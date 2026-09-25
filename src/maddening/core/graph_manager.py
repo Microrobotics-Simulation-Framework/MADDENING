@@ -8433,7 +8433,7 @@ class GraphManager:
                     # half steps covered ``attempted`` -- up to
                     # ``dt_min / min_factor``, not ``dt_min``.  Advancing
                     # the clock by ``dt_min`` left it behind the state
-                    # (MADD-ANO-053).
+                    # (MADD-ANO-058).
                     state = state_half
                     t += attempted
                     n_steps += 1

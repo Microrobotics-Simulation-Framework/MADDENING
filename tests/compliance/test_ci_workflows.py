@@ -18,6 +18,10 @@ claims still goes green:
 * verify-hypothesis runs the slow-marked properties too;
 * the slow lane installs the tools its C tests self-skip without, and
   files an abort as an abort, not as out-of-memory;
+* no step can leave a job green after a red test run: only the slow
+  lane's pytest step carries ``continue-on-error``, and the slow lane's
+  "Re-raise pytest failure" step fails the job whenever pytest exited
+  non-zero;
 * every test that needs ``usd-core`` runs in the one job that installs it,
   and none of them is slow-marked (that job does not run slow tests).
 
@@ -419,11 +423,53 @@ def test_the_cold_verdict_reaches_the_test_job():
 
 
 #: Everything the "Compilation cache mode" step reads from GitHub.
-def _cache_mode_context(event: str) -> dict[str, str]:
+def _cache_mode_context(event: str, head: str = "") -> dict[str, str]:
     return {"github.event_name": event, "github.repository": "o/r",
-            "github.event.pull_request.head.sha": "abc123" if event == "pull_request" else "",
+            "github.event.pull_request.head.sha": head if event == "pull_request" else "",
             "github.token": "t", "runner.os": "Linux", "matrix.python-version": "3.12",
             "matrix.jax-version": "0.10.2", "matrix.shard": "3"}
+
+
+def _checkout_depth(job: dict) -> int | None:
+    """The test job's ``fetch-depth`` (``None``: the whole history)."""
+    (checkout,) = [s for s in job["steps"] if str(s.get("uses", "")).startswith("actions/checkout@")]
+    depth = int((checkout.get("with") or {}).get("fetch-depth", 1))
+    return None if depth == 0 else depth
+
+
+def _pull_request_checkout(tmp_path: Path, message: str, depth: int | None) -> tuple[Path, str]:
+    """What ``actions/checkout`` leaves for a pull request, and the head commit's sha.
+
+    GitHub builds a merge commit of the head into the moved-on base and the
+    job checks that out at ``depth``; the head commit, whose message says
+    ``[cold-ci]`` or not, is its second parent.  The merge commit's own
+    message never carries the head's.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _commit(origin, "src/m.py", "x = 1\n")
+    _git(origin, "checkout", "-q", "-b", "feature")
+    (origin / "src" / "m.py").write_text("x = 2\n")
+    _git(origin, "commit", "-q", "-a", "-m", message)
+    head = _git(origin, "rev-parse", "HEAD")
+    _git(origin, "checkout", "-q", "main")
+    _commit(origin, "src/n.py", "y = 1\n")
+    _git(origin, "merge", "-q", "--no-ff", "-m", f"Merge {head} into main", head)
+    shallow = [] if depth is None else ["--depth", str(depth)]
+    _git(tmp_path, "clone", "-q", *shallow, f"file://{origin}", "work")
+    return tmp_path / "work", head
+
+
+def _run_cache_mode(cwd: Path, tmp_path: Path, context: dict[str, str]):
+    step = _step(_workflow("ci.yml")["jobs"]["test"], "Compilation cache mode")
+    out = tmp_path / "github_output"
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path), "GITHUB_OUTPUT": str(out),
+           **_GIT_ENV, **{k: _render(str(v), context) for k, v in step["env"].items()}}
+    proc = subprocess.run(["bash", "-e", "-c", _render(step["run"], context)], cwd=cwd,
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return dict(line.split("=", 1) for line in out.read_text().splitlines()), proc.stdout
 
 
 @pytest.mark.parametrize("event, message, cold_diff, mode", [
@@ -435,34 +481,46 @@ def _cache_mode_context(event: str) -> dict[str, str]:
 ])
 def test_pushes_start_cold_and_a_pull_request_restores_the_base_cache_unless_told_not_to(
         tmp_path, event, message, cold_diff, mode):
-    """The mode step, run under bash as GitHub runs it.
+    """The mode step, run under bash as GitHub runs it, on the checkout it gets.
 
     A push must start empty: its cache is saved and becomes what every PR
     restores, so a push that restored one would save the base's programs
     plus its own and report none of their compile time.  A PR restores
     that cache unless its head commit says ``[cold-ci]`` or the diff can
-    move a compile cost (``changes.outputs.cold``).
+    move a compile cost (``changes.outputs.cold``).  The head commit's
+    message is read from the checkout, cloned here at the depth the test
+    job's checkout asks for -- at the default depth of 1 the head commit
+    is not there, and every PR would run cold with a warning.
     """
-    if shutil.which("bash") is None:
-        pytest.fail("bash is needed to run the step; CI runners have it")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    # The step asks the API for the head commit's message; answer with this case's.
-    (bin_dir / "gh").write_text('#!/bin/sh\nprintf "%s" "$FAKE_COMMIT_MESSAGE"\n')
-    (bin_dir / "gh").chmod(0o755)
-    step = _step(_workflow("ci.yml")["jobs"]["test"], "Compilation cache mode")
-    context = {**_cache_mode_context(event), "needs.changes.outputs.cold": cold_diff}
-    out = tmp_path / "github_output"
-    env = {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "GITHUB_OUTPUT": str(out),
-           "FAKE_COMMIT_MESSAGE": message,
-           **{k: _render(str(v), context) for k, v in step["env"].items()}}
-    proc = subprocess.run(["bash", "-e", "-c", _render(step["run"], context)], cwd=tmp_path,
-                          env=env, capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
-    assert outputs["mode"] == mode, f"{event} {message!r} cold={cold_diff}: {outputs}"
+    if shutil.which("bash") is None or shutil.which("git") is None:
+        pytest.fail("bash and git are needed to run the step; CI runners have both")
+    if event == "pull_request":
+        work, head = _pull_request_checkout(
+            tmp_path, message, _checkout_depth(_workflow("ci.yml")["jobs"]["test"]))
+    else:
+        work, head = tmp_path, ""
+    context = {**_cache_mode_context(event, head), "needs.changes.outputs.cold": cold_diff}
+    outputs, log = _run_cache_mode(work, tmp_path, context)
+    assert outputs["mode"] == mode, f"{event} {message!r} cold={cold_diff}: {outputs}\n{log}"
+    assert "::warning" not in log, log
     # One cache per shard and lane (whatever else the key holds).
     assert re.fullmatch(r"jaxcc-v1-Linux-.*py3\.12-jax0\.10\.2-shard3of4", outputs["key"]), outputs["key"]
+
+
+def test_a_cold_ci_request_that_cannot_be_read_runs_cold_and_says_so(tmp_path):
+    """The request used to be read with ``gh api ... || true``: when the call
+    failed, the message read empty and a ``[cold-ci]`` run went warm with
+    nothing in the log to say so.  A message that cannot be read now runs
+    cold -- a request cannot be ruled out -- with a warning."""
+    if shutil.which("bash") is None or shutil.which("git") is None:
+        pytest.fail("bash and git are needed to run the step; CI runners have both")
+    work, _ = _pull_request_checkout(tmp_path, "perf: before/after [cold-ci]", 1)
+    missing = "0" * 40                               # not in the checkout
+    context = {**_cache_mode_context("pull_request", missing), "needs.changes.outputs.cold": "false"}
+    outputs, log = _run_cache_mode(work, tmp_path, context)
+    assert outputs["mode"] == "cold", outputs
+    (warning,) = [ln for ln in log.splitlines() if ln.startswith("::warning")]
+    assert warning.startswith("::warning title=Compilation cache::") and missing in warning, warning
 
 
 def test_only_a_warm_run_restores_a_cache_and_only_a_push_saves_one():
@@ -649,6 +707,95 @@ def test_the_slow_lane_files_an_abort_as_an_abort_and_names_both_causes():
     for ordinary in ("1", "139"):
         (info,) = _classify_failure(ordinary, 600)
         assert "ordinary failure" in info["info"]
+
+
+# ---------------------------------------------------------------------------
+# A red test run cannot leave the job green
+# ---------------------------------------------------------------------------
+
+#: The workflows whose jobs run tests or gates.
+TEST_WORKFLOWS = ("ci.yml", "slow-tests.yml")
+
+#: ``(workflow, job, step)`` allowed ``continue-on-error``: the slow lane's
+#: pytest step, so that the failure classifier after it runs on a red
+#: suite; "Re-raise pytest failure" turns the job red again.
+CONTINUE_ON_ERROR_ALLOWED = {("slow-tests.yml", "slow", "Run full suite (slow lane)")}
+
+RERAISE = "Re-raise pytest failure"
+SLOW_PYTEST = "Run full suite (slow lane)"
+
+
+def test_no_step_can_turn_a_red_test_run_green():
+    """``continue-on-error: true`` on ``ci.yml``'s "Run tests" merges every failing test.
+
+    One line, and nothing else notices: the job goes green, the budget step
+    after it still runs.  So no job and no step in the test workflows may
+    carry it, whatever its value, except the one the slow lane re-raises.
+    """
+    found, jobs = set(), []
+    for name in TEST_WORKFLOWS:
+        for job_id, job in _workflow(name)["jobs"].items():
+            if "continue-on-error" in job:
+                jobs.append(f"{name} job {job_id}")
+            found |= {(name, job_id, s.get("name")) for s in job.get("steps", [])
+                      if "continue-on-error" in s}
+    assert not jobs, f"continue-on-error on a whole job: {jobs}"
+    assert found == CONTINUE_ON_ERROR_ALLOWED, (
+        f"continue-on-error on {sorted(found - CONTINUE_ON_ERROR_ALLOWED)}; a failing step there "
+        f"leaves the job green (expected only {sorted(CONTINUE_ON_ERROR_ALLOWED)})")
+
+
+def _run_step(step: dict, context: dict[str, str], tmp_path, extra_env=None, path=None):
+    """Run a ``run:`` step under ``bash -e`` as GitHub does; returns (proc, outputs)."""
+    out = tmp_path / "github_output"
+    out.write_text("")
+    env = {"PATH": path or os.environ["PATH"], "GITHUB_OUTPUT": str(out), **(extra_env or {}),
+           **{k: _render(str(v), context) for k, v in (step.get("env") or {}).items()}}
+    proc = subprocess.run(["bash", "-e", "-c", _render(step["run"], context)], cwd=tmp_path,
+                          env=env, capture_output=True, text=True, timeout=60)
+    outputs = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+    return proc, outputs
+
+
+@pytest.mark.parametrize("pytest_exit", ["0", "1", "2", "124", "134", "137"])
+def test_the_slow_lane_goes_red_when_pytest_fails(tmp_path, pytest_exit):
+    """The slow lane's pytest step never fails (``set +e``, ``continue-on-error``).
+
+    Its exit code reaches the job's result only through "Re-raise pytest
+    failure": delete its ``exit 1``, or loosen its condition, and every
+    ordinary test failure in the only lane that runs slow tests goes green.
+    Both steps are run here under bash, with ``timeout`` (which wraps
+    pytest) replaced by one that exits as pytest would.
+    """
+    if shutil.which("bash") is None:
+        pytest.fail("bash is needed to run the steps; CI runners have it")
+    job = _workflow("slow-tests.yml")["jobs"]["slow"]
+    names = [s.get("name") for s in job["steps"]]
+    run_pytest, reraise = _step(job, SLOW_PYTEST), _step(job, RERAISE)
+    assert run_pytest.get("id") == "pytest"
+    assert names.index(RERAISE) > names.index(SLOW_PYTEST)
+    assert "shell" not in reraise and "continue-on-error" not in reraise
+    # The condition, exactly: GitHub evaluates it, so it is compared, not run.
+    condition = re.sub(r"^\$\{\{\s*(.*?)\s*\}\}$", r"\1", str(reraise.get("if", "")).strip())
+    assert condition == "steps.pytest.outputs.exit_code != '0'", (
+        f"{RERAISE!r} runs when {condition!r}; it must run exactly when pytest exited non-zero")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "timeout").write_text('#!/bin/sh\nexit "$FAKE_PYTEST_EXIT"\n')
+    (bin_dir / "timeout").chmod(0o755)
+    proc, outputs = _run_step(run_pytest, {"matrix.shard": "2"}, tmp_path,
+                              extra_env={"FAKE_PYTEST_EXIT": pytest_exit},
+                              path=f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert outputs["exit_code"] == pytest_exit, outputs
+    if outputs["exit_code"] == "0":
+        return                                       # the re-raise does not run
+    proc, _ = _run_step(reraise, {"steps.pytest.outputs.exit_code": outputs["exit_code"]},
+                        tmp_path)
+    assert proc.returncode != 0, (
+        f"pytest exited {pytest_exit} and {RERAISE!r} exited 0: the job goes green\n"
+        + proc.stdout + proc.stderr)
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ two half steps covered the attempted step, up to ``dt_min / min_factor``.
 It advanced its clock (``t``, ``dt_history``, ``t_history``, the callback's
 ``dt``) by ``dt_min`` instead, so the state ran ahead of the time reported
 for it, and the run went on past ``t_end`` in the state's own time
-(MADD-ANO-053, since 0.1.0).  A node integrating its own clock shows it.
+(MADD-ANO-058, since 0.1.0).  A node integrating its own clock shows it.
 """
 
 import os

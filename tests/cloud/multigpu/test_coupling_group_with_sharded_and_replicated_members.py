@@ -381,11 +381,14 @@ def adjoint(request):
 # solve per step.  Measured 2026-09-25 on 3 pinned cores (jaxlib 0.11.0):
 # 13.9 s of fixture setup for the default solver and 7.4 s for "fori",
 # where the forward tests above take ~2 s.  Per push, the forward tests
-# cover this group, and a gradient through a sharded node (outside any
+# cover this group, a gradient through a sharded node (outside any
 # coupling group) is covered by
-# tests/cloud/multigpu/test_sharded_gradient.py::test_gradient_matches_the_unsharded_node.
-# No per-push test differentiates through a coupling group with a sharded
-# member; slow-tests.yml is where these two run.
+# tests/cloud/multigpu/test_sharded_gradient.py::test_gradient_matches_the_unsharded_node,
+# and one step of this group under the default solver, sharded over two
+# devices and differentiated against the same float64 model, by
+# tests/cloud/multigpu/test_coupling_group_adjoint_through_a_sharded_member.py::test_reverse_mode_ad_through_a_coupling_group_with_a_sharded_member.
+# The eight-step, both-solver, sharded-against-unsharded comparison runs in
+# slow-tests.yml.
 @pytest.mark.slow
 def test_the_adjoint_matches_the_group_with_the_unsharded_inner_node(adjoint):
     solver, out = adjoint

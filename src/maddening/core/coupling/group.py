@@ -154,7 +154,7 @@ class CouplingGroup:
         ``compile()`` refuses a selection that names no floating field.
         (Before 0.4.0, ``solver="fori"`` with ``"aitken"`` or
         ``"fixed"`` relaxed such fields through float32 and kept the
-        rounded value: MADD-ANO-051.)  Read **only** under the two IQN
+        rounded value: MADD-ANO-056.)  Read **only** under the two IQN
         accelerations; supplying it under any other is inert and warns
         (``UserWarning``).
     subcycling : bool

@@ -167,8 +167,10 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
-- **`compile()` refuses a group-internal flux edge the coupling loop reads from the state** -- under `convergence_norm="interface"`, and into a sub-cycled member under `boundary_interpolation="linear"` / `"quadratic"` (a bare `KeyError` inside the step since 0.1.0, MADD-ANO-052) -- and an IQN `accelerated_fields` naming no floating field; a non-floating field it names is dropped.
+- **`compile()` refuses a group-internal flux edge the coupling loop reads from the state** -- under `convergence_norm="interface"`, and into a sub-cycled member under `boundary_interpolation="linear"` / `"quadratic"` (a bare `KeyError` inside the step since 0.1.0, MADD-ANO-057) -- and an IQN `accelerated_fields` naming no floating field; a non-floating field it names is dropped.
   Action: use the `"mixed"` / `"l2"` norm or `"constant"` interpolation the message names; name a floating field.
+- **`scripts/report_test_durations.py` warns when an allowlisted test passes the 20 s hard line** (the allowlist has no ceiling), and a `[cold-ci]` request whose head commit cannot be read now runs cold with a warning instead of silently warm.
+  Action: none; if a kept test's warning appears, re-check its allowlist reason. `docs/developer_guide/testing_standards.md` now lists the framework properties that only the slow lane checks.
 - **`scripts/report_test_durations.py` labels each shard's compilation cache from the hits its report records**: `warm` only when a restored cache served most lookups, else `restored but unused (cold)`, with every shard's hit rate; it warns when a `--cache-mode off` run records cache lookups in more than one file, and no longer offers a skipped or failed allowlisted test as removable.
   Action: none; compare times by a shard's label, not by whether it restored a cache. Pull requests that add or remove a slow mark, remove a test or edit the allowlist now run CI cold.
 - **`compile()` refuses a sub-cycled node whose timestep does not divide its group's largest** (to 1e-9 relative), which covered `round(macro/node_dt) * node_dt` per macro step and drifted silently (MADD-ANO-046). Action: give it a dividing timestep; the error names the two nearest.
@@ -303,9 +305,12 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **Coupling, second audit**: every acceleration acts on floating fields only (an integer, boolean or PRNG-key leaf raised a `TypeError` under `aitken` / `fixed` / IQN since 0.1.0, and `solver="fori"` rounded it through float32 during 0.4.0 development; MADD-ANO-051); `strict_convergence` under `run_adaptive*` raises only about a solve the stepper keeps; `windowed_loss(mask_unconverged=True)` drops a diverged window from the gradient too (it made the gradient NaN);
-  `coupling_diagnostics()` judges the last step under the group that took it, not a replacement; after `jax.grad` of `run_scan` the graph is put back whatever its first node (`step()` raised `UnexpectedTracerError` on a coupled graph with lowercase node names); `run_adaptive` advances its clock by the step a `dt_min` accept keeps, not `dt_min` (MADD-ANO-053).
+- **Coupling, second audit**: every acceleration acts on floating fields only (an integer, boolean or PRNG-key leaf raised a `TypeError` under `aitken` / `fixed` / IQN since 0.1.0, and `solver="fori"` rounded it through float32 during 0.4.0 development; MADD-ANO-056); `strict_convergence` under `run_adaptive*` raises only about a solve the stepper keeps; `windowed_loss(mask_unconverged=True)` drops a diverged window from the gradient too (it made the gradient NaN);
+  `coupling_diagnostics()` judges the last step under the group that took it, not a replacement; after `jax.grad` of `run_scan` the graph is put back whatever its first node (`step()` raised `UnexpectedTracerError` on a coupled graph with lowercase node names); `run_adaptive` advances its clock by the step a `dt_min` accept keeps, not `dt_min` (MADD-ANO-058).
   Action: re-run `solver="fori"` results from accelerated groups holding integer state, masked sysid fits that saw a NaN gradient, and `run_adaptive` runs that warned "hit dt_min".
+- **Compliance gates, second mutation audit**: `check_anomalies` requires `residual_risk` on a `partially_resolved` entry, and `_RETIRED_ANOMALY_IDS` is an `{id: reason}` dict that cannot retire an entry last committed as reachable (read from git; CI's compliance job now fetches full history); `check_impl_mapping` refuses a row traced to a class;
+  `check_sbom` refuses an orphan component, a recorded Python outside `requires-python` and a missing licence; `check_citations` reads in-text `@Key`; `check_stable_signatures` calls a parameter a recorded `*args`/`**kwargs` used to catch breaking.
+  Action: give a retirement its reason; begin a mapping row that means a class with ``Class `Name` ``; write a decorator in prose as code.
 - **`PUT /graph/params` answers 200 only for a write a saved graph reproduces** (MADD-ANO-047, 048, 049): the constructor is asked with every changed key and the live values a save carries (a live leaf skipped it: a `HeatNode` past its Fourier limit, `rho_gas > rho_liquid`); a write the running node would honour unlike its rebuild is refused
   (`LBMPipeNode`'s `G` crossing 0; `HeatNode` now fixes its grid at construction, so `grid_points` on a uniform rod is refused); a non-finite value is a 400 before any write (it was stored, then a 500 on every GET); params carry POST's 422 bounds, and a
   state over the cap or of another layout is refused before anything that size is built.  Action: rebuild a node to change such a value, and check that configs saved after a REST write still load.
@@ -614,35 +619,38 @@ guidance; the itemized changes follow.
 - **Cloud launches reach ready again, and cross-origin browser requests are
   refused**: set `MADDENING_TRANSPORT_TOKEN` so the ZeroMQ CURVE key is not the
   cleartext API bearer token; pass `allowed_origins=` to embed the UI elsewhere
-- **The ZeroMQ transports bind loopback and encrypt any other bind** (CRITICAL):
+- **The ZeroMQ transports bind loopback and encrypt any other bind** (CRITICAL, MADD-ANO-015):
   5555/5556/5580 published state, commands and worker rendezvous to anyone who
-  could reach them; set `MADDENING_API_TOKEN` on both sides to stream off-box
-- **The API requires a bearer token unless it is bound to loopback** (CRITICAL):
+  could reach them; set `MADDENING_TRANSPORT_TOKEN` on both sides to stream off-box
+- **The API requires a bearer token unless it is bound to loopback** (CRITICAL, MADD-ANO-051):
   set `MADDENING_API_TOKEN` or read the one logged at start-up; `JobConfig.ports`
   no longer defaults to `[8000]`, so a cloud launch stops opening the API port
 - **FMI/USD hardening** (three HIGH): a silent TCP peer no longer wedges the FMU
   bridge, `set_state` is value-checked exactly as `set` is, and loading a USD
   stage no longer imports the class it names — pass `node_registry=` to allow one
 - **Cloud surface**: the signaling WebSocket validated its own token, not the
-  client's (CRITICAL; set `MADDENING_STREAM_SECRET`), and the unauthenticated
+  client's (CRITICAL, MADD-ANO-053; set `MADDENING_STREAM_SECRET`), and the unauthenticated
   API now caps `n_steps`, node dimensions and training args, warning on 0.0.0.0
 - **Mapping-spec assets are opened once** (`O_NOFOLLOW`, `fstat`): the size cap
   and the data now come from the descriptor that was checked, closing a
   time-of-check/time-of-use window for a writer in the config directory
-- **FMU bridge no longer unpickles importer bytes** (CRITICAL): the FMU-state
+- **FMU bridge no longer unpickles importer bytes** (CRITICAL, MADD-ANO-054): the FMU-state
   blob is an arrays-only `npz` validated before use — regenerate any stored
-  blob.  `FmuSidecar.handle` stays pickle-based and trusted-clients-only
+  blob.  `FmuSidecar.handle` stays pickle-based and trusted-clients-only (MADD-ANO-055)
 - **FMU sidecar `set_state` zip bomb** via an archive member without a `.npy`
   suffix: the archive directory is checked before `np.load` runs, with
   per-member and total declared-size caps
-- **REST checkpoint endpoints are confined to a directory**: paths are
+- **REST checkpoint endpoints are confined to a directory** (MADD-ANO-052): paths are
   relative to `SimulationServer(checkpoint_root=)` (default `./checkpoints`).
   Since this release the API *does* authenticate on a non-loopback bind
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
-- **MADD-ANO-051, 052, 053 (new, resolved in this release)**: accelerating a coupling group holding an integer, boolean or PRNG-key leaf raised a `TypeError`; a group-internal flux edge read by the interface norm or a sub-cycled member's linear interpolation raised a bare `KeyError`; `run_adaptive` advanced its clock by `dt_min` on a `dt_min` accept whose state covered more (all since 0.1.0; see `### Fixed`, `### Changed`).
+- **MADD-ANO-056, 057, 058 (new, resolved in this release)**: accelerating a coupling group holding an integer, boolean or PRNG-key leaf raised a `TypeError`; a group-internal flux edge read by the interface norm or a sub-cycled member's linear interpolation raised a bare `KeyError`; `run_adaptive` advanced its clock by `dt_min` on a `dt_min` accept whose state covered more (all since 0.1.0; see `### Fixed`, `### Changed`).
   **MADD-ANO-027** now says each extra waveform sweep applies at least one more pass, moving a converged state by about one residual
+- **MADD-ANO-051, 052, 053 (new, resolved in this release; all since 0.1.0)**: the HTTP API served every route, `/cloud/launch` included, with no credential while the container bound `0.0.0.0`; the checkpoint routes took any server path; the signaling server admitted every client (see `### Security`).
+  **MADD-ANO-054 (new, never released)**: the FMU bridge unpickled the importer's state blob, remote code execution; **MADD-ANO-055 (new, resolved)**: `deserialize_fmu_state` and `FmuSidecar.handle` unpickled their input (since 0.3.0).
+  The registry now holds every defect a release carried and every critical or major one found in the cycle, shipped or not (CONTRIBUTING.md)
 - **MADD-ANO-047, 048, 049 (new, resolved in this release)**: `PUT /graph/params` accepted a write flipping a branch the node fixed at construction, values its constructor refuses, and a non-finite value (since 0.1.0; see `### Fixed`).
   **MADD-ANO-050 (new, open)**: two `HeatNode` rods coupled end to end by a converged exchange are unstable above Fo = 3/8, not the 1/2 each accepts; keep Fo < 3/8 on such pairs
 - **MADD-ANO-046 (new, resolved in this release)**: a sub-cycled node whose timestep did not divide the macro timestep drifted by a fixed fraction of every step (since 0.1.0; see `### Changed`)

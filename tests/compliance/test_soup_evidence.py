@@ -85,12 +85,20 @@ def test_the_committed_soup_tables_match_a_fresh_generation():
 # and bumping the number here is part of it.
 #
 # RETIRING AN ID: never delete the entry and never reuse the number.  Put the
-# ID in the matching ``_RETIRED_*`` frozenset below, with a comment saying
-# what was retired and when.  The number stays spoken for, the high-water mark
-# stays honest, and the retirement is a visible line in the diff instead of a
-# gap nobody can account for.
-_HIGHEST_ANOMALY_ID = 53
-_RETIRED_ANOMALY_IDS: frozenset = frozenset()
+# ID in the matching ``_RETIRED_*`` record below, with what was retired and
+# when.  The number stays spoken for, the high-water mark stays honest, and
+# the retirement is a visible line in the diff instead of a gap nobody can
+# account for.
+#
+# ``_RETIRED_ANOMALY_IDS`` is an ``{id: reason}`` dict, and
+# ``scripts/check_anomalies.py`` reads it: an ID with no reason excuses
+# nothing, and neither does the retirement of an entry whose last committed
+# status was reachable (open, partially_resolved, wont_fix).  A reachable
+# anomaly is closed -- resolved, or a duplicate of the entry that carries it
+# -- and stays in the registry; only a closed entry, or a number no commit
+# ever recorded, can be retired.  The gate reads the last status from git.
+_HIGHEST_ANOMALY_ID = 58
+_RETIRED_ANOMALY_IDS: dict = {}
 
 _HIGHEST_BENCHMARK_ID = 16
 _RETIRED_BENCHMARK_IDS: frozenset = frozenset()
@@ -158,8 +166,9 @@ def _membership_message(kind: str, missing: set, unexpected: set) -> str:
         parts.append(
             f"{kind} missing from the registry: {sorted(missing)}.  An entry "
             f"in the committed set is IEC 62304 evidence; restore it, or "
-            f"record the retirement in the _RETIRED_* frozenset in "
-            f"tests/compliance/test_soup_evidence.py rather than deleting it."
+            f"record the retirement, with its reason, in the _RETIRED_* "
+            f"record in tests/compliance/test_soup_evidence.py rather than "
+            f"deleting it."
         )
     if unexpected:
         parts.append(

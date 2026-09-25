@@ -5,7 +5,7 @@ a field of the producer's state.  Two parts of the coupling loop read an
 internal edge's value from the state -- the interface norm, and a
 sub-cycled member's linear (or quadratic) boundary interpolation -- and
 both failed inside the trace with a bare ``KeyError`` naming the flux, at
-every release since 0.1.0 (MADD-ANO-052).  ``compile()`` now refuses them
+every release since 0.1.0 (MADD-ANO-057).  ``compile()`` now refuses them
 by name and says which setting works; the settings it names are checked
 to work here too.
 """

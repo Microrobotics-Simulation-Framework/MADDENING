@@ -73,7 +73,7 @@ def _coupled(holder_cls, extra=None, **kw):
     dict(acceleration="iqn-ils"),
     # ``solver="fori"`` relaxed *every* field under these two, and the
     # integer leaves came back rounded through float32 (0xdeadbeef as
-    # 0xdeadbf00, 2**24 + 1 as 2**24): MADD-ANO-051.
+    # 0xdeadbf00, 2**24 + 1 as 2**24): MADD-ANO-056.
     dict(solver="fori", acceleration="aitken"),
     dict(solver="fori", acceleration="fixed", relaxation=0.7),
     dict(acceleration="aitken"),
@@ -138,7 +138,7 @@ def test_predictor_leaves_integer_fields_alone():
 
 
 # ---------------------------------------------------------------------------
-# An integer field in the quasi-Newton selection (MADD-ANO-051)
+# An integer field in the quasi-Newton selection (MADD-ANO-056)
 # ---------------------------------------------------------------------------
 
 

@@ -106,6 +106,7 @@ def _load(directory: Path, goal: str) -> dict:
     return doc
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 @pytest.mark.parametrize("goal", _GOALS)
 def test_every_goal_records_checks_and_passes_them_in_the_dry_run(dry_run_dir, goal):
@@ -125,6 +126,7 @@ def test_every_goal_records_checks_and_passes_them_in_the_dry_run(dry_run_dir, g
     assert rp.record_problems(doc) == [], rp.record_problems(doc)
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_coupled_json_compares_forward_and_adjoint_under_both_solvers(dry_run_dir):
     doc = _load(dry_run_dir, "coupled")
@@ -153,6 +155,7 @@ def test_coupled_json_compares_forward_and_adjoint_under_both_solvers(dry_run_di
     assert r["solvers"]["fori"]["sharded"]["last_step_iterations"] is None
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_halo_json_is_bit_exact_on_every_boundary_mode_width_and_mesh(dry_run_dir):
     doc = _load(dry_run_dir, "halo")
@@ -167,6 +170,7 @@ def test_halo_json_is_bit_exact_on_every_boundary_mode_width_and_mesh(dry_run_di
         assert m["forward_max_abs"] == 0.0 and m["adjoint_max_abs"] == 0.0
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
     """Periodic, edge (the wrapper's default) and Dirichlet ends, each
@@ -197,6 +201,7 @@ def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
     assert h["parity_f"]["max_rel"] < 1e-5 and h["parity_grad"] < 1e-5
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_indivisible_json_records_the_refusals_and_the_uneven_unstructured_run(dry_run_dir):
     (r,) = _load(dry_run_dir, "indivisible")["results"]
@@ -219,6 +224,7 @@ def _check_timing(t: dict):
     assert t["mean_ms"] > 0
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_exchange_json_ranks_both_transports_with_traffic(dry_run_dir):
     doc = _load(dry_run_dir, "exchange")
@@ -241,6 +247,7 @@ def test_exchange_json_ranks_both_transports_with_traffic(dry_run_dir):
         r["methods"]["all_to_all"]["median_ms"] / r["methods"]["ppermute"]["median_ms"])
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_dir):
     doc = _load(dry_run_dir, "forward")
@@ -258,6 +265,7 @@ def test_forward_json_matches_unsharded_reference_under_both_transports(dry_run_
         assert m["parity_total"]["finite"] and m["parity_total"]["max_rel"] < 1e-5
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
     doc = _load(dry_run_dir, "gradient")
@@ -278,6 +286,7 @@ def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
     assert cg["jvp_parity"]["finite"] and cg["jvp_parity"]["max_rel"] < 1e-3
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_rollout_grad_timings_are_of_compiled_functions(dry_run_dir):
     """Both sides are ``jax.jit(jax.grad(...))`` with compile time reported
@@ -295,6 +304,7 @@ def test_rollout_grad_timings_are_of_compiled_functions(dry_run_dir):
         assert m["grad"]["median_ms"] < 300 * ref["grad"]["median_ms"], (method, m["grad"], ref["grad"])
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_summarise_prints_ranking_table_but_does_not_rank_a_dry_run(dry_run_dir):
     out = _run("--summarise", str(dry_run_dir)).stdout
@@ -306,6 +316,7 @@ def test_summarise_prints_ranking_table_but_does_not_rank_a_dry_run(dry_run_dir)
     assert "sharded_cg grad" in out
 
 
+# Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
 @pytest.mark.slow
 def test_summarise_does_not_close_the_checklist_from_a_dry_run(dry_run_dir):
     out = _run("--summarise", str(dry_run_dir)).stdout
@@ -787,7 +798,6 @@ def test_halo_reference_encodes_the_documented_boundary_fill():
     assert grad[:, 0].tolist() == [1, 1, 1, 2, 2, 1, 1, 1]
 
 
-@pytest.mark.slow
 def test_a_two_device_run_records_the_cases_it_cannot_run():
     """On 2 devices the 2-D pencil cases have no mesh and a halo from the
     wrong neighbour cannot show; each is a check *not run*, so the goal
@@ -817,7 +827,6 @@ def test_a_two_device_run_records_the_cases_it_cannot_run():
         assert rp.goal_verdict([doc]) == "INCOMPLETE"
 
 
-@pytest.mark.slow
 def test_the_stencil_goal_fails_when_unsharded_halo_axes_always_wrap(monkeypatch):
     """The fault the periodic-only goal could not see: the wrapper fills
     the halo of an axis it does not shard periodically whatever

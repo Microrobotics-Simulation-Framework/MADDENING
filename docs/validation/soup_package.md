@@ -113,11 +113,16 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-048 | PUT /graph/params accepted values the node's own constructor refuses, so a graph saved after the write could not be loaded | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-049 | A non-finite value written through PUT /graph/params was stored, then the reply failed with a 500, and every later GET /graph/params for the node failed too | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-050 | Two HeatNode rods coupled end to end are unstable above Fourier number 3/8 once the exchange converges, which each rod's constructor accepts up to 1/2 | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
-| MADD-ANO-051 | Accelerating a coupling group that holds an integer, boolean or PRNG-key state leaf failed at the first step | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
-| MADD-ANO-052 | A group-internal flux edge read by the interface norm, or by a sub-cycled member's linear boundary interpolation, failed with a bare KeyError | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
-| MADD-ANO-053 | run_adaptive advanced its clock by dt_min when it accepted an attempt at dt_min, while the state advanced by the attempted step | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-051 | The HTTP API served every route, POST /cloud/launch included, to any caller with no credential, and the shipped container bound it to 0.0.0.0 | `critical` | `safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-052 | POST /checkpoint/save and /checkpoint/load took any server path from an unauthenticated caller: a file write anywhere the server could write, and a file-existence oracle | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-053 | The WebRTC signaling server validated its own token, not the client's, so it admitted and relayed every client | `critical` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-054 | The FMU TCP bridge unpickled the state blob an importer hands to fmi3SetFMUState: remote code execution for anyone who could reach its port | `critical` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-055 | deserialize_fmu_state and FmuSidecar.handle unpickled the bytes they were given | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
+| MADD-ANO-056 | Accelerating a coupling group that holds an integer, boolean or PRNG-key state leaf failed at the first step | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-057 | A group-internal flux edge read by the interface norm, or by a sub-cycled member's linear boundary interpolation, failed with a bare KeyError | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-058 | run_adaptive advanced its clock by dt_min when it accepted an attempt at dt_min, while the state advanced by the attempted step | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 
-*53 anomalies registered.  17 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 14 `open` plus 3 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*58 anomalies registered.  17 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 14 `open` plus 3 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence
@@ -203,8 +208,11 @@ the directory holds any other SBOM.  It fails if a direct dependency
 SBOM, or is at a version outside its declared range.  It fails if a SOUP
 item §1 lists is missing, or is at a version outside the `pyproject.toml`
 range.  It also fails if a component has no purl, or a purl that disagrees
-with it, and if the file was edited after generation: the `serialNumber`
-is derived from the content.  Each failure names the discrepancy.
+with it, or no licence; if a component is reached by no path from the root
+in the dependency graph, so that no install brings it in; if the recorded
+Python is one `requires-python` refuses; and if the file was edited after
+generation: the `serialNumber` is derived from the content.  Each failure
+names the discrepancy.
 
 **Determinism.**  Components and the dependency graph are sorted, keys are
 written sorted, `metadata.timestamp` is the resolution cutoff (or

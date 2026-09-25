@@ -346,6 +346,23 @@ def test_ci_runs_the_budget_on_the_default_lane():
     assert "JAX_COMPILATION_CACHE_MAX_SIZE:" not in ci
 
 
+def test_the_junit_times_the_budget_reads_include_setup_and_teardown():
+    """pytest's ``junit_duration_report`` must stay ``total`` (its default).
+
+    ``"call"`` reports the test body alone, and a module fixture's compile
+    -- charged to the setup of the first test that needs it -- would vanish
+    from every time the budget judges.  A real run through the ini is in
+    ``tests/compliance/test_ci_sharding.py``.
+    """
+    import tomllib
+
+    ini = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "tool"]["pytest"]["ini_options"]
+    assert ini.get("junit_duration_report", "total") == "total", ini["junit_duration_report"]
+    ci = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "junit_duration_report" not in ci
+
+
 def test_a_partial_lane_lists_no_allowlist_entry_as_removable(gate, tmp_path, capsys):
     # With one shard's report missing, an allowlisted test that is absent
     # may simply be on that shard.

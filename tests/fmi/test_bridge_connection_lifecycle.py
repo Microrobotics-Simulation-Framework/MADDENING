@@ -372,6 +372,23 @@ def test_a_frame_that_arrives_in_pieces_within_its_budget_is_served(frame_budget
             holder.close()
 
 
+def test_a_frame_read_restores_the_socket_timeout():
+    """The frame deadline lowers the socket's timeout for each read; the
+    connection's own budget must be back in place afterwards, or the reply
+    that follows is sent under whatever was left of the frame's."""
+    a, b = socket.socketpair()
+    with a, b:
+        b.settimeout(7.0)
+        body = b'{"op": "hello"}'
+        a.sendall(struct.pack(">I", len(body)) + body)
+        assert tcp_bridge.recv_raw(b, frame_timeout=30.0) == (False, body)
+        assert b.gettimeout() == 7.0
+        a.sendall(struct.pack(">I", 10) + b"12")               # stalls mid-frame
+        with pytest.raises(socket.timeout, match="still incomplete after 2 bytes"):
+            tcp_bridge.recv_raw(b, frame_timeout=0.2)
+        assert b.gettimeout() == 7.0
+
+
 # --------------------------------------------------------------- property
 
 _SILENT_ACTIONS = st.sampled_from([

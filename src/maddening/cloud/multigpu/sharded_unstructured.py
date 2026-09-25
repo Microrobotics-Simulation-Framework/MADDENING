@@ -386,7 +386,7 @@ class ShardedUnstructuredNode(SimulationNode):
         to an inner ``update_padded(..., params=)``.
 
         ``state`` is in partition layout, as :meth:`initial_state` builds
-        it: every field of ``state_fields()`` has ``n_devices *
+        it: every field but a domain integral has ``n_devices *
         n_local_max`` rows.  A field with another leading axis -- a state
         in global cell order on a partition with padding, say -- is
         refused by name.  When the two counts agree (every shard full)

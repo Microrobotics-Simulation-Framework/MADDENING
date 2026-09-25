@@ -6,21 +6,47 @@ restores was saved by that shard on the base branch.  These tests pin the
 properties that make that true: the assignment is a function of the file
 path alone, every test lands on exactly one shard, the pins are real and
 in range, and CI runs the job count the pins were balanced for -- every
-shard of it, each over the whole suite (no matrix leg excluded, no extra
-``--ignore`` or selection flag), since either would drop tests from CI
-while every other check here still passed.
+shard of it (no matrix leg excluded or added).
+
+They also pin what the sharded lanes select, in each place a selection can
+be written, since a narrower one drops tests from CI while every other
+check here still passes:
+
+* the pytest command line of both lanes (no extra ``--ignore``, ``-k``,
+  ``-m`` or ``--deselect``);
+* the environment pytest reads more arguments or plugins from
+  (``PYTEST_ADDOPTS``, ``PYTEST_PLUGINS``), at workflow, job and step
+  level, and in any ``run`` script;
+* ``[tool.pytest.ini_options]`` in ``pyproject.toml`` (``addopts`` exactly
+  ``-m 'not slow'``, no key this file does not know) and the absence of
+  any other pytest configuration file;
+* every ``conftest.py`` under ``tests/`` (no collection hook, no
+  ``collect_ignore``);
+* the root ``conftest.py`` in action: a real pytest run through it, with
+  ``MADDENING_TEST_SHARD=1/2``, keeps one of two files and deselects the
+  other.
+
+What none of it sees: a test that skips itself, and a ``pytestmark`` or
+fixture in a test module that deselects or skips its own tests.
 """
 
+import ast
 import hashlib
+import os
 import re
 import shlex
+import shutil
+import subprocess
+import sys
+import tomllib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from tests import _sharding
+from tests import _jax_timing, _sharding
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -139,3 +165,236 @@ def test_the_sharded_lanes_run_the_whole_suite_but_viz(workflow, job, step, sele
         f"{workflow} {step!r}: pytest selects {chosen}, expected exactly {selection}; "
         "if a new argument only changes reporting, add it to REPORTING_ARGS")
     assert len(args) == len(set(args)), args
+
+
+# ---------------------------------------------------------------------------
+# Selection written anywhere but the command line
+# ---------------------------------------------------------------------------
+
+#: Environment variables pytest takes more arguments (``PYTEST_ADDOPTS``) or
+#: plugins (``PYTEST_PLUGINS``) from.  Set in a workflow, either narrows
+#: every shard's selection where no check of the command line looks.
+PYTEST_ARGUMENT_ENV = ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")
+
+
+def _env_blocks(workflow: dict):
+    """``(where, env)`` for the workflow, each job and each step."""
+    yield "the workflow", workflow.get("env") or {}
+    for job_id, job in workflow["jobs"].items():
+        yield f"job {job_id}", job.get("env") or {}
+        for step in job.get("steps", []):
+            yield f"job {job_id} step {step.get('name')!r}", step.get("env") or {}
+
+
+@pytest.mark.parametrize("workflow", ["ci.yml", "slow-tests.yml"])
+def test_no_workflow_environment_adds_pytest_arguments(workflow):
+    """``PYTEST_ADDOPTS: "--deselect tests/core"`` in a step's env drops tests/core
+    from every shard, and the command-line check above never sees it.
+
+    Every env block is read (workflow, job, step), and every ``run`` script
+    too: ``echo PYTEST_ADDOPTS=... >> "$GITHUB_ENV"`` or an ``export`` sets
+    it for the steps after.
+    """
+    wf = _workflow(workflow)
+    offenders = [f"{where}: {key}" for where, env in _env_blocks(wf)
+                 for key in env if key in PYTEST_ARGUMENT_ENV]
+    for job_id, job in wf["jobs"].items():
+        for step in job.get("steps", []):
+            offenders += [f"job {job_id} step {step.get('name')!r}: {var} in its script"
+                          for var in PYTEST_ARGUMENT_ENV if var in step.get("run", "")]
+    assert not offenders, (
+        f"{workflow} sets pytest arguments outside the command line, where the selection "
+        f"checks do not look: {offenders}")
+
+
+def test_the_environment_check_sees_every_place_a_variable_can_be_set():
+    # The scan above is only a guard if it can fire.
+    wf = {"env": {"PYTEST_ADDOPTS": "-x"},
+          "jobs": {"j": {"env": {"PYTEST_PLUGINS": "p"},
+                         "steps": [{"name": "s", "env": {"PYTEST_ADDOPTS": "-k x"}}]}}}
+    found = [(where, key) for where, env in _env_blocks(wf) for key in env
+             if key in PYTEST_ARGUMENT_ENV]
+    assert found == [("the workflow", "PYTEST_ADDOPTS"), ("job j", "PYTEST_PLUGINS"),
+                     ("job j step 's'", "PYTEST_ADDOPTS")]
+
+
+#: ``[tool.pytest.ini_options]``, key by key.  ``addopts`` reaches every
+#: lane's pytest, so anything added to it (``--ignore=tests/fmi``, ``-k``, a
+#: wider ``-m``) changes what every shard runs; a new key (``norecursedirs``,
+#: ``python_files``, ``junit_duration_report``) can do the same, so an
+#: unknown one fails here until it is added with what it is for.
+EXPECTED_INI = {
+    "addopts": "-m 'not slow'",
+    "testpaths": ["tests"],
+    "filterwarnings": None,   # reporting, not selection: any value
+    "markers": None,          # reporting, not selection: any value
+}
+#: Keys that may be absent, with the one value each may take when present.
+#: ``junit_duration_report = "call"`` would drop setup and teardown -- where
+#: a module fixture's compile is paid -- from every time the budget judges.
+OPTIONAL_INI = {"junit_duration_report": "total"}
+
+
+def test_the_pytest_configuration_selects_nothing_beyond_the_slow_mark():
+    ini = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "tool"]["pytest"]["ini_options"]
+    assert set(ini) - set(OPTIONAL_INI) == set(EXPECTED_INI), (
+        f"[tool.pytest.ini_options] keys are {sorted(ini)}; a new key can change what every "
+        "lane selects or what the time budget measures -- add it to EXPECTED_INI with why")
+    for key, want in EXPECTED_INI.items():
+        if want is not None:
+            assert ini[key] == want, f"[tool.pytest.ini_options] {key} = {ini[key]!r}, expected {want!r}"
+    for key, want in OPTIONAL_INI.items():
+        assert ini.get(key, want) == want, f"[tool.pytest.ini_options] {key} = {ini[key]!r}, expected {want!r}"
+    # pytest reads the first of these it finds before pyproject.toml, and a
+    # `pytest.ini` wins even when it is empty: every setting above would go.
+    for name, section in (("pytest.ini", ""), (".pytest.ini", ""), ("tox.ini", "[pytest]"),
+                          ("setup.cfg", "[tool:pytest]")):
+        path = REPO_ROOT / name
+        if path.is_file():
+            assert section and section not in path.read_text(encoding="utf-8"), (
+                f"{name} holds pytest configuration, which pytest reads instead of pyproject.toml")
+
+
+#: Names that, defined in a ``conftest.py``, choose which tests are collected
+#: or kept.  The root conftest registers ``tests/_sharding.py``'s
+#: ``pytest_collection_modifyitems`` as a plugin; it defines none itself.
+COLLECTION_HOOKS = {"collect_ignore", "collect_ignore_glob", "pytest_ignore_collect",
+                    "pytest_collection_modifyitems", "pytest_deselected", "pytest_collect_file",
+                    "pytest_pycollect_makemodule", "pytest_plugins"}
+
+
+def _collection_hooks(source: str) -> list[str]:
+    found = []
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in COLLECTION_HOOKS:
+            found.append(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            found += [t.id for t in targets if isinstance(t, ast.Name) and t.id in COLLECTION_HOOKS]
+    return found
+
+
+def test_no_conftest_chooses_which_tests_are_collected():
+    """``collect_ignore = ["fmi"]`` in a conftest drops a directory from every shard."""
+    offenders = {}
+    for path in sorted((REPO_ROOT / "tests").rglob("conftest.py")):
+        hooks = _collection_hooks(path.read_text(encoding="utf-8"))
+        if hooks:
+            offenders[path.relative_to(REPO_ROOT).as_posix()] = hooks
+    assert not offenders, (
+        f"these conftests choose which tests run, where no selection check looks: {offenders}")
+
+
+def test_the_conftest_scan_finds_what_it_is_for():
+    source = ("collect_ignore = ['fmi']\n"
+              "collect_ignore_glob: list = ['*.py']\n"
+              "def pytest_collection_modifyitems(config, items):\n    pass\n"
+              "def pytest_configure(config):\n    pass\n"
+              "def ball_node():\n    pass\n")
+    assert _collection_hooks(source) == [
+        "collect_ignore", "collect_ignore_glob", "pytest_collection_modifyitems"]
+
+
+# ---------------------------------------------------------------------------
+# The root conftest switches on what CI asks for
+# ---------------------------------------------------------------------------
+
+#: Time the kept test spends in a fixture's setup, which the JUnit time the
+#: budget judges must include (``junit_duration_report = "total"``, the
+#: default; ``"call"`` would report the test body alone).
+SETUP_SECONDS = 0.2
+
+
+def _files_on_each_shard_of_two() -> tuple[str, str]:
+    """A test file path on shard 1 of 2 and one on shard 2 of 2."""
+    found: dict[int, str] = {}
+    for i in range(100):
+        rel = f"tests/test_scratch_{i}.py"
+        found.setdefault(_sharding.shard_of(rel, 2), rel)
+        if len(found) == 2:
+            return found[1], found[2]
+    raise AssertionError("no two of 100 names hash to different shards of 2")
+
+
+@pytest.fixture(scope="module")
+def shard_run(tmp_path_factory):
+    """One pytest run of a two-file tree through the real root conftest and ini.
+
+    The scratch tree holds copies of ``tests/conftest.py`` (and the two
+    modules it registers) and of ``pyproject.toml``, and runs as one CI
+    shard does: ``MADDENING_TEST_SHARD=1/2`` and ``MADDENING_TEST_JAX_TIMING=1``.
+    """
+    root = tmp_path_factory.mktemp("shard_run")
+    (root / "tests").mkdir()
+    for name in ("__init__.py", "conftest.py", "_sharding.py", "_jax_timing.py"):
+        shutil.copy(REPO_ROOT / "tests" / name, root / "tests" / name)
+    shutil.copy(REPO_ROOT / "pyproject.toml", root / "pyproject.toml")
+    kept, dropped = _files_on_each_shard_of_two()
+    (root / kept).write_text(
+        "import time\n\nimport jax\nimport jax.numpy as jnp\nimport pytest\n\n\n"
+        "@pytest.fixture\n"
+        "def compiled():\n"
+        f"    time.sleep({SETUP_SECONDS})\n"
+        "    return jax.jit(lambda x: x * 1.6180339 + 0.5772156)(jnp.ones(3))\n\n\n"
+        "def test_kept(compiled):\n"
+        "    assert compiled.shape == (3,)\n")
+    (root / dropped).write_text("def test_dropped():\n    pass\n")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("MADDENING_TEST_", "PYTEST_", "JAX_COMPILATION_CACHE",
+                                "JAX_PERSISTENT_CACHE"))}
+    env.update(MADDENING_TEST_SHARD="1/2", MADDENING_TEST_JAX_TIMING="1",
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", JAX_PLATFORMS="cpu")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests", "-p", "no:cacheprovider",
+         "--junitxml=report.xml", "-o", "junit_family=xunit1"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=300)
+    cases = list(ET.parse(root / "report.xml").getroot().iter("testcase")) \
+        if (root / "report.xml").is_file() else []
+    return SimpleNamespace(proc=proc, cases=cases, kept=kept, dropped=dropped)
+
+
+def test_the_root_conftest_keeps_only_this_shards_files(shard_run):
+    """``MADDENING_TEST_SHARD`` must reach ``tests/_sharding.py`` through the conftest.
+
+    If the conftest stopped registering the plugin, every CI shard would
+    run the whole suite: four times the CI time, no test dropped, and every
+    check of ``_sharding.py`` itself still green.
+    """
+    out = shard_run.proc.stdout + shard_run.proc.stderr
+    assert shard_run.proc.returncode == 0, out[-3000:]
+    assert "test shard: 1/2 (by file; see tests/_sharding.py)" in out, out[-3000:]
+    assert re.search(r"\b1 passed, 1 deselected\b", out), out[-3000:]
+    assert [c.get("file") for c in shard_run.cases] == [shard_run.kept], (
+        f"the run kept {[c.get('file') for c in shard_run.cases]}, expected only "
+        f"{shard_run.kept} ({shard_run.dropped} is on shard 2)")
+
+
+def test_the_root_conftest_records_jax_timing_into_the_junit_report(shard_run):
+    """``MADDENING_TEST_JAX_TIMING=1`` must attach the timing properties.
+
+    Without them the budget's summary has no compile / tracing split, no
+    cache hit rates, and cannot check a shard's warm label.  The kept test
+    compiles a program in its fixture, so its trace and compile times are
+    non-zero -- the listeners are really registered, not just the names.
+    """
+    assert shard_run.proc.returncode == 0, shard_run.proc.stdout[-3000:]
+    (case,) = shard_run.cases
+    props = {p.get("name"): float(p.get("value")) for p in case.iter("property")}
+    assert set(props) == set(_jax_timing.PROPERTIES), sorted(props)
+    assert props["jax_trace_s"] > 0 and props["jax_compile_s"] > 0, props
+    assert props["subprocesses"] == 0, props
+
+
+def test_a_shards_junit_time_includes_fixture_setup(shard_run):
+    """The budget judges setup + call + teardown, as it says.
+
+    A module fixture's compile is charged to the first test that needs it,
+    in its setup.  ``junit_duration_report = "call"`` would report the test
+    body alone, and every such compile would vanish from the budget.
+    """
+    assert shard_run.proc.returncode == 0, shard_run.proc.stdout[-3000:]
+    (case,) = shard_run.cases
+    assert float(case.get("time")) >= SETUP_SECONDS, (
+        f"the kept test's JUnit time is {case.get('time')} s, less than the "
+        f"{SETUP_SECONDS} s its fixture's setup took")

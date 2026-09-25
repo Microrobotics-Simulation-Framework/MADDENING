@@ -513,9 +513,15 @@ anomalies:
       'gradient_relative_error_bound', 'iterations', 'precision_limited',
       'ratio_usable', 'residual', 'rho_spectral', 'spectral_error_bound',
       'spectral_usable', 'total_iterations'].
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
+      Graded `major` (it was `minor` until the 0.4.0 severity
+      definition): converged=True is a silent wrong result when the
+      state is not within the tolerance of the fixed point, and it
+      still is on the reachable paths the residual risk records -- 122x
+      its estimate from the fixed point with ratio_usable=True, and a
+      stalled float32 iterate at 4.2e-3 against a tolerance of 1e-6.
       The forward state is as accurate as the criterion makes it and no
       error is raised, so the residual risk is a quiet accuracy
       shortfall rather than a crash.  It matters most for gradients:
@@ -1005,16 +1011,20 @@ anomalies:
       and the limit.  Re-running the measurement against this version
       therefore shows the refusal rather than the divergence, which is the
       fix; the figures above are a record of the defect, not a reproducer.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       The consequence is MADD-ANO-002's, and inherits its rationale: an
       unstable timestep produces incorrect results with no indication of
       error.  What this entry adds is that the documented safe region is
       itself unsafe for `stencil_order=4`, so a caller who honours the
-      published limit is not protected.  Divergence to non-finite values is
-      loud in any downstream check for finiteness, which is why the severity
-      is minor rather than major.
+      published limit is not protected.  Graded `major`, as MADD-ANO-002
+      is: the field passes through finite wrong values before it reaches
+      non-finite ones, and the library says nothing at any point.  (It was
+      `minor` until the 0.4.0 severity definition, on the argument that
+      non-finite values are loud in a downstream finiteness check; the
+      definition counts a result as silent when the library raises and
+      warns nothing, whoever else might notice.)
     affected_components:
       - "maddening.nodes.heat.HeatNode"
     affected_versions: ">=0.1.0, <0.4.0"
@@ -2988,16 +2998,19 @@ anomalies:
       that differs from a declared fill, its own default included, with a
       message saying to pass `boundary="periodic"`.  A node that declares
       nothing is wrapped exactly as before.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
-      Silent wrong physics on a public, STABLE wrapper, graded `minor`
-      because (1) was on a layout the docstring and the guide called
-      invalid, and (2) is sub-percent on the default path (0.27% at the
+      Silent wrong physics on a public, STABLE wrapper: (1) was up to a
+      2.10x error in the centreline velocity with no signal, and (2) was
+      the default and nothing said sharding changed the model.  Graded
+      `major`; it was `minor` until the 0.4.0 severity definition, on the
+      grounds that (1) was on a layout the docstring and the guide called
+      invalid and (2) is sub-percent on the default path (0.27% at the
       tags, 0.64% after MADD-ANO-020's fix), below the node's documented
-      first-order wall error at practical resolutions.  The case for
-      `major`: (2) was the default and nothing said sharding changed the
-      model, and (1) was up to a 2x error with no signal.
+      first-order wall error at practical resolutions.  Those belong to
+      how much it matters, not to whether the result was silently
+      wrong.
       `context_dependent` because it needs a sharded LBM, and for (1) a
       pressure-driven one sharded along its flow axis; whether a result
       built on it matters is a property of the program using it.
@@ -3176,7 +3189,7 @@ anomalies:
       `waveform_iterations` 2 and 3 are 1.48e-03 (relative) from the one
       at 1 after three steps, and equal to each other.  v0.1.0 already
       carries the sweep loop and the interpolation.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       No state is wrong: every result is the converged solution of the
@@ -3189,10 +3202,13 @@ anomalies:
       multi-rate coupling, and a program that chose them for that reason
       gets none of the reduction and no signal; the extra sweeps cost
       passes and, once the first sweep converges, move the state by no
-      more than about one residual.  Graded
-      `minor` because the result is the documented single-pass result,
-      and because the error against a uniform-rate reference is the same
-      number as without the option, which a verification run would show.
+      more than about one residual.  Graded `major`, as MADD-ANO-014 is for
+      a method that does not deliver the accuracy its name states: the
+      result silently carries the splitting error the named method exists
+      to remove.  It was `minor` until the 0.4.0 severity definition,
+      because the result is the documented single-pass result and the
+      error against a uniform-rate reference is the same number as without
+      the option, which a verification run would show.
       `context_dependent` because whether that matters depends on whether
       an accuracy argument rests on the method the parameter names.
     affected_components:
@@ -3349,17 +3365,17 @@ anomalies:
       builds the ghosts beyond each rod end itself, and the sharded rod is
       `update` to float32 rounding (<= 2.4e-07) at both orders, with and
       without boundary inputs, on 1, 2 and 4 devices.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       Silently wrong physics in the default mode of a public, STABLE
-      wrapper, with no error or warning.  Graded `minor` because it is
+      wrapper, with no error or warning: 7% at the end cell, and an end
+      temperature is what a coupled neighbour reads.  Graded `major`; it
+      was `minor` until the 0.4.0 severity definition, because it is
       confined to the cells within a halo width of the global ends, to
       stencils wider than one cell (in-tree, only the 4th-order
       `HeatNode`), and is sub-percent of the field's range (4.7e-03 on a
-      unit range).  The case for `major`: it was the default, the
-      error at the end cell was 7%, and an end temperature is what a
-      coupled neighbour reads.  `context_dependent` because it needs a
+      unit range).  `context_dependent` because it needs a
       sharded stencil node with a halo at least two cells wide and a
       non-periodic `boundary`; whether a result built on it matters is a
       property of the program using it.
@@ -3511,14 +3527,16 @@ anomalies:
       that fix made order 2 insulated and left order 4 as described.  The
       sharded node now reproduces the unsharded one exactly
       (MADD-ANO-030), so it carries the same behaviour.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       A rod end left unconnected is naturally read as insulated, and at
       `stencil_order=2` it is; at `stencil_order=4` it leaks, silently.
-      Graded `minor` because the drift is slow (0.38% of the mean over
-      2000 steps above), confined to the ends, and absent whenever the
-      ends are given a temperature, which is how the node's documented
+      Graded `major`: heat crosses an end that has no temperature given,
+      and nothing says so.  It was `minor` until the 0.4.0 severity
+      definition, because the drift is slow (0.38% of the mean over 2000
+      steps above), confined to the ends, and absent whenever the ends
+      are given a temperature, which is how the node's documented
       boundary condition is meant to be used.  `context_dependent`
       because it needs `stencil_order=4` and an end with no boundary
       input; whether a result built on it matters is a property of the
@@ -3584,7 +3602,7 @@ anomalies:
       trace) stepped a field 3.9e-02 from both the order-2 and the order-4
       step, at v0.2.0, v0.3.1 and in this cycle alike; through `PUT
       /graph/params` on the 0.4.0 tree before the fix it answered 200.
-      Resolved in 0.4.0: `invalidate_static_cache()` drops the compiled
+      Partially resolved in 0.4.0: `invalidate_static_cache()` drops the compiled
       functions and rebuilds the per-shard update on both wrappers, and the
       stencil wrapper reads its halo layout from the node each time it
       builds it, so every `compile()` traces the wrapped node afresh with
@@ -3604,22 +3622,34 @@ anomalies:
     affected_components:
       - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
       - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
-    affected_versions: ">=0.2.0, <0.4.0"
+    affected_versions: ">=0.2.0"
     workaround: >
       Before 0.4.0: set the value before wrapping the node, or build a new
       wrapper after writing it (a new wrapper has nothing cached).  A
       recompile alone does not help once the graph has stepped.
-    resolution_status: "resolved"
+      From 0.4.0, the graph path needs nothing; when calling a wrapper's
+      `update()` directly, call `invalidate_static_cache()` on it after
+      writing a constant of the node it wraps.
+    resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      A wrapper's `update()` called on its own, outside a graph, still
-      reuses its compiled step until `compile()` (or
-      `invalidate_static_cache()`) is called, where the unwrapped node's
-      `update()` reads its params afresh on every call; a graph recompiles
-      on every write that marks it dirty, so the graph path is covered.
+      Live in 0.4.0, which is why this entry is partially resolved rather
+      than resolved: a wrapper's `update()` called on its own, outside a
+      graph, still reuses the step it traced first after a write to a
+      legacy node's constant, until `invalidate_static_cache()` is called
+      (every `compile()` calls it).  The unwrapped node's `update()` reads
+      its params afresh on every call, so the wrapped and unwrapped node
+      disagree silently on that path, under both `ShardedStencilNode` and
+      `ShardedUnstructuredNode`.  A graph recompiles on every write that
+      marks it dirty, so the graph path -- `step`, `run`, the scans and
+      `PUT /graph/params` -- is covered.  Pinned by
+      test_a_wrappers_own_update_keeps_its_compiled_step_until_the_cache_is_dropped,
+      which fails when the direct path is closed too.
     verification:
       - "tests/cloud/multigpu/test_sharded_params.py::test_a_legacy_nodes_param_write_reaches_the_sharded_step_after_a_recompile"
       - "tests/cloud/multigpu/test_sharded_heat_params_and_grid_inputs.py::test_a_stencil_order_write_reaches_a_sharded_rod_after_a_recompile"
+      # What stays open, pinned so that closing it fails.
+      - "tests/cloud/multigpu/test_sharded_params.py::test_a_wrappers_own_update_keeps_its_compiled_step_until_the_cache_is_dropped"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-033"
@@ -3815,7 +3845,7 @@ anomalies:
       records `sharded`, `axis_map`, `boundary`; the reload is a
       `HeatNode` and nothing is said).  The whole-tree audit had pinned it
       as a strict xfail (W7) pending a decision.
-      Resolved in 0.4.0 by making the loss loud rather than by restoring
+      Partially resolved in 0.4.0 by making the loss loud rather than by restoring
       the wrapper.  Restoring needs the device mesh -- and, unstructured,
       the partition layout -- which a config does not carry and the
       loading machine need not have; refusing would block the only reload
@@ -3842,22 +3872,36 @@ anomalies:
       - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
       - "maddening.cloud.multigpu.sharded_node.ShardedPointwiseNode"
       - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
-    affected_versions: ">=0.2.0, <0.4.0"
+    affected_versions: ">=0.2.0"
     workaround: >
       Before 0.4.0: after `from_dict`, wrap the node again and swap it in
       with `replace_node` before `compile()`, using the `axis_map` /
-      `boundary` / `shard_axes` the config recorded beside the node.
-    resolution_status: "resolved"
+      `boundary` / `shard_axes` the config recorded beside the node.  From
+      0.4.0 the same for a config (the warning names the call).  A USD
+      stage of a sharded graph cannot be loaded at all: save the graph
+      with `to_dict()` instead, or save the unsharded graph to USD and wrap
+      the node after loading.
+    resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      The wrapper is still not restored, by design: a config describes the
-      model, not the devices.  A USD stage of a sharded graph still fails
-      to load, loudly (`TypeError`; pinned as a strict xfail).
+      Live in 0.4.0, which is why this entry is partially resolved rather
+      than resolved: the USD half of the same round trip.  The USD writer
+      records the wrapper's qualified class name and the loader calls it
+      as `cls(name=..., timestep=..., **params)`, which no wrapper
+      accepts, so `save_graph_to_usd` succeeds on a graph with a sharded
+      node and `load_graph_from_usd` then raises `TypeError` -- loudly,
+      but the stage cannot be read back.  Pinned as a strict xfail
+      (test_a_usd_round_trip_reloads_a_graph_containing_a_sharded_node),
+      which fails the run when the representation is decided.
+      The config wrapper is still not restored, by design: a config
+      describes the model, not the devices, and the reload says so.
     verification:
       - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_a_config_round_trip_of_a_sharded_node_warns_and_reloads_it_unsharded"
       - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_every_sharded_wrapper_is_named_with_its_recorded_settings"
       - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_the_pointwise_and_unstructured_wrappers_write_the_markers_the_loader_reads"
       - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_an_unsharded_config_loads_without_a_warning"
+      # What stays open: the USD half, a strict xfail.
+      - "tests/cloud/multigpu/test_property_sharded_round_trips.py::test_a_usd_round_trip_reloads_a_graph_containing_a_sharded_node"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-037"
@@ -3955,12 +3999,14 @@ anomalies:
       equivalence sweep of the built-in stencil nodes (HeatNode orders 2 and
       4, LBMNode D2Q9 with walls and an obstacle at the global edges, D3Q19;
       130 configurations) is identical before and after the change.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       Silent and systematic -- every cell, about 3% after 20 steps in the
-      measurement above -- but it needs a custom periodic stencil node that
-      reads a sharded static in its halo; no built-in node does.
+      measurement above -- on a public, STABLE wrapper.  Graded `major`; it
+      was `minor` until the 0.4.0 severity definition, because it needs a
+      custom periodic stencil node that reads a sharded static in its halo
+      and no built-in node does.
       `context_dependent` because whether a result built on it matters is a
       property of the program using it.
     affected_components:
@@ -4127,11 +4173,13 @@ anomalies:
       `axes` is refused with a `ValueError` naming it and the axes the call
       exchanges.  An exchanged axis the dict leaves out still gets
       `"edge"`, as documented.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
-      Silent, but only on a direct call of the exchange primitive with a
-      per-axis dict; the wrappers do not use one.  `context_dependent`
+      Silent: a misspelt axis key gave that axis the wrong halo fill with
+      no error.  Graded `major`; it was `minor` until the 0.4.0 severity
+      definition, because it needs a direct call of the exchange
+      primitive with a per-axis dict, and the wrappers do not use one.  `context_dependent`
       because the wrong fill changes a stencil's boundary values.
     affected_components:
       - "maddening.cloud.multigpu.halo.halo_exchange"
@@ -4490,7 +4538,7 @@ anomalies:
       0.6453 on 71479c7, where it read the new `G` inside the branch
       construction had fixed.  MADD-ANO-024's resolution refused a value no
       step reads; both of these are read, so both passed it.
-      Resolved in 0.4.0, in the route and in `HeatNode`.  The route asks,
+      Partially resolved in 0.4.0, in the route and in `HeatNode`.  The route asks,
       before anything is written, whether the graph a save would reload
       runs what the running graph runs: it builds the node from the params
       a save would carry with the request applied, and where that node
@@ -4520,25 +4568,37 @@ anomalies:
     affected_components:
       - "maddening.api.server.SimulationServer"
       - "maddening.nodes.heat.HeatNode"
-    affected_versions: ">=0.1.0, <0.4.0"
+    affected_versions: ">=0.1.0"
     workaround: >
       Before 0.4.0: change `grid_points` on a `HeatNode`, or cross `G = 0`
       on an `LBMPipeNode`, by rebuilding the node (`DELETE
       /graph/nodes/{name}`, then `POST /graph/nodes`), never through `PUT
-      /graph/params`.
-    resolution_status: "resolved"
+      /graph/params`.  From 0.4.0 the route refuses such a write; a
+      calibration or a `gm.params` write of an `LBMPipeNode`'s `G` must not
+      cross zero either -- bound it away from zero (a `ParamSpec` with
+      bounds of one sign), or rebuild the pipe with the other sign.
+    resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >
+      Live in 0.4.0, which is why this entry is partially resolved rather
+      than resolved: writes outside the route -- a direct `gm.params`
+      write, a fit -- are not asked the route's question, and a built-in
+      node reaches the defect that way.  `G = 0` written into `gm.params`
+      of a multiphase `LBMPipeNode` (`G = -5`) is accepted and saved by
+      `to_dict()`; the running pipe stays on the multiphase branch while
+      the reload is single-phase, and after ten steps the two differ by
+      0.842 in density and 0.645 in the tracer (a phase indicator bounded
+      by 1), with no error or warning.  A fit that moves `G` through zero
+      does the same.  `G` crossing zero is the only such write among the
+      built-in nodes' trainable leaves.  Pinned by
+      test_a_gm_params_write_of_g_through_zero_runs_another_model_than_its_reload.
+      Two limits of the route's own check, recorded rather than closed.
       The comparison runs only where the rebuilt node's attributes differ
       from the running node's, and only for a node its class rebuilds from
       its params (as `from_dict()` does).  It compares one trace of the
       hooks with a zero for every declared boundary input, and the
       initial state; a constructor-derived value that only an undeclared
-      input would reach is not seen.  Writes outside this route -- a
-      direct `gm.params` write, a fit -- are not asked this question: a fit
-      of a multiphase pipe's `G` through zero stays on the multiphase
-      branch while its saved config would not.  `G` crossing zero is the
-      only such write among the built-in nodes' trainable leaves.
+      input would reach is not seen.
     verification:
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_grid_written_into_a_uniform_rod_is_refused_and_the_reload_matches"
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_uniform_rod_keeps_its_stencil_when_grid_points_is_written_into_its_params"
@@ -4551,6 +4611,8 @@ anomalies:
       - "tests/api/test_params_endpoint_reload_agreement.py::test_an_array_the_constructor_derives_from_a_live_value_is_refused"
       - "tests/api/test_params_endpoint_reload_agreement.py::test_an_initial_condition_the_constructor_copied_from_a_live_value_is_refused"
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_node_that_differs_from_its_own_rebuild_is_not_blamed_on_the_write"
+      # What stays open, pinned so that closing it fails.
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_gm_params_write_of_g_through_zero_runs_another_model_than_its_reload"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-048"
@@ -4581,7 +4643,7 @@ anomalies:
       with every changed key of the request applied at once, before
       anything is written, and a constructor refusal is a 400 naming the
       key(s) and the constructor's message, with nothing written.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       The loss is loud where it lands -- the saved config raises on load --
@@ -4590,8 +4652,10 @@ anomalies:
       In between the running graph computes with a value its constructor
       refuses: a rod above its stability limit diverges (visibly), a pipe
       whose gas is denser than its liquid clips its phase indicator
-      silently.  Graded `minor` because the failure announces itself at the
-      reload; the case for `major` is that silent clipping.
+      silently.  Graded `major` for that silent clipping, and for a running
+      graph computing with a value its own constructor refuses.  It was
+      `minor` until the 0.4.0 severity definition, because the failure
+      announces itself at the reload.
       `context_dependent` because it needs a run-time REST write of a value
       the constructor validates.
     affected_components:
@@ -4632,7 +4696,7 @@ anomalies:
       on the 0.4.0 development tree before the fix (71479c7): 500, the NaN
       stored, and the next `GET /graph/params/rod` a 500.  `POST
       /graph/nodes` has refused a non-finite parameter since 0.4.0.
-      Resolved in 0.4.0: every value in the request is checked for
+      Partially resolved in 0.4.0: every value in the request is checked for
       finiteness before anything else, and a non-finite one is a 400
       naming its path (`params.grid_points[1]: value must be finite`), with
       nothing written.
@@ -4646,18 +4710,34 @@ anomalies:
       result anyone could mistake for valid.
     affected_components:
       - "maddening.api.server.SimulationServer"
-    affected_versions: ">=0.1.0, <0.4.0"
+    affected_versions: ">=0.1.0"
     workaround: >
       Before 0.4.0: never send a non-finite number to `PUT
       /graph/params`; to recover a node that took one, rebuild it (`DELETE
-      /graph/nodes/{name}`, then `POST /graph/nodes`).
-    resolution_status: "resolved"
+      /graph/nodes/{name}`, then `POST /graph/nodes`).  From 0.4.0 the
+      route refuses one.  In-process, check a value for finiteness before
+      setting it on a node's params or writing it into `gm.params`, and
+      bound a calibrated parameter so that a diverging fit cannot leave it
+      non-finite; to recover, write a finite value back.
+    resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      None known for the route.  A non-finite value set in-process on a
-      node's params still makes its `GET /graph/params` fail.
+      Live in 0.4.0, which is why this entry is partially resolved rather
+      than resolved.  The route is closed; the reply is not.  A non-finite
+      value that reaches a node's params in-process -- set on the node's
+      params dict, or written into `gm.params`, which is where a
+      calibration that diverged to `NaN` leaves it -- makes every
+      `GET /graph/params/{node}` for that node a 500, because the reply
+      echoes the params and the encoder refuses a non-finite number.  Loud,
+      and no wrong number is reported, but the node's parameter endpoint is
+      unusable until the value is replaced.  Pinned by
+      test_a_non_finite_structural_value_set_in_process_breaks_get and
+      test_a_live_leaf_a_fit_drove_non_finite_breaks_get.
     verification:
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_non_finite_structural_value_is_refused_before_anything_is_written"
+      # What stays open, pinned so that closing it fails.
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_non_finite_structural_value_set_in_process_breaks_get"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_live_leaf_a_fit_drove_non_finite_breaks_get"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-050"
@@ -4886,18 +4966,23 @@ anomalies:
       answered 200 and wrote the file; `path=<dir>/noext` wrote
       `noext.npz`; `load` of a missing path and of `/etc/hostname`
       answered 400 with the two different messages above.
-    severity: "major"
+    severity: "critical"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
-      Graded `major`: the CHANGELOG gives it no label, and the release notes
-      describe it as an arbitrary file write and a file-existence oracle
-      reachable by an unauthenticated client.  The write is constrained to
-      an `.npz` name and to the graph's own arrays, so it cannot plant code,
+      Graded `critical` under the 0.4.0 severity definition
+      (`AnomalySeverity`): unauthorised access -- a file write anywhere the
+      server's user could write, and a file-existence oracle over the host
+      -- through an HTTP route that the shipped default configuration
+      exposed to other hosts, since the container bound the API to `0.0.0.0`
+      with no credential (MADD-ANO-051). The write is constrained to an
+      `.npz` name and to the graph's own arrays, so it cannot plant code,
       but it can overwrite any checkpoint or other `.npz` file the server's
-      user can write, and the oracle maps the host's file system.  Not
-      `critical`, because the API's own writes (MADD-ANO-051) already gave
-      the same caller the simulation, and this adds reach into the host
-      rather than a new way to change results.
+      user can write, and the oracle maps the host's file system. It was
+      graded `major` when first registered, on the ground that the API's own
+      writes (MADD-ANO-051) already gave the same caller the simulation and
+      this added reach into the host rather than a new way to change
+      results; the definition rates each defect's own reach and consequence,
+      and reach into the host from a default exposure is the critical case.
       Graded `context_dependent`: what the write can damage is whatever
       `.npz` files the server's user can write and whatever later reads
       them, which is a property of the host and not of the library.  A
@@ -5096,17 +5181,22 @@ anomalies:
       that was to carry the protocol was out of scope for v0.3.0, and the
       0.4.0 TCP bridge has its own state format (MADD-ANO-054 records the
       bridge's own unpickling).  So the exposure was a program's own use of
-      the two functions, which is why this is `minor` where MADD-ANO-054 is
+      the two functions, which is why this is `major` where MADD-ANO-054 is
       `critical`.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
-      Graded `minor` because nothing the library shipped delivered untrusted
-      bytes to either function; a program had to do that itself, as it
-      would have to for `pickle.loads`.  It is a defect rather than a
-      documented property because both functions present themselves as a
-      state handle and a wire protocol, which is what a reader passes
-      untrusted bytes to.
+      Graded `major` under the 0.4.0 severity definition
+      (`AnomalySeverity`): an API that executes what it is handed while
+      presenting itself as safe for data -- a state handle and a wire
+      protocol, which is what a reader passes untrusted bytes to -- runs the
+      code of any party whose bytes a program passes it, and nothing in
+      either function's documentation said not to. Not `critical`, because
+      nothing the library shipped delivered untrusted bytes to either
+      function or exposed them on a surface other hosts could reach; a
+      program had to do that itself. It was graded `minor` when first
+      registered, on that same ground; the definition places a bounded reach
+      in `major`, not below it.
       Graded `context_dependent`: whether any untrusted party could supply
       the bytes is entirely a property of the program that called them.
       Where one could, the consequence was code execution in the
@@ -5224,13 +5314,17 @@ anomalies:
       a direct call holding the whole grid the whole-grid field).  A
       whole-grid body force on such a direct call is now padded
       periodically, as the node's halo fill is; it was zero-padded.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       Silent, but it needs an input the unsharded node refuses: a caller
-      who runs the same graph unsharded gets an error.  Graded `minor`
-      because the wrong result follows from a mis-shaped input rather than
-      a correct one.  `context_dependent` because a sharded-only workflow
+      who runs the same graph unsharded gets an error. Graded `major` under
+      the 0.4.0 severity definition: a silent wrong result is never `minor`,
+      and accepting an input the node's own contract refuses (the unsharded
+      node's refusal is that contract) and computing a repeated pattern from
+      it is one. It was graded `minor` when first registered, because the
+      wrong result follows from a mis-shaped input rather than a correct
+      one. `context_dependent` because a sharded-only workflow
       that passes a per-shard-length source would take the repeated
       pattern for the intended one.
     affected_components:
@@ -5280,13 +5374,16 @@ anomalies:
       `propeller_x` that is not an integer index in `[0, nx)` (naming the
       default when it is the one outside the grid), and a disc that covers
       no cell of the cross-section.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       Silent: the model that runs is not the one configured, and nothing
-      says so.  Graded `minor` because each case is a configuration value
-      outside what the node documents (a finite viscosity; a disc on the
-      grid), and a pipe with no propeller visibly does not flow.
+      says so. Graded `major` under the 0.4.0 severity definition: a silent
+      wrong result is never `minor`, and on a pipe of 10 planes or fewer the
+      default `propeller_x` alone reached it. It was graded `minor` when
+      first registered, because each case is a configuration value outside
+      what the node documents (a finite viscosity; a disc on the grid), and
+      a pipe with no propeller visibly does not flow.
       `context_dependent` because a small test pipe built with the default
       `propeller_x` gives no sign that its propeller is missing.
     affected_components:

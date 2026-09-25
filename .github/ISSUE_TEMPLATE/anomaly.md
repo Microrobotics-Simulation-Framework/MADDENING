@@ -7,7 +7,7 @@ labels: known-anomaly
 
 ## Severity
 
-<!-- Select one: critical / major / minor -->
+<!-- Select one: critical / major / minor.  Definitions: AnomalySeverity in src/maddening/core/compliance/anomaly.py.  A silent wrong result is never minor. -->
 
 **Severity**:
 

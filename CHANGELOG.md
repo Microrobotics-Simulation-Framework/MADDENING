@@ -651,6 +651,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **Severities defined; thirteen relabelled; four entries partially resolved**: `AnomalySeverity` now defines each level, and a silent wrong result is never `minor`, so MADD-ANO-005, 009, 025, 027, 029, 031, 038, 041, 048, 055, 057 and 058 move to `major`, and 052 (a default-exposed route) to `critical`.
+  MADD-ANO-032, 036, 047 and 049 are `partially_resolved`, not `resolved`: their routes outside a graph or the REST route are still live (see each `residual_risk`); the release notes' Known anomalies section now names every reachable entry, and a test keeps it so.
+  Sharded nodes: iterate `update_padded`'s `shard_info` over its `int` keys only; `"n_local"` (unstructured wrapper) is the one string key.
 - **MADD-ANO-062 (new, resolved in this release)**: `HeatNode` accepted a non-positive `length` or `timestep`, a negative `thermal_diffusivity` and `grid_points` out of order, and answered wrongly without a word (since 0.1.0; see `### Changed`)
 - **MADD-ANO-059, 060, 061 (new, resolved in this release)**: accelerating a coupling group holding an integer, boolean or PRNG-key leaf raised a `TypeError`; a group-internal flux edge read by the interface norm or a sub-cycled member's linear interpolation raised a bare `KeyError`; `run_adaptive` advanced its clock by `dt_min` on a `dt_min` accept whose state covered more (all since 0.1.0; see `### Fixed`, `### Changed`).
   **MADD-ANO-027** now says each extra waveform sweep applies at least one more pass, moving a converged state by about one residual

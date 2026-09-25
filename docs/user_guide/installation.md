@@ -75,7 +75,7 @@ After installing, set up your credentials file:
 
 ```bash
 mkdir -p ~/.maddening
-cp src/maddening/examples/cloud/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
+cp src/maddening/examples/cloud/config/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
 # Edit ~/.maddening/cloud_credentials.yaml and fill in your API key(s)
 # ~/.maddening/cloud_credentials.yaml is the default path. For a different location, use:
 # CloudLauncher(credentials_path='path/to/cloud_credentials.yaml')

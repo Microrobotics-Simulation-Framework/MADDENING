@@ -450,10 +450,20 @@ What that means in practice:
   the first sweep stops at the cap, the later sweeps act as extra
   passes toward the same fixed point, so raising `max_iterations` does
   the same job for less.  Use `waveform_iterations=1`.
-- At a converged step `boundary_interpolation` "constant", "linear" and
-  "quadratic" coincide: bit-identical over 100 macro-steps of the pair
-  at timesteps 0.001 / 0.005, and 4.458e-02 from a uniform-rate
-  reference in every mode, at v0.1.0, v0.3.1 and this release.
+- `boundary_interpolation` has less to work with than its name says.
+  Both ends of the interpolation are end-of-step estimates, so
+  "constant" and "linear" differ only by the in-pass change of a source
+  scheduled *before* the sub-cycled node: nothing under Jacobi, nothing
+  for a source scheduled after it, and nothing at exact stationarity.
+  On the pair at timesteps 0.001 / 0.005 with the fast node scheduled
+  first, the three modes are bit-identical over 100 macro-steps, and
+  4.458e-02 from a uniform-rate reference in every mode, at v0.1.0,
+  v0.3.1 and this release.  With the slow node first and
+  `tolerance=1e-4`, "linear" and "constant" end 2.71e-05 apart
+  (relative) after 100 steps: the in-pass change a converged but not
+  stationary step still carries, O(tolerance) per step, not a gain in
+  accuracy.  "quadratic" is "linear" to the last bit in every case,
+  because it is never given its third value.
 
 Real waveform relaxation is planned for 0.5.0, not promised by this
 release.  The report reads the sweeps as follows:
@@ -526,7 +536,21 @@ the remaining stiffness acting as a spring to ground.  Two mutually
 coupled nodes then contract as `g` under Jacobi and `g²` under
 Gauss-Seidel, and the line and ring shapes add the usual
 `cos(π/(N+1))`-type factor.  The heat fixtures use the Fourier number
-`Fo = α·dt/dx²` the same way.  The module docstring explains why the
+`Fo = α·dt/dx²` the same way, with one factor of two: `HeatNode` imposes
+its Dirichlet datum at the rod end through the ghost cell `2·T_b − T[0]`
+(MADD-ANO-007), so a slab's interface gain is `2·Fo`, and a slab pair
+contracts as `2·Fo` under Jacobi and `(2·Fo)²` under Gauss-Seidel.  Each
+heat fixture's Fourier number was halved when the datum moved to the
+rod end (`slow-drift` 0.225, `expensive-pair` and `heterogeneous` 0.2),
+so each contracts at the rate it was designed and first recorded at.
+Two slabs exchanging end-cell temperatures also have a *time-step*
+limit of their own: solved to convergence, the pair's interface mode
+leaves the unit circle at `Fo = 3/8` (−1.5 per step at 0.4, −4 at
+0.45), where one `HeatNode` with fixed data is stable to ½.  Before the
+halving, `slow-drift` (0.45) and `expensive-pair` (0.4) were past it:
+`slow-drift` exhausted its cap on every step under `gs/none/l2` and
+left float range within 90 steps.  The builders now refuse a slab-pair
+Fourier number at or above 3/8.  The module docstring explains why the
 damping has to be a function of `g` and why every spring fixture carries
 a driver node outside the group.
 

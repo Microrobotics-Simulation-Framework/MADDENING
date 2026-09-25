@@ -147,8 +147,15 @@ class CouplingGroup:
         bare field name instead of a one-element tuple, an empty
         mapping and a mapping naming only foreign nodes all raise
         ``ValueError`` here rather than failing inside the traced
-        coupling loop.  Read **only** under the two IQN accelerations;
-        supplying it under any other is inert and warns
+        coupling loop.  Only floating-point fields are accelerated,
+        here and under ``"aitken"`` / ``"fixed"``: an integer, boolean
+        or PRNG-key field is recomputed from the pre-step state on every
+        pass, so a named one is dropped from the selection, and
+        ``compile()`` refuses a selection that names no floating field.
+        (Before 0.4.0, ``solver="fori"`` with ``"aitken"`` or
+        ``"fixed"`` relaxed such fields through float32 and kept the
+        rounded value: MADD-ANO-051.)  Read **only** under the two IQN
+        accelerations; supplying it under any other is inert and warns
         (``UserWarning``).
     subcycling : bool
         If True, allow mixed timesteps within the coupling group.

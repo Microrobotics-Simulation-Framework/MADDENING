@@ -338,9 +338,15 @@ def windowed_loss(
         ``gm.step``: zeros for every declared input this does not
         supply, and a ``ValueError`` for an undeclared ``node.field``.
     mask_unconverged : bool
-        Multiply a window's loss by 0 when any coupling group exited at
-        ``max_iterations`` unconverged during it (the IFT gradient is
-        unreliable there).  Reads each group's residual and
+        Drop a window from the loss and from its gradient when any
+        coupling group exited at ``max_iterations`` unconverged during it
+        (the IFT gradient is unreliable there): it contributes exactly
+        zero to both, including a window whose state diverged to inf or
+        NaN, and under multiple shooting its continuity penalty goes with
+        it.  The verdict is taken in a gradient-free forward pass before
+        the differentiated one, so masking costs one extra simulation.
+        (Until 0.4.0 the window's loss was multiplied by 0, and a
+        diverged window made the gradient NaN.)  Reads each group's residual and
         amplification slots in ``_meta``, which ``solver="ift"`` always
         writes and ``solver="fori"`` writes only with
         ``diagnostics=True``: a group with no such slots would never be
@@ -417,16 +423,6 @@ def windowed_loss(
                 ok = ok & (estimated_error(meta[key], amp, scale) <= thr)
         return ok
 
-    def _advance_one_sample(carry, _):
-        def inner(c, _):
-            s, ok = c
-            s = step_fn(s, ext, params)
-            return (s, ok & _converged(s)), None
-
-        (state, ok), _ = jax.lax.scan(inner, carry, None, length=sample_every)
-        user = {k: v for k, v in state.items() if k != _META_KEY}
-        return (state, ok), user
-
     if window_states is not None:
         window_states = {k: v for k, v in window_states.items() if k != _META_KEY}
         n_ws = _leading_len(window_states, "window_states")
@@ -435,9 +431,20 @@ def windowed_loss(
                 f"window_states has leading axis {n_ws}, expected n_windows={n_windows}"
             )
 
-    def _window(w, _):
+    def _simulate(w, p, ws):
+        """Window ``w`` under params ``p``: ``(final state, converged, samples)``."""
+        def _advance_one_sample(carry, _):
+            def inner(c, _):
+                s, ok = c
+                s = step_fn(s, ext, p)
+                return (s, ok & _converged(s)), None
+
+            (state, ok), _ = jax.lax.scan(inner, carry, None, length=sample_every)
+            user = {k: v for k, v in state.items() if k != _META_KEY}
+            return (state, ok), user
+
         start = w * window
-        if window_states is None:
+        if ws is None:
             obs_start = jax.tree.map(
                 lambda x: jax.lax.dynamic_index_in_dim(x, start, keepdims=False),
                 observations,
@@ -445,16 +452,70 @@ def windowed_loss(
         else:
             obs_start = jax.tree.map(
                 lambda x: jax.lax.dynamic_index_in_dim(x, w, keepdims=False),
-                window_states,
+                ws,
             )
         state0 = _state_from_obs(obs_start, start)
         (final, ok), sim = jax.lax.scan(
             _advance_one_sample, (state0, jnp.array(True)), None, length=window,
         )
+        return final, ok, sim
+
+    # A masked window is cut out of the loss *and* out of its gradient.
+    # Multiplying its loss by 0 did neither reliably: a window whose
+    # coupling diverged holds inf / NaN, and ``0 * inf`` is NaN.  The
+    # forward loss came out right only because XLA's CPU backend happened
+    # to rewrite the product into a select, while the backward pass
+    # carried the zero cotangent through the window's non-finite
+    # intermediates -- the square, the node updates, the coupling solve's
+    # derivative -- and made the whole gradient NaN.  A zero cotangent does
+    # not survive a multiplication by inf; only a *select* drops what it
+    # does not pick.  So the verdict is taken first, in a gradient-free
+    # pass, and then:
+    #
+    # * the masked window's inputs (the parameters, its free start under
+    #   multiple shooting) enter through ``where(ok, x, stop_gradient(x))``,
+    #   whose derivative selects -- whatever non-finite cotangent the
+    #   window's own backward pass produces is dropped at its boundary;
+    # * its outputs are replaced by their (gradient-free) targets before
+    #   anything is computed from them, so its terms are exactly zero and
+    #   nothing non-finite reaches ``obs_fn``, the square or the next
+    #   window's free start;
+    # * its loss is selected away, never multiplied.
+    #
+    # Values are unchanged wherever every window converges (``where`` picks
+    # its first operand exactly), and a masked window contributes exactly
+    # nothing.  The verdict pass costs one extra forward simulation.
+    if mask_unconverged:
+        frozen_p = jax.lax.stop_gradient(params)
+        frozen_ws = (None if window_states is None
+                     else jax.lax.stop_gradient(window_states))
+
+        def _verdict(w, _):
+            return w + 1, _simulate(w, frozen_p, frozen_ws)[1]
+
+        _, window_ok = jax.lax.scan(_verdict, jnp.int32(0), None, length=n_windows)
+
+    def _window(w, _):
+        start = w * window
+        p, ws = params, window_states
+        if mask_unconverged:
+            ok = window_ok[w]
+
+            def gate(x):
+                return jnp.where(ok, x, jax.lax.stop_gradient(x))
+
+            p = jax.tree.map(gate, params)
+            if ws is not None:
+                ws = jax.tree.map(gate, ws)
+        final, _ok, sim = _simulate(w, p, ws)
         truth = jax.tree.map(
             lambda x: jax.lax.dynamic_slice_in_dim(x, start + 1, window),
             observations,
         )
+        if mask_unconverged:
+            sim = jax.tree.map(
+                lambda a, b: jnp.where(ok, a, jax.lax.stop_gradient(b)), sim, truth,
+            )
         sq = jax.tree.map(
             lambda a, b: jnp.sum((a - b) ** 2), obs_fn(sim), obs_fn(truth),
         )
@@ -462,7 +523,7 @@ def windowed_loss(
         # value; every leaf here is an Array, so the result is one.
         loss_w: Any = sum(jax.tree.leaves(sq))
         if mask_unconverged:
-            loss_w = loss_w * ok.astype(loss_w.dtype)
+            loss_w = jnp.where(ok, loss_w, jnp.zeros_like(loss_w))
         if window_states is not None and continuity_weight > 0.0:
             # Tie this window's end to the next window's free start
             # (no penalty after the last window).
@@ -472,6 +533,13 @@ def windowed_loss(
                 window_states,
             )
             end_user = {k: v for k, v in final.items() if k != _META_KEY}
+            if mask_unconverged:
+                # A masked window's end ties nothing: its penalty is
+                # dropped with it, by the same substitution.
+                end_user = jax.tree.map(
+                    lambda a, b: jnp.where(ok, a, jax.lax.stop_gradient(b)),
+                    end_user, nxt,
+                )
             gap = jax.tree.map(lambda a, b: jnp.sum((a - b) ** 2), end_user, nxt)
             pen = sum(jax.tree.leaves(gap))
             loss_w = loss_w + continuity_weight * pen * (w < n_windows - 1)

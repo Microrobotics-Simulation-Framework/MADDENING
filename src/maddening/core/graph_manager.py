@@ -205,6 +205,62 @@ def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
     return {nn: tuple(sorted(fs)) for nn, fs in ifields.items()} if ifields else None
 
 
+def _floating_accel_fields(fields, state, group_nodes) -> Optional[dict]:
+    """``fields`` restricted to the floating fields an accelerator may touch.
+
+    An accelerator flattens the fields it acts on into one floating
+    vector and writes the relaxed vector back.  An integer, unsigned,
+    boolean or PRNG-key leaf that took that round trip came back rounded
+    through float32 -- ``0xdeadbeef`` as ``0xdeadbf00``, ``2**24 + 1`` as
+    ``2**24`` -- and the rounded value was the one the step kept.  Such a
+    leaf is recomputed from the pre-step state on every pass, so its
+    first-pass value is already the converged one and it has no place in
+    the relaxation; ``solver="ift"`` has always iterated on the floating
+    fields only.
+
+    ``fields`` is ``None`` for "every field of every node in
+    ``group_nodes``", or a ``{node: (field, ...)}`` mapping.  Returned
+    unchanged -- ``None`` included -- when it names floating fields only,
+    so an all-floating group flattens exactly as it always did.  A
+    selection with no floating field left falls back to every floating
+    field of the group (an explicit ``accelerated_fields`` naming none
+    is refused by ``compile()`` before this is reached).
+    """
+    floats = float_fields_of(state, sorted(group_nodes))
+    if fields is None:
+        if all(len(floats[nn]) == len(state[nn]) for nn in floats):
+            return None
+        return {nn: fs for nn, fs in floats.items() if fs}
+    kept = {
+        nn: tuple(f for f in sorted(fs) if f in floats.get(nn, ()))
+        for nn, fs in fields.items()
+    }
+    if all(len(kept[nn]) == len(tuple(fields[nn])) for nn in kept):
+        return fields
+    kept = {nn: fs for nn, fs in kept.items() if fs}
+    return kept if kept else {nn: fs for nn, fs in floats.items() if fs}
+
+
+def _group_accel_fields(group, edges, state) -> Optional[dict]:
+    """The fields ``group``'s acceleration flattens; ``None`` for all of them.
+
+    The quasi-Newton accelerations read ``accelerated_fields`` (or the
+    interface fields the group's internal edges read); ``"aitken"`` and
+    ``"fixed"`` relax the whole group.  Either way only floating fields
+    enter (:func:`_floating_accel_fields`).  Shared by the step builder
+    and by ``compile()``'s IQN-IMVJ warm-start seeding, which must agree
+    on the vector's length.
+    """
+    if group.acceleration in ("iqn-ils", "iqn-imvj"):
+        chosen = (group.accelerated_fields if group.accelerated_fields is not None
+                  else _interface_state_fields(edges, group.nodes, state))
+    elif group.acceleration in ("aitken", "fixed"):
+        chosen = None
+    else:
+        return None
+    return _floating_accel_fields(chosen, state, group.nodes)
+
+
 def _strong_typed(tree):
     """Strip JAX weak typing from every array leaf.
 
@@ -899,6 +955,64 @@ def _subcycling_ratio_errors(group, nodes) -> list[str]:
                            for t in nearest)
             + " -- or change the macro timestep."
         )
+    return errors
+
+
+def _flux_edge_coupling_errors(group, nodes, edges, state) -> list[str]:
+    """``ERROR:`` issues for group-internal flux edges the group cannot read.
+
+    A flux edge carries a value ``compute_boundary_fluxes`` returns, which
+    is not a field of the producer's state.  Two parts of the coupling
+    loop read an internal edge's value *from the state* and so cannot
+    serve one, and both used to fail inside the trace with a bare
+    ``KeyError`` naming the flux:
+
+    * ``convergence_norm="interface"`` measures the change of each
+      internal edge's source field between iterates;
+    * a sub-cycled member under ``boundary_interpolation="linear"`` (or
+      ``"quadratic"``, which is linear) interpolates each internal input
+      between the pass's incoming iterate and the in-pass state.
+
+    Refused here, naming the setting that does work.  (Validation has
+    already checked that a source field missing from the state is one of
+    the producer's fluxes.)
+    """
+    names = sorted(group.nodes)
+    if not all(n in nodes and n in state for n in names):
+        return []
+    flux_edges = [
+        e for e in edges
+        if e.source_node in group.nodes and e.target_node in group.nodes
+        and e.source_field not in state[e.source_node]
+    ]
+    errors = []
+    for e in flux_edges:
+        if group.convergence_norm == "interface":
+            errors.append(
+                f"ERROR: coupling group {names} uses convergence_norm="
+                f"'interface', which measures the values the group's internal "
+                f"edges carry, but edge {e.key!r} carries the boundary flux "
+                f"{e.source_field!r}, which {e.source_node!r} computes in "
+                "compute_boundary_fluxes and does not hold in its state, so "
+                "the norm cannot read it.  Use convergence_norm='mixed' or "
+                "'l2', which measure the state the flux is computed from."
+            )
+    dividers = _group_dividers(group, nodes) or {}
+    if group.boundary_interpolation != "constant":
+        for e in flux_edges:
+            if dividers.get(e.target_node, 1) > 1:
+                errors.append(
+                    f"ERROR: coupling group {names}: node {e.target_node!r} is "
+                    f"sub-cycled ({dividers[e.target_node]} sub-steps per pass) "
+                    f"and reads the boundary flux {e.source_field!r} of "
+                    f"{e.source_node!r} through edge {e.key!r}.  "
+                    f"boundary_interpolation={group.boundary_interpolation!r} "
+                    "interpolates an input between the pass's incoming "
+                    "iterate and the in-pass state, and a flux is computed "
+                    "in compute_boundary_fluxes rather than held in either.  "
+                    "Set boundary_interpolation='constant', which reads the "
+                    "in-pass flux at every sub-step."
+                )
     return errors
 
 
@@ -1805,6 +1919,16 @@ _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
 # Key for internal multi-rate metadata in the full state dict.
 _META_KEY = "_meta"
 
+#: The ``_meta`` slots ``coupling_diagnostics()`` reads a group's report
+#: from, as ``coupling_{group key}_{suffix}``.  A step writes them; they
+#: describe that step and the group it ran under, unlike the warm starts
+#: (``_V`` / ``_W``, ``_pred_*``), which are state.
+_REPORT_SLOT_SUFFIXES = (
+    "iterations", "total_iterations", "residual", "amplification",
+    "rho_spectral", "spectral_residual", "spectral_amplification",
+    "gradient_relative_error_bound",
+)
+
 
 # ------------------------------------------------------------------
 # Deprecated ``coupling_diagnostics()`` field names
@@ -1888,18 +2012,33 @@ class _CouplingDiagnostics(dict):
 def _holds_tracer(state: dict) -> bool:
     """Whether *state* came out of a JAX transform rather than a run.
 
-    One node is enough: the state of a graph stepped under a transform
-    is the transform's output, so a node's fields are tracers together
-    or not at all, and so are the nodes.  Scanning the first node's
-    fields rather than all of them keeps this off the per-step cost of a
-    large graph, while still catching a hand-written partial state whose
-    traced field is not the first one (the shape
-    ``set_node_state`` is given by a differentiable initial condition).
+    Every node is asked, and every field of it.  A transform's output is
+    traced only where it depends on what the transform differentiates: a
+    node that reads no parameter (a clock, a driver) comes back as
+    concrete arrays beside traced ones, and so does an integer field, and
+    so do most ``_meta`` slots.  This used to ask the first entry only,
+    on the premise that nodes are traced together or not at all, and a
+    state that has been through a ``lax.scan`` has its keys sorted -- so
+    a first node that reads no parameter, or ``_meta`` itself whenever the
+    node names sort after ``"_"``, answered "not traced".  The graph then
+    kept the tracers, and the next ``step()`` or ``coupling_diagnostics()``
+    after ``jax.grad`` of a ``run_scan`` raised ``UnexpectedTracerError``.
+    ``_meta`` is skipped: it is not a node, and a graph whose nodes are
+    all concrete is not holding a transform's output.  The scan stops at
+    the first tracer, and in the common untraced case it is one
+    ``isinstance`` per field, next to the per-node dict copies
+    ``_user_state`` already makes every step.
     """
-    for value in state.values():
+    tracer = jax.core.Tracer
+    for key, value in state.items():
+        if key == _META_KEY:
+            continue
         if isinstance(value, dict):
-            return any(isinstance(leaf, jax.core.Tracer) for leaf in value.values())
-        return isinstance(value, jax.core.Tracer)
+            for leaf in value.values():
+                if isinstance(leaf, tracer):
+                    return True
+        elif isinstance(value, tracer):
+            return True
     return False
 
 
@@ -2013,11 +2152,55 @@ def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
         return result
 
 
+def _strict_convergence_messages(group) -> tuple[str, str]:
+    """``(non-finite, unconverged)``: what ``strict_convergence`` raises for *group*.
+
+    Two checks with exclusive predicates, so the message names the cause.
+    A non-finite estimate is a non-finite *state*: since 0.4.0 the norm
+    reports ``inf`` for a field it cannot evaluate rather than dropping it
+    (MADD-ANO-019), and that is the one case where no amount of iteration
+    would help.  Shared by the in-graph checks and by ``run_adaptive*``,
+    which raise them only about a solve the step keeps.
+    """
+    head = (f"coupling group {sorted(group.nodes)} exited at "
+            f"max_iterations={group.max_iterations} without converging")
+    return (
+        head + ": its state is non-finite (a field is NaN, inf, or beyond "
+        "the range its dtype can measure a change at), so the coupling "
+        "residual is non-finite and the IFT gradient is invalid here. The "
+        "iteration diverged and no larger max_iterations would help; check "
+        "the relaxation and the node updates, or set strict_convergence=False "
+        "to only report this via coupling_diagnostics().",
+        head + "; the IFT gradient is invalid here. Raise max_iterations, "
+        "loosen the tolerance, or set strict_convergence=False to only "
+        "report this via coupling_diagnostics().",
+    )
+
+
+def _raise_if_a_kept_solve_failed(messages: dict, verdicts: Sequence[dict]) -> None:
+    """``strict_convergence`` for ``run_adaptive``: raise about a kept solve.
+
+    ``verdicts`` are the ``collect_strict`` verdicts of the steps the
+    stepper keeps (the two half steps of an accepted attempt), and
+    ``messages`` the builder's ``strict_messages``.  Raises
+    ``RuntimeError`` -- what the in-graph check raises through
+    ``jax.jit`` is a subclass -- with the message the in-graph check
+    would have given, non-finite named first.
+    """
+    for key, (nonfinite_msg, unconverged_msg) in messages.items():
+        found = [v[key] for v in verdicts if key in v]
+        if any(bool(nf) for nf, _ in found):
+            raise RuntimeError(nonfinite_msg)
+        if any(bool(uc) for _, uc in found):
+            raise RuntimeError(unconverged_msg)
+
+
 def _run_coupled_block_impl(
     group, group_schedule, new_state, full_state, external_inputs,
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
     multigpu_device_map=None, node_params=None, fires=None,
+    strict_sink=None,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -2047,6 +2230,12 @@ def _run_coupled_block_impl(
     (under ``vmap``) runs both branches, and ``strict_convergence`` must
     not raise about a solve the step discards, so its predicates are
     gated on ``fires`` here as well.
+
+    ``strict_sink`` is ``None``, or a list: then ``strict_convergence``
+    raises nothing here and appends each checked solve's ``(non-finite,
+    unconverged)`` predicates to it instead, for a caller that knows only
+    later whether the step keeps the solve -- ``run_adaptive*``, whose
+    error-estimate full step and rejected attempts are discarded.
     """
     from maddening.core.coupling.acceleration import (
         aitken_relaxation,
@@ -2095,14 +2284,15 @@ def _run_coupled_block_impl(
             edge.target_node, set()
         ).add(edge.target_field)
 
-    # Auto-detect interface fields for IQN acceleration
-    if group.acceleration in ("iqn-ils", "iqn-imvj"):
-        if group.accelerated_fields is not None:
-            accel_fields = group.accelerated_fields
-        else:
-            accel_fields = _interface_state_fields(
-                group_internal_list, group.nodes, new_state,
-            )
+    # The fields the acceleration flattens: IQN's interface (or
+    # ``accelerated_fields``) set, and for ``"aitken"`` / ``"fixed"`` on
+    # the fori path the whole group -- floating fields only, either way
+    # (``_group_accel_fields``).  ``None`` flattens every field, which is
+    # what an all-floating group still gets.  The IFT path relaxes
+    # ``"aitken"`` / ``"fixed"`` on its own floating vector and reads
+    # this only for IQN's index map, so it stays ``None`` there.
+    if group.acceleration in ("iqn-ils", "iqn-imvj") or group.solver == "fori":
+        accel_fields = _group_accel_fields(group, group_internal_list, new_state)
     else:
         accel_fields = None
 
@@ -2177,6 +2367,51 @@ def _run_coupled_block_impl(
         if fires is None:
             return predicate
         return jnp.logical_and(fires, predicate)
+
+    _strict_nonfinite_msg, _strict_unconverged_msg = _strict_convergence_messages(group)
+
+    def _strict_check(value, est):
+        """``strict_convergence`` on a solve whose error estimate is ``est``.
+
+        Raises in-graph about a solve the step keeps (``_gate_on_firing``),
+        or, with ``strict_sink``, hands the two predicates to the caller.
+        """
+        nonfinite = jnp.logical_not(jnp.isfinite(est))
+        if strict_sink is not None:
+            strict_sink.append((
+                nonfinite,
+                # ``not (r <= t)``, not ``r > t``: see below.
+                jnp.logical_and(jnp.isfinite(est),
+                                jnp.logical_not(est <= conv_threshold_value)),
+            ))
+            return value
+        # Lazy for import time only: equinox is a transitive
+        # dependency of lineax, which is a base dependency.
+        import equinox as eqx  # noqa: PLC0415
+
+        # Two checks with exclusive predicates, so the message names the
+        # cause (``_strict_convergence_messages``).  Both are gated on the
+        # step keeping this solve: a multi-rate base step computes and
+        # discards it on every phase the group does not fire on, and used
+        # to raise about a solve nothing applied.
+        value = eqx.error_if(value, _gate_on_firing(nonfinite),
+                             _strict_nonfinite_msg)
+        return eqx.error_if(
+            # ``not (r <= t)`` rather than ``r > t``: the two differ
+            # exactly on NaN, which answers False to both, and a NaN
+            # residual is the one case where the IFT gradient is certainly
+            # invalid.  That case is named by the check above; this
+            # predicate stays in the closed form and is made exclusive of
+            # it so exactly one message fires.  ``coupling_diagnostics()``
+            # already reads a non-finite residual as ``converged=False``;
+            # the guard has to agree.
+            value,
+            _gate_on_firing(jnp.logical_and(
+                jnp.isfinite(est),
+                jnp.logical_not(est <= conv_threshold_value),
+            )),
+            _strict_unconverged_msg,
+        )
 
     _MISSING = object()
 
@@ -2519,48 +2754,10 @@ def _run_coupled_block_impl(
             )
             sub = {nn: state_after_first[nn] for nn in group_node_names}
             if group.strict_convergence and group.solver == "ift":
-                import equinox as eqx  # noqa: PLC0415
-
+                # A non-finite estimate is a non-finite state; see
+                # ``_strict_check`` and the ift branch below.
                 single_est = estimated_error(single_r, single_amp, step_scale)
-                # Two checks with exclusive predicates, so the message
-                # names the cause.  A non-finite estimate is a
-                # non-finite *state*: since 0.4.0 the norm reports
-                # ``inf`` for a field it cannot evaluate rather than
-                # dropping it (MADD-ANO-019), and that is the one case
-                # where no amount of iteration would help.  See the ift
-                # branch below.
-                sub = eqx.error_if(
-                    sub,
-                    _gate_on_firing(jnp.logical_not(jnp.isfinite(single_est))),
-                    f"coupling group {sorted(group.nodes)} exited at "
-                    f"max_iterations={max_iters} without converging: its "
-                    "state is non-finite (a field is NaN, inf, or beyond "
-                    "the range its dtype can measure a change at), so the "
-                    "coupling residual is non-finite and the IFT gradient "
-                    "is invalid here. The iteration diverged and no larger "
-                    "max_iterations would help; check the relaxation and "
-                    "the node updates, or set strict_convergence=False to "
-                    "only report this via coupling_diagnostics().",
-                )
-                sub = eqx.error_if(
-                    # ``not (r <= t)``, not ``r > t``: a NaN residual
-                    # answers False to *both* comparisons, so the
-                    # second form lets the one state the IFT gradient
-                    # is certainly invalid at through silently.  The
-                    # non-finite case is caught above by name; this
-                    # predicate keeps the closed form regardless.
-                    sub,
-                    _gate_on_firing(jnp.logical_and(
-                        jnp.isfinite(single_est),
-                        jnp.logical_not(single_est <= conv_threshold_value),
-                    )),
-                    f"coupling group {sorted(group.nodes)} exited at "
-                    f"max_iterations={max_iters} without converging; "
-                    "the IFT gradient is invalid here. Raise "
-                    "max_iterations, loosen the tolerance, or set "
-                    "strict_convergence=False to only report this via "
-                    "coupling_diagnostics().",
-                )
+                sub = _strict_check(sub, single_est)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = sub[nn]
@@ -2881,58 +3078,15 @@ def _run_coupled_block_impl(
                 rho_spec = jnp.full((), jnp.nan, x0_full.dtype)
                 spec_resid = spec_amp = rho_spec
             if group.strict_convergence:
-                # Lazy for import time only: equinox is a transitive
-                # dependency of lineax, which is a base dependency.
-                import equinox as eqx  # noqa: PLC0415
-
-                final_est = estimated_error(final_res, final_amp, step_scale)
                 # A non-finite estimate is a non-finite *state*.  Since
                 # 0.4.0 every norm reports ``inf`` for a field it cannot
                 # evaluate -- a NaN or inf entry, or a magnitude beyond
                 # what its dtype can measure a change at -- instead of
-                # dropping it from the dead band (MADD-ANO-019), so this
+                # dropping it from the dead band (MADD-ANO-019), so that
                 # is exactly the diverged iteration, and no larger cap
-                # would help.  Named first so the message says so.
-                # Both predicates are gated on the step keeping this
-                # solve: a multi-rate base step computes and discards
-                # it on every phase the group does not fire on, and
-                # used to raise about a solve nothing applied.
-                x_star_full = eqx.error_if(
-                    x_star_full,
-                    _gate_on_firing(jnp.logical_not(jnp.isfinite(final_est))),
-                    f"coupling group {sorted(group.nodes)} exited at "
-                    f"max_iterations={max_iters} without converging: its "
-                    "state is non-finite (a field is NaN, inf, or beyond "
-                    "the range its dtype can measure a change at), so the "
-                    "coupling residual is non-finite and the IFT gradient "
-                    "is invalid here. The iteration diverged and no larger "
-                    "max_iterations would help; check the relaxation and "
-                    "the node updates, or set strict_convergence=False to "
-                    "only report this via coupling_diagnostics().",
-                )
-                x_star_full = eqx.error_if(
-                    # ``not (r <= t)`` rather than ``r > t``: the two
-                    # differ exactly on NaN, which answers False to
-                    # both, and a NaN residual is the one case where
-                    # the IFT gradient is certainly invalid.  That case
-                    # is named by the check above; the predicate here
-                    # stays in the closed form and is made exclusive of
-                    # it so exactly one message fires.
-                    # ``coupling_diagnostics()`` already reads a
-                    # non-finite residual as ``converged=False``; the
-                    # guard has to agree.
-                    x_star_full,
-                    _gate_on_firing(jnp.logical_and(
-                        jnp.isfinite(final_est),
-                        jnp.logical_not(final_est <= conv_threshold_value),
-                    )),
-                    f"coupling group {sorted(group.nodes)} exited at "
-                    f"max_iterations={max_iters} without converging; "
-                    "the IFT gradient is invalid here. Raise "
-                    "max_iterations, loosen the tolerance, or set "
-                    "strict_convergence=False to only report this via "
-                    "coupling_diagnostics().",
-                )
+                # would help: ``_strict_check`` names it first.
+                final_est = estimated_error(final_res, final_amp, step_scale)
+                x_star_full = _strict_check(x_star_full, final_est)
             final = _merge(template_state, _embed(x_star_full), jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
                             spec_amp, grad_bound), (vw if vw else None))
@@ -3510,7 +3664,11 @@ def _build_adaptive_scan(
     Parameters
     ----------
     dt_step_fn : callable
-        ``(state, external_inputs, dt, params) -> state``.
+        ``(state, external_inputs, dt, params) -> (state, verdicts)``,
+        built with ``collect_strict=True``: ``strict_convergence`` is
+        checked here, on ``accepted & ~done``, so a solve the scan
+        discards -- the error estimate's full step, a rejected attempt,
+        a step past ``t_end`` -- never raises (MADD-ANO-052).
     user_state : callable
         Strips the internal ``_meta`` key from a state dict.
     max_steps : int
@@ -3528,6 +3686,8 @@ def _build_adaptive_scan(
     """
     from maddening.core.simulation.adaptive import _tree_error_norm
 
+    strict_messages = dict(getattr(dt_step_fn, "strict_messages", {}))
+
     def adaptive_scan(init_state, ext, params, knobs):
         on_trace()
         t_end, dt_initial, atol, rtol, dt_min, dt_max = knobs
@@ -3543,10 +3703,10 @@ def _build_adaptive_scan(
             done = t >= t_end
 
             # Full step + two half-steps
-            state_full = dt_step_fn(state, ext, dt, params)
+            state_full, _discarded = dt_step_fn(state, ext, dt, params)
             half_dt = dt / 2.0
-            state_half = dt_step_fn(state, ext, half_dt, params)
-            state_half = dt_step_fn(state_half, ext, half_dt, params)
+            state_half, verdicts_1 = dt_step_fn(state, ext, half_dt, params)
+            state_half, verdicts_2 = dt_step_fn(state_half, ext, half_dt, params)
 
             # Error estimate
             user_full = {k: v for k, v in state_full.items() if k != _META_KEY}
@@ -3566,6 +3726,24 @@ def _build_adaptive_scan(
                 lambda s, h: jnp.where(done, s, jnp.where(accepted, h, s)),
                 state, state_half,
             )
+            if strict_messages:
+                # ``strict_convergence`` on the solves this iteration keeps:
+                # the two half steps, when accepted and not already done.
+                import equinox as eqx  # noqa: PLC0415
+
+                kept = jnp.logical_and(accepted, jnp.logical_not(done))
+                for key, (nonfinite_msg, unconverged_msg) in strict_messages.items():
+                    nonfinite = jnp.logical_or(verdicts_1[key][0], verdicts_2[key][0])
+                    unconverged = jnp.logical_or(verdicts_1[key][1], verdicts_2[key][1])
+                    new_state = eqx.error_if(
+                        new_state, jnp.logical_and(kept, nonfinite), nonfinite_msg,
+                    )
+                    new_state = eqx.error_if(
+                        new_state,
+                        jnp.logical_and(kept, jnp.logical_and(
+                            jnp.logical_not(nonfinite), unconverged)),
+                        unconverged_msg,
+                    )
             new_t = jnp.where(done, t, jnp.where(accepted, t + dt, t))
             new_dt = jnp.where(done, dt, dt_next)
             new_n = jnp.where(
@@ -4027,6 +4205,11 @@ class GraphManager:
         # its way through and leaves behind if it raises.  This is what
         # the sub-step phase in ``_meta`` is indexed by.
         self._committed_rate_dividers: dict[str, int] = {}
+        # The coupling groups the compiled step was built from, by group
+        # key.  ``coupling_diagnostics()`` judges the report slots under
+        # the group that wrote them, which until the next compile is this
+        # one and not a replacement registered since.
+        self._committed_coupling_groups: dict[str, CouplingGroup] = {}
 
     def _snapshot_params(self) -> dict:
         return {
@@ -5529,6 +5712,9 @@ class GraphManager:
                 )
             elif len(group_timesteps) > 1:
                 issues.extend(_subcycling_ratio_errors(group, self._nodes))
+            issues.extend(_flux_edge_coupling_errors(
+                group, self._nodes, self._edges, self._state,
+            ))
             coupled_nodes |= group.nodes
 
         # Cycle detection (only on edges with valid endpoints)
@@ -5653,6 +5839,28 @@ class GraphManager:
                         f"accelerated_fields[{nn!r}] names {bad}: not a state field "
                         f"of {nn!r} (state fields: {sorted(have)})"
                     )
+            # Only floating fields are accelerated: an integer, boolean or
+            # PRNG-key field is recomputed from the pre-step state on every
+            # pass, and relaxing it rounded it through float32
+            # (``_floating_accel_fields``).  Such a field is dropped from
+            # the selection; a selection with nothing else in it would
+            # leave the quasi-Newton problem empty, so it is refused here
+            # rather than as a shape error inside the traced loop.
+            if g.acceleration in ("iqn-ils", "iqn-imvj"):
+                floating = float_fields_of(
+                    self._state, [nn for nn in g.accelerated_fields if nn in g.nodes],
+                )
+                if not any(f in floating[nn]
+                           for nn, fields in g.accelerated_fields.items()
+                           for f in fields):
+                    raise ValueError(
+                        f"accelerated_fields={dict(g.accelerated_fields)!r} of coupling "
+                        f"group {sorted(g.nodes)} names no floating-point field.  Only "
+                        "floating fields are accelerated: an integer, boolean or "
+                        "PRNG-key field is recomputed from the pre-step state on "
+                        "every pass.  Name at least one floating field, or leave "
+                        "accelerated_fields=None to use the interface fields."
+                    )
 
         # ``_meta`` is *state*, not derived data: ``step_count`` decides
         # which sub-steps a node with a rate divider > 1 fires on, and the
@@ -5775,12 +5983,10 @@ class GraphManager:
                     from maddening.core.coupling.acceleration import (
                         flatten_coupled_state,
                     )
-                    group_names = sorted(g.nodes)
-                    # Determine accel_fields
-                    if g.accelerated_fields is not None:
-                        af = g.accelerated_fields
-                    else:
-                        af = _interface_state_fields(self._edges, g.nodes, self._state)
+                    # The same field set the step flattens (floating
+                    # fields only), or the warm start's length would not
+                    # match the vector it seeds.
+                    af = _group_accel_fields(g, self._edges, self._state)
                     n_dof = flatten_coupled_state(
                         self._state, list(g.nodes), fields=af
                     ).shape[0]
@@ -5828,8 +6034,27 @@ class GraphManager:
             for name, divider in rate_dividers.items()
             if name in previous_dividers
         )
+        # A group replaced by a different one over the same nodes (a
+        # tightened tolerance, another norm) keeps its slot names, but the
+        # report slots describe a step the new group did not judge:
+        # carried over, ``coupling_diagnostics()`` re-derived ``converged``
+        # from the old residual under the new criterion, and read
+        # ``converged=False`` three passes into a fifty-pass budget.  They
+        # restart at their seeds instead -- no report until the new group
+        # has stepped, as after ``reset_state()`` -- while its warm starts
+        # (IQN matrices, predictor history), which are state, carry on.
+        stale_report_slots = {
+            f"coupling_{gkey}_{suffix}"
+            for g in self._coupling_groups
+            for gkey in ("+".join(sorted(g.nodes)),)
+            if gkey in self._committed_coupling_groups
+            and self._committed_coupling_groups[gkey] != g
+            for suffix in _REPORT_SLOT_SUFFIXES
+        }
         for key_, seed in meta.items():
             if key_ == "step_count" and not phase_still_means_the_same:
+                continue
+            if key_ in stale_report_slots:
                 continue
             live = previous_meta.get(key_)
             if live is None:
@@ -6041,6 +6266,9 @@ class GraphManager:
         else:
             self._state.pop(_META_KEY, None)
         self._committed_rate_dividers = dict(plan.rate_dividers)
+        self._committed_coupling_groups = {
+            "+".join(sorted(g.nodes)): g for g in self._coupling_groups
+        }
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is
         # not comparable across versions).  ``trace_count`` is 0 right
@@ -6755,7 +6983,9 @@ class GraphManager:
               convergence norm for the state ``x`` this step returned.
               At ``max_iterations=1`` it is the distance the single
               pass moved, which is the same thing measured one pass
-              earlier.  **It carries a floating-point noise floor**,
+              earlier.  ``inf`` on a non-finite state, whatever the
+              norm evaluates to there -- NaN included (see
+              ``"converged"``).  **It carries a floating-point noise floor**,
               and near the fixed point that floor is the whole value:
               see the note on ``solver`` below.
             - ``"amplification"`` : float — the estimated
@@ -6841,6 +7071,15 @@ class GraphManager:
               group hit ``max_iterations`` *and* the state it returned
               is still outside the threshold; under ``solver="ift"``
               the gradient through that step is then unreliable.
+              **A non-finite state is the one exception to reading the
+              slots literally, by design** (MADD-ANO-019): when any
+              floating field of the group is NaN or inf, or beyond the
+              magnitude its dtype can measure a change at, the step
+              records ``residual=inf`` -- not the NaN the norm would
+              evaluate to -- so ``"error_estimate"`` is ``inf`` and
+              ``converged`` is ``False``, and recomputing the norm from
+              the returned state does not reproduce the stored
+              residual.
               With ``waveform_iterations > 1`` it is the **last** sweep's
               verdict, which is the verdict on the returned state: every
               sweep iterates the same one-pass map from where the one
@@ -7193,10 +7432,22 @@ class GraphManager:
             ``reset_state()`` -- has no entry, so the dict is empty
             until something has run.
         """
+        # A transform that stepped the graph (``jax.grad`` of a loss
+        # calling ``run_scan``) leaves tracers in it; reading ``_meta``
+        # then raised ``UnexpectedTracerError``.  Put back first, like
+        # every other entry point.
+        self._recover_from_escaped_tracers()
         meta = self._state.get(_META_KEY, {})
         result: dict[str, dict] = {}
-        for group in self._coupling_groups:
-            key = "+".join(sorted(group.nodes))
+        for current in self._coupling_groups:
+            key = "+".join(sorted(current.nodes))
+            # Judged under the group the slots were written under: the one
+            # the compiled step was built from.  A replacement registered
+            # since has not stepped, and re-deriving the last step's
+            # verdict under *its* criterion described a step it never
+            # judged.  ``compile()`` restarts the slots of a replaced
+            # group, so after a recompile the two agree.
+            group = self._committed_coupling_groups.get(key, current)
             iter_key = f"coupling_{key}_iterations"
             res_key = f"coupling_{key}_residual"
             amp_key = f"coupling_{key}_amplification"
@@ -7788,12 +8039,22 @@ class GraphManager:
     # Adaptive timestepping
     # ------------------------------------------------------------------
 
-    def _build_dt_step_fn(self) -> Callable:
+    def _build_dt_step_fn(self, *, collect_strict: bool = False) -> Callable:
         """Build a step function parameterised by ``dt``.
 
         Returns a function ``(state, external_inputs, dt) -> new_state``
         where *dt* is a JAX scalar that overrides each node's compiled
         timestep.  Used by :meth:`run_adaptive`.
+
+        With ``collect_strict=True`` it returns ``(new_state, verdicts)``
+        instead and ``strict_convergence`` raises nothing inside it:
+        ``verdicts`` maps the key of every ``solver="ift"`` group with
+        ``strict_convergence=True`` to ``(non_finite, unconverged)``, each
+        true when some solve of the step failed that way, and the
+        function's ``strict_messages`` attribute maps the same keys to the
+        two messages.  The adaptive steppers compute solves they discard
+        -- the error estimate's full step, every rejected attempt -- and
+        check only the ones they keep (MADD-ANO-052).
         """
         schedule = list(self._schedule)
         nodes_dict = dict(self._nodes)
@@ -7916,6 +8177,7 @@ class GraphManager:
             new_state = {k: v for k, v in state.items()}
             # Per call, not per build: a flux is a value of *this* step.
             flux_state: dict[str, dict] = {}
+            verdicts: dict[str, tuple] = {}
 
             if has_coupling:
                 for block in blocks:
@@ -7927,6 +8189,7 @@ class GraphManager:
                         )
                     else:
                         _, group, group_schedule = block
+                        sink: Optional[list] = [] if collect_strict else None
                         new_state = _run_coupled_block_impl(
                             group, group_schedule, new_state, state,
                             external_inputs, runtime_dt=dt,
@@ -7938,7 +8201,15 @@ class GraphManager:
                             all_edges=self._edges,
                             multigpu_device_map=self._multigpu_device_map,
                             node_params=node_params,
+                            strict_sink=sink,
                         )
+                        if sink:
+                            # One entry per checked solve (one per waveform
+                            # sweep), reduced to "some solve failed so".
+                            verdicts["+".join(sorted(group.nodes))] = (
+                                functools.reduce(jnp.logical_or, [nf for nf, _ in sink]),
+                                functools.reduce(jnp.logical_or, [uc for _, uc in sink]),
+                            )
             else:
                 for nn in schedule:
                     new_state[nn] = _resolve_and_update(
@@ -7946,8 +8217,15 @@ class GraphManager:
                         node_params, flux_state,
                     )
 
+            if collect_strict:
+                return new_state, verdicts
             return new_state
 
+        cast(Any, dt_step_fn).strict_messages = {
+            "+".join(sorted(g.nodes)): _strict_convergence_messages(g)
+            for g in coupling_groups
+            if g.strict_convergence and g.solver == "ift"
+        }
         return dt_step_fn
 
     def _adaptive_multirate_message(self, entry: str) -> str:
@@ -8068,7 +8346,13 @@ class GraphManager:
             dt_max=dt_max,
         )
 
-        dt_step_fn = self._build_dt_step_fn()
+        # ``strict_convergence`` is checked here, on the host, and only
+        # for the solves the stepper keeps: the error estimate's full step
+        # and a rejected attempt are discarded, and raising about them
+        # stopped the controller from recovering by rejecting the very
+        # step whose coupling had not converged (MADD-ANO-052).
+        dt_step_fn = self._build_dt_step_fn(collect_strict=True)
+        strict_messages = cast(Any, dt_step_fn).strict_messages
         # JIT-compile the dt-parameterised step
         dt_step_jit = jax.jit(dt_step_fn)
         params = self._params_or_default(params)
@@ -8089,11 +8373,11 @@ class GraphManager:
             dt_jax = jnp.array(dt)
 
             # Full step
-            state_full = dt_step_jit(state, external_inputs, dt_jax, params)
+            state_full, _discarded = dt_step_jit(state, external_inputs, dt_jax, params)
             # Two half-steps
             half_dt = dt_jax / 2.0
-            state_half = dt_step_jit(state, external_inputs, half_dt, params)
-            state_half = dt_step_jit(state_half, external_inputs, half_dt, params)
+            state_half, verdicts_1 = dt_step_jit(state, external_inputs, half_dt, params)
+            state_half, verdicts_2 = dt_step_jit(state_half, external_inputs, half_dt, params)
 
             # Error estimate
             user_full = self._user_state(state_full)
@@ -8104,6 +8388,7 @@ class GraphManager:
 
             if error_norm <= 1.0:
                 # Accept step -- use the more accurate (half-step) result
+                _raise_if_a_kept_solve_failed(strict_messages, (verdicts_1, verdicts_2))
                 state = state_half
                 t += dt
                 n_steps += 1
@@ -8135,6 +8420,8 @@ class GraphManager:
                         f"(error={error_norm:.3e}). Accepting step.",
                         stacklevel=2,
                     )
+                    _raise_if_a_kept_solve_failed(
+                        strict_messages, (verdicts_1, verdicts_2))
                     state = state_half
                     t += dt_min
                     n_steps += 1
@@ -8242,7 +8529,8 @@ class GraphManager:
             ("run_adaptive_scan", int(max_steps), config.safety,
              config.order, config.min_factor, config.max_factor),
             lambda: _build_adaptive_scan(
-                self._build_dt_step_fn(), self._user_state, int(max_steps),
+                self._build_dt_step_fn(collect_strict=True), self._user_state,
+                int(max_steps),
                 config.safety, config.order, config.min_factor,
                 config.max_factor, self._count_scan_trace,
             ),

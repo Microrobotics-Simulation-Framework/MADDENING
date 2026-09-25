@@ -1217,7 +1217,8 @@ class LBMNode(SimulationNode):
         """``body_force`` at this block's halo-padded shape, or a refusal.
 
         Per block, the forms :meth:`update` takes: a uniform force
-        (anything that broadcasts to ``(D,)``), broadcast; a per-cell field
+        (``(D,)``, or ``(1,)`` for the same value on every component),
+        broadcast; a per-cell field
         as :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
         delivers it, already at the padded block's shape; and, when the
         block is the whole grid (a direct call), the whole-grid field
@@ -1235,10 +1236,9 @@ class LBMNode(SimulationNode):
             return jnp.zeros(target, dtype=jnp.float32)
         force = jnp.asarray(force)
         shape = tuple(force.shape)
-        try:
-            uniform = np.broadcast_shapes(shape, (D,)) == (D,)
-        except ValueError:
-            uniform = False
+        # ``(D,)`` or ``(1,)``: ``update`` indexes ``force[..., None, :]``,
+        # so it refuses a 0-d force, and so does this.
+        uniform = len(shape) == 1 and shape[0] in (1, D)
         if uniform:
             return jnp.broadcast_to(force, target).astype(jnp.float32)
         if shape == target:
@@ -1252,7 +1252,7 @@ class LBMNode(SimulationNode):
         block = "the whole grid" if whole else f"the block {interior} of the grid {self._grid_shape}"
         raise ValueError(
             f"{type(self).__name__} {self.name!r}: body_force has shape {shape}, "
-            f"but it is a uniform force (anything that broadcasts to ({D},)) or "
+            f"but it is a uniform force, shape ({D},) (or (1,)), or "
             f"one vector per cell, shape {grid_field}.  This step holds "
             f"{block}, so update_padded takes a uniform force, or the block's "
             f"cells with {halo} halo cell(s) either side, shape {target}, which "

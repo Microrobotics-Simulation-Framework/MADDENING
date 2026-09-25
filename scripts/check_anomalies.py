@@ -66,6 +66,7 @@ because pytest (``packaging>=22``) and matplotlib depend on it.
 """
 
 import argparse
+import ast
 import os
 import re
 import sys
@@ -534,49 +535,345 @@ _TEST_CLASS_PREFIX = "Test"
 _TEST_FUNCTION_PREFIX = "test"
 
 
-def _mark_kinds(expr):
+#: Test paths that no CI lane collects: every pytest run over ``tests/`` in
+#: ``.github/workflows`` passes ``--ignore=tests/viz``, and no job targets
+#: the directory itself.  A test there runs on nobody's machine but the
+#: author's, so it evidences nothing the release can point to
+#: (audit_040_p4_1, A23).  Repository-relative POSIX paths.  Kept in step
+#: with the workflows by ``tests/compliance/test_gate_scripts.py``, which
+#: derives the same set from them and fails when the two differ.
+PATHS_CI_NEVER_RUNS = ("tests/viz",)
+
+
+def _ci_never_runs(rel):
+    """The entry of :data:`PATHS_CI_NEVER_RUNS` holding ``rel``, or ``None``."""
+    norm = os.path.normpath(rel).replace(os.sep, "/")
+    for path in PATHS_CI_NEVER_RUNS:
+        if norm == path or norm.startswith(path.rstrip("/") + "/"):
+            return path
+    return None
+
+
+def _pytest_aliases(tree):
+    """Module-level names that may stand for something from pytest.
+
+    ``import pytest as pt`` binds ``pt`` to ``"pytest"``; ``from pytest
+    import mark, skip as sk`` binds ``mark`` / ``sk`` to ``"pytest.mark"``
+    / ``"pytest.skip"``; any other module-level ``NAME = value`` binds
+    ``NAME`` to the ``value`` expression, so ``_skip =
+    pytest.mark.skip(reason=...)`` followed by ``@_skip`` is read as the
+    mark it is.  Matching the decorator's text alone (``endswith(
+    "mark.skip")``) passed that spelling (audit_040_p4_1, A22).  A later
+    binding replaces an earlier one, as it does at run time.
+    """
+    aliases = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname and alias.name.split(".")[0] == "pytest":
+                    aliases[alias.asname] = alias.name
+        elif (isinstance(node, ast.ImportFrom) and not node.level
+              and (node.module or "").split(".")[0] == "pytest"):
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name)):
+            aliases[node.targets[0].id] = node.value
+        elif (isinstance(node, ast.AnnAssign) and node.value is not None
+              and isinstance(node.target, ast.Name)):
+            aliases[node.target.id] = node.value
+    return aliases
+
+
+def _dotted(expr, aliases, depth=0):
+    """``expr``'s dotted name with module-level aliases resolved, or ``None``."""
+    if depth > 20:                       # a binding cycle: ``a = b; b = a``
+        return None
+    if isinstance(expr, ast.Name):
+        bound = aliases.get(expr.id)
+        if isinstance(bound, str):
+            return bound
+        if isinstance(bound, (ast.Name, ast.Attribute)):
+            return _dotted(bound, aliases, depth + 1)
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        base = _dotted(expr.value, aliases, depth + 1)
+        return None if base is None else f"{base}.{expr.attr}"
+    return None
+
+
+#: Node types a condition may be built from for :func:`_static_truth` to
+#: evaluate it: literals and the operators that combine them, and nothing
+#: that can name, call or compute (no ``BinOp`` -- ``9 ** 9 ** 9``).
+_CONSTANT_CONDITION_NODES = (
+    ast.Constant, ast.Tuple, ast.List, ast.Load, ast.UnaryOp, ast.Not,
+    ast.UAdd, ast.USub, ast.BoolOp, ast.And, ast.Or, ast.Compare, ast.Eq,
+    ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn, ast.Is,
+    ast.IsNot,
+)
+
+
+def _static_truth(expr):
+    """``True`` / ``False`` when a condition's value is fixed in the source.
+
+    ``None`` when it depends on anything at all -- a name, a call, an
+    attribute -- which is every condition that means something.  pytest
+    evaluates a *string* condition as Python, so a string is parsed and
+    judged the same way: ``skipif("True")`` is ``skipif(True)``.
+    """
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        try:
+            expr = ast.parse(expr.value.strip(), mode="eval").body
+        except SyntaxError:
+            return None
+    if not all(isinstance(n, _CONSTANT_CONDITION_NODES) for n in ast.walk(expr)):
+        return None
+    try:
+        code = compile(ast.fix_missing_locations(ast.Expression(body=expr)),
+                       "<condition>", "eval")
+        return bool(eval(code, {"__builtins__": {}}, {}))
+    except Exception:
+        return None
+
+
+def _mark_kinds(expr, aliases=None, depth=0):
     """``"skip"`` / ``"skipif"`` / ``"xfail"`` for each pytest mark in ``expr``.
 
     ``expr`` is a decorator or a ``pytestmark`` value (one mark or a list).
-    """
-    import ast
+    Names bound at module level are resolved first (:func:`_pytest_aliases`).
 
-    items = expr.elts if isinstance(expr, (ast.List, ast.Tuple)) else [expr]
+    A ``skipif`` whose condition is fixed in the source is not conditional:
+    ``skipif(True)`` skips on every machine and is reported as ``"skip"``,
+    ``skipif(False)`` never skips and is not reported at all; with no
+    condition, pytest skips unconditionally.  ``xfail`` conditions are read
+    the same way.  A condition that depends on anything is ``"skipif"``:
+    the gate cannot know the machine CI runs on, so it reports rather than
+    judges (audit_040_p4_1, A20).
+    """
+    aliases = aliases or {}
+    if depth > 20:
+        return []
+    if isinstance(expr, (ast.List, ast.Tuple)):
+        return [k for item in expr.elts
+                for k in _mark_kinds(item, aliases, depth + 1)]
+    call = expr if isinstance(expr, ast.Call) else None
+    target = call.func if call is not None else expr
+    if (call is None and isinstance(target, ast.Name)
+            and isinstance(aliases.get(target.id), (ast.Call, ast.List, ast.Tuple))):
+        # ``_skip = pytest.mark.skip(reason=...)`` applied as ``@_skip``.
+        return _mark_kinds(aliases[target.id], aliases, depth + 1)
+    parts = (_dotted(target, aliases) or "").split(".")
+    kind = parts[-1] if len(parts) >= 2 and parts[-2] == "mark" else None
+    if kind == "skip":
+        return ["skip"]
+    if kind not in ("skipif", "xfail"):
+        return []
+    conditions = list(call.args) if call is not None else []
+    if call is not None:
+        conditions += [kw.value for kw in call.keywords if kw.arg == "condition"]
+    truths = [_static_truth(c) for c in conditions]
+    if not conditions or any(t is True for t in truths):
+        return ["skip" if kind == "skipif" else "xfail"]
+    if all(t is False for t in truths):
+        return []
+    return [kind]
+
+
+#: Calls that end a test where they run, by their resolved dotted name.
+_IMPERATIVE_OUTCOMES = {
+    "pytest.skip": "skip",
+    "pytest.skip.Exception": "skip",
+    "pytest.xfail": "xfail",
+    "pytest.xfail.Exception": "xfail",
+    "pytest.importorskip": "importorskip",
+}
+
+
+def _imperative_kinds(stmts, aliases, helpers, seen=frozenset()):
+    """Skip / xfail outcomes that running ``stmts`` can reach imperatively.
+
+    A mark is not the only way a test stops: ``pytest.skip()`` or
+    ``pytest.xfail()`` as a test's first statement makes it skip or xfail
+    on every run, and the gate read decorators only, so both passed with
+    pytest reporting the cited test skipped / xfailed (audit_040_p4_1,
+    A19 / A21).  So the statements are walked in execution order:
+
+    * a ``pytest.skip()`` that every run reaches -- straight-line code,
+      not under an ``if``, a loop, an ``except``, a short-circuit or a
+      conditional expression -- is ``"skip"``; one under a condition is
+      ``"skipif"`` (an ``if`` whose test is fixed in the source counts as
+      the branch it always takes);
+    * ``pytest.importorskip()`` is ``"skipif"`` wherever it is: it skips
+      only where the import fails;
+    * ``pytest.xfail()`` is ``"xfail"`` wherever it is, as a conditional
+      ``xfail`` mark is;
+    * a module-level function the statements call (``helpers``) is
+      followed, once, so ``_require_devices()`` is read like its body.
+
+    Code after a ``return`` / ``raise`` in the same block is not reached
+    and is not read.  Nested ``def`` / ``class`` / ``lambda`` bodies do not
+    run where they are written and are not read either.
+    """
     kinds = []
-    for item in items:
-        dotted = ast.unparse(item.func if isinstance(item, ast.Call) else item)
-        for kind in ("skip", "skipif", "xfail"):
-            if dotted.endswith(f"mark.{kind}"):
-                kinds.append(kind)
+
+    def on_call(call, straight):
+        kind = _IMPERATIVE_OUTCOMES.get(_dotted(call.func, aliases) or "")
+        if kind == "importorskip":
+            kinds.append("skipif")
+        elif kind == "skip":
+            kinds.append("skip" if straight else "skipif")
+        elif kind == "xfail":
+            kinds.append("xfail")
+        elif (isinstance(call.func, ast.Name) and call.func.id in helpers
+              and call.func.id not in seen):
+            name = call.func.id
+            for k in _imperative_kinds(helpers[name].body, aliases, helpers,
+                                       seen | {name}):
+                kinds.append(k if straight or k != "skip" else "skipif")
+
+    def expr(node, straight):
+        if isinstance(node, (ast.Lambda, ast.FunctionDef,
+                             ast.AsyncFunctionDef, ast.ClassDef)):
+            return
+        if isinstance(node, ast.IfExp):
+            truth = _static_truth(node.test)
+            expr(node.test, straight)
+            expr(node.body, straight and truth is True)
+            expr(node.orelse, straight and truth is False)
+            return
+        if isinstance(node, ast.BoolOp):
+            expr(node.values[0], straight)
+            for value in node.values[1:]:
+                expr(value, False)
+            return
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp,
+                             ast.GeneratorExp)):
+            straight = False             # the body may run zero times
+        if isinstance(node, ast.Call):
+            on_call(node, straight)
+        for child in ast.iter_child_nodes(node):
+            expr(child, straight)
+
+    def block(body, straight):
+        for stmt in body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                 ast.ClassDef)):
+                continue
+            if isinstance(stmt, ast.If):
+                truth = _static_truth(stmt.test)
+                expr(stmt.test, straight)
+                if truth is not False:
+                    block(stmt.body, straight and truth is True)
+                if truth is not True:
+                    block(stmt.orelse, straight and truth is False)
+            elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+                for item in stmt.items:
+                    expr(item.context_expr, straight)
+                block(stmt.body, straight)
+            elif isinstance(stmt, (ast.Try, ast.TryStar)):
+                block(stmt.body, straight)
+                for handler in stmt.handlers:
+                    block(handler.body, False)
+                block(stmt.orelse, False)
+                block(stmt.finalbody, straight)
+            elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+                expr(stmt.iter, straight)
+                block(stmt.body, False)
+                block(stmt.orelse, False)
+            elif isinstance(stmt, ast.While):
+                truth = _static_truth(stmt.test)
+                expr(stmt.test, straight)
+                block(stmt.body, straight and truth is True)
+                block(stmt.orelse, False)
+            elif isinstance(stmt, ast.Match):
+                expr(stmt.subject, straight)
+                for case in stmt.cases:
+                    block(case.body, False)
+            else:
+                expr(stmt, straight)
+                if isinstance(stmt, (ast.Return, ast.Raise, ast.Break,
+                                     ast.Continue)):
+                    return               # the rest of this block never runs
+
+    block(stmts, True)
     return kinds
 
 
-def _module_marks(tree):
+def _module_functions(tree):
+    return {n.name: n for n in tree.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _fixture_defs(body, aliases):
+    """``({name: def}, [autouse defs])`` for the fixtures a body defines."""
+    found, autouse = {}, []
+    for node in body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for deco in node.decorator_list:
+            call = deco if isinstance(deco, ast.Call) else None
+            if _dotted(call.func if call else deco, aliases) != "pytest.fixture":
+                continue
+            name = node.name
+            for kw in (call.keywords if call else []):
+                if (kw.arg == "name" and isinstance(kw.value, ast.Constant)
+                        and isinstance(kw.value.value, str)):
+                    name = kw.value.value
+                elif kw.arg == "autouse" and _static_truth(kw.value) is True:
+                    autouse.append(node)
+            found[name] = node
+    return found, autouse
+
+
+def _parameters(func):
+    args = func.args
+    return [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+
+
+def _test_function_kinds(func, classes, tree, aliases):
+    """Imperative skips / xfails a test function reaches when it runs.
+
+    Its own body (:func:`_imperative_kinds`), and the body of every fixture
+    it requests by parameter name, the fixtures those request, and the
+    ``autouse`` fixtures in scope -- defined in the same module or in a
+    class enclosing the test.  A fixture that calls ``pytest.skip()``
+    stops the test before its first line.
+    """
+    helpers = _module_functions(tree)
+    kinds = _imperative_kinds(func.body, aliases, helpers)
+    fixtures, autouse = _fixture_defs(tree.body, aliases)
+    for cls in classes:
+        inner, inner_autouse = _fixture_defs(cls.body, aliases)
+        fixtures.update(inner)
+        autouse += inner_autouse
+    todo = [fixtures[n] for n in _parameters(func) if n in fixtures] + autouse
+    done = set()
+    while todo:
+        fixture = todo.pop()
+        if id(fixture) in done:
+            continue
+        done.add(id(fixture))
+        kinds += _imperative_kinds(fixture.body, aliases, helpers)
+        todo += [fixtures[n] for n in _parameters(fixture) if n in fixtures]
+    return kinds
+
+
+def _module_marks(tree, aliases=None):
     """Skip / xfail marks a test module applies to everything in it.
 
-    ``pytestmark = ...``; a top-level ``pytest.importorskip(...)`` (a
-    conditional skip); a top-level ``pytest.skip(...)`` (unconditional);
-    and either call inside a top-level ``if`` or ``try`` (conditional).
+    ``pytestmark = ...`` (aliases resolved), and whatever the module's own
+    top-level code reaches when it is imported (:func:`_imperative_kinds`):
+    a top-level ``pytest.skip(..., allow_module_level=True)`` is
+    unconditional, one inside an ``if`` or ``except`` is conditional, and
+    a ``pytest.importorskip(...)`` anywhere is conditional.
     """
-    import ast
-
+    aliases = _pytest_aliases(tree) if aliases is None else aliases
     kinds = []
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
                 getattr(t, "id", None) == "pytestmark" for t in node.targets):
-            kinds += _mark_kinds(node.value)
-            continue
-        guarded = isinstance(node, (ast.If, ast.Try))
-        if not (guarded or isinstance(node, (ast.Assign, ast.Expr))):
-            continue
-        for call in ast.walk(node):
-            if not isinstance(call, ast.Call):
-                continue
-            name = ast.unparse(call.func)
-            if name.endswith("importorskip"):
-                kinds.append("skipif")
-            elif name in ("pytest.skip", "skip"):
-                kinds.append("skipif" if guarded else "skip")
+            kinds += _mark_kinds(node.value, aliases)
+    kinds += _imperative_kinds(tree.body, aliases, _module_functions(tree))
     return kinds
 
 
@@ -605,14 +902,27 @@ def _reference_findings(aid, status, ref, repo_root):
     * The file must be one pytest collects, and each component a name it
       collects: a ``Test*`` class without ``__init__``, a ``test*``
       function.  A module or class entry must hold at least one test.
+    * The file must not be under a path no CI lane collects
+      (:data:`PATHS_CI_NEVER_RUNS`): evidence has to run where the release
+      is tested.
     * An unconditional ``skip`` anywhere on the path (the function, a class
-      it sits in, the module) is an error: evidence that never runs.
+      it sits in, the module) is an error: evidence that never runs.  A
+      mark (aliases resolved), a ``skipif`` whose condition is fixed in the
+      source, and a ``pytest.skip()`` every run reaches -- in the test's
+      body, a helper it calls, or a fixture it requests -- all count.
     * An ``xfail`` on a ``resolved`` entry's evidence is an error: a
       resolution is evidenced by a test expected to pass.  On an open entry
-      a strict ``xfail`` is how the defect is pinned, and is accepted.
+      a strict ``xfail`` is how the defect is pinned, and is accepted.  A
+      ``pytest.xfail()`` call counts as an ``xfail``.
     * A conditional skip (``skipif``, ``importorskip``, a guarded
       ``pytest.skip``) is returned in ``conditional``: it runs where its
       condition holds, and the gate reports it rather than hiding it.
+
+    What this cannot see: a fixture or helper defined in another module
+    (``conftest.py`` included), a method reached through ``self``, a
+    ``usefixtures`` mark, a collection hook, and a condition that is
+    always true on CI without being fixed in the source.  Those are the
+    runtime's to decide; the gate reads source.
     """
     from maddening.compliance._validate import _defined_in, _member, _parse
 
@@ -624,22 +934,31 @@ def _reference_findings(aid, status, ref, repo_root):
     if not _TEST_FILE.fullmatch(os.path.basename(rel)):
         return [f"{where}: '{rel}' is not a file pytest collects (test_*.py "
                 f"or *_test.py), so nothing in it runs as a test"], []
+    ignored = _ci_never_runs(rel)
+    if ignored:
+        return [f"{where}: '{rel}' is under {ignored}/, which every CI lane "
+                f"excludes (--ignore={ignored} in .github/workflows), so it "
+                f"never runs where the release is tested and evidences "
+                f"nothing; move the test or cite one that CI runs"], []
     tree = _parse(os.path.join(repo_root, rel))
     if tree is None:
         return [], []
-    import ast
 
     module = _defined_in(tree.body)
-    kinds = _module_marks(tree)
+    aliases = _pytest_aliases(tree)
+    kinds = _module_marks(tree, aliases)
     node = None
+    classes = []
     for name in parts[1:]:
         node = module.get(name) if node is None else (
             _member(node, name, module) if isinstance(node, ast.ClassDef)
             else None)
         if node is None:
             return [], []
-        kinds += [k for d in node.decorator_list for k in _mark_kinds(d)]
+        kinds += [k for d in node.decorator_list
+                  for k in _mark_kinds(d, aliases)]
         if isinstance(node, ast.ClassDef):
+            classes.append(node)
             if not node.name.startswith(_TEST_CLASS_PREFIX):
                 return [f"{where}: class {node.name!r} is not collected by "
                         f"pytest (a test class's name starts with "
@@ -652,7 +971,7 @@ def _reference_findings(aid, status, ref, repo_root):
                 if isinstance(stmt, ast.Assign) and any(
                         getattr(t, "id", None) == "pytestmark"
                         for t in stmt.targets):
-                    kinds += _mark_kinds(stmt.value)
+                    kinds += _mark_kinds(stmt.value, aliases)
         elif not node.name.startswith(_TEST_FUNCTION_PREFIX):
             return [f"{where}: {node.name!r} is not a test -- pytest collects "
                     f"a function whose name starts with "
@@ -662,20 +981,26 @@ def _reference_findings(aid, status, ref, repo_root):
         body = tree.body if node is None else node.body
         if not _holds_a_test(body):
             return [f"{where}: holds no test pytest collects"], []
+    else:
+        kinds += _test_function_kinds(node, classes, tree, aliases)
 
     errors, conditional = [], []
     if "skip" in kinds:
-        errors.append(f"{where}: is skipped unconditionally (pytest.mark.skip "
-                      f"or a module-level pytest.skip), so it never runs and "
-                      f"evidences nothing; fix it or cite a test that runs")
+        errors.append(f"{where}: is skipped unconditionally (pytest.mark.skip, "
+                      f"a skipif whose condition is always true, or a "
+                      f"pytest.skip() every run reaches -- in the module, the "
+                      f"test, a helper it calls or a fixture it requests), so "
+                      f"it never runs and evidences nothing; fix it or cite a "
+                      f"test that runs")
     if "xfail" in kinds and status in _STATUSES_RESOLVED:
-        errors.append(f"{where}: is marked xfail, but the entry is "
-                      f"{status!r}; a resolution is evidenced by a test "
-                      f"expected to pass")
+        errors.append(f"{where}: is marked xfail (or calls pytest.xfail()), "
+                      f"but the entry is {status!r}; a resolution is "
+                      f"evidenced by a test expected to pass")
     if "skipif" in kinds:
-        conditional.append(f"{where}: is skipped conditionally (skipif / "
-                           f"importorskip) -- it evidences the entry only "
-                           f"where its condition lets it run")
+        conditional.append(f"{where}: is skipped conditionally (skipif, "
+                           f"importorskip, or a pytest.skip() under a "
+                           f"condition) -- it evidences the entry only where "
+                           f"its condition lets it run")
     return errors, conditional
 
 

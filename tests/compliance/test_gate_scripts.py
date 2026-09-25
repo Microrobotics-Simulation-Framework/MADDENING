@@ -837,6 +837,112 @@ class TestMinMappingsRatchet:
         """The floor is a claim about the tree, not a number in a file."""
         assert mapping_gate.check_pinned({}, self._floor(), str(REPO_ROOT)) == []
 
+    def test_every_pin_equals_its_committed_floor(self, mapping_gate):
+        """Equal, not ``>=``: slack under a pin in the floor file lets the
+        pin drop to it together with the rows."""
+        pins, floor = self._pins(mapping_gate), self._floor()
+        differ = {path: (pins.get(path), floor.get(path))
+                  for path in set(pins) | set(floor)
+                  if pins.get(path) != floor.get(path)}
+        assert not differ, (
+            f"MIN_MAPPINGS and min_mappings_floor.json disagree: {differ} "
+            f"(pin, floor).  Move both, in one commit.")
+
+    @staticmethod
+    def _guide_counts(mapping_gate):
+        counts = {}
+        guide_dir = REPO_ROOT / "docs" / "algorithm_guide"
+        for path in sorted(guide_dir.rglob("*.md")):
+            if path.name.startswith("_"):
+                continue
+            rel = os.path.normpath(str(path.relative_to(REPO_ROOT)))
+            n, errors, _notes, skipped = mapping_gate.check_guide(str(path), rel)
+            assert not errors and not skipped, (rel, errors, skipped)
+            counts[rel] = n
+        return counts
+
+    def test_every_pin_is_its_guides_count(self, mapping_gate):
+        """A pin below its count is slack a row deletion hides in.
+
+        heat, lbm and wavelet sat two below (11/13, 22/24, 24/26), so
+        deleting two rows from any of them passed, against a docstring and
+        a CHANGELOG saying the pins sat at the counts (audit_040_p4_1,
+        M5-M8).  Raise the pin in the commit that adds the rows.
+        """
+        counts = self._guide_counts(mapping_gate)
+        slack = {path: (pin, counts.get(path))
+                 for path, pin in self._pins(mapping_gate).items()
+                 if counts.get(path) != pin}
+        assert not slack, f"(pin, rows found) per guide: {slack}"
+
+    def test_every_guide_with_a_mapping_table_is_pinned(self, mapping_gate):
+        """An unpinned guide is all slack: its whole table can go."""
+        unpinned = {path: n for path, n in self._guide_counts(mapping_gate).items()
+                    if n and path not in self._pins(mapping_gate)}
+        assert not unpinned, (
+            f"guides with Implementation Mapping rows and no MIN_MAPPINGS "
+            f"pin: {unpinned}; pin each at its count, here and in "
+            f"min_mappings_floor.json")
+
+
+def _delete_heat_rows(text, n):
+    needles = ["`maddening.nodes.heat._laplacian_nonuniform`",
+               "`maddening.nodes.heat._laplacian_4th_order_uniform`"][:n]
+    return _delete_rows_containing(text, needles)
+
+
+def _delete_rows_containing(text, needles):
+    lines = text.splitlines(keepends=True)
+    kept = [line for line in lines if not any(n in line for n in needles)]
+    assert len(lines) - len(kept) == len(needles), "a replayed row has moved"
+    return "".join(kept)
+
+
+def _delete_last_single_reference_rows(text, n):
+    import re
+
+    section = re.search(r"## Implementation Mapping\s*\n(.*?)(?=\n## |\Z)",
+                        text, re.S).group(1)
+    rows = [line for line in section.splitlines()
+            if line.startswith("| ") and line.count("`maddening.") == 1]
+    return _delete_rows_containing(text, rows[-n:])
+
+
+@pytest.mark.parametrize("guide, mutate", [
+    pytest.param("heat_node.md", lambda t: _delete_heat_rows(t, 1), id="M5"),
+    pytest.param("heat_node.md", lambda t: _delete_heat_rows(t, 2), id="M6"),
+    pytest.param("wavelet_adaptive_node.md", lambda t: _delete_rows_containing(
+        t, ["| Analysis $c = W^{-1} u$ |", "| Dirichlet basis |"]), id="M7"),
+    pytest.param("lbm_node.md",
+                 lambda t: _delete_last_single_reference_rows(t, 2), id="M8"),
+])
+def test_deleting_rows_from_a_pinned_guide_fails_the_gate(
+    mapping_gate, tmp_path, monkeypatch, guide, mutate
+):
+    """audit_040_p4_1, M5-M8: row deletions inside a pin's slack passed.
+
+    The guide is copied to a scratch repository root at its real relative
+    path, so the gate's own pin for it applies, and the gate runs over that
+    one guide: unmutated it passes, mutated it must exit non-zero.  The
+    node-ID uniqueness scan is stubbed out: it reads all of ``src`` (about
+    2 s) and is not what these mutants test.
+    """
+    monkeypatch.setattr(mapping_gate, "algorithm_id_errors",
+                        lambda _src: (0, []))
+    rel = os.path.join("docs", "algorithm_guide", "nodes", guide)
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True)
+    text = (REPO_ROOT / rel).read_text(encoding="utf-8")
+    monkeypatch.setattr(mapping_gate, "_REPO_ROOT", str(tmp_path))
+    monkeypatch.setattr(mapping_gate, "MIN_MAPPINGS",
+                        {rel: mapping_gate.MIN_MAPPINGS[rel]})
+
+    target.write_text(text, encoding="utf-8")
+    assert mapping_gate.main([str(target.parent)]) == 0
+
+    target.write_text(mutate(text), encoding="utf-8")
+    assert mapping_gate.main([str(target.parent)]) == 1
+
 
 def _node_guide(tmp_path, title, module, id_lines, name="node_guide.md"):
     """A guide whose header names a node, followed by one resolvable row."""
@@ -1116,6 +1222,92 @@ class TestCitationGate:
         gate = _load("check_citations")
         total = len(gate.scan_directory(str(REPO_ROOT / "docs")))
         assert verified == total - declined
+
+
+_CRANK = "@book{Crank1975,\n  title = {Diffusion},\n}\n"
+
+
+class TestCitationGateReadsWhatPandocReads:
+    """Three citations a reader's toolchain renders as broken passed with an
+    undefined key (audit_040_p4_1, C8-C10, repro_gate_check_citations_gaps).
+    Each case keeps one good citation beside the bad one, so the gate has
+    something to verify either way."""
+
+    @staticmethod
+    def _gate(citations_gate, tmp_path, monkeypatch, bib_text, doc_text):
+        bib, docs = _bib_and_doc(tmp_path, bib_text, doc_text)
+        monkeypatch.setenv("BIB_PATH", str(bib))
+        return citations_gate.main([str(docs)])
+
+    @pytest.mark.parametrize("doc", [
+        pytest.param("See [@Crank1975] and [@1975Crank].\n", id="C8-digit-led-key"),
+        pytest.param("See [@Crank1975] and [@_Crank].\n", id="underscore-led-key"),
+        pytest.param("See [@Crank1975].\n\nAs shown in [see\n@Nobody2031, p. 3].\n",
+                     id="C9-bracket-wrapped-onto-the-next-line"),
+        pytest.param("See [@Crank1975; @Nobody2031\n; @Other].\n",
+                     id="wrapped-multi-citation"),
+        pytest.param("See [@Crank1975] and [@{Nobody 2031}].\n", id="braced-key"),
+        pytest.param("See [@Crank1975] and [-@Nobody2031].\n", id="suppress-author"),
+    ])
+    def test_an_undefined_key_fails_however_it_is_spelled(
+        self, citations_gate, tmp_path, monkeypatch, capsys, doc
+    ):
+        assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 1
+        assert "not found in" in capsys.readouterr().err
+
+    def test_a_wrapped_citation_is_reported_on_the_line_its_key_is_on(
+        self, citations_gate, tmp_path
+    ):
+        doc = tmp_path / "g.md"
+        doc.write_text("Intro.\n\nAs shown in [see\n@Nobody2031, p. 3].\n")
+        assert citations_gate.extract_citations(str(doc)) == [(4, "Nobody2031")]
+
+    def test_a_bracket_does_not_reach_across_a_blank_line(
+        self, citations_gate, tmp_path
+    ):
+        """A paragraph break ends any citation Pandoc would read."""
+        doc = tmp_path / "g.md"
+        doc.write_text("An unclosed [bracket\n\n@Nobody2031 is prose].\n")
+        assert citations_gate.extract_citations(str(doc)) == []
+
+    @pytest.mark.parametrize("doc", [
+        "See [@Crank1975]. Mail [me@example.org] for help.\n",
+        "See [@Crank1975], [the manual](mailto:me@example.org).\n",
+    ])
+    def test_an_address_is_not_a_citation(
+        self, citations_gate, tmp_path, monkeypatch, doc
+    ):
+        assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 0
+
+    def test_c10_an_entry_inside_a_comment_block_is_not_defined(
+        self, citations_gate, tmp_path, monkeypatch, capsys
+    ):
+        bib = "@comment{\n" + _CRANK + "}\n@book{Other2000,\n}\n"
+        doc = "See [@Other2000] and [@Crank1975].\n"
+        assert self._gate(citations_gate, tmp_path, monkeypatch, bib, doc) == 1
+        assert "[@Crank1975] not found" in capsys.readouterr().err
+
+    def test_a_parenthesised_comment_block_hides_its_entry_too(
+        self, citations_gate, tmp_path
+    ):
+        bib = tmp_path / "b.bib"
+        bib.write_text("@Comment(\n" + _CRANK + ")\n@book{Other2000,\n}\n")
+        assert citations_gate.parse_bib_entries(str(bib)) == [(6, "Other2000")]
+
+    def test_an_unterminated_comment_block_fails(
+        self, citations_gate, tmp_path, monkeypatch, capsys
+    ):
+        bib = _CRANK + "@comment{ forgot to close\n@book{Other2000,\n}\n"
+        doc = "See [@Crank1975].\n"
+        assert self._gate(citations_gate, tmp_path, monkeypatch, bib, doc) == 1
+        assert "unterminated @comment on line 4" in capsys.readouterr().err
+
+    def test_entries_after_a_closed_comment_block_still_count(
+        self, citations_gate, tmp_path, monkeypatch
+    ):
+        bib = "@comment{ a note {with braces} }\n" + _CRANK
+        doc = "See [@Crank1975].\n"
+        assert self._gate(citations_gate, tmp_path, monkeypatch, bib, doc) == 0
 
 
 class TestCitationTemplateAllowlist:
@@ -1582,6 +1774,8 @@ def _status_of(aid):
 
 
 _PROBE_TESTS = '''\
+import sys
+
 import pytest
 
 
@@ -1594,7 +1788,10 @@ def test_never_runs():
     assert True
 
 
-@pytest.mark.skipif(True, reason="fixture")
+# A condition that depends on the machine.  This fixture used to spell a
+# conditional skip ``skipif(True)``, which skips everywhere and is now
+# refused as unconditional (audit_040_p4_1, A20).
+@pytest.mark.skipif(sys.platform == "no-such-platform", reason="fixture")
 def test_sometimes_runs():
     assert True
 
@@ -1806,6 +2003,312 @@ class TestAnomalyGateChecksWhatAReferenceIs:
         assert not overridden, (
             f"pyproject.toml sets {sorted(overridden)}; update "
             f"scripts/check_anomalies.py's _TEST_FILE / _TEST_*_PREFIX to match")
+
+
+class TestAnomalyGateReadsEveryWayATestIsSkipped:
+    """A skip or xfail need not be a decorator.
+
+    The gate read ``@pytest.mark.skip`` / ``xfail`` by the decorator's text
+    and ``pytestmark`` at module level, so a ``pytest.skip()`` as the cited
+    test's first statement (A19), a ``pytest.xfail()`` there (A21), a mark
+    bound to a name and applied as ``@_skip`` (A22) and ``skipif(True)``
+    (A20) all passed -- with pytest confirming the cited test skipped or
+    xfailed (audit_040_p4_1, repro_gate_check_anomalies_imperative_skip).
+    Each module below holds ``test_a``, cited by a resolved entry.
+    """
+
+    @staticmethod
+    def _gate_on(tmp_path, capsys, module, status="resolved"):
+        path = _registry_citing(tmp_path, status,
+                                ["tests/test_probe.py::test_runs",
+                                 "tests/test_skips.py::test_a"],
+                                extra_files={"test_skips.py": module})
+        rc = _load("check_anomalies").main(
+            [str(path), "--repo-root", str(tmp_path)])
+        captured = capsys.readouterr()
+        return rc, captured.out, captured.err
+
+    @pytest.mark.parametrize("module", [
+        pytest.param('import pytest\n\ndef test_a():\n'
+                     '    pytest.skip("seeded: never runs")\n    assert True\n',
+                     id="A19-imperative-skip"),
+        pytest.param('import pytest\n_skip = pytest.mark.skip(reason="x")\n\n'
+                     '@_skip\ndef test_a():\n    pass\n',
+                     id="A22-mark-bound-to-a-name"),
+        pytest.param('import pytest\n\n@pytest.mark.skipif(True, reason="x")\n'
+                     'def test_a():\n    pass\n', id="A20-skipif-True"),
+        pytest.param('import pytest\n\n@pytest.mark.skipif("True", reason="x")\n'
+                     'def test_a():\n    pass\n', id="skipif-string-True"),
+        pytest.param('import pytest\n\n@pytest.mark.skipif(1 == 1, reason="x")\n'
+                     'def test_a():\n    pass\n', id="skipif-constant-comparison"),
+        pytest.param('import pytest\n\n@pytest.mark.skipif(reason="x")\n'
+                     'def test_a():\n    pass\n', id="skipif-with-no-condition"),
+        pytest.param('from pytest import mark as m\n\n@m.skip\n'
+                     'def test_a():\n    pass\n', id="from-pytest-import-mark-as"),
+        pytest.param('import pytest as pt\n\n@pt.mark.skip(reason="x")\n'
+                     'def test_a():\n    pass\n', id="import-pytest-as"),
+        pytest.param('import pytest\nskipif = pytest.mark.skipif\n\n'
+                     '@skipif(True, reason="x")\ndef test_a():\n    pass\n',
+                     id="aliased-skipif-called-with-True"),
+        pytest.param('from pytest import skip\n\ndef test_a():\n'
+                     '    skip("x")\n', id="from-pytest-import-skip"),
+        pytest.param('import pytest\n\ndef test_a():\n'
+                     '    raise pytest.skip.Exception("x")\n',
+                     id="raise-skip-Exception"),
+        pytest.param('import pytest\n\ndef test_a():\n    with open(__file__):\n'
+                     '        pytest.skip("x")\n', id="skip-inside-with"),
+        pytest.param('import pytest\n\ndef test_a():\n    if True:\n'
+                     '        pytest.skip("x")\n', id="skip-under-if-True"),
+        pytest.param('import pytest\n\ndef _require():\n    pytest.skip("x")\n\n'
+                     'def test_a():\n    _require()\n', id="skip-in-a-helper"),
+        pytest.param('import pytest\n\n@pytest.fixture\ndef dev():\n'
+                     '    pytest.skip("x")\n\ndef test_a(dev):\n    pass\n',
+                     id="skip-in-a-requested-fixture"),
+        pytest.param('import pytest\n\n@pytest.fixture(autouse=True)\n'
+                     'def _always():\n    pytest.skip("x")\n\n'
+                     'def test_a():\n    pass\n', id="skip-in-an-autouse-fixture"),
+        pytest.param('import pytest\n\n@pytest.fixture\ndef inner():\n'
+                     '    pytest.skip("x")\n\n@pytest.fixture\ndef outer(inner):\n'
+                     '    return 1\n\ndef test_a(outer):\n    pass\n',
+                     id="skip-in-a-fixture-a-fixture-requests"),
+    ])
+    def test_a_skip_every_run_reaches_is_refused(self, tmp_path, capsys, module):
+        rc, _out, err = self._gate_on(tmp_path, capsys, module)
+        assert rc == 1, err
+        assert "tests/test_skips.py::test_a': is skipped unconditionally" in err, err
+
+    @pytest.mark.parametrize("module", [
+        pytest.param('import pytest\n\ndef test_a():\n    pytest.xfail("seeded")\n',
+                     id="A21-imperative-xfail"),
+        pytest.param('import pytest\n_xf = pytest.mark.xfail(reason="x")\n\n'
+                     '@_xf\ndef test_a():\n    pass\n', id="xfail-bound-to-a-name"),
+        pytest.param('import sys\nimport pytest\n\ndef test_a():\n'
+                     '    if sys.platform == "x":\n        pytest.xfail("y")\n',
+                     id="guarded-imperative-xfail"),
+    ])
+    def test_an_xfail_is_refused_on_a_resolved_entry(self, tmp_path, capsys, module):
+        rc, _out, err = self._gate_on(tmp_path, capsys, module)
+        assert rc == 1, err
+        assert "is marked xfail (or calls pytest.xfail())" in err, err
+
+    def test_an_imperative_xfail_on_an_open_entry_is_accepted_like_the_mark(
+        self, tmp_path, capsys
+    ):
+        rc, _out, err = self._gate_on(
+            tmp_path, capsys,
+            'import pytest\n\ndef test_a():\n    pytest.xfail("pinned")\n',
+            status="open")
+        assert rc == 0, err
+
+    @pytest.mark.parametrize("module", [
+        pytest.param('import sys\nimport pytest\n\ndef test_a():\n'
+                     '    if sys.platform == "no-such-platform":\n'
+                     '        pytest.skip("x")\n', id="guarded-skip"),
+        pytest.param('import pytest\n\ndef test_a():\n'
+                     '    zmq = pytest.importorskip("zmq")\n', id="importorskip"),
+        pytest.param('import pytest\n\ndef test_a():\n    try:\n'
+                     '        import zmq\n    except ImportError:\n'
+                     '        pytest.skip("x")\n', id="skip-in-an-except"),
+        pytest.param('import sys\nimport pytest\n\ndef test_a():\n'
+                     '    sys.platform == "x" and pytest.skip("y")\n',
+                     id="short-circuited-skip"),
+        pytest.param('import sys\nimport pytest\n\n@pytest.fixture\ndef dev():\n'
+                     '    if sys.platform == "x":\n        pytest.skip("y")\n\n'
+                     'def test_a(dev):\n    pass\n', id="guarded-skip-in-a-fixture"),
+        pytest.param('import sys\nimport pytest\n'
+                     '_needs = pytest.mark.skipif(sys.platform == "x", reason="y")\n\n'
+                     '@_needs\ndef test_a():\n    pass\n',
+                     id="conditional-skipif-bound-to-a-name"),
+    ])
+    def test_a_conditional_skip_is_reported_and_counted(self, tmp_path, capsys, module):
+        """What really runs in CI -- a device count, an import -- is reported."""
+        rc, out, err = self._gate_on(tmp_path, capsys, module)
+        assert rc == 0, err
+        assert "tests/test_skips.py::test_a': is skipped conditionally" in out
+        assert "1 verification test(s) skip conditionally" in out
+
+    @pytest.mark.parametrize("module", [
+        pytest.param('import pytest\n\n@pytest.mark.skipif(False, reason="x")\n'
+                     'def test_a():\n    pass\n', id="skipif-False"),
+        pytest.param('import pytest\n\ndef test_a():\n    return\n'
+                     '    pytest.skip("unreachable")\n', id="skip-after-return"),
+        pytest.param('import pytest\n\ndef test_a():\n    def later():\n'
+                     '        pytest.skip("x")\n    assert later\n',
+                     id="skip-in-an-uncalled-nested-def"),
+        pytest.param('import pytest\n\ndef test_a():\n    if False:\n'
+                     '        pytest.skip("x")\n', id="skip-under-if-False"),
+        pytest.param('import pytest\n\n@pytest.fixture\ndef unused():\n'
+                     '    pytest.skip("x")\n\ndef test_a():\n    pass\n',
+                     id="skip-in-a-fixture-nobody-requests"),
+    ])
+    def test_a_skip_no_run_reaches_is_not_reported(self, tmp_path, capsys, module):
+        rc, out, err = self._gate_on(tmp_path, capsys, module)
+        assert rc == 0, err
+        assert "0 verification test(s) skip conditionally" in out, out
+
+    def test_the_shipped_registry_counts_its_imperative_conditional_skips(self):
+        """The two fmpy ``importorskip`` calls and the device-count skips of
+        ``test_halo_global_edge_fill`` (in a test body and in two fixtures)
+        were invisible to the headline; they are conditional, and run in CI.
+
+        Read statically, reference by reference: the whole-registry run is
+        the compliance job's, and costs ~10 s of imports here.
+        """
+        import yaml
+
+        gate = _load("check_anomalies")
+        registry = yaml.safe_load(
+            (REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml").read_text())
+        cited = {(a["anomaly_id"], a["resolution_status"], ref)
+                 for a in registry["anomalies"]
+                 for ref in a.get("verification") or []}
+        for ref in (
+            "tests/fmi/test_non_finite_json_tokens.py::"
+            "test_the_compiled_wrapper_reads_a_diverged_get_over_json",
+            "tests/cloud/multigpu/test_halo_global_edge_fill.py::"
+            "test_the_wrapper_fills_sharded_and_unsharded_halo_axes_alike",
+            "tests/cloud/multigpu/test_halo_global_edge_fill.py::"
+            "test_a_slab_exchange_fills_every_halo_slot_as_numpy_pad_does",
+        ):
+            entries = [(aid, status) for aid, status, r in cited if r == ref]
+            assert entries, f"{ref} is no longer cited; update this test"
+            for aid, status in entries:
+                errors, conditional = gate._reference_findings(
+                    aid, status, ref, str(REPO_ROOT))
+                assert errors == [], errors
+                assert len(conditional) == 1 and (
+                    "is skipped conditionally" in conditional[0]), conditional
+
+
+def test_a_broken_first_party_import_fails_the_anomaly_gate(
+    tmp_path, capsys, monkeypatch
+):
+    """audit_040_p4_1, A25: a module named by ``affected_components`` gained
+    ``from <own package>.x import renamed_away``; every reference behind it
+    became "NOT checked" and the gate exited 0.  A throwaway package with
+    the same import shape: intact it passes, broken it must exit 1.
+    """
+    import importlib
+
+    root = tmp_path / "pkgroot"
+    pkg = root / "p41_firstparty"
+    (pkg / "core").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "core" / "__init__.py").write_text("")
+    (pkg / "core" / "solver_utils.py").write_text("def helper():\n    pass\n")
+    node = pkg / "heart_pump.py"
+    monkeypatch.syspath_prepend(str(root))
+    registry_root = tmp_path / "repo"
+    registry_root.mkdir()
+    path = _registry_citing(registry_root, "open",
+                            ["tests/test_probe.py::test_runs"],
+                            components=["p41_firstparty.heart_pump.Pump"])
+    gate = _load("check_anomalies")
+
+    def run(source):
+        node.write_text(source)
+        for name in [m for m in sys.modules if m.split(".")[0] == "p41_firstparty"]:
+            del sys.modules[name]
+        importlib.invalidate_caches()
+        rc = gate.main([str(path), "--repo-root", str(registry_root)])
+        return rc, capsys.readouterr()
+
+    intact = "from p41_firstparty.core.solver_utils import helper\n\nclass Pump:\n    pass\n"
+    rc, captured = run(intact)
+    assert rc == 0, captured.err
+    broken = intact.replace(
+        "\n\nclass", "\nfrom p41_firstparty.core.solver_utils import renamed_away\n\nclass")
+    rc, captured = run(broken)
+    assert rc == 1, captured.out
+    assert "broken first-party import" in captured.err
+    assert "NOT checked" not in captured.out
+    for name in [m for m in sys.modules if m.split(".")[0] == "p41_firstparty"]:
+        del sys.modules[name]
+
+
+class TestAnomalyGateRefusesEvidenceCINeverRuns:
+    """Every CI lane runs ``pytest tests/ --ignore=tests/viz``: a resolved
+    entry citing a test there passed (audit_040_p4_1, A23; latent)."""
+
+    def test_a_test_under_tests_viz_is_refused(self, tmp_path, capsys):
+        (tmp_path / "tests" / "viz").mkdir(parents=True)
+        (tmp_path / "tests" / "viz" / "test_network.py").write_text(
+            "def test_a():\n    pass\n")
+        ref = "tests/viz/test_network.py::test_a"
+        path = _registry_citing(tmp_path, "resolved",
+                                ["tests/test_probe.py::test_runs", ref])
+        rc = _load("check_anomalies").main(
+            [str(path), "--repo-root", str(tmp_path)])
+        err = capsys.readouterr().err
+        assert rc == 1, err
+        assert f"'{ref}': 'tests/viz/test_network.py' is under tests/viz/" in err
+
+    def test_a_directory_that_only_shares_the_prefix_is_not(self, tmp_path, capsys):
+        (tmp_path / "tests" / "vizier").mkdir(parents=True)
+        (tmp_path / "tests" / "vizier" / "test_x.py").write_text(
+            "def test_a():\n    pass\n")
+        path = _registry_citing(tmp_path, "resolved",
+                                ["tests/vizier/test_x.py::test_a"])
+        rc = _load("check_anomalies").main(
+            [str(path), "--repo-root", str(tmp_path)])
+        assert rc == 0, capsys.readouterr().err
+
+    @staticmethod
+    def _ci_test_invocations():
+        """``(targets, ignores)`` for every command in the workflows that
+        runs tests: a pytest (or pytest-wrapping) command with a positional
+        argument under ``tests``."""
+        import shlex
+
+        import yaml
+
+        invocations = []
+        for wf in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+            data = yaml.safe_load(wf.read_text()) or {}
+            for job in (data.get("jobs") or {}).values():
+                for step in (job or {}).get("steps") or []:
+                    run = (step or {}).get("run")
+                    if not isinstance(run, str):
+                        continue
+                    for command in run.replace("\\\n", " ").splitlines():
+                        command = command.split(" #", 1)[0].strip()
+                        if "pytest" not in command and "audit_property" not in command:
+                            continue
+                        try:
+                            tokens = shlex.split(command)
+                        except ValueError:
+                            continue
+                        targets = [os.path.normpath(t) for t in tokens
+                                   if os.path.normpath(t).split(os.sep)[0] == "tests"]
+                        ignores = [os.path.normpath(t.split("=", 1)[1]) for t in tokens
+                                   if t.startswith("--ignore=")]
+                        ignores += [os.path.normpath(b) for a, b in zip(tokens, tokens[1:])
+                                    if a == "--ignore"]
+                        if targets:
+                            invocations.append((targets, ignores))
+        return invocations
+
+    def test_the_paths_the_gate_refuses_are_the_paths_no_ci_lane_runs(self):
+        """Derived from ``.github/workflows`` rather than trusted: a path
+        is never run when some test command ignores it and no command runs
+        it or anything under it."""
+        invocations = self._ci_test_invocations()
+        assert invocations, "no test command found in .github/workflows"
+
+        def within(path, root):
+            return path == root or path.startswith(root + os.sep)
+
+        ignored = {i for _targets, ignores in invocations for i in ignores}
+        never = {
+            path for path in ignored
+            if not any(
+                (any(within(path, t) for t in targets)
+                 and not any(within(path, i) for i in ignores))
+                or any(within(t, path) for t in targets)
+                for targets, ignores in invocations)
+        }
+        gate = _load("check_anomalies")
+        assert {p.replace("/", os.sep) for p in gate.PATHS_CI_NEVER_RUNS} == never
 
 
 class TestAnomalyGateHoldsEveryRangeToTheRegistrysVersion:
@@ -2753,6 +3256,65 @@ class TestHeatStabilityCounts:
         assert len(seen) == 1 and unchecked == [] and unstable == []
 
 
+class TestHeatStabilityGridPoints:
+    """Any ``grid_points=`` used to skip the rod, even ``grid_points=None``
+    -- the default, a uniform rod whose constructor refuses an unstable
+    timestep (audit_040_p4_1, H6; latent)."""
+
+    def _scan(self, gate, source):
+        unstable, unchecked, seen = [], [], []
+        gate.scan_source(source, "probe.py", gate._defaults(),
+                         unstable, unchecked, seen)
+        return unstable, unchecked, seen
+
+    def test_an_unstable_rod_spelling_out_grid_points_none_fails(
+        self, heat_stability_gate, tmp_path
+    ):
+        """The auditor's H6, as a scan root: one stable rod, one refused."""
+        _rod(tmp_path,
+             'HeatNode("ok", timestep=0.01, n_cells=10, length=1.0, '
+             'thermal_diffusivity=0.01)\n'
+             'HeatNode("r", timestep=50.0, n_cells=10, length=1.0, '
+             'thermal_diffusivity=0.01, grid_points=None)')
+        assert heat_stability_gate.main([str(tmp_path)]) == 1
+
+    def test_the_constructor_refuses_the_same_rod(self):
+        """So the gate is agreeing with the code, not inventing a rule."""
+        from maddening.nodes.heat import HeatNode
+
+        # Through a mapping held in a variable, which the gate reports as
+        # not evaluated: this file may plant unstable rods only inside
+        # string literals, and a literal call here would (rightly) fail it.
+        rod = dict(timestep=50.0, n_cells=10, length=1.0,
+                   thermal_diffusivity=0.01, grid_points=None)
+        with pytest.raises(ValueError, match="unstable"):
+            HeatNode("r", **rod)
+
+    def test_grid_points_none_positionally_is_judged_too(self, heat_stability_gate):
+        unstable, _unchecked, _seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("r", 50.0, 10, 1.0, 0.01, 0.0, 2, None)\n')
+        assert len(unstable) == 1
+
+    def test_a_literal_grid_is_outside_the_guard(self, heat_stability_gate):
+        """The constructor checks uniform rods only; so does the gate."""
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("g", timestep=50.0, n_cells=4, '
+            'grid_points=[0.0, 0.1, 0.3, 0.6, 1.0])\n')
+        assert (unstable, unchecked, seen) == ([], [], [])
+
+    def test_a_computed_grid_is_not_evaluated_rather_than_skipped(
+        self, heat_stability_gate
+    ):
+        """It may be ``None`` at run time, i.e. a guarded uniform rod."""
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("g", timestep=50.0, n_cells=4, grid_points=xs)\n')
+        assert unstable == [] and seen == []
+        assert len(unchecked) == 1 and "grid_points is computed" in unchecked[0][2]
+
+
 class TestHeatStabilitySplats:
     """A ``**`` or ``*`` splat must not make a rod read as verified.
 
@@ -2907,6 +3469,14 @@ spec.loader.exec_module(gate)
 gate.REPO_ROOT = Path(sys.argv[2])
 gate.PACKAGE = Path("src/probe_pkg")
 gate.EXCLUDED = (gate.PACKAGE / "examples",)
+# The per-file pins name the real package's files; a probe package pins its
+# own.  PROBE_PINS (JSON) when a test sets it, else the probe's own counts,
+# so a test about something else is not failed by a pin it never meant.
+import json, os
+pins = os.environ.get("PROBE_PINS")
+gate.EXAMPLES_PER_FILE = (
+    json.loads(pins) if pins is not None
+    else {path: n for path, (_d, n) in gate._static_counts().items()})
 sys.exit(gate.main(sys.argv[3:]))
 """
 
@@ -2922,13 +3492,23 @@ def two():
 '''
 
 
-def _doctest_gate(tmp_path, module_source, *args):
+def _doctest_gate(tmp_path, module_source, *args, pins=None, extra=None):
+    """Run the doctest gate over a probe package holding ``mod.py``.
+
+    ``extra`` maps further module names to their source; ``pins`` replaces
+    the gate's ``EXAMPLES_PER_FILE`` (default: the probe's own counts).
+    """
     pkg = tmp_path / "src" / "probe_pkg"
     pkg.mkdir(parents=True, exist_ok=True)
     (pkg / "__init__.py").write_text("")
     (pkg / "mod.py").write_text(module_source)
+    for name, text in (extra or {}).items():
+        (pkg / name).write_text(text)
     env = dict(os.environ, JAX_PLATFORMS="cpu",
                PYTEST_DISABLE_PLUGIN_AUTOLOAD="1")
+    env.pop("PROBE_PINS", None)
+    if pins is not None:
+        env["PROBE_PINS"] = json.dumps(pins)
     return subprocess.run(
         [sys.executable, "-c", _DOCTEST_GATE_ON,
          str(SCRIPTS / "check_doctests.py"), str(tmp_path), *args],
@@ -3029,23 +3609,157 @@ class TestDoctestGate:
     #: ``min_mappings_floor.json`` gives the mapping pins
     #: (audit_040_r2/gates, finding G6).  Raise both when examples are
     #: added; lowering both belongs in a commit that says why.
-    COMMITTED_EXAMPLE_FLOOR = 110
+    COMMITTED_EXAMPLE_FLOOR = 111
 
-    def test_the_floor_is_not_below_its_committed_value(self):
+    #: The committed per-file pins, the second half of ``EXAMPLES_PER_FILE``'s
+    #: ratchet.  Deleting the only example in ``core/compliance/metadata.py``
+    #: dropped the whole file out of the gate with "OK" (audit_040_p4_1, D6).
+    COMMITTED_EXAMPLES_PER_FILE = {
+        "src/maddening/api/auth.py": 7,
+        "src/maddening/api/server.py": 3,
+        "src/maddening/core/compliance/metadata.py": 1,
+        "src/maddening/core/coupling/acceleration.py": 37,
+        "src/maddening/core/simulation/calibration.py": 8,
+        "src/maddening/core/solver_utils.py": 5,
+        "src/maddening/nodes/adaptive/wavelet.py": 6,
+        "src/maddening/nodes/adaptive/wavelets/dirichlet.py": 1,
+        "src/maddening/nodes/adaptive/wavelets/transform.py": 5,
+        "src/maddening/serialization/json_codec.py": 3,
+        "src/maddening/surrogates/types.py": 4,
+        "src/maddening/testing/mms.py": 14,
+        "src/maddening/transport_auth.py": 7,
+        "src/maddening/viz/backends/matplotlib_renderer.py": 6,
+        "src/maddening/viz/backends/terminal_renderer.py": 2,
+        "src/maddening/viz/usd_viewer.py": 2,
+    }
+
+    def test_the_floor_equals_its_committed_value(self):
+        """Equal, not ``>=``: a committed floor with slack under it lets
+        ``MIN_EXAMPLES`` drop to it together with the examples."""
         gate = _load("check_doctests")
-        assert gate.MIN_EXAMPLES >= self.COMMITTED_EXAMPLE_FLOOR, (
-            f"MIN_EXAMPLES is {gate.MIN_EXAMPLES}, below the committed floor "
-            f"{self.COMMITTED_EXAMPLE_FLOOR}; an example set that shrank "
-            f"needs a reason, not a lower number"
+        assert gate.MIN_EXAMPLES == self.COMMITTED_EXAMPLE_FLOOR, (
+            f"MIN_EXAMPLES is {gate.MIN_EXAMPLES}, the committed floor is "
+            f"{self.COMMITTED_EXAMPLE_FLOOR}; move both together, and an "
+            f"example set that shrank needs a reason, not a lower number"
         )
+        assert self.COMMITTED_EXAMPLE_FLOOR == sum(
+            self.COMMITTED_EXAMPLES_PER_FILE.values())
 
-    def test_the_floor_is_attainable_from_the_source_as_it_stands(self):
-        """A floor above the examples in the tree could only ever fail.
+    def test_the_floor_is_the_number_of_examples_in_the_source(self):
+        """A floor below the count guards only part of the collection.
 
-        Static, so it holds without running the ~100 examples; the gate's
-        own run in the compliance job is the dynamic half.
+        It sat at 110 over 111 examples, so one deletion passed
+        (audit_040_p4_1, D5); above the count it could only ever fail.
+        Static, so it holds without running the examples; the gate's own
+        run in the compliance job is the dynamic half.
         """
         gate = _load("check_doctests")
         static = sum(n for _d, n in gate._static_counts().values())
-        assert static >= gate.MIN_EXAMPLES, (static, gate.MIN_EXAMPLES)
+        assert static == gate.MIN_EXAMPLES, (
+            f"{static} examples in the source, MIN_EXAMPLES is "
+            f"{gate.MIN_EXAMPLES}: set it (and COMMITTED_EXAMPLE_FLOOR) to "
+            f"the count")
+
+    def test_every_file_is_pinned_at_its_count(self):
+        """The per-file pins are the source's per-file counts, exactly."""
+        gate = _load("check_doctests")
+        static = {path: n for path, (_d, n) in gate._static_counts().items()}
+        assert gate.EXAMPLES_PER_FILE == static, {
+            path: (gate.EXAMPLES_PER_FILE.get(path), static.get(path))
+            for path in set(static) | set(gate.EXAMPLES_PER_FILE)
+            if gate.EXAMPLES_PER_FILE.get(path) != static.get(path)
+        }
+
+    def test_every_pin_equals_its_committed_value(self):
+        gate = _load("check_doctests")
+        assert gate.EXAMPLES_PER_FILE == self.COMMITTED_EXAMPLES_PER_FILE
+
+    # -- replays of audit_040_p4_1 D5 / D6 ---------------------------------
+
+    @staticmethod
+    def _counts_with(gate, rel, mutate):
+        """The tree's per-file example counts with ``rel`` mutated."""
+        import doctest
+        import tempfile
+
+        counts = {path: n for path, (_d, n) in gate._static_counts().items()}
+        text = mutate((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "mutated.py"
+            probe.write_text(text, encoding="utf-8")
+            n = sum(len(doctest.DocTestParser().get_examples(d))
+                    for d in gate._docstrings(probe))
+        if n:
+            counts[rel] = n
+        else:
+            counts.pop(rel, None)
+        return counts
+
+    def test_the_real_pins_refuse_one_example_deleted_from_acceleration(self):
+        """D5: one example out of ``acceleration.py``, 111 -> 110."""
+        gate = _load("check_doctests")
+        rel = "src/maddening/core/coupling/acceleration.py"
+        example = ('    >>> float(residual_precision_floor(s, ["n"], "l2", '
+                   'atol=2.0))   # dead-banded: nothing read\n    0.0\n')
+
+        def mutate(text):
+            assert example in text, "the replayed example has moved"
+            return text.replace(example, "", 1)
+
+        counts = self._counts_with(gate, rel, mutate)
+        assert sum(counts.values()) >= gate.MIN_EXAMPLES - 1
+        errors, _slack = gate.per_file_errors(counts, gate.EXAMPLES_PER_FILE)
+        assert any(e.startswith(f"{rel}: 36 example(s)") for e in errors), errors
+
+    def test_the_real_pins_refuse_a_file_losing_its_only_example(self):
+        """D6: ``metadata.py``'s one example deleted; the file drops out."""
+        gate = _load("check_doctests")
+        rel = "src/maddening/core/compliance/metadata.py"
+
+        def mutate(text):
+            start = text.index("    Examples\n    --------\n    >>> Discret")
+            end = text.index("\n\n", start)
+            return text[:start] + text[end + 2:]
+
+        counts = self._counts_with(gate, rel, mutate)
+        assert rel not in counts, "the mutation must remove every example"
+        errors, _slack = gate.per_file_errors(counts, gate.EXAMPLES_PER_FILE)
+        assert any(e.startswith(f"{rel}: 0 example(s)") for e in errors), errors
+
+    def test_a_file_that_loses_its_only_example_fails_the_gate(self, tmp_path):
+        """D6 end to end: the total still clears ``--min``; the pin does not."""
+        other = '"""Module."""\n\n\ndef one():\n    """One.\n\n    >>> 3\n    3\n    """\n'
+        pins = {"src/probe_pkg/mod.py": 2, "src/probe_pkg/other.py": 1}
+        ok = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2", pins=pins,
+                           extra={"other.py": other})
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        gone = other.replace("    >>> 3\n    3\n", "")
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2",
+                               pins=pins, extra={"other.py": gone})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert ("src/probe_pkg/other.py: 0 example(s) executed and passed, "
+                "pinned at 1") in result.stdout
+
+    def test_one_example_deleted_from_a_docstring_fails_the_gate(self, tmp_path):
+        """D5 end to end, with the total floor one below the count."""
+        source = _TWO_EXAMPLES.replace("    >>> 2 + 2\n    4\n", "")
+        result = _doctest_gate(tmp_path, source, "--min", "1",
+                               pins={"src/probe_pkg/mod.py": 2})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert ("src/probe_pkg/mod.py: 1 example(s) executed and passed, "
+                "pinned at 2") in result.stdout
+
+    def test_a_file_with_examples_and_no_pin_fails_the_gate(self, tmp_path):
+        """Fail closed: an unpinned file's examples are guarded by nothing."""
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2", pins={})
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert ("src/probe_pkg/mod.py holds docstring examples and has no "
+                "entry in EXAMPLES_PER_FILE") in result.stdout
+
+    def test_a_pin_below_its_count_is_reported_as_slack(self, tmp_path):
+        result = _doctest_gate(tmp_path, _TWO_EXAMPLES, "--min", "2",
+                               pins={"src/probe_pkg/mod.py": 1})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert ("NOTE: src/probe_pkg/mod.py: 2 example(s), pinned at 1"
+                in result.stdout)
 

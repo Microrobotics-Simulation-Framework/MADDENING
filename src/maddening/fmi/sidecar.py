@@ -185,14 +185,14 @@ class SidecarConfig:
         and carried in the FMU state snapshot.
     param_specs : dict, optional
         ``GraphManager.param_specs()`` for the same graph.  When given,
-        :meth:`FmuSidecar.set_params` rejects a value outside a leaf's
-        declared ``ParamSpec.bounds`` (the ``min`` / ``max`` the model
-        description advertises), so an importer cannot drive the step
-        with a constant the graph declares invalid.  The FMU-state
-        archive path in
+        :meth:`FmuSidecar.set_params` and :meth:`FmuSidecar.set_fmu_state`
+        reject a value outside a leaf's declared ``ParamSpec.bounds`` (the
+        ``min`` / ``max`` the model description advertises), so an
+        importer cannot drive the step with a constant the graph declares
+        invalid.  The FMU-state archive path in
         :class:`maddening.fmi.tcp_bridge.FmuTcpBridge` checks against the
-        same declarations, so neither door into the parameter tree is
-        wider than the other.
+        same declarations, so no door into the parameter tree is wider
+        than another.
     fixed_params : mapping of str to str, optional
         ``{"<node>.params.<key>": reason}`` for parameters the compiled step
         cannot read -- pass :attr:`ModelDescription.fixed_parameters

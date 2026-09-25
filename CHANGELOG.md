@@ -101,8 +101,8 @@ guidance; the itemized changes follow.
 - Params survive persistence and reach FMI: `to_dict`/`from_dict`, USD and
   checkpoints store effective params and `ParamSpec` overrides;
   `build_model_description` exposes each leaf as an FMI `parameter`/`tunable`;
-  `SidecarConfig(params=, param_specs=)` serves `get_params` / `set_params`, which
-  refuses a non-finite value or one the leaf's dtype cannot hold, as the bridge's `set` does
+  `SidecarConfig(params=, param_specs=)` serves `get_params` / `set_params`; it and `set_fmu_state`
+  refuse a non-finite value, one the leaf's dtype cannot hold or one out of bounds, as the bridge does
 - REST `PUT /graph/params/{node}` addresses any leaf of the live pytree,
   updates in place without a recompile, and validates dtype, shape, finiteness
   and `ParamSpec` bounds before writing

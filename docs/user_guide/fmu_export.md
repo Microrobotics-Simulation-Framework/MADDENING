@@ -195,7 +195,10 @@ must be finite and representable in the dtype of the array it replaces,
 and every parameter must lie inside its declared `ParamSpec` bounds —
 the `min` / `max` the model description advertises.  An importer
 therefore cannot use an FMU-state archive to install a constant the
-graph declares invalid.
+graph declares invalid.  The sidecar's own in-process doors apply the
+same checks with the same messages: `FmuSidecar.set_params` refuses what
+`set` refuses, and `FmuSidecar.set_fmu_state` refuses what `set_state`
+refuses (the bounds only when the sidecar was given `param_specs`).
 
 ```{warning}
 The consequence is that a snapshot of a *diverged* model — one whose

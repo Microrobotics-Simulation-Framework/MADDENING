@@ -699,6 +699,40 @@ class LBMPipeNode(SimulationNode):
         mask = mask.at[prop_x, :, :].set(prop_cross)
         return mask
 
+    @property
+    def static_data(self) -> dict:
+        """The two geometry masks :meth:`update` reads, built in ``__init__``.
+
+        Published so that :meth:`static_data_deps` can name the parameters
+        they are built from.  Nothing rebuilds them when those parameters
+        are written later.
+        """
+        from maddening.core.static_data import StaticArray
+        return {
+            "wall_mask": StaticArray(value=self._wall_mask, replication="replicate"),
+            "propeller_mask": StaticArray(value=self._propeller_mask,
+                                          replication="replicate"),
+        }
+
+    def static_data_deps(self) -> dict[str, tuple[str, ...]]:
+        """The geometry each mask is built from, when the node is constructed.
+
+        Declared because :meth:`initial_state` reads ``pipe_radius`` again
+        (the fill mask, when ``fill_fraction < 1``), and a parameter the
+        running node reads anywhere used to pass ``PUT /graph/params`` as
+        "takes effect at the next reset": the write answered 200 and the
+        reset rebuilt the fill for the new radius while the step kept the
+        wall mask of the old one, and ``to_dict()`` saved a pipe the server
+        was not running (MADD-ANO-024).  A declared dependency is refused
+        outright on every write surface.  All three are
+        ``ParamSpec(trainable=False)`` or structural, so ``compile()`` has
+        nothing to object to.
+        """
+        return {
+            "wall_mask": ("pipe_radius",),
+            "propeller_mask": ("pipe_radius", "propeller_x", "propeller_radius"),
+        }
+
     def _compute_fill_mask(self):
         """Compute a boolean mask for the initially-filled liquid region.
 

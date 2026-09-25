@@ -167,6 +167,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **New refusals where a sharded wrapper or `PUT /graph/params` accepted silently-wrong input**: the route refuses a value that changes a node's state shape (`n_cells`), a structural value the node's constructor refuses, `LBMPipeNode`'s geometry and a write no probe copy can decide; `ShardedUnstructuredNode` refuses a per-cell input on a full partition not in global order, and a state not in partition layout;
+  `ShardedStencilNode` refuses an outer `boundary` other than a wrapped `ShardedStencilNode`'s, and a state its node no longer builds; `ShardedPointwiseNode` refuses a node with no state field on the shard axis.
+  Action: rebuild a node to change such a value; renumber cells with `np.argsort(partition_assignment, kind="stable")`; pass the inner wrapper's `boundary`; shard an axis the state has, or leave the node unwrapped.
 - **`ShardedStencilNode` refuses `boundary="zero"` and `"periodic"` for a `HeatNode`**: the rod now builds its own end ghosts, so the fill would be ignored.
   Action: drop the argument and hold an end at 0 with `left_temperature=0.0` / `right_temperature=0.0` (in a graph, `gm.add_external_input(...)`), exactly as unsharded.
 - **`ShardedStencilNode` refuses a per-axis `boundary` dict**: it was accepted but never worked in the wrapper (it zero-filled the halos of axes
@@ -289,6 +292,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Sharded wrappers, audit of the frozen tree**: a params write followed by `compile()` reaches the sharded step, for a legacy-contract node's constant and for a halo width that follows a parameter (`HeatNode.stencil_order`) (MADD-ANO-032, since 0.2.0); `ShardedStencilNode` keeps `dt` at the graph's precision under x64 (MADD-ANO-033, since 0.2.0); `HybridNode` and `ShardedUnstructuredNode` forward `update_evaluations()`;
+  `ShardedUnstructuredNode` validates `domain_integral_axes` names.  The routes MADD-ANO-024's first fix left open (a part-full pipe's `pipe_radius`, `n_cells`, `stencil_order=3`, wrapped and unprobeable nodes) are closed.
+  Action: re-run sharded results whose structural parameters were written after the wrapper was built, and sharded float64 stencil runs under x64.
 - **CI test-time report** (`scripts/report_test_durations.py`): a cache read is no longer subtracted twice and is shown apart from compile; a share is capped at 100%; a test that started a process is listed as "work in a subprocess
   (not measured here)", not "slow even with a warm cache"; a report holding only collection errors exits 2 instead of passing.
   Action: none; a slow test's split in the lane summary now adds up, and a subprocess test is no longer sent for a code change a warm cache would make unneeded.
@@ -602,6 +608,8 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-032, 033 (new, resolved in this release)**: the sharded wrappers kept a compiled step across `compile()`, so a legacy node's params write after a step never reached the sharded physics; `ShardedStencilNode` stepped with a float32 `dt` under x64 (both since 0.2.0; see `### Fixed`).
+  **MADD-ANO-024** now records the routes its first fix left open, all closed, and **MADD-ANO-004**'s workaround says it held only before the first step
 - **MADD-ANO-028, 029, 030 (new, resolved in this release)**: periodic global halos on a size-1 mesh axis; a wide `"edge"` fill that copied the shard's first cells;
   a sharded `HeatNode` that ignored its end temperatures (all since 0.2.0; see `### Fixed`).  **MADD-ANO-031 (new, open)**: at `stencil_order=4` an end with no
   boundary input is not insulated (order 2 is); give it a temperature or use `stencil_order=2`

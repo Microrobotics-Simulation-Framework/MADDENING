@@ -941,6 +941,32 @@ class HeatNode(SimulationNode):
         alpha = p["thermal_diffusivity"]
         L = p["length"]
         n_global = self.params["n_cells"]
+        # ``n_cells`` is structural and read from ``self.params``, which a
+        # write can move ahead of the state it is stepping.  Unsharded,
+        # such a state no longer broadcasts and update() raises; here it
+        # used to set ``dx = L / n_cells`` and the offset at which the
+        # right rod end is closed, so a 16-cell state stepped after a
+        # write of 17 ran with the wrong spacing and an open right end.
+        # Where the block's own length pins the rod, it must agree.
+        # (ShardedStencilNode compares the whole state's shape with what
+        # initial_state() builds before it gets here.)
+        n_block = int(T_pad.shape[0]) - 2 * halo
+        info = (shard_info or {}).get(0)
+        extent = None if info is None else info[1]
+        if info is None and n_block != n_global:
+            raise ValueError(
+                f"HeatNode {self.name!r}: the temperature block has {n_block} "
+                f"cells and is the whole rod, but params['n_cells'] is "
+                f"{n_global}.  n_cells was changed after the state was built; "
+                "reset the state or rebuild the node."
+            )
+        if isinstance(extent, int) and extent > 0 and n_global % extent:
+            raise ValueError(
+                f"HeatNode {self.name!r}: params['n_cells'] is {n_global}, "
+                f"which is not a whole number of the {extent}-cell blocks the "
+                "rod is sharded into.  n_cells was changed after the state "
+                "was built; reset the state or rebuild the node."
+            )
         dx = L / n_global
         stencil_order = self.params.get("stencil_order", 2)
 

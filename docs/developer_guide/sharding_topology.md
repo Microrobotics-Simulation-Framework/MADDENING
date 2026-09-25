@@ -95,6 +95,16 @@ All three share the same substrate:
   shape.  Everything else (a scalar pressure, a uniform `(D,)` force
   vector) is replicated to every shard.  The unstructured wrapper refuses
   a per-cell input given in *global* cell order rather than misreading it.
+  When every shard is full (`n_global == n_devices * n_local_max`) the two
+  orders have the same length and the shape cannot say which one an array
+  is in: if the partition keeps cells in global order (each device owns a
+  contiguous, ascending block of ids) the two are the same array and it is
+  accepted; otherwise every per-cell input is refused.  Renumber the cells
+  in the order `np.argsort(partition_assignment, kind="stable")` and both
+  readings agree.  The state is in partition layout too: a state field
+  with another row count is refused by name, and on a full, reordered
+  partition a global-order state must go through `partition_value` before
+  it is written, because there nothing can tell it apart.
 
 ## Halo-exchange transport (unstructured path)
 

@@ -198,8 +198,10 @@ def _slab_index(layout, device, g):
     return layout.n_local_max + int(pos[0])
 
 
-def _ring_setup(n=16, n_devices=4):
-    pa = (np.arange(n) * n_devices // n).astype(np.int32)      # contiguous blocks
+def _ring_setup(n=16, n_devices=4, pa=None):
+    if pa is None:
+        pa = (np.arange(n) * n_devices // n).astype(np.int32)  # contiguous blocks
+    pa = np.asarray(pa, dtype=np.int32)
     edges = np.array([[i, (i + 1) % n] for i in range(n)], dtype=np.int32)
     layout = build_unstructured_partition(partition_assignment=pa, edges=edges,
                                           n_devices=n_devices)
@@ -233,3 +235,64 @@ def test_unstructured_global_order_input_is_refused():
         sharded.update(sharded.initial_state(), {"source": jnp.ones(14, jnp.float32)}, 1.0)
     # a scalar is still fine (replicated)
     sharded.update(sharded.initial_state(), {"gain": jnp.float32(2.0)}, 1.0)
+
+    # Balanced: every shard full, so the global count *is* the layout's row
+    # count and the length check above cannot fire.  An interleaved
+    # partition read the global-order source [1..8] as partition layout --
+    # [1, 5, 2, 6, 3, 7, 4, 8] -- silently.  Refused: the shape cannot say
+    # which order an array is in, so a partition-layout array of the same
+    # shape is refused too.
+    pa = (np.arange(8) % 2).astype(np.int32)
+    node, sharded, layout = _ring_setup(n=8, n_devices=2, pa=pa)
+    assert layout.n_devices * layout.n_local_max == 8
+    source = np.arange(1, 9, dtype=np.float32)
+    in_layout = partition_value(value=source, layout=layout).reshape(-1)
+    for given in (source, in_layout):
+        with pytest.raises(ValueError, match="cannot tell a global-order array"):
+            sharded.update(sharded.initial_state(), {"source": jnp.asarray(given)}, 1.0)
+    sharded.update(sharded.initial_state(), {"gain": jnp.float32(2.0)}, 1.0)
+
+
+def _stepped_with_source(node, sharded, source_global, source_given, steps=3):
+    ref, st = node.initial_state(), sharded.initial_state()
+    for _ in range(steps):
+        ref = node.update(ref, {"source": jnp.asarray(source_global)}, 1.0)
+        st = sharded.update(st, {"source": jnp.asarray(source_given)}, 1.0)
+    return np.asarray(sharded.gather_global(st)["x"]), np.asarray(ref["x"])
+
+
+def test_a_balanced_partition_in_global_order_takes_the_per_cell_input():
+    """Contiguous ascending blocks, every shard full: global order and
+    partition layout are the same array, so there is nothing to refuse."""
+    node, sharded, layout = _ring_setup(n=16, n_devices=4)
+    source = np.random.default_rng(5).standard_normal(16).astype(np.float32)
+    assert np.array_equal(partition_value(value=source, layout=layout).reshape(-1), source)
+    got, want = _stepped_with_source(node, sharded, source, source)
+    np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
+def test_renumbering_the_cells_as_the_refusal_says_makes_the_input_readable():
+    """The remedy the refusal names: relabel the cells in the order
+    ``np.argsort(partition_assignment, kind='stable')``.  That gives the
+    interleaved assignment above contiguous ascending blocks, and a ring
+    numbered that way reads its per-cell input correctly (both spellings
+    of it are now one array)."""
+    pa = (np.arange(8) % 2).astype(np.int32)
+    order = np.argsort(pa, kind="stable")             # new id -> old id
+    renumbered = pa[order]
+    assert np.array_equal(renumbered, np.repeat(np.arange(2), 4))
+    node, sharded, layout = _ring_setup(n=8, n_devices=2, pa=renumbered)
+    source_old_ids = np.arange(1, 9, dtype=np.float32)
+    source = source_old_ids[order]                    # the same values, new ids
+    got, want = _stepped_with_source(node, sharded, source, source)
+    np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
+def test_unstructured_state_not_in_partition_layout_is_refused():
+    """``update`` steps a state in partition layout (``initial_state``'s).
+    A global-order state on a padded partition has another row count and
+    used to reach the shard_map, which split it as if it were padded."""
+    node, sharded, layout = _ring_setup(n=14)
+    with pytest.raises(ValueError, match=r"state field 'x' has shape \(14,\).*partition layout"):
+        sharded.update(node.initial_state(), {}, 1.0)
+    sharded.update(sharded.initial_state(), {}, 1.0)

@@ -1992,7 +1992,8 @@ class TestARetirementOfAReachableEntryIsRefused:
 
     def test_a_shallow_clone_is_refused_not_trusted(self, anomalies_gate, tmp_path):
         """CI's default checkout is one commit deep: the removal is not in it."""
-        origin = self._deleted(tmp_path, "open").parent
+        self._deleted(tmp_path, "open")
+        origin = tmp_path / "repo"
         clone = tmp_path / "clone"
         _git(tmp_path, "clone", "-q", "--depth", "1",
              f"file://{origin}", str(clone))

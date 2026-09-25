@@ -509,7 +509,13 @@ def last_committed_entry(registry_path, aid):
         return None, None, (f"{registry_path} is not in a git work tree "
                             f"({str(top).strip()}), so what the retired entry "
                             f"last said cannot be read from its history")
-    rel = os.path.relpath(path, top.strip()).replace(os.sep, "/")
+    # Every command below runs at the top of the work tree: a pathspec is
+    # read relative to the working directory, so from docs/validation the
+    # registry's own repository-relative path named nothing, and every
+    # retirement read "not tracked" (found by re-running the audit's
+    # mutation harness, whose registry sits where the real one does).
+    cwd = top.strip()
+    rel = os.path.relpath(path, cwd).replace(os.sep, "/")
     rc, shallow = _git(cwd, "rev-parse", "--is-shallow-repository")
     if rc != 0 or shallow.strip() != "false":
         return None, None, ("this is a shallow clone, so the commit that "

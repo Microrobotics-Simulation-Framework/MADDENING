@@ -68,11 +68,14 @@ longer frame, never sees one from this bridge.
 instance for as long as it lives, so no wait on it is unbounded: a peer
 has ten seconds to begin its first frame, five minutes of silence
 between frames once it has spoken, and two minutes to finish a frame it
-has announced the length of.  Overrunning any of them ends the
-connection exactly as EOF does, and the instance slot is free again.
-The number of live connection threads is capped (16); further
+has announced the length of -- two minutes in total, whether the rest
+of the frame dribbles in or stops arriving.  Overrunning any of them
+ends the connection exactly as EOF does, and the instance slot is free
+again.  The number of live connection threads is capped (16); further
 connections are closed on accept.  ``stop()`` shuts every live
-connection down, so a parked worker does not outlive the bridge.
+connection down, so a parked worker does not outlive the bridge.  A
+bridge serves once: ``start()`` a second time, or after ``stop()``,
+raises ``RuntimeError`` (build a new bridge to serve again).
 
 The importer is **untrusted**: nothing that arrives on the socket is ever
 unpickled or evaluated.  The FMU-state blob is an ``npz`` archive of plain
@@ -166,9 +169,15 @@ gone, not a slow one."""
 _FRAME_TIMEOUT = 120.0
 """Seconds to finish a frame once its length prefix has arrived.
 
-Bounds the dribbling peer the per-recv timeout alone does not: one byte
-every nine seconds would renew a plain socket timeout for ever.  Two
-minutes still covers a full 64 MiB frame on a link of about 5 Mbit/s."""
+One deadline over the whole body, enforced inside each ``recv`` as well
+as between them: every ``recv`` waits at most for what is left of it
+(:func:`_recv_exact`).  So it bounds both the peer that dribbles -- one
+byte every nine seconds would renew a plain socket timeout for ever --
+and the peer that announces a frame, sends part of it and goes silent,
+which would otherwise hold the instance for the whole idle budget.  Two
+minutes still covers a full 64 MiB frame on a link of about 5 Mbit/s.
+The four-byte length prefix itself is read under the handshake or idle
+budget, whichever the connection is in."""
 _MAX_CONNECTIONS = 16
 """Live connection threads allowed at once.
 
@@ -229,21 +238,50 @@ def _recv_exact(conn: socket.socket, n: int,
     ``deadline`` (a :func:`time.monotonic` value) bounds the whole read,
     not each ``recv``: a peer that dribbles one byte at a time renews the
     socket's own timeout indefinitely, and the connection it is dribbling
-    on holds the bridge's only instance slot.  Overrunning it raises
-    :exc:`socket.timeout`, which every caller already treats as a dead
-    connection.
+    on holds the bridge's only instance slot.  It is also enforced
+    *during* each ``recv``, whose socket timeout is lowered to what is
+    left of the deadline (and restored afterwards): checked only between
+    calls, a peer that sends part of a frame and then goes silent would
+    be released by the socket's own, longer timeout instead.  Overrunning
+    it raises :exc:`socket.timeout`, which every caller already treats as
+    a dead connection.
     """
     buf = bytearray()
-    while len(buf) < n:
-        if deadline is not None and time.monotonic() > deadline:
-            raise socket.timeout(
-                f"frame of {n} bytes was still incomplete after "
-                f"{len(buf)} bytes"
-            )
-        chunk = conn.recv(min(n - len(buf), 1 << 20))
-        if not chunk:
-            return None
-        buf.extend(chunk)
+    if deadline is None:
+        while len(buf) < n:
+            chunk = conn.recv(min(n - len(buf), 1 << 20))
+            if not chunk:
+                return None
+            buf.extend(chunk)
+        return bytes(buf)
+    saved = conn.gettimeout()
+    try:
+        while len(buf) < n:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise socket.timeout(
+                    f"frame of {n} bytes was still incomplete after "
+                    f"{len(buf)} bytes"
+                )
+            frame_bound = saved is None or remaining < saved
+            conn.settimeout(remaining if frame_bound else saved)
+            try:
+                chunk = conn.recv(min(n - len(buf), 1 << 20))
+            except socket.timeout:
+                if frame_bound:
+                    raise socket.timeout(
+                        f"frame of {n} bytes was still incomplete after "
+                        f"{len(buf)} bytes"
+                    ) from None
+                raise
+            if not chunk:
+                return None
+            buf.extend(chunk)
+    finally:
+        try:
+            conn.settimeout(saved)
+        except OSError:
+            pass                    # the socket was closed under us
     return bytes(buf)
 
 
@@ -478,6 +516,10 @@ class FmuTcpBridge:
         self._host, self._port = self._server.getsockname()[:2]
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        # Orders start() against stop(): a start() that loses the race sees
+        # the stop flag and refuses, one that wins has published its thread
+        # before stop() reads it for the join.
+        self._lifecycle_lock = threading.Lock()
         # Live accepted connections and the threads serving them.  ``stop()``
         # has to reach both: closing the listening socket says nothing to a
         # connection already accepted, and a worker parked on one of those
@@ -497,9 +539,36 @@ class FmuTcpBridge:
         return f"{self._host}:{self._port}"
 
     def start(self) -> "FmuTcpBridge":
-        self._thread = threading.Thread(target=self._serve, name="maddening-fmu-bridge",
-                                        daemon=True)
-        self._thread.start()
+        """Start serving on :attr:`endpoint`; returns the bridge.
+
+        A bridge serves once.  Its listening socket is bound in the
+        constructor and closed by :meth:`stop`, so a ``start()`` after
+        ``stop()`` would start a thread with nothing to accept on and
+        return as if it served; and a second ``start()`` would run two
+        accept loops on one socket, only the last of which ``stop()``
+        joins.  Both are refused.
+
+        Raises
+        ------
+        RuntimeError
+            If the bridge was already started, or has been stopped (build
+            a new :class:`FmuTcpBridge` to serve again).
+        """
+        with self._lifecycle_lock:
+            if self._stop.is_set():
+                raise RuntimeError(
+                    f"FmuTcpBridge on {self.endpoint} has been stopped and its "
+                    "listening socket closed; build a new FmuTcpBridge to serve "
+                    "again"
+                )
+            if self._thread is not None:
+                raise RuntimeError(
+                    f"FmuTcpBridge on {self.endpoint} is already started; "
+                    "start() it once"
+                )
+            self._thread = threading.Thread(target=self._serve,
+                                            name="maddening-fmu-bridge", daemon=True)
+            self._thread.start()
         return self
 
     def stop(self) -> None:
@@ -510,8 +579,11 @@ class FmuTcpBridge:
         survive ``stop()`` indefinitely, still holding the instance lock.
         Each live connection is therefore shut down here, which turns the
         worker's pending ``recv`` into an EOF, and the workers are joined.
+        Stopping is final (see :meth:`start`) and idempotent: a second
+        ``stop()``, or one before ``start()``, is quiet.
         """
-        self._stop.set()
+        with self._lifecycle_lock:
+            self._stop.set()
         try:
             self._server.close()
         except OSError:

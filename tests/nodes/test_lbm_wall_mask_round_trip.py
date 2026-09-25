@@ -9,9 +9,10 @@ nested lists of ``bool``.
 
 The fixture is a 12 x 8 D2Q9 channel with walls on both long sides and one
 obstacle cell, driven by a uniform body force so that the walls shape the
-flow: after 30 steps the wall-free domain's velocity is several times the
-walled one's (``test_the_fixture_can_express_a_lost_mask``), so a mask lost
-anywhere is visible in the trajectory, not only in the node's attributes.
+flow: after 30 steps the velocity field without walls differs from the
+walled one by more than the walled flow's peak speed
+(``test_the_fixture_can_express_a_lost_mask``), so a mask lost anywhere is
+visible in the trajectory, not only in the node's attributes.
 """
 
 from __future__ import annotations
@@ -80,12 +81,14 @@ def _usd_installed() -> bool:
 
 
 def test_the_fixture_can_express_a_lost_mask(walled_run):
-    """Without the check below every other test could pass on a flow the
-    walls do not shape."""
+    """Without this every other test could pass on a flow the walls do not
+    shape.  Measured: peak speed 4.73e-4 walled, 6.10e-4 without walls, and
+    the two fields differ by more than the walled flow's own peak."""
     open_run = _run(_graph(_node(None)))
-    walled = float(np.abs(walled_run["velocity"]).max())
-    wall_free = float(np.abs(open_run["velocity"]).max())
-    assert wall_free > 3 * walled > 0.0
+    walled_peak = float(np.abs(walled_run["velocity"]).max())
+    difference = float(np.abs(open_run["velocity"] - walled_run["velocity"]).max())
+    assert difference > walled_peak > 0.0
+    assert not np.array_equal(open_run["wall_mask"], walled_run["wall_mask"])
 
 
 def test_the_mask_is_recorded_in_params_as_nested_lists_of_bool():
@@ -102,7 +105,7 @@ def test_a_node_rebuilt_from_its_params_has_the_same_walls():
                                   _walls().astype(np.uint8))
     np.testing.assert_array_equal(np.asarray(rebuilt._wall_mask), _walls())
     assert rebuilt._has_walls
-    assert rebuilt.to_dict() == node.to_dict()
+    assert json.loads(json.dumps(rebuilt.to_dict())) == d
 
 
 def test_a_config_round_trip_through_json_steps_the_same_flow(walled_run):

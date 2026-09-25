@@ -11,11 +11,13 @@ same config, build the same initial state and step the same trajectory,
 bit for bit.
 
 ``test_every_built_in_node_has_a_round_trip_case`` fails closed when a node
-class is added to ``maddening.nodes`` without a case here.
+class is added to ``maddening.nodes`` or ``maddening.nodes.adaptive``
+without a case here.
 """
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 import inspect
 import json
@@ -119,6 +121,21 @@ def _trajectory(gm: GraphManager, name: str) -> dict:
     return {k: np.asarray(v) for k, v in gm.get_node_state(name).items()}
 
 
+def _initial_state(gm: GraphManager, name: str) -> dict:
+    return {k: np.asarray(v) for k, v in gm.get_node(name).initial_state().items()}
+
+
+@functools.lru_cache(maxsize=None)
+def _original(case: str):
+    """The original graph, its config, initial state and trajectory, built
+    and compiled once per case for both reloads.  The trajectory is taken on
+    the freshly compiled graph; a config and a stage carry no state, so
+    reloading from the graph after it has stepped is the same reload."""
+    gm = _graph(case)
+    config = json.dumps(gm.to_dict(), sort_keys=True)
+    return gm, config, _initial_state(gm, case), _trajectory(gm, case)
+
+
 def _assert_identical(got: dict, want: dict) -> None:
     assert sorted(got) == sorted(want)
     for k in want:
@@ -158,20 +175,24 @@ RELOADS = [
 ]
 
 
+#: Cases whose compile alone is over the per-test budget on a CI runner
+#: (the part-full two-phase pipe, ~9 s here on 3 cores): the slow lane runs them.
+SLOW_CASES = {"lbm_pipe"}
+
+
 @pytest.mark.parametrize("reload", RELOADS)
-@pytest.mark.parametrize("case", sorted(CASES))
+@pytest.mark.parametrize("case", [
+    pytest.param(case, marks=pytest.mark.slow) if case in SLOW_CASES else case
+    for case in sorted(CASES)
+])
 def test_a_reloaded_built_in_node_writes_builds_and_steps_as_the_original(case, reload):
-    original = _graph(case)
+    original, config, initial, trajectory = _original(case)
     reloaded = reload(original)
     reloaded.compile()
 
-    assert json.dumps(reloaded.to_dict(), sort_keys=True) == \
-        json.dumps(original.to_dict(), sort_keys=True)
-    _assert_identical(
-        {k: np.asarray(v) for k, v in reloaded.get_node(case).initial_state().items()},
-        {k: np.asarray(v) for k, v in original.get_node(case).initial_state().items()},
-    )
-    _assert_identical(_trajectory(reloaded, case), _trajectory(original, case))
+    assert json.dumps(reloaded.to_dict(), sort_keys=True) == config
+    _assert_identical(_initial_state(reloaded, case), initial)
+    _assert_identical(_trajectory(reloaded, case), trajectory)
 
 
 def test_every_built_in_node_has_a_round_trip_case():

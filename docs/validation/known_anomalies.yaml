@@ -128,7 +128,7 @@ anomalies:
       bound of the variable-spacing stencil: exact on a uniform grid, and
       sufficient on any.  The same round made the constructor refuse a
       non-positive timestep and a negative thermal_diffusivity
-      (MADD-ANO-059).  Both run the heat equation backwards, and the check
+      (MADD-ANO-062).  Both run the heat equation backwards, and the check
       used to be skipped for them.
       What is still live is every route around it, re-measured on that same rod
       at 0.4.0.dev0 with a half-sine initial profile and a node constructed at a
@@ -3163,7 +3163,13 @@ anomalies:
       "quadratic" is still "linear" to the last bit.  At timesteps 0.001
       and 0.01 with `tolerance=1e-8`: when every first sweep converges
       (`max_iterations=10`), `waveform_iterations` 1, 2 and 3 give
-      bit-identical states over three steps under both solvers.  When the
+      bit-identical states over three steps under both solvers -- the pair
+      is then stationary in float32.  Every sweep starts with one pass, so
+      each later sweep applies at least one more and moves a converged but
+      not stationary state by about one residual: at `tolerance=1e-4` the
+      states at 2 and 3 are 6.0e-08 (relative) from the one at 1 after one
+      step, and on a linear pair contracting at 0.9025, 1.2e-04 at
+      `tolerance=1e-3`.  When the
       first sweep stops at the cap, the later sweeps continue the same
       iteration like extra passes: under `acceleration="fixed"`,
       `relaxation=0.7`, `max_iterations=2`, the states at
@@ -3176,12 +3182,14 @@ anomalies:
       No state is wrong: every result is the converged solution of the
       sub-cycled scheme as it is implemented, which holds the other
       node's end-of-step value across the fast node's sub-steps, and it
-      is the result `waveform_iterations=1` gives.  What is wrong is a
+      is, to within about one residual, the result `waveform_iterations=1`
+      gives.  What is wrong is a
       numerical-method claim.  Waveform relaxation and higher-order
       sub-step interpolation exist to reduce the splitting error of a
       multi-rate coupling, and a program that chose them for that reason
       gets none of the reduction and no signal; the extra sweeps cost
-      passes and change nothing once the first sweep converges.  Graded
+      passes and, once the first sweep converges, move the state by no
+      more than about one residual.  Graded
       `minor` because the result is the documented single-pass result,
       and because the error against a uniform-rate reference is the same
       number as without the option, which a verification run would show.
@@ -3192,8 +3200,10 @@ anomalies:
       - "maddening.core.coupling.group.CouplingGroup.boundary_interpolation"
     affected_versions: ">=0.1.0"
     workaround: >
-      Use `waveform_iterations=1`: it gives the same result with fewer
-      passes.  When the first sweep stops at `max_iterations`, raise
+      Use `waveform_iterations=1`: it gives the same result -- to within
+      about one residual, since each extra sweep applies at least one more
+      pass, and identically at exact stationarity -- with fewer passes.
+      When the first sweep stops at `max_iterations`, raise
       `max_iterations` rather than adding sweeps.  To reduce multi-rate
       splitting error, reduce the slow node's timestep or couple at a
       uniform rate; the interpolation mode changes a converged step by at
@@ -3209,7 +3219,7 @@ anomalies:
       under `solver="ift"` checks every sweep, so a step whose first
       sweep stops at the cap raises even when the last sweep converges.
     verification:
-      - "tests/core/test_coupling_waveform_report.py::test_a_converged_first_sweep_leaves_the_later_sweeps_nothing_to_change"
+      - "tests/core/test_coupling_waveform_report.py::test_each_later_sweep_moves_a_converged_state_by_about_one_residual"
       - "tests/core/test_coupling_waveform_report.py::test_a_capped_first_sweep_is_continued_by_the_later_ones"
       - "tests/core/test_coupling_waveform_report.py::test_the_interpolation_modes_coincide_when_the_source_is_scheduled_after"
       - "tests/core/test_phases_5_7_8.py::TestQuadraticInterpolation::test_quadratic_interpolation_is_linear_interpolation_today"
@@ -5301,6 +5311,168 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-059"
+    title: "Accelerating a coupling group that holds an integer, boolean or PRNG-key state leaf failed at the first step"
+    description: >
+      A coupling group's acceleration flattens the state fields it acts on
+      into one floating vector and writes the relaxed vector back.
+      `acceleration="aitken"` and `"fixed"` flattened every field of every
+      node in the group, and the quasi-Newton accelerations every field
+      their selection named, integer, boolean and PRNG-key leaves included.
+      At v0.1.0, v0.2.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib
+      0.11.0) a group of a spring and a node holding a `uint32` key and an
+      `int32` counter beside its float field raised `TypeError: scan body
+      function carry input and carry output must have equal types` at the
+      first step under `"aitken"` and under `"fixed"`, and so did
+      `"iqn-ils"` with an `accelerated_fields` naming the integer field;
+      `acceleration="none"` stepped it.  During 0.4.0 development, before
+      release, `unflatten_coupled_state` learned to restore each field's
+      dtype and the failure turned silent: `solver="fori"` with
+      `"aitken"` or `"fixed"` returned the leaves rounded through float32
+      (`0xdeadbeef` as `0xdeadbf00`, `2**24 + 1` as `2**24`, a legacy PRNG
+      key rewritten) and kept the rounded values, and `solver="ift"` with
+      a quasi-Newton acceleration raised a broadcasting error when an
+      integer field was in its selection, named or reached through a flux
+      edge (whose producer's whole state stands in for the flux).
+      Resolved in 0.4.0: every acceleration acts on floating fields only,
+      as `solver="ift"` always iterated.  Such a leaf is recomputed from
+      the pre-step state on every pass, so its first-pass value is already
+      the converged one.  A non-floating field named in
+      `accelerated_fields` is dropped from the selection, and `compile()`
+      refuses a selection that names no floating field.  A group whose
+      state is all floating flattens exactly as before, and its floating
+      fields step bit-identically.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud in every release: the step raised before returning anything, so
+      no wrong value was reported as a right one.  The silent form existed
+      only on the 0.4.0 development tree and never shipped.  The harm was
+      that a group holding a counter, a flag or a random key could not use
+      the accelerations at all.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.acceleration"
+      - "maddening.core.coupling.group.CouplingGroup.accelerated_fields"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep integer, boolean and PRNG-key fields out of
+      accelerated coupling groups (in a node outside the group, fed by an
+      edge), or use `acceleration="none"`; under a quasi-Newton
+      acceleration, name only floating fields in `accelerated_fields`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  A field declared integer but meant to be relaxed would
+      now be left at its first-pass value; relaxation of such a field was
+      never meaningful, and the state it takes is the one
+      `acceleration="none"` gives.
+    verification:
+      - "tests/core/test_coupling_non_float_leaves.py::test_wide_integer_leaves_survive_a_coupled_step"
+      - "tests/core/test_coupling_non_float_leaves.py::test_an_integer_field_named_in_accelerated_fields_is_left_out"
+      - "tests/core/test_coupling_non_float_leaves.py::test_a_flux_edge_from_a_node_with_an_integer_field_accelerates_its_floats"
+      - "tests/core/test_coupling_non_float_leaves.py::test_accelerated_fields_naming_no_floating_field_is_refused_at_compile"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-060"
+    title: "A group-internal flux edge read by the interface norm, or by a sub-cycled member's linear boundary interpolation, failed with a bare KeyError"
+    description: >
+      A flux edge carries a value `compute_boundary_fluxes` returns, which
+      is not a field of the producer's state.  Two parts of the coupling
+      loop read an internal edge's value from the state:
+      `convergence_norm="interface"`, which measures the change of every
+      internal edge's source field between iterates, and the boundary
+      interpolation of a sub-cycled member under
+      `boundary_interpolation="linear"` (the default) or `"quadratic"`,
+      which interpolates each internal input between the pass's incoming
+      iterate and the in-pass state.  Given a flux edge, both raised
+      `KeyError` naming the flux inside the traced step, with nothing
+      saying which setting could not read it.  Measured at v0.1.0, v0.2.0
+      and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0) and on the
+      0.4.0 development tree: a spring whose `spring_force` flux drives a
+      follower that drives it back, `add_flux_coupling(gm, "s", "k",
+      "spring_force", "x")`; `KeyError: 'spring_force'` under the interface
+      norm, and with the follower sub-cycled at a tenth of the spring's
+      timestep under the default interpolation.  The `"mixed"` and `"l2"`
+      norms, and `"constant"` interpolation, stepped the same graphs.
+      Resolved in 0.4.0: `validate()`, and so `compile()`, reports an error
+      for each such edge, naming it, the flux, and the setting that works:
+      `"mixed"` or `"l2"` for the norm, `"constant"` for the interpolation.
+      Only a member that sub-steps interpolates, so a flux read by the
+      slow member of a sub-cycled group is still accepted.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the step raised before returning anything, so no wrong value
+      was reported.  The harm was a configuration the API accepted failing
+      with an error that named a field and no cause.
+    affected_components:
+      - "maddening.core.coupling.acceleration.coupling_residual_interface"
+      - "maddening.core.coupling.group.CouplingGroup.boundary_interpolation"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: couple through a flux edge only under the `"mixed"` or
+      `"l2"` norm, and set `boundary_interpolation="constant"` on a
+      sub-cycled group whose fast member reads a flux from inside it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The configurations are refused, not made to work: the interface norm
+      still has no reading of a flux, and linear interpolation of a flux
+      would need the flux of the incoming iterate, which the pass does not
+      compute.
+    verification:
+      - "tests/core/test_coupling_flux_edge_readers.py::test_the_interface_norm_on_a_flux_edge_is_refused_by_name"
+      - "tests/core/test_coupling_flux_edge_readers.py::test_the_norms_the_refusal_names_step_the_same_group"
+      - "tests/core/test_coupling_flux_edge_readers.py::test_a_sub_cycled_consumer_of_a_flux_edge_needs_constant_interpolation"
+      - "tests/core/test_coupling_flux_edge_readers.py::test_constant_interpolation_steps_the_sub_cycled_flux_consumer"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-061"
+    title: "run_adaptive advanced its clock by dt_min when it accepted an attempt at dt_min, while the state advanced by the attempted step"
+    description: >
+      When an attempt's error is too large and the shrunk step would fall
+      to `dt_min`, `GraphManager.run_adaptive` warns and accepts the
+      attempt it has just made: the state becomes that attempt's two half
+      steps, which cover the attempted step.  The attempted step can be up
+      to `dt_min / min_factor` (5x `dt_min` at the default controller), but
+      the stepper advanced `t`, `dt_history`, `t_history` and the
+      callback's `dt` by `dt_min`.  The state then ran ahead of the time
+      reported for it, and the loop, stopping on its own clock, carried the
+      state past `t_end`.  Measured at v0.3.1 (`git archive`, CPU, jaxlib
+      0.11.0) and on the 0.4.0 development tree: a node integrating its own
+      clock beside a spring pair whose coupling diverges at `dt = 0.01`,
+      `run_adaptive(0.02, dt_initial=0.01, dt_max=0.01, dt_min=0.005)` --
+      the first attempt is rejected and accepted at `dt_min` -- reported
+      `t_history[-1] = 0.02` beside a clock state of 0.025.  The code is the
+      same at v0.1.0.  `run_adaptive_scan` accepts at `dt_min` only an
+      attempt made at `dt_min`, and was not affected.
+      Resolved in 0.4.0: the accepted step advances the clock, the
+      histories and the callback by the step it covered.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong time accounting, but only on a step the stepper
+      already warns about ("hit dt_min ... Accepting step"), and by at most
+      `dt_min / min_factor - dt_min` per such step.  `context_dependent`
+      because a run that never reaches `dt_min`, or sets `dt_min` far below
+      the steps it takes, is unaffected, while a run whose `dt_min` is
+      reached repeatedly reports a trajectory against the wrong times.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: treat a run that warned "hit dt_min" as having an
+      unreliable `t_history`, or use `run_adaptive_scan`; read the time of
+      the state from a node that integrates its own clock.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  The step accepted at `dt_min` is still the attempt the
+      controller rejected on its error estimate, as the warning says.
+    verification:
+      - "tests/core/test_adaptive_dt_min_accept_keeps_the_clock.py::test_the_clock_advances_by_the_attempt_a_dt_min_accept_keeps"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-062"
     title: "HeatNode accepted a non-positive length or timestep, a negative diffusivity and grid_points out of order, and answered wrongly without a word"
     description: >
       Until 0.4.0 the HeatNode constructor checked none of its physical

@@ -72,25 +72,40 @@ Warm and cold runs
 ``--cache-mode`` says what the run's compilation cache was: ``off`` (none),
 ``cold`` (started empty), ``warm`` (restored from an earlier run), or
 ``mixed`` (a lane whose shards differed, or one where a shard's mode was
-not recorded).  A
-warm run's times are not comparable with a cold run's, so the header says
-which it was, and a warm run does not list allowlist entries as removable
--- a test that is only fast because its compile was cached is still slow.
+not recorded).  For a report named ``test-results-<x>.xml``, a
+``cache-mode-<x>.txt`` beside it (``ci.yml`` writes one per shard) says
+what that shard's workflow did, and takes precedence.
+
+A restored cache is not necessarily a used one.  JAX's own cache key
+includes the host's CPU features, and runners that report the same CPU
+model can differ in them; a shard on such a runner restores a cache and
+then misses on almost every lookup.  So a shard is labelled from the
+persistent-cache hits and misses its report records: ``warm`` only when a
+cache was restored *and* more than ``WARM_HIT_RATE`` of its lookups hit,
+otherwise ``restored but unused (cold)``.  The summary prints every
+shard's label and hit rate.  (A cold run is not a run without hits: a test
+that needs a program an earlier test compiled reads it back from the cache
+the run is writing, 17-25% of lookups on CI.)
+
+A warm run's times are not comparable with a cold run's, so the header says
+which it was, and a run in which any shard restored a cache does not list
+allowlist entries as removable -- a test that is only fast because its
+compile was cached is still slow.  A report claimed ``off`` that records
+persistent-cache lookups is flagged: a test switched a cache on in-process,
+and when the lookups reach more than one file, it left it on for the tests
+after it, so those times are partly warm.
 
 The allowlist
 -------------
 ``tests/duration_allowlist.txt``: one pytest node id per line, then
-`` # `` and the reason it is there.  It holds two kinds of entry:
-
-* ``pending triage`` -- tests that were already over the policy line when
-  this gate arrived.  Each is to be marked slow, made faster, or kept with
-  a reason; the list only shrinks.
-* ``kept: <why>`` -- a deliberate decision that a slow test must run on
-  every push.
+`` # kept: `` and the reason the test must run on every push although it
+is over the policy line.  (The ``pending triage`` entries the gate started
+with have all been marked slow, sped up or kept.)
 
 Listed tests that no longer run in this lane (marked slow, renamed,
-deleted) or now finish under the policy line are reported as removable;
-that is advisory, because one fast run is not proof.  A single shard's
+deleted) or now pass under the policy line are reported as removable;
+that is advisory, because one fast run is not proof.  A listed test that
+was skipped or failed is not: its time says nothing about its cost.  A single shard's
 report is not the lane, so the per-shard gate writes no summary and the
 lane summary passes ``--no-removable`` when a shard's report is missing.
 
@@ -141,6 +156,18 @@ SUBPROCESS_PROPERTY = "subprocesses"
 COLLECTION_FAILURE = "collection failure"
 
 CACHE_MODES = ("off", "cold", "warm", "mixed")
+
+#: A restored cache counts as used (``warm``) only when more than this share
+#: of a shard's persistent-cache lookups hit.  Measured on CI (2026-09-25):
+#: shards whose restored cache matched hit 88-100% of their lookups; shards
+#: whose restored cache did not (JAX's key includes the host's CPU features)
+#: hit 17-20%, the same as a cold run, which reads back 17-25% of its
+#: lookups from programs it compiled itself earlier in the run.
+WARM_HIT_RATE = 0.5
+
+#: Per-shard labels, beyond ``CACHE_MODES``.
+RESTORED_UNUSED = "restored but unused (cold)"
+UNKNOWN = "unknown"
 
 
 class TestTime(NamedTuple):
@@ -288,6 +315,98 @@ def read_report(path: Path) -> list[TestTime]:
     return out
 
 
+class ShardCache(NamedTuple):
+    """What one report's compilation cache was, and what it did."""
+
+    name: str
+    #: What the workflow did: ``off``, ``cold``, ``warm`` (a cache was
+    #: restored), or ``None`` when that is not known.
+    claimed: str | None
+    hits: int
+    misses: int
+    #: Whether the report records cache lookups at all (JAX timing on).
+    timed: bool
+    #: Tests that recorded persistent-cache lookups: ``[(nodeid, file)]``.
+    looked_up: tuple = ()
+
+    @property
+    def lookups(self) -> int:
+        return self.hits + self.misses
+
+    @property
+    def label(self) -> str:
+        if self.claimed == "warm" and self.timed and self.hits <= WARM_HIT_RATE * self.lookups:
+            return RESTORED_UNUSED
+        return self.claimed or UNKNOWN
+
+    @property
+    def restored(self) -> bool:
+        return self.claimed == "warm"
+
+    def describe(self) -> str:
+        if not self.timed:
+            return f"{self.name} {self.label} (lookups not recorded)"
+        if not self.lookups:
+            return f"{self.name} {self.label} (no cache lookups)"
+        return (f"{self.name} {self.label}, {self.hits} of {self.lookups} lookups hit "
+                f"({100 * self.hits / self.lookups:.0f}%)")
+
+
+def mode_file_for(report: Path) -> Path | None:
+    """``cache-mode-<x>.txt`` beside ``test-results-<x>.xml`` (ci.yml's per-shard record)."""
+    stem = report.name
+    if stem.startswith("test-results-") and stem.endswith(".xml"):
+        return report.with_name("cache-mode-" + stem[len("test-results-"):-len(".xml")] + ".txt")
+    return None
+
+
+def shard_caches(reports, cache_mode: str | None) -> list[ShardCache]:
+    """One ``ShardCache`` per report.
+
+    Each report's mode comes from its ``cache-mode-<x>.txt`` when there is
+    one, else from ``--cache-mode`` when that names one mode for the whole
+    run (``mixed`` does not say which shard was which, so it is unknown).
+    A mode file holding anything else is unknown too, never guessed.
+    """
+    out = []
+    for path, cases in reports:
+        claimed = cache_mode if cache_mode in ("off", "cold", "warm") else None
+        mode_file = mode_file_for(path)
+        if mode_file is not None and mode_file.is_file():
+            recorded = mode_file.read_text(encoding="utf-8").strip()
+            claimed = recorded if recorded in ("off", "cold", "warm") else None
+        timed = [t for t in cases if t.jax]
+        name = path.name
+        if name.startswith("test-results-shard") and name.endswith(".xml"):
+            name = "shard " + name[len("test-results-shard"):-len(".xml")]
+        out.append(ShardCache(
+            name=name, claimed=claimed,
+            hits=int(sum(t.jax["jax_cache_hits"] for t in timed)),
+            misses=int(sum(t.jax["jax_cache_misses"] for t in timed)),
+            timed=bool(timed),
+            looked_up=tuple((t.nodeid, t.file) for t in timed
+                            if t.jax["jax_cache_hits"] + t.jax["jax_cache_misses"])))
+    return out
+
+
+def lane_mode(shards: list[ShardCache], cache_mode: str | None) -> str | None:
+    """The run's label: the shards' common label, else ``mixed``.
+
+    With no shard information at all it is ``--cache-mode`` as given.
+    """
+    labels = {s.label for s in shards}
+    if not shards or labels == {UNKNOWN}:
+        return cache_mode
+    if len(labels) == 1:
+        return labels.pop()
+    return "mixed"
+
+
+def off_but_looked_up(shards: list[ShardCache]) -> list[ShardCache]:
+    """Reports claimed ``off`` whose tests nonetheless recorded cache lookups."""
+    return [s for s in shards if s.claimed == "off" and s.looked_up]
+
+
 def read_allowlist(path: Path | None) -> dict[str, str]:
     """``{nodeid: reason}`` from the allowlist; ``' # '`` separates the reason."""
     if path is None:
@@ -301,8 +420,8 @@ def read_allowlist(path: Path | None) -> dict[str, str]:
         nodeid = nodeid.strip()
         if not reason.strip():
             raise ReportError(
-                f"{path}: {nodeid!r} has no reason; write `<node id> # <why>` "
-                "(`pending triage` or `kept: ...`)"
+                f"{path}: {nodeid!r} has no reason; write "
+                "`<node id> # kept: <why it must run on every push>`"
             )
         entries[nodeid] = reason.strip()
     return entries
@@ -358,11 +477,15 @@ def judge(tests, allow, *, watch_over, slow_over, fail_over):
         "slow_subprocess": [t for t in ranked if t.jax and t.uncacheable > slow_over
                             and t.subprocess_work],
         "allow_absent": sorted(set(allow) - set(by_id)),
-        "allow_fast": [t for t in ranked if t.nodeid in allow and t.seconds <= slow_over],
+        # Only a pass says what a test costs: a skip or an early failure is
+        # fast for reasons of its own.
+        "allow_fast": [t for t in ranked if t.nodeid in allow and t.seconds <= slow_over
+                       and t.outcome == "passed"],
     }
 
 
-def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, cache_mode):
+def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, cache_mode,
+             shards=()):
     ranked = verdict["ranked"]
     total = sum(t.seconds for t in ranked)
     timed = [t for t in ranked if t.jax]
@@ -379,14 +502,22 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
         "",
     ]
     cache_line = {
-        "off": "**Compilation cache: off.** Every compile is paid in full.",
-        "cold": "**Compilation cache: cold** (started empty). Every compile is paid in full.",
-        "warm": ("**Compilation cache: warm** (restored from an earlier run). Compiles of "
-                 "unchanged programs were skipped, so these times are lower than a cold "
-                 "run's; new and changed programs still compiled."),
-        "mixed": ("**Compilation cache: mixed** -- some shards restored a cache and some ran "
-                  "cold (a shard whose runner CPU model had no cache yet), or a shard did not "
-                  "record its mode, so these times may mix warm and cold."),
+        "off": ("**Compilation cache: off.** Nothing is read from or written to a persistent "
+                "cache: each program compiles when the process first needs it."),
+        "cold": ("**Compilation cache: cold** (started empty). Each program compiles in full "
+                 "the first time the run needs it; a later test that needs the same program "
+                 "reads it back from the cache the run is writing, so it can look fast "
+                 "because an earlier test paid for its compile."),
+        "warm": ("**Compilation cache: warm** (restored from an earlier run, and most lookups "
+                 "hit it). Compiles of unchanged programs were skipped, so these times are "
+                 "lower than a cold run's; new and changed programs still compiled."),
+        RESTORED_UNUSED: ("**Compilation cache: restored but unused (cold)** -- a cache was "
+                          "restored, but most lookups missed it (JAX's cache key includes the "
+                          "runner's CPU features, and runners reporting the same CPU model can "
+                          "differ), so these are a cold run's times."),
+        "mixed": ("**Compilation cache: mixed** -- the shards differ (see below): some used a "
+                  "restored cache and some ran cold, or a shard did not record its mode, so "
+                  "these times may mix warm and cold."),
     }.get(cache_mode, "**Compilation cache: not stated.**")
     if timed:
         hits = sum(t.jax["jax_cache_hits"] for t in timed)
@@ -397,8 +528,20 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
                        f"running {_fmt(split[0])}, tracing/lowering {_fmt(split[1])}, "
                        f"XLA compile {_fmt(split[2])} (cache reads excluded), "
                        f"cache reads {_fmt(split[3])}.")
-    lines += [cache_line, "",
-              "| band | tests | time | share |",
+    lines += [cache_line, ""]
+    if any(s.timed for s in shards):
+        lines += ["Per shard: " + "; ".join(s.describe() for s in shards) + ".", ""]
+    for s in off_but_looked_up(shards):
+        files = sorted({f for _, f in s.looked_up})
+        lines += [f"**{s.name}: cache claimed off, but {len(s.looked_up)} tests recorded "
+                  f"persistent-cache lookups** (hits {s.hits}, misses {s.misses}), in "
+                  + ", ".join(f"`{f}`" for f in files[:5])
+                  + (f" and {len(files) - 5} more files" if len(files) > 5 else "") + ". "
+                  + ("A test switched a persistent cache on and left it on, so the times from "
+                     "there on are partly warm." if len(files) > 1 else
+                     "All in one file: what a test that configures a cache of its own records "
+                     "(a cache left on would reach the files after it)."), ""]
+    lines += ["| band | tests | time | share |",
               "|---|---:|---:|---:|",
               f"| up to {watch_over:g} s: fine | {band(fine)} |",
               f"| {watch_over:g}-{slow_over:g} s: watch, optimise | {band(verdict['watch'])} |",
@@ -456,10 +599,10 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
     for f, (s, n) in sorted(files.items(), key=lambda kv: -kv[1][0])[:15]:
         lines.append(f"| {_fmt(s)} | {n} | {s / n:.2f} s | `{f}` |")
     removable = verdict["allow_absent"] + [t.nodeid for t in verdict["allow_fast"]]
-    if removable and cache_mode in ("warm", "mixed"):
-        lines += ["", "Allowlist entries are not judged removable on a warm run: a test that "
-                  "is only fast because its compile was cached is still slow. See the "
-                  "after-merge (cold) runs."]
+    if removable and (cache_mode in ("warm", "mixed") or any(s.restored for s in shards)):
+        lines += ["", "Allowlist entries are not judged removable on a run that restored a "
+                  "cache: a test that is only fast because its compile was cached is still "
+                  "slow. See the after-merge (cold) runs."]
     elif removable:
         lines += ["", f"### Allowlist entries that may be removable ({len(removable)})", "",
                   "Not run in this lane (marked slow, renamed or deleted), or under "
@@ -535,6 +678,17 @@ def main(argv=None) -> int:
             "no allowlist entry is listed as removable"))
         args.no_removable = True
 
+    shards = shard_caches([(r, cases) for r, cases in reports if r not in broken],
+                          args.cache_mode)
+    cache_mode = lane_mode(shards, args.cache_mode)
+    for s in off_but_looked_up(shards):
+        if len({f for _, f in s.looked_up}) > 1:
+            print("::warning title=Compilation cache::" + _escape(
+                f"{s.name}: the run claims no compilation cache (--cache-mode off), but "
+                f"{len(s.looked_up)} tests recorded persistent-cache lookups (hits {s.hits}, "
+                f"misses {s.misses}), from {s.looked_up[0][0]} on: a test switched a cache "
+                "on and left it on, so these times are partly warm"))
+
     fail_over = args.fail_over or float("inf")
     verdict = judge(tests, allow, watch_over=args.watch_over,
                     slow_over=args.slow_over, fail_over=fail_over)
@@ -544,7 +698,7 @@ def main(argv=None) -> int:
         verdict["allow_absent"], verdict["allow_fast"] = [], []
     md = markdown(verdict, allow, title=args.title, watch_over=args.watch_over,
                   slow_over=args.slow_over, fail_over=fail_over, top=args.top,
-                  cache_mode=args.cache_mode)
+                  cache_mode=cache_mode, shards=shards)
     if args.markdown:
         with open(args.markdown, "a", encoding="utf-8") as fh:
             fh.write(md)
@@ -554,6 +708,8 @@ def main(argv=None) -> int:
         print(a)
 
     ranked = verdict["ranked"]
+    if any(s.timed for s in shards):
+        print("compilation cache: " + "; ".join(s.describe() for s in shards))
     print(f"{len(ranked)} tests; {len(verdict['watch'])} in the "
           f"{args.watch_over:g}-{args.slow_over:g} s watch band; "
           f"{len(verdict['slow'])} over {args.slow_over:g} s "

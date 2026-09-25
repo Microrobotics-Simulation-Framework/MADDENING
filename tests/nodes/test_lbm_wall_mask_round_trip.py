@@ -94,6 +94,9 @@ def test_the_fixture_can_express_a_lost_mask(walled_run):
 def test_the_mask_is_recorded_in_params_as_nested_lists_of_bool():
     node = _node(_walls())
     assert node.params["wall_mask"] == _walls().tolist()
+    # bool, not 0/1 (which would compare equal above): the config says what
+    # the value is, and a float spelling would become a pytree leaf.
+    assert {type(v) for row in node.params["wall_mask"] for v in row} == {bool}
     json.dumps(node.to_dict())          # JSON-faithful, no encoder needed
 
 

@@ -73,3 +73,31 @@ def test_a_warning_from_a_replaced_group_names_the_line_that_replaced_it():
         dataclasses.replace(group, max_iterations=1)
     assert [w.filename for w in record] == [__file__], [
         (w.filename, w.lineno) for w in record]
+
+
+def test_measuring_coupling_overhead_repeats_none_of_the_callers_compile_warnings():
+    """The variant's and the restore's recompiles re-ran ``validate()``.
+
+    Each re-emitted the advisories the caller's own compile had raised --
+    here a disconnected node and a ``waveform_iterations`` a uniform-
+    timestep group ignores -- attributed to ``profiler.py``, twice over.
+    """
+    gm = GraphManager()
+    gm.add_node(_Affine("a", 0.5, 1.0))
+    gm.add_node(_Affine("b", 0.5, 0.0))
+    gm.add_node(_Affine("lonely", 0.0, 0.0))
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_coupling_group(["a", "b"], max_iterations=20, tolerance=1e-6,
+                          subcycling=True, waveform_iterations=2)
+    with warnings.catch_warnings(record=True) as own:
+        warnings.simplefilter("always")
+        gm.compile()
+    # The precondition: the caller's compile does warn, twice.
+    assert len(own) == 2, [str(w.message) for w in own]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = profile_graph(gm, n_steps=2, n_warmup=1, counts=False,
+                               measure_coupling=True)
+    assert report.one_iteration_step_ms > 0.0
+    assert not caught, [(w.filename, w.lineno, str(w.message)) for w in caught]

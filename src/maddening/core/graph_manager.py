@@ -3755,6 +3755,63 @@ def _node_with_params(node: Any, params: dict) -> Optional[Any]:
     return copies[id(node)]
 
 
+def _param_probe_pair(node: Any, key: str, value: Any) -> Optional[tuple]:
+    """``(old, new, descended)``: two copies of the node that answers for a
+    write of ``node.params[key] = value`` -- one reading the current params,
+    one reading the new value -- or ``None`` when no faithful copy can be
+    made at any level.
+
+    The node itself is copied when it can be (:func:`_node_with_params`).
+    A wrapper that closes over the node it wraps (the sharded wrappers keep
+    a ``shard_map`` closure over it) cannot be; the node it wraps, which
+    shares its params dict -- so it is where the write lands -- and builds
+    the state and runs the physics the wrapper distributes, is copied
+    instead, and ``descended`` says so.  The walk follows only attributes
+    whose ``params`` *is* the shared dict, breadth first, a few nodes deep.
+    """
+    shared = getattr(node, "params", None)
+    if not isinstance(shared, dict):
+        return None
+    for candidate in _params_holders(node):
+        old = _node_with_params(candidate, dict(shared))
+        new = _node_with_params(candidate, {**shared, key: value})
+        if old is not None and new is not None:
+            return old, new, candidate is not node
+    return None
+
+
+def _params_holders(node: Any) -> list:
+    """``node``, then every node it wraps that shares its params dict
+    (breadth first, a few deep): the objects a ``node.params`` write lands
+    on, outermost first."""
+    shared = getattr(node, "params", None)
+    if not isinstance(shared, dict):
+        return []
+    out: list = []
+    candidates: list = [node]
+    while candidates and len(out) < 8:
+        candidate = candidates.pop(0)
+        if any(candidate is seen for seen in out):
+            continue
+        out.append(candidate)
+        for attr in list(getattr(candidate, "__dict__", {}).values()):
+            if attr is not candidate and not isinstance(attr, type) \
+                    and getattr(attr, "params", None) is shared:
+                candidates.append(attr)
+    return out
+
+
+def _unprobeable_write_reason(node: Any) -> str:
+    """The refusal for a write whose use cannot be established by a copy."""
+    return (
+        f"no copy of {type(node).__name__} that reads the new value can be "
+        "made (it, or a node it wraps that shares its params, holds a "
+        "callable bound to or closing over itself), so whether anything it "
+        "computes while it runs would read the value cannot be told, and a "
+        "write that cannot be shown to be used is not accepted"
+    )
+
+
 def _static_deps_reason(node: Any, key: str) -> Optional[str]:
     """Why ``node`` cannot read a new value of ``key`` from its params, by
     its own :meth:`~maddening.core.node.SimulationNode.static_data_deps`
@@ -4308,13 +4365,20 @@ class GraphManager:
            without constructing the node again).
 
         Steps 3 and 4 run the node's code on a shallow copy that reads the
-        new value (:func:`_node_with_params`), never on the node itself;
-        when no faithful copy can be made, or the code raises, nothing is
-        refused.  A value the node consumed at construction *and* reads
-        again later (a geometry parameter that also shapes the initial
-        fill) passes: like the graph-level walk, this detects "no path at
-        all".  A node that bakes a parameter should declare it in
-        ``static_data_deps``, which refuses it on both surfaces.
+        new value (:func:`_param_probe_pair`: the node, or the node a
+        wrapper that cannot be copied wraps), never on the node itself.
+        When no faithful copy can be made at all, the write is refused.
+        An earlier revision accepted it, on the grounds that nothing could
+        be told, so a node holding a method bound to itself -- and every
+        sharded wrapper, which closes over the node it wraps -- had its
+        structural writes answered 200 whether or not they were used.
+        When the copied code raises, nothing is refused.  A value the node
+        consumed at construction *and* reads again later (a geometry
+        parameter that also shapes the initial fill) passes step 4: like
+        the graph-level walk, this detects "no path at all", so a node
+        that bakes a parameter must declare it in ``static_data_deps``,
+        which refuses it on both surfaces (``LBMPipeNode`` declares its
+        geometry since 0.4.0 for exactly that reason).
         """
         spec = self._nodes.get(owner)
         if spec is None:
@@ -4339,6 +4403,8 @@ class GraphManager:
                 "not read it with every boundary input they declare supplied"
             )
         else:
+            if _param_probe_pair(node, key, value) is None:
+                return _unprobeable_write_reason(node)
             if self._hooks_trace_depends(owner, key, value) is not False:
                 return None
             where = (
@@ -4346,8 +4412,11 @@ class GraphManager:
                 "identically with the new value in node.params, so the "
                 "recompile the write asks for would not use it"
             )
-        if key in node.params and self._initial_state_depends(owner, key, value) is not False:
-            return None
+        if key in node.params:
+            if _param_probe_pair(node, key, value) is None:
+                return _unprobeable_write_reason(node)
+            if self._initial_state_depends(owner, key, value) is not False:
+                return None
         return (
             f"{where}, and initial_state() returns the same state with it: "
             f"nothing {cls} computes while it runs reads the new value (it "
@@ -4358,9 +4427,17 @@ class GraphManager:
         """Do the node's hooks trace differently with ``node.params[key] =
         value``?  ``None`` when that cannot be told (no faithful copy, a
         trace that raises).  Compared on shallow copies holding the current
-        and the new value, as jaxpr text plus constant values."""
+        and the new value, as jaxpr text plus constant values.
+
+        A wrapper that cannot be copied is answered for by the node it
+        wraps (:func:`_param_probe_pair`): that node's own hooks, traced on
+        the state it builds, which is the physics the wrapper distributes.
+        """
         spec = self._nodes[owner]
         node = spec.node
+        pair = _param_probe_pair(node, key, value)
+        if pair is None:
+            return None
         traces = []
         try:
             bi = _declared_boundary_zeros(node)
@@ -4369,15 +4446,18 @@ class GraphManager:
                 leaves = self.params.get("nodes", {}).get(owner)
                 if leaves is None:
                     leaves = node.params_pytree()
-            state = self._state[owner]
-            for params in (dict(node.params), {**node.params, key: value}):
-                probe = _node_with_params(node, params)
-                if probe is None:
-                    return None
+            descended = pair[2]
+            state = pair[0].initial_state() if descended else self._state[owner]
+            for probe in pair[:2]:
                 probe_spec = _NodeSpec(
                     node=probe, update_fn=probe.update, timestep=spec.timestep,
-                    accepts_params=spec.accepts_params,
-                    flux_accepts_params=spec.flux_accepts_params,
+                    accepts_params=(
+                        _method_accepts_params(probe, "update") and leaves is not None
+                        if descended else spec.accepts_params),
+                    flux_accepts_params=(
+                        _method_accepts_params(probe, "compute_boundary_fluxes")
+                        and leaves is not None
+                        if descended else spec.flux_accepts_params),
                 )
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
@@ -4392,16 +4472,123 @@ class GraphManager:
             return True
         return not all(_leaf_values_equal(a, b) for a, b in zip(consts_a, consts_b))
 
+    def _constructor_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
+        """Why the node's own constructor refuses its params with
+        ``params[key] = value``, or ``None`` when it takes them or that
+        cannot be told.
+
+        A graph is saved (:meth:`to_dict`) as each node's class and params,
+        and loaded by calling the class with them (:meth:`from_dict`), so a
+        value the constructor refuses is one a saved graph cannot load.
+        Written straight into ``node.params`` it bypassed that validation:
+        ``PUT /graph/params`` took ``HeatNode``'s ``stencil_order=3``, the
+        running rod kept its 2nd-order stencil (there is no 3rd), and the
+        saved graph raised ``stencil_order must be 2 or 4`` on load.
+
+        Asked of the node, or of the node a wrapper wraps (it shares the
+        params dict, and is the one built from them), whichever is rebuilt
+        from its current params as :meth:`from_dict` would rebuild it; a
+        node that is not rebuilt that way is not asked.
+        """
+        node = self._nodes[owner].node
+        shared = getattr(node, "params", None)
+        for candidate in _params_holders(node):
+            cls = type(candidate)
+
+            def build(params, cls=cls, candidate=candidate):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    return cls(name=candidate.name, timestep=candidate.delta_t, **params)
+
+            try:
+                build(dict(shared or {}))
+            except Exception:  # noqa: BLE001 - not rebuilt from its params
+                continue
+            try:
+                build({**(shared or {}), key: value})
+            except Exception as exc:  # noqa: BLE001 - the constructor refuses it
+                return (
+                    f"{cls.__name__}'s constructor refuses it ({type(exc).__name__}: "
+                    f"{exc}), so a graph saved with it would not load"
+                )
+            return None
+        return None
+
+    def _state_shape_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
+        """Why ``node.params[key] = value`` cannot be taken by the running
+        node because it changes the layout of the state the node builds --
+        the fields of ``initial_state()``, their shapes or dtypes (a cell
+        count, a grid shape) -- or makes ``initial_state()`` raise; ``None``
+        when the layout is unchanged or that cannot be told.
+
+        Such a value is not an initial condition that "takes effect at the
+        next reset": the running state keeps its old shape until then, and
+        the step recompiled for the new value is traced against it.
+        Unsharded, a ``HeatNode`` given a new ``n_cells`` failed its next
+        step (a 500 through ``PUT /graph/params``, after a 200); sharded,
+        it stepped the old 16 cells with ``dx = L/17`` and never closed the
+        right rod end.  Refused on both, before anything is written.
+
+        Evaluated on shallow copies holding the current and the new value
+        (:func:`_param_probe_pair`), never on the node itself; a wrapper
+        that cannot be copied is answered for by the node it wraps, which
+        builds the state the wrapper places.  When no copy can be made this
+        says nothing: :meth:`_unused_node_write_reason`, asked next, refuses
+        such a write.
+        """
+        node = self._nodes[owner].node
+        probes = _param_probe_pair(node, key, value)
+        if probes is None:
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                before = probes[0].initial_state()
+            except Exception:  # noqa: BLE001 - cannot tell: refuse nothing
+                return None
+            try:
+                after = probes[1].initial_state()
+            except Exception as exc:  # noqa: BLE001 - the new value breaks it
+                return (
+                    f"{type(node).__name__}.initial_state() raises with it "
+                    f"({type(exc).__name__}: {exc})"
+                )
+
+        def layout(state) -> dict:
+            flat = jax.tree_util.tree_flatten_with_path(state)[0]
+            return {
+                jax.tree_util.keystr(path): (tuple(np.shape(leaf)),
+                                             str(np.asarray(leaf).dtype))
+                for path, leaf in flat
+            }
+
+        was, now = layout(before), layout(after)
+        if was == now:
+            return None
+        changed = [
+            f"{field} {was.get(field, 'absent')} -> {now.get(field, 'absent')}"
+            for field in sorted(set(was) | set(now))
+            if was.get(field) != now.get(field)
+        ]
+        return (
+            "it changes the layout of the state the node builds ((shape, "
+            f"dtype) of {'; '.join(changed)}), and the running state keeps "
+            "its layout until it is reset: the step recompiled for the new "
+            "value would be traced against a state it was not written for"
+        )
+
     def _initial_state_depends(self, owner: str, key: str, value: Any) -> Optional[bool]:
         """Does ``initial_state()`` return something else with
         ``node.params[key] = value``?  ``None`` when that cannot be told.
         Evaluated on shallow copies holding the current and the new
-        value, never on the node itself."""
+        value, never on the node itself -- of the node a wrapper that
+        cannot be copied wraps, when it is that one
+        (:func:`_param_probe_pair`)."""
         node = self._nodes[owner].node
-        probes = [_node_with_params(node, dict(node.params)),
-                  _node_with_params(node, {**node.params, key: value})]
-        if probes[0] is None or probes[1] is None:
+        pair = _param_probe_pair(node, key, value)
+        if pair is None:
             return None
+        probes = pair[:2]
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")

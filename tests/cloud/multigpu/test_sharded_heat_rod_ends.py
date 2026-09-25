@@ -157,3 +157,25 @@ def test_the_default_fill_is_the_declared_one():
     assert node.halo_boundary() == "edge"
     wrapped = ShardedStencilNode(node, create_device_mesh(shape=(1,)), axis_map={"devices": 0})
     assert wrapped.to_dict()["boundary"] == "edge"
+
+
+@pytest.mark.parametrize("order", (2, 4))
+def test_update_padded_refuses_a_cell_count_its_block_contradicts(order):
+    """``update_padded`` takes ``n_cells`` from ``self.params`` -- it sets
+    ``dx`` and where the right rod end is closed.  A write can move it
+    ahead of the state.  Where the block pins the rod, it must agree: the
+    whole rod (no ``shard_info``) has exactly ``n_cells`` cells, and a
+    sharded rod is a whole number of its blocks.  Before, a 64-cell block
+    with ``n_cells=65`` stepped with ``dx = L/65`` and no right end."""
+    node = _heat(order)
+    h = node.halo_width()[0]
+    padded = {"temperature": jnp.pad(jnp.asarray(_T0), h, mode="edge")}
+    node.params["n_cells"] = _N_CELLS + 1
+    with pytest.raises(ValueError, match=r"has 64 cells and is the whole rod.*is 65"):
+        node.update_padded(padded, {}, _DT)
+    block = {"temperature": padded["temperature"][: 16 + 2 * h]}
+    with pytest.raises(ValueError, match=r"65, which is not a whole number of the 16-cell blocks"):
+        node.update_padded(block, {}, _DT, shard_info={0: (jnp.int32(0), 16)})
+    node.params["n_cells"] = _N_CELLS           # the agreeing count still steps
+    node.update_padded(padded, {}, _DT)
+    node.update_padded(block, {}, _DT, shard_info={0: (jnp.int32(0), 16)})

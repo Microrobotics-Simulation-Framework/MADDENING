@@ -1,18 +1,25 @@
 name: Slow tests (scheduled)
 
-# Runs the @slow-marked tests three times a week.  The default CI lane
-# excludes them (per pyproject.toml's ``addopts = "-m 'not slow'"``);
-# this workflow opts in with ``-m 'slow or not slow'``.
+# Runs the @slow-marked tests.  The default CI lane excludes them (per
+# pyproject.toml's ``addopts = "-m 'not slow'"``); this workflow opts in
+# with ``-m 'slow or not slow'``.
+#
+# What it covers: the schedule below runs it three times a week on `main`
+# only, because GitHub runs a scheduled workflow on the default branch and
+# nowhere else.  A release branch (release/**) gets a slow-lane run only
+# when someone dispatches this workflow on it by hand (Actions tab ->
+# "Run workflow", or `gh workflow run slow-tests.yml --ref <branch>`).
 #
 # Notification model:
 #   * GitHub emails the workflow author on any scheduled-run failure
 #     -- including timeouts (a timed-out job is a failed job).  Silent
 #     on success.
-#   * On a *timeout* or an *out-of-memory* kill specifically, we ALSO
-#     open a tracking issue via the built-in GITHUB_TOKEN.  GitHub then
-#     emails repo watchers with a body that names the failure mode and
-#     suggests the right fix (investigate/bump the timeout, or shrink
-#     the offending test's memory footprint).  This is the only way to
+#   * On a *timeout*, an *out-of-memory* kill or an *abort* (SIGABRT)
+#     specifically, we ALSO open a tracking issue via the built-in
+#     GITHUB_TOKEN.  GitHub then emails repo watchers with a body that
+#     names the failure mode and suggests the right fix (investigate/bump
+#     the timeout, shrink the offending test's memory footprint, or look
+#     for a native memory bug).  This is the only way to
 #     get a failure-mode-specific email body (the default failure email
 #     is just "Run failed").  Without it an OOM-killed run comes back as
 #     a bare exit 137 and the notifier stays silent -- which is exactly
@@ -20,7 +27,8 @@ name: Slow tests (scheduled)
 
 on:
   schedule:
-    # Mon / Wed / Fri at 16:00 UTC  (~18:00 CEST / 17:00 CET).
+    # Mon / Wed / Fri at 16:00 UTC  (~18:00 CEST / 17:00 CET), on `main`
+    # only (the default branch; see the header).
     # Cron is UTC only, no DST adjustment.
     - cron: '0 16 * * 1,3,5'
   workflow_dispatch:       # also runnable on demand from the Actions tab
@@ -80,11 +88,12 @@ jobs:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: "--xla_gpu_autotune_level=0"
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
-          # No compilation cache here, on purpose: this run is the
-          # authoritative cold timing of the whole suite (one process per
-          # shard, so uncontended), which triage and allowlist edits are
-          # based on.  Per-test JAX trace / lower / compile times go into
-          # the JUnit XML.
+          # No compilation cache here, on purpose: this run is a cold,
+          # uncontended timing of the whole suite (one process per shard)
+          # for the commit it ran on -- `main` when scheduled, a release
+          # branch only when dispatched there -- which triage and
+          # allowlist edits are based on.  Per-test JAX trace / lower /
+          # compile times go into the JUnit XML.
           MADDENING_TEST_JAX_TIMING: "1"
           # This job's share of the suite (tests/_sharding.py).
           MADDENING_TEST_SHARD: "${{ matrix.shard }}/4"
@@ -154,18 +163,25 @@ jobs:
             //                    a SIGTERM-ignoring hang.  Split by elapsed
             //                    wall-time: a kill at/after the 175m mark is
             //                    a timeout; an earlier kill is OOM.
-            //   134 (SIGABRT) -> typically C++ std::bad_alloc, i.e. OOM.
+            //   134 (SIGABRT) -> ambiguous too: C++ std::bad_alloc (memory),
+            //                    OR a native assertion or glibc's abort on
+            //                    heap corruption -- this lane loads native
+            //                    code in-process (the FMU C wrapper through
+            //                    ctypes and fmpy), the class of bug its
+            //                    valgrind and libFuzzer tests hunt.  Filed
+            //                    as an abort, naming both.
             // Anything else is an ordinary pytest failure -> no issue, just
             // the default "Run failed" email + the re-raise step below.
             const TIMEOUT_SEC = 175 * 60;
             const isTimeout = code === '124' || (code === '137' && elapsed >= TIMEOUT_SEC);
-            const isOom = code === '134' || (code === '137' && elapsed < TIMEOUT_SEC);
+            const isOom = code === '137' && elapsed < TIMEOUT_SEC;
+            const isAbort = code === '134';
 
             let title, body;
             if (isTimeout) {
               title = `slow-tests: timeout on Python ${py} / JAX ${jaxv} / shard ${shard}/4 @ ${sha}`;
               body = [
-                `The scheduled slow-tests workflow hit the 175-minute wrapper timeout`,
+                `The slow-tests workflow hit the 175-minute wrapper timeout`,
                 `(the job-level \`timeout-minutes\` is 180; the inner \`timeout 175m\`,`,
                 `wrapping pytest, fires first so we can distinguish timeout from other`,
                 `failures).`,
@@ -181,10 +197,10 @@ jobs:
             } else if (isOom) {
               title = `slow-tests: out-of-memory on Python ${py} / JAX ${jaxv} / shard ${shard}/4 @ ${sha}`;
               body = [
-                `The scheduled slow-tests workflow was killed by the OS while running`,
-                `pytest (exit ${code}${code === '137' ? ', SIGKILL — the Linux OOM-killer signature' : ', SIGABRT — typically C++ std::bad_alloc'}; killed after ${Math.round(elapsed / 60)} min,`,
+                `The slow-tests workflow was killed by the OS while running pytest`,
+                `(exit ${code}, SIGKILL — the Linux OOM-killer signature; killed after ${Math.round(elapsed / 60)} min,`,
                 `well under the 175-minute timeout, so this is a *memory* failure, not a`,
-                `slow test).  A test's working set exceeded the ~7 GB \`ubuntu-latest\``,
+                `slow test).  A test's working set exceeded the 16 GB of the \`ubuntu-latest\``,
                 `runner — most likely an XLA backward-compile graph.`,
                 ``,
                 `Action — either:`,
@@ -193,6 +209,27 @@ jobs:
                 `   test pytest reported before the kill; reduce its problem size (e.g.`,
                 `   the chain length \`N\`) until peak RSS fits the runner.`,
                 `2. **Move it to a larger runner** if the scale is essential.`,
+              ];
+            } else if (isAbort) {
+              title = `slow-tests: abort (SIGABRT) on Python ${py} / JAX ${jaxv} / shard ${shard}/4 @ ${sha}`;
+              body = [
+                `The slow-tests workflow's pytest process aborted (exit ${code}, SIGABRT)`,
+                `after ${Math.round(elapsed / 60)} min.  An abort is out-of-memory, or a native`,
+                `assertion or heap-corruption abort: C++ \`std::bad_alloc\` raises it when`,
+                `memory runs out, and glibc raises it when it finds a corrupted heap.  This`,
+                `lane loads native code into the pytest process (the FMU C wrapper, through`,
+                `ctypes and fmpy), so both are possible.`,
+                ``,
+                `Action — find the last test pytest reported in the run log, then:`,
+                ``,
+                `1. **If the log shows \`std::bad_alloc\` or memory near the runner's 16 GB**,`,
+                `   treat it as out-of-memory: shrink that test's problem size until peak`,
+                `   RSS fits, or move it to a larger runner if the scale is essential.`,
+                `2. **If it shows a glibc message such as \`free(): invalid pointer\`,`,
+                `   \`double free or corruption\` or \`malloc(): corrupted top size\`, or an`,
+                `   assertion message**, it is a native memory bug: run that test under`,
+                `   valgrind or AddressSanitizer (see \`tests/fmi/test_c_unit.py\`) to find`,
+                `   the bad access.`,
               ];
             } else {
               core.info(`pytest exit ${code} is an ordinary failure; no tracking issue opened.`);

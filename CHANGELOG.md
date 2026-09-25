@@ -16,7 +16,7 @@ guidance; the itemized changes follow.
 ### Added
 - Multi-GPU session runner covers the sharding checklist: `run_pod.py --goal checklist` (`indivisible`, `halo`, `coupled`,
   `stencil`, `hybrid`), each against its unsharded, NumPy or float64 reference; every goal records pass/fail `checks`
-  (schema 3), stops the session on a failure, and `--summarise` says which items a real-GPU run closed
+  (schema 4), stops the session on a failure; `--summarise` re-derives every verdict and closes an item only on >= 4 real GPUs
 - **`coupling_diagnostics()` gains `gradient_relative_error_bound`** (and `gradient_bound_usable`): the
   IFT gradient's relative error at an early exit, under `solver="ift"`, `diagnostics=True`.  About the
   gradient, not the solve -- it reads 0.0 on an affine group whose state is far off; read `spectral_error_bound` for that
@@ -61,8 +61,8 @@ guidance; the itemized changes follow.
   `static_data` array was derived from; `compile()` now refuses a graph whose
   static derives from a *trainable* parameter — freeze it or stop deriving it
 - **`maddening.sysid` contract properties** (`tests/property/test_sysid_contract.py`)
-  over generated graphs; `windowed_loss` now rejects `sample_every <= 0` and a
-  window wider than the data instead of returning a meaningless loss
+  over generated graphs; `windowed_loss` now rejects `sample_every <= 0`, a window
+  wider than the data and observation leaves of unequal length instead of returning a meaningless loss
 - **Property tests for the sharded surface** (`tests/cloud/multigpu/`):
   wrapper-contract, sharded-equals-unsharded, halo-exchange and round-trip
   invariants over generated meshes; two audit findings pinned as strict xfails
@@ -101,13 +101,14 @@ guidance; the itemized changes follow.
 - Params survive persistence and reach FMI: `to_dict`/`from_dict`, USD and
   checkpoints store effective params and `ParamSpec` overrides;
   `build_model_description` exposes each leaf as an FMI `parameter`/`tunable`;
-  `SidecarConfig(params=, param_specs=)` serves `get_params` / `set_params`
+  `SidecarConfig(params=, param_specs=)` serves `get_params` / `set_params`; it and `set_fmu_state`
+  refuse a non-finite value, one the leaf's dtype cannot hold or one out of bounds, as the bridge does
 - REST `PUT /graph/params/{node}` addresses any leaf of the live pytree,
   updates in place without a recompile, and validates dtype, shape, finiteness
   and `ParamSpec` bounds before writing
 - **FMU C wrapper, TCP bridge and packaging**: a graph now builds a real FMI
   3.0 co-simulation `.fmu` (`build_fmu_binary`, `write_fmu`), driven end to
-  end by FMPy
+  end by FMPy.  A bridge starts once: `start()` again, or after `stop()`, raises `RuntimeError`
 - **FMU sidecar protocol 2 — binary frames** for bulk
   `get`/`set`/`get_state`/`set_state`, negotiated at `hello`; JSON-only
   clients are unaffected.  See "Wire protocol" in
@@ -163,6 +164,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **New refusals where a sharded wrapper or `PUT /graph/params` accepted silently-wrong input**: the route refuses a value that changes a node's state shape (`n_cells`), a structural value the node's constructor refuses, `LBMPipeNode`'s geometry and a write no probe copy can decide; `ShardedUnstructuredNode` refuses a per-cell input on a full partition not in global order, and a state not in partition layout;
+  `ShardedStencilNode` refuses an outer `boundary` other than a wrapped `ShardedStencilNode`'s, and a state its node no longer builds; `ShardedPointwiseNode` refuses a node with no state field on the shard axis.
+  Action: rebuild a node to change such a value; renumber cells with `np.argsort(partition_assignment, kind="stable")`; pass the inner wrapper's `boundary`; shard an axis the state has, or leave the node unwrapped.
 - **`ShardedStencilNode` refuses `boundary="zero"` and `"periodic"` for a `HeatNode`**: the rod now builds its own end ghosts, so the fill would be ignored.
   Action: drop the argument and hold an end at 0 with `left_temperature=0.0` / `right_temperature=0.0` (in a graph, `gm.add_external_input(...)`), exactly as unsharded.
 - **`ShardedStencilNode` refuses a per-axis `boundary` dict**: it was accepted but never worked in the wrapper (it zero-filled the halos of axes
@@ -285,6 +289,12 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Sharded wrappers, audit of the frozen tree**: a params write followed by `compile()` reaches the sharded step, for a legacy-contract node's constant and for a halo width that follows a parameter (`HeatNode.stencil_order`) (MADD-ANO-032, since 0.2.0); `ShardedStencilNode` keeps `dt` at the graph's precision under x64 (MADD-ANO-033, since 0.2.0); `HybridNode` and `ShardedUnstructuredNode` forward `update_evaluations()`;
+  `ShardedUnstructuredNode` validates `domain_integral_axes` names.  The routes MADD-ANO-024's first fix left open (a part-full pipe's `pipe_radius`, `n_cells`, `stencil_order=3`, wrapped and unprobeable nodes) are closed.
+  Action: re-run sharded results whose structural parameters were written after the wrapper was built, and sharded float64 stencil runs under x64.
+- **CI test-time report** (`scripts/report_test_durations.py`): a cache read is no longer subtracted twice and is shown apart from compile; a share is capped at 100%; a test that started a process is listed as "work in a subprocess
+  (not measured here)", not "slow even with a warm cache"; a report holding only collection errors exits 2 instead of passing.
+  Action: none; a slow test's split in the lane summary now adds up, and a subprocess test is no longer sent for a code change a warm cache would make unneeded.
 - **Compliance gates catch the defects a mutation audit slipped past them**: `check_doctests` pins every file's example count (`EXAMPLES_PER_FILE`) and it and `check_impl_mapping` sit at the counts; `check_anomalies` refuses a `pytest.skip()`/`xfail()` in a cited test, an aliased mark, `skipif(True)`,
   a broken first-party import and evidence under `tests/viz`, and counts imperative conditional skips; `check_citations` reads digit-led, line-wrapped and `@comment`-hidden keys; `check_heat_stability` judges `grid_points=None`;
   `generate_soup_tables --check` refuses a duplicated block. Action: a new docstring example goes into `EXAMPLES_PER_FILE` in `scripts/check_doctests.py`.
@@ -595,6 +605,8 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-032, 033 (new, resolved in this release)**: the sharded wrappers kept a compiled step across `compile()`, so a legacy node's params write after a step never reached the sharded physics; `ShardedStencilNode` stepped with a float32 `dt` under x64 (both since 0.2.0; see `### Fixed`).
+  **MADD-ANO-024** now records the routes its first fix left open, all closed, and **MADD-ANO-004**'s workaround says it held only before the first step
 - **MADD-ANO-028, 029, 030 (new, resolved in this release)**: periodic global halos on a size-1 mesh axis; a wide `"edge"` fill that copied the shard's first cells;
   a sharded `HeatNode` that ignored its end temperatures (all since 0.2.0; see `### Fixed`).  **MADD-ANO-031 (new, open)**: at `stencil_order=4` an end with no
   boundary input is not insulated (order 2 is); give it a temperature or use `stencil_order=2`

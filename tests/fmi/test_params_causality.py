@@ -300,6 +300,83 @@ _SNAPSHOT_CASES = [
 ]
 
 
+def _snapshot_edited(sc, kind, edit):
+    """``sc``'s current state and params as an ``FMUState``, with one key
+    dropped or added (``edit = ("drop", path)`` / ``("add", path, value)``),
+    or with no parameter tree at all (``kind == "no_params"``)."""
+    state = {n: {f: np.asarray(v) for f, v in fs.items()} for n, fs in sc.state.items()}
+    params = {section: {o: {k: np.asarray(v) for k, v in leaves.items()}
+                        for o, leaves in owners.items()}
+              for section, owners in sc.params.items()}
+    if kind == "no_params":
+        return serialize_fmu_state(state=state, schema_token=sc._config.schema_token)
+    tree = state if kind == "state" else params["nodes"]
+    op, path, *value = edit
+    if op == "drop" and len(path) == 1:
+        del tree[path[0]]
+    elif op == "drop":
+        del tree[path[0]][path[1]]
+    else:
+        tree.setdefault(path[0], {})[path[1]] = np.asarray(value[0])
+    return serialize_fmu_state(state=state, schema_token=sc._config.schema_token,
+                               params=params)
+
+
+def _archive_edited(bridge, kind, edit):
+    """The bridge's own ``get_state`` archive with the same edit as
+    :func:`_snapshot_edited`, on its member names."""
+    from maddening.fmi.tcp_bridge import state_of
+
+    with np.load(io.BytesIO(state_of(bridge.handle({"op": "get_state"}))),
+                 allow_pickle=False) as data:
+        members = {k: data[k] for k in data.files}
+    if kind == "no_params":
+        members = {k: v for k, v in members.items() if not k.startswith("p/")}
+    else:
+        prefix = "s/" if kind == "state" else "p/nodes/"
+        op, path, *value = edit
+        name = prefix + "/".join(path)
+        if op == "drop":
+            gone = [k for k in members if k == name or k.startswith(name + "/")]
+            assert gone, name
+            for k in gone:
+                del members[k]
+        else:
+            assert name not in members
+            members[name] = np.asarray(value[0])
+    buf = io.BytesIO()
+    np.savez(buf, **members)
+    return buf.getvalue()
+
+
+def _every_param_missing(sc):
+    keys = sorted(f"p/{s}/{o}/{k}" for s, owners in sc.params.items()
+                  for o, leaves in owners.items() for k in leaves)
+    return f"FMU state parameters differ from the model: missing {keys}, extra []"
+
+
+#: ``(kind, edit, refusal)``: a snapshot whose keys are not the live
+#: model's, and what ``set_fmu_state`` and the bridge's ``set_state`` must
+#: both say about it (a callable builds it from the live sidecar).
+_KEY_SET_CASES = [
+    ("state", ("drop", ("ball",)),
+     "FMU state fields differ from the model: missing ['s/ball/position', "
+     "'s/ball/velocity'], extra []"),
+    ("state", ("drop", ("spring", "velocity")),
+     "FMU state fields differ from the model: missing ['s/spring/velocity'], extra []"),
+    ("state", ("add", ("spring", "not_a_field"), np.float32(1.0)),
+     "FMU state fields differ from the model: missing [], extra ['s/spring/not_a_field']"),
+    ("state", ("add", ("ghost", "x"), np.float32(0.0)),
+     "FMU state fields differ from the model: missing [], extra ['s/ghost/x']"),
+    ("param", ("drop", ("spring", "stiffness")),
+     "FMU state parameters differ from the model: missing ['p/nodes/spring/stiffness'], "
+     "extra []"),
+    ("param", ("add", ("spring", "bogus"), np.float32(1.0)),
+     "FMU state parameters differ from the model: missing [], extra ['p/nodes/spring/bogus']"),
+    ("no_params", None, _every_param_missing),
+]
+
+
 class TestSnapshotValues:
     """``FmuSidecar.set_fmu_state`` is a door into the same tree as the
     bridge's ``set_state``.  It had none of that door's value checks: a
@@ -393,6 +470,41 @@ class TestSnapshotValues:
             assert reply["ok"] is False
             assert reply["error"] == f"ValueError: {exc.value}", (reply["error"], str(exc.value))
             assert re.search(refusal, str(exc.value)), str(exc.value)
+        finally:
+            bridge.stop()
+
+    @pytest.mark.parametrize("kind, edit, refusal", _KEY_SET_CASES,
+                             ids=["missing_node", "missing_field", "extra_field",
+                                  "extra_node", "missing_param", "extra_param",
+                                  "no_params_at_all"])
+    def test_set_fmu_state_refuses_a_snapshot_whose_keys_differ_as_the_bridge_does(
+            self, gm, kind, edit, refusal):
+        """A snapshot must carry exactly the live model's nodes, fields and
+        parameters.  ``set_fmu_state`` compared only the leaves a snapshot
+        happened to carry: one missing a node restored, and the next step
+        raised ``KeyError`` and kept raising it; one with an extra field
+        restored it; one missing a parameter restored and failed the next
+        step's completeness check.  The bridge's ``set_state`` refused all
+        three.  Both refuse now, with the same words, and write nothing."""
+        from maddening.fmi.tcp_bridge import FmuTcpBridge
+
+        md, sc = _sidecar(gm)
+        _, bridge_sc = _sidecar(gm)
+        bridge = FmuTcpBridge(bridge_sc, md, master_dt=1e-2)
+        try:
+            if callable(refusal):
+                refusal = refusal(sc)
+            sc.step(gm._default_external_inputs())       # so a restore would show
+            before = _frozen(sc)
+            with pytest.raises(ValueError) as exc:
+                sc.set_fmu_state(_snapshot_edited(sc, kind, edit))
+            assert str(exc.value) == refusal
+            _assert_unchanged(sc, before)
+            assert set(sc.state) == {"table", "ball", "spring"}
+            sc.step(gm._default_external_inputs())       # and it still steps
+            reply = bridge.handle({"op": "set_state",
+                                   "state": _archive_edited(bridge, kind, edit)})
+            assert reply == {"ok": False, "error": f"ValueError: {refusal}"}, reply
         finally:
             bridge.stop()
 

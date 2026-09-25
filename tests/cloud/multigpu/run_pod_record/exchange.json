@@ -1,0 +1,203 @@
+{
+ "schema_version": 4,
+ "goal": "exchange",
+ "dry_run": true,
+ "allow_fewer_devices": false,
+ "n_devices": 4,
+ "environment": {
+  "hostname": "dry-run-host",
+  "timestamp_utc": "2026-09-25T04:49:41Z",
+  "python": "3.12.3",
+  "jax": "0.11.0",
+  "jaxlib": "0.11.0",
+  "platform": "cpu",
+  "devices": [
+   "cpu:0",
+   "cpu:1",
+   "cpu:2",
+   "cpu:3"
+  ],
+  "device_kinds": [
+   "cpu"
+  ],
+  "n_devices_visible": 4,
+  "nvidia_smi": "skipped (dry run)",
+  "xla_flags": "--xla_force_host_platform_device_count=4",
+  "jax_platforms": "cpu",
+  "git_commit": "faa76e5b76fb0ffbabfdcfb6d120d4d8cb9bd8b2"
+ },
+ "config": {
+  "goal": "all",
+  "out": "/tmp/mg-dry",
+  "summarise": null,
+  "keep_going": false,
+  "dry_run": true,
+  "cells": [
+   256,
+   1024
+  ],
+  "n_devices": 4,
+  "allow_fewer_devices": false,
+  "warmup": 1,
+  "repeats": 3,
+  "steps": 3,
+  "grad_steps": 5,
+  "cg_max_iters": 300,
+  "fields": 1,
+  "synthetic": "grid",
+  "mesh": null,
+  "partition": "auto"
+ },
+ "results": [
+  {
+   "cells": 256,
+   "mesh": "grid",
+   "partition": "rcm",
+   "n_devices": 4,
+   "fields_per_cell": 1,
+   "n_local_max": 64,
+   "n_ghost_max": 27,
+   "layout_build_s": 0.001845519000198692,
+   "traffic_cells_per_shard": {
+    "all_to_all": 108,
+    "ppermute": 32,
+    "useful": 19,
+    "ppermute_messages": 2
+   },
+   "input_sharding": "NamedSharding(mesh=Mesh('devices': 4, axis_types=(Auto,)), spec=P('devices',), memory_kind=device)",
+   "input_presharded": true,
+   "methods": {
+    "all_to_all": {
+     "warmup": 1,
+     "repeats": 3,
+     "ms": [
+      0.5290650005917996,
+      0.5896070069866255,
+      0.5458039959194139
+     ],
+     "min_ms": 0.5290650005917996,
+     "median_ms": 0.5458039959194139,
+     "mean_ms": 0.5548253344992796,
+     "compile_s": 0.4408229249966098,
+     "bytes_per_shard": 432,
+     "bytes_total": 1728,
+     "messages": 1,
+     "bandwidth_GBps": 0.003266139317601996
+    },
+    "ppermute": {
+     "warmup": 1,
+     "repeats": 3,
+     "ms": [
+      0.8444679988315329,
+      0.47237200487870723,
+      1.2105350033380091
+     ],
+     "min_ms": 0.47237200487870723,
+     "median_ms": 0.8444679988315329,
+     "mean_ms": 0.8424583356827497,
+     "compile_s": 0.2520214800024405,
+     "bytes_per_shard": 128,
+     "bytes_total": 512,
+     "messages": 2,
+     "bandwidth_GBps": 0.0010838914980397032
+    }
+   },
+   "bit_identical": true,
+   "ppermute_speedup_median": 0.646328808995282,
+   "ppermute_speedup_min": 1.1200176876012151
+  },
+  {
+   "cells": 1024,
+   "mesh": "grid",
+   "partition": "rcm",
+   "n_devices": 4,
+   "fields_per_cell": 1,
+   "n_local_max": 256,
+   "n_ghost_max": 55,
+   "layout_build_s": 0.006158386007882655,
+   "traffic_cells_per_shard": {
+    "all_to_all": 220,
+    "ppermute": 64,
+    "useful": 39,
+    "ppermute_messages": 2
+   },
+   "input_sharding": "NamedSharding(mesh=Mesh('devices': 4, axis_types=(Auto,)), spec=P('devices',), memory_kind=device)",
+   "input_presharded": true,
+   "methods": {
+    "all_to_all": {
+     "warmup": 1,
+     "repeats": 3,
+     "ms": [
+      0.5283770005917177,
+      0.574303005123511,
+      0.418550000176765
+     ],
+     "min_ms": 0.418550000176765,
+     "median_ms": 0.5283770005917177,
+     "mean_ms": 0.5070766686306646,
+     "compile_s": 0.4255275019968394,
+     "bytes_per_shard": 880,
+     "bytes_total": 3520,
+     "messages": 1,
+     "bandwidth_GBps": 0.008409986855843767
+    },
+    "ppermute": {
+     "warmup": 1,
+     "repeats": 3,
+     "ms": [
+      0.605936991632916,
+      0.6519620073959231,
+      0.3712390025611967
+     ],
+     "min_ms": 0.3712390025611967,
+     "median_ms": 0.605936991632916,
+     "mean_ms": 0.543046000530012,
+     "compile_s": 0.3107315480010584,
+     "bytes_per_shard": 256,
+     "bytes_total": 1024,
+     "messages": 2,
+     "bandwidth_GBps": 0.002758330867541859
+    }
+   },
+   "bit_identical": true,
+   "ppermute_speedup_median": 0.8719999073960066,
+   "ppermute_speedup_min": 1.1274408057590053
+  }
+ ],
+ "checks": [
+  {
+   "name": "256 cells: all_to_all == ppermute bit for bit",
+   "value": true,
+   "limit": true,
+   "sense": "==",
+   "detail": "",
+   "passed": true
+  },
+  {
+   "name": "256 cells: timed input pre-placed on the mesh",
+   "value": true,
+   "limit": true,
+   "sense": "==",
+   "detail": "",
+   "passed": true
+  },
+  {
+   "name": "1024 cells: all_to_all == ppermute bit for bit",
+   "value": true,
+   "limit": true,
+   "sense": "==",
+   "detail": "",
+   "passed": true
+  },
+  {
+   "name": "1024 cells: timed input pre-placed on the mesh",
+   "value": true,
+   "limit": true,
+   "sense": "==",
+   "detail": "",
+   "passed": true
+  }
+ ],
+ "passed": true,
+ "wall_s": 1.636073536996264
+}

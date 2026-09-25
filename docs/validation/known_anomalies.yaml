@@ -3431,3 +3431,208 @@ anomalies:
       - "tests/nodes/test_heat.py::test_an_unconnected_fourth_order_end_is_insulated"
       - "tests/nodes/test_heat.py::test_an_unconnected_second_order_end_is_insulated"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-034"
+    title: "run_adaptive / run_adaptive_scan advanced a sub-cycled node by its rate divider times dt on every adaptive step"
+    description: >
+      A coupling group with `subcycling=True` over nodes of different
+      timesteps is not multi-rate: `compile()` schedules every member at the
+      group's macro timestep, so `run_adaptive` and `run_adaptive_scan`
+      accept it.  Their step hands the coupled block one `runtime_dt`, and
+      the block gave that `dt` to every node (`_get_dt`), while still
+      sub-stepping the fast node `round(macro_dt / node_dt)` times per
+      coupling pass.  Every sub-step was therefore the whole adaptive
+      step, and the fast node advanced `divider * dt` per step while the
+      rest of the graph advanced `dt`.  Measured with a node that
+      integrates its own clock (`t <- t + dt`) coupled both ways to a slow
+      node at 0.01 s, `run_adaptive(0.05, dt_initial=0.01, dt_max=0.01)`
+      (CPU, jaxlib 0.11.0): the fast clock read 0.500 at timestep 0.001
+      and 0.200 at 0.0025 while the slow clock and the accepted steps
+      summed to 0.050; `run_adaptive_scan` read 0.49999967, and
+      `run_scan` on the same graphs read 0.050.  Reproduced identically at
+      v0.1.0 and v0.3.1 (`git archive` of each tag, same environment).  The
+      multi-rate refusal beside it said "All nodes must share the same
+      timestep", which is not what it enforced.
+      Resolved in 0.4.0: a sub-cycled member's sub-step under a runtime
+      `dt` is `dt * node_dt / macro_dt`, so its sub-steps cover `dt` at an
+      integer ratio, and one adaptive step at `dt == macro_dt` is the
+      compiled step to float32 rounding.  The refusal names the graph's
+      rate dividers and the one way nodes of different timesteps can
+      share an adaptive run.  Nothing else changes: an adaptive run of a
+      group that does not sub-cycle is bit-identical to before (jaxlib
+      0.10.2, 0.11.0 and 0.11.2).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong physics on a documented configuration: the fast node
+      of a sub-cycled group ran `divider` times further in time than the
+      graph it is coupled to, with no error or warning, and the result is
+      a plausible trajectory rather than a blow-up.  Graded `major` for
+      that silence and for the size of the error (a factor of the rate
+      divider in elapsed time).  `context_dependent` because it needs the
+      adaptive steppers and a sub-cycled group of differing timesteps;
+      `step`, `run` and `run_scan` were right, and whether a result built
+      on the adaptive path matters is a property of the program using it.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: do not use the adaptive steppers on a graph with a
+      sub-cycled group whose members have different timesteps; use
+      `step` / `run_scan`, or give the group's members one timestep.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A non-integer ratio of a member's timestep to the macro timestep is
+      rounded to a whole number of sub-steps, so such a member covers
+      `divider * node_dt` per macro step in the compiled step, not
+      `macro_dt`; the adaptive step keeps that same ratio.  That is a
+      separate, pre-existing property of sub-cycling, not addressed here.
+    verification:
+      - "tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_advances_every_member_by_the_step"
+      - "tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_scan_advances_every_member_by_the_step"
+      - "tests/core/test_adaptive_subcycled_group_dt.py::test_the_adaptive_step_at_the_macro_timestep_is_the_compiled_step"
+      - "tests/core/test_adaptive_subcycled_group_dt.py::test_the_multirate_refusal_says_what_it_enforces"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-035"
+    title: "On a multi-rate graph a coupling group's diagnostics, predictor history and IQN-IMVJ warm start came from solves the step discarded"
+    description: >
+      A coupling group with a rate divider above one solved on every base
+      step, and `graph_step_multirate` kept its node states only on the
+      steps it fires on (`step_count % divider == 0`), through `jnp.where`.
+      The group's `_meta` slots were merged from every solve
+      unconditionally, so between firings they held the solves the step
+      had thrown away.  Everything that reads them inherited it:
+      `coupling_diagnostics()` reported the discarded solves, the linear
+      and quadratic predictors extrapolated from their states, and
+      IQN-IMVJ warm-started from their secant columns.  Measured on a pair
+      at 0.01 s fed the phase 0..9 of a clock at 0.001 s, whose applied
+      solve (phase 0) contracts and whose discarded ones at phases 4-9 do
+      not (CPU, jaxlib 0.11.0): the report read `iterations=10`,
+      unconverged, on every base step between firings, beside applied
+      solves that converged in 9 and then 1 passes; with
+      `predictor="linear"` the state at the second firing was 8.7e12 and
+      at the third 2.1e27, against a fixed point of 1.33; and one discarded
+      solve changed the IQN-IMVJ warm start.  Reproduced at v0.1.0 and
+      v0.3.1 (`git archive` of each tag, same environment) with the same
+      predictor numbers.  In the 0.4.0 development tree the profiler's
+      coupling statistics (at-cap fraction 0.9, converged fraction 0.1
+      where every applied solve converged) and
+      `windowed_loss(mask_unconverged=True)` (which zeroed a window whose
+      one applied solve converged) read the same slots, and
+      `strict_convergence=True` raised about a discarded solve on the
+      first base step after a firing.
+      Resolved in 0.4.0: the group's slots follow its node states'
+      `jnp.where` on the firing predicate; `strict_convergence` checks
+      only a step that keeps the solve; the profiler samples a multi-rate
+      group only on the steps it fires on; and the solve itself runs under
+      a `lax.cond`, so a step that would discard it no longer computes
+      it.  The node states are bit-identical to before, on jaxlib 0.10.2,
+      0.11.0 and 0.11.2, wherever neither a predictor nor IQN-IMVJ was
+      learning from a discarded solve, and a group at the base rate
+      compiles to exactly the program it did.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      With `predictor="linear"` / `"quadratic"` or `acceleration="iqn-imvj"`
+      the forward state itself was built on solves that were never
+      applied: a wrong initial guess or warm start, which a solve that
+      still converges corrects and one that stops at its cap does not.
+      The measured case diverged, which is loud; a milder one gives a
+      plausible state that is further from its fixed point than the cap
+      and tolerance promise, with a report that describes a different
+      solve.  Graded `major` for that.  `context_dependent` because it
+      needs a multi-rate graph and a coupling group with a rate divider
+      above one; without a predictor or IMVJ the node states were right
+      and only the reported verdicts were wrong.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+      - "maddening.core.coupling.group.CouplingGroup.predictor"
+      - "maddening.core.coupling.group.CouplingGroup.jacobian_reuse"
+      - "maddening.core.simulation.profiler.profile_graph"
+      - "maddening.sysid.windowed_loss"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: on a multi-rate graph, give a coupling group with a
+      rate divider above one `predictor="none"` and an acceleration other
+      than `iqn-imvj`, and read its diagnostics only on the base steps it
+      fires on.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Between firings the report describes the group's most recent applied
+      solve, not a step of its own.  Under `vmap` over states at different
+      phases a batched `lax.cond` runs both branches; the selects and the
+      gated strict check keep the discarded solve out there too, which a
+      test pins, but the work is not saved in that case.
+    verification:
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_the_report_between_firings_is_the_last_applied_solve"
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_strict_convergence_does_not_raise_about_a_discarded_solve"
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_strict_convergence_still_raises_about_an_applied_solve"
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_the_linear_predictor_learns_only_from_applied_solves"
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_the_imvj_warm_start_is_carried_only_from_applied_solves"
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_the_profiler_counts_each_applied_solve_once"
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_the_sysid_mask_keeps_a_window_whose_applied_solve_converged"
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_a_group_does_not_solve_on_a_step_it_does_not_fire_on"
+      - "tests/core/test_multirate_group_meta_follows_firing.py::test_a_batched_step_keeps_each_elements_firing_rule"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-036"
+    title: "solver=\"fori\" with acceleration=\"iqn-imvj\" carried zero secant columns to the next step, so jacobian_reuse did nothing"
+    description: >
+      IQN-IMVJ carries the first `jacobian_reuse` secant columns of one
+      step into the next.  The legacy `solver="fori"` loop runs
+      `max_iterations` passes whatever happens and freezes the state once
+      its criterion latches; every pass on the frozen state measures the
+      same residual and the same raw output, and the IQN update shifted
+      the resulting zero column into the secant matrices each time.  By the
+      cap the warm-start window was all zeros, so a group that converged
+      before its cap -- the normal case -- reused nothing.  `"fori"` was the
+      only solver at v0.1.0 and the default through v0.3.1.  Measured on
+      a scalar pair driven by a sine (CPU, jaxlib 0.11.0), at v0.1.0 and
+      v0.3.1 (`git archive` of each tag): the stored warm-start window was
+      all zeros after every step at `jacobian_reuse=3`.  In the 0.4.0
+      development tree, where `"ift"` stops on the latching pass and keeps
+      its columns, the two solvers then disagreed: on an affine three-DOF
+      pair `"fori"` took 5 passes on every step with or without
+      `jacobian_reuse=4` while `"ift"` took 2-3 from the second step on,
+      and on a stiff spring pair they reported 3 against 4 iterations and
+      states 2.3e-04 apart, against the documented solver parity.
+      Resolved in 0.4.0: under `"iqn-imvj"` the `"fori"` loop appends a
+      secant column only on a pass before its criterion latches, so it
+      carries the latching pass's columns, as `"ift"` does.  On the affine
+      pair the two solvers now report the same iterations and return the
+      same state to the bit (jaxlib 0.11.0).  Every other acceleration
+      and solver compiles to exactly the program it did.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The returned state still met the group's criterion, so it was within
+      the tolerance the caller asked for; what was lost is the speed-up
+      `jacobian_reuse` exists for, and the documented agreement between
+      the two solvers, which differed within that tolerance.  No solve
+      stopped short because of it.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.jacobian_reuse"
+      - "maddening.core.coupling.group.CouplingGroup.solver"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      From 0.4.0 use `solver="ift"`, the default, which was never
+      affected.  Before 0.4.0 there was none: the warm start was inert on
+      the `"fori"` path, which was the default.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `"fori"` is deprecated and still runs every pass to the cap; only the
+      columns it carries changed.  The two solvers agree to float32
+      round-off, not always to the bit, as documented for every other
+      acceleration.
+    verification:
+      - "tests/core/test_coupling_imvj_solver_agreement.py::test_the_solvers_take_the_same_passes_every_step"
+      - "tests/core/test_coupling_imvj_solver_agreement.py::test_the_solvers_return_the_same_state"
+      - "tests/core/test_coupling_imvj_solver_agreement.py::test_fori_carries_the_latching_passs_columns"
+      - "tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve"
+    github_issue: null

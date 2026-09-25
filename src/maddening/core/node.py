@@ -1044,6 +1044,13 @@ class SimulationNode(ABC):
         return value is expected to have the same padded shape; the
         sharding wrapper strips halos afterwards.
 
+        ``ShardedUnstructuredNode`` calls the same method with a
+        different layout -- each field is ``[the shard's own cells |
+        ghost cells]`` in partition order, not ``[halo | interior |
+        halo]`` -- so a node is written for one wrapper or the other.
+        That wrapper refuses a node that declares a non-empty
+        :meth:`halo_width` (see its docstring).
+
         Default: pointwise nodes (empty ``halo_width()``) fall back to
         :meth:`update`.  Stencil nodes that have not been ported must
         override this; calling the default raises
@@ -1061,11 +1068,15 @@ class SimulationNode(ABC):
             ``{static_data_key: halo_padded_slab}`` for each
             :class:`~maddening.core.static_data.StaticArray` declared with
             ``replication="shard"`` on this node.  The wrapper has
-            materialised the per-device slice and halo-exchanged it
-            (``boundary="edge"`` — statics don't evolve, so periodic
-            wrap would be wrong even when state uses periodic).  ``None``
-            in the unsharded path and when the node carries no sharded
-            statics.
+            materialised the per-device slice and halo-exchanged it.  At
+            the edges of the global grid the static's halo is filled
+            periodically when the wrapper's ``boundary`` is
+            ``"periodic"`` -- the cells beyond a periodic edge are the
+            opposite edge's, for a static as much as for the state -- and
+            by repeating the edge cell under ``"edge"`` and ``"zero"``,
+            where there is no cell beyond the edge.  (Until 0.4.0 it was
+            edge-filled under every mode.)  ``None`` in the unsharded
+            path and when the node carries no sharded statics.
         shard_info : dict[int, tuple[Any, int]], optional
             ``{spatial_axis: (global_offset, local_extent)}`` for every
             spatial axis the wrapping :class:`ShardedStencilNode` shards.
@@ -1073,6 +1084,13 @@ class SimulationNode(ABC):
             (``lax.axis_index * local_extent``) — usable in
             ``jax.lax.dynamic_slice`` but **not** in Python integer
             slicing.  ``None`` in the unsharded path.
+            ``ShardedUnstructuredNode`` passes ``{0: (offset,
+            n_local_max), "n_local": n_owned}``: ``n_local_max`` is the
+            padded length of the owned block, the same on every shard;
+            ``n_owned`` (a traced int32 scalar, added in 0.4.0) is this
+            shard's own cell count, and rows from ``n_owned`` on are
+            padding that a node summing its cells must mask out
+            (``jnp.arange(n_local_max) < shard_info["n_local"]``).
 
         Sharded outputs
         ---------------

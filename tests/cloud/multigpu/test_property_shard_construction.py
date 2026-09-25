@@ -194,8 +194,11 @@ def test_stencil_construction_either_succeeds_or_says_why_it_cannot(
     assert "diff" in message
     assert f"{n_cells} cells" in message
     assert f"{n_devices} devices" in message
-    # The three ways out are named, so the message is actionable.
-    assert "ShardedUnstructuredNode" in message
+    # The ways out are named, so the message is actionable -- and the
+    # unstructured wrapper is named as *not* one for a stencil node: it
+    # used to be recommended here, and stepped a stencil node wrong.
+    assert f"the next one up is {(n_cells // n_devices + 1) * n_devices}" in message
+    assert "ShardedUnstructuredNode is not a way out for a stencil node" in message
 
 
 @pytest.mark.parametrize("n_devices", DEVICE_COUNTS)

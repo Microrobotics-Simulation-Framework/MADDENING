@@ -37,6 +37,7 @@ the path is tested on CPU virtual devices only
 from __future__ import annotations
 
 import functools
+import warnings
 from typing import Any, Optional
 
 import jax
@@ -65,6 +66,24 @@ def _partition_statics(static_data) -> dict[str, StaticArray]:
         k: v for k, v in static_data.items()
         if isinstance(v, StaticArray) and v.replication == "partition"
     }
+
+
+def _reads_partition_layout(node) -> bool:
+    """Does ``node`` say its ``update_padded`` reads the partition layout?
+
+    The private, provisional opt-in for a node that declares a Cartesian
+    ``halo_width()`` (so that :class:`ShardedStencilNode` can wrap it)
+    *and* whose ``update_padded`` also reads ``[owned cells | ghost
+    cells]``: a class attribute or a method ``_reads_partition_layout``
+    that is (or returns) true.  Not part of the node contract: an
+    internal convention, like ``_halo_boundary_hint``, until a release
+    has shown it earns a public name.  A node written only for this
+    wrapper needs none of it -- it declares ``halo_width() == {}``.
+    """
+    hook = getattr(node, "_reads_partition_layout", None)
+    if hook is None:
+        return False
+    return bool(hook() if callable(hook) else hook)
 
 
 def _validate_partition_statics(
@@ -106,9 +125,11 @@ class ShardedUnstructuredNode(SimulationNode):
     """Sharded wrapper for a graph-partitioned :class:`SimulationNode`.
 
     The wrapped ``node`` exposes ``update_padded(state_padded,
-    boundary_inputs, dt, *, static_padded=None, shard_info=None)``
-    just as a stencil-sharded inner node does.  The difference is the
-    layout of the padded arrays:
+    boundary_inputs, dt, *, static_padded=None, shard_info=None)``,
+    the signature a stencil-sharded inner node has -- but not its
+    contract.  The padded arrays are in *partition layout*, not the
+    Cartesian ``[halo | interior | halo]`` one, so a node is written
+    for one wrapper or the other:
 
     * ``state_padded[<field>]`` is a 1-D-or-higher array whose first
       axis has length ``n_local_max + n_ghost_max``.  The first
@@ -118,13 +139,34 @@ class ShardedUnstructuredNode(SimulationNode):
       ``ghost_global_ids[d]``.
     * ``static_padded[<key>]`` follows the same layout when
       ``StaticArray(replication="partition")`` is declared.
-    * ``shard_info`` is ``{0: (offset, n_local_max)}`` where ``offset``
-      is a *traced* ``lax.axis_index(mesh_axis) * n_local_max`` —
-      i.e. a JAX scalar.  Unlike the Cartesian case, the offset isn't
-      a geometric coordinate (cells aren't contiguous in global ID
-      space), but it's exposed for symmetry with
-      :class:`ShardedStencilNode` and for nodes that want a unique
-      per-shard tag.
+    * ``shard_info`` is ``{0: (offset, n_local_max), "n_local":
+      n_owned}``.  ``n_local_max`` is the length of the owned block,
+      the same on every shard so that it can size a slice; on a shard
+      that owns fewer cells than the largest one, rows ``n_owned`` to
+      ``n_local_max - 1`` of that block are padding.  ``n_owned`` is
+      this shard's own cell count (``layout.n_local[d]``), a *traced*
+      int32 scalar: a node that sums over its cells -- a domain
+      integral -- masks the padding with ``jnp.arange(n_local_max) <
+      shard_info["n_local"]``.  (Added in 0.4.0; before it nothing told
+      the node which rows were padding, and a node that summed the
+      block summed them into its integral.)  ``offset`` is a *traced*
+      ``lax.axis_index(mesh_axis) * n_local_max``.  Unlike the
+      Cartesian case, it isn't a geometric coordinate (cells aren't
+      contiguous in global ID space), but it's exposed for symmetry
+      with :class:`ShardedStencilNode` and for nodes that want a
+      unique per-shard tag.
+
+    A node that declares a non-empty ``halo_width()`` is written for
+    the Cartesian layout -- its ``update_padded`` reads each field as
+    ``[halo | interior | halo]`` -- and is refused at construction:
+    handed the partition layout it reads the wrong cells, silently (a
+    ``HeatNode`` rod ran 43 K off on two devices, with no error, before
+    0.4.0).  Shard it with :class:`ShardedStencilNode`.  A node written
+    for this wrapper declares ``halo_width() == {}``: its halo is the
+    layout's ghost cells.  The rare node whose ``update_padded`` reads
+    *both* layouts, and so declares a halo for the stencil wrapper, can
+    say so with a private ``_reads_partition_layout = True``
+    (provisional, and not part of the node contract).
 
     Output classification follows the same rules as
     :class:`ShardedStencilNode`:
@@ -133,16 +175,29 @@ class ShardedUnstructuredNode(SimulationNode):
       first ``n_local_max`` slots are returned).
     * Keys in ``inner.domain_integral_fields()``: ``lax.psum`` across
       the mesh axis (the partial sums from each shard are summed).
+      Such a key is not a per-cell field: when the state carries it (a
+      node that declares its initial value, or a graph feeding a step's
+      output back) it is placed as the step returns it -- replicated
+      once reduced, stacked along the mesh axis when not -- rather than
+      partitioned, and reaches ``update_padded`` unpadded: the reduced
+      value, or this shard's slice of the stacked one (a leading axis of
+      length one).
     * Any other key raises ``ValueError`` — we cannot infer a
       partition spec for unknown outputs.
+
+    Every other state field is per-cell: its leading axis has one row
+    per cell of the layout.  A node whose cell count differs from the
+    layout's is refused at construction, naming both counts; before
+    0.4.0 the cells past the layout's count were silently dropped.
 
     Parameters
     ----------
     node : SimulationNode
         The inner node.  Must implement ``update_padded`` with the
-        signature above.  ``node.halo_width()`` is ignored for
-        unstructured sharding — the halo is determined by the
-        partition layout, not by an axis-aligned halo width.
+        signature above, reading the partition layout, and declare an
+        empty ``halo_width()`` -- the halo is determined by the
+        partition layout, not by an axis-aligned halo width.  A node
+        with a non-empty ``halo_width()`` is refused (see above).
     mesh : Mesh
         1-D JAX device mesh.
     layout : UnstructuredPartitionLayout
@@ -155,6 +210,16 @@ class ShardedUnstructuredNode(SimulationNode):
     mesh_axis : str, optional
         The name of the mesh axis to shard along.  Defaults to
         ``"devices"``.  Must match ``mesh.axis_names``.
+
+    Raises
+    ------
+    ValueError
+        If ``mesh_axis`` is not a mesh axis, if the mesh and the layout
+        disagree on the device count, if ``node`` declares a non-empty
+        ``halo_width()`` (a Cartesian stencil node), if a per-cell state
+        field of ``node`` does not have one row per cell of the layout,
+        if a partitioned ``StaticArray`` disagrees with the layout, or
+        if ``exchange`` is unknown.
 
     Notes
     -----
@@ -183,6 +248,28 @@ class ShardedUnstructuredNode(SimulationNode):
             raise ValueError(
                 f"ShardedUnstructuredNode: mesh axis {mesh_axis!r} has size "
                 f"{mesh_size} but layout.n_devices={layout.n_devices}"
+            )
+
+        # A Cartesian stencil node reads ``[halo | interior | halo]``; this
+        # wrapper hands it ``[owned | ghosts]``.  Until 0.4.0 the halo was
+        # "ignored" and the node stepped the wrong cells without a word
+        # (a HeatNode rod 43 K off on two devices, every cell wrong).
+        halo = dict(node.halo_width())
+        if halo and not _reads_partition_layout(node):
+            raise ValueError(
+                f"ShardedUnstructuredNode cannot wrap {type(node).__name__} "
+                f"{node.name!r}: it declares halo_width() == {halo}, the "
+                "Cartesian stencil contract, under which update_padded reads "
+                "each field as [halo | interior | halo] along those axes.  This "
+                "wrapper hands update_padded the partition layout instead -- "
+                "[the shard's own cells | ghost cells], in the order of "
+                "layout.local_global_ids and layout.ghost_global_ids -- which "
+                "such a node would read as the wrong cells, silently.  Shard a "
+                "Cartesian stencil node with ShardedStencilNode, sizing each "
+                "sharded axis to a multiple of its device count (or running on "
+                "a device count that divides it).  A node written for the "
+                "partition layout declares halo_width() == {}: its halo is the "
+                "layout's ghost cells."
             )
 
         # Verify any StaticArray(replication="partition") on the inner
@@ -215,6 +302,7 @@ class ShardedUnstructuredNode(SimulationNode):
         self._layout = layout
         self._exchange = exchange
         self._sharded_static = sharded_static
+        self._check_inner_cell_count()
         # Cached compiled fns keyed by the input signature.  Dropped by
         # :meth:`invalidate_static_cache` (every ``compile()``): each entry
         # is a trace of the inner node as it read its params then.
@@ -323,8 +411,24 @@ class ShardedUnstructuredNode(SimulationNode):
         global_state = self._inner.initial_state()
         sharded = {}
         sharding = NamedSharding(self._mesh, P(self._mesh_axis))
+        integrals = set(self._inner.domain_integral_fields())
         for k, arr in global_state.items():
             arr = jnp.asarray(arr)
+            if k in integrals:
+                # A domain integral is not a per-cell field: it is placed
+                # as the step returns it, replicated once reduced.
+                # Partitioned, a scalar raised an IndexError here.  A
+                # per-shard (unreduced) integral comes back stacked along
+                # the mesh axis, so its initial value is stacked too, and a
+                # scan carry keeps its shape.
+                if not self._integral_is_reduced(k):
+                    arr = jnp.broadcast_to(
+                        arr, (self._layout.n_devices,) + tuple(arr.shape),
+                    )
+                sharded[k] = jax.device_put(
+                    arr, NamedSharding(self._mesh, self._integral_spec(k)),
+                )
+                continue
             per_shard = partition_value(
                 value=jax.device_get(arr), layout=self._layout,
             )
@@ -497,7 +601,16 @@ class ShardedUnstructuredNode(SimulationNode):
         if cached is not None:
             return cached
 
-        state_specs = {k: P(self._mesh_axis) for k in state}
+        # A domain integral fed back as state (a graph's second step) is
+        # not a per-cell field: it is placed as the step returns it --
+        # replicated once reduced, stacked along the mesh axis when not.
+        # ``P(mesh_axis)`` on a reduced scalar was "too long" for it and
+        # the step failed.
+        integrals = set(self._inner.domain_integral_fields())
+        state_specs = {
+            k: (self._integral_spec(k) if k in integrals else P(self._mesh_axis))
+            for k in state
+        }
         cell_bi = self._cell_boundary_inputs(boundary_inputs)
         bi_specs = {
             k: (P(self._mesh_axis) if k in cell_bi else P())
@@ -505,11 +618,9 @@ class ShardedUnstructuredNode(SimulationNode):
         }
         static_specs = {k: P(self._mesh_axis) for k in self._sharded_static}
         out_specs = {**state_specs}
-        for k in self._inner.domain_integral_fields():
-            if self._integral_is_reduced(k):
-                out_specs[k] = P()  # fully replicated after psum
-            else:
-                out_specs[k] = P(self._mesh_axis)  # per-shard values stacked
+        for k in integrals:
+            # fully replicated after psum, or the per-shard values stacked
+            out_specs[k] = self._integral_spec(k)
 
         local_fn = functools.partial(self._local_update_fn, cell_bi=cell_bi)
 
@@ -523,6 +634,10 @@ class ShardedUnstructuredNode(SimulationNode):
         fn = jax.jit(sm)
         self._sharded_cache[key] = fn
         return fn
+
+    def _integral_spec(self, key: str) -> P:
+        """Where domain integral ``key`` lives, as the step returns it."""
+        return P() if self._integral_is_reduced(key) else P(self._mesh_axis)
 
     def _integral_is_reduced(self, key: str) -> bool:
         """Is domain integral ``key`` summed over the mesh axis?
@@ -545,6 +660,45 @@ class ShardedUnstructuredNode(SimulationNode):
                 f"axes {unknown} not in mesh.axis_names={mesh_axes}"
             )
         return self._mesh_axis in axes
+
+    def _check_inner_cell_count(self) -> None:
+        """Refuse a node whose per-cell fields do not have the layout's cell count.
+
+        ``partition_value`` gathers ``value[ids]`` for the ids the layout
+        owns; before 0.4.0 it never compared ``value.shape[0]`` with the
+        layout, so a 10-cell node on an 8-cell layout lost cells 8 and 9
+        without a word (and its integral with them).  Checked here, on
+        the shapes ``initial_state()`` builds (evaluated abstractly), so
+        the refusal names the node at construction; ``partition_value``
+        refuses the same thing wherever else it is called.  A node whose
+        ``initial_state()`` cannot be evaluated that way (one waiting for
+        a ``static_data_provider``, say) is left to that backstop.
+        """
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                built = dict(jax.eval_shape(self._inner.initial_state))
+        except Exception:  # noqa: BLE001 - cannot tell: the backstop checks
+            return
+        n_global = int(np.asarray(self._layout.partition_assignment).size)
+        integrals = set(self._inner.domain_integral_fields())
+        for k, v in built.items():
+            if k in integrals or not hasattr(v, "shape"):
+                continue
+            shape = tuple(v.shape)
+            if shape and shape[0] == n_global:
+                continue
+            rows = f"{shape[0]} rows" if shape else "no cell axis (0-d)"
+            raise ValueError(
+                f"ShardedUnstructuredNode cannot wrap {type(self._inner).__name__} "
+                f"{self._inner.name!r}: its state field {k!r} has shape {shape}, "
+                f"{rows}, but the layout partitions {n_global} cells.  Every "
+                "state field but a domain integral is per-cell, one row per "
+                "cell of the layout; the rows past the layout's count would be "
+                "silently dropped.  Build the layout from this node's cells, "
+                "or declare a field that is one value for the whole domain in "
+                "domain_integral_fields()."
+            )
 
     def _check_state_layout(self, state: dict) -> None:
         """Refuse a per-cell state field that is not in partition layout."""
@@ -633,6 +787,7 @@ class ShardedUnstructuredNode(SimulationNode):
         mesh_axis = self._mesh_axis
         exchange = self._exchange
         n_local_max = layout.n_local_max
+        n_local_per_shard = np.asarray(layout.n_local, dtype=np.int32)
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
         reduced = {k: self._integral_is_reduced(k) for k in integrals}
@@ -645,8 +800,13 @@ class ShardedUnstructuredNode(SimulationNode):
             # collapsed for us — local arrays now have shape (n_local_max, *).
 
             # 1. Halo-exchange each state field.
+            #    A domain integral carried in the state is not a per-cell
+            #    field: passed through unpadded.
             padded_state = {}
             for k, arr in local_state.items():
+                if k in integrals:
+                    padded_state[k] = arr
+                    continue
                 padded_state[k] = exchange_unstructured(
                     arr, layout=layout, mesh_axis=mesh_axis, method=exchange,
                 )
@@ -665,9 +825,15 @@ class ShardedUnstructuredNode(SimulationNode):
                     arr, layout=layout, mesh_axis=mesh_axis, method=exchange,
                 )
 
-            # 3. shard_info — traced offset for nodes that want a per-shard tag.
+            # 3. shard_info — traced offset for nodes that want a per-shard
+            #    tag, the padded block length (static, it sizes slices), and
+            #    this shard's own cell count (traced), which is what tells a
+            #    node summing its cells where the padding starts.
             idx = lax.axis_index(mesh_axis)
-            shard_info = {0: (idx * n_local_max, n_local_max)}
+            shard_info = {
+                0: (idx * n_local_max, n_local_max),
+                "n_local": jnp.asarray(n_local_per_shard)[idx],
+            }
 
             # 4. Dispatch.
             extra = {"params": local_params} if (accepts_params and local_params) else {}

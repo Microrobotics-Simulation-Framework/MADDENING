@@ -200,7 +200,9 @@ def halo_exchange(
         Equivalent to ``axes=[(mesh_axis, spatial_axis, halo)]``.
     boundary : str or dict[str, str]
         Either a single mode applied to all axes, or a per-mesh-axis
-        dict (an axis it does not name gets ``"edge"``).  The mode fills
+        dict (an exchanged axis it does not name gets ``"edge"``; a key
+        that names no mesh axis in ``axes`` is refused -- until 0.4.0 it
+        was ignored, and the axis it meant took ``"edge"``).  The mode fills
         only the halos at the two edges of the global grid; a halo
         between two shards always holds the neighbouring shard's cells.
         For a halo ``h`` cells wide along a global row ``r0, ...,
@@ -223,6 +225,13 @@ def halo_exchange(
     jax.Array
         Padded copy of ``local`` with ``halo`` ghost cells prepended and
         appended along each requested spatial axis.
+
+    Raises
+    ------
+    ValueError
+        If neither ``axes`` nor the single-axis shortcut is given, if a
+        mode is unknown, or if a ``boundary`` dict has a key that names
+        no mesh axis in ``axes``.
     """
     if axes is None:
         if mesh_axis is None or spatial_axis is None or halo is None:
@@ -237,6 +246,20 @@ def halo_exchange(
         boundary_map: dict[str, str] = {ma: boundary for ma, _, _ in axes}
     else:
         boundary_map = dict(boundary)
+        # A key that names no exchanged mesh axis -- a misspelt axis
+        # name, most often -- was read as "no mode given" and that axis
+        # silently took "edge" in place of the mode asked for.
+        exchanged = [ma for ma, _, _ in axes]
+        unknown = [k for k in boundary_map if k not in exchanged]
+        if unknown:
+            raise ValueError(
+                f"halo_exchange: boundary names mesh axes {unknown} that this "
+                f"call does not exchange; it exchanges {exchanged}.  A "
+                "per-axis boundary dict is keyed by the mesh axis names in "
+                "`axes` (an exchanged axis it leaves out gets \"edge\"); an "
+                "unknown key is refused rather than ignored, because the axis "
+                "it meant would silently take the default fill."
+            )
 
     out = local
     for ma, sa, h in axes:

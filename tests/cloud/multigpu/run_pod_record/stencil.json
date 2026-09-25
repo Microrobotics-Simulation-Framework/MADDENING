@@ -1,681 +1,1731 @@
 {
- "schema_version": 4,
- "goal": "stencil",
- "dry_run": true,
- "allow_fewer_devices": false,
- "n_devices": 4,
- "environment": {
-  "hostname": "dry-run-host",
-  "timestamp_utc": "2026-09-25T06:09:08Z",
-  "python": "3.12.3",
-  "jax": "0.11.0",
-  "jaxlib": "0.11.0",
-  "platform": "cpu",
-  "devices": [
-   "cpu:0",
-   "cpu:1",
-   "cpu:2",
-   "cpu:3"
-  ],
-  "device_kinds": [
-   "cpu"
-  ],
-  "n_devices_visible": 4,
-  "nvidia_smi": "skipped (dry run)",
-  "xla_flags": "--xla_force_host_platform_device_count=4",
-  "jax_platforms": "cpu",
-  "git_commit": "24bbcf741c518714f91b96dbf0afe564a5fd190b"
- },
- "config": {
-  "goal": "all",
-  "out": "/tmp/mg-dry",
-  "summarise": null,
-  "keep_going": false,
+  "schema_version": 5,
+  "goal": "stencil",
   "dry_run": true,
-  "cells": [
-   256,
-   1024
-  ],
-  "n_devices": 4,
   "allow_fewer_devices": false,
-  "warmup": 1,
-  "repeats": 3,
-  "steps": 3,
-  "grad_steps": 5,
-  "cg_max_iters": 300,
-  "fields": 1,
-  "synthetic": "grid",
-  "mesh": null,
-  "partition": "auto"
- },
- "results": [
-  {
-   "cells": 256,
-   "shape": [
-    16,
-    16
-   ],
-   "boundary": "periodic",
-   "n_devices": 4,
-   "steps": 3,
-   "grad_steps": 5,
-   "input_partitioned": true,
-   "forward": {
-    "unsharded": {
-     "compile_s": 0.15716447998420335,
-     "rollout": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.04156498471274972,
-       0.026394991436973214,
-       0.02474500797688961
+  "n_devices": 4,
+  "environment": {
+    "hostname": "dry-run-host",
+    "timestamp_utc": "2026-09-25T10:18:22Z",
+    "python": "3.12.3",
+    "jax": "0.11.0",
+    "jaxlib": "0.11.0",
+    "platform": "cpu",
+    "devices": [
+      "cpu:0",
+      "cpu:1",
+      "cpu:2",
+      "cpu:3"
+    ],
+    "device_kinds": [
+      "cpu"
+    ],
+    "n_devices_visible": 4,
+    "nvidia_smi": "skipped (dry run)",
+    "xla_flags": "--xla_force_host_platform_device_count=4",
+    "jax_platforms": "cpu",
+    "git_commit": "a62b21f74e1e57a1859516102bfafeca2e541f1a"
+  },
+  "config": {
+    "goal": "all",
+    "out": "/tmp/mg-dry",
+    "summarise": null,
+    "keep_going": false,
+    "dry_run": true,
+    "cells": [
+      256,
+      1024
+    ],
+    "n_devices": 4,
+    "allow_fewer_devices": false,
+    "warmup": 1,
+    "repeats": 3,
+    "steps": 3,
+    "grad_steps": 5,
+    "cg_max_iters": 300,
+    "fields": 1,
+    "synthetic": "grid",
+    "mesh": null,
+    "partition": "auto"
+  },
+  "results": [
+    {
+      "node": "field",
+      "mesh": "1d",
+      "mesh_shape": [
+        4,
+        1
       ],
-      "min_ms": 0.02474500797688961,
-      "median_ms": 0.026394991436973214,
-      "mean_ms": 0.030901661375537515,
-      "ms_per_step": 0.00879833047899107
-     }
-    },
-    "sharded": {
-     "compile_s": 0.27736016298877075,
-     "rollout": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.6309940072242171,
-       0.5424949922598898,
-       0.6748999876435846
+      "cells": 256,
+      "shape": [
+        16,
+        16
       ],
-      "min_ms": 0.5424949922598898,
-      "median_ms": 0.6309940072242171,
-      "mean_ms": 0.6161296623758972,
-      "ms_per_step": 0.2103313357414057
-     }
+      "boundary": "periodic",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "diffusivity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.2049573340045754,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.07454800652340055,
+              0.05184998735785484,
+              0.049569003749638796
+            ],
+            "min_ms": 0.049569003749638796,
+            "median_ms": 0.05184998735785484,
+            "mean_ms": 0.058655665876964726,
+            "ms_per_step": 0.017283329119284947
+          }
+        },
+        "sharded": {
+          "compile_s": 0.7157027370121796,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              1.6434380086138844,
+              1.489350019255653,
+              1.593221997609362
+            ],
+            "min_ms": 1.489350019255653,
+            "median_ms": 1.593221997609362,
+            "mean_ms": 1.5753366751596332,
+            "ms_per_step": 0.5310739992031207
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 2.061840534210205,
+            "finite": true
+          },
+          "averages": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 1.0576205253601074,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 0.7455315330007579,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.44768801308237016,
+              0.3870170039590448,
+              0.26636000256985426
+            ],
+            "min_ms": 0.26636000256985426,
+            "median_ms": 0.3870170039590448,
+            "mean_ms": 0.3670216732037564
+          },
+          "loss": 1.800889015197754,
+          "grad_parameter": -0.1316429078578949
+        },
+        "sharded": {
+          "compile_s": 1.4845015309983864,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              2.6440100045874715,
+              2.642992010805756,
+              2.4552970135118812
+            ],
+            "min_ms": 2.4552970135118812,
+            "median_ms": 2.642992010805756,
+            "mean_ms": 2.5807663429683694
+          },
+          "loss": 1.800889015197754,
+          "grad_parameter": -0.1316429227590561
+        },
+        "parity_loss": 0.0,
+        "parity_grad_initial_field": {
+          "max_abs": 3.725290298461914e-09,
+          "max_rel": 1.8432780488164542e-07,
+          "reference_scale": 0.020210137590765953,
+          "finite": true
+        },
+        "parity_grad_parameter": 1.1319380159797954e-07
+      }
     },
-    "parity_f": {
-     "max_abs": 0.0,
-     "max_rel": 0.0,
-     "reference_scale": 2.013456344604492,
-     "finite": true
+    {
+      "node": "field",
+      "mesh": "1d",
+      "mesh_shape": [
+        4,
+        1
+      ],
+      "cells": 256,
+      "shape": [
+        16,
+        16
+      ],
+      "boundary": "edge",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "diffusivity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.2030741430062335,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.06446000770665705,
+              0.05007401341572404,
+              0.059914018493145704
+            ],
+            "min_ms": 0.05007401341572404,
+            "median_ms": 0.059914018493145704,
+            "mean_ms": 0.05814934653850893,
+            "ms_per_step": 0.019971339497715235
+          }
+        },
+        "sharded": {
+          "compile_s": 0.7565869409881998,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              1.4325309894047678,
+              1.5122320037335157,
+              1.4965219888836145
+            ],
+            "min_ms": 1.4325309894047678,
+            "median_ms": 1.4965219888836145,
+            "mean_ms": 1.4804283273406327,
+            "ms_per_step": 0.49884066296120483
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 2.061840534210205,
+            "finite": true
+          },
+          "averages": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_rel": 1.1256155428596128e-07,
+            "reference_scale": 1.059058666229248,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 0.7438238410104532,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.16289300401695073,
+              0.13693299842998385,
+              0.1352389808744192
+            ],
+            "min_ms": 0.1352389808744192,
+            "median_ms": 0.13693299842998385,
+            "mean_ms": 0.14502166110711792
+          },
+          "loss": 1.803065299987793,
+          "grad_parameter": -0.12449659407138824
+        },
+        "sharded": {
+          "compile_s": 1.5681791969982442,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              3.033148997928947,
+              2.7820190007332712,
+              2.8879729798063636
+            ],
+            "min_ms": 2.7820190007332712,
+            "median_ms": 2.8879729798063636,
+            "mean_ms": 2.901046992822861
+          },
+          "loss": 1.803065299987793,
+          "grad_parameter": -0.12449659407138824
+        },
+        "parity_loss": 0.0,
+        "parity_grad_initial_field": {
+          "max_abs": 3.725290298461914e-09,
+          "max_rel": 1.8432780488164542e-07,
+          "reference_scale": 0.020210137590765953,
+          "finite": true
+        },
+        "parity_grad_parameter": 0.0
+      }
+    },
+    {
+      "node": "field",
+      "mesh": "1d",
+      "mesh_shape": [
+        4,
+        1
+      ],
+      "cells": 256,
+      "shape": [
+        16,
+        16
+      ],
+      "boundary": "dirichlet",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "diffusivity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.32034892099909484,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.05772401345893741,
+              0.047784007620066404,
+              0.0448159989900887
+            ],
+            "min_ms": 0.0448159989900887,
+            "median_ms": 0.047784007620066404,
+            "mean_ms": 0.050108006689697504,
+            "ms_per_step": 0.015928002540022135
+          }
+        },
+        "sharded": {
+          "compile_s": 0.7487827199802268,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              1.247778011020273,
+              1.5036030090413988,
+              1.4599629794247448
+            ],
+            "min_ms": 1.247778011020273,
+            "median_ms": 1.4599629794247448,
+            "mean_ms": 1.403781333162139,
+            "ms_per_step": 0.48665432647491497
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 2.061840534210205,
+            "finite": true
+          },
+          "averages": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_rel": 1.119378091442444e-07,
+            "reference_scale": 1.06496000289917,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 0.9639804530015681,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.1495729957241565,
+              0.1299479918088764,
+              0.12372099445201457
+            ],
+            "min_ms": 0.12372099445201457,
+            "median_ms": 0.1299479918088764,
+            "mean_ms": 0.13441399399501583
+          },
+          "loss": 1.8230211734771729,
+          "grad_parameter": -0.02273983135819435
+        },
+        "sharded": {
+          "compile_s": 1.9988797589903697,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              2.747710997937247,
+              3.2360400073230267,
+              2.67449498642236
+            ],
+            "min_ms": 2.67449498642236,
+            "median_ms": 2.747710997937247,
+            "mean_ms": 2.8860819972275444
+          },
+          "loss": 1.8230211734771729,
+          "grad_parameter": -0.02273983135819435
+        },
+        "parity_loss": 0.0,
+        "parity_grad_initial_field": {
+          "max_abs": 3.725290298461914e-09,
+          "max_rel": 1.8432780488164542e-07,
+          "reference_scale": 0.020210137590765953,
+          "finite": true
+        },
+        "parity_grad_parameter": 0.0
+      }
+    },
+    {
+      "node": "lbm",
+      "mesh": "1d",
+      "mesh_shape": [
+        4,
+        1
+      ],
+      "cells": 256,
+      "shape": [
+        16,
+        16
+      ],
+      "boundary": "periodic",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "viscosity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.7404715869924985,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.7653379871044308,
+              0.7613069901708513,
+              0.7573780021630228
+            ],
+            "min_ms": 0.7573780021630228,
+            "median_ms": 0.7613069901708513,
+            "mean_ms": 0.7613409931461016,
+            "ms_per_step": 0.25376899672361714
+          }
+        },
+        "sharded": {
+          "compile_s": 1.3129846550000366,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              3.110638994257897,
+              2.8995309839956462,
+              2.8438339941203594
+            ],
+            "min_ms": 2.8438339941203594,
+            "median_ms": 2.8995309839956462,
+            "mean_ms": 2.9513346574579677,
+            "ms_per_step": 0.9665103279985487
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 0.4622983932495117,
+            "finite": true
+          },
+          "velocity": {
+            "max_abs": 2.2351741790771484e-08,
+            "max_rel": 5.307491276253505e-07,
+            "reference_scale": 0.04211357235908508,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 1.9831110849918332,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              2.386526990449056,
+              2.148298983229324,
+              2.2483720094896853
+            ],
+            "min_ms": 2.148298983229324,
+            "median_ms": 2.2483720094896853,
+            "mean_ms": 2.261065994389355
+          },
+          "loss": 0.00010045382077805698,
+          "grad_parameter": -0.0005485091242007911
+        },
+        "sharded": {
+          "compile_s": 3.837773371982621,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              7.885514001827687,
+              8.572380000259727,
+              7.370401988737285
+            ],
+            "min_ms": 7.370401988737285,
+            "median_ms": 7.885514001827687,
+            "mean_ms": 7.9427653302748995
+          },
+          "loss": 0.00010045379167422652,
+          "grad_parameter": -0.0005485090659931302
+        },
+        "parity_loss": 2.8972347921972834e-07,
+        "parity_grad_initial_field": {
+          "max_abs": 1.382431946694851e-10,
+          "max_rel": 1.4477059651276587e-06,
+          "reference_scale": 9.549121023155749e-05,
+          "finite": true
+        },
+        "parity_grad_parameter": 1.0611976783117194e-07
+      }
+    },
+    {
+      "node": "field",
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 256,
+      "shape": [
+        16,
+        16
+      ],
+      "boundary": "periodic",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "diffusivity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.24837822100380436,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.05904500721953809,
+              0.05412500468082726,
+              0.06038299761712551
+            ],
+            "min_ms": 0.05412500468082726,
+            "median_ms": 0.05904500721953809,
+            "mean_ms": 0.05785100317249695,
+            "ms_per_step": 0.019681669073179364
+          }
+        },
+        "sharded": {
+          "compile_s": 0.9247142199892551,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              1.8637980101630092,
+              1.7905870045069605,
+              1.9504799856804311
+            ],
+            "min_ms": 1.7905870045069605,
+            "median_ms": 1.8637980101630092,
+            "mean_ms": 1.8682883334501337,
+            "ms_per_step": 0.6212660033876697
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 2.061840534210205,
+            "finite": true
+          },
+          "averages": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 1.0576205253601074,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 0.8237134559894912,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.28458202723413706,
+              0.33865898149088025,
+              0.13573901378549635
+            ],
+            "min_ms": 0.13573901378549635,
+            "median_ms": 0.28458202723413706,
+            "mean_ms": 0.2529933408368379
+          },
+          "loss": 1.800889015197754,
+          "grad_parameter": -0.1316429078578949
+        },
+        "sharded": {
+          "compile_s": 1.5469759720144793,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              4.309667012421414,
+              4.553097998723388,
+              4.26879501901567
+            ],
+            "min_ms": 4.26879501901567,
+            "median_ms": 4.309667012421414,
+            "mean_ms": 4.377186676720157
+          },
+          "loss": 1.800889015197754,
+          "grad_parameter": -0.1316429078578949
+        },
+        "parity_loss": 0.0,
+        "parity_grad_initial_field": {
+          "max_abs": 2.7939677238464355e-09,
+          "max_rel": 1.3824585366123408e-07,
+          "reference_scale": 0.020210137590765953,
+          "finite": true
+        },
+        "parity_grad_parameter": 0.0
+      }
+    },
+    {
+      "node": "field",
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 256,
+      "shape": [
+        16,
+        16
+      ],
+      "boundary": "edge",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "diffusivity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.2640991030202713,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.3736439975909889,
+              0.3756860096473247,
+              0.2641629835125059
+            ],
+            "min_ms": 0.2641629835125059,
+            "median_ms": 0.3736439975909889,
+            "mean_ms": 0.3378309969169398,
+            "ms_per_step": 0.12454799919699629
+          }
+        },
+        "sharded": {
+          "compile_s": 1.1032934300019406,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              2.044252003543079,
+              2.7217080059926957,
+              1.9948209810536355
+            ],
+            "min_ms": 1.9948209810536355,
+            "median_ms": 2.044252003543079,
+            "mean_ms": 2.2535936635298035,
+            "ms_per_step": 0.6814173345143596
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 2.061840534210205,
+            "finite": true
+          },
+          "averages": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_rel": 1.1256155428596128e-07,
+            "reference_scale": 1.059058666229248,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 0.8992678689828608,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.23749200045131147,
+              0.19412700203247368,
+              0.1801910111680627
+            ],
+            "min_ms": 0.1801910111680627,
+            "median_ms": 0.19412700203247368,
+            "mean_ms": 0.20393667121728262
+          },
+          "loss": 1.803065299987793,
+          "grad_parameter": -0.12449659407138824
+        },
+        "sharded": {
+          "compile_s": 1.8901646900048945,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              6.369886978063732,
+              5.965312011539936,
+              5.7453330082353204
+            ],
+            "min_ms": 5.7453330082353204,
+            "median_ms": 5.965312011539936,
+            "mean_ms": 6.026843999279663
+          },
+          "loss": 1.803065299987793,
+          "grad_parameter": -0.12449659407138824
+        },
+        "parity_loss": 0.0,
+        "parity_grad_initial_field": {
+          "max_abs": 3.725290298461914e-09,
+          "max_rel": 1.8432780488164542e-07,
+          "reference_scale": 0.020210137590765953,
+          "finite": true
+        },
+        "parity_grad_parameter": 0.0
+      }
+    },
+    {
+      "node": "field",
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 256,
+      "shape": [
+        16,
+        16
+      ],
+      "boundary": "dirichlet",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "diffusivity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.3352949820109643,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.08956601959653199,
+              0.06444600876420736,
+              0.06369801121763885
+            ],
+            "min_ms": 0.06369801121763885,
+            "median_ms": 0.06444600876420736,
+            "mean_ms": 0.07257001319279273,
+            "ms_per_step": 0.021482002921402454
+          }
+        },
+        "sharded": {
+          "compile_s": 1.199419801007025,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              2.9850229911971837,
+              2.2940990165807307,
+              2.271965000545606
+            ],
+            "min_ms": 2.271965000545606,
+            "median_ms": 2.2940990165807307,
+            "mean_ms": 2.517029002774507,
+            "ms_per_step": 0.7646996721935769
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 2.061840534210205,
+            "finite": true
+          },
+          "averages": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_rel": 1.119378091442444e-07,
+            "reference_scale": 1.06496000289917,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 1.0256088240130339,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.2391059824731201,
+              0.19570099539123476,
+              0.1732290256768465
+            ],
+            "min_ms": 0.1732290256768465,
+            "median_ms": 0.19570099539123476,
+            "mean_ms": 0.20267866784706712
+          },
+          "loss": 1.8230211734771729,
+          "grad_parameter": -0.02273983135819435
+        },
+        "sharded": {
+          "compile_s": 2.4049988509796094,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              3.9738380000926554,
+              3.9148580108303577,
+              3.7751509808003902
+            ],
+            "min_ms": 3.7751509808003902,
+            "median_ms": 3.9148580108303577,
+            "mean_ms": 3.8879489972411343
+          },
+          "loss": 1.8230211734771729,
+          "grad_parameter": -0.02273983135819435
+        },
+        "parity_loss": 0.0,
+        "parity_grad_initial_field": {
+          "max_abs": 3.725290298461914e-09,
+          "max_rel": 1.8432780488164542e-07,
+          "reference_scale": 0.020210137590765953,
+          "finite": true
+        },
+        "parity_grad_parameter": 0.0
+      }
+    },
+    {
+      "node": "lbm",
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 256,
+      "shape": [
+        16,
+        16
+      ],
+      "boundary": "periodic",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "viscosity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.8536518090113532,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.7907639956101775,
+              0.7091890147421509,
+              0.6853920058347285
+            ],
+            "min_ms": 0.6853920058347285,
+            "median_ms": 0.7091890147421509,
+            "mean_ms": 0.7284483387290189,
+            "ms_per_step": 0.23639633824738362
+          }
+        },
+        "sharded": {
+          "compile_s": 1.502593994984636,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              4.340863990364596,
+              4.736194008728489,
+              4.35618800111115
+            ],
+            "min_ms": 4.340863990364596,
+            "median_ms": 4.35618800111115,
+            "mean_ms": 4.477748666734745,
+            "ms_per_step": 1.45206266703705
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 0.4622983932495117,
+            "finite": true
+          },
+          "velocity": {
+            "max_abs": 2.2351741790771484e-08,
+            "max_rel": 5.307491276253505e-07,
+            "reference_scale": 0.04211357235908508,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 2.1727576389967,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              2.251792000606656,
+              2.1482240117620677,
+              1.9996249757241458
+            ],
+            "min_ms": 1.9996249757241458,
+            "median_ms": 2.1482240117620677,
+            "mean_ms": 2.133213662697623
+          },
+          "loss": 0.00010045382077805698,
+          "grad_parameter": -0.0005485091242007911
+        },
+        "sharded": {
+          "compile_s": 4.427352290018462,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              9.061759017640725,
+              9.16963498457335,
+              9.384559991303831
+            ],
+            "min_ms": 9.061759017640725,
+            "median_ms": 9.16963498457335,
+            "mean_ms": 9.205317997839302
+          },
+          "loss": 0.00010045379167422652,
+          "grad_parameter": -0.0005485089495778084
+        },
+        "parity_loss": 2.8972347921972834e-07,
+        "parity_grad_initial_field": {
+          "max_abs": 1.418811734765768e-10,
+          "max_rel": 1.485803490525755e-06,
+          "reference_scale": 9.549121023155749e-05,
+          "finite": true
+        },
+        "parity_grad_parameter": 3.183593034935158e-07
+      }
+    },
+    {
+      "node": "field",
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 1024,
+      "shape": [
+        32,
+        32
+      ],
+      "boundary": "periodic",
+      "n_devices": 4,
+      "steps": 3,
+      "grad_steps": 5,
+      "parameter": "diffusivity",
+      "input_partitioned": true,
+      "forward": {
+        "unsharded": {
+          "compile_s": 0.30868595599895343,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.2879679959733039,
+              0.3057649882975966,
+              0.3257530042901635
+            ],
+            "min_ms": 0.2879679959733039,
+            "median_ms": 0.3057649882975966,
+            "mean_ms": 0.3064953295203547,
+            "ms_per_step": 0.10192166276586552
+          }
+        },
+        "sharded": {
+          "compile_s": 0.6963070019846782,
+          "rollout": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              1.9820940215140581,
+              1.91027601249516,
+              1.904171978821978
+            ],
+            "min_ms": 1.904171978821978,
+            "median_ms": 1.91027601249516,
+            "mean_ms": 1.9321806709437321,
+            "ms_per_step": 0.63675867083172
+          }
+        },
+        "parity": {
+          "f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 2.0922441482543945,
+            "finite": true
+          },
+          "averages": {
+            "max_abs": 5.960464477539063e-08,
+            "max_rel": 5.551991793711969e-08,
+            "reference_scale": 1.0735722780227661,
+            "finite": true
+          }
+        }
+      },
+      "gradient": {
+        "unsharded": {
+          "compile_s": 0.7966637549980078,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              0.4337589780334383,
+              0.4484730015974492,
+              0.4368110094219446
+            ],
+            "min_ms": 0.4337589780334383,
+            "median_ms": 0.4368110094219446,
+            "mean_ms": 0.43968099635094404
+          },
+          "loss": 1.8257994651794434,
+          "grad_parameter": -0.040199387818574905
+        },
+        "sharded": {
+          "compile_s": 1.5877736459951848,
+          "grad": {
+            "warmup": 1,
+            "repeats": 3,
+            "ms": [
+              4.440004995558411,
+              4.0580700151622295,
+              4.314086982049048
+            ],
+            "min_ms": 4.0580700151622295,
+            "median_ms": 4.314086982049048,
+            "mean_ms": 4.2707206642565625
+          },
+          "loss": 1.8257997035980225,
+          "grad_parameter": -0.04019938409328461
+        },
+        "parity_loss": 1.3058311367077228e-07,
+        "parity_grad_initial_field": {
+          "max_abs": 9.313225746154785e-10,
+          "max_rel": 1.7367221297562414e-07,
+          "reference_scale": 0.005362530704587698,
+          "finite": true
+        },
+        "parity_grad_parameter": 9.267032411723871e-08
+      }
     }
-   },
-   "gradient": {
-    "unsharded": {
-     "compile_s": 0.7183935889916029,
-     "grad": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.31030000536702573,
-       0.29590001213364303,
-       0.2859490050468594
-      ],
-      "min_ms": 0.2859490050468594,
-      "median_ms": 0.29590001213364303,
-      "mean_ms": 0.29738300751584273
-     },
-     "loss": 0.9171518683433533,
-     "grad_diffusivity": -0.1267203390598297
+  ],
+  "checks": [
+    {
+      "name": "field 1d 4x1 16x16 periodic: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
     },
-    "sharded": {
-     "compile_s": 0.788477658003103,
-     "grad": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       2.5817810092121363,
-       2.310890005901456,
-       2.1443820151034743
-      ],
-      "min_ms": 2.1443820151034743,
-      "median_ms": 2.310890005901456,
-      "mean_ms": 2.3456843434056887
-     },
-     "loss": 0.9171518683433533,
-     "grad_diffusivity": -0.1267203390598297
+    {
+      "name": "field 1d 4x1 16x16 periodic forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
     },
-    "parity_loss": 0.0,
-    "parity_grad_initial_field": {
-     "max_abs": 2.7939677238464355e-09,
-     "max_rel": 1.7691345464564117e-07,
-     "reference_scale": 0.0157928504049778,
-     "finite": true
+    {
+      "name": "field 1d 4x1 16x16 periodic forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
     },
-    "parity_grad_diffusivity": 0.0
-   }
-  },
-  {
-   "cells": 256,
-   "shape": [
-    16,
-    16
-   ],
-   "boundary": "edge",
-   "n_devices": 4,
-   "steps": 3,
-   "grad_steps": 5,
-   "input_partitioned": true,
-   "forward": {
-    "unsharded": {
-     "compile_s": 0.17483695500413887,
-     "rollout": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.030705006793141365,
-       0.020626001060009003,
-       0.01973399776034057
-      ],
-      "min_ms": 0.01973399776034057,
-      "median_ms": 0.020626001060009003,
-      "mean_ms": 0.02368833520449698,
-      "ms_per_step": 0.006875333686669667
-     }
+    {
+      "name": "field 1d 4x1 16x16 periodic forward averages vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
     },
-    "sharded": {
-     "compile_s": 0.2623748249898199,
-     "rollout": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.7415320142172277,
-       0.7612829795107245,
-       0.8198049908969551
-      ],
-      "min_ms": 0.7415320142172277,
-      "median_ms": 0.7612829795107245,
-      "mean_ms": 0.7742066615416358,
-      "ms_per_step": 0.25376099317024153
-     }
+    {
+      "name": "field 1d 4x1 16x16 periodic forward averages vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
     },
-    "parity_f": {
-     "max_abs": 0.0,
-     "max_rel": 0.0,
-     "reference_scale": 2.013456344604492,
-     "finite": true
+    {
+      "name": "field 1d 4x1 16x16 periodic loss vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 periodic d loss / d initial f vs unsharded max_rel",
+      "value": 1.8432780488164542e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 periodic d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 periodic d loss / d diffusivity vs unsharded rel",
+      "value": 1.1319380159797954e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 periodic d loss / d diffusivity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-1.316429e-01",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge forward averages vs unsharded max_rel",
+      "value": 1.1256155428596128e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge forward averages vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge loss vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge d loss / d initial f vs unsharded max_rel",
+      "value": 1.8432780488164542e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge d loss / d diffusivity vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 edge d loss / d diffusivity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-1.244966e-01",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet forward averages vs unsharded max_rel",
+      "value": 1.119378091442444e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet forward averages vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet loss vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet d loss / d initial f vs unsharded max_rel",
+      "value": 1.8432780488164542e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet d loss / d diffusivity vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 1d 4x1 16x16 dirichlet d loss / d diffusivity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-2.273983e-02",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic forward velocity vs unsharded max_rel",
+      "value": 5.307491276253505e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic forward velocity vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic loss vs unsharded rel",
+      "value": 2.8972347921972834e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic d loss / d initial f vs unsharded max_rel",
+      "value": 1.4477059651276587e-06,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic d loss / d viscosity vs unsharded rel",
+      "value": 1.0611976783117194e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 1d 4x1 16x16 periodic d loss / d viscosity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-5.485091e-04",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic forward averages vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic forward averages vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic loss vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic d loss / d initial f vs unsharded max_rel",
+      "value": 1.3824585366123408e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic d loss / d diffusivity vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 periodic d loss / d diffusivity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-1.316429e-01",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge forward averages vs unsharded max_rel",
+      "value": 1.1256155428596128e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge forward averages vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge loss vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge d loss / d initial f vs unsharded max_rel",
+      "value": 1.8432780488164542e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge d loss / d diffusivity vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 edge d loss / d diffusivity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-1.244966e-01",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet forward averages vs unsharded max_rel",
+      "value": 1.119378091442444e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet forward averages vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet loss vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet d loss / d initial f vs unsharded max_rel",
+      "value": 1.8432780488164542e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet d loss / d diffusivity vs unsharded rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 16x16 dirichlet d loss / d diffusivity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-2.273983e-02",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic forward velocity vs unsharded max_rel",
+      "value": 5.307491276253505e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic forward velocity vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic loss vs unsharded rel",
+      "value": 2.8972347921972834e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic d loss / d initial f vs unsharded max_rel",
+      "value": 1.485803490525755e-06,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic d loss / d viscosity vs unsharded rel",
+      "value": 3.183593034935158e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "lbm 2d 2x2 16x16 periodic d loss / d viscosity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-5.485091e-04",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic: sharded state is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic forward f vs unsharded max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic forward f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic forward averages vs unsharded max_rel",
+      "value": 5.551991793711969e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic forward averages vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic loss vs unsharded rel",
+      "value": 1.3058311367077228e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic d loss / d initial f vs unsharded max_rel",
+      "value": 1.7367221297562414e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic d loss / d initial f vs unsharded finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic d loss / d diffusivity vs unsharded rel",
+      "value": 9.267032411723871e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "field 2d 2x2 32x32 periodic d loss / d diffusivity is not zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "-4.019939e-02",
+      "passed": true
     }
-   },
-   "gradient": {
-    "unsharded": {
-     "compile_s": 0.6013748749974184,
-     "grad": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.2943399886135012,
-       0.3541609912645072,
-       0.3368030011188239
-      ],
-      "min_ms": 0.2943399886135012,
-      "median_ms": 0.3368030011188239,
-      "mean_ms": 0.3284346603322774
-     },
-     "loss": 0.918540358543396,
-     "grad_diffusivity": -0.12023107707500458
-    },
-    "sharded": {
-     "compile_s": 0.9804770880145952,
-     "grad": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       2.1493870008271188,
-       2.097543008858338,
-       2.306076989043504
-      ],
-      "min_ms": 2.097543008858338,
-      "median_ms": 2.1493870008271188,
-      "mean_ms": 2.184335666242987
-     },
-     "loss": 0.9185404777526855,
-     "grad_diffusivity": -0.12023106962442398
-    },
-    "parity_loss": 1.297812213061831e-07,
-    "parity_grad_initial_field": {
-     "max_abs": 2.7939677238464355e-09,
-     "max_rel": 1.7691345464564117e-07,
-     "reference_scale": 0.0157928504049778,
-     "finite": true
-    },
-    "parity_grad_diffusivity": 6.196884181845831e-08
-   }
-  },
-  {
-   "cells": 256,
-   "shape": [
-    16,
-    16
-   ],
-   "boundary": "dirichlet",
-   "n_devices": 4,
-   "steps": 3,
-   "grad_steps": 5,
-   "input_partitioned": true,
-   "forward": {
-    "unsharded": {
-     "compile_s": 0.39941351499874145,
-     "rollout": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.3625999961514026,
-       0.12447699555195868,
-       0.11173100210726261
-      ],
-      "min_ms": 0.11173100210726261,
-      "median_ms": 0.12447699555195868,
-      "mean_ms": 0.19960266460354129,
-      "ms_per_step": 0.041492331850652896
-     }
-    },
-    "sharded": {
-     "compile_s": 0.48058535502059385,
-     "rollout": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.8620310109108686,
-       0.6695330084767193,
-       0.5907760059926659
-      ],
-      "min_ms": 0.5907760059926659,
-      "median_ms": 0.6695330084767193,
-      "mean_ms": 0.7074466751267513,
-      "ms_per_step": 0.22317766949223974
-     }
-    },
-    "parity_f": {
-     "max_abs": 0.0,
-     "max_rel": 0.0,
-     "reference_scale": 2.013456344604492,
-     "finite": true
-    }
-   },
-   "gradient": {
-    "unsharded": {
-     "compile_s": 0.9652663389861118,
-     "grad": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.15360800898633897,
-       0.16706198221072555,
-       0.13577897334471345
-      ],
-      "min_ms": 0.13577897334471345,
-      "median_ms": 0.15360800898633897,
-      "mean_ms": 0.1521496548472593
-     },
-     "loss": 0.9297390580177307,
-     "grad_diffusivity": -0.060876935720443726
-    },
-    "sharded": {
-     "compile_s": 1.2028537699952722,
-     "grad": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       2.460513002006337,
-       2.271232020575553,
-       2.4110680096782744
-      ],
-      "min_ms": 2.271232020575553,
-      "median_ms": 2.4110680096782744,
-      "mean_ms": 2.380937677420055
-     },
-     "loss": 0.9297390580177307,
-     "grad_diffusivity": -0.06087692826986313
-    },
-    "parity_loss": 0.0,
-    "parity_grad_initial_field": {
-     "max_abs": 3.725290298461914e-09,
-     "max_rel": 2.3588460619418823e-07,
-     "reference_scale": 0.0157928504049778,
-     "finite": true
-    },
-    "parity_grad_diffusivity": 1.223875759965653e-07
-   }
-  },
-  {
-   "cells": 1024,
-   "shape": [
-    32,
-    32
-   ],
-   "boundary": "periodic",
-   "n_devices": 4,
-   "steps": 3,
-   "grad_steps": 5,
-   "input_partitioned": true,
-   "forward": {
-    "unsharded": {
-     "compile_s": 0.20781345100840554,
-     "rollout": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.0518420129083097,
-       0.04285000613890588,
-       0.041381019400432706
-      ],
-      "min_ms": 0.041381019400432706,
-      "median_ms": 0.04285000613890588,
-      "mean_ms": 0.04535767948254943,
-      "ms_per_step": 0.014283335379635295
-     }
-    },
-    "sharded": {
-     "compile_s": 0.31465577601920813,
-     "rollout": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.772458006395027,
-       0.9877590055111796,
-       0.7082759984768927
-      ],
-      "min_ms": 0.7082759984768927,
-      "median_ms": 0.772458006395027,
-      "mean_ms": 0.8228310034610331,
-      "ms_per_step": 0.25748600213167566
-     }
-    },
-    "parity_f": {
-     "max_abs": 0.0,
-     "max_rel": 0.0,
-     "reference_scale": 2.0367560386657715,
-     "finite": true
-    }
-   },
-   "gradient": {
-    "unsharded": {
-     "compile_s": 0.6960393869958352,
-     "grad": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       0.3609660197980702,
-       0.42403399129398167,
-       0.4125740088056773
-      ],
-      "min_ms": 0.3609660197980702,
-      "median_ms": 0.4125740088056773,
-      "mean_ms": 0.3991913399659097
-     },
-     "loss": 0.9369583129882812,
-     "grad_diffusivity": -0.038336388766765594
-    },
-    "sharded": {
-     "compile_s": 0.9381817220128141,
-     "grad": {
-      "warmup": 1,
-      "repeats": 3,
-      "ms": [
-       2.414143003989011,
-       2.4629610124975443,
-       2.269900985993445
-      ],
-      "min_ms": 2.269900985993445,
-      "median_ms": 2.414143003989011,
-      "mean_ms": 2.3823350008266666
-     },
-     "loss": 0.9369581937789917,
-     "grad_diffusivity": -0.03833639249205589
-    },
-    "parity_loss": 1.2723008899999186e-07,
-    "parity_grad_initial_field": {
-     "max_abs": 9.313225746154785e-10,
-     "max_rel": 2.0871637135735144e-07,
-     "reference_scale": 0.004462144337594509,
-     "finite": true
-    },
-    "parity_grad_diffusivity": 9.717374062346283e-08
-   }
-  }
- ],
- "checks": [
-  {
-   "name": "16x16 periodic: sharded field is partitioned over 4 devices",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 periodic forward f vs unsharded max_rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 periodic forward f vs unsharded finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 periodic loss vs unsharded rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 periodic d loss / d initial field vs unsharded max_rel",
-   "value": 1.7691345464564117e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 periodic d loss / d initial field vs unsharded finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 periodic d loss / d diffusivity vs unsharded rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 periodic d loss / d diffusivity is not zero",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "-1.267203e-01",
-   "passed": true
-  },
-  {
-   "name": "16x16 edge: sharded field is partitioned over 4 devices",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 edge forward f vs unsharded max_rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 edge forward f vs unsharded finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 edge loss vs unsharded rel",
-   "value": 1.297812213061831e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 edge d loss / d initial field vs unsharded max_rel",
-   "value": 1.7691345464564117e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 edge d loss / d initial field vs unsharded finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 edge d loss / d diffusivity vs unsharded rel",
-   "value": 6.196884181845831e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 edge d loss / d diffusivity is not zero",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "-1.202311e-01",
-   "passed": true
-  },
-  {
-   "name": "16x16 dirichlet: sharded field is partitioned over 4 devices",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 dirichlet forward f vs unsharded max_rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 dirichlet forward f vs unsharded finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 dirichlet loss vs unsharded rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 dirichlet d loss / d initial field vs unsharded max_rel",
-   "value": 2.3588460619418823e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 dirichlet d loss / d initial field vs unsharded finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 dirichlet d loss / d diffusivity vs unsharded rel",
-   "value": 1.223875759965653e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 dirichlet d loss / d diffusivity is not zero",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "-6.087694e-02",
-   "passed": true
-  },
-  {
-   "name": "32x32 periodic: sharded field is partitioned over 4 devices",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "32x32 periodic forward f vs unsharded max_rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 periodic forward f vs unsharded finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "32x32 periodic loss vs unsharded rel",
-   "value": 1.2723008899999186e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 periodic d loss / d initial field vs unsharded max_rel",
-   "value": 2.0871637135735144e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 periodic d loss / d initial field vs unsharded finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "32x32 periodic d loss / d diffusivity vs unsharded rel",
-   "value": 9.717374062346283e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 periodic d loss / d diffusivity is not zero",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "-3.833639e-02",
-   "passed": true
-  }
- ],
- "passed": true,
- "wall_s": 9.37990711000748
+  ],
+  "passed": true,
+  "wall_s": 46.431112314981874
 }

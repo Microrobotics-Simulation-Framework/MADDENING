@@ -1,845 +1,1043 @@
 {
- "schema_version": 4,
- "goal": "coupled",
- "dry_run": true,
- "allow_fewer_devices": false,
- "n_devices": 4,
- "environment": {
-  "hostname": "dry-run-host",
-  "timestamp_utc": "2026-09-25T06:09:08Z",
-  "python": "3.12.3",
-  "jax": "0.11.0",
-  "jaxlib": "0.11.0",
-  "platform": "cpu",
-  "devices": [
-   "cpu:0",
-   "cpu:1",
-   "cpu:2",
-   "cpu:3"
-  ],
-  "device_kinds": [
-   "cpu"
-  ],
-  "n_devices_visible": 4,
-  "nvidia_smi": "skipped (dry run)",
-  "xla_flags": "--xla_force_host_platform_device_count=4",
-  "jax_platforms": "cpu",
-  "git_commit": "24bbcf741c518714f91b96dbf0afe564a5fd190b"
- },
- "config": {
-  "goal": "all",
-  "out": "/tmp/mg-dry",
-  "summarise": null,
-  "keep_going": false,
+  "schema_version": 5,
+  "goal": "coupled",
   "dry_run": true,
-  "cells": [
-   256,
-   1024
-  ],
-  "n_devices": 4,
   "allow_fewer_devices": false,
-  "warmup": 1,
-  "repeats": 3,
-  "steps": 3,
-  "grad_steps": 5,
-  "cg_max_iters": 300,
-  "fields": 1,
-  "synthetic": "grid",
-  "mesh": null,
-  "partition": "auto"
- },
- "results": [
-  {
-   "cells": 256,
-   "shape": [
-    16,
-    16
-   ],
-   "n_devices": 4,
-   "steps": 5,
-   "coupled_dof": 257,
-   "max_iterations": 40,
-   "tolerance": 1e-07,
-   "parameters": [
-    "field.diffusivity",
-    "far.conductance",
-    "field.exchange"
-   ],
-   "solvers": {
-    "ift": {
-     "unsharded": {
-      "compile_s": 4.51134977399488,
-      "value_and_grad": {
-       "warmup": 1,
-       "repeats": 3,
-       "ms": [
-        5.3852109995204955,
-        5.1205880008637905,
-        4.7895660100039095
-       ],
-       "min_ms": 4.7895660100039095,
-       "median_ms": 5.1205880008637905,
-       "mean_ms": 5.098455003462732,
-       "ms_per_step": 1.024117600172758
-      },
-      "loss": 1.2420729398727417,
-      "grad": [
-       -0.07914458215236664,
-       0.2780992090702057,
-       -0.5484946370124817
-      ],
-      "last_step_iterations": 5,
-      "partitioned": false,
-      "device0_pinned_ops": 2
-     },
-     "sharded": {
-      "compile_s": 4.67019970799447,
-      "value_and_grad": {
-       "warmup": 1,
-       "repeats": 3,
-       "ms": [
-        215.13381699332967,
-        202.70093498402275,
-        186.301868990995
-       ],
-       "min_ms": 186.301868990995,
-       "median_ms": 202.70093498402275,
-       "mean_ms": 201.37887365611581,
-       "ms_per_step": 40.54018699680455
-      },
-      "loss": 1.2420729398727417,
-      "grad": [
-       -0.07914458215236664,
-       0.27809929847717285,
-       -0.5484946370124817
-      ],
-      "last_step_iterations": 5,
-      "partitioned": true,
-      "device0_pinned_ops": 2
-     },
-     "parity_f": {
-      "max_abs": 0.0,
-      "max_rel": 0.0,
-      "reference_scale": 1.6157844066619873,
-      "finite": true
-     },
-     "parity_u": 0.0,
-     "parity_loss": 0.0,
-     "parity_grad": 3.2149306523383637e-07,
-     "model": {
-      "sharded": {
-       "f": {
-        "max_abs": 1.6647142109249558e-07,
-        "max_rel": 1.0302824903952639e-07,
-        "reference_scale": 1.6157842401905662,
-        "finite": true
-       },
-       "u": 1.7756311272787527e-09,
-       "loss": 2.0911677691913456e-08,
-       "grad": 2.490999907799349e-07
-      },
-      "unsharded": {
-       "f": {
-        "max_abs": 1.6647142109249558e-07,
-        "max_rel": 1.0302824903952639e-07,
-        "reference_scale": 1.6157842401905662,
-        "finite": true
-       },
-       "u": 1.7756311272787527e-09,
-       "loss": 2.0911677691913456e-08,
-       "grad": 2.630124670692494e-07
-      }
-     }
-    },
-    "fori": {
-     "unsharded": {
-      "compile_s": 2.005949934013188,
-      "value_and_grad": {
-       "warmup": 1,
-       "repeats": 3,
-       "ms": [
-        3.096594999078661,
-        2.921913022873923,
-        2.8778599807992578
-       ],
-       "min_ms": 2.8778599807992578,
-       "median_ms": 2.921913022873923,
-       "mean_ms": 2.9654560009172806,
-       "ms_per_step": 0.5843826045747846
-      },
-      "loss": 1.2420729398727417,
-      "grad": [
-       -0.07914459705352783,
-       0.27809926867485046,
-       -0.5484947562217712
-      ],
-      "last_step_iterations": null,
-      "partitioned": false,
-      "device0_pinned_ops": 0
-     },
-     "sharded": {
-      "compile_s": 2.428249814984156,
-      "value_and_grad": {
-       "warmup": 1,
-       "repeats": 3,
-       "ms": [
-        76.28617098089308,
-        77.96466199215502,
-        70.88446998386644
-       ],
-       "min_ms": 70.88446998386644,
-       "median_ms": 76.28617098089308,
-       "mean_ms": 75.04510098563817,
-       "ms_per_step": 15.257234196178615
-      },
-      "loss": 1.2420729398727417,
-      "grad": [
-       -0.07914459705352783,
-       0.27809926867485046,
-       -0.5484947562217712
-      ],
-      "last_step_iterations": null,
-      "partitioned": true,
-      "device0_pinned_ops": 0
-     },
-     "parity_f": {
-      "max_abs": 0.0,
-      "max_rel": 0.0,
-      "reference_scale": 1.6157844066619873,
-      "finite": true
-     },
-     "parity_u": 0.0,
-     "parity_loss": 0.0,
-     "parity_grad": 0.0,
-     "model": {
-      "sharded": {
-       "f": {
-        "max_abs": 1.6647142109249558e-07,
-        "max_rel": 1.0302824903952639e-07,
-        "reference_scale": 1.6157842401905662,
-        "finite": true
-       },
-       "u": 1.7756311272787527e-09,
-       "loss": 2.0911677691913456e-08,
-       "grad": 1.2796131472199613e-07
-      },
-      "unsharded": {
-       "f": {
-        "max_abs": 1.6647142109249558e-07,
-        "max_rel": 1.0302824903952639e-07,
-        "reference_scale": 1.6157842401905662,
-        "finite": true
-       },
-       "u": 1.7756311272787527e-09,
-       "loss": 2.0911677691913456e-08,
-       "grad": 1.2796131472199613e-07
-      }
-     }
-    }
-   },
-   "model": {
-    "loss": 1.2420729658465712,
-    "grad": [
-     -0.07914458692608244,
-     0.278099282213784,
-     -0.5484947736425247
+  "n_devices": 4,
+  "environment": {
+    "hostname": "dry-run-host",
+    "timestamp_utc": "2026-09-25T10:18:22Z",
+    "python": "3.12.3",
+    "jax": "0.11.0",
+    "jaxlib": "0.11.0",
+    "platform": "cpu",
+    "devices": [
+      "cpu:0",
+      "cpu:1",
+      "cpu:2",
+      "cpu:3"
     ],
-    "wall_s": 0.007511986012104899
-   }
-  },
-  {
-   "cells": 1024,
-   "shape": [
-    32,
-    32
-   ],
-   "n_devices": 4,
-   "steps": 5,
-   "coupled_dof": 1025,
-   "max_iterations": 40,
-   "tolerance": 1e-07,
-   "parameters": [
-    "field.diffusivity",
-    "far.conductance",
-    "field.exchange"
-   ],
-   "solvers": {
-    "ift": {
-     "unsharded": {
-      "compile_s": 3.551541665015975,
-      "value_and_grad": {
-       "warmup": 1,
-       "repeats": 3,
-       "ms": [
-        16.112871002405882,
-        16.69681500061415,
-        17.328251007711515
-       ],
-       "min_ms": 16.112871002405882,
-       "median_ms": 16.69681500061415,
-       "mean_ms": 16.712645670243848,
-       "ms_per_step": 3.3393630001228303
-      },
-      "loss": 1.254713535308838,
-      "grad": [
-       -0.0229627825319767,
-       0.27821213006973267,
-       -0.5607787370681763
-      ],
-      "last_step_iterations": 5,
-      "partitioned": false,
-      "device0_pinned_ops": 2
-     },
-     "sharded": {
-      "compile_s": 4.9157846460002474,
-      "value_and_grad": {
-       "warmup": 1,
-       "repeats": 3,
-       "ms": [
-        141.329001984559,
-        152.6647069840692,
-        140.77492599608377
-       ],
-       "min_ms": 140.77492599608377,
-       "median_ms": 141.329001984559,
-       "mean_ms": 144.92287832157066,
-       "ms_per_step": 28.2658003969118
-      },
-      "loss": 1.2547136545181274,
-      "grad": [
-       -0.02296275831758976,
-       0.2782121002674103,
-       -0.5607782006263733
-      ],
-      "last_step_iterations": 6,
-      "partitioned": true,
-      "device0_pinned_ops": 2
-     },
-     "parity_f": {
-      "max_abs": 1.1920928955078125e-07,
-      "max_rel": 7.248345945576085e-08,
-      "reference_scale": 1.6446412801742554,
-      "finite": true
-     },
-     "parity_u": 1.8210801500169407e-07,
-     "parity_loss": 9.500916838474913e-08,
-     "parity_grad": 1.0545057815307368e-06,
-     "model": {
-      "sharded": {
-       "f": {
-        "max_abs": 1.5921614449077026e-07,
-        "max_rel": 9.680904320000592e-08,
-        "reference_scale": 1.6446412362720317,
-        "finite": true
-       },
-       "u": 7.711295934119311e-08,
-       "loss": 6.085988374574472e-08,
-       "grad": 1.078807761853286e-07
-      },
-      "unsharded": {
-       "f": {
-        "max_abs": 1.77815110857793e-07,
-        "max_rel": 1.0811787211468258e-07,
-        "reference_scale": 1.6446412362720317,
-        "finite": true
-       },
-       "u": 1.0499503654006326e-07,
-       "loss": 3.4149281394509576e-08,
-       "grad": 9.466260035680019e-07
-      }
-     }
-    },
-    "fori": {
-     "unsharded": {
-      "compile_s": 2.212717751011951,
-      "value_and_grad": {
-       "warmup": 1,
-       "repeats": 3,
-       "ms": [
-        7.491308992030099,
-        7.583245023852214,
-        7.635357993422076
-       ],
-       "min_ms": 7.491308992030099,
-       "median_ms": 7.583245023852214,
-       "mean_ms": 7.5699706697681295,
-       "ms_per_step": 1.5166490047704428
-      },
-      "loss": 1.254713535308838,
-      "grad": [
-       -0.02296275459229946,
-       0.2782121002674103,
-       -0.5607781410217285
-      ],
-      "last_step_iterations": null,
-      "partitioned": false,
-      "device0_pinned_ops": 0
-     },
-     "sharded": {
-      "compile_s": 3.0926557940256316,
-      "value_and_grad": {
-       "warmup": 1,
-       "repeats": 3,
-       "ms": [
-        81.75749101792462,
-        79.30421200580895,
-        87.70112800993957
-       ],
-       "min_ms": 79.30421200580895,
-       "median_ms": 81.75749101792462,
-       "mean_ms": 82.92094367789105,
-       "ms_per_step": 16.351498203584924
-      },
-      "loss": 1.2547136545181274,
-      "grad": [
-       -0.02296276204288006,
-       0.27821213006973267,
-       -0.5607782006263733
-      ],
-      "last_step_iterations": null,
-      "partitioned": true,
-      "device0_pinned_ops": 0
-     },
-     "parity_f": {
-      "max_abs": 1.1920928955078125e-07,
-      "max_rel": 7.248345945576085e-08,
-      "reference_scale": 1.6446412801742554,
-      "finite": true
-     },
-     "parity_u": 9.10539992100155e-08,
-     "parity_loss": 9.500916838474913e-08,
-     "parity_grad": 3.2446371218121947e-07,
-     "model": {
-      "sharded": {
-       "f": {
-        "max_abs": 1.5921614449077026e-07,
-        "max_rel": 9.680904320000592e-08,
-        "reference_scale": 1.6446412362720317,
-        "finite": true
-       },
-       "u": 7.711295934119311e-08,
-       "loss": 6.085988374574472e-08,
-       "grad": 1.496956168406564e-07
-      },
-      "unsharded": {
-       "f": {
-        "max_abs": 1.5921614449077026e-07,
-        "max_rel": 9.680904320000592e-08,
-        "reference_scale": 1.6446412362720317,
-        "finite": true
-       },
-       "u": 1.3941038599435073e-08,
-       "loss": 3.4149281394509576e-08,
-       "grad": 2.701125884550718e-07
-      }
-     }
-    }
-   },
-   "model": {
-    "loss": 1.254713578156405,
-    "grad": [
-     -0.022962760794830218,
-     0.2782120884226025,
-     -0.5607782111986673
+    "device_kinds": [
+      "cpu"
     ],
-    "wall_s": 0.0063636970007792115
-   }
-  }
- ],
- "checks": [
-  {
-   "name": "16x16 ift sharded field vs float64 model max_rel",
-   "value": 1.0302824903952639e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
+    "n_devices_visible": 4,
+    "nvidia_smi": "skipped (dry run)",
+    "xla_flags": "--xla_force_host_platform_device_count=4",
+    "jax_platforms": "cpu",
+    "git_commit": "a62b21f74e1e57a1859516102bfafeca2e541f1a"
   },
-  {
-   "name": "16x16 ift sharded far field and loss vs float64 model rel",
-   "value": 2.0911677691913456e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
+  "config": {
+    "goal": "all",
+    "out": "/tmp/mg-dry",
+    "summarise": null,
+    "keep_going": false,
+    "dry_run": true,
+    "cells": [
+      256,
+      1024
+    ],
+    "n_devices": 4,
+    "allow_fewer_devices": false,
+    "warmup": 1,
+    "repeats": 3,
+    "steps": 3,
+    "grad_steps": 5,
+    "cg_max_iters": 300,
+    "fields": 1,
+    "synthetic": "grid",
+    "mesh": null,
+    "partition": "auto"
   },
-  {
-   "name": "16x16 ift sharded gradient vs float64 model differences rel",
-   "value": 2.490999907799349e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift unsharded field vs float64 model max_rel",
-   "value": 1.0302824903952639e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift unsharded far field and loss vs float64 model rel",
-   "value": 2.0911677691913456e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift unsharded gradient vs float64 model differences rel",
-   "value": 2.630124670692494e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift: the field member is partitioned over 4 devices",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift field vs unsharded group max_rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift field vs unsharded group finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift far field vs unsharded group rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift loss vs unsharded group rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift d loss / d (field.diffusivity, far.conductance, field.exchange) vs unsharded group rel",
-   "value": 3.2149306523383637e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift every gradient component is non-zero",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "[-0.07914458215236664, 0.2780992090702057, -0.5484946370124817]",
-   "passed": true
-  },
-  {
-   "name": "16x16 ift: the last step iterated (2 <= passes < 40) on both paths",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "(5, 5)",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori sharded field vs float64 model max_rel",
-   "value": 1.0302824903952639e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori sharded far field and loss vs float64 model rel",
-   "value": 2.0911677691913456e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori sharded gradient vs float64 model differences rel",
-   "value": 1.2796131472199613e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori unsharded field vs float64 model max_rel",
-   "value": 1.0302824903952639e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori unsharded far field and loss vs float64 model rel",
-   "value": 2.0911677691913456e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori unsharded gradient vs float64 model differences rel",
-   "value": 1.2796131472199613e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori: the field member is partitioned over 4 devices",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori field vs unsharded group max_rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori field vs unsharded group finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori far field vs unsharded group rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori loss vs unsharded group rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori d loss / d (field.diffusivity, far.conductance, field.exchange) vs unsharded group rel",
-   "value": 0.0,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "16x16 fori every gradient component is non-zero",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "[-0.07914459705352783, 0.27809926867485046, -0.5484947562217712]",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift sharded field vs float64 model max_rel",
-   "value": 9.680904320000592e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift sharded far field and loss vs float64 model rel",
-   "value": 7.711295934119311e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift sharded gradient vs float64 model differences rel",
-   "value": 1.078807761853286e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift unsharded field vs float64 model max_rel",
-   "value": 1.0811787211468258e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift unsharded far field and loss vs float64 model rel",
-   "value": 1.0499503654006326e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift unsharded gradient vs float64 model differences rel",
-   "value": 9.466260035680019e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift: the field member is partitioned over 4 devices",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift field vs unsharded group max_rel",
-   "value": 7.248345945576085e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift field vs unsharded group finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift far field vs unsharded group rel",
-   "value": 1.8210801500169407e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift loss vs unsharded group rel",
-   "value": 9.500916838474913e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift d loss / d (field.diffusivity, far.conductance, field.exchange) vs unsharded group rel",
-   "value": 1.0545057815307368e-06,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift every gradient component is non-zero",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "[-0.0229627825319767, 0.27821213006973267, -0.5607787370681763]",
-   "passed": true
-  },
-  {
-   "name": "32x32 ift: the last step iterated (2 <= passes < 40) on both paths",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "(5, 6)",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori sharded field vs float64 model max_rel",
-   "value": 9.680904320000592e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori sharded far field and loss vs float64 model rel",
-   "value": 7.711295934119311e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori sharded gradient vs float64 model differences rel",
-   "value": 1.496956168406564e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori unsharded field vs float64 model max_rel",
-   "value": 9.680904320000592e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori unsharded far field and loss vs float64 model rel",
-   "value": 3.4149281394509576e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori unsharded gradient vs float64 model differences rel",
-   "value": 2.701125884550718e-07,
-   "limit": 0.0001,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori: the field member is partitioned over 4 devices",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori field vs unsharded group max_rel",
-   "value": 7.248345945576085e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori field vs unsharded group finite",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori far field vs unsharded group rel",
-   "value": 9.10539992100155e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori loss vs unsharded group rel",
-   "value": 9.500916838474913e-08,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori d loss / d (field.diffusivity, far.conductance, field.exchange) vs unsharded group rel",
-   "value": 3.2446371218121947e-07,
-   "limit": 1e-05,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "32x32 fori every gradient component is non-zero",
-   "value": true,
-   "limit": true,
-   "sense": "==",
-   "detail": "[-0.02296275459229946, 0.2782121002674103, -0.5607781410217285]",
-   "passed": true
-  }
- ],
- "passed": true,
- "wall_s": 30.494577854988165
+  "results": [
+    {
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 256,
+      "shape": [
+        16,
+        16
+      ],
+      "n_devices": 4,
+      "steps": 5,
+      "coupled_dof": 259,
+      "max_iterations": 40,
+      "tolerance": 1e-07,
+      "parameters": [
+        "field.diffusivity",
+        "far.conductance",
+        "field.exchange"
+      ],
+      "solvers": {
+        "ift": {
+          "unsharded": {
+            "compile_s": 5.1525494510133285,
+            "value_and_grad": {
+              "warmup": 1,
+              "repeats": 3,
+              "ms": [
+                3.9467810129281133,
+                3.7355459935497493,
+                3.6922860017511994
+              ],
+              "min_ms": 3.6922860017511994,
+              "median_ms": 3.7355459935497493,
+              "mean_ms": 3.791537669409687,
+              "ms_per_step": 0.7471091987099499
+            },
+            "loss": 1.2424644231796265,
+            "grad": [
+              -0.07727488875389099,
+              0.2781974971294403,
+              -0.5486755967140198
+            ],
+            "last_step_iterations": 5,
+            "partitioned": false,
+            "device0_pinned_ops": 2
+          },
+          "sharded": {
+            "compile_s": 7.40248776198132,
+            "value_and_grad": {
+              "warmup": 1,
+              "repeats": 3,
+              "ms": [
+                224.34187200269662,
+                210.10270898113959,
+                210.15250898199156
+              ],
+              "min_ms": 210.10270898113959,
+              "median_ms": 210.15250898199156,
+              "mean_ms": 214.8656966552759,
+              "ms_per_step": 42.03050179639831
+            },
+            "loss": 1.242464542388916,
+            "grad": [
+              -0.07727484405040741,
+              0.27819743752479553,
+              -0.5486751794815063
+            ],
+            "last_step_iterations": 5,
+            "partitioned": true,
+            "device0_pinned_ops": 2
+          },
+          "parity_f": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_rel": 7.379110976516127e-08,
+            "reference_scale": 1.6154966354370117,
+            "finite": true
+          },
+          "parity_averages": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 0.8418800830841064,
+            "finite": true
+          },
+          "parity_u": 9.105579006468421e-08,
+          "parity_loss": 9.594583742342443e-08,
+          "parity_grad": 7.604357035860735e-07,
+          "model": {
+            "sharded": {
+              "f": {
+                "max_abs": 1.505151363545565e-07,
+                "max_rel": 9.316957954524141e-08,
+                "reference_scale": 1.615496571834041,
+                "finite": true
+              },
+              "averages": {
+                "max_abs": 2.1737772915031428e-08,
+                "max_rel": 2.5820510342511582e-08,
+                "reference_scale": 0.841880064595074,
+                "finite": true
+              },
+              "u": 2.3539440350745677e-08,
+              "loss": 3.9533121987939257e-08,
+              "grad": 9.836800524669125e-08
+            },
+            "unsharded": {
+              "f": {
+                "max_abs": 1.505151363545565e-07,
+                "max_rel": 9.316957954524141e-08,
+                "reference_scale": 1.615496571834041,
+                "finite": true
+              },
+              "averages": {
+                "max_abs": 2.1737772915031428e-08,
+                "max_rel": 2.5820510342511582e-08,
+                "reference_scale": 0.841880064595074,
+                "finite": true
+              },
+              "u": 6.751634356618453e-08,
+              "loss": 5.641271002292047e-08,
+              "grad": 6.620682017996812e-07
+            }
+          }
+        },
+        "fori": {
+          "unsharded": {
+            "compile_s": 2.7096679219976068,
+            "value_and_grad": {
+              "warmup": 1,
+              "repeats": 3,
+              "ms": [
+                3.970231977291405,
+                3.825361985946074,
+                3.5406960232649
+              ],
+              "min_ms": 3.5406960232649,
+              "median_ms": 3.825361985946074,
+              "mean_ms": 3.7787633288341262,
+              "ms_per_step": 0.7650723971892148
+            },
+            "loss": 1.2424644231796265,
+            "grad": [
+              -0.077274851500988,
+              0.27819743752479553,
+              -0.5486752390861511
+            ],
+            "last_step_iterations": null,
+            "partitioned": false,
+            "device0_pinned_ops": 0
+          },
+          "sharded": {
+            "compile_s": 4.150676524004666,
+            "value_and_grad": {
+              "warmup": 1,
+              "repeats": 3,
+              "ms": [
+                127.29173398111016,
+                118.84368900791742,
+                113.80982998525724
+              ],
+              "min_ms": 113.80982998525724,
+              "median_ms": 118.84368900791742,
+              "mean_ms": 119.98175099142827,
+              "ms_per_step": 23.768737801583484
+            },
+            "loss": 1.242464542388916,
+            "grad": [
+              -0.0772748589515686,
+              0.27819740772247314,
+              -0.5486751794815063
+            ],
+            "last_step_iterations": null,
+            "partitioned": true,
+            "device0_pinned_ops": 0
+          },
+          "parity_f": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_rel": 7.379110976516127e-08,
+            "reference_scale": 1.6154966354370117,
+            "finite": true
+          },
+          "parity_averages": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 0.8418800830841064,
+            "finite": true
+          },
+          "parity_u": 9.105579006468421e-08,
+          "parity_loss": 9.594583742342443e-08,
+          "parity_grad": 1.0863374274856188e-07,
+          "model": {
+            "sharded": {
+              "f": {
+                "max_abs": 1.505151363545565e-07,
+                "max_rel": 9.316957954524141e-08,
+                "reference_scale": 1.615496571834041,
+                "finite": true
+              },
+              "averages": {
+                "max_abs": 2.1737772915031428e-08,
+                "max_rel": 2.5820510342511582e-08,
+                "reference_scale": 0.841880064595074,
+                "finite": true
+              },
+              "u": 2.3539440350745677e-08,
+              "loss": 3.9533121987939257e-08,
+              "grad": 2.4759057393774226e-07
+            },
+            "unsharded": {
+              "f": {
+                "max_abs": 1.505151363545565e-07,
+                "max_rel": 9.316957954524141e-08,
+                "reference_scale": 1.615496571834041,
+                "finite": true
+              },
+              "averages": {
+                "max_abs": 2.1737772915031428e-08,
+                "max_rel": 2.5820510342511582e-08,
+                "reference_scale": 0.841880064595074,
+                "finite": true
+              },
+              "u": 6.751634356618453e-08,
+              "loss": 5.641271002292047e-08,
+              "grad": 1.511739315432612e-07
+            }
+          }
+        }
+      },
+      "model": {
+        "loss": 1.2424644932704156,
+        "grad": [
+          -0.07727483981904666,
+          0.27819742287604754,
+          -0.5486752334535946
+        ],
+        "wall_s": 0.01476230297703296
+      }
+    },
+    {
+      "mesh": "2d",
+      "mesh_shape": [
+        2,
+        2
+      ],
+      "cells": 1024,
+      "shape": [
+        32,
+        32
+      ],
+      "n_devices": 4,
+      "steps": 5,
+      "coupled_dof": 1027,
+      "max_iterations": 40,
+      "tolerance": 1e-07,
+      "parameters": [
+        "field.diffusivity",
+        "far.conductance",
+        "field.exchange"
+      ],
+      "solvers": {
+        "ift": {
+          "unsharded": {
+            "compile_s": 4.2193160300084855,
+            "value_and_grad": {
+              "warmup": 1,
+              "repeats": 3,
+              "ms": [
+                18.38115500868298,
+                19.903964013792574,
+                19.84134499798529
+              ],
+              "min_ms": 18.38115500868298,
+              "median_ms": 19.84134499798529,
+              "mean_ms": 19.37548800682028,
+              "ms_per_step": 3.9682689995970577
+            },
+            "loss": 1.2546660900115967,
+            "grad": [
+              -0.023205379024147987,
+              0.2781974971294403,
+              -0.5607622861862183
+            ],
+            "last_step_iterations": 5,
+            "partitioned": false,
+            "device0_pinned_ops": 2
+          },
+          "sharded": {
+            "compile_s": 7.185492111981148,
+            "value_and_grad": {
+              "warmup": 1,
+              "repeats": 3,
+              "ms": [
+                221.98069401201792,
+                226.75038399756886,
+                276.81119900080375
+              ],
+              "min_ms": 221.98069401201792,
+              "median_ms": 226.75038399756886,
+              "mean_ms": 241.84742567013018,
+              "ms_per_step": 45.35007679951377
+            },
+            "loss": 1.2546659708023071,
+            "grad": [
+              -0.023205379024147987,
+              0.27819740772247314,
+              -0.5607622861862183
+            ],
+            "last_step_iterations": 5,
+            "partitioned": true,
+            "device0_pinned_ops": 2
+          },
+          "parity_f": {
+            "max_abs": 1.1920928955078125e-07,
+            "max_rel": 7.24824034469152e-08,
+            "reference_scale": 1.644665241241455,
+            "finite": true
+          },
+          "parity_averages": {
+            "max_abs": 1.7881393432617188e-07,
+            "max_rel": 2.1239831253788656e-07,
+            "reference_scale": 0.841880202293396,
+            "finite": true
+          },
+          "parity_u": 1.8211154696474684e-07,
+          "parity_loss": 9.501276116395193e-08,
+          "parity_grad": 3.213794807128925e-07,
+          "model": {
+            "sharded": {
+              "f": {
+                "max_abs": 1.8130651868730752e-07,
+                "max_rel": 1.1023916626602808e-07,
+                "reference_scale": 1.644665184148621,
+                "finite": true
+              },
+              "averages": {
+                "max_abs": 5.2894398083758176e-08,
+                "max_rel": 6.282889947033882e-08,
+                "reference_scale": 0.841880066811123,
+                "finite": true
+              },
+              "u": 6.991394715518903e-08,
+              "loss": 3.4827984862588735e-08,
+              "grad": 7.815687246043806e-08
+            },
+            "unsharded": {
+              "f": {
+                "max_abs": 1.8130651868730752e-07,
+                "max_rel": 1.1023916626602808e-07,
+                "reference_scale": 1.644665184148621,
+                "finite": true
+              },
+              "averages": {
+                "max_abs": 1.7210368763453943e-07,
+                "max_rel": 2.044277972828535e-07,
+                "reference_scale": 0.841880066811123,
+                "finite": true
+              },
+              "u": 1.1219762024204e-07,
+              "loss": 6.018478201968552e-08,
+              "grad": 2.6092282612074144e-07
+            }
+          }
+        },
+        "fori": {
+          "unsharded": {
+            "compile_s": 2.8904975640180055,
+            "value_and_grad": {
+              "warmup": 1,
+              "repeats": 3,
+              "ms": [
+                12.14874000288546,
+                9.240243001841009,
+                9.055872011231259
+              ],
+              "min_ms": 9.055872011231259,
+              "median_ms": 9.240243001841009,
+              "mean_ms": 10.148285005319243,
+              "ms_per_step": 1.8480486003682017
+            },
+            "loss": 1.2546659708023071,
+            "grad": [
+              -0.023205382749438286,
+              0.27819743752479553,
+              -0.560762345790863
+            ],
+            "last_step_iterations": null,
+            "partitioned": false,
+            "device0_pinned_ops": 0
+          },
+          "sharded": {
+            "compile_s": 4.519801891001407,
+            "value_and_grad": {
+              "warmup": 1,
+              "repeats": 3,
+              "ms": [
+                167.03554597916082,
+                157.59197899024002,
+                159.27481002290733
+              ],
+              "min_ms": 157.59197899024002,
+              "median_ms": 159.27481002290733,
+              "mean_ms": 161.3007783307694,
+              "ms_per_step": 31.854962004581466
+            },
+            "loss": 1.2546659708023071,
+            "grad": [
+              -0.023205380886793137,
+              0.27819740772247314,
+              -0.560762345790863
+            ],
+            "last_step_iterations": null,
+            "partitioned": true,
+            "device0_pinned_ops": 0
+          },
+          "parity_f": {
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+            "reference_scale": 1.644665241241455,
+            "finite": true
+          },
+          "parity_averages": {
+            "max_abs": 5.960464477539063e-08,
+            "max_rel": 7.079944753775097e-08,
+            "reference_scale": 0.8418800830841064,
+            "finite": true
+          },
+          "parity_u": 0.0,
+          "parity_loss": 0.0,
+          "parity_grad": 1.0712651652314034e-07,
+          "model": {
+            "sharded": {
+              "f": {
+                "max_abs": 1.8130651868730752e-07,
+                "max_rel": 1.1023916626602808e-07,
+                "reference_scale": 1.644665184148621,
+                "finite": true
+              },
+              "averages": {
+                "max_abs": 5.2894398083758176e-08,
+                "max_rel": 6.282889947033882e-08,
+                "reference_scale": 0.841880066811123,
+                "finite": true
+              },
+              "u": 6.991394715518903e-08,
+              "loss": 3.4827984862588735e-08,
+              "grad": 8.393673966689368e-08
+            },
+            "unsharded": {
+              "f": {
+                "max_abs": 1.8130651868730752e-07,
+                "max_rel": 1.1023916626602808e-07,
+                "reference_scale": 1.644665184148621,
+                "finite": true
+              },
+              "averages": {
+                "max_abs": 1.627298340522998e-08,
+                "max_rel": 1.932933685776509e-08,
+                "reference_scale": 0.841880066811123,
+                "finite": true
+              },
+              "u": 6.991394715518903e-08,
+              "loss": 3.4827984862588735e-08,
+              "grad": 1.642045583535244e-07
+            }
+          }
+        }
+      },
+      "model": {
+        "loss": 1.254666014499796,
+        "grad": [
+          -0.023205378939009286,
+          0.2781974245413821,
+          -0.5607623300136482
+        ],
+        "wall_s": 0.13320454201311804
+      }
+    }
+  ],
+  "checks": [
+    {
+      "name": "2d 2x2 16x16 ift sharded field vs float64 model max_rel",
+      "value": 9.316957954524141e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift sharded domain integral averages vs float64 model max_rel",
+      "value": 2.5820510342511582e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift sharded far field and loss vs float64 model rel",
+      "value": 3.9533121987939257e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift sharded gradient vs float64 model differences rel",
+      "value": 9.836800524669125e-08,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift unsharded field vs float64 model max_rel",
+      "value": 9.316957954524141e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift unsharded domain integral averages vs float64 model max_rel",
+      "value": 2.5820510342511582e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift unsharded far field and loss vs float64 model rel",
+      "value": 6.751634356618453e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift unsharded gradient vs float64 model differences rel",
+      "value": 6.620682017996812e-07,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift: the field member is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift field vs unsharded group max_rel",
+      "value": 7.379110976516127e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift field vs unsharded group finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift domain integral averages vs unsharded group max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift domain integral averages vs unsharded group finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift far field vs unsharded group rel",
+      "value": 9.105579006468421e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift loss vs unsharded group rel",
+      "value": 9.594583742342443e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift d loss / d (field.diffusivity, far.conductance, field.exchange) vs unsharded group rel",
+      "value": 7.604357035860735e-07,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift every gradient component is non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.07727488875389099, 0.2781974971294403, -0.5486755967140198]",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 ift: the last step iterated (2 <= passes < 40) on both paths",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "(5, 5)",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori sharded field vs float64 model max_rel",
+      "value": 9.316957954524141e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori sharded domain integral averages vs float64 model max_rel",
+      "value": 2.5820510342511582e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori sharded far field and loss vs float64 model rel",
+      "value": 3.9533121987939257e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori sharded gradient vs float64 model differences rel",
+      "value": 2.4759057393774226e-07,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori unsharded field vs float64 model max_rel",
+      "value": 9.316957954524141e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori unsharded domain integral averages vs float64 model max_rel",
+      "value": 2.5820510342511582e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori unsharded far field and loss vs float64 model rel",
+      "value": 6.751634356618453e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori unsharded gradient vs float64 model differences rel",
+      "value": 1.511739315432612e-07,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori: the field member is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori field vs unsharded group max_rel",
+      "value": 7.379110976516127e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori field vs unsharded group finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori domain integral averages vs unsharded group max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori domain integral averages vs unsharded group finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori far field vs unsharded group rel",
+      "value": 9.105579006468421e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori loss vs unsharded group rel",
+      "value": 9.594583742342443e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori d loss / d (field.diffusivity, far.conductance, field.exchange) vs unsharded group rel",
+      "value": 1.0863374274856188e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 16x16 fori every gradient component is non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.077274851500988, 0.27819743752479553, -0.5486752390861511]",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift sharded field vs float64 model max_rel",
+      "value": 1.1023916626602808e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift sharded domain integral averages vs float64 model max_rel",
+      "value": 6.282889947033882e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift sharded far field and loss vs float64 model rel",
+      "value": 6.991394715518903e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift sharded gradient vs float64 model differences rel",
+      "value": 7.815687246043806e-08,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift unsharded field vs float64 model max_rel",
+      "value": 1.1023916626602808e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift unsharded domain integral averages vs float64 model max_rel",
+      "value": 2.044277972828535e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift unsharded far field and loss vs float64 model rel",
+      "value": 1.1219762024204e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift unsharded gradient vs float64 model differences rel",
+      "value": 2.6092282612074144e-07,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift: the field member is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift field vs unsharded group max_rel",
+      "value": 7.24824034469152e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift field vs unsharded group finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift domain integral averages vs unsharded group max_rel",
+      "value": 2.1239831253788656e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift domain integral averages vs unsharded group finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift far field vs unsharded group rel",
+      "value": 1.8211154696474684e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift loss vs unsharded group rel",
+      "value": 9.501276116395193e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift d loss / d (field.diffusivity, far.conductance, field.exchange) vs unsharded group rel",
+      "value": 3.213794807128925e-07,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift every gradient component is non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.023205379024147987, 0.2781974971294403, -0.5607622861862183]",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 ift: the last step iterated (2 <= passes < 40) on both paths",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "(5, 5)",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori sharded field vs float64 model max_rel",
+      "value": 1.1023916626602808e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori sharded domain integral averages vs float64 model max_rel",
+      "value": 6.282889947033882e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori sharded far field and loss vs float64 model rel",
+      "value": 6.991394715518903e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori sharded gradient vs float64 model differences rel",
+      "value": 8.393673966689368e-08,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori unsharded field vs float64 model max_rel",
+      "value": 1.1023916626602808e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori unsharded domain integral averages vs float64 model max_rel",
+      "value": 1.932933685776509e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori unsharded far field and loss vs float64 model rel",
+      "value": 6.991394715518903e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori unsharded gradient vs float64 model differences rel",
+      "value": 1.642045583535244e-07,
+      "limit": 0.0001,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori: the field member is partitioned over 4 devices",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori field vs unsharded group max_rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori field vs unsharded group finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori domain integral averages vs unsharded group max_rel",
+      "value": 7.079944753775097e-08,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori domain integral averages vs unsharded group finite",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori far field vs unsharded group rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori loss vs unsharded group rel",
+      "value": 0.0,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori d loss / d (field.diffusivity, far.conductance, field.exchange) vs unsharded group rel",
+      "value": 1.0712651652314034e-07,
+      "limit": 1e-05,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d 2x2 32x32 fori every gradient component is non-zero",
+      "value": true,
+      "limit": true,
+      "sense": "==",
+      "detail": "[-0.023205382749438286, 0.27819743752479553, -0.560762345790863]",
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "wall_s": 42.93336639300105
 }

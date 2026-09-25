@@ -1,454 +1,454 @@
 {
- "schema_version": 4,
- "goal": "halo",
- "dry_run": true,
- "allow_fewer_devices": false,
- "n_devices": 4,
- "environment": {
-  "hostname": "dry-run-host",
-  "timestamp_utc": "2026-09-25T06:09:08Z",
-  "python": "3.12.3",
-  "jax": "0.11.0",
-  "jaxlib": "0.11.0",
-  "platform": "cpu",
-  "devices": [
-   "cpu:0",
-   "cpu:1",
-   "cpu:2",
-   "cpu:3"
-  ],
-  "device_kinds": [
-   "cpu"
-  ],
-  "n_devices_visible": 4,
-  "nvidia_smi": "skipped (dry run)",
-  "xla_flags": "--xla_force_host_platform_device_count=4",
-  "jax_platforms": "cpu",
-  "git_commit": "24bbcf741c518714f91b96dbf0afe564a5fd190b"
- },
- "config": {
-  "goal": "all",
-  "out": "/tmp/mg-dry",
-  "summarise": null,
-  "keep_going": false,
+  "schema_version": 5,
+  "goal": "halo",
   "dry_run": true,
-  "cells": [
-   256,
-   1024
-  ],
-  "n_devices": 4,
   "allow_fewer_devices": false,
-  "warmup": 1,
-  "repeats": 3,
-  "steps": 3,
-  "grad_steps": 5,
-  "cg_max_iters": 300,
-  "fields": 1,
-  "synthetic": "grid",
-  "mesh": null,
-  "partition": "auto"
- },
- "results": [
-  {
-   "n_devices": 4,
-   "stencil_cases": [
+  "n_devices": 4,
+  "environment": {
+    "hostname": "dry-run-host",
+    "timestamp_utc": "2026-09-25T10:18:22Z",
+    "python": "3.12.3",
+    "jax": "0.11.0",
+    "jaxlib": "0.11.0",
+    "platform": "cpu",
+    "devices": [
+      "cpu:0",
+      "cpu:1",
+      "cpu:2",
+      "cpu:3"
+    ],
+    "device_kinds": [
+      "cpu"
+    ],
+    "n_devices_visible": 4,
+    "nvidia_smi": "skipped (dry run)",
+    "xla_flags": "--xla_force_host_platform_device_count=4",
+    "jax_platforms": "cpu",
+    "git_commit": "a62b21f74e1e57a1859516102bfafeca2e541f1a"
+  },
+  "config": {
+    "goal": "all",
+    "out": "/tmp/mg-dry",
+    "summarise": null,
+    "keep_going": false,
+    "dry_run": true,
+    "cells": [
+      256,
+      1024
+    ],
+    "n_devices": 4,
+    "allow_fewer_devices": false,
+    "warmup": 1,
+    "repeats": 3,
+    "steps": 3,
+    "grad_steps": 5,
+    "cg_max_iters": 300,
+    "fields": 1,
+    "synthetic": "grid",
+    "mesh": null,
+    "partition": "auto"
+  },
+  "results": [
     {
-     "mesh": "1d",
-     "mesh_shape": [
-      4,
-      1
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 1,
-     "boundary": "periodic",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "1d",
-     "mesh_shape": [
-      4,
-      1
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 2,
-     "boundary": "periodic",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "1d",
-     "mesh_shape": [
-      4,
-      1
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 1,
-     "boundary": "edge",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "1d",
-     "mesh_shape": [
-      4,
-      1
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 2,
-     "boundary": "edge",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "1d",
-     "mesh_shape": [
-      4,
-      1
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 1,
-     "boundary": "zero",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "1d",
-     "mesh_shape": [
-      4,
-      1
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 2,
-     "boundary": "zero",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "2d",
-     "mesh_shape": [
-      2,
-      2
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 1,
-     "boundary": "periodic",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "2d",
-     "mesh_shape": [
-      2,
-      2
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 2,
-     "boundary": "periodic",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "2d",
-     "mesh_shape": [
-      2,
-      2
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 1,
-     "boundary": "edge",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "2d",
-     "mesh_shape": [
-      2,
-      2
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 2,
-     "boundary": "edge",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "2d",
-     "mesh_shape": [
-      2,
-      2
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 1,
-     "boundary": "zero",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
-    },
-    {
-     "mesh": "2d",
-     "mesh_shape": [
-      2,
-      2
-     ],
-     "shape": [
-      32,
-      32
-     ],
-     "halo": 2,
-     "boundary": "zero",
-     "forward_max_abs": 0.0,
-     "adjoint_max_abs": 0.0
+      "n_devices": 4,
+      "stencil_cases": [
+        {
+          "mesh": "1d",
+          "mesh_shape": [
+            4,
+            1
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 1,
+          "boundary": "periodic",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d",
+          "mesh_shape": [
+            4,
+            1
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 2,
+          "boundary": "periodic",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d",
+          "mesh_shape": [
+            4,
+            1
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 1,
+          "boundary": "edge",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d",
+          "mesh_shape": [
+            4,
+            1
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 2,
+          "boundary": "edge",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d",
+          "mesh_shape": [
+            4,
+            1
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 1,
+          "boundary": "zero",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d",
+          "mesh_shape": [
+            4,
+            1
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 2,
+          "boundary": "zero",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d",
+          "mesh_shape": [
+            2,
+            2
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 1,
+          "boundary": "periodic",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d",
+          "mesh_shape": [
+            2,
+            2
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 2,
+          "boundary": "periodic",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d",
+          "mesh_shape": [
+            2,
+            2
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 1,
+          "boundary": "edge",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d",
+          "mesh_shape": [
+            2,
+            2
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 2,
+          "boundary": "edge",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d",
+          "mesh_shape": [
+            2,
+            2
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 1,
+          "boundary": "zero",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d",
+          "mesh_shape": [
+            2,
+            2
+          ],
+          "shape": [
+            32,
+            32
+          ],
+          "halo": 2,
+          "boundary": "zero",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        }
+      ],
+      "unstructured": {
+        "cells": 1024,
+        "partition": "rcm",
+        "n_local_max": 256,
+        "n_ghost_max": 55,
+        "methods": {
+          "all_to_all": {
+            "forward_max_abs": 0.0,
+            "adjoint_max_abs": 0.0
+          },
+          "ppermute": {
+            "forward_max_abs": 0.0,
+            "adjoint_max_abs": 0.0
+          }
+        }
+      }
     }
-   ],
-   "unstructured": {
-    "cells": 1024,
-    "partition": "rcm",
-    "n_local_max": 256,
-    "n_ghost_max": 55,
-    "methods": {
-     "all_to_all": {
-      "forward_max_abs": 0.0,
-      "adjoint_max_abs": 0.0
-     },
-     "ppermute": {
-      "forward_max_abs": 0.0,
-      "adjoint_max_abs": 0.0
-     }
+  ],
+  "checks": [
+    {
+      "name": "1d mesh 4x1, 32x32, halo 1, periodic: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 1, periodic: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 2, periodic: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 2, periodic: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 1, edge: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 1, edge: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 2, edge: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 2, edge: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 1, zero: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 1, zero: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 2, zero: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "1d mesh 4x1, 32x32, halo 2, zero: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 1, periodic: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 1, periodic: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 2, periodic: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 2, periodic: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 1, edge: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 1, edge: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 2, edge: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 2, edge: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 1, zero: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 1, zero: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 2, zero: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x32, halo 2, zero: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "unstructured 1024 cells all_to_all: owned and ghost slots vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "unstructured 1024 cells all_to_all: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "unstructured 1024 cells ppermute: owned and ghost slots vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "unstructured 1024 cells ppermute: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
     }
-   }
-  }
- ],
- "checks": [
-  {
-   "name": "1d mesh 4x1, 32x32, halo 1, periodic: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 1, periodic: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 2, periodic: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 2, periodic: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 1, edge: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 1, edge: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 2, edge: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 2, edge: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 1, zero: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 1, zero: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 2, zero: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "1d mesh 4x1, 32x32, halo 2, zero: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 1, periodic: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 1, periodic: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 2, periodic: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 2, periodic: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 1, edge: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 1, edge: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 2, edge: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 2, edge: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 1, zero: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 1, zero: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 2, zero: forward vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "2d mesh 2x2, 32x32, halo 2, zero: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "unstructured 1024 cells all_to_all: owned and ghost slots vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "unstructured 1024 cells all_to_all: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "unstructured 1024 cells ppermute: owned and ghost slots vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  },
-  {
-   "name": "unstructured 1024 cells ppermute: adjoint vs NumPy max_abs",
-   "value": 0.0,
-   "limit": 0.0,
-   "sense": "<=",
-   "passed": true
-  }
- ],
- "passed": true,
- "wall_s": 5.174948589003179
+  ],
+  "passed": true,
+  "wall_s": 4.641266207006993
 }

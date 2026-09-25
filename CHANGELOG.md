@@ -301,6 +301,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`ParamSpec.from_dict` refuses a non-boolean `trainable` or a non-numeric bound** (`"false"` read as trainable, `true` as 1.0): a saved
+  graph carrying one fails to load, a USD stage warns and skips it.  **`run_pod.py`'s stencil, hybrid and coupled goals now fail on a
+  broken stencil wrapper** (four seeded faults; schema 5, pencil mesh, D2Q9).  Action: write JSON booleans; re-run schema-4 dry runs.
 - **`PUT /graph/params` answers 200 only for a write a saved graph reproduces** (MADD-ANO-047, 048, 049): the constructor is asked with every changed key and the live values a save carries (a live leaf skipped it: a `HeatNode` past its Fourier limit, `rho_gas > rho_liquid`); a write the running node would honour unlike its rebuild is refused
   (`LBMPipeNode`'s `G` crossing 0; `HeatNode` now fixes its grid at construction, so `grid_points` on a uniform rod is refused); a non-finite value is a 400 before any write (it was stored, then a 500 on every GET); params carry POST's 422 bounds, and a
   state over the cap or of another layout is refused before anything that size is built.  Action: rebuild a node to change such a value, and check that configs saved after a REST write still load.

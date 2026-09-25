@@ -211,6 +211,22 @@ def _a_case_the_runner_does_not_run(rp, d):
     return ["hybrid"]
 
 
+def _the_pencil_mesh_cases_left_out(rp, d):
+    """A stencil file as a runner that knew only the 1-D mesh would write
+    it on four devices -- results and checks consistent, every one of
+    them passing -- and a hybrid file relabelled onto the 1-D mesh.  The
+    pencil cases are the ones a fault in the wrapper's second exchanged
+    axis fails; a file without them must not decide item 1."""
+    st = d["stencil"][0]
+    st["results"] = [r for r in st["results"] if r["mesh"] == "1d"]
+    st["checks"] = [c for c in st["checks"] if " 2d " not in c["name"]]
+    hy = d["hybrid"][0]
+    for r in hy["results"]:
+        r["mesh"], r["mesh_shape"] = "1d", [4, 1]
+    hy["checks"] = rp.hybrid_checks(hy["results"], 4)
+    return ["stencil", "hybrid"]
+
+
 def _a_stencil_refusal_that_recommends_the_unstructured_wrapper(rp, d):
     """The stencil refusal as it read before 0.4.0, recommending the wrapper
     that now refuses a stencil node, with its check still recorded as passed.
@@ -255,6 +271,7 @@ _SEEDS = [
     (_device_list_and_count_disagree,
      "its environment lists 4 device(s) but records n_devices_visible 8"),
     (_a_case_the_runner_does_not_run, "holds case(s) the runner does not run"),
+    (_the_pencil_mesh_cases_left_out, "case(s) the runner"),
     (_a_stencil_refusal_that_recommends_the_unstructured_wrapper,
      "check value(s) disagree with its results: 'stencil refusal names the cell count, "
      "the device count and that the unstructured wrapper is not a way out for a stencil "

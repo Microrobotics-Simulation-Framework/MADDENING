@@ -1355,6 +1355,80 @@ class TestCitationGateReadsWhatPandocReads:
     ):
         assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 0
 
+    # -- the in-text form: ``@Key`` in prose, outside any bracket ------------
+    #
+    # audit_040_p4_2, C5: ``As @NoSuchKey2099 shows.`` appended to a guide
+    # passed, because only bracketed citations were read.
+
+    @pytest.mark.parametrize("doc", [
+        pytest.param("See [@Crank1975].\n\nAs @Nobody2031 shows.\n", id="C5-mid-sentence"),
+        pytest.param("See [@Crank1975].\n\n@Nobody2031 says so.\n", id="line-start"),
+        pytest.param("See [@Crank1975].\n\nAs @Nobody2031 [p. 3] shows.\n",
+                     id="with-a-locator"),
+        pytest.param("See [@Crank1975].\n\nAs @{Nobody 2031} shows.\n", id="braced"),
+        pytest.param("See [@Crank1975].\n\n```python\nx = 1\n```\n\nAs @Nobody2031 shows.\n",
+                     id="after-a-closed-fence"),
+    ])
+    def test_an_in_text_citation_of_an_undefined_key_fails(
+        self, citations_gate, tmp_path, monkeypatch, capsys, doc
+    ):
+        assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 1
+        assert "(an in-text citation" in capsys.readouterr().err
+
+    def test_the_audits_c5_on_the_shipped_heat_guide_fails(
+        self, citations_gate, tmp_path, monkeypatch
+    ):
+        guide = REPO_ROOT / "docs" / "algorithm_guide" / "nodes" / "heat_node.md"
+        docs = tmp_path / "docs"
+        docs.mkdir()
+        (docs / "heat_node.md").write_text(
+            guide.read_text() + "\nAs @NoSuchKey2099 shows.\n")
+        monkeypatch.setenv("BIB_PATH", str(REPO_ROOT / "docs" / "bibliography.bib"))
+        assert citations_gate.main([str(docs)]) == 1
+
+    def test_an_in_text_citation_of_a_defined_key_passes_and_counts(
+        self, citations_gate, tmp_path, monkeypatch, capsys
+    ):
+        doc = "As @Crank1975 shows, and [@Crank1975] again.\n"
+        assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 0
+        assert "OK: 2 citation(s) verified" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("doc", [
+        pytest.param("Tag it `@stability(StabilityLevel.STABLE)`.\n", id="inline-code"),
+        pytest.param("Tag it ``@stability`` twice.\n", id="double-backtick-code"),
+        pytest.param("```python\n@pytest.mark.slow\ndef test_x(): ...\n```\n",
+                     id="fenced-code"),
+        pytest.param("~~~~\n@given(st.floats())\n~~~~\n", id="tilde-fence"),
+        pytest.param("```\n@unclosed\n", id="unclosed-fence-runs-to-the-end"),
+        pytest.param("<!-- @NotACitation -->\n", id="html-comment"),
+        pytest.param("Mail me@example.org or see a@b.\n", id="address"),
+        pytest.param("Compute `A @ B`, or A @ B in prose.\n", id="matmul"),
+        pytest.param("A [bracketed @Crank1975 key] is read once.\n",
+                     id="inside-a-bracket"),
+    ])
+    def test_code_comments_and_addresses_are_not_in_text_citations(
+        self, citations_gate, tmp_path, doc
+    ):
+        path = tmp_path / "g.md"
+        path.write_text(doc)
+        assert citations_gate.extract_in_text_citations(str(path)) == []
+
+    def test_a_decorator_written_in_prose_is_read_as_pandoc_reads_it(
+        self, citations_gate, tmp_path, monkeypatch, capsys
+    ):
+        """Pandoc renders it as a broken citation; the gate says so, and how
+        to write it instead."""
+        doc = "See [@Crank1975].  Current @stability tagging.\n"
+        assert self._gate(citations_gate, tmp_path, monkeypatch, _CRANK, doc) == 1
+        assert "put it in backticks" in capsys.readouterr().err
+
+    def test_an_in_text_citation_is_reported_on_its_own_line(
+        self, citations_gate, tmp_path
+    ):
+        doc = tmp_path / "g.md"
+        doc.write_text("Intro.\n\n```\ncode\n```\nAs @Nobody2031 shows.\n")
+        assert citations_gate.extract_in_text_citations(str(doc)) == [(6, "Nobody2031")]
+
     def test_c10_an_entry_inside_a_comment_block_is_not_defined(
         self, citations_gate, tmp_path, monkeypatch, capsys
     ):

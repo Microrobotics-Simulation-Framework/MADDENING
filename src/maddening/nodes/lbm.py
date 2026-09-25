@@ -680,7 +680,8 @@ class LBMNode(SimulationNode):
     ValueError
         For an unknown lattice or face, a face on an axis the lattice does
         not have, ``grid_shape`` or ``wall_mask`` of the wrong rank or
-        shape, ``tau <= 0.5``, or ``inlet_face == outlet_face``.
+        shape, a non-finite ``viscosity`` or ``tau <= 0.5``, or
+        ``inlet_face == outlet_face``.
 
     Notes
     -----
@@ -815,6 +816,16 @@ class LBMNode(SimulationNode):
                 f"requires {lat.D} dims."
             )
 
+        # A non-finite viscosity passed ``tau > 0.5`` below (inf) or every
+        # comparison (nan): at inf, ``(f - f_eq) / tau`` is 0 and the node
+        # ran with no collision at all, a different model with no error.
+        if not np.isfinite(viscosity):
+            raise ValueError(
+                f"viscosity must be a finite number > 0 (got {viscosity}).  "
+                "tau = 0.5 + viscosity / cs2 would not be finite, and BGK "
+                "collision relaxes by (f - f_eq) / tau: with tau = inf the node "
+                "would not collide at all."
+            )
         # Compute tau from viscosity
         tau = 0.5 + viscosity / lat.cs2
         if tau <= 0.5:
@@ -1112,26 +1123,10 @@ class LBMNode(SimulationNode):
             wall_pad = self._wall_mask
 
         # Body force first (needed for the Guo half-correction below).
-        # Three input shapes are accepted:
-        #   (D,)                      -- uniform, broadcast across grid
-        #   density_pad.shape + (D,)  -- already padded local field
-        #   density_pad.interior shape (e.g. (nx,ny,nz,D)) -- pad locally
-        # The first form is the right call under sharding: send a
-        # constant vector, broadcast trivially per device.
         target_density_shape = f_pad.shape[:-1]  # padded spatial shape
-        force = boundary_inputs.get("body_force", None)
-        if force is None:
-            force = jnp.zeros(target_density_shape + (D,), dtype=jnp.float32)
-        elif force.ndim == 1 and force.shape == (D,):
-            force = jnp.broadcast_to(
-                force, target_density_shape + (D,),
-            ).astype(jnp.float32)
-        elif force.shape != target_density_shape + (D,):
-            pad_widths = [
-                (halo, halo) if d < ndim else (0, 0)
-                for d in range(force.ndim)
-            ]
-            force = jnp.pad(force, pad_widths)
+        force = self._local_body_force(
+            boundary_inputs.get("body_force", None), target_density_shape, halo,
+        )
 
         # BGK collision is purely local, so we collide on the *entire*
         # padded array -- halo cells included -- so that the post-stream
@@ -1217,6 +1212,53 @@ class LBMNode(SimulationNode):
         if "wall_mask" in state_padded:
             result["wall_mask"] = state_padded["wall_mask"]
         return result
+
+    def _local_body_force(self, force, padded_shape: tuple, halo: int):
+        """``body_force`` at this block's halo-padded shape, or a refusal.
+
+        Per block, the forms :meth:`update` takes: a uniform force
+        (``(D,)``, or ``(1,)`` for the same value on every component),
+        broadcast; a per-cell field
+        as :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
+        delivers it, already at the padded block's shape; and, when the
+        block is the whole grid (a direct call), the whole-grid field
+        ``(*grid_shape, D)``, whose halos are filled periodically -- the
+        node's :meth:`halo_boundary`, and what :meth:`update`'s streaming
+        wraps to.  Anything else is refused, naming its shape.  Until 0.4.0
+        any other shape was zero-padded and applied, so a caller's force of
+        shape ``(4, 8, 2)`` on a ``(16, 8)`` grid split four ways was read
+        by every slab as its own (``update`` refuses it), and a whole-grid
+        force on a direct call collided the halo cells with no force.
+        """
+        D = self._D
+        target = tuple(padded_shape) + (D,)
+        if force is None:
+            return jnp.zeros(target, dtype=jnp.float32)
+        force = jnp.asarray(force)
+        shape = tuple(force.shape)
+        # ``(D,)`` or ``(1,)``: ``update`` indexes ``force[..., None, :]``,
+        # so it refuses a 0-d force, and so does this.
+        uniform = len(shape) == 1 and shape[0] in (1, D)
+        if uniform:
+            return jnp.broadcast_to(force, target).astype(jnp.float32)
+        if shape == target:
+            return force
+        interior = tuple(int(n) - 2 * halo for n in padded_shape)
+        whole = interior == self._grid_shape
+        if whole and shape == interior + (D,):
+            widths = [(halo, halo)] * len(interior) + [(0, 0)]
+            return jnp.pad(force, widths, mode="wrap")
+        grid_field = self._grid_shape + (D,)
+        block = "the whole grid" if whole else f"the block {interior} of the grid {self._grid_shape}"
+        raise ValueError(
+            f"{type(self).__name__} {self.name!r}: body_force has shape {shape}, "
+            f"but it is a uniform force, shape ({D},) (or (1,)), or "
+            f"one vector per cell, shape {grid_field}.  This step holds "
+            f"{block}, so update_padded takes a uniform force, or the block's "
+            f"cells with {halo} halo cell(s) either side, shape {target}, which "
+            f"is how ShardedStencilNode delivers a {grid_field} field"
+            + (f", or {grid_field} itself." if whole else ".")
+        )
 
     def param_specs(self) -> dict[str, ParamSpec]:
         return {

@@ -124,8 +124,8 @@ def test_node_passes_battery(name):
 
 
 def test_lbm_pipe_multiphase_constants_are_trainable_only_in_multiphase():
-    single = LBMPipeNode("a", 1.0, nx=6, ny=5, nz=5)
-    multi = LBMPipeNode("b", 1.0, nx=6, ny=5, nz=5, G=-5.0)
+    single = LBMPipeNode("a", 1.0, nx=6, ny=5, nz=5, propeller_x=2)
+    multi = LBMPipeNode("b", 1.0, nx=6, ny=5, nz=5, propeller_x=2, G=-5.0)
     for key in ("G", "rho_0", "rho_wall", "rho_liquid", "rho_gas"):
         assert single.param_specs()[key].trainable is False
         assert multi.param_specs()[key].trainable is True

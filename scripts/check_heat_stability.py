@@ -43,10 +43,17 @@ first is "verified":
 * **refused** -- the same, and the rod is past the limit: the gate fails;
 * **not evaluated** -- something decides the Fourier number that the gate
   cannot read: a computed argument, a ``**mapping`` held in a variable, a
-  ``*args`` splat, a keyword given twice, a non-positive value, or a
-  stencil order with no limit.  These are counted and reported by reason
+  ``*args`` splat, a keyword given twice, a non-positive value, a
+  stencil order with no limit, or a computed ``grid_points`` (which may
+  be ``None``, i.e. a uniform rod the constructor checks).  These are counted and reported by reason
   (``--list-unevaluated`` prints each one), never folded into the verified
   count, and a scope in which *nothing* could be evaluated fails.
+
+A rod given a literal non-uniform grid (``grid_points=[...]``) is outside
+the constructor's guard, which checks uniform rods only, and is in none of
+the three counts.  ``grid_points=None`` is the default spelled out, a
+uniform rod, and is judged like one; it used to be skipped with every
+other ``grid_points=`` (audit_040_p4_1, H6).
 
 A literal ``**{"thermal_diffusivity": 1e3}`` or ``**dict(...)`` splat is
 read like the keywords it spells.  It used to be dropped silently, so the
@@ -213,6 +220,15 @@ def _number(node):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return value
+
+
+def _is_literal(node) -> bool:
+    """Does ``node`` evaluate to a literal (``ast.literal_eval``)?"""
+    try:
+        ast.literal_eval(node)
+    except Exception:
+        return False
+    return True
 
 
 def _parse(src: str):
@@ -385,8 +401,20 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
             unchecked.append((origin, node.lineno, why_not))
             continue
 
-        # An explicit grid is not a uniform rod; the guard skips it too.
-        if "grid_points" in args:
+        # An explicit grid is not a uniform rod, and the constructor's guard
+        # skips it too -- but only a grid that is actually given.  Any
+        # ``grid_points=`` used to skip the rod, so ``grid_points=None``
+        # (the default, spelled out) hid an unstable uniform rod that
+        # ``HeatNode.__init__`` refuses (audit_040_p4_1, H6).
+        grid = args.get("grid_points")
+        if grid is not None and not (isinstance(grid, ast.Constant)
+                                     and grid.value is None):
+            if _is_literal(grid):
+                continue                 # a literal grid: outside the guard
+            unchecked.append((
+                origin, node.lineno,
+                "grid_points is computed, so it cannot be read whether this "
+                "is a uniform rod, the kind HeatNode.__init__ checks"))
             continue
 
         values = {}

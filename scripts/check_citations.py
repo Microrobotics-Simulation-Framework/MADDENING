@@ -15,6 +15,11 @@ What the naive version of this got wrong, and why each matters:
 * The key pattern was ``\\w+``, so a hyphenated key such as ``Van-Leer1979``
   was neither defined nor cited correctly.
 * The scan covered docs/algorithm_guide/ only: 5 of 41 documentation files.
+* The key pattern also demanded a leading letter, but Pandoc keys may
+  begin with a digit or ``_`` (``[@1975Crank]``); a citation bracket may
+  wrap onto the next line (``[see\n@Key, p. 3]``); and an entry inside
+  ``@comment{...}`` is not an entry.  All three passed with an undefined
+  key (audit_040_p4_1, C8-C10).
 
 Unused bibliography entries are reported as warnings (non-blocking).
 
@@ -69,7 +74,70 @@ _NON_ENTRY_TYPES = {"comment", "string", "preamble"}
 # A key may contain hyphens, colons, dots and slashes -- anything but
 # whitespace, a comma or a brace.
 _BIB_ENTRY = re.compile(r"@(\w+)\s*\{\s*([^,\s{}]+)\s*,")
-_CITE_KEY = re.compile(r"@([A-Za-z][A-Za-z0-9_:./-]*)")
+# Pandoc's citation key: it "must begin with a letter, digit, or _, and may
+# contain alphanumerics, _, and internal punctuation characters
+# (:.#$%&-+?<>~/)", or be any text in braces, ``@{...}``.  The ``@`` starts
+# a citation only at the start of the bracket, after whitespace or ``;``,
+# or after ``-`` (suppress-author) -- so ``me@example.org`` is not one.
+# A leading letter used to be required, so ``[@1975Crank]`` was never read
+# and could cite nothing without failing (audit_040_p4_1, C8).
+_KEY_PUNCTUATION = ":.#$%&-+?<>~/"
+_CITE_KEY = re.compile(
+    r"(?:(?<=[\s;\[-])|^)@(?:\{([^{}]*)\}|([A-Za-z0-9_][A-Za-z0-9_"
+    + re.escape(_KEY_PUNCTUATION) + r"]*))")
+# A bracket holding an ``@``, which may wrap across lines but not across a
+# paragraph break (a blank line) -- Pandoc reads ``[see\n@Key, p. 3]`` as
+# one citation, and a line-by-line scan never saw it (audit_040_p4_1, C9).
+_NOT_A_BRACKET_END = r"(?:[^\]\n]|\n(?![ \t]*\n))"
+_CITE_BRACKET = re.compile(
+    r"\[(" + _NOT_A_BRACKET_END + r"*?@" + _NOT_A_BRACKET_END + r"+)\]")
+# ``@comment{...}`` / ``@comment(...)``: its contents are not entries.  An
+# entry wrapped in one still counted as defined (audit_040_p4_1, C10).
+_BIB_COMMENT = re.compile(r"@comment\s*([{(])", re.IGNORECASE)
+
+
+def _blank_bib_comments(text: str) -> tuple[str, list[str]]:
+    """``text`` with every comment blanked out, and any malformed one.
+
+    Lines whose first non-whitespace character is ``%`` go, and so does the
+    whole body of each ``@comment{...}`` (braces balanced) or
+    ``@comment(...)``.  Blanked, not deleted: every character but a newline
+    becomes a space, so line numbers still point at the source.  An
+    unterminated ``@comment`` blanks to the end of the file and is
+    reported, since it swallows every entry after it.
+    """
+    text = "".join(
+        ("\n" if line.endswith("\n") else "") if line.lstrip().startswith("%")
+        else line
+        for line in text.splitlines(keepends=True))
+    chars = list(text)
+    problems = []
+    pos = 0
+    while True:
+        match = _BIB_COMMENT.search(text, pos)
+        if match is None:
+            break
+        opener = match.group(1)
+        closer = "}" if opener == "{" else ")"
+        depth, end = 0, len(text)
+        for i in range(match.end() - 1, len(text)):
+            if text[i] == opener:
+                depth += 1
+            elif text[i] == closer:
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if depth:
+            problems.append(
+                f"unterminated @comment on line "
+                f"{text.count(chr(10), 0, match.start()) + 1}: it hides every "
+                f"entry after it")
+        for i in range(match.start(), end):
+            if chars[i] != "\n":
+                chars[i] = " "
+        pos = end
+    return "".join(chars), problems
 
 
 def parse_bib_entries(bib_path: str) -> list[tuple[int, str]]:
@@ -77,18 +145,24 @@ def parse_bib_entries(bib_path: str) -> list[tuple[int, str]]:
 
     Lines whose first non-whitespace character is ``%`` are comments and are
     dropped before matching, because BibTeX ignores them -- an entry left
-    commented out is exactly how a live citation goes dangling.
+    commented out is exactly how a live citation goes dangling.  So is an
+    entry inside ``@comment{...}`` (:func:`_blank_bib_comments`).
     """
-    entries = []
     with open(bib_path) as f:
-        for lineno, line in enumerate(f, 1):
-            if line.lstrip().startswith("%"):
+        text, _problems = _blank_bib_comments(f.read())
+    entries = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        for match in _BIB_ENTRY.finditer(line):
+            if match.group(1).lower() in _NON_ENTRY_TYPES:
                 continue
-            for match in _BIB_ENTRY.finditer(line):
-                if match.group(1).lower() in _NON_ENTRY_TYPES:
-                    continue
-                entries.append((lineno, match.group(2)))
+            entries.append((lineno, match.group(2)))
     return entries
+
+
+def bib_problems(bib_path: str) -> list[str]:
+    """Malformed comments in the bibliography (see :func:`_blank_bib_comments`)."""
+    with open(bib_path) as f:
+        return _blank_bib_comments(f.read())[1]
 
 
 def parse_bib_keys(bib_path: str) -> set[str]:
@@ -112,19 +186,22 @@ def find_duplicate_keys(entries: list[tuple[int, str]]) -> list[str]:
 def extract_citations(md_path: str) -> list[tuple[int, str]]:
     """Extract all ``[@Key]`` citations from a Markdown file.
 
-    Returns ``(line_number, key)`` pairs.  Handles both single citations
-    ``[@Key]`` and multiple citations ``[@Key1; @Key2]``.
+    Returns ``(line_number, key)`` pairs, the line being the key's own.
+    Handles single citations ``[@Key]``, multiple citations ``[@Key1;
+    @Key2]``, and a bracket that wraps onto the next line.
     """
-    citations = []
     with open(md_path) as f:
-        for lineno, line in enumerate(f, 1):
-            for bracket_match in re.finditer(r"\[([^\]]*@[^\]]+)\]", line):
-                bracket_content = bracket_match.group(1)
-                for key_match in _CITE_KEY.finditer(bracket_content):
-                    # Trailing punctuation belongs to the prose, not the key.
-                    key = key_match.group(1).rstrip(".:-/")
-                    if key:
-                        citations.append((lineno, key))
+        text = f.read()
+    citations = []
+    for bracket in _CITE_BRACKET.finditer(text):
+        content = bracket.group(1)
+        for key_match in _CITE_KEY.finditer(content):
+            braced, bare = key_match.groups()
+            # Trailing punctuation belongs to the prose, not the key.
+            key = braced if braced is not None else bare.rstrip(_KEY_PUNCTUATION)
+            if key:
+                offset = bracket.start(1) + key_match.start()
+                citations.append((text.count("\n", 0, offset) + 1, key))
     return citations
 
 
@@ -162,7 +239,7 @@ def main(argv=None) -> int:
     entries = parse_bib_entries(bib_path)
     bib_keys = {key for _lineno, key in entries}
 
-    errors = list(find_duplicate_keys(entries))
+    errors = list(find_duplicate_keys(entries)) + bib_problems(bib_path)
     if not bib_keys:
         errors.append(f"no BibTeX entries found in {bib_path}")
 

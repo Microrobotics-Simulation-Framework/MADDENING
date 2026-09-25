@@ -114,7 +114,11 @@ usd = ["usd-core>=21.8"]
 # WebRTC streaming (GStreamer + signaling)
 streaming = ["PyGObject>=3.42", "websockets>=11.0"]
 
-# SBOM generation
+# SBOM generation tool, for running cyclonedx-py by hand.
+# scripts/generate_sbom.py does not use this extra: it installs its own
+# pinned cyclonedx-bom into a separate venv, because the tool installed
+# next to maddening would list itself in maddening's SBOM.  Kept so that
+# `pip install maddening[sbom]` keeps resolving.
 sbom = ["cyclonedx-bom>=4.0"]
 
 # zstd compression for the binary state encoder (v0.2 #6).

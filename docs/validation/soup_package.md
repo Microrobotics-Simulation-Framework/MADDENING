@@ -23,9 +23,11 @@ to forget on a release; there is deliberately no longer one here.
 | Install | `pip install maddening` |
 <!-- END GENERATED: software-identification -->
 
-Optional extras (GPU, server, visualization, FMI, USD, …) are listed in
+Optional extras (GPU, server, visualization, USD, …) are listed in
 `pyproject.toml` under `[project.optional-dependencies]`; only the base
-dependencies above are installed by `pip install maddening`.
+dependencies above are installed by `pip install maddening`.  FMU export
+(`maddening.fmi`) needs no extra.  The resolved dependency tree of the base
+install, and of the extras listed in §6, is in the SBOMs described there.
 
 ## 2. Functional Description
 
@@ -114,13 +116,102 @@ See `docs/regulatory/iec62304_mapping.md` for the full lifecycle mapping.
 
 - Version control: Git (GitHub)
 - Release tags: semantic versioning (`vX.Y.Z`)
-- {term}`SBOM`: none is published.  A CycloneDX SBOM generated at release
-  time from a clean install is planned (the `sbom` extra pins the tool,
-  `cyclonedx-bom`).  A `sbom.json` captured from one development machine's
-  whole environment in 2026-03 sat at the repository root, never
-  regenerated, until 0.4.0 removed it: it listed that machine's packages,
-  not MADDENING's dependency set.
+- {term}`SBOM`: CycloneDX 1.6 JSON, one per covered install, in
+  `docs/validation/sbom/` (below)
 - CI: GitHub Actions
+
+### Software Bill of Materials
+
+Each SBOM is the environment that a clean install of MADDENING's wheel
+resolved to.  `scripts/generate_sbom.py` builds the wheel from the tree,
+installs it into a new, isolated virtual environment, and runs
+`cyclonedx-py` against that environment from a separate tool environment, so
+the tool is not in the SBOM.  MADDENING is the root component, with its
+version, purl and licence.  Every other installed distribution is a
+component with its name, version, `pkg:pypi` purl and the licence its
+metadata declares.  The dependency graph is included, and the root's edges
+are exactly the direct dependencies `pyproject.toml` declares for that
+install.
+
+| File | Install | What it covers |
+|---|---|---|
+| `maddening-0.4.0.dev0-core.cdx.json` | `pip install maddening` | The base dependencies: what every user gets, and the SOUP items of §1 |
+| `maddening-0.4.0.dev0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `terminal`, `viz` and `compression` extras |
+| `maddening-0.4.0.dev0-surrogates.cdx.json` | `pip install maddening[surrogates]` | Neural surrogate training (`optax`).  A trained surrogate replaces a physics node, so this code is in the computed result |
+| `maddening-0.4.0.dev0-usd.cdx.json` | `pip install maddening[usd]` | OpenUSD stage read and write (`usd-core`, a binary wheel that bundles OpenUSD's C++ libraries) |
+
+**Why these installs, and not the others.**  These are the installs whose
+code runs in a deployed simulation: the base install, the network surfaces
+a deployment exposes, the surrogate path that feeds computed results, and
+the geometry import path.  The rest are left out on purpose:
+
+- `cuda12` and `tpu` install hardware runtimes, and GPU is not a verified
+  configuration: CI runs on CPU (MADD-ANO-001).  On 2026-09-25 `cuda12`
+  resolved fifteen more wheels on Linux: JAX's two CUDA plugin wheels and
+  thirteen NVIDIA CUDA libraries.  A GPU deployment records its own SBOM.
+  The cloud Docker image installs `jax[cuda12]` with `.[server]`, and
+  `python scripts/generate_sbom.py --extra cuda12+server --output-dir <dir>`
+  records that combination.
+- `all`, `dev` and `ci` describe a developer's workstation, not a deployment.
+  On 2026-09-25 `all` resolved 176 packages, including SkyPilot's cloud SDKs,
+  PyGObject and the display stack.  That is the shape of the whole-machine
+  `sbom.json` which sat at the repository root from 2026-03 until 0.4.0
+  removed it.  It listed one machine's packages, not MADDENING's dependency
+  set.
+- The cloud extras (`runpod`, `lambda`, `aws`, `gcp`, `cloud`, `cloud-all`)
+  are launch tooling on the operator's machine, not code in the simulation's
+  process.  `viz3d`, `gpu-viz` and `streaming` are display-side
+  visualisation.  `verify` and `sbom` are tooling, and `ift` is empty.
+
+**What an SBOM records, and what it does not.**  Each file records the
+Python version and platform it was resolved on (the PEP 508 marker
+variables and the wheel platform tag, as `maddening:sbom:*` properties) and
+the resolution cutoff (`maddening:sbom:exclude-newer`): only distributions
+uploaded before it were considered.  All three decide the transitive
+versions.  jaxlib, numpy and scipy ship per-platform wheels, and a later
+date resolves newer releases inside the declared ranges.  An SBOM here
+records one resolution, on Python 3.12 and `linux-x86_64`, as of the
+recorded date.  It is not a lock file: `pip install maddening` resolves
+afresh, and it is not the environment any CI run installed (see the warning
+in `framework_verification.md`).  A deployment records its own environment
+by running `generate_sbom.py` for its own install, or `cyclonedx-py` on its
+own environment.
+
+**Consistency.**  `scripts/check_sbom.py` runs in CI through
+`tests/compliance/test_sbom_check.py`, with no network.  It fails if a
+covered install has no SBOM at the version `pyproject.toml` declares, or if
+the directory holds any other SBOM.  It fails if a direct dependency
+`pyproject.toml` declares for an install is missing from that install's
+SBOM, or is at a version outside its declared range.  It fails if a SOUP
+item §1 lists is missing, or is at a version outside the `pyproject.toml`
+range.  It also fails if a component has no purl, or a purl that disagrees
+with it, and if the file was edited after generation: the `serialNumber`
+is derived from the content.  Each failure names the discrepancy.
+
+**Determinism.**  Components and the dependency graph are sorted, keys are
+written sorted, `metadata.timestamp` is the resolution cutoff (or
+`SOURCE_DATE_EPOCH` when set), and the `serialNumber` is a UUIDv5 of the
+content.  Regenerating with the same cutoff on the same platform therefore
+writes the same bytes.  To compare SBOMs generated on different days,
+`python scripts/check_sbom.py --normalise <file>` prints one without the
+three date-dependent fields (`serialNumber`, `metadata.timestamp`, the
+cutoff).
+
+**At release, the SBOMs are regenerated from the tagged build.**  The files
+above are generated from this tree at the version `pyproject.toml` declares,
+which their names carry.  They are not the release SBOM.  The release step,
+done by the maintainer:
+
+1. On the release commit, after the version bump and before the tag,
+   change the version in the file names in the table above.
+2. Run `python scripts/generate_sbom.py` (it needs `uv` and network
+   access).  It builds the wheel from that tree, resolves each install
+   afresh, writes `maddening-<version>-<install>.cdx.json` for the new
+   version, removes the previous version's files, and runs the check.
+   Until both steps are done the check fails on the version bump, which
+   makes them hard to skip.
+3. Commit the SBOMs with the release commit, tag that commit, and attach
+   the four `.cdx.json` files to the GitHub release as assets.
 
 ## 7. Anomaly Management Policy
 
@@ -130,5 +221,8 @@ See CONTRIBUTING.md for the three-phase anomaly lifecycle and three-tier release
 
 The base dependencies — what `pip install maddening` pulls in — are listed in
 [§1 Software Identification](#1-software-identification), generated from
-`pyproject.toml`.  Optional extras, and the transitive tree, are in
-`pyproject.toml` itself.  A CycloneDX {term}`SBOM` is still planned (§6).
+`pyproject.toml`.  The optional extras are declared in `pyproject.toml`.
+The transitive tree, with the version and declared licence of every
+package, is in the CycloneDX {term}`SBOM` of each covered install (§6): the
+core SBOM for the base install, and one each for the `server`, `surrogates`
+and `usd` extras.

@@ -771,6 +771,27 @@ def test_a_config_round_trip_of_a_graph_preserves_the_trajectory():
     assert bool(jnp.array_equal(a["c"], b["c"]))
 
 
+def test_an_explicit_dtype_survives_a_config_round_trip():
+    """``dtype`` was the one constructor keyword kept off ``self.params``, so
+    a reload rebuilt the node at the canonical float: under x64 (this
+    suite's setting) a float32 node came back float64, and without its
+    dtype enforcement either way.  It is recorded by name now; a node built
+    without it records nothing and still follows the canonical float."""
+    import json
+
+    node = _node(n_levels=3, dtype=jnp.float32, blindness_gate=False)
+    assert node.params["dtype"] == "float32"
+    d = json.loads(json.dumps(node.to_dict()))
+    rebuilt = WaveletAdaptiveNode(name=d["name"], timestep=d["timestep"], **d["params"])
+    # ``dtype`` types the cold-start ``c`` and is enforced on every solve.
+    assert rebuilt.dtype == jnp.float32 and rebuilt._enforce_dtype
+    assert rebuilt.to_dict() == node.to_dict()
+
+    default = _node(n_levels=3, blindness_gate=False)
+    assert "dtype" not in default.params
+    assert default.dtype == jnp.zeros(()).dtype and not default._enforce_dtype
+
+
 def test_the_node_drives_a_downstream_node_through_an_edge_at_the_default_precision():
     """An edge out of ``c`` into a ``BallNode`` (the smallest graph that makes
     the node an edge source), at the float32 precision the framework runs

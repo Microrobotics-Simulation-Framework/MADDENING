@@ -239,7 +239,10 @@ class AdaptiveNode(SimulationNode):
         dtype is rejected.  The default is JAX's canonical float
         resolved at construction time (``float64`` under
         ``jax_enable_x64``, ``float32`` otherwise) and types the
-        cold-start buffer without forcing a cast.
+        cold-start buffer without forcing a cast.  An explicit dtype is
+        recorded in ``self.params`` by name (``"float32"``) so it
+        survives a round trip; the default records nothing, and a node
+        rebuilt without the key follows the canonical float again.
     **params
         Physical constants of the subclass, stored on ``self.params`` and
         exposed through :meth:`params_pytree` / :meth:`param_specs` like
@@ -432,6 +435,21 @@ class AdaptiveNode(SimulationNode):
         if D_threshold is not None:
             settings["D_threshold"] = _positive_int(D_threshold, "D_threshold")
 
+        dt = jnp.zeros((), dtype=dtype).dtype
+        if not jnp.issubdtype(dt, jnp.floating):
+            raise ValueError(
+                f"dtype must be a floating dtype (it types the coefficient "
+                f"vector c), got {dtype!r} -> {dt}"
+            )
+        if dtype is not None:
+            # By name, the spelling a config and a USD stage can carry.  It
+            # used to be kept off ``self.params``, so a round trip rebuilt
+            # the node at the canonical float: a float32 node reloaded as
+            # float64 under x64, and lost the enforcement below either way.
+            # The name asked for, not the one resolved: a reload resolves it
+            # the same way under the same x64 setting.
+            settings["dtype"] = np.dtype(dtype).name
+
         # ``n_max`` is structural and stays out of ``self.params``: it is
         # not a parameter a fit could identify, and putting it there made
         # every round-tripped subclass receive it twice (audit A4).
@@ -440,12 +458,6 @@ class AdaptiveNode(SimulationNode):
         self.blindness_gate = settings["blindness_gate"]
         self.on_blind = settings["on_blind"]
 
-        dt = jnp.zeros((), dtype=dtype).dtype
-        if not jnp.issubdtype(dt, jnp.floating):
-            raise ValueError(
-                f"dtype must be a floating dtype (it types the coefficient "
-                f"vector c), got {dtype!r} -> {dt}"
-            )
         self.dtype = dt
         # Only an explicitly requested dtype is *enforced* on the solve
         # output.  The default is JAX's canonical float resolved at

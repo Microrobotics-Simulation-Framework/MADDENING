@@ -487,7 +487,7 @@ class HeatNode(SimulationNode):
             "1st-order in time -- temporal accuracy is O(dt)",
             "No convection or radiation terms",
             "Non-uniform grids are 2nd-order only; stencil_order=4 requires a uniform grid",
-            "Two rods coupled end to end -- each rod's end-cell temperature the other's Dirichlet datum, the exchange converged within the step by a coupling group -- are stable only below Fourier number 3/8, not the 1/2 each rod has for fixed data: the pair's interface mode is amplified by -1.5 per step at Fo = 0.4 and -4 at 0.45 (MADD-ANO-037).  Keep Fo < 3/8 on rods coupled that way; neither the constructor nor compile() checks it",
+            "Two rods coupled end to end -- each rod's end-cell temperature the other's Dirichlet datum, the exchange converged within the step by a coupling group -- are stable only below Fourier number 3/8, not the 1/2 each rod has for fixed data: the pair's interface mode is amplified by -1.5 per step at Fo = 0.4 and -4 at 0.45 (MADD-ANO-040).  Keep Fo < 3/8 on rods coupled that way; neither the constructor nor compile() checks it",
         ),
         validated_regimes=(
             ValidatedRegime("thermal_diffusivity", 1e-6, 1.0, "m^2/s"),
@@ -505,7 +505,7 @@ class HeatNode(SimulationNode):
         hazard_hints=(
             "CFL is checked only against the constructor's timestep, thermal_diffusivity and length; a calibrated or externally supplied dt/alpha can still go unstable silently (MADD-ANO-002)",
             "No runtime validation of thermal_diffusivity > 0",
-            "Two rods exchanging end-cell temperatures in a converged coupling group diverge above Fourier number 3/8, which each rod's own constructor check (limit 1/2) accepts; the growth alternates sign every step and leaves float range in under 70 steps at Fo = 0.45 (MADD-ANO-037)",
+            "Two rods exchanging end-cell temperatures in a converged coupling group diverge above Fourier number 3/8, which each rod's own constructor check (limit 1/2) accepts; the growth alternates sign every step and leaves float range in under 70 steps at Fo = 0.45 (MADD-ANO-040)",
         ),
         implementation_map={
             "alpha * d^2T/dx^2 (diffusion)": "maddening.nodes.heat.HeatNode._compute_laplacian",

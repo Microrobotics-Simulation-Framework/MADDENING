@@ -569,3 +569,59 @@ def test_a_node_replaced_under_the_same_name_before_compiling_is_asked_again():
     resp = client.put("/graph/params/n", json={"params": {"k": 5.0}})
     assert resp.status_code == 400, resp.text
     assert gm._nodes["n"].node.params["k"] == 2.0
+
+
+# ---------------------------------------------------------------------------
+# LBMNode's wall mask: in params since 0.4.0 (MADD-ANO-034), so reachable
+# by both routes
+# ---------------------------------------------------------------------------
+
+from maddening.nodes.lbm import LBMNode  # noqa: E402
+
+
+def _walled_lbm_request(wall):
+    return {"type": "LBMNode", "name": "fluid", "timestep": 1.0,
+            "params": {"grid_shape": [12, 8], "lattice": "D2Q9", "viscosity": 0.1,
+                       "wall_mask": wall.tolist()}}
+
+
+def _lbm_walls():
+    wall = np.zeros((12, 8), bool)
+    wall[:, 0] = wall[:, -1] = True
+    return wall
+
+
+def test_a_walled_lbm_node_is_created_from_json_with_its_walls():
+    """``POST /graph/nodes`` carries the mask as nested lists, the spelling a
+    saved config uses; before 0.4.0 the constructor read ``wall_mask.shape``
+    and a JSON body could not build a walled node at all."""
+    server = SimulationServer(node_registry={"LBMNode": LBMNode})
+    client = TestClient(server.create_app(), raise_server_exceptions=False)
+    resp = client.post("/graph/nodes", json=_walled_lbm_request(_lbm_walls()))
+    assert resp.status_code == 201, resp.text
+    node = server.gm._nodes["fluid"].node
+    np.testing.assert_array_equal(np.asarray(node.initial_state()["wall_mask"]),
+                                  _lbm_walls().astype(np.uint8))
+    assert client.get("/graph/params/fluid").json()["wall_mask"] == _lbm_walls().tolist()
+
+
+def test_a_new_lbm_wall_mask_is_refused_and_the_saved_graph_keeps_the_running_walls():
+    """The step reads the mask the constructor built (it is in the state),
+    so writing ``node.params['wall_mask']`` would be served by ``GET`` and
+    saved by ``to_dict()`` while every step kept the old walls: refused by
+    the graph's liveness probe, and nothing is written."""
+    gm = GraphManager()
+    gm.add_node(LBMNode("fluid", 1.0, grid_shape=(12, 8), lattice="D2Q9",
+                        viscosity=0.1, wall_mask=_lbm_walls()))
+    gm.compile()
+    client = _client(gm)
+    node_before, live_before = _node_params(gm, "fluid"), _live(gm, "fluid")
+    moved = np.roll(_lbm_walls(), 1, axis=1)
+
+    resp = client.put("/graph/params/fluid", json={"params": {"wall_mask": moved.tolist()}})
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"].startswith("wall_mask:")
+    assert "Nothing was written" in resp.json()["detail"]
+    _assert_nothing_written(gm, "fluid", node_before, live_before, False)
+    assert gm.to_dict()["nodes"][0]["params"]["wall_mask"] == _lbm_walls().tolist()

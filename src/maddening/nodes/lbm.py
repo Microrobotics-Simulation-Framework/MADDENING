@@ -44,6 +44,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+from numpy.typing import ArrayLike
 
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.compliance.metadata import (
@@ -659,8 +660,13 @@ class LBMNode(SimulationNode):
         ``tau = 0.5 + viscosity / cs2``.
     lattice : str
         Lattice type: ``"D3Q19"`` (default) or ``"D2Q9"``.
-    wall_mask : numpy.ndarray or None
+    wall_mask : array-like of bool, or None
         Boolean array of shape ``grid_shape``, True = wall.  If None, no walls.
+        Any array-like is accepted (a NumPy or JAX array, or the nested
+        lists a saved config carries) and read as ``bool``.  It is kept in
+        ``params`` as nested lists of ``bool``, so a saved graph
+        (:meth:`~maddening.core.graph_manager.GraphManager.to_dict`, a USD
+        stage) rebuilds the same walls; with no mask the key is absent.
     inlet_face : str
         Face for pressure inlet BC: ``"x_min"`` (default), ``"x_max"``, etc.
     outlet_face : str
@@ -787,7 +793,7 @@ class LBMNode(SimulationNode):
         grid_shape: tuple = (64, 32, 32),
         viscosity: float = 0.1,
         lattice: str = "D3Q19",
-        wall_mask: Optional[np.ndarray] = None,
+        wall_mask: Optional[ArrayLike] = None,
         inlet_face: str = "x_min",
         outlet_face: str = "x_max",
         geometry_source: Optional[str] = None,
@@ -840,6 +846,26 @@ class LBMNode(SimulationNode):
                 f"outlet_face={_OPPOSITE_FACE[inlet_face]!r}."
             )
 
+        # Wall mask.  Recorded in ``params`` as nested lists of bool -- the
+        # JSON-faithful spelling, as HeatNode records ``grid_points`` -- so
+        # that the node a saved graph rebuilds (``cls(name=, timestep=,
+        # **params)``: GraphManager.from_dict, a USD stage, POST
+        # /graph/nodes) has these walls.  Until 0.4.0 the mask was kept on
+        # the node alone and every reload ran a domain with no walls
+        # (MADD-ANO-034).  No mask, no key: a wall-free node's config is
+        # unchanged.
+        mask_param = {}
+        mask = None
+        if wall_mask is not None:
+            mask = np.asarray(wall_mask)
+            if mask.shape != tuple(grid_shape):
+                raise ValueError(
+                    f"wall_mask shape {mask.shape} != grid_shape "
+                    f"{tuple(grid_shape)}"
+                )
+            mask = mask.astype(bool)
+            mask_param = {"wall_mask": mask.tolist()}
+
         super().__init__(
             name,
             timestep,
@@ -849,6 +875,7 @@ class LBMNode(SimulationNode):
             inlet_face=inlet_face,
             outlet_face=outlet_face,
             geometry_source=geometry_source,
+            **mask_param,
         )
 
         self._lat = lat
@@ -863,14 +890,9 @@ class LBMNode(SimulationNode):
         # Wall mask: convert to JAX array for JIT compatibility.
         # Track at Python level whether any walls are present so the
         # sharded `update_padded` can guard cheaply outside of tracing.
-        if wall_mask is not None:
-            if wall_mask.shape != tuple(grid_shape):
-                raise ValueError(
-                    f"wall_mask shape {wall_mask.shape} != grid_shape "
-                    f"{tuple(grid_shape)}"
-                )
-            self._has_walls = bool(np.any(np.asarray(wall_mask)))
-            self._wall_mask = jnp.asarray(wall_mask, dtype=jnp.bool_)
+        if mask is not None:
+            self._has_walls = bool(np.any(mask))
+            self._wall_mask = jnp.asarray(mask, dtype=jnp.bool_)
         else:
             self._has_walls = False
             self._wall_mask = jnp.zeros(grid_shape, dtype=jnp.bool_)

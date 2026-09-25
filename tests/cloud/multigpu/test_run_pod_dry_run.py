@@ -798,7 +798,6 @@ def test_halo_reference_encodes_the_documented_boundary_fill():
     assert grad[:, 0].tolist() == [1, 1, 1, 2, 2, 1, 1, 1]
 
 
-@pytest.mark.slow
 def test_a_two_device_run_records_the_cases_it_cannot_run():
     """On 2 devices the 2-D pencil cases have no mesh and a halo from the
     wrong neighbour cannot show; each is a check *not run*, so the goal
@@ -828,7 +827,6 @@ def test_a_two_device_run_records_the_cases_it_cannot_run():
         assert rp.goal_verdict([doc]) == "INCOMPLETE"
 
 
-@pytest.mark.slow
 def test_the_stencil_goal_fails_when_unsharded_halo_axes_always_wrap(monkeypatch):
     """The fault the periodic-only goal could not see: the wrapper fills
     the halo of an axis it does not shard periodically whatever

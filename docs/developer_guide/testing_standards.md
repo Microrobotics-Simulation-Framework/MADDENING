@@ -504,7 +504,7 @@ run reads it decides what its times mean:
 | Pull request whose diff adds or removes a slow mark, removes a test function, or edits `tests/duration_allowlist.txt` or `tests/_sharding.py` | **cold**, not saved | Accurate for the tests the change moved a compile onto (see below). |
 | Push to `main` / `release/**` (after a merge) | **cold**: starts empty, saves the result for the next PRs | Accurate: each program compiles in full the first time the run needs it. A later test that needs the same program reads it back from the cache the run is writing (17-25% of lookups on CI), so it can look fast because an earlier test paid. |
 | `slow-tests.yml`: scheduled Mon/Wed/Fri on `main` only; on a release branch only when dispatched by hand | **off**, one process per shard | A cold, uncontended timing of the whole suite, for the commit it ran on. Triage and allowlist edits are based on these runs, so check that commit: on a release branch the last run is the last dispatch, which may be well behind the tip. |
-| Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. |
+| Pull request with `[cold-ci]` in its head commit message | **cold**, not saved | For before/after numbers while optimising tests. The job reads the message from its checkout; if it cannot, it runs cold and says so in a warning. |
 
 Pull requests never save, so a second push cannot read the first push's
 cache: a new test that takes 25 s cold would otherwise pass at 8 s.

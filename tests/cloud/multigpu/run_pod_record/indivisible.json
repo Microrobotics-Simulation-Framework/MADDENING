@@ -6,7 +6,7 @@
  "n_devices": 4,
  "environment": {
   "hostname": "dry-run-host",
-  "timestamp_utc": "2026-09-25T04:49:41Z",
+  "timestamp_utc": "2026-09-25T06:09:08Z",
   "python": "3.12.3",
   "jax": "0.11.0",
   "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
   "nvidia_smi": "skipped (dry run)",
   "xla_flags": "--xla_force_host_platform_device_count=4",
   "jax_platforms": "cpu",
-  "git_commit": "faa76e5b76fb0ffbabfdcfb6d120d4d8cb9bd8b2"
+  "git_commit": "24bbcf741c518714f91b96dbf0afe564a5fd190b"
  },
  "config": {
   "goal": "all",
@@ -57,7 +57,7 @@
      16
     ],
     "raised": "ValueError",
-    "message": "ShardedStencilNode cannot shard state field 'f' of node 'field': spatial axis 0 has 17 cells and mesh axis 'devices' has 4 devices, which does not divide it (17 % 4 == 1).  A sharded axis is split evenly across the devices, so the cell count must be a multiple of the device count: resize that axis to a multiple of 4 (the next one up is 20), run on one of the device counts that do divide 17 ([1]), or use ShardedUnstructuredNode, which carries an explicit padded layout and accepts any (device, cell) pair.",
+    "message": "ShardedStencilNode cannot shard state field 'f' of node 'field': spatial axis 0 has 17 cells and mesh axis 'devices' has 4 devices, which does not divide it (17 % 4 == 1).  A sharded axis is split evenly across the devices, so the cell count must be a multiple of the device count: resize that axis to a multiple of 4 (the next one up is 20), or run on one of the device counts that do divide 17 ([1]).  ShardedUnstructuredNode is not a way out for a stencil node: it hands update_padded the partition layout, not [halo | interior | halo], and refuses a node that declares a halo_width().",
     "divisible_shape": [
      16,
      16
@@ -71,7 +71,7 @@
      16
     ],
     "raised": "ValueError",
-    "message": "ShardedPointwiseNode cannot shard state field 'x' of node 'pointwise': spatial axis 0 has 17 cells and mesh axis 'devices' has 4 devices, which does not divide it (17 % 4 == 1).  A sharded axis is split evenly across the devices, so the cell count must be a multiple of the device count: resize that axis to a multiple of 4 (the next one up is 20), run on one of the device counts that do divide 17 ([1]), or use ShardedUnstructuredNode, which carries an explicit padded layout and accepts any (device, cell) pair."
+    "message": "ShardedPointwiseNode cannot shard state field 'x' of node 'pointwise': spatial axis 0 has 17 cells and mesh axis 'devices' has 4 devices, which does not divide it (17 % 4 == 1).  A sharded axis is split evenly across the devices, so the cell count must be a multiple of the device count: resize that axis to a multiple of 4 (the next one up is 20), or run on one of the device counts that do divide 17 ([1]), or, for a node whose cells are its first array axis, use ShardedUnstructuredNode with a layout from build_unstructured_partition (edges may be empty), which pads each shard to an explicit layout and accepts any (device, cell) pair."
    },
    "pencil": {
     "mesh": [
@@ -83,7 +83,7 @@
      17
     ],
     "raised": "ValueError",
-    "message": "ShardedStencilNode cannot shard state field 'f' of node 'field': spatial axis 1 has 17 cells and mesh axis 'spatial_z' has 2 devices, which does not divide it (17 % 2 == 1).  A sharded axis is split evenly across the devices, so the cell count must be a multiple of the device count: resize that axis to a multiple of 2 (the next one up is 18), run on one of the device counts that do divide 17 ([1]), or use ShardedUnstructuredNode, which carries an explicit padded layout and accepts any (device, cell) pair."
+    "message": "ShardedStencilNode cannot shard state field 'f' of node 'field': spatial axis 1 has 17 cells and mesh axis 'spatial_z' has 2 devices, which does not divide it (17 % 2 == 1).  A sharded axis is split evenly across the devices, so the cell count must be a multiple of the device count: resize that axis to a multiple of 2 (the next one up is 18), or run on one of the device counts that do divide 17 ([1]).  ShardedUnstructuredNode is not a way out for a stencil node: it hands update_padded the partition layout, not [halo | interior | halo], and refuses a node that declares a halo_width()."
    },
    "unstructured": {
     "cells": 273,
@@ -114,7 +114,7 @@
    "passed": true
   },
   {
-   "name": "stencil refusal names the cell count, the device count and the unstructured alternative",
+   "name": "stencil refusal names the cell count, the device count and that the unstructured wrapper is not a way out for a stencil node",
    "value": true,
    "limit": true,
    "sense": "==",
@@ -186,5 +186,5 @@
   }
  ],
  "passed": true,
- "wall_s": 1.8181729950010777
+ "wall_s": 1.326808521989733
 }

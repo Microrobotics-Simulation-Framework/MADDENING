@@ -6,7 +6,7 @@
  "n_devices": 4,
  "environment": {
   "hostname": "dry-run-host",
-  "timestamp_utc": "2026-09-25T04:49:41Z",
+  "timestamp_utc": "2026-09-25T06:09:08Z",
   "python": "3.12.3",
   "jax": "0.11.0",
   "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
   "nvidia_smi": "skipped (dry run)",
   "xla_flags": "--xla_force_host_platform_device_count=4",
   "jax_platforms": "cpu",
-  "git_commit": "faa76e5b76fb0ffbabfdcfb6d120d4d8cb9bd8b2"
+  "git_commit": "24bbcf741c518714f91b96dbf0afe564a5fd190b"
  },
  "config": {
   "goal": "all",
@@ -60,20 +60,20 @@
    "grad_steps": 5,
    "correction_shift_rows": 2,
    "unsharded": {
-    "run_scan_first_call_s": 0.2752506289980374,
+    "run_scan_first_call_s": 0.20900362302199937,
     "partitioned": false,
-    "compile_s": 1.144680712997797,
+    "compile_s": 0.9157535150006879,
     "value_and_grad": {
      "warmup": 1,
      "repeats": 3,
      "ms": [
-      0.34855600097216666,
-      0.382562997401692,
-      0.2129339991370216
+      0.3141570196021348,
+      0.11723299394361675,
+      0.10228098835796118
      ],
-     "min_ms": 0.2129339991370216,
-     "median_ms": 0.34855600097216666,
-     "mean_ms": 0.31468433250362676
+     "min_ms": 0.10228098835796118,
+     "median_ms": 0.11723299394361675,
+     "mean_ms": 0.17789033396790424
     },
     "loss": 0.915367066860199,
     "grad": [
@@ -82,20 +82,20 @@
     ]
    },
    "sharded": {
-    "run_scan_first_call_s": 0.4982548279949697,
+    "run_scan_first_call_s": 0.31617319901124574,
     "partitioned": true,
-    "compile_s": 1.8147650560131297,
+    "compile_s": 1.1204100110044237,
     "value_and_grad": {
      "warmup": 1,
      "repeats": 3,
      "ms": [
-      4.538737994153053,
-      4.505498000071384,
-      5.043631012085825
+      2.8689950122497976,
+      3.356050990987569,
+      4.3269459856674075
      ],
-     "min_ms": 4.505498000071384,
-     "median_ms": 4.538737994153053,
-     "mean_ms": 4.695955668770087
+     "min_ms": 2.8689950122497976,
+     "median_ms": 3.356050990987569,
+     "mean_ms": 3.517330662968258
     },
     "loss": 0.9153671264648438,
     "grad": [
@@ -124,20 +124,20 @@
    "grad_steps": 5,
    "correction_shift_rows": 4,
    "unsharded": {
-    "run_scan_first_call_s": 0.6329972009989433,
+    "run_scan_first_call_s": 0.3570911889837589,
     "partitioned": false,
-    "compile_s": 1.414731965996907,
+    "compile_s": 0.889407309005037,
     "value_and_grad": {
      "warmup": 1,
      "repeats": 3,
      "ms": [
-      0.3289539890829474,
-      0.3573889989638701,
-      0.2625170018291101
+      0.3947520162910223,
+      0.2963659935630858,
+      0.14190797810442746
      ],
-     "min_ms": 0.2625170018291101,
-     "median_ms": 0.3289539890829474,
-     "mean_ms": 0.31628666329197586
+     "min_ms": 0.14190797810442746,
+     "median_ms": 0.2963659935630858,
+     "mean_ms": 0.27767532931951183
     },
     "loss": 0.9350303411483765,
     "grad": [
@@ -146,20 +146,20 @@
     ]
    },
    "sharded": {
-    "run_scan_first_call_s": 0.7665094039984979,
+    "run_scan_first_call_s": 0.410711500007892,
     "partitioned": true,
-    "compile_s": 2.4782297009951435,
+    "compile_s": 1.4493903369875625,
     "value_and_grad": {
      "warmup": 1,
      "repeats": 3,
      "ms": [
-      10.230572006548755,
-      8.948201997554861,
-      8.391759009100497
+      4.196321999188513,
+      4.054097982589155,
+      4.130785004235804
      ],
-     "min_ms": 8.391759009100497,
-     "median_ms": 8.948201997554861,
-     "mean_ms": 9.190177671068037
+     "min_ms": 4.054097982589155,
+     "median_ms": 4.130785004235804,
+     "mean_ms": 4.127068328671157
     },
     "loss": 0.9350303411483765,
     "grad": [
@@ -287,5 +287,5 @@
   }
  ],
  "passed": true,
- "wall_s": 10.524191171003622
+ "wall_s": 6.621965407015523
 }

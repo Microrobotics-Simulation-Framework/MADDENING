@@ -96,8 +96,14 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-031 | A HeatNode at stencil_order=4 with no boundary input is not insulated: heat crosses a rod end that has no temperature given | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-032 | After a parameter write and compile(), the sharded wrappers kept computing with what they had built from the old value: a legacy node's constant, and ShardedStencilNode's halo width | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
 | MADD-ANO-033 | ShardedStencilNode stepped with dt rounded to float32 under jax_enable_x64 | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
+| MADD-ANO-034 | ShardedUnstructuredNode accepted a Cartesian stencil node and stepped it wrong, every cell, with no error | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
+| MADD-ANO-035 | ShardedStencilNode edge-filled a sharded static's global halos under a periodic wrapper | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.2.1, <0.4.0 |
+| MADD-ANO-036 | ShardedUnstructuredNode dropped the cells a node had past the layout's count, and gave a node no way to leave padding out of an integral | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
+| MADD-ANO-037 | ShardedUnstructuredNode could not host a node with a domain integral in a GraphManager | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
+| MADD-ANO-038 | halo_exchange ignored a per-axis boundary key naming no exchanged mesh axis, and that axis took the edge fill | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
+| MADD-ANO-039 | ShardedStencilNode accepted an empty axis_map and sharded nothing | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
 
-*33 anomalies registered.  15 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 12 `open` plus 3 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*39 anomalies registered.  15 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 12 `open` plus 3 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

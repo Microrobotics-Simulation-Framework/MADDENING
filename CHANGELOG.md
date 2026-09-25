@@ -161,10 +161,6 @@ guidance; the itemized changes follow.
   `strategies.node_states` samples bool and integer fields
 - Property-test coverage for round trips, the REST and FMU-bridge surfaces
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
-- **Static type checking, phase 1 (non-blocking)**: `pyrightconfig.json`,
-  `pyright` in the `ci`/`dev` extras, a `continue-on-error` `typecheck` job
-  and `scripts/typing_baseline.py`.  No source annotations changed; baseline
-  and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
 - **`ShardedStencilNode` refuses `boundary="zero"` and `"periodic"` for a `HeatNode`**: the rod now builds its own end ghosts, so the fill would be ignored.

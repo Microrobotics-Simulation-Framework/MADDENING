@@ -1207,13 +1207,31 @@ anomalies:
       matches the trust model of the bearer token it reuses, but a
       deployment that needs mutually distrusting clients needs per-peer
       keys, which this does not provide.  There is no forward secrecy:
-      a recorded session is readable if the token later leaks.  The
-      token itself still reaches a cloud VM only through JobConfig envs
-      or the operator's own provisioning -- _skypilot.py passes no
-      secret into the container -- so an operator who publishes 5555
-      without arranging the token gets a refusal to start rather than a
-      working exposed socket, which is the intended failure but is still
-      a configuration burden.  Separately, maddening.fmi.tcp_bridge is
+      a recorded session is readable if the token later leaks.  On the
+      CloudSession launch path a token is always present, so a published
+      ZeroMQ port starts encrypted rather than refusing to start.
+      CloudSession always holds an API token: the MADDENING_API_TOKEN of
+      the launching process, or one it generates (readable from
+      CloudSession.api_token).  launch_vm passes it into the container
+      as MADDENING_API_TOKEN, and MADDENING_TRANSPORT_TOKEN as well when
+      one is configured; the values travel in SkyPilot's task
+      environment, not on the docker command line.  A ZeroMQ endpoint
+      that code in the container binds on a reachable address therefore
+      finds a token and starts with CURVE.  Unless
+      MADDENING_TRANSPORT_TOKEN is set, the CURVE keys are derived from
+      MADDENING_API_TOKEN, the HTTP API's bearer credential.  There is
+      no TLS, so that credential crosses the wire in cleartext on every
+      API request, and anyone who observes one request can derive both
+      CURVE keypairs and read the state and command streams.  This
+      default applies to a generated token exactly as it does to an
+      operator-chosen one.  Setting MADDENING_TRANSPORT_TOKEN to a
+      different value (in the launching environment, or as
+      CloudSession(transport_token=...)) is what separates the streams
+      from the HTTP credential.  The refusal to start
+      (TransportAuthError) still applies to a process that holds neither
+      variable, such as a container started outside CloudSession with no
+      token in its environment, and to a variable that is set but
+      blank.  Separately, maddening.fmi.tcp_bridge is
       an unauthenticated listening socket with its own protocol; it is a
       different component, is not covered by this entry, and is
       documented as trusted-clients-only.  It is not on 5555: the

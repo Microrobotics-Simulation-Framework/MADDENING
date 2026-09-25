@@ -2863,7 +2863,10 @@ anomalies:
       `from_dict()` reproduced (CPU, jaxlib 0.11.0), with one exception
       that is not a parameter write: an `LBMNode` built with a `wall_mask`
       does not keep the mask among its params, so its reload has no walls
-      with or without a write (also at v0.3.1).  A user-authored node that bakes a
+      with or without a write (also at v0.3.1).  The same drive through
+      `ShardedStencilNode` (`HeatNode` at both orders, `LBMNode`), against an
+      unsharded node built with the new value, found no difference either.
+      A user-authored node that bakes a
       parameter and reads it again, in `initial_state()` or its hooks, must
       declare it.  For a wrapper that cannot be copied, the wrapped node's
       own `update` stands in for the wrapper's distributed step.  A value

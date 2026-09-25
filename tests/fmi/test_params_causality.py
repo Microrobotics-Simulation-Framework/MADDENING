@@ -9,8 +9,10 @@
   through the same ``jax.jvp`` as everything else.
 """
 
+import io
 import os
 import pickle
+import re
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -139,6 +141,58 @@ class TestSidecar:
         with pytest.raises(ValueError, match="shape"):
             sc.set_params({"spring.params.stiffness": [1.0, 2.0]})
 
+    @pytest.mark.parametrize("with_specs", [False, True], ids=["no_specs", "specs"])
+    @pytest.mark.parametrize("value, refusal", [
+        (float("nan"), "must be finite"),
+        (float("inf"), "must be finite"),
+        (float("-inf"), "must be finite"),
+        (1e39, "does not fit its type float32"),     # finite float64, inf as float32
+        (-1e39, "does not fit its type float32"),
+    ])
+    def test_set_params_refuses_values_the_leaf_cannot_hold(self, gm, with_specs, value,
+                                                            refusal):
+        """The bridge's ``set`` refused these; ``set_params`` checked them
+        only through ``ParamSpec.check``, so a sidecar built without
+        ``param_specs`` stored NaN, and ``1e39`` as float32 ``inf``.  The
+        refusal is atomic: the valid update beside it is not written."""
+        md = build_model_description(gm, model_name="m")
+        sc = FmuSidecar(SidecarConfig(
+            schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+            initial_state=gm._state, params=gm.params,
+            param_specs=gm.param_specs() if with_specs else None))
+        with pytest.raises(ValueError,
+                           match=rf"parameter 'spring.params.stiffness': value {refusal}"):
+            sc.set_params({"spring.params.damping": 3.0, "spring.params.stiffness": value})
+        got = sc.get_params()
+        assert float(got["spring.params.stiffness"]) == 30.0
+        assert float(got["spring.params.damping"]) == 2.0
+        # the largest float32 is a value the leaf can hold, and is accepted
+        big = float(np.finfo(np.float32).max)
+        sc.set_params({"spring.params.stiffness": big})
+        assert float(sc.get_params()["spring.params.stiffness"]) == big
+
+    def test_set_params_refuses_what_the_bridge_set_refuses(self, gm):
+        """One value check for both doors, with the same words."""
+        from maddening.fmi.tcp_bridge import FmuTcpBridge
+
+        md = build_model_description(gm, model_name="m")
+        sc = FmuSidecar(SidecarConfig(
+            schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+            initial_state=gm._state, params=gm.params))
+        bridge = FmuTcpBridge(sc, md, master_dt=1e-2)
+        try:
+            k = next(v.value_reference for v in md.variables
+                     if v.name == "spring.params.stiffness")
+            for value in (1e39, float("nan")):
+                reply = bridge.handle({"op": "set", "vr": [k], "values": [value]})
+                assert reply["ok"] is False
+                with pytest.raises(ValueError) as exc:
+                    sc.set_params({"spring.params.stiffness": value})
+                tail = str(exc.value).split(": ", 1)[1]
+                assert reply["error"].endswith(tail), (reply["error"], str(exc.value))
+        finally:
+            bridge.stop()
+
     def test_set_params_without_params_config_errors(self):
         sc = FmuSidecar(SidecarConfig(
             schema_token="t", step_fn=lambda s, e: s,
@@ -184,6 +238,163 @@ class TestSidecar:
         assert float(sc.get_params()["spring.params.damping"]) == 5.0
         status, err = pickle.loads(sc.handle(pickle.dumps(("set_params", {"nope": 1.0}))))
         assert status == "err" and "unknown parameter" in err
+
+
+def _snapshot_with(sc, kind, owner, key, value):
+    """``sc``'s current state and params as an ``FMUState``, one leaf replaced."""
+    state = {n: {f: np.asarray(v) for f, v in fs.items()} for n, fs in sc.state.items()}
+    params = {section: {o: {k: np.asarray(v) for k, v in leaves.items()}
+                        for o, leaves in owners.items()}
+              for section, owners in sc.params.items()}
+    target = state[owner] if kind == "state" else params["nodes"][owner]
+    target[key] = np.asarray(value)
+    return serialize_fmu_state(state=state, schema_token=sc._config.schema_token,
+                               params=params)
+
+
+def _archive_with(bridge, kind, owner, key, value):
+    """The bridge's own ``get_state`` archive, one member replaced."""
+    from maddening.fmi.tcp_bridge import state_of
+
+    member = f"s/{owner}/{key}" if kind == "state" else f"p/nodes/{owner}/{key}"
+    with np.load(io.BytesIO(state_of(bridge.handle({"op": "get_state"}))),
+                 allow_pickle=False) as data:
+        members = {k: data[k] for k in data.files}
+    assert member in members
+    members[member] = np.asarray(value)
+    buf = io.BytesIO()
+    np.savez(buf, **members)
+    return buf.getvalue()
+
+
+def _frozen(sc):
+    return ({n: {f: np.asarray(v).copy() for f, v in fs.items()} for n, fs in sc.state.items()},
+            {k: np.asarray(v).copy() for k, v in sc.get_params().items()})
+
+
+def _assert_unchanged(sc, before):
+    state, params = before
+    for n, fs in state.items():
+        for f, v in fs.items():
+            np.testing.assert_array_equal(np.asarray(sc.state[n][f]), v)
+    for k, v in params.items():
+        np.testing.assert_array_equal(np.asarray(sc.get_params()[k]), v)
+
+
+#: ``(kind, owner, key, value, refusal)``: one leaf of a snapshot, and what
+#: ``set_fmu_state`` and the bridge's ``set_state`` must both say about it
+#: (``None``: both accept it).
+_SNAPSHOT_CASES = [
+    ("state", "spring", "velocity", np.float32(np.nan),
+     "FMU state spring.velocity: value must be finite"),
+    ("param", "spring", "stiffness", np.float32(np.inf),
+     "FMU state param spring.params.stiffness: value must be finite"),
+    ("param", "spring", "stiffness", np.float64(1e39),
+     "FMU state param spring.params.stiffness: value does not fit its type float32"),
+    ("param", "ball", "elasticity", np.float32(1.5), "elasticity'\\]=1.5 above bound 1.0"),
+    ("param", "ball", "elasticity", np.float32(0.25), None),
+    ("state", "spring", "position", np.zeros(3, np.float32),
+     r"^FMU state spring\.position: shape \(3,\) != \(\)$"),
+    ("param", "spring", "stiffness", np.zeros(2, np.float32),
+     r"^FMU state param spring\.params\.stiffness: shape \(2,\) != \(\)$"),
+]
+
+
+class TestSnapshotValues:
+    """``FmuSidecar.set_fmu_state`` is a door into the same tree as the
+    bridge's ``set_state``.  It had none of that door's value checks: a
+    snapshot with a NaN state field, an ``inf`` parameter or a parameter
+    outside its declared bounds was installed without a word, and the
+    next step computed with it."""
+
+    def test_a_snapshot_cannot_install_a_non_finite_state_field(self, gm):
+        _, sc = _sidecar(gm)
+        sc.step(gm._default_external_inputs())
+        before = _frozen(sc)
+        with pytest.raises(ValueError,
+                           match=r"^FMU state spring\.velocity: value must be finite$"):
+            sc.set_fmu_state(_snapshot_with(sc, "state", "spring", "velocity", np.nan))
+        _assert_unchanged(sc, before)
+
+    def test_a_snapshot_cannot_install_a_non_finite_parameter(self, gm):
+        _, sc = _sidecar(gm)
+        before = _frozen(sc)
+        with pytest.raises(ValueError, match=r"^FMU state param spring\.params\.stiffness: "
+                                             r"value must be finite$"):
+            sc.set_fmu_state(_snapshot_with(sc, "param", "spring", "stiffness",
+                                            np.float32(np.inf)))
+        _assert_unchanged(sc, before)
+        # and one that is finite as float64 but inf in the float32 leaf
+        with pytest.raises(ValueError, match="does not fit its type float32"):
+            sc.set_fmu_state(_snapshot_with(sc, "param", "spring", "stiffness",
+                                            np.float64(1e39)))
+        _assert_unchanged(sc, before)
+
+    def test_a_snapshot_cannot_install_a_parameter_outside_its_bounds(self, gm):
+        _, sc = _sidecar(gm)                          # carries gm.param_specs()
+        before = _frozen(sc)
+        with pytest.raises(ValueError, match=r"elasticity'\]=1\.5 above bound 1\.0"):
+            sc.set_fmu_state(_snapshot_with(sc, "param", "ball", "elasticity",
+                                            np.float32(1.5)))
+        _assert_unchanged(sc, before)
+        # without declared bounds there is nothing to hold it to, as on the bridge
+        md = build_model_description(gm, model_name="m")
+        plain = FmuSidecar(SidecarConfig(
+            schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+            initial_state=gm._state, params=gm.params))
+        plain.set_fmu_state(_snapshot_with(plain, "param", "ball", "elasticity",
+                                           np.float32(1.5)))
+        assert float(plain.get_params()["ball.params.elasticity"]) == 1.5
+
+    def test_a_healthy_snapshot_still_round_trips(self, gm):
+        _, sc = _sidecar(gm)
+        ext = gm._default_external_inputs()
+        sc.step(ext)
+        snap = sc.get_fmu_state()
+        want = np.asarray(sc.state["spring"]["position"]).copy()
+        sc.step(ext)
+        sc.set_fmu_state(snap)
+        np.testing.assert_array_equal(np.asarray(sc.state["spring"]["position"]), want)
+        assert np.asarray(sc.state["spring"]["position"]).dtype == want.dtype
+        # a leaf that arrives wider than the live one lands in the live dtype,
+        # as it does through the bridge: a float64 carry would retrace the step
+        sc.set_fmu_state(_snapshot_with(sc, "state", "spring", "position", np.float64(0.3)))
+        restored = np.asarray(sc.state["spring"]["position"])
+        assert restored.dtype == np.float32 and restored == np.float32(0.3)
+        sc.set_fmu_state(_snapshot_with(sc, "param", "spring", "stiffness", np.float64(45.0)))
+        assert np.asarray(sc.get_params()["spring.params.stiffness"]).dtype == np.float32
+
+    @pytest.mark.parametrize("kind, owner, key, value, refusal", _SNAPSHOT_CASES,
+                             ids=["nan_state", "inf_param", "overflow_param",
+                                  "out_of_bounds_param", "healthy_param",
+                                  "misshapen_state", "misshapen_param"])
+    def test_set_fmu_state_refuses_what_the_bridge_set_state_refuses(
+            self, gm, kind, owner, key, value, refusal):
+        """The two restore paths share their checks, so they cannot drift:
+        the same leaf is accepted by both or refused by both, with the same
+        words."""
+        from maddening.fmi.tcp_bridge import FmuTcpBridge
+
+        md, sc = _sidecar(gm)
+        _, bridge_sc = _sidecar(gm)
+        bridge = FmuTcpBridge(bridge_sc, md, master_dt=1e-2)
+        try:
+            reply = bridge.handle({"op": "set_state",
+                                   "state": _archive_with(bridge, kind, owner, key, value)})
+            snap = _snapshot_with(sc, kind, owner, key, value)
+            if refusal is None:
+                assert reply == {"ok": True}, reply
+                sc.set_fmu_state(snap)
+                got = bridge_sc.get_params()[f"{owner}.params.{key}"]
+                assert float(sc.get_params()[f"{owner}.params.{key}"]) == float(got)
+                return
+            with pytest.raises(ValueError) as exc:
+                sc.set_fmu_state(snap)
+            assert reply["ok"] is False
+            assert reply["error"] == f"ValueError: {exc.value}", (reply["error"], str(exc.value))
+            assert re.search(refusal, str(exc.value)), str(exc.value)
+        finally:
+            bridge.stop()
 
 
 class TestDirectionalDerivativeWrtParameter:

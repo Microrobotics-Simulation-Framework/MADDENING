@@ -20,7 +20,7 @@ pod except whether to stop.
 
 | # | claim | goal(s) | compared against | limit |
 |---|---|---|---|---|
-| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil`, `forward` | the unsharded node, same pod | rel 1e-5 |
+| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (periodic, edge and Dirichlet ends), `forward` | the unsharded node, same pod | rel 1e-5 |
 | 2 | halo exchange at the shard and global boundaries | `halo` | NumPy, every slot, forward and adjoint | **0** (bit for bit) |
 | 3 | sharded adjoint ≡ unsharded adjoint | `stencil`, `gradient`, `coupled` | the unsharded adjoint | rel 1e-5 (rollouts), 1e-4 (coupled, IFT), 1e-3 (`sharded_cg`) |
 | 4 | nested `HybridNode(ShardedStencilNode(inner))` | `hybrid` | `HybridNode(inner)` in the same graph | rel 1e-5 |
@@ -49,11 +49,11 @@ carries it to the GPUs.
 
 | # | CPU virtual devices (`tests/cloud/multigpu/`) | on the pod |
 |---|---|---|
-| 1 | `test_property_sharded_equals_unsharded.py` (all three wrappers, 1–4 devices, node and graph level), `test_sharded_stencil_node.py`, `test_sharded_unstructured.py`, `test_exchange_ppermute.py` | `stencil` (a 2-D field with a sharded `StaticArray`, 1e5–1e6 cells), `forward` (unstructured, both transports) |
+| 1 | `test_property_sharded_equals_unsharded.py` (all three wrappers, 1–4 devices, node and graph level), `test_sharded_stencil_node.py`, `test_sharded_unstructured.py`, `test_exchange_ppermute.py` | `stencil` (a 2-D field with a sharded `StaticArray`, 1e5–1e6 cells; periodic ends at every size, and at the smallest also `"edge"` ends -- the wrapper's default fill, on the sharded and the unsharded axis -- and Dirichlet ends held through a boundary input), `forward` (unstructured, both transports) |
 | 2 | `test_halo.py` (slab and pencil fills, halo 1 and 2, the gradient by finite differences), `test_property_exchange_transports.py`, `test_exchange_ppermute.py` | `halo`: every mode × width on a 1-D and a 2×2 mesh, and the unstructured exchange under both transports, forward and adjoint, bit for bit |
 | 3 | `test_property_sharded_equals_unsharded.py::test_a_gradient_through_the_sharded_path_matches_the_unsharded_one`, `test_property_injected_params_gradient.py`, `test_sharded_gradient.py` (finite differences), `test_iterative_solver.py` | `stencil` (d/d initial field and d/d a parameter), `gradient`, `coupled` |
 | 4 | `test_sharded_static_cache.py`: static-cache invalidation, hashing and drift through `HybridNode(ShardedStencilNode(...))` with an empty correction — no forward or adjoint parity with a non-zero correction | `hybrid`: `run_scan` and `jax.grad` of the graph with a non-local correction (a shift across shards) |
-| 5 | `test_property_shard_construction.py` (the stencil and pointwise refusals; the unstructured wrapper taking a prime cell count) | `indivisible`: the same refusals on the real mesh, a 2×2 pencil refusal naming axis 1, and an uneven unstructured split matching the unsharded node |
+| 5 | `test_property_shard_construction.py` (the stencil and pointwise refusals; the unstructured wrapper taking a prime cell count) | `indivisible`: the same refusals on the real mesh, a 2×2 pencil refusal naming axis 1 (recorded as *not run* on a device count with no pencil mesh), and an uneven unstructured split matching the unsharded node |
 | 6 | `test_coupling_group_with_sharded_and_replicated_members.py`: forward on every push, adjoint in the slow lane, default solver and `"fori"`, against the unwrapped group and a float64 model | `coupled` |
 
 Before item 6's test, the nearest coverage was
@@ -73,8 +73,9 @@ python benchmarks/multigpu/run_pod.py --summarise /tmp/mg-dry     # needs no JAX
 pytest tests/cloud/multigpu -m "slow or not slow" -q             # includes the runner dry-run test
 ```
 
-The dry run takes about 45 s on four cores.  It must print
-`checks n/n passed` for all eight goals and exit 0.  The summary must
+The dry run takes about a minute on three cores.  It must print
+`checks n/n passed` for all eight goals, no `CHECK NOT RUN` line, and exit
+0.  The summary must
 exit 0, show every checklist item as `open: passed on CPU / dry run only`
 (a dry run never closes an item) and the transport recommendation as
 `undecided`.  Anything else: fix it here, not on the pod.
@@ -144,10 +145,13 @@ Optional: `pip install pymetis` for a real graph partition of the mesh.
 ### 2b. The goals, in this order, each under its time box
 
 Run one command at a time and read its exit status (`echo $?`) before the
-next: **0** = every check passed, go on; **1** = a check failed (the log
+next: **0** = no check failed, go on; **1** = a check failed (the log
 names it on a `CHECK FAILED` line); **124** = the time box ran out;
 anything else = a crash.  Anything but 0 is the stop condition in
-section 3.
+section 3.  A `CHECK NOT RUN` line is a case this device count cannot
+express (the 2-D pencil cases need an even count of at least 4); it is
+not a failure and does not stop the session, but it keeps the item open.
+On four GPUs there are none.
 
 ```sh
 R="python benchmarks/multigpu/run_pod.py --out results/multigpu"
@@ -213,7 +217,7 @@ dominates; a GPU compile of the coupled group's adjoint is assumed to take
 | `indivisible` | 3 refusals; a 1e5-cell uneven unstructured run, 20 public `update()` calls | ~1 min | 10 min |
 | `halo` | 3 programs at 1e6 cells (1-D mesh, 2×2 mesh, unstructured) and the NumPy reference | 1–2 min | 10 min |
 | `coupled` | per size, 4 programs (2 solvers × sharded/unsharded) and the float64 model on the host | 5–10 min | 20 min |
-| `stencil` | per size, 4 programs (rollout and gradient × 2 paths) | 3–5 min | 15 min |
+| `stencil` | 4 programs (rollout and gradient × 2 paths) per case: periodic ends at each size, edge and Dirichlet ends at 1e5 cells (5 cases) | 4–7 min | 15 min |
 | `hybrid` | per size, 2 graphs × (`run_scan` and the gradient) | 3–6 min | 15 min |
 | `exchange` | per size, 2 transports | ~5 min | 10 min |
 | `forward` | per size, 2 transports, public and compiled step | ~10 min | 15 min |
@@ -260,18 +264,27 @@ and commit it with the summary output pasted into the commit body.
 ## 5. Read the result
 
 `python benchmarks/multigpu/run_pod.py --summarise benchmarks/results/multigpu`
-exits 0 when every recorded check passed, 3 when any failed, and 1 when
-the directory holds no goal JSON.  It prints:
+exits 0 when no recorded check failed, 3 when any failed, and 1 when the
+directory holds no goal JSON.  It does not take a check's recorded
+`passed` on trust: pass/fail is re-derived from the check's `value`,
+`limit` and `sense`, and a record that disagrees -- a value of 0.5
+against a limit of 0.0 recorded as passed, say -- is listed as failed
+(`recorded passed=True, but the value fails its limit`), as is a file
+whose top-level `passed` its checks do not bear out.  It prints:
 
 * **Runs**: one line per JSON file — platform, devices, device kind,
   `jax / jaxlib`, dry run, checks passed, verdict.
-* **Checklist**: per item, `CLOSED` (every goal that decides it passed on
-  real GPUs, not a dry run, on ≥ 4 devices — ≥ 2 if the run recorded
-  `--allow-fewer-devices`), `FAILED` (a deciding goal failed a check),
-  `open` (a deciding goal was not run, or recorded no checks), or `open:
-  passed on CPU / dry run only`.  The session succeeded when all six read
-  `CLOSED`.
-* **Failed checks**, each with its value and limit.
+* **Checklist**: per item, `CLOSED` (every goal that decides it passed,
+  with every check run, on real GPUs, not a dry run, on ≥ 4 devices —
+  `--allow-fewer-devices` does not lower that: it is for the transport
+  ranking, and on 2 devices a halo taken from the wrong neighbour passes
+  every check), `FAILED` (a deciding goal failed a check), `open` (a
+  deciding goal was not run, recorded no checks, or is `INCOMPLETE`:
+  a check was recorded as not run), `open: passed on CPU / dry run only`,
+  or `open: passed on fewer than 4 devices`.  The session succeeded when
+  all six read `CLOSED`.
+* **Failed checks**, each with its value and limit, and **Checks not
+  run**, each with why.
 * The per-goal tables (indivisible, halo, coupled, stencil, hybrid), then
   the transport ranking and the forward and gradient tables.
 
@@ -300,24 +313,28 @@ unsharded one" is a statement about the compiled step, not about Python;
 and in `coupled`, the sharded against the unsharded `value_and_grad`
 time, which is where the device-0 gather above shows its cost at scale.
 
-## Schema of the JSON (schema_version 3)
+## Schema of the JSON (schema_version 4)
 
 Common: `goal`, `dry_run`, `allow_fewer_devices`, `n_devices` (the mesh
 size), `environment` (`hostname`, `timestamp_utc`, `python`, `jax`,
 `jaxlib`, `platform`, `devices`, `device_kinds`, `n_devices_visible`,
 `nvidia_smi` (a list, or the string `"skipped (dry run)"`), `xla_flags`,
 `jax_platforms`, `git_commit`), `config` (the CLI namespace), `wall_s`,
-`results`, `checks` (a list of `{name, value, limit, passed[, detail]}`:
-a numeric check passes when `value <= limit` and is finite, a yes/no
-check has `limit: true`) and `passed` (every check passed, and there was
-at least one).  Timings are `{warmup, repeats, ms: [...], min_ms,
+`results`, `checks` (a list of `{name, value, limit, sense, passed[,
+detail]}`: a numeric check has `sense: "<="` and passes when `value <=
+limit` and is finite, a yes/no check has `sense: "=="` and `limit: true`;
+a case the device count cannot express is `{name, value: null, limit:
+null, sense: null, passed: false, not_run: true, detail}`, detail saying
+what it needs) and `passed` (every check ran and passed, and there was at
+least one).  Timings are `{warmup, repeats, ms: [...], min_ms,
 median_ms, mean_ms}`; parity blocks are `{max_abs, max_rel,
 reference_scale, finite}`; a bare `parity_*` number is the largest
 componentwise relative difference; every `compile_s` is an ahead-of-time
 compile without execution.
 
 * `indivisible.json` results (one entry): `stencil`, `pointwise` and,
-  on ≥ 4 devices, `pencil` = `{shape, raised, message}` (`stencil` also
+  on an even count ≥ 4 devices, `pencil` = `{shape, raised, message}`
+  (otherwise a check not run) (`stencil` also
   `divisible_shape`, `divisible_raised`: one row fewer is accepted);
   `unstructured` = `{cells, partition, cells_per_device, steps,
   parity_x}`.
@@ -333,7 +350,8 @@ compile without execution.
   `"fori"`), `partitioned`, `device0_pinned_ops`), `parity_f`,
   `parity_u`, `parity_loss`, `parity_grad`, `model.<side>.{f, u, loss,
   grad}`.
-* `stencil.json` results: `cells`, `shape`, `steps`, `grad_steps`,
+* `stencil.json` results, one per case: `cells`, `shape`, `boundary`
+  (`periodic`, `edge` or `dirichlet`), `steps`, `grad_steps`,
   `input_partitioned`, `forward.{sharded,unsharded}` (`compile_s`,
   `rollout` timing with `ms_per_step`), `forward.parity_f`,
   `gradient.{sharded,unsharded}` (`compile_s`, `grad` timing, `loss`,
@@ -364,7 +382,10 @@ compile without execution.
   `grad_sharded`, `grad_unsharded`, `compile_s.{sharded,unsharded}`,
   `grad_parity`, `jvp_parity`).
 
-Schema 2 files (the first three goals, before the checklist goals) carry
+Schema 3 files carry no `sense` (the summary reads it from the limit's
+type, which is how schema 3 wrote checks), never record a check as not
+run, and ran the stencil goal with periodic ends only.  Schema 2 files
+(the first three goals, before the checklist goals) carry
 no `checks`, `passed` or top-level `n_devices`; the summary shows them as
 `no checks` and they close no checklist item.  Schema 1 files lack the
 `compile_s`/`input_presharded` keys and carried gradient timings that were

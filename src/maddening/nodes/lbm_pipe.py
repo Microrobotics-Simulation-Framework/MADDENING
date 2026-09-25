@@ -490,7 +490,17 @@ class LBMPipeNode(SimulationNode):
         stability=StabilityLevel.EXPERIMENTAL,
         description="D3Q19 Lattice Boltzmann in cylindrical pipe with propeller actuator disc",
         governing_equations="BGK collision: f_i = f_i - (f_i - f_eq_i)/τ; streaming: f_i(x+e_i, t+1) = f_i(x, t)",
-        discretization="Lattice Boltzmann (D3Q19, explicit, 2nd-order in space and time for low Ma)",
+        # No order is claimed.  The only convergence study (MADD-VER-013)
+        # is outside the asymptotic range -- its two triples measure 1.49
+        # and 3.35 -- and bounce-back on the staircased circular wall is
+        # 1st-order, so "2nd-order in space and time", which this said
+        # until 0.4.0, was the bulk scheme's textbook order and not a
+        # property anything measured of this node.
+        discretization=(
+            "Lattice Boltzmann (D3Q19, BGK, explicit; one lattice step per "
+            "timestep).  No order of accuracy is claimed: the one "
+            "convergence study (MADD-VER-013) is not in the asymptotic range"
+        ),
         assumptions=(
             "Incompressible flow (Mach number << 1)",
             "BGK single-relaxation-time collision operator",
@@ -506,9 +516,24 @@ class LBMPipeNode(SimulationNode):
             "No accuracy verdict: the one convergence study (MADD-VER-013) "
             "is not in the asymptotic range, and no test compares the node "
             "against an analytical solution with a pass criterion",
+            "The verified configuration is single-phase, fully filled and "
+            "uniformly forced (MADD-VER-013).  No verification benchmark "
+            "covers the Shan-Chen multiphase mode, the passive tracer, "
+            "partial fill, gravity or a localised actuator disc",
         ),
         validated_regimes=(
-            ValidatedRegime("tau", 0.501, 2.0, notes="tau > 0.5 required for stability; tau >> 1 causes numerical diffusion"),
+            ValidatedRegime(
+                "tau", 0.8, 0.8,
+                notes=(
+                    "The only value any verification runs at: MADD-VER-013 "
+                    "uses tau = 0.8 (nu = 0.1).  The constructor accepts any "
+                    "tau > 0.5, which BGK needs to be stable, but nothing "
+                    "verifies the node at another value; tau near 0.5 is "
+                    "prone to instability and tau >> 1 adds numerical "
+                    "diffusion.  0.501 to 2.0, the range this declared "
+                    "until 0.4.0, was never run"
+                ),
+            ),
             ValidatedRegime(
                 "Reynolds number", 0, 0.03,
                 notes=(
@@ -535,7 +560,7 @@ class LBMPipeNode(SimulationNode):
             ),
         ),
         hazard_hints=(
-            "Behaviour uncharacterised above Re ~0.03; verified only in the Stokes regime (MADD-VER-013), not across the laminar range",
+            "Behaviour uncharacterised above Re ~0.03 and at any tau but 0.8; verified only in the Stokes regime, at tau = 0.8, on 12 to 32 cells per side (MADD-VER-013), not across the laminar range",
             "No turbulence model — do not use above laminar-turbulent transition (Re ~2000)",
             "Wall bounce-back assumes rigid, impermeable walls; deformable or porous walls not modelled",
             "Gravity applied uniformly — no spatially varying body forces",

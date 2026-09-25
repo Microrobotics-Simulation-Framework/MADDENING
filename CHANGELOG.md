@@ -289,6 +289,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`LBMNode(wall_mask=...)` keeps its walls through a save/reload**: the mask was not in `params`, so `from_dict` and a USD stage rebuilt the node with no walls and the reloaded graph ran an open domain, with no error (MADD-ANO-034, since 0.1.0).  The mask is recorded as nested lists of bool, and `POST /graph/nodes` takes it;
+  `AdaptiveNode(dtype=...)` is recorded too (a reload came back at the canonical float).  Every built-in node's constructor arguments are now checked through a JSON and a USD reload.
+  Action: re-run results from a reloaded graph that holds a walled `LBMNode`.
 - **Sharded wrappers, audit of the frozen tree**: a params write followed by `compile()` reaches the sharded step, for a legacy-contract node's constant and for a halo width that follows a parameter (`HeatNode.stencil_order`) (MADD-ANO-032, since 0.2.0); `ShardedStencilNode` keeps `dt` at the graph's precision under x64 (MADD-ANO-033, since 0.2.0); `HybridNode` and `ShardedUnstructuredNode` forward `update_evaluations()`;
   `ShardedUnstructuredNode` validates `domain_integral_axes` names.  The routes MADD-ANO-024's first fix left open (a part-full pipe's `pipe_radius`, `n_cells`, `stencil_order=3`, wrapped and unprobeable nodes) are closed.
   Action: re-run sharded results whose structural parameters were written after the wrapper was built, and sharded float64 stencil runs under x64.
@@ -605,6 +608,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-034 (new, resolved in this release)**: a walled `LBMNode` reloaded with no walls (since 0.1.0; see `### Fixed`).  **MADD-ANO-035 (new, open)**: on a balanced partition whose cells are not in global order, `ShardedUnstructuredNode`
+  reads a global-order state written with `set_node_state` as partition layout, so each cell steps from another cell's value (since 0.3.0).  Convert the state with `partition_value` first, or renumber the cells with
+  `np.argsort(partition_assignment, kind="stable")`; an explicit layout on the state write is planned for 0.5.0
 - **MADD-ANO-032, 033 (new, resolved in this release)**: the sharded wrappers kept a compiled step across `compile()`, so a legacy node's params write after a step never reached the sharded physics; `ShardedStencilNode` stepped with a float32 `dt` under x64 (both since 0.2.0; see `### Fixed`).
   **MADD-ANO-024** now records the routes its first fix left open, all closed, and **MADD-ANO-004**'s workaround says it held only before the first step
 - **MADD-ANO-028, 029, 030 (new, resolved in this release)**: periodic global halos on a size-1 mesh axis; a wide `"edge"` fill that copied the shard's first cells;

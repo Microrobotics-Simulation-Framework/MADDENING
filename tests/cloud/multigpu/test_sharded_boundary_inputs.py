@@ -310,11 +310,11 @@ def test_unstructured_state_not_in_partition_layout_is_refused():
 # refuse the documented partition-layout spelling too (same shape), so the
 # fix needs an explicit layout on the write and is deferred to 0.5.0.
 
-_ANO_035_PA = (np.arange(8) % 2).astype(np.int32)      # interleaved, 2 x 4
-_ANO_035_STATE = np.arange(1, 9, dtype=np.float32)     # x = [1..8], global order
+_BALANCED_PA = (np.arange(8) % 2).astype(np.int32)      # interleaved, 2 x 4
+_GLOBAL_ORDER_X = np.arange(1, 9, dtype=np.float32)     # x = [1..8], global order
 
 
-def _ano_035_graph(pa=_ANO_035_PA):
+def _balanced_interleaved_graph(pa=_BALANCED_PA):
     from maddening.core.graph_manager import GraphManager
 
     node, sharded, layout = _ring_setup(n=8, n_devices=2, pa=pa)
@@ -338,15 +338,15 @@ def test_a_global_order_state_on_a_balanced_interleaved_partition_is_read_as_par
     device 0, then 1, 3, 5, 7).  The step then advances *that* state, so
     the result is the unsharded node's step from the permuted cells, not
     from the state that was written."""
-    node, sharded, layout, gm = _ano_035_graph()
-    gm.set_node_state("ring", {"x": jnp.asarray(_ANO_035_STATE)})    # no error
+    node, sharded, layout, gm = _balanced_interleaved_graph()
+    gm.set_node_state("ring", {"x": jnp.asarray(_GLOBAL_ORDER_X)})    # no error
 
     read_as = np.asarray(sharded.gather_global(gm.get_node_state("ring"))["x"])
     np.testing.assert_array_equal(read_as, [1, 5, 2, 6, 3, 7, 4, 8])
 
     got = _stepped_global(sharded, gm)
     from_permuted = np.asarray(node.update({"x": jnp.asarray(read_as)}, {}, 1.0)["x"])
-    intended = np.asarray(node.update({"x": jnp.asarray(_ANO_035_STATE)}, {}, 1.0)["x"])
+    intended = np.asarray(node.update({"x": jnp.asarray(_GLOBAL_ORDER_X)}, {}, 1.0)["x"])
     np.testing.assert_allclose(got, from_permuted, rtol=1e-6, atol=1e-6)
     # The fixture can express the defect: the two readings step apart.
     assert np.max(np.abs(from_permuted - intended)) > 1.0
@@ -365,34 +365,34 @@ def test_a_global_order_state_on_a_balanced_interleaved_partition_is_read_as_par
     ),
 )
 def test_a_global_order_state_on_a_balanced_partition_steps_the_cells_it_names():
-    node, sharded, layout, gm = _ano_035_graph()
-    gm.set_node_state("ring", {"x": jnp.asarray(_ANO_035_STATE)})
+    node, sharded, layout, gm = _balanced_interleaved_graph()
+    gm.set_node_state("ring", {"x": jnp.asarray(_GLOBAL_ORDER_X)})
     got = _stepped_global(sharded, gm)
-    intended = np.asarray(node.update({"x": jnp.asarray(_ANO_035_STATE)}, {}, 1.0)["x"])
+    intended = np.asarray(node.update({"x": jnp.asarray(_GLOBAL_ORDER_X)}, {}, 1.0)["x"])
     np.testing.assert_allclose(got, intended, rtol=1e-6, atol=1e-6)
 
 
-def test_ano_035_workaround_a_state_converted_with_partition_value_steps_the_cells_it_names():
+def test_the_workaround_a_state_converted_with_partition_value_steps_the_cells_it_names():
     """The first workaround: convert a global-order state to partition
     layout with ``partition_value`` (and flatten the device axis) before
     writing it."""
-    node, sharded, layout, gm = _ano_035_graph()
-    in_layout = partition_value(value=_ANO_035_STATE, layout=layout).reshape(-1)
-    assert not np.array_equal(in_layout, _ANO_035_STATE)        # a real permutation
+    node, sharded, layout, gm = _balanced_interleaved_graph()
+    in_layout = partition_value(value=_GLOBAL_ORDER_X, layout=layout).reshape(-1)
+    assert not np.array_equal(in_layout, _GLOBAL_ORDER_X)        # a real permutation
     gm.set_node_state("ring", {"x": jnp.asarray(in_layout)})
     got = _stepped_global(sharded, gm)
-    intended = np.asarray(node.update({"x": jnp.asarray(_ANO_035_STATE)}, {}, 1.0)["x"])
+    intended = np.asarray(node.update({"x": jnp.asarray(_GLOBAL_ORDER_X)}, {}, 1.0)["x"])
     np.testing.assert_allclose(got, intended, rtol=1e-6, atol=1e-6)
 
 
-def test_ano_035_workaround_renumbered_cells_read_a_global_order_state_correctly():
+def test_the_workaround_renumbered_cells_read_a_global_order_state_correctly():
     """The second workaround: renumber the cells so that each device owns a
     contiguous ascending block (``np.argsort(partition_assignment,
     kind="stable")``).  Global order and partition layout are then the same
     array, and a global-order state steps the cells it names."""
-    order = np.argsort(_ANO_035_PA, kind="stable")              # new id -> old id
-    node, sharded, layout, gm = _ano_035_graph(pa=_ANO_035_PA[order])
-    state = _ANO_035_STATE[order]                               # same values, new ids
+    order = np.argsort(_BALANCED_PA, kind="stable")              # new id -> old id
+    node, sharded, layout, gm = _balanced_interleaved_graph(pa=_BALANCED_PA[order])
+    state = _GLOBAL_ORDER_X[order]                               # same values, new ids
     assert np.array_equal(partition_value(value=state, layout=layout).reshape(-1), state)
     gm.set_node_state("ring", {"x": jnp.asarray(state)})
     got = _stepped_global(sharded, gm)

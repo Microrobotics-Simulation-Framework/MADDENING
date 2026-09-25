@@ -116,6 +116,17 @@ anomalies:
       raises ValueError ("the Fourier number dt*alpha/dx^2 is 5, above the 0.5
       limit of the order-2 stencil").  That check is MADD-ANO-009's and it sees
       the constructor's own timestep, thermal_diffusivity and length only.
+      It covers a rod built on `grid_points` as well.  Until the
+      release-record audit of 0.4.0 it did not: the same 20 cell centres
+      given as `grid_points` at Fo = 5.0 built without a word and reached inf
+      by step 32.  A non-uniform rod is now held to `dt*alpha/min(h_L*h_R) <=
+      1/2`, where `h_L` and `h_R` are a cell's spacings to its two neighbours
+      and the end spacing repeats beyond each end.  That is the Gershgorin
+      bound of the variable-spacing stencil: exact on a uniform grid, and
+      sufficient on any.  The same round made the constructor refuse a
+      non-positive timestep and a negative thermal_diffusivity
+      (MADD-ANO-051).  Both run the heat equation backwards, and the check
+      used to be skipped for them.
       What is still live is every route around it, re-measured on that same rod
       at 0.4.0.dev0 with a half-sine initial profile and a node constructed at a
       stable Fo = 0.4:
@@ -153,10 +164,14 @@ anomalies:
       - "maddening.nodes.heat.HeatNode"
     affected_versions: ">=0.1.0"
     workaround: >
-      The constructor checks this for you from 0.4.0; below 0.4.0, check it
-      yourself: timestep * thermal_diffusivity / dx**2 < 0.5 for
-      stencil_order=2 and < 0.3125 for stencil_order=4, with
-      dx = length / n_cells.  The constructor parameter is
+      The constructor checks this for you from 0.4.0, on a uniform grid and
+      on `grid_points`; below 0.4.0, check it yourself:
+      timestep * thermal_diffusivity / dx**2 < 0.5 for stencil_order=2 and
+      < 0.3125 for stencil_order=4, with dx = length / n_cells.  On a
+      non-uniform grid, use timestep * thermal_diffusivity / min(h_L * h_R)
+      <= 0.5 whatever stencil_order says, with h_L and h_R a cell's spacings
+      to its two neighbours and the end spacing repeated beyond each end.
+      The constructor parameter is
       `thermal_diffusivity` (there is no `alpha=` keyword — passing one is a
       TypeError), and `timestep` is the value the check applies to.
       What no version checks, and what the workaround is for at 0.4.0: apply
@@ -169,8 +184,10 @@ anomalies:
       non-finite values after the step if it can.
     resolution_status: "open"
     verification:
-      # The narrowing: the constructor's check (MADD-ANO-009's).
+      # The narrowing: the constructor's check (MADD-ANO-009's), on both grids.
       - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_constructor_refuses_an_unstable_configuration"
+      - "tests/nodes/test_heat_nonuniform_fourier_limit.py::test_a_non_uniform_rod_past_its_limit_is_refused"
+      - "tests/nodes/test_heat_nonuniform_fourier_limit.py::test_the_criterion_is_conservative_on_graded_grids"
       # What stays open, pinned so that a fix, or a drifted figure, fails.
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_the_constructor_does_refuse_the_same_fourier_number"
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_an_unstable_dt_passed_to_update_diverges_silently"
@@ -1028,8 +1045,10 @@ anomalies:
       or `length` moved by a calibration run -- both are trainable -- bypass
       it entirely, and cannot be checked inside a traced step without a host
       callback.  MADD-ANO-002 stays open for that reason and is the right
-      place to read about it.  The check is also skipped for a non-uniform
-      grid, where `dx` is not a single number.
+      place to read about it.  Until the release-record audit of 0.4.0 the
+      check was also skipped for a non-uniform grid, where `dx` is not a
+      single number.  It now applies there too, as `dt * alpha / min(h_L *
+      h_R) <= 1/2` (see MADD-ANO-002).
     verification:
       - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_fourth_order_stencil_is_stable_up_to_five_sixteenths"
       - "tests/verification/test_mms_order.py::TestHeatStabilityBound::test_the_fourth_order_limit_is_below_the_three_eighths_of_its_symbol"
@@ -4197,11 +4216,14 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      A non-integer ratio of a member's timestep to the macro timestep is
-      rounded to a whole number of sub-steps, so such a member covers
-      `divider * node_dt` per macro step in the compiled step, not
-      `macro_dt`; the adaptive step keeps that same ratio.  That is a
-      separate, pre-existing property of sub-cycling, not addressed here.
+      None known from this fix.  The one related property it did not
+      address was separate and pre-existing: a member whose timestep does
+      not divide the macro timestep was rounded to a whole number of
+      sub-steps, so it covered `divider * node_dt` per macro step rather
+      than `macro_dt`, and the adaptive step kept that ratio.  That is
+      MADD-ANO-046, resolved in the same release.  `compile()` now refuses
+      such a group, so the configuration can reach neither the compiled
+      step nor the adaptive one.
     verification:
       - "tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_advances_every_member_by_the_step"
       - "tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_scan_advances_every_member_by_the_step"
@@ -4615,57 +4637,174 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-050"
-    title: "Two HeatNode rods coupled end to end are unstable above Fourier number 3/8 once the exchange converges, which each rod's constructor accepts up to 1/2"
+    title: "Two HeatNode rods coupled end to end are unstable above Fourier number 3/8 (stencil_order=2) or 0.226 (stencil_order=4) once the exchange converges, below the limit each rod's constructor accepts"
     description: >
       Coupling two rods by making each one's end-cell temperature the
       other's Dirichlet datum (`extract_last` into `left_temperature`,
       `extract_first` into `right_temperature`) and converging the exchange
       within the step with a coupling group gives a pair that is not one
-      continuous rod: `HeatNode` imposes the datum through the ghost
-      `2*T_b - T[0]` (the rod-end fix of MADD-ANO-007), and the converged
-      pair has an interface mode whose per-step amplification is -1 at
-      Fourier number `Fo = dt*alpha/dx**2 = 3/8` and grows past it.  Each
-      rod's constructor checks its own limit, 1/2 for fixed data, so
-      nothing refuses the pair.  Measured on the 0.4.0 development tree
-      (CPU, jaxlib 0.11.0): two rods of 8 or of 20 cells, `alpha = 0.1`,
-      length 1, started at 300 K and 360 K, `add_coupling_group(["a",
-      "b"], max_iterations=100, tolerance=1e-9)`.  After 60 steps the
-      largest departure from 330 K is 29.8 K at `Fo = 0.375`, 1.51e+06 K at
-      0.4 and 3.5e+31 K at 0.45, and the part of the field that alternates
-      in time is multiplied by -1.500 per step at 0.4 and -4.000 at 0.45 on
-      both grids; at 0.45 the field is non-finite from step 68 (8 cells) or
-      67 (20 cells).  No error or warning.  The same pair exchanging its
-      data without a coupling group (lagged by the schedule) stays within
-      its initial range at 0.45 over 200 steps.  At v0.3.1 (`git archive`, same
-      environment) the pair stays bounded at every Fourier number up to
-      0.45 with the group and without it: the old closure wrote the datum
-      into the end cell, which made the pair one continuous rod, so the
-      limit arrived with the 0.4.0 rod-end fix.  The coupling benchmark
-      fixtures refuse `Fo >= 3/8` for their heat slab pairs themselves.
+      continuous rod.  `HeatNode` imposes the datum through ghost cells (the
+      rod-end fix of MADD-ANO-007).  The converged exchange makes each datum
+      an implicit value, the other rod's end cell at the new time, while the
+      rod interiors stay explicit.  The pair then has an interface mode that
+      alternates in sign every step.  Its amplification is -1 at a Fourier
+      number `Fo = dt*alpha/dx**2` below each rod's own limit and grows past
+      it.  Each rod's constructor checks its own limit, for fixed data, so
+      nothing refuses the pair.
+      The limit depends on the stencil, because the ghost closure sets how
+      much of the exchanged datum reaches the end cell:
+        - `stencil_order=2`: exactly 3/8, against 1/2 for one rod.  The mirror
+          ghost `2*T_b - T[0]` puts 2 of the datum into the end cell's row.
+          The interface mode decays away from the interface as `(-1/3)**k`,
+          so its eigenvalue is `-16/3` and `Fo = 2 / (16/3) = 3/8`;
+        - `stencil_order=4`: 0.2261266 as `n_cells` grows (0.2261215 at 5
+          cells, the fewest the stencil accepts), against 5/16 = 0.3125 for
+          one rod.  The cubic ghost puts 16/5 of the datum into the end
+          cell's row.  The interface mode is a sum of the 5-point
+          recurrence's two decaying roots, and the two closure rows fix
+          their product `p` as the root in (-1, 0) of the irreducible sextic
+          `p**6 - 294 p**5 - 2333 p**4 + 1692 p**3 - 9 p**2 + 362 p + 5`.
+          That gives an eigenvalue of -8.8446028.  Both figures were
+          re-derived numerically too, by bisecting on the spectral radius of
+          the pair's amplification matrix built from `_compute_laplacian`
+          (5 to 256 cells per rod).
+      Measured at `stencil_order=2` on the 0.4.0 development tree (CPU,
+      jaxlib 0.11.0): two rods of 8 or of 20 cells, `alpha = 0.1`, length 1,
+      started at 300 K and 360 K, `add_coupling_group(["a", "b"],
+      max_iterations=100, tolerance=1e-9)`.  After 60 steps the largest
+      departure from 330 K is 29.8 K at `Fo = 0.375`, 1.51e+06 K at 0.4 and
+      3.5e+31 K at 0.45.  The part of the field that alternates in time is
+      multiplied by -1.500 per step at 0.4 and -4.000 at 0.45 on both grids.
+      At 0.45 the field is non-finite from step 68 (8 cells) or 67 (20
+      cells).
+      At `stencil_order=4` on the same construction (8 cells) the pair stays
+      bounded at 0.20 and 0.22, over 2000 and 1500 steps.  It is non-finite
+      from step 907 at 0.23, 258 at 0.24, 150 at 0.25, 35 at 0.30 and 21 at
+      0.31.  Each of those is inside the order-4 constructor limit, and
+      inside the 3/8 this entry used to quote for every stencil.  The measured growth per step is
+      the predicted interface mode's: -1.107 at 0.23, -1.435 at 0.24 and
+      -1.866 at 0.25.
+      A chain of three or more short rods goes unstable slightly below the
+      pair figure: 0.3730 (order 2) and 0.2248 (order 4) for a long chain of
+      5-cell rods, and 0.3749 and 0.2261 for 8-cell rods.  From about 20
+      cells per rod a chain has the pair figure.
+      No error, at either order.  Since 0.4.0 `compile()` warns: it emits a
+      UserWarning that names both rods, their Fourier numbers, the limit and
+      this entry, when a coupling group holds two uniform rods coupled this
+      way through `extract_first` / `extract_last` and either rod is past
+      the pair limit of its stencil.  The same pair exchanging its data
+      without a coupling group (lagged by the schedule) stays within its
+      initial range at 0.45 over 200 steps, at order 2.  At v0.3.1 (`git
+      archive`, same environment) the order-2 pair stays bounded at every
+      Fourier number up to 0.45, with the group and without it, and the
+      order-4 pair stays bounded at 0.23, 0.25 and 0.30 over 1000 steps.  The old
+      closure wrote the datum into the end cell, which made the pair one
+      continuous rod, so the limit arrived with the 0.4.0 rod-end fix.  The
+      coupling benchmark fixtures refuse `Fo >= 3/8` for their order-2 heat
+      slab pairs themselves.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       Silent until it is not: a configuration every individual check
       accepts grows an oscillation that flips sign every step and leaves
-      float range in under 70 steps at `Fo = 0.45`, with nothing
-      raised before the field is visibly wrong, and it is wrong for many
-      steps before it is non-finite.  Graded `major` because the pattern is
-      the natural way to couple two rods and the limit is not the one the
-      node documents for itself.  `context_dependent` because it needs rods
-      coupled end to end through their Dirichlet inputs, a converged
-      exchange, and a Fourier number between 3/8 and 1/2; a single rod, or
-      a pair below 3/8, is unaffected.
+      float range in under 70 steps at `Fo = 0.45` (order 2) and 150 at
+      0.25 (order 4).  Nothing is raised before the field is visibly wrong,
+      and it is wrong for many steps before it is non-finite.  The warning
+      `compile()` now gives does not refuse the graph, and it sees only the
+      pattern it recognises.  Graded `major` because the pattern is the
+      natural way to couple two rods and the limit is not the one the node
+      documents for itself.  `context_dependent` because it needs rods coupled end to end through
+      their Dirichlet inputs, a converged exchange, and a Fourier number
+      between the pair limit and the single-rod one.  A single rod, or a pair below the pair
+      limit, is unaffected.
     affected_components:
       - "maddening.nodes.heat.HeatNode"
     affected_versions: ">=0.4.0.dev0"
     workaround: >
-      Keep `Fo = dt*alpha/dx**2 < 3/8` on rods coupled end to end through
-      their temperature inputs, whatever each rod's own constructor
-      accepts.  A compile-time stability check of coupled groups is
+      Keep `Fo = dt*alpha/dx**2` below 3/8 at `stencil_order=2`, and below
+      0.226 at `stencil_order=4`, on rods coupled end to end through their
+      temperature inputs, whatever each rod's own constructor accepts.
+      Below those figures on both rods the pair is stable, at mixed orders
+      too.  `compile()` warns when it finds such a pair past them, but it
+      only recognises the built-in `extract_first` / `extract_last` edges
+      between uniform `HeatNode`s in one coupling group.  A custom
+      transform, a wrapped or non-uniform rod, or a sub-cycled pair of
+      different timesteps is not judged, so check those yourself.  Or
+      exchange the data without a coupling group, lagged by a step.  That
+      stays bounded.  A compile-time stability check of coupled groups is
       proposed for 0.5.0.
     resolution_status: "open"
     verification:
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_a_converged_end_to_end_pair_diverges_above_three_eighths"
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_the_same_pair_below_three_eighths_stays_bounded"
       - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_one_rod_with_fixed_data_is_stable_at_the_same_fourier_number"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_a_converged_order_four_pair_diverges_below_its_constructor_limit"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_the_same_order_four_pair_below_its_limit_stays_bounded"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_the_recorded_pair_limit_sits_under_the_pair_operator_limit"
+      # The warning (not a fix: the entry stays open).
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_compile_warns_about_a_pair_past_its_limit"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_no_warning_for_a_pair_below_its_limit"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-051"
+    title: "HeatNode accepted a non-positive length or timestep, a negative diffusivity and grid_points out of order, and answered wrongly without a word"
+    description: >
+      Until 0.4.0 the HeatNode constructor checked none of its physical
+      constants for meaning.  The node built, compiled and stepped on each
+      of these with no error or warning:
+        - `length <= 0`: the Laplacian reads `dx**2` and was unchanged, but
+          `compute_boundary_fluxes` divides by the signed `dx`, so both
+          rod-end fluxes changed sign.  On a 10-cell rod with ends held at
+          250 K and 400 K, the left flux read +12.87 at `length=-1` against
+          -12.87 at `length=1`;
+        - `grid_points` not strictly increasing: `_laplacian_nonuniform`
+          replaces a non-positive span `x[i+1] - x[i-1]` with 1.0, so two
+          swapped points, or the whole grid in decreasing order, gave a
+          finite and wrong Laplacian, and a repeated point divided by zero;
+        - `timestep < 0` or `thermal_diffusivity < 0`: the explicit update
+          ran the heat equation backwards (anti-diffusion), and the Fourier
+          check added in 0.4.0 (MADD-ANO-009) was skipped for any
+          non-positive constant;
+        - a non-finite value of any of them.
+      Found on the 0.4.0 development tree (audit of 2026-09-25, CPU, jaxlib
+      0.11.0).  v0.3.1 (`git archive` of the tag, same environment) accepts
+      every case too.  Its flux formula differs, but the sign flip is the
+      same: -5.98 at `length=1` and +5.98 at `length=-1`, after five steps.
+      Resolved in 0.4.0: the constructor raises ValueError naming the
+      constant and what it would have done.  `timestep` and `length` must be
+      finite and greater than 0, and `thermal_diffusivity` finite and at
+      least 0; zero is a rod that does not conduct.  `grid_points` must be
+      finite and strictly increasing.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent, but except for one case only on input with no physical
+      meaning.  The exception is grid points listed in decreasing order.
+      Coordinates read along a negative axis can produce that, and the
+      constructor's documentation never said it was not allowed; the rod
+      then gave plausible, wrong temperatures.  Minor because every other
+      case needs a constant no rod can have, and anti-diffusion eventually
+      leaves float range.  `context_dependent` because whether a wrong
+      temperature or flux matters is a property of the program using it.
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass a positive, finite `length` and `timestep`, a
+      non-negative `thermal_diffusivity`, and `grid_points` in strictly
+      increasing order.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The checks read the constructor's concrete numbers only.  A value
+      traced through the constructor is not judged.  Neither is a `dt`
+      handed to `update()`, nor a `thermal_diffusivity` or `length`
+      injected through params: that is MADD-ANO-002, which stays open.
+      `initial_temperature` is not checked for finiteness.
+    verification:
+      - "tests/nodes/test_heat_constructor_validation.py::test_a_length_that_is_not_a_finite_positive_number_is_refused"
+      - "tests/nodes/test_heat_constructor_validation.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused"
+      - "tests/nodes/test_heat_constructor_validation.py::test_a_diffusivity_that_is_negative_or_not_finite_is_refused"
+      - "tests/nodes/test_heat_constructor_validation.py::test_grid_points_out_of_order_are_refused"
+      - "tests/nodes/test_heat_constructor_validation.py::test_grid_points_that_are_not_finite_are_refused"
     github_issue: null

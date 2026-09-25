@@ -32,6 +32,7 @@ import warnings
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -201,22 +202,29 @@ def _pair_amplification_limit(order, n_cells):
     node = HeatNode("r", 1e-9, n_cells=n_cells, length=float(n_cells),
                     thermal_diffusivity=1.0, stencil_order=order)
 
-    def lap(field, left, right):
-        return np.asarray(node._compute_laplacian(
-            jnp.asarray(field, dtype=jnp.float32), left, right,
-            length=float(n_cells)), dtype=np.float64)
+    def columns(left_default, right_default):
+        """Laplacian of each unit vector, one rod end on its default datum
+        (its own end cell), the other end's datum zero."""
+        def lap(e):
+            left = e[0] if left_default else 0.0
+            right = e[-1] if right_default else 0.0
+            return node._compute_laplacian(e, left, right, length=float(n_cells))
+        rows = jax.vmap(lap)(jnp.eye(n_cells, dtype=jnp.float32))
+        return np.asarray(rows, dtype=np.float64).T
+
+    def datum_response(left, right):
+        zero = jnp.zeros(n_cells, dtype=jnp.float32)
+        return np.asarray(node._compute_laplacian(zero, left, right,
+                                                  length=float(n_cells)),
+                          dtype=np.float64)
 
     n = n_cells
     P = np.zeros((2 * n, 2 * n))
     Q = np.zeros((2 * n, 2 * n))
-    for j in range(n):
-        e = np.zeros(n)
-        e[j] = 1.0
-        P[:n, j] = lap(e, e[0], 0.0)          # rod a: right datum from b
-        P[n:, n + j] = lap(e, 0.0, e[-1])     # rod b: left datum from a
-    zero = np.zeros(n)
-    Q[:n, n] = lap(zero, 0.0, 1.0)            # a's right datum is b'[0]
-    Q[n:, n - 1] = lap(zero, 1.0, 0.0)        # b's left datum is a'[-1]
+    P[:n, :n] = columns(True, False)          # rod a: right datum from b
+    P[n:, n:] = columns(False, True)          # rod b: left datum from a
+    Q[:n, n] = datum_response(0.0, 1.0)       # a's right datum is b'[0]
+    Q[n:, n - 1] = datum_response(1.0, 0.0)   # b's left datum is a'[-1]
     eye = np.eye(2 * n)
 
     def stable(fo):

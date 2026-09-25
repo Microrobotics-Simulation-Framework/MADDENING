@@ -32,6 +32,7 @@ stencil's ghosts were built at the wrong positions (MADD-ANO-008).
 Both are fixed here; see ``docs/algorithm_guide/nodes/heat_node.md``.
 """
 
+import math
 from typing import Optional
 
 import jax.numpy as jnp
@@ -124,6 +125,68 @@ MAX_FOURIER_NUMBER = {2: 0.5, 4: 5.0 / 16.0}
 #: Fourier numbers and mixed orders too; checked on grids for ``n_cells`` = 5, 8 and 16.
 #: ``tests/nodes/test_heat_coupled_pair_fourier_limit.py`` pins them.
 _COUPLED_PAIR_MAX_FOURIER_NUMBER = {2: 3.0 / 8.0, 4: 0.226}
+
+
+def _concrete_float(value):
+    """``float(value)``, or ``None`` for a traced or non-numeric value."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _refuse_meaningless_constants(timestep, length, thermal_diffusivity,
+                                  grid_points):
+    """``ValueError`` for a HeatNode constant no rod can have.
+
+    ``timestep`` and ``length`` must be finite and positive, and
+    ``thermal_diffusivity`` finite and not negative (zero is a rod that
+    does not conduct).  ``grid_points``, when given, must be finite and
+    strictly increasing.  A value that is not a concrete number, a tracer
+    say, is not judged.
+    """
+    for name, value, allow_zero, why in (
+        ("timestep", timestep, False,
+         "A negative timestep runs the explicit update backwards in time, "
+         "which amplifies every mode diffusion should damp (anti-diffusion), "
+         "and a zero one never moves the rod."),
+        ("length", length, False,
+         "The cell width is length / n_cells.  A negative one leaves the "
+         "Laplacian unchanged, because it reads dx**2, but flips the sign of "
+         "both reported rod-end fluxes."),
+        ("thermal_diffusivity", thermal_diffusivity, True,
+         "A negative diffusivity runs the heat equation backwards "
+         "(anti-diffusion)."),
+    ):
+        v = _concrete_float(value)
+        if v is None:
+            continue
+        ok = math.isfinite(v) and (v >= 0.0 if allow_zero else v > 0.0)
+        if not ok:
+            bound = ">= 0" if allow_zero else "> 0"
+            raise ValueError(
+                f"{name} must be a finite number {bound}, got {value!r}.  {why}"
+            )
+    if grid_points is None:
+        return
+    bad = [i for i, x in enumerate(grid_points) if not math.isfinite(x)]
+    if bad:
+        raise ValueError(
+            f"grid_points must be finite, got {grid_points[bad[0]]!r} at "
+            f"index {bad[0]}."
+        )
+    order = [i for i in range(len(grid_points) - 1)
+             if not grid_points[i + 1] > grid_points[i]]
+    if order:
+        i = order[0]
+        raise ValueError(
+            f"grid_points must be strictly increasing, got "
+            f"{grid_points[i]!r} then {grid_points[i + 1]!r} at indices {i} "
+            f"and {i + 1}.  The variable-spacing stencil divides by the "
+            f"spacing between neighbouring points, so a repeated point gives "
+            f"inf, and it replaces a negative span with 1.0, so points out of "
+            f"order give a finite, wrong Laplacian."
+        )
 
 
 def _nonuniform_fourier_spacing(grid_points):
@@ -634,6 +697,19 @@ class HeatNode(SimulationNode):
                     f"n_cells ({n_cells})"
                 )
 
+        # Refuse constants with no physical meaning.  Each of these used to
+        # build, compile and step without a word, and to answer wrongly: a
+        # negative timestep or diffusivity runs the heat equation backwards
+        # (anti-diffusion), a negative length leaves the Laplacian as it was
+        # (it reads dx**2) but flips the sign of both rod-end fluxes, and
+        # grid_points out of order gives a finite, wrong Laplacian, because
+        # ``_laplacian_nonuniform`` replaces a non-positive span with 1.0.
+        # The Fourier check below was skipped for all of them.  A traced or
+        # otherwise non-numeric argument is not judged, as below.
+        _refuse_meaningless_constants(
+            timestep, length, thermal_diffusivity, gp_list,
+        )
+
         # Reject a configuration that is unconditionally unstable.  The
         # explicit scheme above its Fourier limit does not degrade, it
         # diverges to NaN in tens of steps with no warning, and the
@@ -687,17 +763,11 @@ class HeatNode(SimulationNode):
                     f"cells, or a smaller thermal_diffusivity."
                 )
         if gp_list is not None and len(gp_list) >= 2:
+            # Strictly increasing and finite by now, so this is a number.
             spacing = _nonuniform_fourier_spacing(gp_list)
-            if spacing is None:
-                raise ValueError(
-                    f"grid_points must be strictly increasing, got "
-                    f"{gp_list!r}.  The variable-spacing stencil divides "
-                    f"by the spacing between neighbouring points, so a "
-                    f"repeated point gives inf and a decreasing one a "
-                    f"wrong Laplacian."
-                )
             if (
-                concrete is not None
+                spacing is not None
+                and concrete is not None
                 and concrete[0] > 0
                 and concrete[2] > 0
             ):

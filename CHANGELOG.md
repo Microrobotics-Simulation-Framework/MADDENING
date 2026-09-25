@@ -167,7 +167,7 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
-- **`HeatNode` refuses more of what it used to run wrongly, and `compile()` warns about an unstable coupled pair**: a rod on `grid_points` is held to `dt*alpha/min(h_L*h_R) <= 1/2` (the Fourier check skipped it; MADD-ANO-002), and a non-positive `length` or `timestep`, a negative `thermal_diffusivity`, a non-finite one of these, or `grid_points` not strictly increasing raise `ValueError` (MADD-ANO-056).
+- **`HeatNode` refuses more of what it used to run wrongly, and `compile()` warns about an unstable coupled pair**: a rod on `grid_points` is held to `dt*alpha/min(h_L*h_R) <= 1/2` (the Fourier check skipped it; MADD-ANO-002), and a non-positive `length` or `timestep`, a negative `thermal_diffusivity`, a non-finite one of these, or `grid_points` not strictly increasing raise `ValueError` (MADD-ANO-059).
   Two uniform rods coupled end to end through `extract_first`/`extract_last` in a coupling group, past their pair limit (3/8 at `stencil_order=2`, 0.226 at 4), get a `UserWarning` naming both rods and MADD-ANO-050; it is a warning, not a refusal.
   Action: give a refused rod a stable timestep or meaningful constants; for a warned pair use a smaller timestep or exchange the data without a coupling group, and check a pair the warning cannot recognise yourself.
 - **`scripts/report_test_durations.py` warns when an allowlisted test passes the 20 s hard line** (the allowlist has no ceiling), and a `[cold-ci]` request whose head commit cannot be read now runs cold with a warning instead of silently warm.
@@ -306,6 +306,8 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Sharded stencil wrapper and LBM nodes, round-3 audit** (MADD-ANO-056, 057, 058): `shard_info`'s block size comes from the grid, not a domain integral in the state (a sharded `HeatNode` carrying a vector energy integral left its right end open, 70.9 K off); a nested `ShardedStencilNode` keeps the node's parameters; a replicated `heat_source`/`body_force` the unsharded node refuses is refused sharded (it was applied on every shard);
+  `LBMNode`/`LBMPipeNode` refuse a non-finite viscosity or `tau`, a `propeller_x` outside the grid and a disc covering no cell (each ran with no collision or no propeller).  Action: re-run sharded results whose node carries an integral in its state; give pipes of 10 planes or fewer an explicit `propeller_x` (the default is 10).
 - **Compliance gates, second mutation audit**: `check_anomalies` requires `residual_risk` on a `partially_resolved` entry, and `_RETIRED_ANOMALY_IDS` is an `{id: reason}` dict that cannot retire an entry last committed as reachable (read from git; CI's compliance job now fetches full history); `check_impl_mapping` refuses a row traced to a class;
   `check_sbom` refuses an orphan component, a recorded Python outside `requires-python` and a missing licence; `check_citations` reads in-text `@Key`; `check_stable_signatures` calls a parameter a recorded `*args`/`**kwargs` used to catch breaking.
   Action: give a retirement its reason; begin a mapping row that means a class with ``Class `Name` ``; write a decorator in prose as code.
@@ -644,7 +646,7 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
-- **MADD-ANO-056 (new, resolved in this release)**: `HeatNode` accepted a non-positive `length` or `timestep`, a negative `thermal_diffusivity` and `grid_points` out of order, and answered wrongly without a word (since 0.1.0; see `### Changed`)
+- **MADD-ANO-059 (new, resolved in this release)**: `HeatNode` accepted a non-positive `length` or `timestep`, a negative `thermal_diffusivity` and `grid_points` out of order, and answered wrongly without a word (since 0.1.0; see `### Changed`)
 - **MADD-ANO-051, 052, 053 (new, resolved in this release; all since 0.1.0)**: the HTTP API served every route, `/cloud/launch` included, with no credential while the container bound `0.0.0.0`; the checkpoint routes took any server path; the signaling server admitted every client (see `### Security`).
   **MADD-ANO-054 (new, never released)**: the FMU bridge unpickled the importer's state blob, remote code execution; **MADD-ANO-055 (new, resolved)**: `deserialize_fmu_state` and `FmuSidecar.handle` unpickled their input (since 0.3.0).
   The registry now holds every defect a release carried and every critical or major one found in the cycle, shipped or not (CONTRIBUTING.md)

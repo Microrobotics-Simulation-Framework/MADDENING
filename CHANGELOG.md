@@ -163,6 +163,7 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`windowed_loss(mask_unconverged=True)` refuses a coupling group with no convergence slot** (`solver="fori"` with `diagnostics=False`), which the mask silently never masked. Action: set `diagnostics=True` on the group, or use `solver="ift"`.
 - **`ShardedStencilNode` refuses `boundary="zero"` and `"periodic"` for a `HeatNode`**: the rod now builds its own end ghosts, so the fill would be ignored.
   Action: drop the argument and hold an end at 0 with `left_temperature=0.0` / `right_temperature=0.0` (in a graph, `gm.add_external_input(...)`), exactly as unsharded.
 - **`ShardedStencilNode` refuses a per-axis `boundary` dict**: it was accepted but never worked in the wrapper (it zero-filled the halos of axes
@@ -285,6 +286,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling runtime, audit of the frozen tree**: `run_adaptive*` sub-steps a sub-cycled node at `dt * node_dt / macro_dt` (it advanced `divider * dt`, MADD-ANO-034); on a multi-rate graph a group's diagnostics, predictor history and IQN-IMVJ warm start come only from the solves the step keeps, and `strict_convergence` checks only those (MADD-ANO-035);
+  `solver="fori"` + `iqn-imvj` carries the latching pass's secant columns, not zeros (MADD-ANO-036); `converged` is one verdict, in the residual's dtype, in the report, the profiler, sysid and strict; the profiler samples a multi-rate group on its firing steps only and stops re-warning about its one-iteration variant.
+  Action: re-run `run_adaptive*` results with a sub-cycled group, and multi-rate results with a coupling group using `predictor` or `iqn-imvj`.
 - **Compliance gates catch the defects a mutation audit slipped past them**: `check_doctests` pins every file's example count (`EXAMPLES_PER_FILE`) and it and `check_impl_mapping` sit at the counts; `check_anomalies` refuses a `pytest.skip()`/`xfail()` in a cited test, an aliased mark, `skipif(True)`,
   a broken first-party import and evidence under `tests/viz`, and counts imperative conditional skips; `check_citations` reads digit-led, line-wrapped and `@comment`-hidden keys; `check_heat_stability` judges `grid_points=None`;
   `generate_soup_tables --check` refuses a duplicated block. Action: a new docstring example goes into `EXAMPLES_PER_FILE` in `scripts/check_doctests.py`.

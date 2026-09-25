@@ -21,10 +21,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.coupling import acceleration
 from maddening.core.coupling.acceleration import (
     convergence_criterion,
     estimated_error,
-    reported_converged,
     reported_error_estimate,
 )
 from maddening.core.graph_manager import GraphManager
@@ -107,7 +107,8 @@ def test_every_reader_gives_the_loops_verdict(edge_tolerance, solver):
     assert report["converged"] is True, report
     assert _meta_converged(gm._state["_meta"], f"coupling_{KEY}_residual",
                            f"coupling_{KEY}_amplification", threshold, scale) is True
-    assert reported_converged(residual, amplification, scale, threshold) is True
+    assert acceleration.reported_converged(residual, amplification, scale,
+                                           threshold) is True
     # ``error_estimate`` is the estimate the loop compared, in float32,
     # so ``converged`` is its float32 comparison with the threshold.
     assert report["error_estimate"] == float(np.float32(residual * amplification))
@@ -131,7 +132,9 @@ def test_the_sysid_mask_agrees_with_the_report(edge_tolerance):
     kw = dict(obs_fn=lambda s: s["a"]["x"], window=1)
     unmasked = float(windowed_loss(gm, gm.params, obs, mask_unconverged=False, **kw))
     masked = float(windowed_loss(gm, gm.params, obs, mask_unconverged=True, **kw))
-    assert unmasked > 0.0 and masked == unmasked
+    assert unmasked > 0.0 and masked == unmasked    # sysid: converged
+    gm.step()                                       # the same step, reported
+    assert gm.coupling_diagnostics()[KEY]["converged"] is True
 
 
 def _draws(dtype, n=200):
@@ -156,7 +159,8 @@ def test_the_host_verdict_is_the_in_graph_verdict_on_float32_slots():
         assert reported_error_estimate(residual, amplification, scale) == float(expected)
         for threshold in (float(expected), math.nextafter(float(expected), 0.0),
                           math.nextafter(float(expected), math.inf)):
-            assert reported_converged(residual, amplification, scale, threshold) is \
+            assert acceleration.reported_converged(
+                residual, amplification, scale, threshold) is \
                 bool(expected <= threshold), (residual, amplification, scale, threshold)
 
 
@@ -167,5 +171,6 @@ def test_float64_slots_keep_the_float64_arithmetic():
         expected = r * max(scale * a, 1.0) if a >= 1.0 else r
         assert reported_error_estimate(residual, amplification, scale) == expected
         for threshold in (expected, math.nextafter(expected, 0.0)):
-            assert reported_converged(residual, amplification, scale, threshold) is \
+            assert acceleration.reported_converged(
+                residual, amplification, scale, threshold) is \
                 (expected <= threshold)

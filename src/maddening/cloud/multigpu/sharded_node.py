@@ -1560,9 +1560,11 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         for key, value in boundary_inputs.items():
             if key in grid_bi or key not in specs:
                 continue
-            declared = getattr(specs[key], "shape", None)
+            declared_shape = getattr(specs[key], "shape", None)
+            if declared_shape is None:
+                continue
             try:
-                declared = tuple(int(n) for n in declared)
+                declared = tuple(int(n) for n in declared_shape)
             except (TypeError, ValueError):
                 continue           # not a concrete shape: nothing to hold it to
             if len(declared) < rank or declared[:rank] != ref:

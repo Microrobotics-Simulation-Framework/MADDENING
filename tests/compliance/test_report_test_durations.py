@@ -80,7 +80,41 @@ def test_the_same_test_on_the_allowlist_passes(gate, tmp_path, capsys):
     allow.write_text("# header\n\ntests/a/test_x.py::test_slow # kept: the only end-to-end run\n")
     code, out = _run(gate, capsys, report, "--allowlist", allow)
     assert code == 0
-    assert "::error" not in out and "::warning" not in out
+    assert "::error" not in out
+    assert "title=Test over" not in out     # neither the 20 s error nor the 5 s warning
+
+
+@pytest.mark.parametrize("seconds, warned", [(6.0, False), (20.0, False), (25.0, True),
+                                             (900.0, True)])
+def test_an_allowlisted_test_over_the_hard_line_passes_but_is_not_silent(
+        gate, tmp_path, capsys, seconds, warned):
+    """The allowlist has no ceiling, so a kept test's regression must still show.
+
+    A kept test that went from 6 s to 900 s used to pass with no
+    annotation at all; its only trace was a row in the slowest-tests table.
+    """
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_kept", seconds),
+                     _case("tests/a/test_x.py", "test_other", 0.2))
+    allow = tmp_path / "allow.txt"
+    allow.write_text("tests/a/test_x.py::test_kept # kept: the only end-to-end check\n")
+    code, out = _run(gate, capsys, report, "--allowlist", allow, "--cache-mode", "cold")
+    md = Path(str(report) + ".md").read_text()
+    assert code == 0 and "::error" not in out
+    warnings = [ln for ln in out.splitlines() if ln.startswith("::warning")]
+    if not warned:
+        assert warnings == [] and "Allowlisted and over" not in md
+        return
+    (warning,) = warnings
+    assert warning.startswith(
+        "::warning file=tests/a/test_x.py,line=11,title=Allowlisted test over 20 s::"
+        f"tests/a/test_x.py::test_kept took {gate._fmt(seconds)}"), warning
+    assert "the allowlist has no ceiling" in warning
+    assert "### Allowlisted and over 20 s" in md and "`tests/a/test_x.py::test_kept`" in md
+    assert out.rstrip().endswith("0 unlisted over 20 s, 1 allowlisted over it."), out
+    # The lane summary and the slow lane pass --fail-over 0: no hard line, no warning.
+    Path(str(report) + ".md").unlink()
+    code, out = _run(gate, capsys, report, "--allowlist", allow, "--fail-over", "0")
+    assert code == 0 and "Allowlisted test over" not in out
 
 
 def test_an_unlisted_test_over_the_policy_line_warns_without_failing(gate, tmp_path, capsys):
@@ -192,7 +226,8 @@ def test_an_allowlist_entry_exempts_exactly_its_node_id(gate, tmp_path, capsys):
     assert code == 1
     assert "tests/a/test_x.py::test_p[a] took 30.0 s" in out
     assert "tests/a/test_x.py::test_q took 30.0 s" in out
-    assert "test_kept[b] took" not in out
+    errors = [ln for ln in out.splitlines() if ln.startswith("::error")]
+    assert not any("test_kept[b]" in ln for ln in errors), errors
 
 
 def test_the_shipped_allowlist_names_real_tests_with_reasons(gate):

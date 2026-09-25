@@ -367,6 +367,8 @@ def test_the_generator_draws_every_option_of_every_coupling_group_enum():
 # Checkpoints
 # ---------------------------------------------------------------------------
 
+# Per push, on a fixed graph:
+# tests/core/test_checkpoint_resumes_the_same_rollout.py::test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout
 @pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(), split=st.integers(min_value=1, max_value=N_STEPS - 1))
 def test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout(
@@ -396,6 +398,8 @@ def test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout(
                                 what="continued trajectory")
 
 
+# Per push, on two heat rods:
+# tests/core/test_mapping_spec_serialisation.py::test_checkpoint_weights_win_over_the_rebuilt_spec
 @pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(train_mapping_weights=True, max_nodes=3))
 def test_a_checkpoint_beats_the_config_for_trained_mapping_weights(recipe):

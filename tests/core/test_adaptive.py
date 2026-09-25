@@ -441,6 +441,8 @@ class TestRunAdaptiveScan:
 # ==================================================================
 
 class TestAdaptivePhysics:
+    # Per push, over a fifth of a second:
+    # tests/core/test_run_adaptive_conserves_energy.py::test_run_adaptive_conserves_an_undamped_springs_energy
     @pytest.mark.slow  # a 2 s run_adaptive at atol 1e-8, one host round trip per step: 12-22 s on CI
     def test_conservation(self):
         """Undamped spring: energy should be conserved within tolerance.

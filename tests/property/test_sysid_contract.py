@@ -320,6 +320,8 @@ class TestTrainableContract:
     that may have moved.
     """
 
+    # Per push: test_a_leaf_outside_the_mask_is_bit_identical_after_a_fit (below, every
+    # fitter) and tests/core/test_sysid.py::test_fit_mask_overrides_specs_and_tol_stops_early.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(recipe=graph_recipes(max_nodes=3), data=st.data(),
            n_iter=st.integers(min_value=1, max_value=4))
@@ -467,6 +469,7 @@ class TestTrainableContract:
         # no-op that would leave every leaf untouched for free.
         assert float(result.params["nodes"]["s"]["damping"]) != before_damping
 
+    # Per push: tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(recipe=graph_recipes(max_nodes=3))
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -500,6 +503,9 @@ class TestTrainableContract:
     # ``fitter`` is drawn rather than ``@pytest.mark.parametrize``\ d: a
     # parametrised ``@given`` *method* gets a fresh class instance per
     # case, which Hypothesis rejects as ``HealthCheck.differing_executors``.
+    # Per push, one fitter each: tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec,
+    # tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_lm_gets_its_iterate_back_bit_for_bit,
+    # tests/core/test_sysid_contract_examples.py::test_multiple_shooting_leaves_a_spec_frozen_leaf_bit_identical.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(fitter=st.sampled_from(["adam", "lm", "multiple_shooting"]),
            freeze=st.lists(st.sampled_from(["stiffness", "damping", "mass",
@@ -718,6 +724,9 @@ class TestBoundsAndTransforms:
         note(f"spec={spec} u={u}")
         spec.check(spec.to_constrained(jnp.float32(u)))
 
+    # Per push: test_a_bound_no_float32_can_hold_is_met_at_the_leafs_precision (below),
+    # TestTrainableContract::test_a_frozen_leaf_made_trainable_in_the_spec_respects_its_bounds
+    # (an upper bound), tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(bounds=st.tuples(_finite(0.5, 5.0), _finite(6.0, 40.0)),
            transform=st.sampled_from([None, "log", "logit"]),
@@ -845,6 +854,7 @@ class TestFIMAgainstFiniteDifference:
     band is not stable between runs.
     """
 
+    # Per push: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_central_finite_difference_and_its_bound_is_the_inverse.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
@@ -870,6 +880,7 @@ class TestFIMAgainstFiniteDifference:
             scale = max(1.0, float(np.abs(F).max()))
             assert np.allclose(F, F_fd, rtol=1e-7, atol=1e-7 * scale), (F, F_fd)
 
+    # Per push: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_finite_difference_of_a_spring_rollout.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(truth=st.fixed_dictionaries({
         "stiffness": _finite(1.0, 200.0),
@@ -927,6 +938,8 @@ class TestFIMAgainstFiniteDifference:
         assume(scale > 0.0)
         assert np.abs(F - F_fd).max() <= 2e-2 * scale, (F, F_fd)
 
+    # Per push: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_central_finite_difference_and_its_bound_is_the_inverse
+    # and test_crb_is_infinite_along_an_exact_null_direction (below).
     @pytest.mark.slow  # shares the slow test above's analytic-residual compiles; alone it paid them (4.6 s -> 11.6 s locally)
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
@@ -1135,6 +1148,8 @@ class TestFIMMaskingAndScaling:
     class was filtered when this one was missed."""
 
 
+    # Per push: tests/core/test_sysid_fim_nominal_scale.py::test_a_masked_column_keeps_its_own_spec
+    # and tests/core/test_sysid.py::test_fim_mask_restricts_to_selected_leaves.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(problem=analytic_residual(), data=st.data(),
            scale=st.sampled_from([None, "relative"]))
@@ -1171,6 +1186,7 @@ class TestFIMMaskingAndScaling:
         with pytest.raises(ValueError, match="same tree structure"):
             fim(residual, params, mask={"a": True})
 
+    # Per push: tests/core/test_sysid.py::test_fim_noise_std_scales_information.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(problem=analytic_residual(), sigma=_finite(0.25, 4.0))
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
@@ -1323,6 +1339,8 @@ class TestMaskStructure:
         with pytest.raises(ValueError, match="same tree structure as params"):
             fim(self._residual, params, scale=None, mask=mask)
 
+    # Per push: tests/core/test_sysid.py::test_fim_mask_restricts_to_selected_leaves and
+    # tests/core/test_sysid_degenerate_inputs.py::test_a_mask_built_from_the_params_tree_is_still_accepted.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(keys=st.lists(st.text("abcdefg", min_size=1, max_size=3),
                          min_size=2, max_size=5, unique=True),
@@ -1446,6 +1464,7 @@ class TestWindowTilings:
 
 class TestMultipleShootingLoss:
 
+    # Per push: tests/core/test_sysid_contract_examples.py::test_the_continuity_penalty_is_affine_in_its_weight_and_charges_a_bumped_start.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(tiling=st.sampled_from([t for t in _TILINGS if t[2] < t[0] // t[1]]),
            weight=_finite(1e-3, 1e4))
@@ -1518,6 +1537,8 @@ class TestMultipleShootingLoss:
         assert 0.0 <= unwindowed <= 1e-9 * (1.0 + energy), unwindowed
         assert abs(shooting - unwindowed) <= tol, (shooting, unwindowed)
 
+    # Per push: tests/core/test_sysid.py::test_multiple_shooting_loss_zero_at_truth_and_penalises_gaps
+    # and tests/core/test_sysid_contract_examples.py::test_the_continuity_penalty_is_affine_in_its_weight_and_charges_a_bumped_start.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(tiling=st.sampled_from([t for t in _TILINGS if t[2] < t[0] // t[1]]),
            bump=_finite(0.1, 1.0))
@@ -1673,6 +1694,8 @@ def _build_springs(**coupling_kwargs):
 
 class TestTuneCouplingParams:
 
+    # No per-push check: each configuration builds and compiles a coupled graph (a two-point
+    # grid took 29 s cold on three local cores), over an API deprecated for removal in 0.5.0.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(tolerances=st.lists(st.sampled_from([1e-3, 1e-6, 1e-9]),
                                min_size=1, max_size=2, unique=True),
@@ -1710,6 +1733,7 @@ class TestTuneCouplingParams:
             assert result.best_max_error == min(
                 t["max_error"] for t in result.all_trials)
 
+    # No per-push check, for the reason above.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(iterations=st.lists(st.sampled_from([3, 6, 9]), min_size=2,
                                max_size=2, unique=True))

@@ -116,7 +116,9 @@ def test_imvj_uses_fewer_iterations_than_none():
 
 # Slow-marked (still run by slow-tests.yml): a gradient and two
 # finite-difference solves through a 20-step scan of the heat-rod/spring
-# group, 7-13 s on the CI runner.  The forward is checked on every push above.
+# group, 7-13 s on the CI runner.  The forward is checked on every push above,
+# and the gradient against finite differences, over three steps, by
+# tests/core/test_imvj_gradient_matches_finite_differences.py.
 @pytest.mark.slow
 def test_gradient_through_multiphysics_imvj_matches_fd():
     gm = _graph()

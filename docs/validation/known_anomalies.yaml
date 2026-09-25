@@ -3833,3 +3833,60 @@ anomalies:
       - "tests/core/test_coupling_imvj_solver_agreement.py::test_fori_carries_the_latching_passs_columns"
       - "tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-037"
+    title: "A sub-cycled node whose timestep does not divide the group's macro timestep covered round(macro / node_dt) * node_dt per macro step, and nothing refused it"
+    description: >
+      A node in a coupling group with `subcycling=True` takes
+      `round(macro_dt / node_dt)` sub-steps of its own timestep per
+      coupling pass, `macro_dt` the largest timestep in the group.  Unless
+      that ratio is a whole number the node covers
+      `round(macro_dt / node_dt) * node_dt` per macro step instead of
+      `macro_dt`, so its clock drifts from the rest of the graph by a
+      fixed fraction of every step, with no error or warning.  Measured
+      with a node integrating its own clock (`t <- t + dt`) coupled both
+      ways to a node at 0.01 s, ten steps (CPU, jaxlib 0.11.0): the
+      sub-cycled clock read 0.090 at timestep 0.003 (three sub-steps of
+      0.003 per 0.01), 0.080 at 0.004 and 0.090 at 0.009 (a divider of
+      one), against 0.100 for the graph; 0.0025, which divides, read
+      0.100.  Reproduced identically at v0.1.0 and v0.3.1 (`git archive`
+      of each tag, same environment).  `run_adaptive` kept the same ratio
+      (after MADD-ANO-034's fix; before it, it also multiplied by the
+      divider).
+      Resolved in 0.4.0: `validate()`, and so `compile()`, reports an
+      error for every sub-cycled member whose timestep does not divide
+      the macro timestep to a relative `1e-9`, naming the node, both
+      timesteps, what it would cover and the two nearest timesteps that
+      divide.  A group whose ratios are whole compiles to exactly the
+      program it did.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong physics on an accepted configuration: the sub-cycled
+      node integrates less (or, at a ratio rounding up, more) time than
+      the graph it is coupled to, every step, and the result is a
+      plausible trajectory.  Graded `major` for that silence and because
+      the error accumulates without bound.  `context_dependent` because
+      it needs a sub-cycled group with a timestep that does not divide
+      the largest; the common choices (halves, quarters, tenths) were
+      unaffected.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+      - "maddening.core.coupling.group.CouplingGroup.subcycling"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: give every member of a sub-cycled group a timestep
+      that divides the group's largest timestep exactly.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A ratio within `1e-9` of a whole number is accepted and rounded, so
+      such a member drifts by at most one sub-step in a billion macro
+      steps.  Graphs saved with a non-dividing timestep no longer compile
+      and must be edited.
+    verification:
+      - "tests/core/test_subcycling_ratio_refusal.py::test_a_member_whose_timestep_does_not_divide_is_refused"
+      - "tests/core/test_subcycling_ratio_refusal.py::test_every_member_that_does_not_divide_is_named"
+      - "tests/core/test_subcycling_ratio_refusal.py::test_a_member_that_divides_is_accepted_and_keeps_the_graphs_clock"
+      - "tests/core/test_subcycling_ratio_refusal.py::test_the_tolerance_admits_float_noise_and_nothing_coarser"
+    github_issue: null

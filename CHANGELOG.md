@@ -167,6 +167,7 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`compile()` refuses a sub-cycled node whose timestep does not divide its group's largest** (to 1e-9 relative), which covered `round(macro/node_dt) * node_dt` per macro step and drifted silently (MADD-ANO-037). Action: give it a dividing timestep; the error names the two nearest.
 - **`windowed_loss(mask_unconverged=True)` refuses a coupling group with no convergence slot** (`solver="fori"` with `diagnostics=False`), which the mask silently never masked. Action: set `diagnostics=True` on the group, or use `solver="ift"`.
 - **New refusals where a sharded wrapper or `PUT /graph/params` accepted silently-wrong input**: the route refuses a value that changes a node's state shape (`n_cells`), a structural value the node's constructor refuses, `LBMPipeNode`'s geometry and a write no probe copy can decide; `ShardedUnstructuredNode` refuses a per-cell input on a full partition not in global order, and a state not in partition layout;
   `ShardedStencilNode` refuses an outer `boundary` other than a wrapped `ShardedStencilNode`'s, and a state its node no longer builds; `ShardedPointwiseNode` refuses a node with no state field on the shard axis.
@@ -293,6 +294,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`profile_graph(measure_coupling=True)`** no longer repeats the caller's compile-time warnings (a disconnected node, an inert knob) from its variant and restore recompiles. Action: none.
 - **Coupling runtime, audit of the frozen tree**: `run_adaptive*` sub-steps a sub-cycled node at `dt * node_dt / macro_dt` (it advanced `divider * dt`, MADD-ANO-034); on a multi-rate graph a group's diagnostics, predictor history and IQN-IMVJ warm start come only from the solves the step keeps, `strict_convergence` checks only those, and the group no longer solves on the base steps that discarded the result (MADD-ANO-035);
   `solver="fori"` + `iqn-imvj` carries the latching pass's secant columns, not zeros (MADD-ANO-036); `converged` is one verdict, in the residual's dtype, in the report, the profiler, sysid and strict; the profiler samples a multi-rate group on its firing steps only and stops re-warning about its one-iteration variant.
   Action: re-run `run_adaptive*` results with a sub-cycled group, and multi-rate results with a coupling group using `predictor` or `iqn-imvj`.
@@ -615,6 +617,7 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-037 (new, resolved in this release)**: a sub-cycled node whose timestep did not divide the macro timestep drifted by a fixed fraction of every step (since 0.1.0; see `### Changed`)
 - **MADD-ANO-034, 035, 036 (new, resolved in this release)**: `run_adaptive*` advanced a sub-cycled node `divider * dt` per step; a multi-rate group's diagnostics, predictor and IQN-IMVJ warm start came from discarded solves;
   `solver="fori"` + `iqn-imvj` carried zero secant columns, so `jacobian_reuse` did nothing (all since 0.1.0; see `### Fixed`)
 - **MADD-ANO-032, 033 (new, resolved in this release)**: the sharded wrappers kept a compiled step across `compile()`, so a legacy node's params write after a step never reached the sharded physics; `ShardedStencilNode` stepped with a float32 `dt` under x64 (both since 0.2.0; see `### Fixed`).

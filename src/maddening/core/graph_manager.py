@@ -7059,6 +7059,24 @@ class GraphManager:
               random signs moved stiffness and mass by the same
               relative amount, and the dynamics see only their ratio).
 
+              *Its own rounding.*  The curvature factor is the
+              difference of two Jacobian-vector products of the map,
+              and where the curvature along the step is only a few
+              float32 ulps of those products the bound carries their
+              rounding: two compilations of the same step can disagree
+              in its leading digit.  Measured on a pair whose map is
+              bilinear in its state and a coupled constant: 2.01e-06
+              unbatched and 1.84e-06 under ``jax.vmap`` for the same
+              step -- the products one ulp apart between the two
+              programs, their difference twelve ulps -- against a true
+              relative error of 9.5e-07, so both hold.  That is the
+              float32 resolution of the gradient itself (about
+              ``amplification * eps``), not a defect of batching: under
+              ``vmap`` the forward state, ``iterations``, ``residual``
+              and ``amplification`` are bit-identical, and the spectral
+              keys agree to a few ulps (the Arnoldi's batched linear
+              algebra rounds differently too).
+
               **This is a statement about the gradient, not about the
               solve.**  On a map that is affine in its state with
               additive parameters the IFT gradient is the fixed

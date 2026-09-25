@@ -56,9 +56,16 @@ Three things happen per step:
    `step()` on its own: the graph's static-data check hashes shape
    and dtype, never contents.
 2. Inside `shard_map`, each device's slab is halo-exchanged along
-   the matching spatial axis (boundary `"edge"` — static arrays
-   don't evolve, so periodic wrap is wrong even if state uses
-   periodic).
+   the matching spatial axis.  Between two shards the halo holds the
+   neighbour's cells.  At the edges of the *global* grid it follows
+   the wrapper's `boundary` when that is `"periodic"`: the cells
+   beyond a periodic edge are the opposite edge's cells, for a static
+   array as much as for the state.  Under `"edge"` and `"zero"` there
+   is no cell beyond the edge, and the static's halo repeats the edge
+   cell.  (The halo fill is a question about space, not time; until
+   0.4.0 statics were edge-filled under every mode "because they don't
+   evolve", and a periodic node that read a static in its halo stepped
+   about 3% off the unsharded node, with no error.)
 3. The inner node's `update_padded` receives the padded slab via
    `static_padded[<key>]` and uses it like any other padded array.
 
@@ -146,7 +153,11 @@ def update_padded(
         wall = static_padded["pipe_wall"]
     else:
         # Unsharded path; the full wall is closure-captured on self.
-        wall = jnp.pad(self._pipe_wall, [(1, 1), (0, 0), (0, 0)], mode="edge")
+        # Pad it the way the wrapper would: this node is wrapped with
+        # boundary="periodic", so the halo beyond each x face is the
+        # opposite face ("wrap"); a node wrapped with "edge" or "zero"
+        # would use mode="edge".
+        wall = jnp.pad(self._pipe_wall, [(1, 1), (0, 0), (0, 0)], mode="wrap")
     ...
 ```
 
@@ -222,6 +233,24 @@ def update_padded(self, state_padded, boundary_inputs, dt,
 
 `shard_info` is `None` when the node is run outside of
 `ShardedStencilNode`.
+
+`ShardedUnstructuredNode` passes a different `shard_info`, for a
+different layout: `{0: (offset, n_local_max), "n_local": n_owned}`.
+Each shard's block of owned cells is padded to `n_local_max`, the
+largest shard's count, so a shard that owns fewer cells has padding
+rows at the end of its block; `n_owned` (a traced int32 scalar, added
+in 0.4.0) is its own count.  A domain integral on that path masks the
+padding out:
+
+```python
+_, n_local_max = shard_info[0]
+owned = jnp.arange(n_local_max) < shard_info["n_local"]
+total_partial = jnp.sum(jnp.where(owned, x_new[:n_local_max], 0.0))
+```
+
+Before 0.4.0 nothing told the node where the padding started, and a
+node that summed its block summed the padding into the integral (on a
+7-cell, 2-device partition, 36 where the answer is 35).
 
 ## Sharding policy is part of the JIT cache key
 

@@ -198,6 +198,20 @@ def test_a_body_force_the_node_takes_steps_the_sharded_node_the_same(axis, kind)
     assert float(jnp.max(jnp.abs(want["velocity"]))) > 1e-5
 
 
+def test_update_padded_refuses_an_unpadded_block_force_on_a_split_grid():
+    """The node's own check, for a caller that is not the wrapper: a slab of
+    4 of the grid's 16 rows is handed its cells halo-padded; a force of the
+    slab's unpadded shape used to be zero-padded and applied."""
+    node = _lbm()
+    state = node.initial_state()
+    padded = {k: jnp.pad(v[:4], [(1, 1), (1, 1)] + [(0, 0)] * (v.ndim - 2), mode="wrap")
+              for k, v in state.items()}
+    info = {0: (jnp.int32(4), 4)}
+    with pytest.raises(ValueError, match=r"body_force has shape \(4, 8, 2\)"):
+        node.update_padded(padded, {"body_force": jnp.full((4, 8, 2), 1e-4, jnp.float32)},
+                           1.0, shard_info=info)
+
+
 def test_update_padded_on_the_whole_grid_fills_a_per_cell_force_periodically():
     """A direct call on the whole grid, with its halos filled periodically as
     the node declares: the force's halos must be the opposite edge's too.

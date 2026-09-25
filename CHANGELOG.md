@@ -292,9 +292,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **Sharded wrappers, audit of the frozen tree**: a legacy-contract node's params write followed by `compile()` reaches the sharded step (MADD-ANO-032, since 0.2.0); `ShardedStencilNode` keeps `dt` at the graph's precision under x64 (MADD-ANO-033, since 0.2.0); `HybridNode` and `ShardedUnstructuredNode` forward `update_evaluations()`;
+- **Sharded wrappers, audit of the frozen tree**: a params write followed by `compile()` reaches the sharded step, for a legacy-contract node's constant and for a halo width that follows a parameter (`HeatNode.stencil_order`) (MADD-ANO-032, since 0.2.0); `ShardedStencilNode` keeps `dt` at the graph's precision under x64 (MADD-ANO-033, since 0.2.0); `HybridNode` and `ShardedUnstructuredNode` forward `update_evaluations()`;
   `ShardedUnstructuredNode` validates `domain_integral_axes` names.  The routes MADD-ANO-024's first fix left open (a part-full pipe's `pipe_radius`, `n_cells`, `stencil_order=3`, wrapped and unprobeable nodes) are closed.
-  Action: re-run sharded results on legacy-contract nodes whose constants were written after their first step, and sharded float64 stencil runs under x64.
+  Action: re-run sharded results whose structural parameters were written after the wrapper was built, and sharded float64 stencil runs under x64.
 - **Sharded stencils at the edges of the global grid**: a size-1 mesh axis got periodic halos whatever `boundary` said (a one-device `HeatNode` ran as a ring, 0.40 off); `"edge"` wider than one cell put `r0, r1` before `r0`;
   a sharded `HeatNode` ignored `left_temperature`/`right_temperature` (0.87 off with both ends at 0) and now closes its rod ends exactly as unsharded; `ShardedStencilNode` refuses an unknown `boundary` at construction.
   Action: re-run sharded results taken on one device or a size-1 mesh axis, and every sharded `HeatNode` result with end temperatures or `stencil_order=4`.

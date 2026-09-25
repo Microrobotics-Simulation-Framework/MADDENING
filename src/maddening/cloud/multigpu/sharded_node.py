@@ -799,14 +799,33 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         """
         inner = self._inner
         mesh = self._mesh
-        exchange_axes = self._exchange_axes
         boundary = self._boundary
-        replicated_halo_axes = self._replicated_halo_axes
         strip_fn = self._strip_halos
         field_needs_halo = self._field_needs_halo
         sharded_static = self._sharded_static
         axis_map = self._axis_map  # {mesh_axis: spatial_axis}
-        halo_widths = inner.halo_width()
+        # The halo layout is read from the node whenever the update is
+        # built -- at construction and on every ``compile()`` -- rather
+        # than kept from construction: a node's halo can follow one of its
+        # parameters (``HeatNode``'s is 1 at ``stencil_order=2`` and 2 at
+        # 4).  Kept, a ``stencil_order`` write and a recompile padded each
+        # shard with one halo cell and stripped two, and the sharded rod
+        # stepped a field matching neither order (4.0e-2 off both).
+        halo_widths = dict(inner.halo_width())
+        unhaloed = sorted(sa for sa in axis_map.values() if sa not in halo_widths)
+        if unhaloed:
+            raise ValueError(
+                f"ShardedStencilNode {self.name!r}: axis_map shards spatial "
+                f"axes {unhaloed}, which {type(inner).__name__}.halo_width() "
+                f"= {halo_widths} no longer lists; the node's halo changed "
+                "after the wrapper was built.  Rebuild the wrapper."
+            )
+        exchange_axes = [(ma, sa, halo_widths[sa]) for ma, sa in axis_map.items()]
+        replicated_halo_axes = {
+            sa: h for sa, h in halo_widths.items() if sa not in set(axis_map.values())
+        }
+        self._exchange_axes = exchange_axes
+        self._replicated_halo_axes = replicated_halo_axes
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
         integral_reduction = {k: self._integral_reduction(k) for k in integrals}
@@ -922,7 +941,7 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             out: dict[str, Any] = {}
             for k, v in new_padded.items():
                 if k in state_set:
-                    out[k] = strip_fn(v, original=local_state[k])
+                    out[k] = strip_fn(v, original=local_state[k], halo=halo_widths)
                 elif k in integrals:
                     reduce_axes, unreduced = integral_reduction[k]
                     red = lax.psum(v, axis_name=reduce_axes) if reduce_axes else v
@@ -1306,9 +1325,16 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 return True
         return False
 
-    def _strip_halos(self, arr: jax.Array, *, original: jax.Array) -> jax.Array:
-        """Strip every halo axis (sharded **and** replicated)."""
-        halo = self._inner.halo_width()
+    def _strip_halos(
+        self, arr: jax.Array, *, original: jax.Array,
+        halo: Optional[dict[int, int]] = None,
+    ) -> jax.Array:
+        """Strip every halo axis (sharded **and** replicated).
+
+        ``halo`` is the layout the padding was built with; the node's
+        current ``halo_width()`` when not given.
+        """
+        halo = self._inner.halo_width() if halo is None else halo
         out = arr
         for spatial_axis in sorted(halo):
             if spatial_axis >= out.ndim:

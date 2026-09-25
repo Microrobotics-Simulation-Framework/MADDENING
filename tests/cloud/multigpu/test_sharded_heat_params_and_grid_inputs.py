@@ -247,3 +247,43 @@ def test_a_cell_count_written_under_a_sharded_rod_is_refused_by_its_step(n_cells
             assert excinfo.type is ValueError
             assert "state field 'temperature' has shape (16,)" in str(excinfo.value)
             assert f"now builds ({n_cells},)" in str(excinfo.value)
+
+
+def _ramp_rod(order=2):
+    t0 = (0.3 + 0.2 * np.sin(np.linspace(0.0, 3.0, 16))).astype(np.float32).tolist()
+    return HeatNode(name="heat", timestep=1e-4, n_cells=16, length=1.0,
+                    thermal_diffusivity=0.1, stencil_order=order, initial_temperature=t0)
+
+
+@pytest.mark.parametrize("surface", ["rest_after_a_step", "node_params_before_any_step"])
+def test_a_stencil_order_write_reaches_a_sharded_rod_after_a_recompile(surface):
+    """``HeatNode``'s halo is 1 cell at ``stencil_order=2`` and 2 at 4.  The
+    wrapper built its halo layout once, at construction, and stripped the
+    node's current halo: after a ``stencil_order=4`` write and a recompile
+    each shard was padded with one cell and stripped two, and the rod
+    stepped a field matching neither order (4.0e-2 off both, at v0.2.0,
+    v0.3.1 and this cycle alike).  The layout is rebuilt on every
+    ``compile()`` now, and the step is the unsharded order-4 step."""
+    from fastapi.testclient import TestClient
+    from maddening.api.server import SimulationServer
+
+    node = _ramp_rod(2)
+    gm = GraphManager()
+    gm.add_node(ShardedStencilNode(node, create_device_mesh(shape=(4,)), axis_map={"devices": 0}))
+    gm.compile()
+    two, four = _ramp_rod(2), _ramp_rod(4)
+    if surface == "rest_after_a_step":
+        client = TestClient(SimulationServer({"HeatNode": HeatNode}, gm).create_app(),
+                            raise_server_exceptions=False)
+        assert client.post("/sim/step", json={}).status_code == 200
+        resp = client.put("/graph/params/heat", json={"params": {"stencil_order": 4}})
+        assert resp.status_code == 200, resp.text
+        assert client.post("/sim/step", json={}).status_code == 200
+        want = four.update(two.update(two.initial_state(), {}, 1e-4), {}, 1e-4)["temperature"]
+    else:
+        node.params["stencil_order"] = 4
+        gm.compile()
+        gm.step()
+        want = four.update(four.initial_state(), {}, 1e-4)["temperature"]
+    np.testing.assert_allclose(np.asarray(gm.get_node_state("heat")["temperature"]),
+                               np.asarray(want), rtol=0, atol=1e-6)

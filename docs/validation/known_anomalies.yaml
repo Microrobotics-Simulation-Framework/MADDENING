@@ -3456,7 +3456,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-032"
-    title: "After a parameter write and compile(), ShardedStencilNode and ShardedUnstructuredNode kept stepping with the old value of a constant their node reads from self.params"
+    title: "After a parameter write and compile(), the sharded wrappers kept computing with what they had built from the old value: a legacy node's constant, and ShardedStencilNode's halo width"
     description: >
       Both wrappers keep a `jax.jit(shard_map(...))` per input signature
       (the shapes and dtypes of state, boundary inputs and sharded statics,
@@ -3494,9 +3494,20 @@ anomalies:
       recompile was, and it is the workaround MADD-ANO-004 records for
       those versions, which therefore held only while no step had run.
       The cache dates from the stencil wrapper's first commit (3601f55).
+      `ShardedStencilNode` also fixed its halo layout at construction --
+      the exchange width per axis, from `halo_width()` -- while it stripped
+      the node's current `halo_width()`, so a node whose halo follows a
+      parameter was mis-sliced after a write: `HeatNode`'s halo is 1 cell
+      at `stencil_order=2` and 2 at 4, and a 16-cell rod on four devices
+      written to order 4 and recompiled (before any step, so no stale
+      trace) stepped a field 3.9e-02 from both the order-2 and the order-4
+      step, at v0.2.0, v0.3.1 and in this cycle alike; through `PUT
+      /graph/params` on the 0.4.0 tree before the fix it answered 200.
       Resolved in 0.4.0: `invalidate_static_cache()` drops the compiled
-      functions and rebuilds the per-shard update closure on both wrappers,
-      so every `compile()` traces the wrapped node afresh.
+      functions and rebuilds the per-shard update on both wrappers, and the
+      stencil wrapper reads its halo layout from the node each time it
+      builds it, so every `compile()` traces the wrapped node afresh with
+      the halo it declares.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -3527,6 +3538,7 @@ anomalies:
       on every write that marks it dirty, so the graph path is covered.
     verification:
       - "tests/cloud/multigpu/test_sharded_params.py::test_a_legacy_nodes_param_write_reaches_the_sharded_step_after_a_recompile"
+      - "tests/cloud/multigpu/test_sharded_heat_params_and_grid_inputs.py::test_a_stencil_order_write_reaches_a_sharded_rod_after_a_recompile"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-033"

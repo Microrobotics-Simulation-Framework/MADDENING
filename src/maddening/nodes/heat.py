@@ -1038,20 +1038,55 @@ class HeatNode(SimulationNode):
         T_interior = T_pad[halo:-halo]
         n_local = T_interior.shape[0]
 
-        source = boundary_inputs.get(
-            "heat_source", jnp.zeros(n_local, dtype=T_pad.dtype)
+        source = self._local_heat_source(
+            boundary_inputs.get("heat_source"), n_local, halo, n_global,
+            T_pad.dtype,
         )
-        source = jnp.asarray(source, dtype=T_pad.dtype)
-        if source.ndim == 1 and source.shape[0] == n_local + 2 * halo:
-            # a grid-shaped input arrives halo-padded from ShardedStencilNode
-            source = source[halo:-halo]
-        source = jnp.broadcast_to(source, (n_local,))
 
         T_new_interior = T_interior + alpha * dt * lap + source * dt
 
         return {"temperature": jnp.concatenate(
             [T_pad[:halo], T_new_interior, T_pad[-halo:]], axis=0
         )}
+
+    def _local_heat_source(self, source, n_local, halo, n_global, dtype):
+        """``heat_source`` on this block's ``n_local`` cells, or a refusal.
+
+        :meth:`update` takes a scalar or an array of shape ``(n_cells,)``
+        (anything that broadcasts to it).  Here that is, per block: a
+        scalar or ``(1,)``, broadcast; a per-cell source as
+        :class:`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
+        delivers it, this block's cells with ``halo`` cells either side;
+        and, when the block is the whole rod (a direct call), ``(n_cells,)``
+        itself.  Anything else is refused, naming its shape.  Until 0.4.0
+        any 1-D source of ``n_local`` values was broadcast, so a caller's
+        4 values on a 16-cell rod split four ways were read by every block
+        as its own and repeated along the rod, where :meth:`update`
+        refuses them.
+        """
+        if source is None:
+            return jnp.zeros(n_local, dtype=dtype)
+        source = jnp.asarray(source, dtype=dtype)
+        shape = tuple(source.shape)
+        if source.ndim == 0 or shape == (1,):
+            return jnp.broadcast_to(source, (n_local,))
+        if shape == (n_local + 2 * halo,):
+            return source[halo:-halo]
+        if n_local == n_global and shape == (n_global,):
+            return source
+        block = (
+            "the whole rod" if n_local == n_global
+            else f"{n_local} of its {n_global} cells"
+        )
+        raise ValueError(
+            f"HeatNode {self.name!r}: heat_source has shape {shape}, but it is "
+            f"a scalar or one value per cell, shape ({n_global},).  This block "
+            f"holds {block}, so update_padded takes a scalar, shape (1,), or "
+            f"the block's cells with {halo} halo cell(s) either side, shape "
+            f"({n_local + 2 * halo},), which is how ShardedStencilNode delivers "
+            f"a ({n_global},) source"
+            + (f", or ({n_global},) itself." if n_local == n_global else ".")
+        )
 
     def update(
         self, state: dict, boundary_inputs: dict, dt: float, *, params=None,

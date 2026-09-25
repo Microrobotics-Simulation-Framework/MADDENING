@@ -843,17 +843,19 @@ class ShardedUnstructuredNode(SimulationNode):
                 shard_info=shard_info, **extra,
             )
 
-            # 5. Classify outputs.
+            # 5. Classify outputs.  An integral first, as the stencil
+            #    wrapper does: one that ``state_fields()`` also lists (the
+            #    default lists every ``initial_state`` key) is still summed.
             out = {}
             for k, v in new.items():
-                if k in state_set:
-                    # Strip the ghost tail.
-                    out[k] = v[:n_local_max]
-                elif k in integrals:
+                if k in integrals:
                     if reduced[k]:
                         out[k] = lax.psum(v, axis_name=mesh_axis)
                     else:
                         out[k] = v[None]          # stacked along the mesh axis
+                elif k in state_set:
+                    # Strip the ghost tail.
+                    out[k] = v[:n_local_max]
                 else:
                     raise ValueError(
                         f"{type(inner).__name__}.update_padded returned "

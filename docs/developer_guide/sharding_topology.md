@@ -96,15 +96,20 @@ which wrapper a node is written for:
   can tell the unstructured wrapper so with a private
   `_reads_partition_layout = True`.  That flag is provisional and not
   part of the node contract.
-* Outputs are classified the same way: keys in `state_fields()` have
-  halo/padding stripped; keys in `domain_integral_fields()` get
-  `lax.psum`-ed across the mesh — or across the subset of mesh axes
+* Outputs are classified the same way: keys in `domain_integral_fields()`
+  get `lax.psum`-ed across the mesh — or across the subset of mesh axes
   `domain_integral_axes()` names for them, keeping a leading axis per
-  unreduced mesh axis; other keys raise.
+  unreduced mesh axis; other keys in `state_fields()` have halo/padding
+  stripped; other keys raise.  A key in both lists is an integral (the
+  default `state_fields()` lists every `initial_state` key, so a node that
+  declares its integral's initial value lists it; before 0.4.0 that
+  failed under both wrappers).
 * Both wrappers take part in the graph parameter contract: if the inner
   node's `update_padded` accepts `params`, the wrapper exposes the inner
   `params_pytree()` and hands the node's entry of `gm.params` (replicated
-  to every shard) to `update_padded(..., params=)`.
+  to every shard) to `update_padded(..., params=)`.  A
+  `ShardedStencilNode` wrapping another `ShardedStencilNode` answers for
+  the node inside, and its `update_padded` forwards `params` to it.
 * The sharded Krylov solvers (`sharded_cg` / `sharded_gmres`) take a
   `preconditioner=` (`jacobi_preconditioner`, `block_jacobi_preconditioner`
   ship) and `differentiable=True`, which routes the solve through
@@ -122,7 +127,13 @@ which wrapper a node is written for:
   `partition_value` produces) is sharded and halo/ghost-padded exactly
   like a state field, so `update_padded` receives it at the padded local
   shape.  Everything else (a scalar pressure, a uniform `(D,)` force
-  vector) is replicated to every shard.  The unstructured wrapper refuses
+  vector) is replicated to every shard, whole, where it cannot be told
+  from the shard's own block.  So on the stencil path a replicated input
+  that the node's `boundary_input_spec()` declares per cell (its declared
+  shape leads with the grid's) must broadcast to that declared shape — a
+  scalar, a uniform vector — and anything else is refused, naming the
+  shape given (v0.4.0; a `heat_source` of 4 values on a 16-cell rod split
+  four ways used to be applied on every block).  The unstructured wrapper refuses
   a per-cell input given in *global* cell order rather than misreading it.
   When every shard is full (`n_global == n_devices * n_local_max`) the two
   orders have the same length and the shape cannot say which one an array

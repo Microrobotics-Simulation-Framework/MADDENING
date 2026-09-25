@@ -130,7 +130,7 @@ not loopback; `/healthz` and `/viz/*` never do.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/graph/params/{node_name}` | The node's parameters, live values (`gm.params`) over constructor ones |
-| PUT | `/graph/params/{node_name}` | Update parameters (`{params: {key: value}}`). A leaf the step reads takes effect on the next step; a structural value the node reads when traced marks the graph for recompilation; an initial condition `initial_state()` reads takes effect at the next `POST /sim/reset`. A value the running node cannot use (declared in `static_data_deps`, or consumed when the node was constructed) is a 400 naming it, and nothing in the request is written: rebuild the node (`DELETE` then `POST /graph/nodes`) to change it |
+| PUT | `/graph/params/{node_name}` | Update parameters (`{params: {key: value}}`). A leaf the step reads takes effect on the next step; a structural value the node reads when traced marks the graph for recompilation; an initial condition `initial_state()` reads takes effect at the next `POST /sim/reset`. A value the running node cannot use (declared in `static_data_deps`, or consumed when the node was constructed) is a 400 naming it, and nothing in the request is written: rebuild the node (`DELETE` then `POST /graph/nodes`) to change it.  So is a request the node's constructor refuses with the params a save would carry, one the node a reload builds would compute differently with (a branch the constructor chose from the value), and any non-finite value; integers are bounded as in `POST /graph/nodes` |
 
 ### Checkpoints
 

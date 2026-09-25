@@ -295,9 +295,11 @@ class TransportAuth:
         The shared secret both sides must hold.
     token_env : str or None
         Which environment variable the secret came from, or ``None``
-        when it was passed as *token*.  Callers that propagate the
-        secret -- the cloud launch path does -- use this to pass on the
-        variable the operator actually set.
+        when it was passed as *token*.  A caller that propagates the
+        secret can use this to pass on the variable the operator actually
+        set.  (The cloud launch path does not read it:
+        :meth:`maddening.cloud.session.CloudSession.container_env` reads
+        both variables itself and passes on each one that is set.)
 
     Raises
     ------

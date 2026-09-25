@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **CycloneDX SBOMs** in `docs/validation/sbom/` for the base install and the `server`, `surrogates` and `usd` extras, from a
+  clean install of the wheel (`scripts/generate_sbom.py`), checked offline against `pyproject.toml` and the SOUP package
+  (`scripts/check_sbom.py`, in CI).  Regenerated from the release commit before each tag; see `soup_package.md` §6
 - Multi-GPU session runner covers the sharding checklist: `run_pod.py --goal checklist` (`indivisible`, `halo`, `coupled`,
   `stencil`, `hybrid`), each against its unsharded, NumPy or float64 reference; every goal records pass/fail `checks`
   (schema 3), stops the session on a failure, and `--summarise` says which items a real-GPU run closed

@@ -60,7 +60,9 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 | Lagrange derivative at the end face | `maddening.nodes.heat._lagrange_gradient_weights` | Pure-Python weights, folded before tracing: one formula for both grids, both ends and both datum cases, and one dot product in the graph |
 | $S$ (source term) | `maddening.nodes.heat.HeatNode.update` | Added as `source * dt` after diffusion step |
 | Time integration ($\partial T / \partial t$) | `maddening.nodes.heat.HeatNode.update` | Forward Euler: `T + alpha * dt * laplacian + source * dt` |
-| Stability bound on $\Delta t$ | `maddening.nodes.heat.HeatNode.__init__` | Refuses a configuration above the per-stencil Fourier limit in `MAX_FOURIER_NUMBER` |
+| Stability bound on $\Delta t$ | `maddening.nodes.heat.HeatNode.__init__` | Refuses a configuration above the per-stencil Fourier limit in `MAX_FOURIER_NUMBER`, and a constant no rod can have (MADD-ANO-062) |
+| Stability bound on a non-uniform grid | `maddening.nodes.heat._nonuniform_fourier_spacing` | $\min_i h_{L,i} h_{R,i}$, the length squared the Gershgorin bound divides by; the constructor refuses $\Delta t\,\alpha / \min(h_L h_R) > 1/2$ |
+| Coupled-pair limit (warning) | `maddening.nodes.heat._coupled_pair_advisories` | `compile()` warns when two rods exchange end cells in a coupling group past $3/8$ (`stencil_order=2`) or $0.226$ (`stencil_order=4`), MADD-ANO-050 |
 | Rod-end closure on a sharded rod | `maddening.nodes.heat.HeatNode.update_padded` | The block holding a rod end (from `shard_info`) rebuilds its ghosts with the two closures above, from `left_temperature` / `right_temperature`; the 4th-order cubic as one `(2, 3)` product (`_cubic_ghosts`), equal to `update` to float32 rounding |
 | Which halo fill a sharded rod takes | `maddening.nodes.heat.HeatNode.halo_boundary` | `"edge"`; `ShardedStencilNode` refuses `"zero"` and `"periodic"`, which the closure would otherwise ignore |
 
@@ -80,10 +82,12 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 | `n_cells` | 4 – 1000 | Convergence verified |
 | Fourier number, `stencil_order=2` | $< 1/2$ | $\Delta t \cdot \alpha / \Delta x^2 < 0.5$; exact spectral bound |
 | Fourier number, `stencil_order=4` | $< 5/16$ | $0.3125$, conservative; the sharp bound runs from $0.3169$ at $N=5$ to $0.3249$ as $N \to \infty$ (MADD-ANO-009) |
+| Fourier number, non-uniform grid | $\le 1/2$ | $\Delta t \cdot \alpha / \min(h_L h_R)$, any `stencil_order`; Gershgorin, exact on a uniform grid |
+| Fourier number, two rods coupled end to end | $< 3/8$ (order 2), $< 0.226$ (order 4) | Converged exchange through the Dirichlet inputs (MADD-ANO-050) |
 
 ## Known Limitations and Failure Modes
 
-1. **Stability limit depends on the stencil**: Fourier number $< 1/2$ for `stencil_order=2`, $< 5/16$ for `stencil_order=4` (MADD-ANO-009). The constructor refuses a configuration above its limit, because the explicit update diverges to NaN there rather than degrading. A $\Delta t$ handed to `update()`, or a `thermal_diffusivity` / `length` moved by calibration, bypasses that check — MADD-ANO-002.
+1. **Stability limit depends on the stencil**: Fourier number $< 1/2$ for `stencil_order=2`, $< 5/16$ for `stencil_order=4` (MADD-ANO-009), and $\Delta t\,\alpha / \min(h_L h_R) \le 1/2$ on a non-uniform grid. The constructor refuses a configuration above its limit on either grid, because the explicit update diverges to NaN there rather than degrading. A $\Delta t$ handed to `update()`, or a `thermal_diffusivity` / `length` moved by calibration, bypasses that check — MADD-ANO-002.
 2. **1st-order in time**: temporal accuracy is $O(\Delta t)$
 3. **No convection**: pure diffusion only
 4. **No radiation**: no radiative heat transfer
@@ -92,6 +96,7 @@ Before 0.4.0 the Dirichlet value was written into the first and last cell after 
 7. **Units**: `boundary_flux_spec` declares `K*m/s`, not `W/m^2`. $-\alpha\,\partial T/\partial x$ is the conductive flux divided by $\rho c_p$, and neither is a parameter of this node
 8. **An end with no boundary input is insulated only at `stencil_order=2`** (MADD-ANO-031). With no `left_temperature` the datum is the end cell, $T_b = T_0$: at 2nd order the ghost is then $T_0$ and the face flux is exactly zero, but the 4th-order cubic through $(0, T_0)$ and the three end cells has a non-zero slope at the rod end, so heat crosses it — the mean of an $x^2$ profile on 64 cells falls from 0.333313 to 0.332048 in 2000 steps (float64), where 2nd order conserves it exactly. Pass explicit end temperatures, or use `stencil_order=2`, for an insulated rod
 9. **Sharding**: `ShardedStencilNode(HeatNode)` is the unsharded node for the same boundary inputs on any number of devices (to float32 rounding; MADD-ANO-030 until 0.4.0). Hold an end at a temperature with `left_temperature` / `right_temperature`, exactly as unsharded; the wrapper's `boundary` must be `"edge"`
+10. **Two rods coupled end to end have a lower limit** (MADD-ANO-050). When each rod's end-cell temperature is the other's Dirichlet datum and a coupling group converges the exchange, the pair is unstable above $3/8$ at `stencil_order=2` and $0.226$ at `stencil_order=4`; see Stability Conditions. `compile()` warns about the pattern it recognises; nothing refuses it
 
 ## Stability Conditions
 
@@ -108,6 +113,16 @@ Both are spectral bounds on the *whole* discrete operator, boundary rows include
 For `stencil_order=2` the mirror ghost is exact on the operator's eigenvectors $\sin(m\pi x/L)$, so the closure adds nothing to the interior spectrum and the classical $1/2$ survives unchanged.
 
 For `stencil_order=4` the bare 5-point symbol would allow $3/8$, but the cubic boundary closure raises the spectral radius: the sharp bound is $0.3169$ at $N = 5$, rising monotonically to $0.3249$ as $N \to \infty$. $5/16 = 0.3125$ is below all of them, so one number is safe at every resolution the node accepts.
+
+On a non-uniform grid (`grid_points`) the stencil is the 2nd-order variable-spacing one whatever `stencil_order` says. Row $i$ has diagonal $-2/(h_L h_R)$ and off-diagonal weights summing to $2/(h_L h_R)$, where $h_L$ and $h_R$ are the spacings to the two neighbours and the end spacing repeats beyond each end. The Dirichlet end row is $(T_1 - 3T_0 + 2T_b)/h^2$. Gershgorin puts every eigenvalue in $[-4/\min(h_L h_R), 0]$. The operator is tridiagonal with positive off-diagonal products, so it is similar to a symmetric matrix and the eigenvalues are real. Hence
+
+$$
+\frac{\alpha\,\Delta t}{\min_i h_{L,i}\,h_{R,i}} \le \frac{1}{2},
+$$
+
+which is the uniform bound on a uniform grid, sufficient on any grid, and within $1.5\times$ of the sharp limit on the graded grids of `tests/nodes/test_heat_nonuniform_fourier_limit.py`.
+
+**Two rods coupled end to end** (MADD-ANO-050). Converging the exchange makes each datum the other rod's end cell at the *new* time, while the interiors stay explicit, so the step is $(I - \mathrm{Fo}\,Q)\,T' = (I + \mathrm{Fo}\,P)\,T$. An amplification of $-1$ needs $(P - Q)v = -(2/\mathrm{Fo})\,v$. The mode that gets there first is mirror-symmetric about the interface: each rod sees a datum of minus its own end cell, and the mode decays away from the interface. At `stencil_order=2`, $v_k = r^k$ with $1 + 1/r = -2$, so $r = -1/3$, the eigenvalue is $-16/3$ and $\mathrm{Fo} = 3/8$. At `stencil_order=4` the two decaying roots of the 5-point recurrence must satisfy both cubic-closure rows. Their product $p$ is then the root in $(-1, 0)$ of $p^6 - 294p^5 - 2333p^4 + 1692p^3 - 9p^2 + 362p + 5$, the eigenvalue is $-8.8446$, and $\mathrm{Fo} = 0.2261266$ ($0.2261215$ at $N = 5$). The node records $0.226$. The cubic ghost puts $16/5$ of the datum into the end cell's row where the mirror ghost puts $2$, which is why the order-4 figure is so much lower.
 
 ## State Variables
 

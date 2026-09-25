@@ -44,14 +44,18 @@ first is "verified":
 * **not evaluated** -- something decides the Fourier number that the gate
   cannot read: a computed argument, a ``**mapping`` held in a variable, a
   ``*args`` splat, a keyword given twice, a non-positive value, a
-  stencil order with no limit, or a computed ``grid_points`` (which may
-  be ``None``, i.e. a uniform rod the constructor checks).  These are counted and reported by reason
+  stencil order with no limit, or a computed ``grid_points``.  These are counted and reported by reason
   (``--list-unevaluated`` prints each one), never folded into the verified
   count, and a scope in which *nothing* could be evaluated fails.
 
-A rod given a literal non-uniform grid (``grid_points=[...]``) is outside
-the constructor's guard, which checks uniform rods only, and is in none of
-the three counts.  ``grid_points=None`` is the default spelled out, a
+A rod given a literal non-uniform grid (``grid_points=[...]``) is judged
+by the constructor's non-uniform criterion.  That is ``dt * alpha /
+min(h_L * h_R)`` against ``MAX_FOURIER_NUMBER[2]``, with the spacing read
+through the node's own ``_nonuniform_fourier_spacing``.  A grid that is not
+strictly increasing is refused, as ``HeatNode.__init__`` refuses it.  Until
+0.4.0 the constructor skipped non-uniform rods, and so did this gate.  A rod
+at ten times its limit built without a word (audit_040_p4_2,
+release-record, M3).  ``grid_points=None`` is the default spelled out, a
 uniform rod, and is judged like one; it used to be skipped with every
 other ``grid_points=`` (audit_040_p4_1, H6).
 
@@ -109,7 +113,11 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from maddening.nodes.heat import MAX_FOURIER_NUMBER, HeatNode  # noqa: E402
+from maddening.nodes.heat import (  # noqa: E402
+    MAX_FOURIER_NUMBER,
+    HeatNode,
+    _nonuniform_fourier_spacing,
+)
 
 def _positional_order() -> list:
     """``HeatNode.__init__``'s parameters, in order, so the gate cannot drift.
@@ -368,6 +376,64 @@ def _call_arguments(node):
     return args, None
 
 
+def _judge_grid(origin, lineno, points, args, defaults, unstable,
+                unchecked, seen):
+    """Judge a rod built on a literal ``grid_points``, as the constructor does.
+
+    The non-uniform stencil is 2nd order whatever ``stencil_order`` says, and
+    ``length`` and ``n_cells`` do not enter its Fourier number.  So only
+    ``timestep``, ``thermal_diffusivity`` and the points are read.
+    """
+    try:
+        coords = [float(v) for v in points]
+    except (TypeError, ValueError):
+        unchecked.append((origin, lineno,
+                          "grid_points is a literal but not a sequence of "
+                          "numbers, so this was NOT checked"))
+        return
+    if len(coords) < 2:
+        unchecked.append((origin, lineno,
+                          "grid_points has fewer than two points, so no "
+                          "spacing is defined and this was NOT checked"))
+        return
+    values = {}
+    for key in ("timestep", "thermal_diffusivity"):
+        values[key] = _number(args[key]) if key in args else defaults.get(key)
+    if any(v is None for v in values.values()):
+        unchecked.append((origin, lineno,
+                          "a constructor argument is computed, not literal"))
+        return
+    dt, alpha = values["timestep"], values["thermal_diffusivity"]
+    spacing = _nonuniform_fourier_spacing(coords)
+    if spacing is None:
+        seen.append((origin, lineno))
+        unstable.append((
+            origin, lineno,
+            f"grid_points {coords!r} is not strictly increasing; "
+            f"HeatNode.__init__ raises ValueError"))
+        return
+    if min(dt, alpha) <= 0:
+        unchecked.append((
+            origin, lineno,
+            f"a non-positive constructor argument (dt={dt!r}, "
+            f"alpha={alpha!r}); no Fourier number is defined, so this was "
+            f"NOT checked"))
+        return
+    seen.append((origin, lineno))
+    limit = MAX_FOURIER_NUMBER[2]
+    fourier = dt * alpha / spacing
+    if fourier > limit:
+        unstable.append((
+            origin, lineno,
+            f"Fourier number {fourier:.4g} (dt*alpha/min(h_left*h_right) on "
+            f"the non-uniform grid) exceeds the {limit:g} limit of the "
+            f"2nd-order variable-spacing stencil (dt={dt!r}, "
+            f"alpha={alpha!r}, min(h_left*h_right)={spacing:.6g}); "
+            f"HeatNode.__init__ raises ValueError. "
+            f"Use timestep <= {limit * spacing / alpha:.6g}, a wider finest "
+            f"spacing, or a smaller thermal_diffusivity"))
+
+
 def scan_source(src, origin, defaults, unstable, unchecked, seen):
     """Walk one source string, recursing into embedded source."""
     tree = _parse(src)
@@ -401,20 +467,22 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
             unchecked.append((origin, node.lineno, why_not))
             continue
 
-        # An explicit grid is not a uniform rod, and the constructor's guard
-        # skips it too -- but only a grid that is actually given.  Any
-        # ``grid_points=`` used to skip the rod, so ``grid_points=None``
+        # An explicit grid is a non-uniform rod, judged on the constructor's
+        # non-uniform criterion -- but only a grid that is actually given.
+        # Any ``grid_points=`` used to skip the rod, so ``grid_points=None``
         # (the default, spelled out) hid an unstable uniform rod that
         # ``HeatNode.__init__`` refuses (audit_040_p4_1, H6).
         grid = args.get("grid_points")
         if grid is not None and not (isinstance(grid, ast.Constant)
                                      and grid.value is None):
-            if _is_literal(grid):
-                continue                 # a literal grid: outside the guard
-            unchecked.append((
-                origin, node.lineno,
-                "grid_points is computed, so it cannot be read whether this "
-                "is a uniform rod, the kind HeatNode.__init__ checks"))
+            if not _is_literal(grid):
+                unchecked.append((
+                    origin, node.lineno,
+                    "grid_points is computed, so the grid the Fourier number "
+                    "depends on cannot be read"))
+                continue
+            _judge_grid(origin, node.lineno, ast.literal_eval(grid), args,
+                        defaults, unstable, unchecked, seen)
             continue
 
         values = {}

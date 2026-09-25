@@ -3670,13 +3670,67 @@ class TestHeatStabilityGridPoints:
             'HeatNode("r", 50.0, 10, 1.0, 0.01, 0.0, 2, None)\n')
         assert len(unstable) == 1
 
-    def test_a_literal_grid_is_outside_the_guard(self, heat_stability_gate):
-        """The constructor checks uniform rods only; so does the gate."""
+    def test_an_unstable_literal_grid_is_refused(self, heat_stability_gate):
+        """The constructor checks non-uniform rods too since 0.4.0, and so
+        does the gate: min(h_L * h_R) is 0.1**2 here, so Fo = 50 * 0.01 /
+        0.01 = 50 against 1/2.  Both used to skip the rod
+        (audit_040_p4_2, release-record, M3)."""
         unstable, unchecked, seen = self._scan(
             heat_stability_gate,
-            'HeatNode("g", timestep=50.0, n_cells=4, '
+            'HeatNode("g", timestep=50.0, n_cells=5, '
             'grid_points=[0.0, 0.1, 0.3, 0.6, 1.0])\n')
-        assert (unstable, unchecked, seen) == ([], [], [])
+        assert unchecked == [] and len(seen) == 1
+        assert len(unstable) == 1 and "non-uniform grid" in unstable[0][2]
+        assert "Fourier number 50 " in unstable[0][2]
+
+    def test_a_stable_literal_grid_is_verified(self, heat_stability_gate):
+        """The same grid at a timestep just under its limit, 0.5 * 0.01 /
+        0.01 = 0.5: verified, not skipped."""
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("g", timestep=0.5, n_cells=5, '
+            'grid_points=[0.0, 0.1, 0.3, 0.6, 1.0])\n')
+        assert (unstable, unchecked) == ([], []) and len(seen) == 1
+
+    def test_the_grid_criterion_is_the_product_of_neighbouring_spacings(
+        self, heat_stability_gate
+    ):
+        """Not the smallest spacing squared.  On [0, 0.2, 0.3, 0.7, 1.5] the
+        spacings are 0.2, 0.1, 0.4, 0.8 (the ends mirrored), so the products
+        of neighbouring spacings are 0.04, 0.02, 0.04, 0.32, 0.64 and the
+        smallest is 0.02, while the smallest spacing squared is 0.01.  At
+        dt = 0.99 and the default alpha = 0.01 the criterion reads 0.495,
+        inside 1/2.  A smallest-spacing rule would read 0.99 and refuse a
+        rod that is stable."""
+        points = [0.0, 0.2, 0.3, 0.7, 1.5]
+        from maddening.nodes.heat import HeatNode, _nonuniform_fourier_spacing
+
+        assert _nonuniform_fourier_spacing(points) == pytest.approx(0.02)
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            f'HeatNode("g", timestep=0.99, n_cells=5, grid_points={points})\n')
+        assert (unstable, unchecked) == ([], []) and len(seen) == 1
+        # ...and the constructor agrees at the same numbers.
+        HeatNode("g", 0.99, n_cells=5, grid_points=points)
+
+    def test_a_grid_that_is_not_strictly_increasing_is_refused(
+        self, heat_stability_gate
+    ):
+        """The constructor refuses it: a repeated point divides by zero."""
+        unstable, _unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("g", timestep=1e-6, n_cells=4, '
+            'grid_points=[0.0, 0.1, 0.1, 0.6])\n')
+        assert len(unstable) == 1 and "strictly increasing" in unstable[0][2]
+        assert len(seen) == 1
+
+    def test_the_grid_spacing_comes_from_the_node_not_a_copy(
+        self, heat_stability_gate
+    ):
+        from maddening.nodes.heat import _nonuniform_fourier_spacing
+
+        assert (heat_stability_gate._nonuniform_fourier_spacing
+                is _nonuniform_fourier_spacing)
 
     def test_a_computed_grid_is_not_evaluated_rather_than_skipped(
         self, heat_stability_gate

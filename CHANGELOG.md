@@ -167,6 +167,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`HeatNode` refuses more of what it used to run wrongly, and `compile()` warns about an unstable coupled pair**: a rod on `grid_points` is held to `dt*alpha/min(h_L*h_R) <= 1/2` (the Fourier check skipped it; MADD-ANO-002), and a non-positive `length` or `timestep`, a negative `thermal_diffusivity`, a non-finite one of these, or `grid_points` not strictly increasing raise `ValueError` (MADD-ANO-062).
+  Two uniform rods coupled end to end through `extract_first`/`extract_last` in a coupling group, past their pair limit (3/8 at `stencil_order=2`, 0.226 at 4), get a `UserWarning` naming both rods and MADD-ANO-050; it is a warning, not a refusal.
+  Action: give a refused rod a stable timestep or meaningful constants; for a warned pair use a smaller timestep or exchange the data without a coupling group, and check a pair the warning cannot recognise yourself.
 - **`compile()` refuses a group-internal flux edge the coupling loop reads from the state** -- under `convergence_norm="interface"`, and into a sub-cycled member under `boundary_interpolation="linear"` / `"quadratic"` (a bare `KeyError` inside the step since 0.1.0, MADD-ANO-060) -- and an IQN `accelerated_fields` naming no floating field; a non-floating field it names is dropped.
   Action: use the `"mixed"` / `"l2"` norm or `"constant"` interpolation the message names; name a floating field.
 - **`scripts/report_test_durations.py` warns when an allowlisted test passes the 20 s hard line** (the allowlist has no ceiling), and a `[cold-ci]` request whose head commit cannot be read now runs cold with a warning instead of silently warm.
@@ -648,13 +651,14 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-062 (new, resolved in this release)**: `HeatNode` accepted a non-positive `length` or `timestep`, a negative `thermal_diffusivity` and `grid_points` out of order, and answered wrongly without a word (since 0.1.0; see `### Changed`)
 - **MADD-ANO-059, 060, 061 (new, resolved in this release)**: accelerating a coupling group holding an integer, boolean or PRNG-key leaf raised a `TypeError`; a group-internal flux edge read by the interface norm or a sub-cycled member's linear interpolation raised a bare `KeyError`; `run_adaptive` advanced its clock by `dt_min` on a `dt_min` accept whose state covered more (all since 0.1.0; see `### Fixed`, `### Changed`).
   **MADD-ANO-027** now says each extra waveform sweep applies at least one more pass, moving a converged state by about one residual
 - **MADD-ANO-051, 052, 053 (new, resolved in this release; all since 0.1.0)**: the HTTP API served every route, `/cloud/launch` included, with no credential while the container bound `0.0.0.0`; the checkpoint routes took any server path; the signaling server admitted every client (see `### Security`).
   **MADD-ANO-054 (new, never released)**: the FMU bridge unpickled the importer's state blob, remote code execution; **MADD-ANO-055 (new, resolved)**: `deserialize_fmu_state` and `FmuSidecar.handle` unpickled their input (since 0.3.0).
   The registry now holds every defect a release carried and every critical or major one found in the cycle, shipped or not (CONTRIBUTING.md)
 - **MADD-ANO-047, 048, 049 (new, resolved in this release)**: `PUT /graph/params` accepted a write flipping a branch the node fixed at construction, values its constructor refuses, and a non-finite value (since 0.1.0; see `### Fixed`).
-  **MADD-ANO-050 (new, open)**: two `HeatNode` rods coupled end to end by a converged exchange are unstable above Fo = 3/8, not the 1/2 each accepts; keep Fo < 3/8 on such pairs
+  **MADD-ANO-050 (new, open)**: two `HeatNode` rods coupled end to end by a converged exchange are unstable above Fo = 3/8 at `stencil_order=2` and 0.226 at 4, not the 1/2 or 5/16 each accepts; keep Fo below those on such pairs (`compile()` warns; see `### Changed`)
 - **MADD-ANO-046 (new, resolved in this release)**: a sub-cycled node whose timestep did not divide the macro timestep drifted by a fixed fraction of every step (since 0.1.0; see `### Changed`)
 - **MADD-ANO-043, 044, 045 (new, resolved in this release)**: `run_adaptive*` advanced a sub-cycled node `divider * dt` per step; a multi-rate group's diagnostics, predictor and IQN-IMVJ warm start came from discarded solves;
   `solver="fori"` + `iqn-imvj` carried zero secant columns, so `jacobian_reuse` did nothing (all since 0.1.0; see `### Fixed`)

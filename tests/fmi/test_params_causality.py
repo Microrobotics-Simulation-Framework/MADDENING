@@ -356,6 +356,13 @@ class TestSnapshotValues:
         sc.set_fmu_state(snap)
         np.testing.assert_array_equal(np.asarray(sc.state["spring"]["position"]), want)
         assert np.asarray(sc.state["spring"]["position"]).dtype == want.dtype
+        # a leaf that arrives wider than the live one lands in the live dtype,
+        # as it does through the bridge: a float64 carry would retrace the step
+        sc.set_fmu_state(_snapshot_with(sc, "state", "spring", "position", np.float64(0.3)))
+        restored = np.asarray(sc.state["spring"]["position"])
+        assert restored.dtype == np.float32 and restored == np.float32(0.3)
+        sc.set_fmu_state(_snapshot_with(sc, "param", "spring", "stiffness", np.float64(45.0)))
+        assert np.asarray(sc.get_params()["spring.params.stiffness"]).dtype == np.float32
 
     @pytest.mark.parametrize("kind, owner, key, value, refusal", _SNAPSHOT_CASES,
                              ids=["nan_state", "inf_param", "overflow_param",

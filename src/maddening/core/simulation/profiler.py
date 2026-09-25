@@ -646,18 +646,30 @@ def _one_iteration_variant(gm):
             # own construction, so what its constructor says is not the
             # caller's business; the groups were validated, and warned
             # about, when the caller built them.
+            #
+            # The same goes for the two recompiles.  ``compile()`` re-runs
+            # ``validate()`` and re-emits every advisory it raised when the
+            # caller compiled -- a disconnected node, a knob a uniform-
+            # timestep group ignores -- each attributed to this module,
+            # and twice (the variant, then the restore).  Neither graph
+            # differs from the caller's in anything those advisories read:
+            # the variant changes ``max_iterations`` and
+            # ``strict_convergence``, the restore puts the caller's groups
+            # back.  Errors still raise: only warnings are silenced.
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 gm._coupling_groups = [
                     dataclasses.replace(g, max_iterations=1, strict_convergence=False)
                     for g in saved_groups
                 ]
-            gm.compile()
+                gm.compile()
             gm._state = jax.tree.map(lambda x: x, saved_state)
             yield
         finally:
             gm._coupling_groups = saved_groups
-            gm.compile()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                gm.compile()
             gm._state = saved_state
             gm.params = saved_params
             # ``compile`` rebuilt the step; the original object is fine

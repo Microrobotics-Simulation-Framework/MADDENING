@@ -63,9 +63,16 @@ read complete.  ``--summarise DIR`` reads the JSON files back and prints
 the checklist verdict, the per-goal tables and the ``ppermute`` vs
 ``all_to_all`` recommendation.  It re-derives every check's pass/fail from
 its value, limit and sense rather than trusting the recorded flag, and
-fails a record that disagrees.  A checklist item reads ``CLOSED`` only
-when every goal deciding it passed with every check run, on real GPUs,
-not a dry run, on at least ``MIN_DECIDING_DEVICES`` (4) devices.  It does
+fails a record that disagrees.  It also refuses to take a file's own word
+for what it checked (:func:`record_problems`): a file decides nothing
+unless it is on the current ``SCHEMA_VERSION``, its ``n_devices`` is no
+more than the devices its environment saw, its results hold every case
+this runner runs for the file's own config, and its checks are exactly
+the ones this runner derives from its results (``GOAL_CHECKS``), limits
+from ``LIMITS`` included.  A checklist item reads ``CLOSED`` only when
+every goal deciding it passed with every check run and every file valid,
+on real GPUs, not a dry run, on at least ``MIN_DECIDING_DEVICES`` (4)
+devices, and every deciding file records the same git commit.  It does
 not import JAX, so it works on a laptop without a usable jaxlib.
 
 Every timed callable receives inputs that were placed on the device mesh
@@ -110,6 +117,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections import Counter
 import os
 import platform
 import socket
@@ -211,6 +219,11 @@ LIMITS = {
     # float64 differences themselves are good to ~1e-9.
     "model_gradient": 1e-4,
 }
+
+#: The parameters the ``hybrid`` and ``coupled`` goals differentiate with
+#: respect to, as ``(node, params key)``; the check names spell them out.
+HYBRID_WRITES = (("field", "diffusivity"), ("field", "exchange"))
+COUPLED_WRITES = (("field", "diffusivity"), ("far", "conductance"), ("field", "exchange"))
 
 #: Coupling group of the ``coupled`` goal.
 COUPLED_MAX_ITERATIONS = 40
@@ -362,9 +375,23 @@ def ring_edges(n: int) -> np.ndarray:
     return np.stack([i, (i + 1) % n], axis=1)
 
 
+def _grid_side(n: int) -> int:
+    return max(int(round(np.sqrt(n))), 2)
+
+
+def synthetic_cells(kind: str, n: int) -> int:
+    """The cell count :func:`synthetic_mesh` builds for ``n`` (a grid rounds
+    to a square), without building it."""
+    if kind == "ring":
+        return n
+    if kind == "grid":
+        return _grid_side(n) ** 2
+    raise ValueError(f"unknown synthetic mesh {kind!r} (ring|grid)")
+
+
 def grid_edges(n: int) -> tuple[int, np.ndarray]:
     """4-neighbour lattice with about ``n`` cells (rounded to a square)."""
-    side = max(int(round(np.sqrt(n))), 2)
+    side = _grid_side(n)
     ids = np.arange(side * side, dtype=np.int32).reshape(side, side)
     horiz = np.stack([ids[:, :-1].ravel(), ids[:, 1:].ravel()], axis=1)
     vert = np.stack([ids[:-1, :].ravel(), ids[1:, :].ravel()], axis=1)
@@ -1041,13 +1068,24 @@ def run_exchange(args, out: dict) -> dict:
               f"ppermute {p['median_ms']:8.3f} ms  {speedup_txt}  "
               f"identical={entry['bit_identical']}")
     out["results"] = results
+    return finish_checks(out, exchange_checks(results, D))
+
+
+def exchange_checks(results: list, n_devices: int) -> list:
+    """The ``exchange`` goal's checks, from its ``results`` alone.
+
+    Every goal's checks are a pure function of what it records, so that
+    ``--summarise`` can derive them again from a file's ``results`` with
+    this same code and refuse a file whose ``checks`` say anything else
+    (:func:`record_problems`).
+    """
     checks = []
     for r in results:
         checks.append(check_that(f"{r['cells']} cells: all_to_all == ppermute bit for bit",
                                  r["bit_identical"]))
         checks.append(check_that(f"{r['cells']} cells: timed input pre-placed on the mesh",
                                  r["input_presharded"]))
-    return finish_checks(out, checks)
+    return checks
 
 
 # ---------------------------------------------------------------------------
@@ -1129,14 +1167,21 @@ def run_forward(args, out: dict) -> dict:
                   f"  compile {compile_s:6.2f} s  max|dx|={m['parity_x']['max_abs']:.2e}")
         results.append(entry)
     out["results"] = results
+    return finish_checks(out, forward_checks(results, D))
+
+
+def forward_checks(results: list, n_devices: int) -> list:
+    """The ``forward`` goal's checks, from its ``results`` alone (see
+    :func:`exchange_checks`)."""
     checks = []
     for r in results:
-        for method, m in r["methods"].items():
+        for method in METHODS:
+            m = r["methods"][method]
             prefix = f"{r['cells']} cells {method}"
             checks += _parity_checks(f"{prefix} x vs unsharded", m["parity_x"], LIMITS["forward"])
             checks += _parity_checks(f"{prefix} total vs unsharded", m["parity_total"],
                                      LIMITS["forward"])
-    return finish_checks(out, checks)
+    return checks
 
 
 # ---------------------------------------------------------------------------
@@ -1279,6 +1324,12 @@ def run_gradient(args, out: dict) -> dict:
               f"rel grad={cg['grad_parity']['max_rel']:.2e} jvp={cg['jvp_parity']['max_rel']:.2e}")
         results.append(entry)
     out["results"] = results
+    return finish_checks(out, gradient_checks(results, D))
+
+
+def gradient_checks(results: list, n_devices: int) -> list:
+    """The ``gradient`` goal's checks, from its ``results`` alone (see
+    :func:`exchange_checks`)."""
     checks = []
     for r in results:
         for method in METHODS:
@@ -1289,7 +1340,7 @@ def run_gradient(args, out: dict) -> dict:
                                  cg["grad_parity"], LIMITS["krylov"])
         checks += _parity_checks(f"{cg['dof']} dof sharded_cg jvp vs unsharded",
                                  cg["jvp_parity"], LIMITS["krylov"])
-    return finish_checks(out, checks)
+    return checks
 
 
 # ---------------------------------------------------------------------------
@@ -1327,7 +1378,6 @@ def run_indivisible(args, out: dict) -> dict:
     _load_backend()
     D = args.n_devices
     mesh = _mesh_for(D)
-    checks = []
     ny_ok, nx = field_shape(min(args.cells), D)
     ny_bad = ny_ok + 1                              # D >= 2: never a multiple of D
     entry: dict = {"n_devices": D}
@@ -1339,26 +1389,12 @@ def run_indivisible(args, out: dict) -> dict:
     kind, msg = _refusal(lambda: stencil(ny_bad))
     kind_ok, msg_ok = _refusal(lambda: stencil(ny_ok))
     entry["stencil"] = {"shape": [ny_bad, nx], "raised": kind, "message": msg,
-                        "divisible_shape": [ny_ok, nx], "divisible_raised": kind_ok}
-    checks += [
-        check_that(f"stencil {ny_bad}x{nx} on {D} devices: ValueError at construction",
-                   kind == "ValueError", msg[:300]),
-        check_that("stencil refusal names the cell count, the device count and the "
-                   "unstructured alternative",
-                   _names_both(msg, ny_bad, D) and "ShardedUnstructuredNode" in msg),
-        check_that(f"stencil {ny_ok}x{nx} (divisible) is accepted", kind_ok is None,
-                   msg_ok[:300]),
-    ]
+                        "divisible_shape": [ny_ok, nx], "divisible_raised": kind_ok,
+                        "divisible_message": msg_ok}
 
     kind, msg = _refusal(lambda: ShardedPointwiseNode(Pointwise2D(ny_bad, nx), mesh,
                                                       shard_axes=(0,)))
     entry["pointwise"] = {"shape": [ny_bad, nx], "raised": kind, "message": msg}
-    checks += [
-        check_that(f"pointwise {ny_bad}x{nx} on {D} devices: ValueError at construction",
-                   kind == "ValueError", msg[:300]),
-        check_that("pointwise refusal names the cell count and the device count",
-                   _names_both(msg, ny_bad, D)),
-    ]
 
     if _pencil_mesh_fits(D):
         # A pencil mesh: the refusal names the axis that does not divide.
@@ -1370,15 +1406,6 @@ def run_indivisible(args, out: dict) -> dict:
             axis_map={"spatial_y": 0, "spatial_z": 1}, boundary="periodic"))
         entry["pencil"] = {"mesh": [2, nz], "shape": [rows, cols], "raised": kind,
                            "message": msg}
-        checks += [
-            check_that(f"pencil {rows}x{cols} on a 2x{nz} mesh: ValueError at construction",
-                       kind == "ValueError", msg[:300]),
-            check_that("pencil refusal names spatial axis 1 and both numbers",
-                       "spatial axis 1" in msg and _names_both(msg, cols, nz)),
-        ]
-    else:
-        checks.append(check_not_run("pencil (2-D mesh) refusal naming the axis that does "
-                                    "not divide", _pencil_mesh_needs(D)))
 
     # The rule is the stencil path's: the unstructured wrapper carries a
     # padded layout and takes an uneven split.
@@ -1395,14 +1422,60 @@ def run_indivisible(args, out: dict) -> dict:
     parity = _diff(got["x"], np.asarray(jax.device_get(ref_state["x"])))
     entry["unstructured"] = {"cells": n, "partition": how, "cells_per_device": counts.tolist(),
                              "steps": args.steps, "parity_x": parity}
-    checks.append(check_that(f"unstructured {n} cells on {D} devices is an uneven split",
-                             len(set(counts.tolist())) > 1, str(counts.tolist())))
-    checks += _parity_checks(f"unstructured {n} cells x vs unsharded", parity, LIMITS["forward"])
     print(f"[indivisible] stencil {ny_bad}x{nx}: {entry['stencil']['raised']}  pointwise: "
           f"{entry['pointwise']['raised']}  unstructured {n} cells {counts.tolist()}: "
           f"max|dx|={parity['max_abs']:.2e}")
     out["results"] = [entry]
-    return finish_checks(out, checks)
+    return finish_checks(out, indivisible_checks(out["results"], D))
+
+
+def indivisible_checks(results: list, n_devices: int) -> list:
+    """The ``indivisible`` goal's checks, from its ``results`` alone (see
+    :func:`exchange_checks`)."""
+    [entry] = results
+    D = n_devices
+    st = entry["stencil"]
+    ny_bad, nx = st["shape"]
+    ny_ok = st["divisible_shape"][0]
+    kind, msg = st["raised"], st["message"]
+    checks = [
+        check_that(f"stencil {ny_bad}x{nx} on {D} devices: ValueError at construction",
+                   kind == "ValueError", msg[:300]),
+        check_that("stencil refusal names the cell count, the device count and the "
+                   "unstructured alternative",
+                   _names_both(msg, ny_bad, D) and "ShardedUnstructuredNode" in msg),
+        check_that(f"stencil {ny_ok}x{nx} (divisible) is accepted",
+                   st["divisible_raised"] is None, st.get("divisible_message", "")[:300]),
+    ]
+    pw = entry["pointwise"]
+    kind, msg = pw["raised"], pw["message"]
+    checks += [
+        check_that(f"pointwise {ny_bad}x{nx} on {D} devices: ValueError at construction",
+                   kind == "ValueError", msg[:300]),
+        check_that("pointwise refusal names the cell count and the device count",
+                   _names_both(msg, ny_bad, D)),
+    ]
+    if _pencil_mesh_fits(D):
+        pencil = entry["pencil"]
+        nz = pencil["mesh"][1]
+        rows, cols = pencil["shape"]
+        kind, msg = pencil["raised"], pencil["message"]
+        checks += [
+            check_that(f"pencil {rows}x{cols} on a 2x{nz} mesh: ValueError at construction",
+                       kind == "ValueError", msg[:300]),
+            check_that("pencil refusal names spatial axis 1 and both numbers",
+                       "spatial axis 1" in msg and _names_both(msg, cols, nz)),
+        ]
+    else:
+        checks.append(check_not_run("pencil (2-D mesh) refusal naming the axis that does "
+                                    "not divide", _pencil_mesh_needs(D)))
+    un = entry["unstructured"]
+    n, counts = un["cells"], list(un["cells_per_device"])
+    checks.append(check_that(f"unstructured {n} cells on {D} devices is an uneven split",
+                             len(set(counts)) > 1, str(counts)))
+    checks += _parity_checks(f"unstructured {n} cells x vs unsharded", un["parity_x"],
+                             LIMITS["forward"])
+    return checks
 
 
 # ---------------------------------------------------------------------------
@@ -1475,24 +1548,11 @@ def run_halo(args, out: dict) -> dict:
     """Every halo slot, forward and adjoint, against NumPy, bit for bit."""
     _load_backend()
     D = args.n_devices
-    checks = []
     ny, nx = field_shape(max(args.cells), D)
     meshes = [("1d", create_device_mesh(shape=(D,)), (D, 1), P(MESH_AXIS, None))]
     if _pencil_mesh_fits(D):
         meshes.append(("2d", create_device_mesh(shape=(2, D // 2)), (2, D // 2),
                        P("spatial_y", "spatial_z")))
-    else:
-        checks.append(check_not_run("2d pencil mesh: every boundary mode and width, forward "
-                                    "and adjoint vs NumPy", _pencil_mesh_needs(D)))
-    if D < 3:
-        # The forward and backward ring permutations are the same pair on
-        # two devices, so no case on this mesh can tell a correct exchange
-        # from one that takes each halo from the wrong neighbour.
-        checks.append(check_not_run(
-            "1d mesh: left and right neighbours are different devices, so a halo taken "
-            "from the wrong neighbour shows",
-            f"needs >= 3 devices on the axis; on {D} both neighbours of a shard are the "
-            "same device"))
     cases = []
     for label, mesh, (py, pz), spec in meshes:
         nx_m = -(-nx // pz) * pz
@@ -1525,12 +1585,9 @@ def run_halo(args, out: dict) -> dict:
         for (boundary, h, want, want_grad), (got, got_grad) in zip(refs, outs):
             fwd_err = _max_abs(np.asarray(jax.device_get(got)), want)
             adj_err = _max_abs(np.asarray(jax.device_get(got_grad)), want_grad)
-            name = f"{label} mesh {py}x{pz}, {ny}x{nx_m}, halo {h}, {boundary}"
             cases.append({"mesh": label, "mesh_shape": [py, pz], "shape": [ny, nx_m],
                           "halo": h, "boundary": boundary,
                           "forward_max_abs": fwd_err, "adjoint_max_abs": adj_err})
-            checks.append(check(f"{name}: forward vs NumPy max_abs", fwd_err, LIMITS["exact"]))
-            checks.append(check(f"{name}: adjoint vs NumPy max_abs", adj_err, LIMITS["exact"]))
 
     # The unstructured exchange: every owned slot and every ghost slot.
     mesh = _mesh_for(D)
@@ -1577,17 +1634,49 @@ def run_halo(args, out: dict) -> dict:
         adj_err = max(_max_abs(got_grad[d, :layout.n_local[d]], want_grad[d, :layout.n_local[d]])
                       for d in range(D))
         unstructured["methods"][method] = {"forward_max_abs": fwd_err, "adjoint_max_abs": adj_err}
-        checks.append(check(f"unstructured {n} cells {method}: owned and ghost slots vs NumPy "
-                            "max_abs", fwd_err, LIMITS["exact"]))
-        checks.append(check(f"unstructured {n} cells {method}: adjoint vs NumPy max_abs",
-                            adj_err, LIMITS["exact"]))
     worst = max([c["forward_max_abs"] for c in cases] + [c["adjoint_max_abs"] for c in cases])
     print(f"[halo] {len(cases)} stencil cases on {'+'.join(m[0] for m in meshes)} meshes, "
           f"worst |diff| {worst:.1e}; unstructured {n} cells: "
           + "  ".join(f"{m} fwd {v['forward_max_abs']:.1e} adj {v['adjoint_max_abs']:.1e}"
                       for m, v in unstructured["methods"].items()))
     out["results"] = [{"n_devices": D, "stencil_cases": cases, "unstructured": unstructured}]
-    return finish_checks(out, checks)
+    return finish_checks(out, halo_checks(out["results"], D))
+
+
+def halo_checks(results: list, n_devices: int) -> list:
+    """The ``halo`` goal's checks, from its ``results`` alone (see
+    :func:`exchange_checks`)."""
+    [entry] = results
+    D = n_devices
+    checks = []
+    if not _pencil_mesh_fits(D):
+        checks.append(check_not_run("2d pencil mesh: every boundary mode and width, forward "
+                                    "and adjoint vs NumPy", _pencil_mesh_needs(D)))
+    if D < 3:
+        # The forward and backward ring permutations are the same pair on
+        # two devices, so no case on this mesh can tell a correct exchange
+        # from one that takes each halo from the wrong neighbour.
+        checks.append(check_not_run(
+            "1d mesh: left and right neighbours are different devices, so a halo taken "
+            "from the wrong neighbour shows",
+            f"needs >= 3 devices on the axis; on {D} both neighbours of a shard are the "
+            "same device"))
+    for c in entry["stencil_cases"]:
+        (py, pz), (ny, nx_m) = c["mesh_shape"], c["shape"]
+        name = f"{c['mesh']} mesh {py}x{pz}, {ny}x{nx_m}, halo {c['halo']}, {c['boundary']}"
+        checks.append(check(f"{name}: forward vs NumPy max_abs", c["forward_max_abs"],
+                            LIMITS["exact"]))
+        checks.append(check(f"{name}: adjoint vs NumPy max_abs", c["adjoint_max_abs"],
+                            LIMITS["exact"]))
+    un = entry["unstructured"]
+    n = un["cells"]
+    for method in METHODS:
+        m = un["methods"][method]
+        checks.append(check(f"unstructured {n} cells {method}: owned and ghost slots vs NumPy "
+                            "max_abs", m["forward_max_abs"], LIMITS["exact"]))
+        checks.append(check(f"unstructured {n} cells {method}: adjoint vs NumPy max_abs",
+                            m["adjoint_max_abs"], LIMITS["exact"]))
+    return checks
 
 
 # ---------------------------------------------------------------------------
@@ -1632,7 +1721,7 @@ def run_stencil(args, out: dict) -> dict:
     _load_backend()
     D = args.n_devices
     mesh = _mesh_for(D)
-    results, checks = [], []
+    results = []
     for n_hint, boundary in stencil_cases(args.cells):
         ny, nx = field_shape(n_hint, D)
         ref = Field2D("field", ny, nx, exchange=0.3, boundary=boundary)
@@ -1671,18 +1760,6 @@ def run_stencil(args, out: dict) -> dict:
         entry["gradient"]["parity_grad_initial_field"] = _diff(gf_s, gf_u)
         entry["gradient"]["parity_grad_diffusivity"] = _rel_each(gd_s, gd_u)
         prefix = f"{ny}x{nx} {boundary}"
-        checks.append(check_that(f"{prefix}: sharded field is partitioned over {D} devices",
-                                 entry["input_partitioned"]))
-        checks += _parity_checks(f"{prefix} forward f vs unsharded", entry["forward"]["parity_f"],
-                                 LIMITS["forward"])
-        checks.append(check(f"{prefix} loss vs unsharded rel", entry["gradient"]["parity_loss"],
-                            LIMITS["gradient"]))
-        checks += _parity_checks(f"{prefix} d loss / d initial field vs unsharded",
-                                 entry["gradient"]["parity_grad_initial_field"], LIMITS["gradient"])
-        checks.append(check(f"{prefix} d loss / d diffusivity vs unsharded rel",
-                            entry["gradient"]["parity_grad_diffusivity"], LIMITS["gradient"]))
-        checks.append(check_that(f"{prefix} d loss / d diffusivity is not zero", gd_u != 0.0,
-                                 f"{gd_u:.6e}"))
         results.append(entry)
         fwd = entry["forward"]
         print(f"[stencil] {prefix:>21} fwd {fwd['sharded']['rollout']['ms_per_step']:8.3f} ms/step"
@@ -1691,7 +1768,30 @@ def run_stencil(args, out: dict) -> dict:
               f"  grad field {entry['gradient']['parity_grad_initial_field']['max_rel']:.1e}"
               f"  grad d {entry['gradient']['parity_grad_diffusivity']:.1e}")
     out["results"] = results
-    return finish_checks(out, checks)
+    return finish_checks(out, stencil_checks(results, D))
+
+
+def stencil_checks(results: list, n_devices: int) -> list:
+    """The ``stencil`` goal's checks, from its ``results`` alone (see
+    :func:`exchange_checks`)."""
+    checks = []
+    for entry in results:
+        (ny, nx), fwd, grad = entry["shape"], entry["forward"], entry["gradient"]
+        prefix = f"{ny}x{nx} {entry['boundary']}"
+        gd_u = grad["unsharded"]["grad_diffusivity"]
+        checks.append(check_that(f"{prefix}: sharded field is partitioned over {n_devices} "
+                                 "devices", entry["input_partitioned"]))
+        checks += _parity_checks(f"{prefix} forward f vs unsharded", fwd["parity_f"],
+                                 LIMITS["forward"])
+        checks.append(check(f"{prefix} loss vs unsharded rel", grad["parity_loss"],
+                            LIMITS["gradient"]))
+        checks += _parity_checks(f"{prefix} d loss / d initial field vs unsharded",
+                                 grad["parity_grad_initial_field"], LIMITS["gradient"])
+        checks.append(check(f"{prefix} d loss / d diffusivity vs unsharded rel",
+                            grad["parity_grad_diffusivity"], LIMITS["gradient"]))
+        checks.append(check_that(f"{prefix} d loss / d diffusivity is not zero", gd_u != 0.0,
+                                 f"{gd_u:.6e}"))
+    return checks
 
 
 # ---------------------------------------------------------------------------
@@ -1740,8 +1840,8 @@ def run_hybrid(args, out: dict) -> dict:
     _load_backend()
     D = args.n_devices
     mesh = _mesh_for(D)
-    results, checks = [], []
-    writes = [("field", "diffusivity"), ("field", "exchange")]
+    results = []
+    writes = list(HYBRID_WRITES)
     theta = jnp.asarray([0.2, 0.3], jnp.float32)
     for n_hint in args.cells:
         ny, nx = field_shape(n_hint, D)
@@ -1783,9 +1883,26 @@ def run_hybrid(args, out: dict) -> dict:
         entry["parity_loss"] = _rel_each(l_s, l_u)
         entry["parity_grad"] = _rel_each(g_s, g_u)
         prefix = f"{ny}x{nx}"
+        results.append(entry)
+        print(f"[hybrid] {prefix:>11} max_rel f {entry['parity_f']['max_rel']:.1e}  grad "
+              f"{entry['parity_grad']:.1e}  value+grad "
+              f"{entry['sharded']['value_and_grad']['median_ms']:8.2f} ms (unsharded "
+              f"{entry['unsharded']['value_and_grad']['median_ms']:8.2f})")
+    out["results"] = results
+    return finish_checks(out, hybrid_checks(results, D))
+
+
+def hybrid_checks(results: list, n_devices: int) -> list:
+    """The ``hybrid`` goal's checks, from its ``results`` alone (see
+    :func:`exchange_checks`)."""
+    params = ", ".join(key for _node, key in HYBRID_WRITES)
+    checks = []
+    for entry in results:
+        (ny, nx), g_u = entry["shape"], entry["unsharded"]["grad"]
+        prefix = f"{ny}x{nx}"
         checks += [
-            check_that(f"{prefix}: the field inside the hybrid is partitioned over {D} devices",
-                       entry["sharded"]["partitioned"]),
+            check_that(f"{prefix}: the field inside the hybrid is partitioned over {n_devices} "
+                       "devices", entry["sharded"]["partitioned"]),
             check_that(f"{prefix}: the correction is not negligible (> 100x the forward limit)",
                        entry["correction_rel"] > 100 * LIMITS["forward"],
                        f"{entry['correction_rel']:.3e}"),
@@ -1793,18 +1910,12 @@ def run_hybrid(args, out: dict) -> dict:
                             LIMITS["forward"]),
             check(f"{prefix} loss vs HybridNode(inner) rel", entry["parity_loss"],
                   LIMITS["gradient"]),
-            check(f"{prefix} d loss / d (diffusivity, exchange) vs HybridNode(inner) rel",
+            check(f"{prefix} d loss / d ({params}) vs HybridNode(inner) rel",
                   entry["parity_grad"], LIMITS["gradient"]),
             check_that(f"{prefix} both gradient components are non-zero",
-                       bool(np.all(g_u != 0.0)), str(g_u.tolist())),
+                       bool(np.all(np.asarray(g_u, np.float64) != 0.0)), str(list(g_u))),
         ]
-        results.append(entry)
-        print(f"[hybrid] {prefix:>11} max_rel f {entry['parity_f']['max_rel']:.1e}  grad "
-              f"{entry['parity_grad']:.1e}  value+grad "
-              f"{entry['sharded']['value_and_grad']['median_ms']:8.2f} ms (unsharded "
-              f"{entry['unsharded']['value_and_grad']['median_ms']:8.2f})")
-    out["results"] = results
-    return finish_checks(out, checks)
+    return checks
 
 
 def coupled_graph(ny: int, nx: int, mesh, solver: str):
@@ -1881,10 +1992,10 @@ def run_coupled(args, out: dict) -> dict:
     _load_backend()
     D = args.n_devices
     mesh = _mesh_for(D)
-    writes = [("field", "diffusivity"), ("far", "conductance"), ("field", "exchange")]
+    writes = list(COUPLED_WRITES)
     theta = jnp.asarray([0.2, 2.0, 0.8], jnp.float32)
     iterations_key = "coupling_far+field_iterations"
-    results, checks = [], []
+    results = []
 
     def loss_of(state):
         return jnp.mean(state["field"]["f"] ** 2) + state["far"]["u"] ** 2
@@ -1938,36 +2049,6 @@ def run_coupled(args, out: dict) -> dict:
                 for label in ("sharded", "unsharded")}
             entry["solvers"][solver] = sol
             prefix = f"{ny}x{nx} {solver}"
-            for label, vs in sol["model"].items():
-                checks += [
-                    check(f"{prefix} {label} field vs float64 model max_rel", vs["f"]["max_rel"],
-                          LIMITS["forward"]),
-                    check(f"{prefix} {label} far field and loss vs float64 model rel",
-                          max(vs["u"], vs["loss"]), LIMITS["forward"]),
-                    check(f"{prefix} {label} gradient vs float64 model differences rel",
-                          vs["grad"], LIMITS["model_gradient"]),
-                ]
-            checks += [
-                check_that(f"{prefix}: the field member is partitioned over {D} devices",
-                           sol["sharded"]["partitioned"]),
-                *_parity_checks(f"{prefix} field vs unsharded group", sol["parity_f"],
-                                LIMITS["forward"]),
-                check(f"{prefix} far field vs unsharded group rel", sol["parity_u"],
-                      LIMITS["forward"]),
-                check(f"{prefix} loss vs unsharded group rel", sol["parity_loss"],
-                      LIMITS["forward"]),
-                check(f"{prefix} d loss / d ({', '.join(entry['parameters'])}) vs unsharded "
-                      "group rel", sol["parity_grad"], LIMITS[f"coupled_gradient_{solver}"]),
-                check_that(f"{prefix} every gradient component is non-zero",
-                           bool(np.all(g_u != 0.0)), str(g_u.tolist())),
-            ]
-            if solver == "ift":
-                its = (sol["unsharded"]["last_step_iterations"],
-                       sol["sharded"]["last_step_iterations"])
-                checks.append(check_that(
-                    f"{prefix}: the last step iterated (2 <= passes < {COUPLED_MAX_ITERATIONS}) "
-                    "on both paths",
-                    all(i is not None and 2 <= i < COUPLED_MAX_ITERATIONS for i in its), str(its)))
             print(f"[coupled] {prefix:>16} max_rel f {sol['parity_f']['max_rel']:.1e}  u "
                   f"{sol['parity_u']:.1e}  grad {sol['parity_grad']:.1e}  vs model grad "
                   f"{max(v['grad'] for v in sol['model'].values()):.1e}  value+grad "
@@ -1977,7 +2058,53 @@ def run_coupled(args, out: dict) -> dict:
                   f"{sol['sharded']['device0_pinned_ops']}")
         results.append(entry)
     out["results"] = results
-    return finish_checks(out, checks)
+    return finish_checks(out, coupled_checks(results, D))
+
+
+def coupled_checks(results: list, n_devices: int) -> list:
+    """The ``coupled`` goal's checks, from its ``results`` alone (see
+    :func:`exchange_checks`)."""
+    params = ", ".join(f"{node}.{key}" for node, key in COUPLED_WRITES)
+    checks = []
+    for entry in results:
+        ny, nx = entry["shape"]
+        for solver in COUPLED_SOLVERS:
+            sol = entry["solvers"][solver]
+            prefix = f"{ny}x{nx} {solver}"
+            g_u = sol["unsharded"]["grad"]
+            for label in ("sharded", "unsharded"):
+                vs = sol["model"][label]
+                checks += [
+                    check(f"{prefix} {label} field vs float64 model max_rel", vs["f"]["max_rel"],
+                          LIMITS["forward"]),
+                    check(f"{prefix} {label} far field and loss vs float64 model rel",
+                          max(vs["u"], vs["loss"]), LIMITS["forward"]),
+                    check(f"{prefix} {label} gradient vs float64 model differences rel",
+                          vs["grad"], LIMITS["model_gradient"]),
+                ]
+            checks += [
+                check_that(f"{prefix}: the field member is partitioned over {n_devices} devices",
+                           sol["sharded"]["partitioned"]),
+                *_parity_checks(f"{prefix} field vs unsharded group", sol["parity_f"],
+                                LIMITS["forward"]),
+                check(f"{prefix} far field vs unsharded group rel", sol["parity_u"],
+                      LIMITS["forward"]),
+                check(f"{prefix} loss vs unsharded group rel", sol["parity_loss"],
+                      LIMITS["forward"]),
+                check(f"{prefix} d loss / d ({params}) vs unsharded group rel",
+                      sol["parity_grad"], LIMITS[f"coupled_gradient_{solver}"]),
+                check_that(f"{prefix} every gradient component is non-zero",
+                           bool(np.all(np.asarray(g_u, np.float64) != 0.0)), str(list(g_u))),
+            ]
+            if solver == "ift":
+                its = (sol["unsharded"]["last_step_iterations"],
+                       sol["sharded"]["last_step_iterations"])
+                checks.append(check_that(
+                    f"{prefix}: the last step iterated (2 <= passes < {COUPLED_MAX_ITERATIONS}) "
+                    "on both paths",
+                    all(isinstance(i, int) and not isinstance(i, bool)
+                        and 2 <= i < COUPLED_MAX_ITERATIONS for i in its), str(its)))
+    return checks
 
 
 def check_checklist_device_count(n_devices: int) -> None:
@@ -2002,14 +2129,282 @@ def _load_results(directory: Path, goal: str) -> list[dict]:
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
         if doc.get("goal") == goal:
+            doc["_file"] = path.name          # for the reader; never part of a record
             docs.append(doc)
     return docs
+
+
+# --- record integrity -------------------------------------------------------
+#
+# A file's checks are only evidence if this runner, as it stands, would
+# have written them.  ``--summarise`` used to take four things on each
+# file's word: the limit a check was held to, the set of checks, the
+# schema, and where and on what the file was measured.  Every one of them
+# is recorded, so each is now checked against the runner itself:
+#
+# * the file is on the current ``SCHEMA_VERSION``;
+# * its ``n_devices`` is no more than the devices its environment saw, and
+#   agrees with its config and with every result entry;
+# * its results hold exactly the cases the runner runs for the file's own
+#   config (``cells``, ``n_devices``, ``synthetic``, ``mesh``) -- the
+#   minimum check set, derived from the runner's own case lists
+#   (``stencil_cases``, ``HALO_BOUNDARIES``, ``COUPLED_SOLVERS``, ...);
+# * its checks are exactly the ones ``GOAL_CHECKS[goal]`` derives from its
+#   results: same names, values, limits (so every limit is ``LIMITS``'),
+#   senses and flags -- results that disagree with the checks, a limit
+#   loosened in the record, a check deleted or one added all show here;
+#
+# and across the files that decide one checklist item, a single recorded
+# ``git_commit``.  A file that fails any of this reads ``INVALID`` and
+# cannot close an item; the item says which file and why.
+
+GOAL_CHECKS = {
+    "indivisible": indivisible_checks, "halo": halo_checks, "coupled": coupled_checks,
+    "stencil": stencil_checks, "hybrid": hybrid_checks, "exchange": exchange_checks,
+    "forward": forward_checks, "gradient": gradient_checks,
+}
+"""Goal -> the function its runner builds its checks with, from its results."""
+
+
+def _file_of(doc: dict) -> str:
+    return doc.get("_file") or f"{doc.get('goal')}.json"
+
+
+def _is_count(x) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool)
+
+
+def _shape(x) -> tuple:
+    return tuple(x)
+
+
+def case_keys(goal: str, doc: dict) -> tuple[Counter, Counter]:
+    """``(expected, recorded)``: the cases the runner runs for this file's
+    own config, and the cases its results hold, as comparable keys.
+
+    Derived from the same case lists and size rules the runners use, so
+    the two cannot drift apart.  Raises ``KeyError`` / ``TypeError`` /
+    ``ValueError`` on results or a config it cannot read.
+    """
+    cfg, results, n_dev = doc["config"], doc["results"], doc["n_devices"]
+    cells = [int(n) for n in cfg["cells"]]
+    methods = tuple(sorted(METHODS))
+    want: Counter = Counter()
+    got: Counter = Counter()
+    if goal == "exchange":
+        want.update((synthetic_cells(cfg["synthetic"], n), methods) for n in cells)
+        got.update((r["cells"], tuple(sorted(r["methods"]))) for r in results)
+    elif goal in ("forward", "gradient"):
+        file_mesh = bool(cfg.get("mesh"))
+        sizes = [cells[-1]] if file_mesh else cells
+        if goal == "forward":
+            per, extra = methods, ()
+        else:
+            per, extra = tuple(sorted((*METHODS, "unsharded"))), ("sharded_cg",)
+        want.update((None if file_mesh else synthetic_cells(cfg["synthetic"], n), per, extra)
+                    for n in sizes)
+        got.update((None if file_mesh else r["cells"],
+                    tuple(sorted(r["methods" if goal == "forward" else "rollout"])),
+                    tuple(k for k in extra if r.get(k) is not None)) for r in results)
+    elif goal == "indivisible":
+        ny_ok, nx = field_shape(min(cells), n_dev)
+        ny_bad = ny_ok + 1
+        n_un = ny_bad * nx + (1 if (ny_bad * nx) % n_dev == 0 else 0)
+        pencil = None
+        if _pencil_mesh_fits(n_dev):
+            nz = n_dev // 2
+            pencil = ((2, nz), (16, 8 * nz + 1))
+        want[((ny_bad, nx), pencil, n_un)] += 1
+        for r in results:
+            p = r.get("pencil")
+            got[(_shape(r["stencil"]["shape"]),
+                 None if p is None else (_shape(p["mesh"]), _shape(p["shape"])),
+                 r["unstructured"]["cells"])] += 1
+            if r.get("pointwise") is None:
+                got[("pointwise", "missing")] += 1
+    elif goal == "halo":
+        ny, nx = field_shape(max(cells), n_dev)
+        meshes = [("1d", (n_dev, 1))]
+        if _pencil_mesh_fits(n_dev):
+            meshes.append(("2d", (2, n_dev // 2)))
+        for label, (py, pz) in meshes:
+            nx_m = -(-nx // pz) * pz
+            want.update((label, (py, pz), (ny, nx_m), h, b)
+                        for b in HALO_BOUNDARIES for h in HALO_WIDTHS)
+        want[("unstructured", synthetic_cells(cfg["synthetic"], max(cells)), methods)] += 1
+        for r in results:
+            got.update((c["mesh"], _shape(c["mesh_shape"]), _shape(c["shape"]), c["halo"],
+                        c["boundary"]) for c in r["stencil_cases"])
+            un = r["unstructured"]
+            got[("unstructured", un["cells"], tuple(sorted(un["methods"])))] += 1
+    elif goal == "stencil":
+        want.update((field_shape(n, n_dev), b) for n, b in stencil_cases(cells))
+        got.update((_shape(r["shape"]), r.get("boundary")) for r in results)
+    elif goal == "hybrid":
+        want.update(field_shape(n, n_dev) for n in cells)
+        got.update(_shape(r["shape"]) for r in results)
+    elif goal == "coupled":
+        solvers = tuple(sorted(COUPLED_SOLVERS))
+        want.update((field_shape(n, n_dev), solvers) for n in cells)
+        got.update((_shape(r["shape"]), tuple(sorted(r["solvers"]))) for r in results)
+    else:
+        raise ValueError(f"unknown goal {goal!r}")
+    return want, got
+
+
+def _fmt_case(key) -> str:
+    if isinstance(key, tuple):
+        if len(key) == 2 and all(_is_count(k) for k in key):
+            return f"{key[0]}x{key[1]}"
+        return " ".join(_fmt_case(k) for k in key if k not in (None, ()))
+    return str(key)
+
+
+def _fmt_few(items, n: int = 3) -> str:
+    items = list(items)
+    text = ", ".join(items[:n])
+    return text + (f" (+{len(items) - n} more)" if len(items) > n else "")
+
+
+def _canonical(c: dict) -> tuple:
+    """What a check claims, comparably (NaN equal to NaN, ``detail`` aside)."""
+    return (c.get("name"), json.dumps(c.get("value"), default=repr),
+            json.dumps(c.get("limit"), default=repr), c.get("sense"), c.get("passed"),
+            bool(c.get("not_run", False)))
+
+
+def _check_differences(recorded: list, derived: list) -> list[str]:
+    """How a file's recorded checks differ from the ones derived from its
+    results, one line per kind of difference."""
+    if Counter(map(_canonical, recorded)) == Counter(map(_canonical, derived)):
+        return []
+    rec: dict = {}
+    for c in recorded:
+        rec.setdefault(c.get("name"), []).append(c)
+    der: dict = {}
+    for c in derived:
+        der.setdefault(c["name"], []).append(c)
+    out = []
+    lacking = [n for n in der if n not in rec]
+    if lacking:
+        out.append(f"lacks {len(lacking)} check(s) the runner derives from its results: "
+                   + _fmt_few(repr(n) for n in lacking))
+    unknown = [n for n in rec if n not in der]
+    if unknown:
+        out.append(f"has {len(unknown)} check(s) the runner does not emit for its results: "
+                   + _fmt_few(repr(n) for n in unknown))
+    limits, values, other = [], [], []
+    for name in (n for n in rec if n in der):
+        r, d = rec[name], der[name]
+        if Counter(map(_canonical, r)) == Counter(map(_canonical, d)):
+            continue
+        if len(r) != len(d):
+            other.append(f"{name!r} recorded {len(r)} time(s), derived {len(d)}")
+            continue
+        for rc, dc in zip(r, d):
+            if _canonical(rc)[2] != _canonical(dc)[2]:
+                limits.append(f"{name!r} records limit {rc.get('limit')!r}, the runner "
+                              f"holds it to {dc.get('limit')!r}")
+            elif _canonical(rc)[1] != _canonical(dc)[1]:
+                values.append(f"{name!r} records {rc.get('value')!r}, its results give "
+                              f"{dc.get('value')!r}")
+            elif _canonical(rc) != _canonical(dc):
+                other.append(f"{name!r} records sense/passed/not_run "
+                             f"{(rc.get('sense'), rc.get('passed'), rc.get('not_run', False))!r}"
+                             f", derived {(dc.get('sense'), dc.get('passed'), dc.get('not_run', False))!r}")
+    if limits:
+        out.append(f"{len(limits)} limit(s) differ from LIMITS: " + _fmt_few(limits, 2))
+    if values:
+        out.append(f"{len(values)} check value(s) disagree with its results: "
+                   + _fmt_few(values, 2))
+    if other:
+        out.append(f"{len(other)} check(s) differ: " + _fmt_few(other, 2))
+    return out
+
+
+def record_problems(doc: dict) -> list[str]:
+    """Why this file's checks are not evidence this runner would have
+    written, one line each; empty when they are.  See the block comment
+    above for what is checked and why."""
+    problems: list[str] = []
+    goal = doc.get("goal")
+    if goal not in GOAL_CHECKS:
+        return [f"unknown goal {goal!r}"]
+    version = doc.get("schema_version")
+    if not (_is_count(version) and version == SCHEMA_VERSION):
+        problems.append(f"schema_version {version!r}, not {SCHEMA_VERSION}: written by "
+                        "another version of this runner")
+    env, cfg, n_dev = doc.get("environment"), doc.get("config"), doc.get("n_devices")
+    if not isinstance(env, dict) or not isinstance(cfg, dict):
+        return problems + ["no environment or config recorded"]
+    if not _is_count(n_dev) or n_dev < 1:
+        return problems + [f"n_devices {n_dev!r} is not a device count"]
+    visible, devices = env.get("n_devices_visible"), env.get("devices")
+    if not _is_count(visible) or not isinstance(devices, list) or len(devices) != visible:
+        n_listed = len(devices) if isinstance(devices, list) else None
+        problems.append(f"its environment lists {n_listed} device(s) but records "
+                        f"n_devices_visible {visible!r}")
+    elif n_dev > visible:
+        problems.append(f"n_devices {n_dev}, but its environment saw {visible} device(s)")
+    if cfg.get("n_devices") != n_dev:
+        problems.append(f"n_devices {n_dev}, but its config says {cfg.get('n_devices')!r}")
+    if ("allow_fewer_devices" in doc
+            and bool(cfg.get("allow_fewer_devices", False)) != bool(doc["allow_fewer_devices"])):
+        problems.append("allow_fewer_devices differs between the file and its config")
+    results, checks = doc.get("results"), doc.get("checks")
+    if not isinstance(results, list) or not isinstance(checks, list):
+        return problems + ["no results or no checks recorded"]
+    measured_on = sorted({repr(r.get("n_devices")) for r in results
+                          if not isinstance(r, dict) or r.get("n_devices") != n_dev})
+    if measured_on:
+        problems.append(f"n_devices {n_dev}, but its results were measured on "
+                        f"{', '.join(measured_on)}")
+    try:
+        want, got = case_keys(goal, doc)
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+        return problems + [f"its results or config cannot be read ({type(exc).__name__}: {exc})"]
+    if want != got:
+        missing, extra = want - got, got - want
+        if missing:
+            problems.append(f"lacks case(s) the runner runs for cells {cfg.get('cells')} on "
+                            f"{n_dev} devices: " + _fmt_few(_fmt_case(k) for k in missing))
+        if extra:
+            problems.append("holds case(s) the runner does not run for its config: "
+                            + _fmt_few(_fmt_case(k) for k in extra))
+    try:
+        derived = GOAL_CHECKS[goal](results, n_dev)
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+        return problems + [f"its results cannot be read ({type(exc).__name__}: {exc})"]
+    if not all(isinstance(c, dict) for c in checks):
+        return problems + ["a recorded check is not a record"]
+    return problems + _check_differences(checks, derived)
+
+
+def item_problems(docs: list) -> list[str]:
+    """Why the files deciding one checklist item cannot decide it together:
+    each must record a commit, and it must be the same one."""
+    by_commit: dict = {}
+    for d in docs:
+        commit = d.get("environment", {}).get("git_commit")
+        by_commit.setdefault(commit if isinstance(commit, str) and commit else None,
+                             []).append(_file_of(d))
+    problems = []
+    if None in by_commit:
+        problems.append(f"no git commit recorded in {', '.join(by_commit.pop(None))}")
+    if len(by_commit) > 1:
+        problems.append(f"its files come from {len(by_commit)} commits ("
+                        + "; ".join(f"{c[:12]}: {', '.join(files)}"
+                                    for c, files in sorted(by_commit.items())) + ")")
+    return problems
 
 
 def _excluded_because(row: dict, *, min_cells: int, min_devices: int) -> str | None:
     """Why a row does not decide the transport, or ``None`` if it does."""
     if not row["hardware"]:
         return "dry-run / CPU row (does not rank NCCL transports)"
+    if row["record"] != "PASS":
+        return (f"its file reads {row['record']}, not PASS (a failed check, or a record "
+                "--summarise lists under 'Records that cannot decide')")
     if row["cells"] < min_cells:
         return f"{row['cells']} cells < {min_cells}"
     if row["n_devices"] < MIN_DEVICES_WITH_ESCAPE:
@@ -2027,9 +2422,11 @@ def recommend(exchange_docs: list[dict], *, min_cells: int = 100_000,
     """Which transport should be the default.
 
     A row *decides* only when it comes from a real accelerator run (not
-    ``--dry-run``), has ``cells >= min_cells``, ran on ``n_devices >=
-    min_devices`` (or ``>= 2`` when that run recorded
-    ``allow_fewer_devices``), and has a finite speedup.  ``ppermute`` wins
+    ``--dry-run``) whose file reads ``PASS`` (:func:`goal_verdict`: every
+    check passed, and the record is one this runner would have written),
+    has ``cells >= min_cells``, ran on ``n_devices >= min_devices`` (or
+    ``>= 2`` when that run recorded ``allow_fewer_devices``), and has a
+    finite speedup.  ``ppermute`` wins
     when its median exchange time beats ``all_to_all`` by at least
     ``margin`` at every deciding row; ``all_to_all`` keeps the default
     when it is faster at any such row; anything in between is a tie.
@@ -2040,6 +2437,7 @@ def recommend(exchange_docs: list[dict], *, min_cells: int = 100_000,
     for doc in exchange_docs:
         env = doc["environment"]
         hw = env["platform"] == "gpu" and not doc.get("dry_run", False)
+        record = goal_verdict([doc])
         allow_fewer = bool(doc.get("allow_fewer_devices",
                                    doc.get("config", {}).get("allow_fewer_devices", False)))
         for r in doc["results"]:
@@ -2053,6 +2451,7 @@ def recommend(exchange_docs: list[dict], *, min_cells: int = 100_000,
                 "a2a_bytes_total": a["bytes_total"], "ppermute_bytes_total": p["bytes_total"],
                 "speedup_median": r["ppermute_speedup_median"],
                 "bit_identical": r["bit_identical"],
+                "record": record,
             }
             row["excluded_because"] = _excluded_because(row, min_cells=min_cells,
                                                         min_devices=min_devices)
@@ -2110,13 +2509,18 @@ def _file_flag_consistent(doc: dict) -> bool:
 
 
 def goal_verdict(docs: list) -> str:
-    """``PASS`` / ``FAIL`` / ``INCOMPLETE`` / ``not run`` / ``no checks`` over
-    every file of a goal.
+    """``PASS`` / ``FAIL`` / ``INVALID`` / ``INCOMPLETE`` / ``not run`` /
+    ``no checks`` over every file of a goal.
 
     Pass/fail is re-derived from each check's value, limit and sense
     (:func:`check_status`), not read from the recorded flag: a flag that
     disagrees with them, at the check or the file level, is a ``FAIL``.
-    ``INCOMPLETE``: nothing failed, but a check was recorded as not run.
+    ``INVALID``: nothing failed, but a file is not evidence this runner
+    would have written (:func:`record_problems`: another schema, more
+    devices than its environment saw, a case missing, or checks that are
+    not the ones its results give under ``LIMITS``).  ``INCOMPLETE``:
+    nothing failed and every file is valid, but a check was recorded as
+    not run.
     """
     if not docs:
         return "not run"
@@ -2126,6 +2530,8 @@ def goal_verdict(docs: list) -> str:
     if ("failed" in statuses or "inconsistent" in statuses
             or not all(_file_flag_consistent(d) for d in docs)):
         return "FAIL"
+    if any(record_problems(d) for d in docs):
+        return "INVALID"
     if "not run" in statuses:
         return "INCOMPLETE"
     return "PASS" if "passed" in statuses else "no checks"
@@ -2139,7 +2545,15 @@ def _why_still_open(docs: list) -> str:
 
 
 def checklist_status(docs_by_goal: dict) -> dict:
-    """Checklist item -> ``(status, detail)`` from the goals that decide it."""
+    """Checklist item -> ``(status, detail)`` from the goals that decide it.
+
+    ``CLOSED`` needs every deciding goal to ``PASS`` (which includes every
+    file being valid, :func:`record_problems`), every deciding file from a
+    real GPU run, not a dry run, on at least ``MIN_DECIDING_DEVICES``
+    devices, and all of them from one recorded commit
+    (:func:`item_problems`).  An item held open by a file or by the
+    commits says which, and why, in its status.
+    """
     status = {}
     for item, (_claim, goals) in CHECKLIST.items():
         verdicts = {g: goal_verdict(docs_by_goal.get(g, [])) for g in goals}
@@ -2147,12 +2561,17 @@ def checklist_status(docs_by_goal: dict) -> dict:
         docs = [d for g in goals for d in docs_by_goal.get(g, [])]
         if "FAIL" in verdicts.values():
             status[item] = ("FAILED", detail)
+        elif "INVALID" in verdicts.values():
+            file, why = next((_file_of(d), p) for d in docs for p in record_problems(d))
+            status[item] = (f"open: {file} cannot decide it ({why})", detail)
         elif any(v != "PASS" for v in verdicts.values()):
             status[item] = ("open", detail)
-        elif all(closes_the_gap(d) for d in docs):
-            status[item] = ("CLOSED", detail)
-        else:
+        elif not all(closes_the_gap(d) for d in docs):
             status[item] = (_why_still_open(docs), detail)
+        elif problems := item_problems(docs):
+            status[item] = (f"open: {problems[0]}", detail)
+        else:
+            status[item] = ("CLOSED", detail)
     return status
 
 
@@ -2180,10 +2599,11 @@ def _why_failed(c: dict) -> str:
 
 
 def _print_runs_and_checklist(docs_by_goal: dict) -> int:
-    """The per-file run table, the checklist verdict, every failed check and
-    every check not run.  Returns the number of failures: failed checks,
-    inconsistent records, and files whose ``passed`` disagrees with their
-    checks."""
+    """The per-file run table, the checklist verdict, every record that
+    cannot decide, every failed check and every check not run.  Returns the
+    number of failures: failed checks, inconsistent records, files whose
+    ``passed`` disagrees with their checks, and files that are not
+    evidence this runner would have written (:func:`record_problems`)."""
     print("Runs (one line per JSON file)")
     print(f"{'goal':<12} {'platform':<8} {'dev':>3}  {'device kind':<26} {'jax / jaxlib':<17} "
           f"{'dry run':<7} {'checks':>7}  verdict")
@@ -2208,9 +2628,25 @@ def _print_runs_and_checklist(docs_by_goal: dict) -> int:
             if checks is not None and not _file_flag_consistent(doc):
                 bad_files.append((goal, doc.get("passed")))
     print(f"\nChecklist (CLOSED needs a PASS from real GPUs, not a dry run, on >= "
-          f"{MIN_DECIDING_DEVICES} devices, with every check run)")
+          f"{MIN_DECIDING_DEVICES} devices, with every check run, every file valid and "
+          "one commit)")
     for item, (status, detail) in checklist_status(docs_by_goal).items():
         print(f"{item}  {CHECKLIST[item][0]:<74} {status}  [{detail}]")
+    invalid = [(goal, doc, record_problems(doc)) for goal in ALL_GOALS
+               for doc in docs_by_goal.get(goal, []) if "checks" in doc]
+    invalid = [(goal, doc, problems) for goal, doc, problems in invalid if problems]
+    mixed = [(item, item_problems([d for g in goals for d in docs_by_goal.get(g, [])]))
+             for item, (_claim, goals) in CHECKLIST.items()]
+    mixed = [(item, problems) for item, problems in mixed if problems]
+    if invalid or mixed:
+        print("\nRecords that cannot decide (not evidence this runner, as it stands, "
+              "would have written)")
+        for goal, doc, problems in invalid:
+            for problem in problems:
+                print(f"  [{goal}] {_file_of(doc)}: {problem}")
+        for item, problems in mixed:
+            for problem in problems:
+                print(f"  [item {item}] {problem}")
     if failed or bad_files:
         print("\nFailed checks")
         for goal, c in failed:
@@ -2221,7 +2657,7 @@ def _print_runs_and_checklist(docs_by_goal: dict) -> int:
         print("\nChecks not run (each keeps its checklist items open)")
         for goal, c in not_run:
             print(f"  [{goal}] {c.get('name')} -- {c.get('detail', '')}")
-    return len(failed) + len(bad_files)
+    return len(failed) + len(bad_files) + len(invalid)
 
 
 def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
@@ -2296,8 +2732,10 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
 def summarise(directory: Path) -> int:
     """Print the verdicts and tables; 0 = no check failed (checks recorded
     as not run are listed and keep their items open, but are not
-    failures), 1 = no goal JSON under ``directory``, 3 = at least one check
-    failed, or a recorded pass/fail disagrees with its value and limit."""
+    failures; so do files from different commits), 1 = no goal JSON under
+    ``directory``, 3 = at least one check failed, a recorded pass/fail
+    disagrees with its value and limit, or a file is not evidence this
+    runner would have written (:func:`record_problems`)."""
     docs_by_goal = {goal: _load_results(directory, goal) for goal in ALL_GOALS}
     if not any(docs_by_goal.values()):
         print(f"no goal JSON ({'/'.join(ALL_GOALS)}) under {directory}")

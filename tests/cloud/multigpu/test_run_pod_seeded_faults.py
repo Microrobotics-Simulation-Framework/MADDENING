@@ -21,7 +21,6 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -31,6 +30,7 @@ from typing import NamedTuple
 import pytest
 
 import maddening
+from tests.cloud.multigpu.run_pod_support import checked_argv, offline_env, run_pod
 
 _PKG = Path(maddening.__file__).resolve().parent
 _RUNNER = _PKG.parents[1] / "benchmarks" / "multigpu" / "run_pod.py"
@@ -117,6 +117,28 @@ def test_every_seed_applies_once_to_the_wrapper_as_it_stands(name):
     compile(seeded, _WRAPPER, "exec")
 
 
+@pytest.mark.parametrize("argv", [
+    ["--goal", "checklist", "--out", "x"], ["--goal", "stencil", "--keep-going", "--out", "x"],
+    ["--summarise", "x", "--goal", "all", "--out", "x"], []])
+def test_the_harness_refuses_to_run_a_goal_without_dry_run(argv):
+    """No test runs a goal for real, even by mistake: without
+    ``--dry-run`` the run is refused before anything starts."""
+    with pytest.raises(AssertionError, match="refusing to run run_pod.py without --dry-run"):
+        run_pod(_RUNNER, argv, pythonpath=str(_PKG.parent), timeout=1)
+    assert checked_argv(["--summarise", "x"]) == ["--summarise", "x"]
+    assert checked_argv([*argv, "--dry-run"])[-1] == "--dry-run"
+
+
+def test_a_run_sees_no_cloud_credentials_and_an_empty_home(monkeypatch):
+    monkeypatch.setenv("RUNPOD_API_KEY", "not-a-key")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "not-a-key")
+    env = offline_env(str(_PKG.parent), _N_DEV)
+    assert not [k for k in env if k.upper().startswith(("RUNPOD_", "AWS_"))]
+    home = Path(env["HOME"])
+    assert home != Path.home() and home.is_dir()
+    assert not {p.name for p in home.iterdir()} & {".runpod", ".sky", ".aws", ".maddening"}
+
+
 def test_the_seeds_must_fail_every_item_the_wrapper_decides():
     """Items 1, 3, 4 and 6 are the ones the wrapper goals decide; an item
     decided by none of them (2, the halo exchange; 5, the refusals) must
@@ -197,15 +219,6 @@ def test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault(
 # --- slow: the goals themselves, as the session runs them ---------------------
 
 
-def _env(src: Path) -> dict:
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("XLA_FLAGS", "JAX_PLATFORMS", "MADDENING_VIRTUAL_DEVICES")}
-    env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={_N_DEV}"
-    env["JAX_PLATFORMS"] = "cpu"
-    env["PYTHONPATH"] = str(src)
-    return env
-
-
 def _scratch_library(tmp: Path, seed: Seed | None) -> Path:
     src = tmp / "src"
     shutil.copytree(_PKG, src / "maddening", ignore=shutil.ignore_patterns("__pycache__"))
@@ -214,17 +227,17 @@ def _scratch_library(tmp: Path, seed: Seed | None) -> Path:
     found = subprocess.run(
         [sys.executable, "-c",
          "import importlib.util; print(importlib.util.find_spec('maddening').origin)"],
-        env=_env(src), capture_output=True, text=True, timeout=60, check=True).stdout.strip()
+        env=offline_env(str(src), _N_DEV), capture_output=True, text=True, timeout=60,
+        check=True).stdout.strip()
     assert Path(found).resolve() == (src / "maddening" / "__init__.py").resolve(), found
     return src
 
 
 def _run_checklist(tmp: Path, src: Path) -> tuple[int, dict, str]:
     out = tmp / "out"
-    proc = subprocess.run(
-        [sys.executable, str(_RUNNER), "--goal", "checklist", "--dry-run", "--keep-going",
-         "--cells", "256", "--out", str(out)],
-        env=_env(src), capture_output=True, text=True, timeout=1800, check=False)
+    proc = run_pod(_RUNNER, ["--goal", "checklist", "--dry-run", "--keep-going",
+                             "--cells", "256", "--out", out],
+                   pythonpath=str(src), timeout=1800, n_devices=_N_DEV)
     rp = _runner()
     docs = {goal: rp._load_results(out, goal) for goal in rp.CHECKLIST_GOALS}
     return proc.returncode, docs, proc.stdout[-4000:] + proc.stderr[-2000:]

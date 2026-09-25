@@ -28,6 +28,7 @@ import numpy as np
 import pytest
 
 import maddening
+from tests.cloud.multigpu.run_pod_support import offline_env, run_pod
 
 _RUNNER = Path(maddening.__file__).resolve().parents[2] / "benchmarks" / "multigpu" / "run_pod.py"
 _SRC = str(Path(maddening.__file__).resolve().parents[1])
@@ -38,17 +39,13 @@ _GOALS = ("indivisible", "halo", "coupled", "stencil", "hybrid", "exchange", "fo
 
 
 def _env() -> dict:
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("XLA_FLAGS", "JAX_PLATFORMS", "MADDENING_VIRTUAL_DEVICES")}
-    env["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={_N_DEV}"
-    env["JAX_PLATFORMS"] = "cpu"
-    env["PYTHONPATH"] = _SRC + os.pathsep + env.get("PYTHONPATH", "")
-    return env
+    """Offline (``run_pod_support``): an empty ``HOME``, no cloud variables."""
+    return offline_env(_SRC + os.pathsep + os.environ.get("PYTHONPATH", ""), _N_DEV)
 
 
 def _run(*argv: str) -> subprocess.CompletedProcess:
-    out = subprocess.run([sys.executable, str(_RUNNER), *argv], env=_env(),
-                         capture_output=True, text=True, timeout=600, check=False)
+    out = run_pod(_RUNNER, argv, pythonpath=_env()["PYTHONPATH"], timeout=600,
+                  n_devices=_N_DEV)
     assert out.returncode == 0, f"stdout:\n{out.stdout[-3000:]}\nstderr:\n{out.stderr[-3000:]}"
     return out
 
@@ -373,8 +370,8 @@ def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_i
 
 
 def test_summarise_of_an_empty_directory_fails_clearly(tmp_path):
-    out = subprocess.run([sys.executable, str(_RUNNER), "--summarise", str(tmp_path)],
-                         env=_env(), capture_output=True, text=True, timeout=300, check=False)
+    out = run_pod(_RUNNER, ["--summarise", tmp_path], pythonpath=_env()["PYTHONPATH"],
+                  timeout=300, n_devices=_N_DEV)
     assert out.returncode == 1
     assert "no goal JSON" in out.stdout
 

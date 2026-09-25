@@ -571,27 +571,68 @@ def convergence_criterion(group) -> tuple[float, float]:
     ``residual * amplification`` without the step scale, so under
     ``acceleration="fixed"`` it overstated convergence when over-relaxed
     and understated it when under-relaxed.
+
+    **The comparison is made in the residual's own dtype**, float32 for
+    a float32 group, with ``threshold`` rounded to it: that is what the
+    solvers' loops, ``strict_convergence`` and the sysid mask compute
+    in-graph, and :func:`reported_converged` repeats it on the host for
+    the report and the profiler.  So ``converged`` can be ``True`` for an
+    estimate a float64 comparison would put a fraction of a float32 ulp
+    above ``threshold``.
     """
     threshold = (1.0 if group.convergence_norm in ("mixed", "interface")
                  else float(group.tolerance))
     return threshold, relaxation_step_scale(group.acceleration, group.relaxation)
 
 
-def reported_error_estimate(residual: float, amplification: float,
-                            step_scale: float) -> float:
+def _reported_dtype(residual) -> np.dtype:
+    """The floating dtype a stored residual is in; float64 for a Python float."""
+    dtype = np.asarray(residual).dtype
+    return dtype if jnp.issubdtype(dtype, jnp.floating) else np.dtype(np.float64)
+
+
+def reported_error_estimate(residual, amplification, step_scale: float) -> float:
     """:func:`estimated_error` on a reported ``(residual, amplification)`` pair.
 
-    Host-side arithmetic in Python floats, for readers of a step's
-    ``_meta`` slots.  There ``amplification`` is ``1 / (1 - rho)`` when
-    the contraction ratio was usable and ``0.0`` when it was rejected, so
-    anything below one falls back to the raw residual.  This is the
-    number ``coupling_diagnostics()`` reports as ``"error_estimate"``,
-    and ``<= threshold`` (see :func:`convergence_criterion`) is its
-    ``"converged"``.
+    Host-side, for readers of a step's ``_meta`` slots.  There
+    ``amplification`` is ``1 / (1 - rho)`` when the contraction ratio was
+    usable and ``0.0`` when it was rejected, so anything below one falls
+    back to the raw residual.  This is the number
+    ``coupling_diagnostics()`` reports as ``"error_estimate"``.
+
+    **Computed in the residual's own dtype** -- pass the slots' values as
+    stored (a float32 scalar for a float32 group; a Python float is
+    float64) -- and by the same two operations :func:`estimated_error`
+    performs in-graph, a multiply and a ``maximum``, each rounded to that
+    dtype.  It is therefore the estimate the solve itself compared, not
+    the float64 product of its factors, which differs from it by up to
+    half a float32 ulp.  That difference is what let the report and the
+    profiler call a step unconverged that the loop, ``strict_convergence``
+    and the sysid mask had called converged.
     """
-    if amplification >= 1.0:
-        return residual * max(step_scale * amplification, 1.0)
-    return residual
+    dtype = _reported_dtype(residual)
+    with np.errstate(all="ignore"):     # an overflow to inf is the answer
+        r = np.asarray(residual, dtype=dtype)
+        scaled = np.asarray(step_scale, dtype=dtype) * np.asarray(amplification, dtype=dtype)
+        return float(r * np.maximum(scaled, np.ones_like(scaled)))
+
+
+def reported_converged(residual, amplification, step_scale: float,
+                       threshold: float) -> bool:
+    """``converged`` for a reported ``(residual, amplification)`` pair.
+
+    :func:`reported_error_estimate` ``<= threshold``, the comparison made
+    in the residual's dtype with ``threshold`` rounded to it -- exactly as
+    the loops, ``strict_convergence`` and the sysid mask make it in-graph
+    (see :func:`convergence_criterion`).  The one definition of a group's
+    ``converged`` that ``GraphManager.coupling_diagnostics()`` and the
+    profiler read.
+    """
+    dtype = _reported_dtype(residual)
+    estimate = np.asarray(
+        reported_error_estimate(residual, amplification, step_scale), dtype=dtype)
+    with np.errstate(all="ignore"):
+        return bool(estimate <= np.asarray(threshold, dtype=dtype))
 
 
 # ------------------------------------------------------------------

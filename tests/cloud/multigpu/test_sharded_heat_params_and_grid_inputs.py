@@ -176,3 +176,114 @@ def test_sharded_heat_takes_a_grid_shaped_source_like_the_unsharded_node():
     # fallback, a pre-existing sharded-heat semantic outside this check
     np.testing.assert_allclose(np.asarray(a["temperature"])[1:-1],
                                np.asarray(b["temperature"])[1:-1], rtol=1e-5, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# The cell count is structural: it cannot be changed under a running rod
+# ---------------------------------------------------------------------------
+
+
+def _uniform_rod():
+    """``_heat`` at a scalar initial temperature, so another ``n_cells`` can
+    build a state at all -- the refusal under test is about its shape."""
+    return HeatNode(name="heat", timestep=1e-4, n_cells=16, length=1.0,
+                    thermal_diffusivity=0.1, initial_temperature=0.3)
+
+
+def _rod_graph(sharded):
+    node = _uniform_rod()
+    gm = GraphManager()
+    gm.add_node(ShardedStencilNode(node, create_device_mesh(shape=(4,)),
+                                   axis_map={"devices": 0}) if sharded else node)
+    gm.add_external_input("heat", "left_temperature")
+    gm.add_external_input("heat", "right_temperature")
+    gm.compile()
+    return gm, node
+
+
+@pytest.mark.parametrize("n_cells", [17, 24])
+def test_a_rest_write_of_the_cell_count_is_refused_on_a_sharded_rod(n_cells):
+    """Sharded, ``PUT n_cells=17`` answered 200 and the next step returned
+    a plausible field for a rod that does not exist: the 16 cells stepped
+    with ``dx = L/17`` and the right end never closed (8.5e-2 from the
+    correct step), where the unsharded node's step was a 500.  Refused on
+    both before anything is written; the sharded rod still steps as the
+    rod it was built as."""
+    from fastapi.testclient import TestClient
+    from maddening.api.server import SimulationServer
+
+    gm, node = _rod_graph(sharded=True)
+    client = TestClient(SimulationServer({"HeatNode": HeatNode}, gm).create_app(),
+                        raise_server_exceptions=False)
+    resp = client.put("/graph/params/heat", json={"params": {"n_cells": n_cells}})
+    assert resp.status_code == 400, resp.text
+    assert "changes the layout of the state" in resp.json()["detail"]
+    assert node.params["n_cells"] == 16 and not gm._dirty
+    assert client.post("/sim/step", json={}).status_code == 200
+    ref = _uniform_rod()
+    ends = {"left_temperature": jnp.float32(0.0), "right_temperature": jnp.float32(0.0)}
+    want = ref.update(ref.initial_state(), ends, 1e-4)["temperature"]
+    np.testing.assert_allclose(np.asarray(gm.get_node_state("heat")["temperature"]),
+                               np.asarray(want), rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.parametrize("n_cells", [17, 24])
+def test_a_cell_count_written_under_a_sharded_rod_is_refused_by_its_step(n_cells):
+    """The same write made directly (``node.params`` and ``compile()``),
+    which no route guards.  Unsharded, the next step raises: the state has
+    16 cells and the node now broadcasts to ``n_cells``.  Sharded it used
+    to step: ``update_padded`` never sees the global grid and took the
+    extent from the params.  The wrapper now compares the state with what
+    ``initial_state()`` builds (24 is a whole number of the 4-cell shard
+    blocks, so only that comparison can see it), and refuses by name."""
+    for sharded in (False, True):
+        gm, node = _rod_graph(sharded)
+        gm.step()
+        node.params["n_cells"] = n_cells
+        gm.compile()
+        with pytest.raises(Exception) as excinfo:
+            gm.step()
+        if sharded:
+            assert excinfo.type is ValueError
+            assert "state field 'temperature' has shape (16,)" in str(excinfo.value)
+            assert f"now builds ({n_cells},)" in str(excinfo.value)
+
+
+def _ramp_rod(order=2):
+    t0 = (0.3 + 0.2 * np.sin(np.linspace(0.0, 3.0, 16))).astype(np.float32).tolist()
+    return HeatNode(name="heat", timestep=1e-4, n_cells=16, length=1.0,
+                    thermal_diffusivity=0.1, stencil_order=order, initial_temperature=t0)
+
+
+@pytest.mark.parametrize("surface", ["rest_after_a_step", "node_params_before_any_step"])
+def test_a_stencil_order_write_reaches_a_sharded_rod_after_a_recompile(surface):
+    """``HeatNode``'s halo is 1 cell at ``stencil_order=2`` and 2 at 4.  The
+    wrapper built its halo layout once, at construction, and stripped the
+    node's current halo: after a ``stencil_order=4`` write and a recompile
+    each shard was padded with one cell and stripped two, and the rod
+    stepped a field matching neither order (4.0e-2 off both, at v0.2.0,
+    v0.3.1 and this cycle alike).  The layout is rebuilt on every
+    ``compile()`` now, and the step is the unsharded order-4 step."""
+    from fastapi.testclient import TestClient
+    from maddening.api.server import SimulationServer
+
+    node = _ramp_rod(2)
+    gm = GraphManager()
+    gm.add_node(ShardedStencilNode(node, create_device_mesh(shape=(4,)), axis_map={"devices": 0}))
+    gm.compile()
+    two, four = _ramp_rod(2), _ramp_rod(4)
+    if surface == "rest_after_a_step":
+        client = TestClient(SimulationServer({"HeatNode": HeatNode}, gm).create_app(),
+                            raise_server_exceptions=False)
+        assert client.post("/sim/step", json={}).status_code == 200
+        resp = client.put("/graph/params/heat", json={"params": {"stencil_order": 4}})
+        assert resp.status_code == 200, resp.text
+        assert client.post("/sim/step", json={}).status_code == 200
+        want = four.update(two.update(two.initial_state(), {}, 1e-4), {}, 1e-4)["temperature"]
+    else:
+        node.params["stencil_order"] = 4
+        gm.compile()
+        gm.step()
+        want = four.update(four.initial_state(), {}, 1e-4)["temperature"]
+    np.testing.assert_allclose(np.asarray(gm.get_node_state("heat")["temperature"]),
+                               np.asarray(want), rtol=0, atol=1e-6)

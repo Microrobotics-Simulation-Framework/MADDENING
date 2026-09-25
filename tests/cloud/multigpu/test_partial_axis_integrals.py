@@ -123,3 +123,41 @@ def test_unstructured_stacked_per_shard_values():
     expected = [mass[pa == d].sum() for d in range(n_devices)]
     np.testing.assert_allclose(per, expected, rtol=1e-6)
     assert np.isclose(per.sum(), 136.0)
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+def test_unstructured_unknown_axis_rejected_at_construction():
+    """The stencil wrapper refuses a mesh axis the mesh does not have; the
+    unstructured one read a misspelt name as "not this axis" and returned
+    the stacked per-shard partials where the declared reduction was the
+    scalar.  Refused by name at construction, and the correct spelling
+    still reduces."""
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+    from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
+    from tests.cloud.multigpu.test_sharded_unstructured import _NeighbourAverageNode
+
+    def declaring(axes):
+        class Declares(_NeighbourAverageNode):
+            def domain_integral_axes(self):
+                return {"total_mass": axes}
+        return Declares
+
+    n_global, n_devices = 16, 4
+    pa = (np.arange(n_global) % n_devices).astype(np.int32)
+    edges = np.array([[i, (i + 1) % n_global] for i in range(n_global)], dtype=np.int32)
+    layout = build_unstructured_partition(partition_assignment=pa, edges=edges,
+                                          n_devices=n_devices)
+    mesh = create_device_mesh(shape=(n_devices,))
+
+    def build(axes):
+        node = declaring(axes)(name="toy", n_global_cells=n_global, edges=edges,
+                               partition_assignment=pa)
+        return ShardedUnstructuredNode(node, mesh, layout)
+
+    with pytest.raises(ValueError, match=r"domain_integral_axes\['total_mass'\].*\['devics'\] "
+                                         r"not in mesh.axis_names"):
+        build(("devics",))
+    sharded = build(("devices",))
+    out = sharded.update(sharded.initial_state(), {}, 1.0)
+    assert np.asarray(jax.device_get(out["total_mass"])).shape == ()
+    assert np.isclose(float(jax.device_get(out["total_mass"])), n_global)

@@ -196,3 +196,32 @@ def test_a_declared_halo_boundary_that_is_not_a_mode_is_refused():
     node = Declares("d", 1.0, grid_shape=(8, 4), viscosity=0.1, lattice="D2Q9")
     with pytest.raises(ValueError, match=r"halo_boundary\(\) returned 'wrap'"):
         ShardedStencilNode(node, _mesh(), axis_map={"a": 0}, boundary="periodic")
+
+
+def test_a_wrapper_around_a_wrapper_takes_the_fill_the_inner_one_was_built_with():
+    """Only the outer wrapper's halo fill runs: it calls the inner one's
+    ``update_padded``, which forwards to the node.  The inner wrapper
+    declares no ``halo_boundary()`` of its own, so an outer default
+    ``"edge"`` around an inner ``"periodic"`` LBM wrapper used to be
+    accepted and ran another model (``f`` 0.020 from the unsharded node).
+    It is refused, naming both fills; the matching outer fill is the
+    unsharded node, and a declaring-nothing node nests as before."""
+    node = _channel()
+    inner = _wrap(node)
+    for boundary in ("edge", "zero"):
+        with pytest.raises(ValueError) as info:
+            ShardedStencilNode(inner, _mesh(), axis_map={"a": 1}, boundary=boundary)
+        message = str(info.value)
+        assert "is itself a ShardedStencilNode (LBMNode 'lbm')" in message
+        assert f"built with boundary='periodic', but the outer wrapper was given boundary={boundary!r}" in message
+        assert "Pass boundary='periodic'" in message
+    outer = ShardedStencilNode(inner, _mesh(), axis_map={"a": 1}, boundary="periodic")
+    got = _run(outer, node, PRESSURES, 5)
+    want = _run(node, node, PRESSURES, 5)
+    np.testing.assert_allclose(got["f"], want["f"], rtol=1e-6, atol=1e-7)
+
+    plain = StencilDiffusion1D(name="d", n_cells=16)
+    zero = ShardedStencilNode(plain, _mesh(), axis_map={"a": 0}, boundary="zero")
+    with pytest.raises(ValueError, match="built with boundary='zero'"):
+        ShardedStencilNode(zero, _mesh(), axis_map={"a": 0})
+    ShardedStencilNode(zero, _mesh(), axis_map={"a": 0}, boundary="zero")

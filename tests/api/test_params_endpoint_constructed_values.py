@@ -126,9 +126,10 @@ def test_wavelet_mass_is_refused_and_the_saved_graph_still_matches_the_running_o
 
 @pytest.mark.parametrize("compiled", [True, False], ids=["compiled", "before_compile"])
 def test_pipe_radius_is_refused_and_the_saved_graph_still_matches_the_running_one(tmp_path, compiled):
-    """``pipe_radius`` is baked into the wall mask in ``__init__``; nothing
-    declares it, so the liveness walk (compiled) or the node's hooks
-    (before the first compile) have to find it."""
+    """``pipe_radius`` is baked into the wall mask in ``__init__``.  The
+    liveness walk (compiled) and the node's hooks (before the first compile)
+    found it while the pipe was full; since the initial fill of a part-full
+    pipe reads it too, ``LBMPipeNode`` declares it in ``static_data_deps``."""
     gm = _pipe(compile=compiled)
     client = _client(gm)
     node_before, live_before = _node_params(gm, "p"), _live(gm, "p")
@@ -138,7 +139,7 @@ def test_pipe_radius_is_refused_and_the_saved_graph_still_matches_the_running_on
 
     assert resp.status_code == 400, resp.text
     detail = resp.json()["detail"]
-    assert detail.startswith("pipe_radius:") and "initial_state()" in detail
+    assert detail.startswith("pipe_radius:") and "static_data_deps" in detail
     _assert_nothing_written(gm, "p", node_before, live_before, dirty_before)
     assert gm.to_dict()["nodes"][0]["params"]["pipe_radius"] == pytest.approx(0.8)
     np.testing.assert_array_equal(_velocity(_reloaded(gm)), _velocity(gm))
@@ -158,16 +159,41 @@ def test_a_refused_key_leaves_the_accepted_keys_of_the_same_request_unwritten():
 
 
 def test_a_structural_value_consumed_at_construction_is_refused():
-    """``propeller_x`` (an int) goes the recompile path, and the recompile
-    would trace the mask ``__init__`` built from the old value."""
+    """``propeller_x`` (an int) would go the recompile path, and the
+    recompile would trace the mask ``__init__`` built from the old value.
+    ``LBMPipeNode`` declares it in ``static_data_deps``, so it is refused
+    before any trace; the undeclared form of the same case (the hooks trace
+    identically) is ``test_a_structural_value_the_node_copied_in_init_is_refused``."""
     gm = _pipe()
     client = _client(gm)
     node_before, live_before = _node_params(gm, "p"), _live(gm, "p")
     resp = client.put("/graph/params/p", json={"params": {"propeller_x": 5}})
     assert resp.status_code == 400, resp.text
     assert resp.json()["detail"].startswith("propeller_x:")
-    assert "trace identically" in resp.json()["detail"]
+    assert "static_data_deps" in resp.json()["detail"]
     _assert_nothing_written(gm, "p", node_before, live_before, False)
+
+
+@pytest.mark.parametrize("key, value", [("pipe_radius", 0.5), ("propeller_radius", 0.5),
+                                        ("propeller_x", 5)])
+def test_pipe_geometry_the_initial_fill_also_reads_is_refused_and_the_reload_matches(key, value):
+    """A part-full pipe: ``initial_state()`` reads ``pipe_radius`` again (the
+    fill mask), which the undeclared rule took for "takes effect at the next
+    reset".  ``pipe_radius`` was answered 200; after ``/sim/reset`` the step
+    kept the wall mask of the old radius, bit for bit, while ``to_dict()``
+    saved the new one, and the reload ran a pipe 5.667e-03 away."""
+    gm = _pipe(fill_fraction=0.5)
+    client = _client(gm)
+    node_before, live_before = _node_params(gm, "p"), _live(gm, "p")
+
+    resp = client.put("/graph/params/p", json={"params": {key: value}})
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"].startswith(f"{key}:")
+    assert "static_data_deps" in resp.json()["detail"]
+    _assert_nothing_written(gm, "p", node_before, live_before, False)
+    assert client.post("/sim/reset").status_code == 200
+    np.testing.assert_array_equal(_velocity(_reloaded(gm), n=5), _velocity(gm, n=5))
 
 
 def test_an_initial_condition_copied_at_construction_is_refused():
@@ -296,16 +322,23 @@ class _SelfBound(_Legacy):
         return {"x": state["x"] * (1.0 - dt * self._rate())}
 
 
-def test_a_node_holding_a_method_bound_to_itself_is_not_refused_on_a_blind_copy():
+def test_a_node_no_copy_can_be_made_of_is_refused_rather_than_assumed_to_use_the_write():
+    """Whether the step reads ``k`` can only be told on a copy that reads
+    the new value, and none can be made of this node.  "Cannot tell" used
+    to mean "accept": the write was answered 200 whatever the node did with
+    it.  It is refused now, saying why, and nothing is written."""
     node = _SelfBound()
     assert _node_with_params(node, {**node.params, "k": 4.0}) is None
     gm = GraphManager()
     gm.add_node(node)
     gm.compile()
+    node_before, live_before = _node_params(gm, "n"), _live(gm, "n")
     resp = _client(gm).put("/graph/params/n", json={"params": {"k": 4.0}})
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 400, resp.text
+    assert "no copy of _SelfBound that reads the new value can be made" in resp.json()["detail"]
+    _assert_nothing_written(gm, "n", node_before, live_before, False)
     gm.step()
-    assert float(gm.get_node_state("n")["x"]) == pytest.approx(1.0 - 0.1 * 7.0)
+    assert float(gm.get_node_state("n")["x"]) == pytest.approx(1.0 - 0.1 * 5.0)
 
 
 class _Inner(SimulationNode):

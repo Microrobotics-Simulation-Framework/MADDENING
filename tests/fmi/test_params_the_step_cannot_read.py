@@ -124,8 +124,11 @@ def test_a_pipe_exports_what_its_step_reads_and_not_its_geometry(promoted):
     gm = _pipe()
     md = build_model_description(gm, model_name="pipe")
     assert {"p.params.tau", "p.params.propeller_strength", "p.params.gravity"} <= _exported(md)
-    for name in ("p.params.pipe_radius", "p.params.propeller_radius",
-                 "p.params.fill_fraction", "p.params.initial_velocity"):
+    # The geometry is declared: the masks are built from it (static_data_deps).
+    for name in ("p.params.pipe_radius", "p.params.propeller_radius"):
+        assert "static_data_deps" in md.fixed_parameters[name], name
+    # The initial fill and velocity are read by initial_state() alone.
+    for name in ("p.params.fill_fraction", "p.params.initial_velocity"):
         assert "no operation of the compiled step" in md.fixed_parameters[name], name
     _assert_exports_only_what_the_step_reads(gm, md)
 
@@ -159,7 +162,7 @@ def test_the_sidecar_refuses_a_value_its_step_would_ignore(promoted):
     gm = _pipe()
     md = build_model_description(gm, model_name="pipe")
     sc = _sidecar(gm, md, fixed_params=md.fixed_parameters)
-    with pytest.raises(ValueError, match=NOT_TUNABLE + ": no operation of the compiled step"):
+    with pytest.raises(ValueError, match=NOT_TUNABLE + r": LBMPipeNode bakes it into static_data"):
         sc.set_params({"p.params.pipe_radius": 0.5})
     # atomic: the tunable key of a refused request is not written either
     with pytest.raises(ValueError, match=NOT_TUNABLE):

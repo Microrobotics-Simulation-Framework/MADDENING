@@ -18,9 +18,11 @@ unsharded group" cannot pass on two copies of the same wrong answer.
 
 Before this module nothing under ``tests/`` put a partitioned array inside
 a coupling group.  ``test_sharded_wrapper_coupling_hooks.py`` couples a
-``ShardedPointwiseNode`` to a relay under ``solver="ift"``, forward only,
-but the wrapped spring's state is 0-d: it lives whole on one device and
-nothing is partitioned.  ``test_coupled_sharded.py`` couples two sharded
+``ShardedPointwiseNode`` to a relay under ``solver="ift"``, forward only;
+its wrapped spring's state was 0-d, living whole on one device, until the
+wrapper began refusing a node with nothing to shard, and it is now a batch
+of independent springs, one per device, with nothing exchanged between
+shards.  ``test_coupled_sharded.py`` couples two sharded
 nodes by staggered edges, with no group and a 10% tolerance; the graph
 property in ``test_property_sharded_equals_unsharded.py`` drives a sharded
 node through a one-way edge; ``test_graph_multigpu.py`` places whole nodes

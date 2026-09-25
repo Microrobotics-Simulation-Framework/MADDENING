@@ -12,6 +12,8 @@ cannot (its state is in partition layout, where the inner node's global
 indices name other cells) and refuses by name instead of answering ``{}``.
 """
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -28,6 +30,12 @@ _HAS_4 = len(jax.devices()) >= 4
 pytestmark = pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
 
 
+#: One spring per device.  ``ShardedPointwiseNode`` refuses a node with
+#: nothing to shard, which a single spring's 0-d state is, so the springs
+#: here are a batch of four and every device owns one.
+_N_SPRINGS = 4
+
+
 class _Relay(SimulationNode):
     """``y = a * inp + b``: consumes a flux edge, feeds a BC edge back."""
 
@@ -35,17 +43,32 @@ class _Relay(SimulationNode):
         super().__init__(name, 1e-2)
 
     def initial_state(self):
-        return {"y": jnp.asarray(0.1, jnp.float32)}
+        return {"y": jnp.full(_N_SPRINGS, 0.1, jnp.float32)}
 
     def update(self, state, bi, dt):
-        return {"y": 0.01 * jnp.asarray(bi.get("inp", 0.0), jnp.float32) + 0.1}
+        inp = bi.get("inp", jnp.zeros(_N_SPRINGS, jnp.float32))
+        return {"y": 0.01 * jnp.asarray(inp, jnp.float32) + 0.1}
 
     def boundary_input_spec(self):
-        return {"inp": BoundaryInputSpec(shape=())}
+        return {"inp": BoundaryInputSpec(shape=(_N_SPRINGS,))}
 
 
-def _spring():
-    return SpringDamperNode("s", 1e-2, stiffness=40.0, rest_length=0.6, initial_position=0.2)
+class _Springs(SpringDamperNode):
+    """``SpringDamperNode`` over a batch of springs: its update and flux are
+    elementwise, so only the declared input and flux shapes change."""
+
+    def boundary_input_spec(self):
+        return {"anchor_position": BoundaryInputSpec(shape=(_N_SPRINGS,))}
+
+    def boundary_flux_spec(self):
+        spec = super().boundary_flux_spec()["spring_force"]
+        return {"spring_force": dataclasses.replace(spec, shape=(_N_SPRINGS,))}
+
+
+def _spring(stiffness=40.0):
+    return _Springs("s", 1e-2, stiffness=stiffness, rest_length=0.6,
+                    initial_position=[0.2, 0.3, 0.4, 0.5],
+                    initial_velocity=[0.0] * _N_SPRINGS)
 
 
 def _spring_relay(node, solver):
@@ -79,11 +102,10 @@ def test_a_calibrated_constant_reaches_the_flux_through_the_wrapper():
     mesh = create_device_mesh(shape=(4,))
     wrapped = _spring_relay(ShardedPointwiseNode(_spring(), mesh), None)
     wrapped.params["nodes"]["s"]["stiffness"] = jnp.asarray(52.0, jnp.float32)
-    ref = _spring_relay(SpringDamperNode("s", 1e-2, stiffness=52.0, rest_length=0.6,
-                                         initial_position=0.2), None)
+    ref = _spring_relay(_spring(stiffness=52.0), None)
     for _ in range(3):
         a, b = ref.step(), wrapped.step()
-    np.testing.assert_allclose(float(b["R"]["y"]), float(a["R"]["y"]), rtol=1e-6)
+    np.testing.assert_allclose(np.asarray(b["R"]["y"]), np.asarray(a["R"]["y"]), rtol=1e-6)
 
 
 def _heat(**kw):

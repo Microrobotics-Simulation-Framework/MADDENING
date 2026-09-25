@@ -1255,9 +1255,8 @@ class SimulationServer:
                             f"{key}: node '{node_name}' cannot take a new value "
                             f"for this parameter while it runs: {reason}.  The "
                             "write would be reported, and saved by to_dict() / "
-                            "save_state(), while every step kept the value the "
-                            "node was built with.  Nothing was written; to "
-                            "change it, rebuild the node (DELETE "
+                            "save_state(), as the value in force.  Nothing was "
+                            "written; to change it, rebuild the node (DELETE "
                             f"/graph/nodes/{node_name}, then POST /graph/nodes "
                             "with the new value)."
                         ),

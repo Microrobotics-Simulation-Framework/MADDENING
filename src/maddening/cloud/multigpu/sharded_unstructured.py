@@ -237,9 +237,21 @@ class ShardedUnstructuredNode(SimulationNode):
         # A misspelt mesh axis in ``domain_integral_axes`` used to be read
         # as "not this axis" and return the stacked per-shard partials in
         # place of the reduced value; refused here, by name, as
-        # ``ShardedStencilNode`` refuses it.
-        for key in node.domain_integral_fields():
-            self._integral_is_reduced(key)
+        # ``ShardedStencilNode`` refuses it (building the local update
+        # below asks the same question of every integral).
+        #
+        # The per-shard update, built once and rebuilt by
+        # ``invalidate_static_cache``, as ``ShardedStencilNode`` keeps it.
+        # Held as an attribute, its closure over the inner node is what
+        # tells the REST route's parameter probe (which answers "would
+        # the running node use this write?" on a shallow copy) that this
+        # wrapper cannot be copied, so it asks the node inside, which
+        # shares the params dict.  Rebuilt on each cache miss instead, the
+        # wrapper looked copyable, and the copy shared -- and wrote into --
+        # the compiled-function cache of the original: it answered with the
+        # original's trace and left its own traces behind for the original
+        # to call.
+        self._local_update_fn = self._build_local_update()
         # Cached per-device materialisation of the partitioned statics;
         # see ``_materialise_partitioned_statics``.
         self._static_device_cache: Optional[tuple] = None
@@ -412,6 +424,7 @@ class ShardedUnstructuredNode(SimulationNode):
         """
         self._static_device_cache = None
         self._sharded_cache.clear()
+        self._local_update_fn = self._build_local_update()
         super().invalidate_static_cache()
 
     def _materialise_partitioned_statics(self) -> dict:
@@ -498,7 +511,7 @@ class ShardedUnstructuredNode(SimulationNode):
             else:
                 out_specs[k] = P(self._mesh_axis)  # per-shard values stacked
 
-        local_fn = functools.partial(self._build_local_update(), cell_bi=cell_bi)
+        local_fn = functools.partial(self._local_update_fn, cell_bi=cell_bi)
 
         params_specs = jax.tree.map(lambda _: P(), params if params else {})
         sm = shard_map(

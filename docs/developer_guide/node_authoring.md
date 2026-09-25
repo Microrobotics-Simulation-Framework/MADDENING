@@ -607,6 +607,12 @@ One node's flux output feeds another's boundary input:
 from maddening.core.coupling_helpers import add_flux_coupling
 add_flux_coupling(gm, "rod_a", "rod_b", "right_heat_flux", "heat_source")
 ```
+A flux is computed by `compute_boundary_fluxes`, not held in the state, so
+inside a coupling group it cannot be read where the loop reads an edge's
+value from the state: under `convergence_norm="interface"`, or by a
+sub-cycled member under `boundary_interpolation="linear"`.  `compile()`
+refuses both, naming the edge and the setting that works (`"mixed"` or
+`"l2"`; `"constant"`).
 
 ### Dirichlet-Neumann coupling
 The classic partitioned approach — one node gets a value BC, the other gets a flux BC:

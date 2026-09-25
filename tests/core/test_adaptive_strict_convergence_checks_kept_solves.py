@@ -103,6 +103,17 @@ def test_run_adaptive_still_raises_about_a_kept_solve_that_did_not_converge():
         np.testing.assert_array_equal(after[leaf], value, err_msg=leaf)
 
 
+def test_run_adaptive_raises_about_an_accepted_attempts_unconverged_half_step():
+    """The ordinary accept path, not the ``dt_min`` one: one pass per solve.
+
+    The controller shrinks ``dt`` until an attempt's error is small enough
+    to accept, and a single pass never meets the tolerance, so the first
+    accepted attempt keeps an unconverged half step.
+    """
+    with pytest.raises(RuntimeError, match="max_iterations=1 without converging"):
+        _pair(True, max_iterations=1).run_adaptive(T_END, **KW)
+
+
 def test_run_adaptive_accepts_the_same_steps_without_strict():
     """The control: those half steps really are kept when strict is off."""
     gm = _pair(False)

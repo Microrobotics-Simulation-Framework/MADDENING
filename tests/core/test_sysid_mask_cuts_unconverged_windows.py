@@ -120,6 +120,48 @@ def test_a_diverged_window_leaves_a_finite_gradient_of_the_other_windows(divergi
         np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-6)
 
 
+def test_the_gradient_with_respect_to_the_observations_is_finite(diverging):
+    """Nothing non-finite reaches the loss's arithmetic on the observations.
+
+    The diverged window's samples are replaced by its (gradient-free)
+    targets before they are compared, so its term's derivative with
+    respect to the targets is exactly zero rather than ``inf * 0``.
+    """
+    gm, obs = diverging
+    grad = jax.grad(_loss(gm), argnums=1)(gm.params, obs)
+    for leaf in jax.tree.leaves(grad):
+        assert np.all(np.isfinite(np.asarray(leaf))), grad
+
+
+def test_a_masked_window_contributes_nothing_whatever_its_samples_hold():
+    """A missing (NaN) target inside a masked window changes nothing.
+
+    Two samples per window; window 1 starts at 30 and diverges, and its
+    first target -- not a window start -- is NaN.  Selected away, the
+    window's term is exactly zero; multiplied by zero it was NaN.
+    """
+    gm = _square_pair()
+    gm.step()
+    xa = float(gm._state["a"]["x"])
+    xb = float(gm._state["b"]["x"])
+    gm.reset_state()
+
+    def obs_with(target):
+        return {"a": {"x": jnp.full((7,), xa, jnp.float32).at[2].set(30.0).at[3].set(target)},
+                "b": {"x": jnp.full((7,), xb, jnp.float32).at[2].set(30.0).at[3].set(target)}}
+
+    def loss(p, obs):
+        return sysid.windowed_loss(gm, p, obs, obs_fn=lambda s: s["a"]["x"], window=2,
+                                   mask_unconverged=True)
+
+    value_and_grad = jax.jit(jax.value_and_grad(loss))
+    missing, g_missing = value_and_grad(gm.params, obs_with(jnp.nan))
+    finite, g_finite = value_and_grad(gm.params, obs_with(xa))
+    assert np.isfinite(float(missing)) and float(missing) == float(finite)
+    for a, b in zip(jax.tree.leaves(g_missing), jax.tree.leaves(g_finite)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
 def test_multiple_shooting_drops_a_diverged_window_and_its_continuity_term(diverging):
     """Under multiple shooting the diverged window's end ties nothing either.
 

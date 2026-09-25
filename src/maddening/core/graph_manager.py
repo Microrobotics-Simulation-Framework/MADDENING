@@ -2010,10 +2010,12 @@ def _run_coupled_block_impl(
 
     ``fires`` is ``None``, or -- on a multi-rate graph, for a group
     whose rate divider is above one -- the traced boolean saying whether
-    this base step applies the group's solve at all.  The solve is
-    computed either way; ``graph_step_multirate`` keeps its result only
-    when it fires, and ``strict_convergence`` must not raise about a
-    solve the step discards, so its predicates are gated on it here.
+    this base step applies the group's solve at all.
+    ``graph_step_multirate`` runs this block under a ``lax.cond`` on it,
+    so a step that does not fire does not solve; but a batched ``cond``
+    (under ``vmap``) runs both branches, and ``strict_convergence`` must
+    not raise about a solve the step discards, so its predicates are
+    gated on ``fires`` here as well.
     """
     from maddening.core.coupling.acceleration import (
         aitken_relaxation,
@@ -6293,11 +6295,29 @@ class GraphManager:
                         group_rd = rate_dividers[group_schedule[0]]
                         fires = (None if group_rd == 1
                                  else (step_count % group_rd) == 0)
-                        coupled_result = _run_coupled_block(
-                            group, group_schedule, new_state,
-                            full_state, external_inputs, node_params,
-                            fires=fires,
-                        )
+
+                        def _solve(state_in, group=group,
+                                   group_schedule=group_schedule, fires=fires):
+                            return _run_coupled_block(
+                                group, group_schedule, state_in,
+                                full_state, external_inputs, node_params,
+                                fires=fires,
+                            )
+
+                        if fires is None:
+                            coupled_result = _solve(new_state)
+                        else:
+                            # Solve only on a base step that keeps the
+                            # result: the fixed-point iteration is the cost
+                            # of the step, and a group at divider ``d`` used
+                            # to pay it ``d`` times per solve it applied.
+                            # The branch that does not solve hands the
+                            # state through unchanged, so the selects below
+                            # are exact either way -- and under ``vmap``,
+                            # where a batched ``cond`` runs both branches,
+                            # they are what keeps the discarded solve out.
+                            coupled_result = jax.lax.cond(
+                                fires, _solve, dict, new_state)
                         for nn in group_schedule:
                             new_state[nn] = _apply_multirate(
                                 nn, coupled_result[nn], new_state

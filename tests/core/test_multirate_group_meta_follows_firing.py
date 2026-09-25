@@ -1,14 +1,14 @@
 """A multi-rate coupling group's ``_meta`` comes only from solves the step keeps.
 
 On a multi-rate graph a coupling group with a rate divider above one
-solves on every base step -- the step function has one static structure
--- but its node states are kept only on the steps it fires on
-(``step_count % divider == 0``).  Its ``_meta`` slots used to be merged
-from *every* solve, so between firings they described solves the step
-had thrown away: ``coupling_diagnostics()``, the profiler and the sysid
-mask reported those, ``strict_convergence`` raised about them, and the
-linear predictor and the IQN-IMVJ warm start learned from them.  The
-slots now follow the node states' rule.
+used to solve on every base step and keep its node states only on the
+steps it fires on (``step_count % divider == 0``).  Its ``_meta`` slots
+were merged from *every* solve, so between firings they described solves
+the step had thrown away: ``coupling_diagnostics()``, the profiler and
+the sysid mask reported those, ``strict_convergence`` raised about them,
+and the linear predictor and the IQN-IMVJ warm start learned from them.
+The slots now follow the node states' rule, and the solve is skipped on
+the steps that would have discarded it.
 
 The graph makes the difference loud.  A pair ``a <-> b`` at 0.01 s is fed
 the phase ``0..9`` of a clock at 0.001 s; the pair's gain grows with the
@@ -18,6 +18,7 @@ discards at phases 4-9 do not.
 
 import warnings
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -44,12 +45,21 @@ class _Phase(SimulationNode):
         return {"phase": jnp.mod(state["phase"] + 1.0, 10.0)}
 
 
+#: Coupled-node evaluations, counted from inside the compiled step.
+_EVALUATIONS = [0]
+
+
+def _count_evaluation():
+    _EVALUATIONS[0] += 1
+
+
 class _Gained(SimulationNode):
     """``x <- (0.5 + 0.5 * phase) * u + bias``."""
 
-    def __init__(self, name, timestep, bias, phased):
+    def __init__(self, name, timestep, bias, phased, counted=False):
         super().__init__(name=name, timestep=timestep, bias=bias)
         self._phased = phased
+        self._counted = counted
 
     def initial_state(self):
         return {"x": jnp.float32(0.0)}
@@ -63,6 +73,8 @@ class _Gained(SimulationNode):
         return spec
 
     def update(self, state, boundary_inputs, dt):
+        if self._counted:
+            jax.debug.callback(_count_evaluation)
         # ``.get``: the profiler times each node with no inputs at all.
         gain = 0.5 + 0.5 * boundary_inputs.get("phase", jnp.float32(0.0))
         return {"x": gain * boundary_inputs.get("u", jnp.float32(0.0))
@@ -192,3 +204,33 @@ def test_the_sysid_mask_keeps_a_window_whose_applied_solve_converged():
     masked = float(windowed_loss(gm, gm.params, obs, mask_unconverged=True, **kw))
     assert unmasked > 0.0
     assert masked == unmasked
+
+
+def test_a_group_does_not_solve_on_a_step_it_does_not_fire_on():
+    """The solve is skipped, not computed and thrown away.
+
+    Its result was always discarded between firings; it was still
+    computed on every base step, so a group at divider ``d`` paid its
+    fixed-point iteration ``d`` times per solve it applied.  Counted from
+    inside the compiled step: ``a``'s evaluations on each base step.
+    """
+    gm = GraphManager()
+    gm.add_node(_Phase("clock", 0.001))
+    gm.add_node(_Gained("a", 0.01, bias=1.0, phased=True, counted=True))
+    gm.add_node(_Gained("b", 0.01, bias=0.0, phased=False))
+    gm.add_edge("clock", "a", "phase", "phase")
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_coupling_group(["a", "b"], max_iterations=10, tolerance=1e-5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+    per_step = []
+    for _ in range(DIVIDER + 1):
+        before = _EVALUATIONS[0]
+        gm.step()
+        jax.effects_barrier()
+        per_step.append(_EVALUATIONS[0] - before)
+    fired = [per_step[0], per_step[DIVIDER]]
+    assert all(n > 0 for n in fired), per_step
+    assert per_step[1:DIVIDER] == [0] * (DIVIDER - 1), per_step

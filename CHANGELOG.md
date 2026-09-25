@@ -286,7 +286,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **Coupling runtime, audit of the frozen tree**: `run_adaptive*` sub-steps a sub-cycled node at `dt * node_dt / macro_dt` (it advanced `divider * dt`, MADD-ANO-034); on a multi-rate graph a group's diagnostics, predictor history and IQN-IMVJ warm start come only from the solves the step keeps, and `strict_convergence` checks only those (MADD-ANO-035);
+- **Coupling runtime, audit of the frozen tree**: `run_adaptive*` sub-steps a sub-cycled node at `dt * node_dt / macro_dt` (it advanced `divider * dt`, MADD-ANO-034); on a multi-rate graph a group's diagnostics, predictor history and IQN-IMVJ warm start come only from the solves the step keeps, `strict_convergence` checks only those, and the group no longer solves on the base steps that discarded the result (MADD-ANO-035);
   `solver="fori"` + `iqn-imvj` carries the latching pass's secant columns, not zeros (MADD-ANO-036); `converged` is one verdict, in the residual's dtype, in the report, the profiler, sysid and strict; the profiler samples a multi-rate group on its firing steps only and stops re-warning about its one-iteration variant.
   Action: re-run `run_adaptive*` results with a sub-cycled group, and multi-rate results with a coupling group using `predictor` or `iqn-imvj`.
 - **Compliance gates catch the defects a mutation audit slipped past them**: `check_doctests` pins every file's example count (`EXAMPLES_PER_FILE`) and it and `check_impl_mapping` sit at the counts; `check_anomalies` refuses a `pytest.skip()`/`xfail()` in a cited test, an aliased mark, `skipif(True)`,

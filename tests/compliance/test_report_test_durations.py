@@ -506,6 +506,33 @@ def test_timing_plugin_counts_the_processes_a_test_starts():
     assert dict(item.user_properties)["subprocesses"] == 2
 
 
+def test_registering_the_timing_plugin_starts_counting_processes():
+    # What conftest calls when MADDENING_TEST_JAX_TIMING=1.  In a child:
+    # neither the audit hook nor JAX's listeners can be removed once added.
+    # JAX's listener API is stubbed (its events are checked against the real
+    # JAX above), which keeps the child to a fraction of a second.
+    probe = (
+        "import subprocess, sys\n"
+        "from types import ModuleType, SimpleNamespace\n"
+        "jax = ModuleType('jax')\n"
+        "jax.monitoring = SimpleNamespace(register_event_duration_secs_listener=lambda f: None,\n"
+        "                                 register_event_listener=lambda f: None)\n"
+        "sys.modules['jax'] = jax\n"
+        "from tests import _jax_timing as jt\n"
+        "names = []\n"
+        "config = SimpleNamespace(pluginmanager=SimpleNamespace(\n"
+        "    register=lambda plugin, name: names.append(name)))\n"
+        "timing = jt.register(config)\n"
+        "subprocess.run([sys.executable, '-c', ''], check=True)\n"
+        "print(timing.totals['subprocesses'], names)\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONSAFEPATH"}
+    proc = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT, env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert proc.stdout.split(None, 1) == ["1", "['maddening-jax-timing']\n"], proc.stdout
+
+
 def test_python_still_raises_the_audit_events_the_process_count_listens_for():
     # If Python renamed one, the count would read zero and a subprocess
     # test would be called uncacheable again.  Checked in a child, since an

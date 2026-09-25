@@ -26,7 +26,7 @@ incompatibly before the next major version. The mechanics are in
   hard to take back — which is why a level is cheap to set *before* the
   release that first ships it and expensive afterwards;
 - a `stable` *class* promises every public method and property an instance
-  answers to, inherited ones included. `stable_api.json` records 239 members
+  answers to, inherited ones included. `stable_api.json` records 248 members
   behind today's 17 tagged surfaces, and
   `scripts/check_stable_signatures.py` fails on any change to any of them —
   **distinguishing a break from a compatible widening**. A new parameter with

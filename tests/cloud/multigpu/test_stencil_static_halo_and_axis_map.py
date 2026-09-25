@@ -206,7 +206,7 @@ def _exchange(boundary, mesh):
 
 @pytest.mark.parametrize("boundary", [{"device": "periodic"},
                                       {"devices": "periodic", "spatial_z": "zero"}],
-                         ids=["misspelt-axis", "axis-not-exchanged"])
+                         ids=["misspelt-axis", "unknown-beside-a-known-axis"])
 def test_a_boundary_dict_key_naming_no_exchanged_axis_is_refused(boundary):
     """``{"device": "periodic"}`` on a ``"devices"`` exchange returned the
     edge fill with no error."""
@@ -214,6 +214,21 @@ def test_a_boundary_dict_key_naming_no_exchanged_axis_is_refused(boundary):
     with pytest.raises(ValueError, match=r"boundary names mesh axes \[.*\] that this call "
                                          r"does not exchange; it exchanges \['devices'\]"):
         _exchange(boundary, mesh)
+
+
+def test_a_boundary_dict_key_naming_a_mesh_axis_this_call_does_not_exchange_is_refused():
+    """On a 2x2 mesh, exchanging along ``spatial_y`` only: a mode for
+    ``spatial_z`` -- a real mesh axis -- would be ignored as silently as a
+    misspelt one."""
+    mesh = create_device_mesh(shape=(2, 2))
+    fn = shard_map(
+        lambda v: halo_exchange(v, mesh=mesh, axes=[("spatial_y", 0, 1)],
+                                boundary={"spatial_y": "edge", "spatial_z": "periodic"}),
+        mesh=mesh, in_specs=P("spatial_y", "spatial_z"),
+        out_specs=P("spatial_y", "spatial_z"),
+    )
+    with pytest.raises(ValueError, match=r"\['spatial_z'\] that this call does not exchange"):
+        jax.jit(fn)(jnp.zeros((4, 4)))
 
 
 def test_a_boundary_dict_of_exchanged_axes_fills_as_asked_and_defaults_to_edge():

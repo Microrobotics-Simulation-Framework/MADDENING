@@ -32,6 +32,9 @@
 #     the fix and after it; the description says which builds had it.
 #     (">=0.4.0.dev0, <0.4.0", which two entries used to carry for this,
 #     admits no version at all -- it read as a window and was empty.)
+#     Such a defect gets an entry only when it is critical or major; every
+#     defect a release carried gets one ("Which defects get an entry" in
+#     CONTRIBUTING.md).
 #   * duplicate: parsed but not compared; the range lives on the other entry.
 #   * FIRST, FIX and resolution_version name versions somebody could install:
 #     a release (a dated "## [X.Y.Z] - YYYY-MM-DD" heading in CHANGELOG.md),

@@ -31,7 +31,8 @@ Four things this gate has to get right, because each was a hole:
 * **A pinned minimum per guide**, so a table that vanishes fails instead of
   quietly lowering the count.  The pins sit at the current counts; a guide
   that gains rows should raise its pin, or the slack reopens for row
-  deletions.
+  deletions.  ``tests/compliance/test_gate_scripts.py::TestMinMappingsRatchet``
+  holds each pin equal to its guide's count, so that cannot happen quietly.
 
 Two identity checks run beside the mappings, because a mapping table is only
 evidence for the node the guide is *about*:
@@ -102,10 +103,18 @@ NODE_ID_PREFIX = "MADD-NODE-"
 # wavelet guide sat at 20 with 24 references, so four could go
 # (audit_040_phase3_confirm).  Floors, not exact counts, so that two
 # branches each adding rows to one guide do not collide on its number.
+#
+# The slack came back: heat, lbm and wavelet sat two below their counts
+# (11/13, 22/24, 24/26), so deleting two rows from any of them passed
+# while the module docstring and the CHANGELOG said the pins sat at the
+# counts (audit_040_p4_1, M5-M8).  ``TestMinMappingsRatchet`` now holds
+# every pin *equal* to its guide's count, and every guide with a mapping
+# table to a pin, so raising a guide without raising its pin fails CI
+# rather than reopening the hole.
 MIN_MAPPINGS = {
-    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 11,
+    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"): 13,
     os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"): 12,
-    os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"): 24,
+    os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"): 26,
     os.path.join(
         "docs", "algorithm_guide", "solvers", "explicit_integrators.md"
     ): 5,
@@ -113,7 +122,7 @@ MIN_MAPPINGS = {
     os.path.join("docs", "algorithm_guide", "nodes", "ball_node.md"): 7,
     os.path.join("docs", "algorithm_guide", "nodes", "rigid_body_2d_node.md"): 7,
     os.path.join("docs", "algorithm_guide", "nodes", "heart_pump_node.md"): 9,
-    os.path.join("docs", "algorithm_guide", "nodes", "lbm_node.md"): 22,
+    os.path.join("docs", "algorithm_guide", "nodes", "lbm_node.md"): 24,
 }
 
 _QNAME = re.compile(r"`(maddening\.[^`]+)`")

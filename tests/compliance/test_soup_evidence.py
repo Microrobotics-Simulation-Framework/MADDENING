@@ -96,6 +96,58 @@ _HIGHEST_BENCHMARK_ID = 16
 _RETIRED_BENCHMARK_IDS: frozenset = frozenset()
 
 
+def _with_a_stale_second_anomaly_block(text: str) -> str:
+    """The auditor's G5: a second copy of the known-anomalies block, one row
+    rewritten as resolved -- the shape a bad merge leaves."""
+    import re
+
+    block = re.search(
+        r"<!-- BEGIN GENERATED: known-anomalies.*?"
+        r"<!-- END GENERATED: known-anomalies -->", text, re.S)
+    assert block, "no known-anomalies block to duplicate"
+    stale = block.group(0).replace("| `open` |", "| `resolved (in 0.4.0)` |", 1)
+    assert stale != block.group(0), "the replayed row has changed shape"
+    return text + "\n\n## Appendix: anomaly summary\n\n" + stale + "\n"
+
+
+def test_a_second_stale_copy_of_a_generated_block_fails_the_check(
+    tmp_path, monkeypatch
+):
+    """audit_040_p4_1, G5: ``--check`` compared only the first copy of a
+    block (``count=1``), so a stale duplicate after it read "OK: SOUP
+    evidence tables match their sources"."""
+    soup = tmp_path / "soup_package.md"
+    soup.write_text(_with_a_stale_second_anomaly_block(
+        gen.SOUP_PACKAGE.read_text()))
+    monkeypatch.setattr(gen, "SOUP_PACKAGE", soup)
+    monkeypatch.setattr(sys, "argv", ["generate_soup_tables.py", "--check"])
+    with pytest.raises(SystemExit) as exc:
+        gen.main()
+    assert exc.value.code not in (0, None)
+    assert "'known-anomalies' must appear exactly once" in str(exc.value.code)
+    assert "2 BEGIN and 2 END" in str(exc.value.code)
+
+
+@pytest.mark.parametrize("extra, counts", [
+    ("<!-- END GENERATED: known-anomalies -->\n", "1 BEGIN and 2 END"),
+    ("<!-- BEGIN GENERATED: known-anomalies -->\n", "2 BEGIN and 1 END"),
+])
+def test_a_lone_marker_is_refused(extra, counts):
+    text = gen.SOUP_PACKAGE.read_text() + "\n" + extra
+    with pytest.raises(SystemExit) as exc:
+        gen.splice(text, "known-anomalies", "body", gen.SOUP_PACKAGE)
+    assert counts in str(exc.value.code)
+
+
+def test_a_block_whose_name_only_starts_with_another_is_not_a_copy():
+    text = ("<!-- BEGIN GENERATED: test-suite -->\nold\n"
+            "<!-- END GENERATED: test-suite -->\n"
+            "<!-- BEGIN GENERATED: test-suite-archive -->\nkept\n"
+            "<!-- END GENERATED: test-suite-archive -->\n")
+    out = gen.splice(text, "test-suite", "new", gen.SOUP_PACKAGE)
+    assert "new" in out and "old" not in out and "kept" in out
+
+
 def _expected_ids(prefix: str, highest: int, retired: frozenset) -> set:
     return {f"{prefix}{n:03d}" for n in range(1, highest + 1)} - set(retired)
 

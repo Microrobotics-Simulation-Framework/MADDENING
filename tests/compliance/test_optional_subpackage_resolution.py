@@ -48,6 +48,13 @@ def fake_package(tmp_path, monkeypatch):
     * ``bare`` raises a plain ``ModuleNotFoundError`` for a third-party
       package, the other shape the same situation takes.
     * ``broken`` raises a non-import error, which must stay a hard failure.
+    * ``stale`` imports a name its own package no longer has -- a stale
+      internal rename, the shape audit_040_p4_1's A25 seeded.
+    * ``missing_sub`` imports a first-party module that does not exist.
+    * ``wrapped`` is an extra's guard around a *first-party* failure, as
+      ``maddening.viz``'s lazy loader re-raises any ``ImportError``.
+    * ``chained`` is the real ``maddening.usd`` shape: the guard re-raises
+      ``from`` the third-party ``ModuleNotFoundError``.
     """
     root = tmp_path / "pkgroot"
     pkg = root / "fakelib"
@@ -68,6 +75,28 @@ def fake_package(tmp_path, monkeypatch):
     _write(pkg / "bare" / "__init__.py", "import definitely_not_installed_xyz\n")
     _write(pkg / "bare" / "inner.py", "def also_here(): pass\n")
     _write(pkg / "broken" / "__init__.py", "raise RuntimeError('this module is broken')\n")
+    _write(pkg / "stale" / "__init__.py",
+           "from fakelib.present import gone_by_rename\n\nTHING = 1\n")
+    _write(pkg / "missing_sub" / "__init__.py", "import fakelib.no_such_module\n")
+    _write(pkg / "wrapped" / "__init__.py", """
+        try:
+            from fakelib.present import gone_by_rename
+        except ImportError as _exc:
+            raise ImportError(
+                "fakelib.wrapped requires 'fake-extra'. "
+                "Install with:  pip install fakelib[wrapped]"
+            ) from _exc
+    """)
+    _write(pkg / "chained" / "__init__.py", """
+        try:
+            import definitely_not_installed_xyz
+        except ImportError as _exc:
+            raise ImportError(
+                "fakelib.chained requires 'fake-extra'. "
+                "Install with:  pip install fakelib[chained]"
+            ) from _exc
+    """)
+    _write(pkg / "chained" / "inner.py", "def writes_a_stage(): pass\n")
 
     monkeypatch.syspath_prepend(str(root))
     importlib.invalidate_caches()
@@ -126,6 +155,49 @@ class TestUnavailableIsNotStale:
         assert not resolve_dotted_name(
             "fakelib.present.A_CONSTANT", require_callable=True
         ).ok
+
+
+class TestAFirstPartyBreakIsNotAMissingExtra:
+    """A broken import of the package's *own* code is a defect.
+
+    ``cannot import name 'x' from 'maddening.core.solver_utils'`` carries
+    ``name='maddening.core.solver_utils'``; the resolver labelled it with
+    its top-level package, ``maddening``, and reported every reference
+    behind the module "not checked (missing optional extra)" -- so a stale
+    internal rename left the anomaly gate at exit 0 (audit_040_p4_1, A25).
+    """
+
+    @pytest.mark.parametrize("qname, culprit", [
+        ("fakelib.stale.THING", "gone_by_rename"),
+        ("fakelib.missing_sub.anything", "fakelib.no_such_module"),
+        ("fakelib.wrapped.anything", "gone_by_rename"),
+    ])
+    def test_a_first_party_import_failure_is_a_hard_failure(
+        self, fake_package, qname, culprit
+    ):
+        res = resolve_dotted_name(qname)
+        assert not res.ok
+        assert res.unavailable is None, res
+        assert "broken first-party import" in res.reason
+        assert culprit in res.reason
+
+    def test_an_extra_guard_chained_from_a_third_party_package_is_unavailable(
+        self, fake_package
+    ):
+        """The control: the real ``maddening.usd`` shape is still a skip."""
+        res = resolve_dotted_name("fakelib.chained.inner.writes_a_stage")
+        assert not res.ok
+        assert res.unavailable == "fakelib.chained"
+        assert "pip install fakelib[chained]" in res.reason
+
+    def test_the_anomaly_validator_reports_it_as_an_error_not_a_note(
+        self, fake_package, tmp_path
+    ):
+        notes = []
+        path = _registry(tmp_path, ["fakelib.stale.THING"])
+        errors = validate_anomaly_registry(path, notes=notes)
+        assert notes == []
+        assert len(errors) == 1 and "broken first-party import" in errors[0]
 
 
 def _registry(tmp_path, components):

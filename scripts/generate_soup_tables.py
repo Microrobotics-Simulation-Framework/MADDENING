@@ -733,18 +733,57 @@ def _check_benchmark_modules_are_complete() -> list[str]:
 
 def _marker_re(name: str) -> re.Pattern:
     return re.compile(
-        r"(?P<begin><!-- BEGIN GENERATED: " + re.escape(name) + r"[^>]*-->\n)"
+        r"(?P<begin><!-- BEGIN GENERATED: " + re.escape(name)
+        + r"(?![\w-])[^>]*-->\n)"
         r"(?P<body>.*?)"
         r"(?P<end><!-- END GENERATED: " + re.escape(name) + r" -->)",
         re.DOTALL,
     )
 
 
+def _markers(name: str) -> tuple[re.Pattern, re.Pattern]:
+    """Every BEGIN / END marker for block ``name``, paired or not.
+
+    The name must end at a word boundary, so ``test-suite`` does not count
+    a ``test-suite-old`` marker.
+    """
+    begin = re.compile(r"<!-- BEGIN GENERATED: " + re.escape(name) + r"(?![\w-])")
+    end = re.compile(r"<!-- END GENERATED: " + re.escape(name) + r" -->")
+    return begin, end
+
+
+def _display(path: Path) -> Path:
+    try:
+        return path.relative_to(REPO_ROOT)
+    except ValueError:
+        return path
+
+
 def splice(text: str, name: str, body: str, path: Path) -> str:
+    """Replace the one generated block ``name`` in ``text`` with ``body``.
+
+    Exactly one BEGIN and one END marker must be present.  ``--check`` used
+    to compare only the first copy of a block (``count=1``), so a second,
+    stale copy -- the shape of a bad merge, which duplicates a marked
+    region -- passed with the whole document "matching its sources"
+    (audit_040_p4_1, G5).  Regenerating every copy would hide that such a
+    merge happened; a document that holds a generated block twice is
+    refused instead, and so is a lone or unbalanced marker.
+    """
     pattern = _marker_re(name)
+    begin, end = _markers(name)
+    n_begin, n_end = len(begin.findall(text)), len(end.findall(text))
+    if n_begin > 1 or n_end > 1 or n_begin != n_end:
+        raise SystemExit(
+            f"{_display(path)}: generated block '{name}' must appear exactly "
+            f"once, and it has {n_begin} BEGIN and {n_end} END marker(s).  A "
+            f"second copy is never regenerated or compared, so it can say "
+            f"anything; delete every copy but one (a bad merge is the usual "
+            f"cause), then run scripts/generate_soup_tables.py"
+        )
     if not pattern.search(text):
         raise SystemExit(
-            f"{path.relative_to(REPO_ROOT)}: no "
+            f"{_display(path)}: no "
             f"'<!-- BEGIN GENERATED: {name} -->' / "
             f"'<!-- END GENERATED: {name} -->' pair found"
         )

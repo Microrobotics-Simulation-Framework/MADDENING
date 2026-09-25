@@ -549,7 +549,7 @@ class TestWaveformIterations:
     (MADD-ANO-027).  These tests check that the option runs under every
     path; what the extra sweeps do and do not change is pinned in
     ``tests/core/test_coupling_waveform_report.py``
-    (``test_a_converged_first_sweep_leaves_the_later_sweeps_nothing_to_change``,
+    (``test_each_later_sweep_moves_a_converged_state_by_about_one_residual``,
     ``test_a_capped_first_sweep_is_continued_by_the_later_ones``).
     """
 

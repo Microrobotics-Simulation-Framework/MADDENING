@@ -147,8 +147,15 @@ class CouplingGroup:
         bare field name instead of a one-element tuple, an empty
         mapping and a mapping naming only foreign nodes all raise
         ``ValueError`` here rather than failing inside the traced
-        coupling loop.  Read **only** under the two IQN accelerations;
-        supplying it under any other is inert and warns
+        coupling loop.  Only floating-point fields are accelerated,
+        here and under ``"aitken"`` / ``"fixed"``: an integer, boolean
+        or PRNG-key field is recomputed from the pre-step state on every
+        pass, so a named one is dropped from the selection, and
+        ``compile()`` refuses a selection that names no floating field.
+        (Before 0.4.0, ``solver="fori"`` with ``"aitken"`` or
+        ``"fixed"`` relaxed such fields through float32 and kept the
+        rounded value: MADD-ANO-059.)  Read **only** under the two IQN
+        accelerations; supplying it under any other is inert and warns
         (``UserWarning``).
     subcycling : bool
         If True, allow mixed timesteps within the coupling group.
@@ -191,10 +198,14 @@ class CouplingGroup:
         relaxation (MADD-ANO-027): each sweep re-solves the same fixed
         point, from where the previous sweep stopped and with a freshly
         started accelerator, and no sweep sees a boundary waveform over
-        the sub-step window (see ``boundary_interpolation``).  With a
-        converged first sweep the result equals ``waveform_iterations=1``;
-        when the first sweep stops at ``max_iterations`` the later sweeps
-        act as extra iterations, so raise ``max_iterations`` instead.
+        the sub-step window (see ``boundary_interpolation``).  Every
+        sweep starts with one pass, so after a converged first sweep each
+        later sweep still applies at least one more pass and moves the
+        state by about one residual -- within the tolerance, and
+        identical to ``waveform_iterations=1`` only at exact
+        stationarity.  When the first sweep stops at ``max_iterations``
+        the later sweeps act as extra iterations, so raise
+        ``max_iterations`` instead.
         ``1`` (the default) runs the solve once.  Read **only** when
         ``subcycling=True``; setting it away from its default otherwise
         is inert and warns (``UserWarning``).  Each sweep has a budget of

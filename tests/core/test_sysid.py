@@ -92,6 +92,53 @@ def test_windows_must_tile_the_observations(spring):
         windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"], window=7)
 
 
+def _truncated(obs, field, n):
+    return {"s": {**obs["s"], field: obs["s"][field][:n]}}
+
+
+@pytest.mark.parametrize("short_field", ["velocity", "position"])
+def test_observation_leaves_of_unequal_length_are_refused(spring, short_field):
+    """``T`` used to come from the first leaf alone.  A *later* leaf that
+    was shorter was read past its end -- ``dynamic_slice`` clamps, so the
+    late windows compared against its last sample repeated and the loss
+    was finite and non-zero at the true parameters -- and a *first* leaf
+    that was shorter set ``T`` and silently dropped the others' tail.
+    ``position`` sorts before ``velocity``, so the two cases are the two
+    orders.  Both lengths below tile with ``WINDOW``, so only the length
+    check can refuse them."""
+    gm, obs = spring
+    ragged = _truncated(obs, short_field, N_STEPS - WINDOW + 1)
+    with pytest.raises(ValueError, match="disagree on the leading axis") as exc:
+        windowed_loss(gm, gm.params, ragged, obs_fn=lambda h: h["s"]["position"],
+                      window=WINDOW)
+    msg = str(exc.value)
+    assert f"{N_STEPS + 1}: " in msg and f"{N_STEPS - WINDOW + 1}: " in msg, msg
+    assert "'s.position'" in msg and "'s.velocity'" in msg, msg
+    with pytest.raises(ValueError, match="disagree on the leading axis"):
+        init_window_states(ragged, WINDOW)
+
+
+def test_window_states_of_unequal_length_are_refused(spring):
+    """The multiple-shooting starts are indexed per window with the same
+    clamping ``dynamic_index``: a leaf with too few entries would restart
+    its late windows from its last entry."""
+    gm, obs = spring
+    ws = init_window_states(obs, WINDOW)
+    ragged = {"s": {**ws["s"], "velocity": ws["s"]["velocity"][:-1]}}
+    with pytest.raises(ValueError,
+                       match="window_states leaves disagree on the leading axis"):
+        windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                      window=WINDOW, window_states=ragged)
+
+
+def test_a_scalar_observation_leaf_is_refused_by_name(spring):
+    gm, obs = spring
+    bad = {"s": {**obs["s"], "velocity": obs["s"]["velocity"][0]}}
+    with pytest.raises(ValueError, match=r"'s\.velocity' is a scalar"):
+        windowed_loss(gm, gm.params, bad, obs_fn=lambda h: h["s"]["position"],
+                      window=WINDOW)
+
+
 def test_mask_unconverged_through_coupled_group():
     gm = _spring_gm(coupled=True)
     obs = _observations(gm)

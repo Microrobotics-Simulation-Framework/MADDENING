@@ -69,6 +69,7 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.params import check_bounds
 from maddening.fmi.directional_derivatives import (
     DirectionalDerivativeKind,
     get_directional_derivative,
@@ -108,6 +109,55 @@ def _same_leaf(a: Any, b: Any) -> bool:
     return x.shape == y.shape and bool(np.array_equal(x, y))
 
 
+def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
+    """``arr`` cast to ``dtype``, refused unless the model can hold it.
+
+    The one value check on every write path into a sidecar's parameters
+    and state: :meth:`FmuSidecar.set_params` here, and the TCP bridge's
+    ``set`` and ``set_state`` through
+    :func:`maddening.fmi.tcp_bridge.checked_value`, which delegates to
+    this function.  It lives in this module because the bridge imports
+    the sidecar and not the other way round.
+
+    Raises
+    ------
+    ValueError
+        If the incoming value is not finite, or if ``dtype`` cannot hold
+        it: a float32 leaf set to ``1e39`` would be stored (and read back)
+        as ``inf``, and an integer would wrap or truncate silently.
+    """
+    a = np.asarray(arr)
+    if np.issubdtype(a.dtype, np.inexact) and not bool(np.all(np.isfinite(a))):
+        raise ValueError(f"{what}: value must be finite")
+    with np.errstate(over="ignore", invalid="ignore"):
+        cast = a.astype(dtype)
+    if np.issubdtype(cast.dtype, np.floating):
+        fits = bool(np.all(np.isfinite(cast)))
+    elif np.issubdtype(cast.dtype, np.integer):
+        fits = bool(np.array_equal(cast.astype(np.float64), a.astype(np.float64)))
+    else:
+        fits = True                                       # bool
+    if not fits:
+        raise ValueError(f"{what}: value does not fit its type {dtype}")
+    return cast
+
+
+def _restored_leaf(value: Any, live: Any, *, what: str) -> np.ndarray:
+    """A snapshot leaf, checked against the live leaf it would replace.
+
+    The shape must match and the value must pass :func:`_checked_value` in
+    the live leaf's dtype.  A leaf with no live counterpart is checked in
+    its own dtype (finite only).
+    """
+    arr = np.asarray(value)
+    if live is None:
+        return _checked_value(arr, arr.dtype, what=what)
+    live_arr = np.asarray(live)
+    if arr.shape != live_arr.shape:
+        raise ValueError(f"{what}: shape {arr.shape} != {live_arr.shape}")
+    return _checked_value(arr, live_arr.dtype, what=what)
+
+
 @stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class SidecarConfig:
@@ -137,14 +187,14 @@ class SidecarConfig:
         and carried in the FMU state snapshot.
     param_specs : dict, optional
         ``GraphManager.param_specs()`` for the same graph.  When given,
-        :meth:`FmuSidecar.set_params` rejects a value outside a leaf's
-        declared ``ParamSpec.bounds`` (the ``min`` / ``max`` the model
-        description advertises), so an importer cannot drive the step
-        with a constant the graph declares invalid.  The FMU-state
-        archive path in
+        :meth:`FmuSidecar.set_params` and :meth:`FmuSidecar.set_fmu_state`
+        reject a value outside a leaf's declared ``ParamSpec.bounds`` (the
+        ``min`` / ``max`` the model description advertises), so an
+        importer cannot drive the step with a constant the graph declares
+        invalid.  The FMU-state archive path in
         :class:`maddening.fmi.tcp_bridge.FmuTcpBridge` checks against the
-        same declarations, so neither door into the parameter tree is
-        wider than the other.
+        same declarations, so no door into the parameter tree is wider
+        than another.
     fixed_params : mapping of str to str, optional
         ``{"<node>.params.<key>": reason}`` for parameters the compiled step
         cannot read -- pass :attr:`ModelDescription.fixed_parameters
@@ -250,12 +300,17 @@ class FmuSidecar:
         parameter value reference) into the pytree the next step uses.
 
         Keys are ``"<node>.params.<key>"``; an unknown name, a shape
-        that differs from the current leaf, a new value for a parameter the
+        that differs from the current leaf, a value that is not finite or
+        that the leaf's dtype cannot hold (a float32 leaf set to ``1e39``
+        would read back as ``inf``), a new value for a parameter the
         step cannot read (``SidecarConfig.fixed_params``), or a value
         outside the leaf's ``ParamSpec.bounds`` (when the config carries
         ``param_specs``) is an error, so an importer cannot silently
         tune a constant the step never reads or declares invalid.  The
-        call is atomic: nothing is written unless every update is valid.
+        value check is the TCP bridge's own, so ``set_params`` refuses
+        what the bridge's ``set`` refuses, with or without
+        ``param_specs``.  The call is atomic: nothing is written unless
+        every update is valid.
         """
         if self._params is None:
             raise RuntimeError(
@@ -272,7 +327,11 @@ class FmuSidecar:
                     f"unknown parameter {name!r}; known: {sorted(self.get_params())}",
                 )
             current = nodes[node][key]
-            new = jnp.asarray(value, dtype=current.dtype)
+            # Checked before the cast, not after: ``jnp.asarray(1e39,
+            # dtype=float32)`` is ``inf``, NaN passes straight through, and
+            # without ``param_specs`` nothing below looks at the value.
+            new = jnp.asarray(_checked_value(
+                value, current.dtype, what=f"parameter {name!r}"))
             if new.shape != current.shape:
                 raise ValueError(
                     f"parameter {name!r} has shape {current.shape}, got {new.shape}",
@@ -306,17 +365,59 @@ class FmuSidecar:
         )
 
     def set_fmu_state(self, fmu_state: FMUState) -> None:
+        """Restore a snapshot taken by :meth:`get_fmu_state` (or built with
+        :func:`~maddening.fmi.fmu_state.serialize_fmu_state`).
+
+        A snapshot is a door into the state and parameter tree, so it is
+        held to the checks the TCP bridge's ``set_state`` applies, with the
+        same messages, all before anything is committed: every state leaf
+        and every parameter must be finite and representable in the dtype
+        (and have the shape) of the live leaf it replaces, a parameter the
+        step cannot read (``SidecarConfig.fixed_params``) may not change,
+        and the restored parameters must lie inside their declared
+        ``ParamSpec`` bounds when the config carries ``param_specs``.  A
+        snapshot of a *diverged* model -- one holding ``inf`` or ``NaN`` --
+        therefore does not restore; the error names the field.
+
+        Raises
+        ------
+        ValueError
+            On a schema-token mismatch or an unreadable payload (see
+            :func:`~maddening.fmi.fmu_state.deserialize_fmu_state`), or if
+            any of the checks above fails.  Nothing is written.
+        """
         state, params = deserialize_fmu_state(
             fmu_state, expected_schema_token=self._config.schema_token,
             return_params=True,
         )
+        new_state: dict[str, dict[str, Any]] = {}
+        for node, fields in state.items():
+            if not isinstance(fields, dict):
+                # A graph state is node -> {field: array}; anything else is
+                # not a snapshot of this sidecar's model.
+                raise ValueError(f"FMU state {node}: expected a mapping of fields, "
+                                 f"got {type(fields).__name__}")
+            live_fields = self._state.get(node) or {}
+            new_state[node] = {
+                field: _restored_leaf(value, live_fields.get(field),
+                                      what=f"FMU state {node}.{field}")
+                for field, value in fields.items()
+            }
         new_params = None
         if params is not None and self._params is not None:
-            new_params = {
-                k: ({n: {kk: jnp.asarray(vv) for kk, vv in leaves.items()}
-                     for n, leaves in v.items()} if isinstance(v, dict) else v)
-                for k, v in params.items()
-            }
+            new_params = {}
+            for section, owners in params.items():
+                if not isinstance(owners, dict):
+                    new_params[section] = owners
+                    continue
+                live_owners = self._params.get(section) or {}
+                new_params[section] = {
+                    owner: {key: jnp.asarray(_restored_leaf(
+                        value, (live_owners.get(owner) or {}).get(key),
+                        what=f"FMU state param {owner}.params.{key}"))
+                        for key, value in leaves.items()}
+                    for owner, leaves in owners.items()
+                }
             # A snapshot is a door into the parameter tree like set_params:
             # it may not install a new value for a parameter the step cannot
             # read.  Checked before anything is committed.
@@ -329,7 +430,10 @@ class FmuSidecar:
                 restored = new_params.get("nodes", {}).get(node, {}).get(key, current)
                 if not _same_leaf(restored, current):
                     raise _not_tunable_error(name, reason, current)
-        self._state = state
+            # The declared bounds, through the same function the bridge's
+            # set_state applies them with, so the messages agree.
+            check_bounds(new_params, self._config.param_specs or {})
+        self._state = new_state
         if new_params is not None:
             self._params = new_params
 

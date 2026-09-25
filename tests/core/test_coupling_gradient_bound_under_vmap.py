@@ -28,6 +28,9 @@ from maddening.core.node import BoundaryInputSpec, SimulationNode
 
 # Compiling the spectral and gradient-bound machinery twice (the step and
 # its vmap) costs 17 s on a three-core slice, over the per-test budget.
+# Per push, the bound read through one vmapped compile of a simpler group,
+# member by member against the closed-form error:
+# tests/core/test_coupling_gradient_bound_through_a_vmapped_step.py::test_the_gradient_bound_holds_for_each_member_of_a_vmapped_batch
 pytestmark = pytest.mark.slow
 
 KEY = "a+b"

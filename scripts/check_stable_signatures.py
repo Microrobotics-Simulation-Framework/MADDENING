@@ -308,7 +308,11 @@ def _flatten(snapshot: dict[str, Any]) -> dict[str, Any]:
     the surface is resolved from the unbound function and keeps ``self``, the
     member record drops it -- so one silently overwrote the other, and the
     "N member(s) unchanged" line understated the snapshot by exactly the
-    number of such surfaces (4 of 243 today).
+    number of such surfaces: 4 of the 243 recorded member records when this
+    was found (2026-09-20).  On 2026-09-25 it is still 4, of 252 records,
+    and the passing line reads "17 STABLE surface(s), 248 member(s) (4 of
+    them tagged in their own right)".  That line (:func:`_count_line`) is
+    the live count; a figure written here goes stale.
 
     The registered surface wins, because that is the thing the registry
     promises, and the duplicate member is not emitted at all rather than

@@ -2215,7 +2215,7 @@ MADDENING depends on several core libraries that are themselves SOUP when MADDEN
 
 **Dependency monitoring**: MADDENING monitors its core dependencies (JAX, jaxlib, NumPy) for known security vulnerabilities and breaking changes using two mechanisms: (1) **GitHub Dependabot** is enabled on the repository and automatically monitors PyPI dependencies for published CVEs, creating pull requests for security-relevant version bumps; (2) **manual changelog review** of JAX ecosystem libraries (JAX, jaxlib, Equinox, Optax) at each MADDENING release, since these libraries are not comprehensively covered by CVE databases and may introduce correctness-affecting changes (XLA compiler changes, numerical behaviour changes) that are not classified as security vulnerabilities. Both mechanisms are documented in `SECURITY.md`. Security-relevant dependency updates are flagged in the `Security` section of `CHANGELOG.md`. Downstream commercial manufacturers building Class III products will need more rigorous post-market surveillance of SOUP dependencies — that is their PMS obligation under EU MDR Article 83, not MADDENING's.
 
-**Version pinning**: JAX is a rapidly evolving library with frequent releases. MADDENING pins tested version ranges in `pyproject.toml` and runs CI against pinned versions for each release. The exact versions tested are recorded in the SOUP package document and SBOM.
+**Version pinning**: JAX is a rapidly evolving library with frequent releases. MADDENING declares version ranges in `pyproject.toml` and runs CI against pinned `jax`/`jaxlib` versions for each release. The SOUP package document records those pinned versions.  The SBOM records one clean resolution of each covered install on a stated date; it is not the environment a CI run installed, and the other base dependencies CI resolves are not recorded (`docs/validation/framework_verification.md`).
 
 **Dependency credibility assessment**:
 
@@ -2504,19 +2504,22 @@ The `SimulationProvenance` dataclass (Section 9.2) captures `maddening_version` 
 
 #### Software Bill of Materials (SBOM)
 
-EU MDR (via MDCG 2019-16) and FDA cybersecurity guidance both increasingly expect SBOMs for software components in medical devices. MADDENING should publish SBOM artifacts with each release.
+EU MDR (via MDCG 2019-16) and FDA cybersecurity guidance both increasingly expect SBOMs for software components in medical devices. MADDENING publishes SBOM artifacts with each release.
 
-**Recommendation**: Generate CycloneDX or SPDX SBOMs as part of the release process. Tools like `cyclonedx-py` can generate these automatically from `pyproject.toml`.
+**Implemented in v0.4.0.**  One CycloneDX 1.6 JSON SBOM per covered install (the base install, and the `server`, `surrogates` and `usd` extras) is committed under `docs/validation/sbom/`:
 
 ```bash
-# Generate SBOM (add to release process)
-pip install cyclonedx-bom
-cyclonedx-py environment -o sbom.json --format json
+# Needs uv and network access; writes docs/validation/sbom/ and runs the check
+python scripts/generate_sbom.py
+# Offline; CI runs it through tests/compliance/test_sbom_check.py
+python scripts/check_sbom.py
 ```
 
-The SBOM should be:
-- Published alongside each GitHub release as a release artifact
-- Referenced in the SOUP package document
+Each SBOM is generated from a clean install of the wheel into a fresh virtual environment, never from a developer's environment.  The obvious recipe, `cyclonedx-py environment` in the working environment, records that machine's packages and not MADDENING's dependency set.  The `sbom.json` it produced in 2026-03 listed 350 components, ROS packages among them, and was removed in 0.4.0.  The tool runs from a separate environment so that it is not in the SBOM either.
+
+The SBOM is:
+- Regenerated from the release commit before each tag, and attached to the GitHub release by hand until a release workflow does it
+- Referenced in the SOUP package document (§6 of `docs/validation/soup_package.md`), which says which installs are covered and why, and what an SBOM does not record
 - Available for downstream tools to incorporate into their own SBOMs
 
 ---
@@ -3241,7 +3244,7 @@ These items are essential for EU regulatory readiness and should be prioritized 
 24. **`docs/regulatory/mdcg_2019_11.md`** (Section 13) — qualification and classification guide
 25. **Complete and expand `docs/regulatory/downstream_integration.md`** (Section 2) — flesh out the Phase 1 skeleton with full per-layer responsibility documentation, classification-by-use-mode analysis, and complete commercial boundary content
 26. **`docs/validation/cou_template.md`** (Section 4) — downstream user COU template
-27. **SBOM generation** (Section 14) — add CycloneDX to release process
+27. **SBOM generation** (Section 14) — add CycloneDX to release process (done in v0.4.0; attaching it to the release is still manual)
 28. **`SECURITY.md`** (Section 8) — vulnerability reporting process
 
 ### Phase 4: UQ, Stability, and Commercial Readiness (when surrogate framework matures)
@@ -3661,8 +3664,8 @@ These items establish the shared compliance infrastructure that all subsequent p
 
 **SBOM:**
 
-- [ ] SBOM generation is integrated into the release process using CycloneDX format (Section 14)
-- [ ] SBOM artifact (JSON or XML) is attached to each GitHub release as a release asset (Section 14)
+- [x] SBOM generation is integrated into the release process using CycloneDX format (Section 14): `scripts/generate_sbom.py`, a documented release step, and a CI check that fails on a version bump until the SBOMs are regenerated
+- [ ] SBOM artifact (JSON or XML) is attached to each GitHub release as a release asset (Section 14): a manual release step in `docs/validation/soup_package.md` §6; no workflow does it yet
 
 ### Phase 4 — UQ and Stability Machinery
 

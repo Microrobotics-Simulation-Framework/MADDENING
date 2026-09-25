@@ -919,10 +919,10 @@ def test_the_pipe_ladder_is_not_in_the_asymptotic_range_and_the_harness_says_so(
 def test_lbm_pipe_declares_no_order_so_the_study_skips_rather_than_passing():
     """An undeclared node with a converging ladder still is not verified.
 
-    ``LBMPipeNode`` claims "2nd-order in space and time for low Ma" in
-    prose, in ``meta.discretization``, but declares no
-    ``DiscretizationOrder``, so there is nothing machine-readable to
-    hold the measurement to.  The harness says so instead of reporting
+    ``LBMPipeNode`` declares no ``DiscretizationOrder`` (and, since 0.4.0,
+    claims none in ``meta.discretization`` either: it used to say
+    "2nd-order in space and time for low Ma"), so there is nothing
+    machine-readable to hold the measurement to.  The harness says so instead of reporting
     a pass -- and the skip carries the whole measurement, so nothing
     the study learned is thrown away.
     """

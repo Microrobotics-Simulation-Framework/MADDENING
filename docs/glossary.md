@@ -391,6 +391,7 @@ SaMD
 
 SBOM
    *Software Bill of Materials* — a machine-readable inventory of every
-   dependency in a build. MADDENING emits one (CycloneDX format) so
-   downstream {term}`SOUP` analysis has a complete component list.
+   dependency in a build. MADDENING commits one per covered install
+   (CycloneDX format, `docs/validation/sbom/`) so downstream {term}`SOUP`
+   analysis has a complete component list.
 ```

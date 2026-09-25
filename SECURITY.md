@@ -52,9 +52,11 @@ The primary security concerns are:
 - **Network surfaces** (only with the `api`, `network` or `cloud` extras):
   the HTTP/WebSocket API on 8000, the WebRTC signaling socket on 8443,
   and the ZeroMQ transports on 5555 (state), 5556 (commands) and 5580
-  (multi-job coordinator)
+  (multi-job coordinator).  Separately, the FMU TCP bridge
+  (`maddening.fmi.tcp_bridge`, base install) listens on an ephemeral
+  loopback port while an FMU is served
 
-### The rule every listening socket follows
+### The rule for listening sockets, and its one exception
 
 **A loopback bind is unauthenticated; any other bind demands a
 credential.** One credential, `MADDENING_API_TOKEN`, covers the HTTP API
@@ -62,6 +64,13 @@ credential.** One credential, `MADDENING_API_TOKEN`, covers the HTTP API
 CURVE keypairs). The signaling socket has its own,
 `MADDENING_STREAM_SECRET`. No surface falls back to cleartext when its
 credential is missing -- it refuses to start.
+
+**The FMU TCP bridge is the exception: it authenticates nobody, on any
+bind.** Any process that can reach its port can read, write, step and
+hold the model. It defaults to loopback, and it takes a non-loopback
+`host` without a check or a warning. Keep it on loopback, on a
+single-user host or in its own network namespace, for trusted clients
+only; see `MADD-ANO-023`.
 
 **There is no TLS on the HTTP API.** Its bearer token crosses the network
 in cleartext, so it belongs behind an SSH tunnel or a TLS-terminating

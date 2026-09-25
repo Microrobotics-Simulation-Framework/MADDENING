@@ -6,7 +6,7 @@
  "n_devices": 4,
  "environment": {
   "hostname": "dry-run-host",
-  "timestamp_utc": "2026-09-25T04:49:41Z",
+  "timestamp_utc": "2026-09-25T06:09:08Z",
   "python": "3.12.3",
   "jax": "0.11.0",
   "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
   "nvidia_smi": "skipped (dry run)",
   "xla_flags": "--xla_force_host_platform_device_count=4",
   "jax_platforms": "cpu",
-  "git_commit": "faa76e5b76fb0ffbabfdcfb6d120d4d8cb9bd8b2"
+  "git_commit": "24bbcf741c518714f91b96dbf0afe564a5fd190b"
  },
  "config": {
   "goal": "all",
@@ -450,5 +450,5 @@
   }
  ],
  "passed": true,
- "wall_s": 6.422469861005084
+ "wall_s": 5.174948589003179
 }

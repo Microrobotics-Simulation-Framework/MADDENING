@@ -24,14 +24,27 @@ instead of ``halo_width`` now raise
 
 ## Why this changed
 
-Pencil decomposition (the multi-GPU sharding path —
-{class}`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`
-in v0.2.1, plus
-{class}`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
-added in v0.3.0) needs to know each axis's halo width, not just
-"do you need a halo at all".  The boolean was load-bearing
+Pencil decomposition (the Cartesian multi-GPU sharding path,
+{class}`~maddening.cloud.multigpu.sharded_node.ShardedStencilNode`,
+added in v0.2.1) needs to know each axis's halo width, not just
+"do you need a halo at all": it pads every sharded axis by that
+axis's width on each side, `[halo | interior | halo]`, before
+`update_padded` runs.  The boolean was load-bearing
 once — when stencils were 1-D and one axis per node — but it
 silently lost information the moment we shipped 3-D LBM.
+
+{class}`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
+(added in v0.3.0) takes no halo width from the node.  A node's
+neighbours there are the partition layout's ghost cells, handed to
+`update_padded` as `[the shard's own cells | ghost cells]`, so a node
+written for it declares `halo_width() == {}`.  Since v0.4.0 that
+wrapper refuses a node that declares a non-empty `halo_width()`: that
+is the Cartesian contract, and such a node would read the partition
+layout as the wrong cells.  Shard a stencil node with
+`ShardedStencilNode`.  (Until v0.4.0 this guide said the unstructured
+wrapper needed each axis's halo width too.)  The
+[sharding topology guide](sharding_topology.md) sets the two layouts
+side by side.
 
 The v0.2 release kept the boolean as a derived fallback for
 back-compat and emitted a {class}`FutureWarning`.  v0.3.0 closes
@@ -83,6 +96,10 @@ class MyPointwiseNode(SimulationNode):
 
 If your node never overrode `halo_width` *or* `requires_halo`, the
 base class already returns `{}` and you don't need to do anything.
+
+A node written for `ShardedUnstructuredNode` returns `{}` too, even
+though its `update_padded` reads neighbours: they arrive as the
+partition layout's ghost cells, not as a per-axis halo (see above).
 
 ### Auto-migration tooling
 

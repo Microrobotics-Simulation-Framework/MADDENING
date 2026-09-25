@@ -1034,6 +1034,10 @@ class SimulationNode(ABC):
         dt: float,
         *,
         static_padded: dict | None = None,
+        # Spells only the int-keyed entries; the one str key,
+        # ShardedUnstructuredNode's "n_local", is documented below.
+        # Widening it changes a recorded STABLE signature, which
+        # scripts/check_stable_signatures.py classifies as breaking.
         shard_info: dict[int, tuple[Any, int]] | None = None,
     ) -> dict:
         """Update from halo-padded state.
@@ -1077,7 +1081,7 @@ class SimulationNode(ABC):
             where there is no cell beyond the edge.  (Until 0.4.0 it was
             edge-filled under every mode.)  ``None`` in the unsharded
             path and when the node carries no sharded statics.
-        shard_info : dict[int, tuple[Any, int]], optional
+        shard_info : dict, optional
             ``{spatial_axis: (global_offset, local_extent)}`` for every
             spatial axis the wrapping :class:`ShardedStencilNode` shards.
             ``global_offset`` is a **traced JAX scalar**
@@ -1091,6 +1095,12 @@ class SimulationNode(ABC):
             shard's own cell count, and rows from ``n_owned`` on are
             padding that a node summing its cells must mask out
             (``jnp.arange(n_local_max) < shard_info["n_local"]``).
+            So the keys are ``int`` spatial axes, each mapped to an
+            ``(offset, extent)`` tuple, plus, from the unstructured
+            wrapper only, the one ``str`` key ``"n_local"``, mapped to a
+            scalar.  The annotation,
+            ``dict[int, tuple[Any, int]] | None``, spells only the
+            ``int``-keyed entries.
 
         Sharded outputs
         ---------------

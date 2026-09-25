@@ -20,12 +20,12 @@ pod except whether to stop.
 
 | # | claim | goal(s) | compared against | limit |
 |---|---|---|---|---|
-| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (periodic, edge and Dirichlet ends), `forward` | the unsharded node, same pod | rel 1e-5 |
+| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (a field under periodic, edge and Dirichlet ends and a D2Q9 lattice, on the 1-D and the 2 × 2 pencil mesh), `forward` | the unsharded node, same pod | rel 1e-5 |
 | 2 | halo exchange at the shard and global boundaries | `halo` | NumPy, every slot, forward and adjoint | **0** (bit for bit) |
 | 3 | sharded adjoint ≡ unsharded adjoint | `stencil`, `gradient`, `coupled` | the unsharded adjoint | rel 1e-5 (rollouts), 1e-4 (coupled, IFT), 1e-3 (`sharded_cg`) |
-| 4 | nested `HybridNode(ShardedStencilNode(inner))` | `hybrid` | `HybridNode(inner)` in the same graph | rel 1e-5 |
+| 4 | nested `HybridNode(ShardedStencilNode(inner))` | `hybrid` (pencil mesh) | `HybridNode(inner)` in the same graph | rel 1e-5 |
 | 5 | an indivisible grid is refused | `indivisible` | the documented `ValueError`, naming both numbers | exact |
-| 6 | one sharded and one replicated member in one coupling group, with its adjoint | `coupled` | the same group with the node unwrapped, **and** a float64 model of the coupled step | rel 1e-5 forward; gradient 1e-4 (IFT) / 1e-5 (`"fori"`), 1e-4 against the model |
+| 6 | one sharded and one replicated member in one coupling group, with its adjoint | `coupled` (pencil mesh) | the same group with the node unwrapped, **and** a float64 model of the coupled step | rel 1e-5 forward; gradient 1e-4 (IFT) / 1e-5 (`"fori"`), 1e-4 against the model |
 
 The limits live in `LIMITS` in `run_pod.py`, each with its reason; a dry
 run is held to the same ones.  Item 6 has no expected value anywhere else,
@@ -33,6 +33,34 @@ which is why its goal also carries an independent float64 model: a fault
 that moved the sharded and the unsharded group alike (a solver problem on
 the GPU backend, say) passes a sharded-versus-unsharded comparison and
 fails against the model.
+
+### What a broken wrapper does to the goals
+
+A sharded-versus-unsharded comparison proves the wrapper only on the paths
+its node carries into the answer.  Until 0.4.0 the stencil goals' node
+read its static only in the interior, took scalar inputs only, declared no
+domain integral and ran on a 1-D mesh, and `ShardedStencilNode` broken in
+four ways -- a static's halos set to NaN, grid-shaped inputs zeroed,
+domain integrals halved, every sharded axis after the first zero-filled at
+the global edges -- passed every goal and closed items 1, 3, 4 and 6 once
+relabelled as a GPU run.  The goals' `Field2D` now reads its mask one cell
+into the halo (face-averaged conductances), takes a grid-shaped `source`
+(read through a 5-point smoothing) and a grid-shaped `ambient`, and
+carries a domain integral, `averages`, in its state; the goals run on the
+2 × 2 pencil mesh, and the `stencil` goal adds `LBMNode` on D2Q9, whose
+streaming reads the halo corners.  In the `coupled` goal the field reaches
+the far field through `averages` and the far field reaches the field as a
+grid-shaped `ambient`, so both paths are inside the group's fixed point
+and its adjoint.
+
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds the four faults
+as seeds of `sharded_node.py`: slow-marked, it applies each to a scratch
+copy of the library, runs `--goal checklist --dry-run --keep-going`, and
+requires `stencil`, `hybrid` and `coupled` to read `FAIL` (and
+`indivisible` and `halo` `PASS`), items 1, 3, 4 and 6 `FAILED` once
+relabelled as four GPUs, and the unseeded copy to pass everything.  Its
+per-push tests fail when a seed no longer matches the wrapper, and check
+one step of the goals' own node against each seeded wrapper in-process.
 
 ### The transport question
 
@@ -49,12 +77,12 @@ carries it to the GPUs.
 
 | # | CPU virtual devices (`tests/cloud/multigpu/`) | on the pod |
 |---|---|---|
-| 1 | `test_property_sharded_equals_unsharded.py` (all three wrappers, 1–4 devices, node and graph level), `test_sharded_stencil_node.py`, `test_sharded_unstructured.py`, `test_exchange_ppermute.py` | `stencil` (a 2-D field with a sharded `StaticArray`, 1e5–1e6 cells; periodic ends at every size, and at the smallest also `"edge"` ends -- the wrapper's default fill, on the sharded and the unsharded axis -- and Dirichlet ends held through a boundary input), `forward` (unstructured, both transports) |
+| 1 | `test_property_sharded_equals_unsharded.py` (all three wrappers, 1–4 devices, node and graph level), `test_sharded_stencil_node.py`, `test_sharded_unstructured.py`, `test_exchange_ppermute.py`, `test_stencil_static_halo_and_axis_map.py`, `test_sharded_boundary_inputs.py`, `test_stencil_domain_integral_state.py`, `test_lbm_sharded.py` | `stencil` (a 2-D field reading a sharded `StaticArray` in its halo, with a grid-shaped source and a domain integral, 1e5–1e6 cells: periodic ends at every size on the pencil mesh, and at the smallest size `"edge"` ends -- the wrapper's default fill -- and Dirichlet ends held through a boundary input, plus a D2Q9 lattice with a grid-shaped body force, each on the 1-D and the pencil mesh), `forward` (unstructured, both transports) |
 | 2 | `test_halo.py` (slab and pencil fills, halo 1 and 2, the gradient by finite differences), `test_property_exchange_transports.py`, `test_exchange_ppermute.py` | `halo`: every mode × width on a 1-D and a 2×2 mesh, and the unstructured exchange under both transports, forward and adjoint, bit for bit |
 | 3 | `test_property_sharded_equals_unsharded.py::test_a_gradient_through_the_sharded_path_matches_the_unsharded_one`, `test_property_injected_params_gradient.py`, `test_sharded_gradient.py` (finite differences), `test_iterative_solver.py` | `stencil` (d/d initial field and d/d a parameter), `gradient`, `coupled` |
-| 4 | `test_sharded_static_cache.py`: static-cache invalidation, hashing and drift through `HybridNode(ShardedStencilNode(...))` with an empty correction — no forward or adjoint parity with a non-zero correction | `hybrid`: `run_scan` and `jax.grad` of the graph with a non-local correction (a shift across shards) |
+| 4 | `test_sharded_static_cache.py`: static-cache invalidation, hashing and drift through `HybridNode(ShardedStencilNode(...))` with an empty correction — no forward or adjoint parity with a non-zero correction | `hybrid`: `run_scan` and `jax.grad` of the graph on the pencil mesh with a non-local correction (a shift across shards), a grid-shaped source held through an external input, and the field's domain integral compared |
 | 5 | `test_property_shard_construction.py` (the stencil and pointwise refusals; the unstructured wrapper taking a prime cell count) | `indivisible`: the same refusals on the real mesh, a 2×2 pencil refusal naming axis 1 (recorded as *not run* on a device count with no pencil mesh), and an uneven unstructured split matching the unsharded node |
-| 6 | `test_coupling_group_with_sharded_and_replicated_members.py`: forward on every push, adjoint in the slow lane, default solver and `"fori"`, against the unwrapped group and a float64 model | `coupled` |
+| 6 | `test_coupling_group_with_sharded_and_replicated_members.py`: forward on every push, adjoint in the slow lane, default solver and `"fori"`, against the unwrapped group and a float64 model | `coupled`, on the pencil mesh, coupled through the field's domain integral and a grid-shaped input |
 
 Before item 6's test, the nearest coverage was
 `test_sharded_wrapper_coupling_hooks.py`, which couples a
@@ -73,9 +101,10 @@ python benchmarks/multigpu/run_pod.py --summarise /tmp/mg-dry     # needs no JAX
 pytest tests/cloud/multigpu -m "slow or not slow" -q             # includes the runner dry-run test
 ```
 
-The dry run takes about a minute on three cores.  It must print
-`checks n/n passed` for all eight goals, no `CHECK NOT RUN` line, and exit
-0.  The summary must
+The dry run takes about two minutes on three cores (`--cells 256 1024`,
+most of it XLA compiling the 9 `stencil` cases and the coupled group's
+adjoint).  It must print `checks n/n passed` for all eight goals, no
+`CHECK NOT RUN` line, and exit 0.  The summary must
 exit 0, show every checklist item as `open: passed on CPU / dry run only`
 (a dry run never closes an item), list nothing under "Records that cannot
 decide", and show the transport recommendation as `undecided`.  Anything
@@ -129,17 +158,38 @@ session, it is a different measurement).
 
 ### 2a. Sanity, and what to record before the first goal
 
+Each file records the commit `git rev-parse HEAD` names and nothing more:
+not whether the tree was dirty, nor where `maddening` was imported from.
+Until the runner records those, the session makes them true by procedure:
+
+* **Run from a clean checkout at one commit.**  `git status --porcelain`
+  prints nothing, before the first goal and after the last.
+* **Import `maddening` from that checkout.**  Print `maddening.__file__`
+  (below); it must be under the synced tree, not an older install.
+* **One pod per item.**  Every goal that decides a checklist item runs on
+  the same pod, in one session: the summary checks that an item's files
+  share a commit, not that they share a machine.
+* **Check `device_kinds` by eye** in the summary's run table: every line
+  of the session names the GPU the pod was rented with.
+
 ```sh
 cd ~/sky_workdir
 nvidia-smi -L                                    # four GPUs, else stop (section 3)
 pip install -q "jax[cuda12]>=0.10,<0.13" && pip install -q -e .
-python -c "import jax, jaxlib; print(jax.__version__, jaxlib.__version__, jax.devices())"
+echo "/results/" >> .git/info/exclude            # the session's output is not the tree
+test -z "$(git status --porcelain)" || { git status --short; echo "dirty tree: stop"; }
+python -c "import jax, jaxlib, maddening; print(jax.__version__, jaxlib.__version__, jax.devices()); print(maddening.__file__)"
 mkdir -p results/multigpu
-{ date -u; git rev-parse HEAD; nvidia-smi; pip freeze | grep -iE "^(jax|jaxlib|jax-cuda|lineax|equinox|numpy|scipy)"; } \
+{ date -u; git rev-parse HEAD; git status --porcelain; python -c "import maddening; print(maddening.__file__)"; \
+  nvidia-smi; pip freeze | grep -iE "^(jax|jaxlib|jax-cuda|lineax|equinox|numpy|scipy)"; } \
     > results/multigpu/session.txt 2>&1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 set -o pipefail
 ```
+
+A dirty tree is the stop condition of section 3, before anything is
+spent on goals.  Run `git status --porcelain` again after the last goal:
+it must still print nothing.
 
 Optional: `pip install pymetis` for a real graph partition of the mesh.
 
@@ -160,7 +210,7 @@ L=results/multigpu
 timeout 10m $R --goal indivisible 2>&1 | tee $L/indivisible.log      # checklist 5
 timeout 10m $R --goal halo        2>&1 | tee $L/halo.log             # checklist 2
 timeout 20m $R --goal coupled     2>&1 | tee $L/coupled.log          # checklist 6 (and 3)
-timeout 15m $R --goal stencil     2>&1 | tee $L/stencil.log          # checklist 1 and 3
+timeout 25m $R --goal stencil     2>&1 | tee $L/stencil.log          # checklist 1 and 3
 timeout 15m $R --goal hybrid      2>&1 | tee $L/hybrid.log           # checklist 4
 timeout 10m $R --goal exchange    2>&1 | tee $L/exchange.log         # the transport ranking
 timeout 15m $R --goal forward     2>&1 | tee $L/forward.log   # add --mesh /path/to/mesh.npz for a real mesh
@@ -197,10 +247,11 @@ the tests that need 8/16 devices.  It is not part of the session.
   `jaxlib`.
 * **The logs** (`*.log`): one line per measurement, the `CHECK FAILED`
   lines, and XLA's own warnings.  Under the default solver the coupled
-  goal logs `[SPMD] Involuntary full rematerialization ... f32[N+1]`: the
-  adjoint's failure check (a host callback, present above 50 coupled
-  degrees of freedom) is pinned to device 0, and XLA gathers the coupled
-  state vector onto that device and scatters it back.  It is expected,
+  goal logs `[SPMD] Involuntary full rematerialization ... f32[N+3]` (the
+  field, its two `averages`, the far field): the adjoint's failure check
+  (a host callback, present above 50 coupled degrees of freedom) is
+  pinned to device 0, and XLA gathers the coupled state vector onto that
+  device and scatters it back.  It is expected,
   it is counted in `device0_pinned_ops`, and its cost is inside the
   sharded `value_and_grad` time — record it, do not act on it at the pod.
 * **`session.txt`** and **`summary.txt`**, and by hand: the pod type and
@@ -217,15 +268,16 @@ dominates; a GPU compile of the coupled group's adjoint is assumed to take
 |---|---|---|---|
 | `indivisible` | 3 refusals; a 1e5-cell uneven unstructured run, 20 public `update()` calls | ~1 min | 10 min |
 | `halo` | 3 programs at 1e6 cells (1-D mesh, 2×2 mesh, unstructured) and the NumPy reference | 1–2 min | 10 min |
-| `coupled` | per size, 4 programs (2 solvers × sharded/unsharded) and the float64 model on the host | 5–10 min | 20 min |
-| `stencil` | 4 programs (rollout and gradient × 2 paths) per case: periodic ends at each size, edge and Dirichlet ends at 1e5 cells (5 cases) | 4–7 min | 15 min |
-| `hybrid` | per size, 2 graphs × (`run_scan` and the gradient) | 3–6 min | 15 min |
+| `coupled` | per size, 4 programs (2 solvers × sharded/unsharded) on the pencil mesh and the float64 model on the host | 5–10 min | 20 min |
+| `stencil` | 4 programs (rollout and gradient × 2 paths) per case: at 1e5 cells the field under each of the three ends and the D2Q9 lattice, on the 1-D and the pencil mesh (8 cases), and periodic ends on the pencil mesh at 3e5 and 1e6 (10 cases) | 8–14 min | 25 min |
+| `hybrid` | per size, 2 graphs × (`run_scan` and the gradient) on the pencil mesh | 3–6 min | 15 min |
 | `exchange` | per size, 2 transports | ~5 min | 10 min |
 | `forward` | per size, 2 transports, public and compiled step | ~10 min | 15 min |
 | `gradient` | per size, 3 rollout gradients and `sharded_cg` (3000-iteration cap) | ~15 min | 20 min |
 
-About 45–55 minutes of goals, 1–1.5 h with setup and copy-back.  Budget
-one and a half pod-hours; the whole session is capped at **2 hours**.
+About 50–65 minutes of goals, 1.25–1.75 h with setup and copy-back.
+Budget one and three-quarter pod-hours; the whole session is capped at
+**2 hours**.
 
 ## 3. Stop condition
 
@@ -237,6 +289,8 @@ pod:
   out), or anything else (a crash, an out-of-memory);
 * `nvidia-smi -L` lists fewer than four GPUs, or `jax.devices()` does
   not list four CUDA devices;
+* `git status --porcelain` prints anything, or `maddening.__file__` is not
+  under the synced checkout (section 2a);
 * the session passes **2 hours** since launch, or the provider's cost
   reaches the `CostPolicy` budget.
 
@@ -280,14 +334,15 @@ evidence only if it is what `run_pod.py`, as it stands, would have
 written; otherwise its goal reads `INVALID` and it closes nothing.  A
 file must:
 
-* be on the current `schema_version` (4);
+* be on the current `schema_version` (5);
 * record an `n_devices` no larger than the devices its `environment`
   lists (`n_devices_visible`, which must count `devices`), and the same
   `n_devices` in its `config` and in every result entry;
 * hold every case the runner runs for the file's own `config` (`cells`,
   `n_devices`, `synthetic`, `mesh`) and no other: every boundary mode ×
-  width × mesh of `halo`, the `"edge"` and Dirichlet ends of `stencil`
-  at its smallest size, both solvers of `coupled`, both transports, ...;
+  width × mesh of `halo`, every node × ends × mesh case of `stencil`,
+  the mesh of `hybrid` and `coupled`, both solvers of `coupled`, both
+  transports, ...;
 * carry exactly the checks the runner derives from its results -- the
   same names, values, limits, senses and flags.  So every limit is the
   one in `LIMITS` (a limit loosened, or tightened, in the file is
@@ -353,7 +408,7 @@ unsharded one" is a statement about the compiled step, not about Python;
 and in `coupled`, the sharded against the unsharded `value_and_grad`
 time, which is where the device-0 gather above shows its cost at scale.
 
-## Schema of the JSON (schema_version 4)
+## Schema of the JSON (schema_version 5)
 
 Common: `goal`, `dry_run`, `allow_fewer_devices`, `n_devices` (the mesh
 size), `environment` (`hostname`, `timestamp_utc`, `python`, `jax`,
@@ -382,25 +437,29 @@ compile without execution.
   mesh_shape, shape, halo, boundary, forward_max_abs, adjoint_max_abs}]`,
   `unstructured` = `{cells, partition, n_local_max, n_ghost_max,
   methods.<m>.{forward_max_abs, adjoint_max_abs}}`.
-* `coupled.json` results: `cells`, `shape`, `steps`, `coupled_dof`,
-  `max_iterations`, `tolerance`, `parameters`, `model` (`loss`, `grad`
-  and `wall_s` of the float64 model), `solvers.<ift|fori>` =
-  `{sharded, unsharded}` (`compile_s`, `value_and_grad` timing with
-  `ms_per_step`, `loss`, `grad`, `last_step_iterations` (`null` under
-  `"fori"`), `partitioned`, `device0_pinned_ops`), `parity_f`,
-  `parity_u`, `parity_loss`, `parity_grad`, `model.<side>.{f, u, loss,
+* `coupled.json` results: `mesh` (`1d`/`2d`), `mesh_shape`, `cells`,
+  `shape`, `steps`, `coupled_dof`, `max_iterations`, `tolerance`,
+  `parameters`, `model` (`loss`, `grad` and `wall_s` of the float64
+  model), `solvers.<ift|fori>` = `{sharded, unsharded}` (`compile_s`,
+  `value_and_grad` timing with `ms_per_step`, `loss`, `grad`,
+  `last_step_iterations` (`null` under `"fori"`), `partitioned`,
+  `device0_pinned_ops`), `parity_f`, `parity_averages`, `parity_u`,
+  `parity_loss`, `parity_grad`, `model.<side>.{f, averages, u, loss,
   grad}`.
-* `stencil.json` results, one per case: `cells`, `shape`, `boundary`
+* `stencil.json` results, one per case: `node` (`field` or `lbm`), `mesh`
+  (`1d` or `2d`), `mesh_shape`, `cells`, `shape`, `boundary`
   (`periodic`, `edge` or `dirichlet`), `steps`, `grad_steps`,
-  `input_partitioned`, `forward.{sharded,unsharded}` (`compile_s`,
-  `rollout` timing with `ms_per_step`), `forward.parity_f`,
-  `gradient.{sharded,unsharded}` (`compile_s`, `grad` timing, `loss`,
-  `grad_diffusivity`), `gradient.parity_loss`,
-  `gradient.parity_grad_initial_field`, `gradient.parity_grad_diffusivity`.
-* `hybrid.json` results: `cells`, `shape`, `steps`, `grad_steps`,
-  `correction_shift_rows`, `{sharded,unsharded}` (`run_scan_first_call_s`,
-  `partitioned`, `compile_s`, `value_and_grad` timing, `loss`, `grad`),
-  `correction_rel`, `parity_f`, `parity_loss`, `parity_grad`.
+  `parameter` (`diffusivity` or `viscosity`), `input_partitioned`,
+  `forward.{sharded,unsharded}` (`compile_s`, `rollout` timing with
+  `ms_per_step`), `forward.parity.<field>` (`f` and `averages`, or `f` and
+  `velocity`), `gradient.{sharded,unsharded}` (`compile_s`, `grad`
+  timing, `loss`, `grad_parameter`), `gradient.parity_loss`,
+  `gradient.parity_grad_initial_field`, `gradient.parity_grad_parameter`.
+* `hybrid.json` results: `mesh`, `mesh_shape`, `cells`, `shape`, `steps`,
+  `grad_steps`, `correction_shift_rows`, `{sharded,unsharded}`
+  (`run_scan_first_call_s`, `partitioned`, `compile_s`, `value_and_grad`
+  timing, `loss`, `grad`), `correction_rel`, `parity_f`,
+  `parity_averages`, `parity_loss`, `parity_grad`.
 * `exchange.json` results: `cells`, `mesh`, `partition`, `n_devices`,
   `fields_per_cell`, `n_local_max`, `n_ghost_max`, `layout_build_s`,
   `traffic_cells_per_shard` (`exchange_traffic()` output),
@@ -422,8 +481,10 @@ compile without execution.
   `grad_sharded`, `grad_unsharded`, `compile_s.{sharded,unsharded}`,
   `grad_parity`, `jvp_parity`).
 
-Schema 3 files carry no `sense` (the summary reads it from the limit's
-type, which is how schema 3 wrote checks), never record a check as not
+Schema 4 files ran the stencil goals on a 1-D mesh only, with a node that
+read its static in the interior only and took no grid-shaped input or
+domain integral.  Schema 3 files carry no `sense` (the summary reads it
+from the limit's type, which is how schema 3 wrote checks), never record a check as not
 run, and ran the stencil goal with periodic ends only.  Schema 2 files
 (the first three goals, before the checklist goals) carry
 no `checks`, `passed` or top-level `n_devices`; the summary shows them as

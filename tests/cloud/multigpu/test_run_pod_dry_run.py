@@ -88,7 +88,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 4
+    assert doc["schema_version"] == 5
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -129,13 +129,16 @@ def test_every_goal_records_checks_and_passes_them_in_the_dry_run(dry_run_dir, g
 def test_coupled_json_compares_forward_and_adjoint_under_both_solvers(dry_run_dir):
     doc = _load(dry_run_dir, "coupled")
     (r,) = doc["results"]
-    assert r["cells"] == 16 * 16 and r["coupled_dof"] == 16 * 16 + 1
+    # on the pencil mesh, the field, its two averages and the far field coupled
+    assert (r["mesh"], r["mesh_shape"]) == ("2d", [2, 2])
+    assert r["cells"] == 16 * 16 and r["coupled_dof"] == 16 * 16 + 2 + 1
     assert r["parameters"] == ["field.diffusivity", "far.conductance", "field.exchange"]
     assert set(r["solvers"]) == {"ift", "fori"}
     for solver, sol in r["solvers"].items():
         assert sol["sharded"]["partitioned"] is True
         assert sol["unsharded"]["partitioned"] is False
         assert sol["parity_f"]["finite"] and sol["parity_f"]["max_rel"] < 1e-5
+        assert sol["parity_averages"]["finite"] and sol["parity_averages"]["max_rel"] < 1e-5
         assert sol["parity_u"] < 1e-5 and sol["parity_loss"] < 1e-5
         assert sol["parity_grad"] < (1e-4 if solver == "ift" else 1e-5)
         assert all(g != 0.0 for g in sol["unsharded"]["grad"])
@@ -146,6 +149,7 @@ def test_coupled_json_compares_forward_and_adjoint_under_both_solvers(dry_run_di
             # both paths against the float64 model of the coupled step
             model = sol["model"][side]
             assert model["f"]["max_rel"] < 1e-5 and model["u"] < 1e-5 and model["loss"] < 1e-5
+            assert model["averages"]["max_rel"] < 1e-5
             assert model["grad"] < 1e-4
     assert len(r["model"]["grad"]) == 3 and all(g != 0.0 for g in r["model"]["grad"])
     ift = r["solvers"]["ift"]
@@ -169,32 +173,49 @@ def test_halo_json_is_bit_exact_on_every_boundary_mode_width_and_mesh(dry_run_di
 
 @pytest.mark.slow
 def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
-    """Periodic, edge (the wrapper's default) and Dirichlet ends, each
+    """Periodic, edge (the wrapper's default) and Dirichlet ends of the
+    field, and the D2Q9 lattice, on the 1-D and the pencil mesh, each
     forward and adjoint against the unsharded node.  Periodic alone let a
-    wrapper whose unsharded halo axes always wrapped pass the goal."""
+    wrapper whose unsharded halo axes always wrapped pass the goal, and the
+    1-D mesh alone one that zero-filled every sharded axis but the first."""
     doc = _load(dry_run_dir, "stencil")
-    by_boundary = {s["boundary"]: s for s in doc["results"]}
-    assert len(doc["results"]) == 3
-    assert set(by_boundary) == {"periodic", "edge", "dirichlet"}
-    for boundary, s in by_boundary.items():
-        assert s["cells"] == 16 * 16, boundary
+    cases = {(s["node"], s["mesh"], s["boundary"]): s for s in doc["results"]}
+    assert set(cases) == {(node, mesh, b) for mesh in ("1d", "2d")
+                          for node, b in (("field", "periodic"), ("field", "edge"),
+                                          ("field", "dirichlet"), ("lbm", "periodic"))}
+    assert len(doc["results"]) == 8
+    for (node, mesh, boundary), s in cases.items():
+        assert s["cells"] == 16 * 16
+        assert s["mesh_shape"] == ([4, 1] if mesh == "1d" else [2, 2])
         assert s["input_partitioned"] is True
-        assert s["forward"]["parity_f"]["max_rel"] < 1e-5
+        fields = {"field": {"f", "averages"}, "lbm": {"f", "velocity"}}[node]
+        assert set(s["forward"]["parity"]) == fields
+        assert all(p["max_rel"] < 1e-5 for p in s["forward"]["parity"].values())
         assert s["gradient"]["parity_grad_initial_field"]["max_rel"] < 1e-5
-        assert s["gradient"]["parity_grad_diffusivity"] < 1e-5
+        assert s["gradient"]["parity_grad_parameter"] < 1e-5
+        assert s["parameter"] == {"field": "diffusivity", "lbm": "viscosity"}[node]
         for side in ("sharded", "unsharded"):
             _check_timing(s["forward"][side]["rollout"])
             _check_timing(s["gradient"][side]["grad"])
-        assert sum(c["name"].startswith(f"16x16 {boundary} ")
-                   or c["name"].startswith(f"16x16 {boundary}:") for c in doc["checks"]) == 8
+        prefix = f"{node} {mesh} {s['mesh_shape'][0]}x{s['mesh_shape'][1]} 16x16 {boundary}"
+        assert sum(c["name"].startswith(prefix + " ") or c["name"].startswith(prefix + ":")
+                   for c in doc["checks"]) == 10
     # the three conditions are different models: nothing here compares a
-    # mode with itself under another name
-    losses = {b: s["gradient"]["unsharded"]["loss"] for b, s in by_boundary.items()}
-    assert len(set(losses.values())) == 3, losses
+    # mode with itself under another name; and one model on both meshes
+    for mesh in ("1d", "2d"):
+        losses = {b: cases[("field", mesh, b)]["gradient"]["unsharded"]["loss"]
+                  for b in ("periodic", "edge", "dirichlet")}
+        assert len(set(losses.values())) == 3, losses
+    for node, b in (("field", "periodic"), ("field", "edge"), ("field", "dirichlet"),
+                    ("lbm", "periodic")):
+        assert (cases[(node, "1d", b)]["gradient"]["unsharded"]["loss"]
+                == cases[(node, "2d", b)]["gradient"]["unsharded"]["loss"])
     (h,) = _load(dry_run_dir, "hybrid")["results"]
+    assert (h["mesh"], h["mesh_shape"]) == ("2d", [2, 2])
     assert h["sharded"]["partitioned"] is True
     assert h["correction_rel"] > 1e-3            # the correction is part of the answer
     assert h["parity_f"]["max_rel"] < 1e-5 and h["parity_grad"] < 1e-5
+    assert h["parity_averages"]["max_rel"] < 1e-5
 
 
 @pytest.mark.slow
@@ -318,18 +339,37 @@ def test_summarise_does_not_close_the_checklist_from_a_dry_run(dry_run_dir):
     assert "Coupled group" in out and "Stencil wrapper" in out and "Halo exchange" in out
     assert "Checks not run" not in out and "Failed checks" not in out     # 4 devices
     assert "Records that cannot decide" not in out
-    for boundary in ("periodic", "edge", "dirichlet"):
-        assert f"16x16    {boundary:<9} f " in out, out
+    for mesh in ("1d 4x1", "2d 2x2"):
+        for case in ("field", "lbm"):
+            for boundary in (("periodic", "edge", "dirichlet") if case == "field"
+                             else ("periodic",)):
+                assert f"{case} {mesh} 16x16 {boundary}" in out, out
 
 
-def test_the_stencil_goal_runs_every_boundary_at_its_smallest_size():
+def test_the_stencil_goal_runs_every_boundary_and_the_lattice_on_every_mesh_at_its_smallest_size():
     rp = _runner_module()
     assert rp.STENCIL_BOUNDARIES == ("periodic", "edge", "dirichlet")
-    assert rp.stencil_cases([1024, 256]) == [(1024, "periodic"), (256, "periodic"),
-                                             (256, "edge"), (256, "dirichlet")]
-    assert rp.stencil_cases(list(rp.GPU_CELLS))[:3] == [
-        (100_000, "periodic"), (100_000, "edge"), (100_000, "dirichlet")]
-    assert len(rp.stencil_cases(list(rp.GPU_CELLS))) == 5
+    smallest = []
+    for mesh in ("1d", "2d"):
+        smallest += [(256, "field", b, mesh) for b in rp.STENCIL_BOUNDARIES]
+        smallest.append((256, "lbm", "periodic", mesh))
+    assert rp.stencil_cases([1024, 256], 4) == [(1024, "field", "periodic", "2d"), *smallest]
+    # no pencil mesh on 2 or 3 devices: the 1-D mesh carries every case
+    assert rp.stencil_cases([256, 1024], 2) == [
+        (256, "field", "periodic", "1d"), (256, "field", "edge", "1d"),
+        (256, "field", "dirichlet", "1d"), (256, "lbm", "periodic", "1d"),
+        (1024, "field", "periodic", "1d")]
+    gpu = rp.stencil_cases(list(rp.GPU_CELLS), 4)
+    assert gpu[:4] == [(100_000, "field", b, "1d") for b in rp.STENCIL_BOUNDARIES] + [
+        (100_000, "lbm", "periodic", "1d")]
+    assert gpu[-2:] == [(300_000, "field", "periodic", "2d"),
+                        (1_000_000, "field", "periodic", "2d")]
+    assert len(gpu) == 10
+    # one grid for both meshes: each axis splits on the 1-D and the pencil mesh
+    for cells in (*rp.GPU_CELLS, *rp.DRY_RUN_CELLS, 64):
+        for n_dev in (2, 3, 4, 6, 8):
+            ny, nx = rp.field_shape(cells, n_dev)
+            assert ny % n_dev == 0 and nx % n_dev == 0
 
 
 def test_summarise_of_an_empty_directory_fails_clearly(tmp_path):
@@ -791,13 +831,17 @@ def test_halo_reference_encodes_the_documented_boundary_fill():
 def test_a_two_device_run_records_the_cases_it_cannot_run():
     """On 2 devices the 2-D pencil cases have no mesh and a halo from the
     wrong neighbour cannot show; each is a check *not run*, so the goal
-    reads incomplete instead of passing on what it could reach."""
+    reads incomplete instead of passing on what it could reach.  The
+    wrapper goals run their 1-D cases and record the pencil as not run."""
     rp = _runner_module()
     args = SimpleNamespace(n_devices=2, cells=[64], synthetic="grid", partition="contiguous",
-                           mesh=None, steps=1)
+                           mesh=None, steps=1, grad_steps=1, warmup=0, repeats=1)
     for goal, run, expected in (
             ("halo", rp.run_halo, {"2d pencil mesh", "1d mesh: left and right"}),
-            ("indivisible", rp.run_indivisible, {"pencil (2-D mesh) refusal"})):
+            ("indivisible", rp.run_indivisible, {"pencil (2-D mesh) refusal"}),
+            ("stencil", rp.run_stencil, {"2d pencil mesh"}),
+            ("hybrid", rp.run_hybrid, {"2d pencil mesh"}),
+            ("coupled", rp.run_coupled, {"2d pencil mesh"})):
         doc = run(args, {})
         not_run = [c for c in doc["checks"] if c.get("not_run")]
         assert {next(e for e in expected if c["name"].startswith(e)) for c in not_run} \
@@ -821,8 +865,11 @@ def test_a_two_device_run_records_the_cases_it_cannot_run():
 def test_the_stencil_goal_fails_when_unsharded_halo_axes_always_wrap(monkeypatch):
     """The fault the periodic-only goal could not see: the wrapper fills
     the halo of an axis it does not shard periodically whatever
-    ``boundary`` says.  Only the ``"edge"`` case can fail on it -- periodic
-    wraps anyway and Dirichlet overwrites those halos -- so it must."""
+    ``boundary`` says.  The field's ``"edge"`` case fails on it, and so
+    does its Dirichlet case, which overwrites the field's halos but reads
+    the grid-shaped source's, which the wrapper fills ``"edge"`` there;
+    periodic wraps anyway, and so does the lattice.  (On 2 devices there
+    is only the 1-D mesh, whose axis 1 is the unsharded one.)"""
     from maddening.cloud.multigpu import sharded_node
 
     rp = _runner_module()
@@ -836,8 +883,10 @@ def test_the_stencil_goal_fails_when_unsharded_halo_axes_always_wrap(monkeypatch
     args = SimpleNamespace(n_devices=2, cells=[64], steps=2, grad_steps=2, warmup=0,
                            repeats=1)
     doc = rp.run_stencil(args, {})
-    failed = {c["name"].split()[1].rstrip(":") for c in doc["checks"] if not c["passed"]}
-    assert failed == {"edge"}, [c["name"] for c in doc["checks"] if not c["passed"]]
+    failed = {" ".join(c["name"].split()[:5]).rstrip(":") for c in doc["checks"]
+              if not c["passed"] and not c.get("not_run")}
+    assert failed == {"field 1d 2x1 8x8 edge", "field 1d 2x1 8x8 dirichlet"}, [
+        c["name"] for c in doc["checks"] if not c["passed"]]
     assert doc["passed"] is False
 
 

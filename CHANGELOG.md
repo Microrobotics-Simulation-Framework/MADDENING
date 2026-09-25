@@ -296,6 +296,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **FMU bridge and the multi-GPU session verdict**: `FmuTcpBridge.stop()` returns within five seconds and logs any worker still inside a request, which then commits nothing; `set`/`get` refuse a non-integer value reference (`10.9`, `"10"` and `true` addressed variables 10 and 1); `FmuSidecar.set_fmu_state` refuses a snapshot whose nodes, fields or parameters differ from the model, as `set_state` does, and `set_state` keeps a node without state fields.
+  `run_pod.py --summarise` closes a checklist item only from files on the current schema, from one commit, with `n_devices` within the devices they saw, holding every case the runner runs and exactly the checks it derives from their results under `LIMITS`; other files read `INVALID`.
+  Action: send integer value references; restore snapshots that carry the model's parameters; re-run session goals whose files come from another commit or runner version.
 - **`LBMNode(wall_mask=...)` keeps its walls through a save/reload**: the mask was not in `params`, so `from_dict` and a USD stage rebuilt the node with no walls and the reloaded graph ran an open domain, with no error (MADD-ANO-034, since 0.1.0).  The mask is recorded as nested lists of bool, and `POST /graph/nodes` takes it;
   `AdaptiveNode(dtype=...)` is recorded too (a reload came back at the canonical float).  Every built-in node's constructor arguments are now checked through a JSON and a USD reload.
   Action: re-run results from a reloaded graph that holds a walled `LBMNode`.

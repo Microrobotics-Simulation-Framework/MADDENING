@@ -787,7 +787,7 @@ class ShardedUnstructuredNode(SimulationNode):
         mesh_axis = self._mesh_axis
         exchange = self._exchange
         n_local_max = layout.n_local_max
-        n_local_per_shard = jnp.asarray(np.asarray(layout.n_local, dtype=np.int32))
+        n_local_per_shard = np.asarray(layout.n_local, dtype=np.int32)
         state_set = set(inner.state_fields())
         integrals = set(inner.domain_integral_fields())
         reduced = {k: self._integral_is_reduced(k) for k in integrals}
@@ -832,7 +832,7 @@ class ShardedUnstructuredNode(SimulationNode):
             idx = lax.axis_index(mesh_axis)
             shard_info = {
                 0: (idx * n_local_max, n_local_max),
-                "n_local": n_local_per_shard[idx],
+                "n_local": jnp.asarray(n_local_per_shard)[idx],
             }
 
             # 4. Dispatch.

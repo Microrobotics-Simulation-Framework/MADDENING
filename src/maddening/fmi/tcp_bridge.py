@@ -73,9 +73,15 @@ of the frame dribbles in or stops arriving.  Overrunning any of them
 ends the connection exactly as EOF does, and the instance slot is free
 again.  The number of live connection threads is capped (16); further
 connections are closed on accept.  ``stop()`` shuts every live
-connection down, so a parked worker does not outlive the bridge.  A
-bridge serves once: ``start()`` a second time, or after ``stop()``,
-raises ``RuntimeError`` (build a new bridge to serve again).
+connection down, so a parked worker does not outlive the bridge, and
+returns within about five seconds.  A worker still *inside a request*
+then (a first step that is compiling a large graph, say) cannot be
+interrupted: ``stop()`` logs a warning naming it, and the request
+commits nothing -- no request that is still running when ``stop()``
+begins, and none after it, changes the model's state, parameters,
+inputs or time.  A bridge serves once: ``start()`` a second time, or
+after ``stop()``, raises ``RuntimeError`` (build a new bridge to serve
+again).
 
 The importer is **untrusted**: nothing that arrives on the socket is ever
 unpickled or evaluated.  The FMU-state blob is an ``npz`` archive of plain
@@ -95,6 +101,7 @@ added later without touching the C wrapper's request format.
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import json
 import logging
@@ -103,7 +110,7 @@ import struct
 import threading
 import time
 import zipfile
-from typing import Any, Optional, cast
+from typing import Any, Iterator, Optional, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -115,6 +122,7 @@ from maddening.fmi.model_description import FMIVariable, ModelDescription
 from maddening.fmi.sidecar import (
     FmuSidecar,
     _checked_value,
+    _key_set_error,
     _not_tunable_error,
     _restored_leaf,
 )
@@ -213,6 +221,17 @@ peer that really is a second instance gets its error reply, two seconds
 later, instead of hanging on a lock for ever."""
 _HANDOVER_POLL = 0.05
 """Granularity of that wait, so ``stop()`` is not held up by the grace."""
+_STOP_JOIN_TIMEOUT = 5.0
+"""Seconds :meth:`FmuTcpBridge.stop` waits, in total, for its threads.
+
+One budget over the serve thread and every connection worker together,
+so ``stop()`` is bounded however many connections were live.  A worker
+parked on a read ends at once (``stop()`` shuts its socket down); one
+that is *inside a request* -- the first step of a large graph spends
+its first call compiling -- cannot be interrupted, and may outlive the
+wait.  ``stop()`` then logs a warning naming it, and the request it is
+serving is refused at its commit: nothing a worker computes after
+``stop()`` is written into the model (see ``FmuTcpBridge._committing``)."""
 
 
 def _json_object(body: bytes, what: str) -> Any:
@@ -408,6 +427,28 @@ def _copy_tree(tree):
     return tree if hasattr(tree, "dtype") else np.asarray(tree)
 
 
+def _value_reference(vr: Any) -> int:
+    """``vr`` as a value reference, refused unless it is an integer.
+
+    FMI value references are integers, and nothing on the wire may be
+    coerced into one: ``int()`` truncates ``10.9`` and ``10.4`` to 10,
+    parses ``"10"`` and turns ``true`` into 1, so each of those used to
+    address a variable the importer never named -- a ``set`` wrote it, a
+    ``get`` read it back, and the reply said ``ok``.  A Python ``int``
+    (what JSON decodes an integer to) or a NumPy integer is accepted;
+    ``bool`` is not, although Python counts it as an ``int``.
+
+    Raises
+    ------
+    ValueError
+        If ``vr`` is not an integer; the dispatcher answers it with the
+        usual error reply and nothing is read or written.
+    """
+    if isinstance(vr, (bool, np.bool_)) or not isinstance(vr, (int, np.integer)):
+        raise ValueError(f"value reference must be an integer, got {vr!r}")
+    return int(vr)
+
+
 def _size(var: FMIVariable) -> int:
     return int(np.prod(var.shape)) if var.shape else 1
 
@@ -523,7 +564,10 @@ class FmuTcpBridge:
         self._stop = threading.Event()
         # Orders start() against stop(): a start() that loses the race sees
         # the stop flag and refuses, one that wins has published its thread
-        # before stop() reads it for the join.
+        # before stop() reads it for the join.  It also orders every commit
+        # into the model against stop() (``_committing``): stop() sets the
+        # flag under it, so a commit either finishes before stop() goes on
+        # or sees the flag and writes nothing.
         self._lifecycle_lock = threading.Lock()
         # Live accepted connections and the threads serving them.  ``stop()``
         # has to reach both: closing the listening socket says nothing to a
@@ -532,6 +576,9 @@ class FmuTcpBridge:
         self._live_lock = threading.Lock()
         self._live_conns: set[socket.socket] = set()
         self._live_workers: set[threading.Thread] = set()
+        # The op each worker is serving right now, so a worker that outlives
+        # stop() can be named with what it is doing.
+        self._in_flight: dict[threading.Thread, Any] = {}
         self.requests_served = 0
         self.binary_frames_served = 0     # binary replies sent (get / get_state)
         self.binary_frames_received = 0   # binary requests accepted (set / set_state)
@@ -586,6 +633,18 @@ class FmuTcpBridge:
         worker's pending ``recv`` into an EOF, and the workers are joined.
         Stopping is final (see :meth:`start`) and idempotent: a second
         ``stop()``, or one before ``start()``, is quiet.
+
+        The wait is bounded: ``stop()`` returns within about
+        ``_STOP_JOIN_TIMEOUT`` (five seconds) however many connections
+        were live.  A worker that is inside a request at that point -- a
+        sidecar step can take longer than that, and the first one compiles
+        the graph -- cannot be interrupted.  ``stop()`` then logs a warning
+        naming every thread still alive and the op each worker is serving,
+        and that request is refused where it would commit: once ``stop()``
+        has begun, no request changes the model's state, parameters,
+        inputs or time, whether it began before ``stop()`` or after.  The
+        instance slot stays held until such a worker returns; a stopped
+        bridge serves no one, so nothing waits on it.
         """
         with self._lifecycle_lock:
             self._stop.set()
@@ -593,9 +652,34 @@ class FmuTcpBridge:
             self._server.close()
         except OSError:
             pass
+        started = time.monotonic()
+        deadline = started + _STOP_JOIN_TIMEOUT
+        workers = self._shut_down_live_connections()
+        if self._thread is not None:
+            self._thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        # A connection the serve thread accepted just before the listening
+        # socket closed may have registered after the first sweep.
+        workers |= self._shut_down_live_connections()
+        for worker in workers:
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        alive = [t for t in (self._thread, *workers) if t is not None and t.is_alive()]
+        if alive:
+            with self._live_lock:
+                doing = {t: self._in_flight.get(t) for t in alive}
+            logger.warning(
+                "FmuTcpBridge on %s: stop() returned after %.1f s with %d thread(s) "
+                "still alive: %s.  A worker inside a request cannot be interrupted; "
+                "its request will commit nothing, and it exits when the request "
+                "returns.",
+                self.endpoint, time.monotonic() - started, len(alive),
+                "; ".join(self._describe_thread(t, doing[t]) for t in alive),
+            )
+
+    def _shut_down_live_connections(self) -> set[threading.Thread]:
+        """Half-close every live connection; returns the workers serving them."""
         with self._live_lock:
             conns = list(self._live_conns)
-            workers = list(self._live_workers)
+            workers = set(self._live_workers)
         for conn in conns:
             # shutdown, not close: the worker owns the socket object and
             # closes it on its way out, and a half-close is what makes its
@@ -605,10 +689,38 @@ class FmuTcpBridge:
                 conn.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
-        for worker in workers:
-            worker.join(timeout=5.0)
+        return workers
+
+    def _describe_thread(self, thread: threading.Thread, op: Any) -> str:
+        what = "the accept loop" if thread is self._thread else (
+            f"serving op {op!r}" if op is not None else "between requests")
+        return f"{thread.name} (ident {thread.ident}, {what})"
+
+    @contextlib.contextmanager
+    def _committing(self, op: str) -> Iterator[None]:
+        """Hold the lifecycle lock around one commit into the model.
+
+        Every write into the sidecar's state or parameters, the pending
+        inputs or the time goes through here, *after* everything that can
+        take long (a sidecar step, decoding an archive) has run on local
+        copies.  ``stop()`` sets its flag under the same lock, so a commit
+        either completes before ``stop()`` proceeds or finds the flag set
+        and raises -- which the dispatcher answers as an error reply with
+        nothing written.  Without it, a worker that outlived ``stop()``'s
+        join replaced the model's state after ``stop()`` had returned.
+
+        Raises
+        ------
+        RuntimeError
+            If the bridge has been stopped.
+        """
+        with self._lifecycle_lock:
+            if self._stop.is_set():
+                raise RuntimeError(
+                    f"FmuTcpBridge on {self.endpoint} has been stopped; the {op!r} "
+                    "request was not committed"
+                )
+            yield
 
     def __enter__(self) -> "FmuTcpBridge":
         return self.start()
@@ -664,6 +776,7 @@ class FmuTcpBridge:
             with self._live_lock:
                 self._live_conns.discard(conn)
                 self._live_workers.discard(threading.current_thread())
+                self._in_flight.pop(threading.current_thread(), None)
 
     def _claim_instance(self) -> bool:
         """Claim the single instance slot, waiting out a hand-over.
@@ -748,7 +861,13 @@ class FmuTcpBridge:
                         # quotes, say) is an error reply, not a dead instance
                         reply = {"ok": False, "error": f"malformed request: {exc}"}
                     else:
-                        reply = self._dispatch(req)
+                        with self._live_lock:
+                            self._in_flight[threading.current_thread()] = req.get("op")
+                        try:
+                            reply = self._dispatch(req)
+                        finally:
+                            with self._live_lock:
+                                self._in_flight.pop(threading.current_thread(), None)
                         if req.get("op") == "hello" and reply.get("ok"):
                             # Applied only once the reply is on the wire
                             # (below): a hello whose reply could not be sent
@@ -965,17 +1084,20 @@ class FmuTcpBridge:
                     raise ValueError(
                         f"communication point must be finite, got {raw_t!r}"
                     )
-                saved = self._sidecar._state                        # noqa: SLF001
-                try:
-                    for _ in range(n):
-                        self._sidecar.step(self._inputs)
-                except Exception:
-                    # a failed sub-step must not leave a partial advance
-                    # behind: the importer is told nothing happened
-                    self._sidecar._state = saved                    # noqa: SLF001
-                    raise
-                self._time = t0 + n * self._dt
-                return {"ok": True, "t": self._time}
+                # Every sub-step runs on a local state and the result is
+                # committed once, at the end: a failed sub-step leaves no
+                # partial advance behind (the importer is told nothing
+                # happened), and a step that is still running when stop()
+                # is called -- the first one compiles the graph and can
+                # outlast stop()'s bounded join -- is refused at its commit
+                # instead of replacing the state of a stopped bridge.
+                state = self._sidecar._state                        # noqa: SLF001
+                for _ in range(n):
+                    state = self._sidecar._advanced(state, self._inputs)  # noqa: SLF001
+                with self._committing("step"):
+                    self._sidecar._state = state                    # noqa: SLF001
+                    self._time = t0 + n * self._dt
+                    return {"ok": True, "t": self._time}
             if op == "get_state":
                 return {"ok": True, "state": self._encode_state()}
             if op == "set_state":
@@ -985,13 +1107,16 @@ class FmuTcpBridge:
                 self._decode_state(bytes(blob))
                 return {"ok": True}
             if op == "reset":
-                # A copy of the state dict the bridge started from; _copy_tree
-                # is typed for any tree, so say which one this is.
-                self._sidecar._state = cast(                              # noqa: SLF001
-                    "dict[str, dict[str, Any]]", _copy_tree(self._initial_state))
-                if self._initial_params is not None:
-                    self._sidecar._params = _copy_tree(self._initial_params)  # noqa: SLF001
-                self._inputs, self._time = self._zero_inputs(), 0.0
+                with self._committing("reset"):
+                    # A copy of the state dict the bridge started from;
+                    # _copy_tree is typed for any tree, so say which one
+                    # this is.
+                    self._sidecar._state = cast(                          # noqa: SLF001
+                        "dict[str, dict[str, Any]]", _copy_tree(self._initial_state))
+                    if self._initial_params is not None:
+                        self._sidecar._params = _copy_tree(               # noqa: SLF001
+                            self._initial_params)
+                    self._inputs, self._time = self._zero_inputs(), 0.0
                 return {"ok": True}
             if op == "terminate":
                 return {"ok": True}
@@ -1066,8 +1191,20 @@ class FmuTcpBridge:
         except Exception as exc:  # noqa: BLE001 - BadZipFile and friends
             raise ValueError(f"FMU state blob is not a valid archive: {exc}") from exc
         with zf:
+            infos = zf.infolist()
+            # A state field or parameter the model does not have is refused
+            # with the key-set message ``FmuSidecar.set_fmu_state`` uses for
+            # the same snapshot (both sets in full), still from the
+            # directory alone.
+            listed = {info.filename[:-4] for info in infos if info.filename.endswith(".npy")}
+            for prefix, what in (("s/", "fields"), ("p/", "parameters")):
+                got = {k for k in listed if k.startswith(prefix)}
+                expected = {k for k in caps if k.startswith(prefix)}
+                refusal = _key_set_error(what, expected, got) if got - expected else None
+                if refusal is not None:
+                    raise refusal
             total = 0
-            for info in zf.infolist():
+            for info in infos:
                 name = info.filename
                 key = name[:-4] if name.endswith(".npy") else None
                 if key is None or key not in caps:
@@ -1108,28 +1245,36 @@ class FmuTcpBridge:
                 raise ValueError("FMU state belongs to a different model (schema token mismatch)")
             state = {n: dict(f) for n, f in self._sidecar.state.items()}
             expected = {f"s/{n}/{f}" for n, fields in state.items() for f in fields}
-            got = {k for k in keys if k.startswith("s/")}
-            if got != expected:
-                raise ValueError(f"FMU state fields differ from the model: "
-                                 f"missing {sorted(expected - got)}, extra {sorted(got - expected)}")
-            new_state: dict[str, dict[str, Any]] = {}
-            for k in expected:
-                _, node, field = k.split("/", 2)
-                # The leaf check FmuSidecar.set_fmu_state applies too: one
-                # function, so the two restore paths cannot drift apart.
-                new_state.setdefault(node, {})[field] = jnp.asarray(_restored_leaf(
-                    data[k], state[node][field], what=f"FMU state {node}.{field}"))
+            refusal = _key_set_error("fields", expected,
+                                     {k for k in keys if k.startswith("s/")})
+            if refusal is not None:
+                raise refusal
+            # Rebuilt on the live skeleton: a node with no fields has no
+            # member to name it, and used to vanish from the restored state.
+            new_state: dict[str, dict[str, Any]] = {n: {} for n in state}
+            for node, fields in state.items():
+                for field, live in fields.items():
+                    # The leaf check FmuSidecar.set_fmu_state applies too: one
+                    # function, so the two restore paths cannot drift apart.
+                    new_state[node][field] = jnp.asarray(_restored_leaf(
+                        data[f"s/{node}/{field}"], live, what=f"FMU state {node}.{field}"))
             params = self._sidecar.params
             new_params = None
             if params is not None:
+                expected_params = {f"p/{section}/{owner}/{k}"
+                                   for section in ("nodes", "mappings")
+                                   for owner, leaves in params.get(section, {}).items()
+                                   for k in leaves}
+                refusal = _key_set_error("parameters", expected_params,
+                                         {k for k in keys if k.startswith("p/")})
+                if refusal is not None:
+                    raise refusal
                 new_params = {"nodes": {}, "mappings": {}}
                 for section in ("nodes", "mappings"):
                     for owner, leaves in params.get(section, {}).items():
                         new_params[section][owner] = {}
                         for k, v in leaves.items():
                             key = f"p/{section}/{owner}/{k}"
-                            if key not in keys:
-                                raise ValueError(f"FMU state lacks parameter {key}")
                             new_params[section][owner][k] = jnp.asarray(_restored_leaf(
                                 data[key], v, what=f"FMU state param {owner}.params.{k}"))
             inputs: dict[str, dict[str, Any]] = self._zero_inputs()
@@ -1172,10 +1317,11 @@ class FmuTcpBridge:
             # and that has to hold for both doors into the parameter tree.
             check_bounds(new_params, self._sidecar.param_specs or {})
         # every check passed: commit
-        self._sidecar._state = new_state                      # noqa: SLF001
-        if new_params is not None:
-            self._sidecar._params = new_params                # noqa: SLF001
-        self._inputs, self._time = inputs, t
+        with self._committing("set_state"):
+            self._sidecar._state = new_state                  # noqa: SLF001
+            if new_params is not None:
+                self._sidecar._params = new_params            # noqa: SLF001
+            self._inputs, self._time = inputs, t
 
     # ----------------------------------------------------------- vr mapping
     def _set(self, vrs: list[int], values) -> None:
@@ -1187,7 +1333,7 @@ class FmuTcpBridge:
         pos = 0
         staged: list[tuple[FMIVariable, np.ndarray]] = []
         for vr in vrs:
-            var = self._vars.get(int(vr))
+            var = self._vars.get(_value_reference(vr))
             if var is None:
                 raise KeyError(f"unknown value reference {vr}")
             n = _size(var)
@@ -1214,10 +1360,11 @@ class FmuTcpBridge:
                 raise ValueError(f"variable {var.name!r} ({var.causality}) is read-only")
         # Atomic: parameters are validated (bounds) by the sidecar first;
         # inputs are only committed once nothing can fail any more.
-        if param_updates:
-            self._sidecar.set_params(param_updates)
-        for node, field, arr in input_updates:
-            self._inputs.setdefault(node, {})[field] = arr
+        with self._committing("set"):
+            if param_updates:
+                self._sidecar.set_params(param_updates)
+            for node, field, arr in input_updates:
+                self._inputs.setdefault(node, {})[field] = arr
 
     @staticmethod
     def _in_dtype(var: FMIVariable, arr: np.ndarray) -> np.ndarray:
@@ -1232,7 +1379,7 @@ class FmuTcpBridge:
         parts: list[np.ndarray] = []
         params = self._sidecar.get_params()
         for vr in vrs:
-            var = self._vars.get(int(vr))
+            var = self._vars.get(_value_reference(vr))
             if var is None:
                 raise KeyError(f"unknown value reference {vr}")
             if var.causality == "independent":

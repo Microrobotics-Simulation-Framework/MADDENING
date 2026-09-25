@@ -117,8 +117,9 @@ def ift_linear_solve(
         ``jax.lax.stop_gradient`` on its output: at convergence the
         solution and its sensitivity are independent of ``M``, so
         gradient flow through ``M`` is wasted compute and a potential
-        source of noise.  Pinned by ``tests/adaptive/
-        test_ift_linear_solve.py::test_preconditioner_gradient_blocked``.
+        source of noise.  Pinned by
+        ``test_preconditioner_gradient_blocked`` in
+        ``tests/adaptive/test_ift_linear_solve.py``.
     rtol, atol : float
         Relative and absolute tolerances for the iterative solvers.
         Ignored when ``solver="dense"``.

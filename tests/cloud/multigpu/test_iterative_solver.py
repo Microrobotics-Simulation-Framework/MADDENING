@@ -1,4 +1,4 @@
-"""Tests for the sharded sparse iterative solver substrate (v0.3.0 §A5).
+"""Tests for the sharded sparse iterative solver substrate (added in v0.3.0).
 
 The conftest in this directory forces XLA to expose 16 virtual CPU
 devices, so the 4-device mesh tests run locally without real GPUs.
@@ -350,8 +350,8 @@ class TestValidation:
 
 
 # ---------------------------------------------------------------------------
-# Stability tagging — these functions are the v0.4.0 commitment surface
-# per §A5 + §A6.
+# Stability tagging — these functions are the sharded solver's public
+# surface.
 # ---------------------------------------------------------------------------
 
 

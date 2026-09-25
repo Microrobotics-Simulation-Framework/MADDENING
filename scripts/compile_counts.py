@@ -314,11 +314,11 @@ WORKLOADS: dict[str, tuple] = {
 #   same JAX version   +/- max(2 ops, 2%)
 #   different version  +/- max(10 ops, 25%)
 #
-# Both widths were set against a measurement rather than a guess.  Every
-# count in this file was taken twice, once on JAX 0.10.2 (what CI pins)
-# and once on JAX 0.11.0, and all thirty-four numbers came out
-# *identical* -- retraces, jaxpr primitives and HLO ops, on all five
-# workloads.  So:
+# Both widths were set against a measurement rather than a guess.  The
+# baseline is recorded on JAX 0.10.2 (the lower CI lane).  Re-measured on
+# JAX 0.11.0 (``--show``) against the 0.4.0 release tree, every one of its
+# 21 counts came out *identical* -- retraces, jaxpr primitives and HLO
+# ops on all six workloads, heat_chain's scan program included.  So:
 #
 #   * The same-version band is not absorbing any known variation.  It
 #     was sized when CI ran Python 3.11 and 3.12 and only 3.12 had been

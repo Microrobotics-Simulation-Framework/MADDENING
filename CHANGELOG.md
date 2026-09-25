@@ -162,10 +162,6 @@ guidance; the itemized changes follow.
   `strategies.node_states` samples bool and integer fields
 - Property-test coverage for round trips, the REST and FMU-bridge surfaces
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
-- **Static type checking, phase 1 (non-blocking)**: `pyrightconfig.json`,
-  `pyright` in the `ci`/`dev` extras, a `continue-on-error` `typecheck` job
-  and `scripts/typing_baseline.py`.  No source annotations changed; baseline
-  and phase-2 plan in `docs/developer_guide/typing.md`
 
 ### Changed
 - **`ShardedStencilNode` refuses `boundary="zero"` and `"periodic"` for a `HeatNode`**: the rod now builds its own end ghosts, so the fill would be ignored.
@@ -552,7 +548,7 @@ guidance; the itemized changes follow.
 - **The coupled adjoint-identity property stops scaling by a cancelling
   inner product**: it divides by the norm of the terms contracted, not by
   the value they produce, which removes a latent float32 flake
-- **Mapping-spec resolver, against generated input** (11 properties): a
+- **Mapping-spec resolver, against generated input** (10 properties): a
   mutated spec is refused naming the edge or loads exactly the recipe on
   disk, and no generated asset path escapes the config directory
 - **C-level tests for the FMU wrapper** (`tests/fmi/test_c_unit.py`,
@@ -561,9 +557,9 @@ guidance; the itemized changes follow.
   normal and hostile bridges, `validate_fmu`, and a `-std=c11 -pedantic`
   build.  CI installs valgrind and clang; each part self-skips if its tool is
   missing
-- Full MADDENING test suite at `c51cd6a`: **3440 tests collected**, 3413 under
-  `-m "not slow"` (27 deselected).  A collection count, not a pass count — see
-  `docs/release_notes/v0.4.0.md` for the last full CI run.  v0.2.1's own
+- Full MADDENING test suite at `1ad3fa2`: **6386 tests collected** locally, 6198
+  under `-m "not slow"` (188 deselected); CI's run at the same commit passed 5986
+  (jax 0.10.2) / 5985 (jax 0.11.2) — see `docs/release_notes/v0.4.0.md`.  v0.2.1's own
   Verification block, which an edit during this cycle had moved here, is back
   under [0.2.1] as released
 - Differentiable sharded solves and the C1 multi-physics IQN-IMVJ case match

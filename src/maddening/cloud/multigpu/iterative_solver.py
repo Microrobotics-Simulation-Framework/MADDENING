@@ -1,4 +1,4 @@
-"""Sharded sparse iterative solvers — v0.3.0 §A5.
+"""Sharded sparse iterative solvers (added in v0.3.0).
 
 Builds on the IFT branch's matrix-free lineax integration
 (see :func:`maddening.core.graph_manager._ift_linear_solve`).
@@ -7,12 +7,12 @@ operators: the user supplies a callable ``matvec(x) → A · x`` whose
 internal implementation uses ``shard_map`` to run across multiple
 devices, and we wrap it in a small public API for CG / GMRES.
 
-Why this module exists (v0.3.0 plan §A5):
+Why this module exists:
 
 * FVM PISO pressure correction in MIME v0.5.0 (against MADDENING v0.4.0
   — the hard downstream gate) needs scalable Krylov solves on
   distributed operators.
-* The FMI 3.0 substrate (§A1) commits us to exposing exact directional
+* The FMI 3.0 substrate (:mod:`maddening.fmi`) commits us to exposing exact directional
   derivatives via ``fmi3GetDirectionalDerivative`` → ``jax.jvp`` /
   ``jax.vjp``.  Differentiating through a sharded solve requires the
   solver participate in autodiff cleanly.
@@ -30,8 +30,7 @@ Design:
   ``lineax.GMRES`` / ``lineax.CG`` to reuse the IFT branch's
   battle-tested adjoint path.  ``lineax`` is a base dependency as of
   v0.4.0, so this path is always available.
-* When ``lineax`` cannot consume a sharded matvec cleanly (the
-  contingency anticipated in §A5's risk callouts), or when a
+* When ``lineax`` cannot consume a sharded matvec cleanly, or when a
   preconditioner is supplied (lineax's CG / GMRES take none), the
   hand-rolled ``lax.fori_loop`` paths in ``_cg_loop`` and
   ``_gmres_loop`` provide a fallback that depends only on stock JAX.
@@ -44,7 +43,7 @@ but the v0.3.0 substrate exposes the primal solver only — adjoint
 plumbing through the user-supplied matvec is the caller's responsibility
 (``jax.linear_transpose`` on the matvec gives the transpose action).
 
-Preconditioning: Jacobi-only for v0.3.0 (per §A5 scope).  The interface
+Preconditioning: Jacobi only.  The interface
 accepts an optional ``preconditioner`` callable for forward compat
 with AMG / block-Jacobi in v0.4.0+.
 """

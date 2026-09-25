@@ -8,8 +8,8 @@ boundary inputs at all, a generic source term is not even well defined
 for a lattice Boltzmann collision operator, and a node a *user* writes
 will usually have no forcing input either.  Extending
 ``SimulationNode`` with a manufactured-source hook was considered and
-rejected; ``TODO.md``, "DECIDED AGAINST: a manufactured-source
-convention on ``SimulationNode``", records why.
+rejected; ``docs/developer_guide/verification.md`` ("Grid convergence:
+the fallback where MMS cannot reach") records why.
 
 These tests cover the fallback that made rejecting it acceptable.  A
 Richardson / Grid Convergence Index study compares three successively
@@ -748,8 +748,9 @@ def test_mms_cannot_reach_lbm_pipe_at_all():
     forcing path is an undeclared scalar ``propeller_force`` applied on
     an actuator-disc mask fixed at construction, which cannot carry a
     spatially varying manufactured source.  If this ever stops being
-    true the node becomes MMS-testable and the argument in ``TODO.md``
-    for preferring GCI here needs revisiting -- so this fails loudly
+    true the node becomes MMS-testable and the argument in
+    ``docs/developer_guide/verification.md`` for preferring GCI here
+    needs revisiting -- so this fails loudly
     rather than leaving a stale justification in place.
     """
     node = LBMPipeNode("pipe", 1.0, nx=1, ny=8, nz=8, tau=_PIPE_TAU)

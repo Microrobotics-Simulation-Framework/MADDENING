@@ -152,9 +152,10 @@ python scripts/compile_counts.py --show     # print, write nothing
 python scripts/compile_counts.py            # regenerate the baseline
 ```
 
-Five workloads are measured — a single node, a coupled pair, a
-multi-rate graph, a heat chain with a `run_scan` program, and a
-`ShardedStencilNode` over a four-device mesh — and compared to
+Six workloads are measured — a single node, a coupled pair, a
+multi-rate graph, a heat chain with a `run_scan` program, a
+`ShardedStencilNode` over a four-device mesh, and two coupling groups
+with `diagnostics=True` — and compared to
 `benchmarks/compile_counts_baseline.json`.  The script pins
 `JAX_PLATFORMS=cpu` and the device count before importing JAX, because
 both change the counts; JAX fixes its device count when its backend

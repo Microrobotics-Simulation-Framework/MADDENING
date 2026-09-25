@@ -535,13 +535,33 @@ def partition_value(
     Parameters
     ----------
     value : np.ndarray
-        First axis is the global cell axis.
+        First axis is the global cell axis: exactly one row per cell of
+        the layout.
     layout : UnstructuredPartitionLayout
         Pre-computed partition layout.
     pad_value : scalar
         Fill value for padding slots beyond a shard's actual cell count.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is 0-d, or its first axis does not have one row per
+        cell of the layout (``layout.partition_assignment.size``).  Until
+        0.4.0 the length was not checked: a longer array lost the rows
+        past the layout's count without a word, and a shorter one failed
+        with a bare ``IndexError``.
     """
     value = np.asarray(value)
+    n_global = int(np.asarray(layout.partition_assignment).size)
+    if value.ndim == 0 or value.shape[0] != n_global:
+        rows = f"{value.shape[0]} rows" if value.ndim else "no cell axis (0-d)"
+        raise ValueError(
+            f"partition_value: value has shape {value.shape}, {rows}, but the "
+            f"layout partitions {n_global} cells.  The first axis of a value "
+            "to partition is the global cell axis, one row per cell of the "
+            "layout; rows past the layout's count would be dropped.  Build "
+            "the layout from the same cells as the array."
+        )
     trailing = value.shape[1:]
     out = np.full(
         (layout.n_devices, layout.n_local_max) + trailing,

@@ -86,6 +86,27 @@ def _check_shard_divisible(
         return
     nearest = ((extent // n_devices) + 1) * n_devices
     divisors = sorted(d for d in range(1, n_devices + 1) if extent % d == 0)
+    if wrapper == "ShardedPointwiseNode":
+        # A pointwise node reads no neighbour, so it steps correctly under
+        # the partition layout too: every row is updated on its own.
+        way_out = (
+            ", or, for a node whose cells are its first array axis, use "
+            "ShardedUnstructuredNode with a layout from "
+            "build_unstructured_partition (edges may be empty), which pads "
+            "each shard to an explicit layout and accepts any (device, cell) "
+            "pair."
+        )
+    else:
+        # Until 0.4.0 this pointed a stencil node at ShardedUnstructuredNode,
+        # which hands update_padded [owned | ghosts] rather than
+        # [halo | interior | halo] and stepped the node wrong (it now
+        # refuses a node with a halo_width()).
+        way_out = (
+            ".  ShardedUnstructuredNode is not a way out for a stencil "
+            "node: it hands update_padded the partition layout, not "
+            "[halo | interior | halo], and refuses a node that declares a "
+            "halo_width()."
+        )
     raise ValueError(
         f"{wrapper} cannot shard {what} of node {owner!r}: spatial axis "
         f"{spatial_axis} has {extent} cells and mesh axis {mesh_axis!r} has "
@@ -93,10 +114,8 @@ def _check_shard_divisible(
         f"({extent} % {n_devices} == {extent % n_devices}).  A sharded axis "
         f"is split evenly across the devices, so the cell count must be a "
         f"multiple of the device count: resize that axis to a multiple of "
-        f"{n_devices} (the next one up is {nearest}), run on one of the "
-        f"device counts that do divide {extent} ({divisors}), or use "
-        "ShardedUnstructuredNode, which carries an explicit padded layout "
-        "and accepts any (device, cell) pair."
+        f"{n_devices} (the next one up is {nearest}), or run on one of the "
+        f"device counts that do divide {extent} ({divisors}){way_out}"
     )
 
 
@@ -457,12 +476,16 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         physical boundary conditions in ``update_padded`` after the
         exchange.  A node that declares ``halo_boundary()`` must be given
         exactly that mode (see the note below).  One string for every
-        axis; anything else is refused at construction.
+        axis; anything else is refused at construction.  A sharded
+        ``StaticArray``'s halos are filled periodically under
+        ``"periodic"`` and with the edge cell repeated under the other two
+        (see :meth:`update`).
 
     Raises
     ------
     ValueError
-        If *node* is pointwise, if ``axis_map`` names a mesh axis the
+        If *node* is pointwise, if ``axis_map`` is empty (nothing would
+        be sharded), names a mesh axis the
         mesh does not have or a spatial axis with no declared halo, if a
         sharded extent is not divisible by the devices on its mesh axis
         (see the note below), if *boundary* is not one of the three modes
@@ -492,11 +515,21 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     **Each sharded extent must divide by the devices on its mesh axis.**
     A pencil decomposition gives every device the same slab, so a 17-cell
     axis over 3 devices has no layout; construction refuses it, naming
-    the cell count and the device count.  Pad the grid to a multiple,
-    choose a device count that divides it, or use
-    :class:`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`,
-    which carries an explicit padded layout and takes any (device, cell)
-    pair.  This is a property of the stencil path only.
+    the cell count and the device count.  Pad the grid to a multiple, or
+    choose a device count that divides it.
+    :class:`~maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode`
+    takes any (device, cell) pair, but it is not a way out for a stencil
+    node: it hands ``update_padded`` the partition layout (``[owned cells
+    | ghost cells]``), not ``[halo | interior | halo]``, and since 0.4.0
+    refuses a node that declares a ``halo_width()``.  (Until then this
+    note recommended it, and a ``HeatNode`` wrapped that way stepped
+    every cell wrong without an error.)
+
+    **An empty** ``axis_map`` **is refused.**  It would shard no spatial
+    axis: every device would run the whole node, which is the unsharded
+    node at the cost of a wrapper.  Before 0.4.0 an ``LBMNode`` wrapped
+    with ``axis_map={}`` was accepted and did exactly that, and a
+    ``HeatNode`` was refused with a message about its ``grid_x`` static.
     """
 
     def __init__(
@@ -511,6 +544,22 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             raise ValueError(
                 f"{type(node).__name__} has empty halo_width() -- use "
                 "ShardedPointwiseNode for pointwise sharding."
+            )
+        # An empty axis_map shards nothing: every device runs the whole
+        # node.  Until 0.4.0 an LBMNode was accepted that way, and a
+        # HeatNode refused only because its ``grid_x`` static named a
+        # shard axis the map did not have -- a message about the static,
+        # not about the map.  Refused first, as ShardedPointwiseNode
+        # refuses a node none of whose fields it could shard.
+        if not axis_map:
+            raise ValueError(
+                f"ShardedStencilNode cannot wrap {type(node).__name__} "
+                f"{node.name!r} with an empty axis_map: no spatial axis would "
+                "be sharded, so every device would run the whole node.  Map a "
+                "mesh axis to each spatial axis to shard, one the node "
+                f"declares a halo on (halo_width() == {dict(halo)}), e.g. "
+                f"axis_map={{{mesh.axis_names[0]!r}: {min(halo)}}}; or leave "
+                "the node unwrapped."
             )
 
         # One mode for every axis, and a known one.  Until 0.4.0 nothing
@@ -836,9 +885,19 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
 
         # Pre-compute per-static halo-exchange descriptors. A sharded
         # static gets halo-exchanged only on the single mesh axis that
-        # maps to its shard_axis, with ``boundary="edge"`` (statics
-        # don't evolve in time -- periodic wrap would be wrong even when
-        # the state uses periodic).
+        # maps to its shard_axis.  At the global edges its halo is filled
+        # periodically when the wrapper is periodic, and by repeating the
+        # edge cell otherwise.  The halo fill is a question about space,
+        # not time -- which cells lie beyond the edge -- and on a periodic
+        # grid those are the opposite edge's cells, for a static as much as
+        # for the state.  Until 0.4.0 statics were always edge-filled,
+        # "because statics don't evolve", and a periodic node that read a
+        # static in its halo stepped ~3% off the unsharded node with no
+        # error.  Under "edge" or "zero" there is no cell beyond the edge:
+        # the state's halo there is a boundary condition the wrapper
+        # imposes, a static has none to impose, and it keeps the edge fill
+        # it always had.
+        static_boundary = "periodic" if boundary == "periodic" else "edge"
         static_exchange: dict[str, list[tuple[str, int, int]]] = {}
         for k, sa in sharded_static.items():
             descriptors: list[tuple[str, int, int]] = []
@@ -891,13 +950,15 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 for k, v in local_bi.items()
             }
 
-            # 2. Halo-pad sharded statics (boundary="edge").
+            # 2. Halo-pad sharded statics (periodic under a periodic
+            #    wrapper, the edge cell repeated otherwise).
             padded_static: dict[str, Any] = {}
             for k, arr in local_static.items():
                 descriptors = static_exchange[k]
                 if descriptors:
                     padded_static[k] = halo_exchange(
-                        arr, mesh=mesh, axes=descriptors, boundary="edge",
+                        arr, mesh=mesh, axes=descriptors,
+                        boundary=static_boundary,
                     )
                 else:
                     padded_static[k] = arr
@@ -1172,8 +1233,12 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         Sharded static arrays declared by the inner node (via
         :class:`~maddening.core.static_data.StaticArray` with
         ``replication="shard"``) are materialised per-device and
-        halo-exchanged with ``boundary="edge"`` before being passed
-        through as ``static_padded`` to :meth:`update_padded`.
+        halo-exchanged before being passed through as ``static_padded``
+        to :meth:`update_padded`: periodically when ``boundary`` is
+        ``"periodic"`` (the cells beyond a periodic edge are the opposite
+        edge's, for a static as for the state), with the edge cell
+        repeated under ``"edge"`` and ``"zero"``.  Until 0.4.0 they were
+        edge-filled under every mode.
 
         The shard_map wrapper is built once per
         ``(state_shape, bi_shape, static_shape, static_data_hash)``

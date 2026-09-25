@@ -749,20 +749,32 @@ class LBMNode(SimulationNode):
         ),
         validated_regimes=(
             ValidatedRegime(
-                "tau", 0.501, 2.0,
-                notes="tau > 0.5 required; tau >> 1 causes numerical diffusion",
+                "tau", 0.8, 1.0,
+                notes=(
+                    "The values the benchmarks run at: tau = 0.8 (nu = 0.1; "
+                    "MADD-VER-003, MADD-VER-007) and tau = 1 (nu = 1/6; "
+                    "MADD-VER-016).  tau > 0.5 is required and the "
+                    "constructor enforces it through nu > 0, but nothing "
+                    "verifies the node outside [0.8, 1]; tau >> 1 adds "
+                    "numerical diffusion.  0.501 to 2.0, the range this "
+                    "declared until 0.4.0, was never run"
+                ),
             ),
             ValidatedRegime(
-                "Reynolds number", 0, 100,
+                "Reynolds number", 0, 0.21,
                 notes=(
-                    "Validated against Poiseuille analytical solutions, "
-                    "body-force (MADD-VER-003) and pressure-driven "
-                    "(MADD-VER-016)"
+                    "The Poiseuille benchmarks run in the Stokes regime.  "
+                    "Measured on their own configurations (jaxlib 0.11.0): "
+                    "MADD-VER-016's pressure-driven channel reaches "
+                    "Re = u_mean * H / nu = 0.21 at H = 8 and 0.19 at "
+                    "H = 16, and MADD-VER-003's body-force pipe "
+                    "Re = u_mean * 2R / nu = 0.21.  The 0 to 100 this "
+                    "declared until 0.4.0 was never run"
                 ),
             ),
         ),
         hazard_hints=(
-            "Behaviour uncharacterised at Re > 100",
+            "Behaviour uncharacterised above Re ~0.2 and outside tau in [0.8, 1]; the Poiseuille benchmarks (MADD-VER-003, MADD-VER-016) run only in the Stokes regime",
             "No turbulence model -- do not use above Re ~2000",
             "Wall bounce-back assumes rigid, impermeable walls",
         ),

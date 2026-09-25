@@ -2341,7 +2341,8 @@ def record_problems(doc: dict) -> list[str]:
         problems.append(f"n_devices {n_dev}, but its environment saw {visible} device(s)")
     if cfg.get("n_devices") != n_dev:
         problems.append(f"n_devices {n_dev}, but its config says {cfg.get('n_devices')!r}")
-    if bool(cfg.get("allow_fewer_devices", False)) != bool(doc.get("allow_fewer_devices", False)):
+    if ("allow_fewer_devices" in doc
+            and bool(cfg.get("allow_fewer_devices", False)) != bool(doc["allow_fewer_devices"])):
         problems.append("allow_fewer_devices differs between the file and its config")
     results, checks = doc.get("results"), doc.get("checks")
     if not isinstance(results, list) or not isinstance(checks, list):

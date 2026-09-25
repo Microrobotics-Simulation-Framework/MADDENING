@@ -1441,7 +1441,7 @@ from datetime import date
 class AnomalySeverity(Enum):
     """Severity classification aligned with IEC 62304 problem reporting.
     The definitions below ("Severity") are this class's docstring."""
-    CRITICAL = "critical"   # Silent wrong result or unauthorised access: default config, no workaround, undetectable
+    CRITICAL = "critical"   # Undetectable silent wrong result by default, no workaround; default exposure to other hosts; remote code execution
     MAJOR = "major"         # Any other silent wrong result or unauthorised access; a loud failure with no workaround
     MINOR = "minor"         # Loud with a workaround; documentation/metadata; performance; x64-only float32 rounding; cosmetic
     ENHANCEMENT = "enhancement"  # Not a defect; a feature request
@@ -1517,10 +1517,14 @@ reaches it.  Size, reach and detectability go in the entry's description and
 `safety_relevance_rationale`, where a reader can weigh them; they do not
 lower the severity below `major`.
 
+*Unauthorised access* is a party the user did not authorise reading or
+changing the simulation, its inputs or its files, or running code, by a
+defect of the library.
+
 | Severity | Definition |
 |---|---|
-| `critical` | A silent wrong result, or access by a party the user did not authorise, that a shipped default configuration reaches, that no workaround avoids short of not using the feature, and that the user cannot detect from anything the library returns. |
-| `major` | Any other silent wrong result.  Any other unauthorised access (one that needs a non-default configuration, or that a workaround prevents).  A loud failure (an exception, a refusal, a crash) whose only workaround is not to use the feature. |
+| `critical` | A silent wrong result that a shipped default configuration reaches, that the user cannot detect from anything the library returns, and that no workaround avoids short of not using the feature.  Unauthorised access through a surface the library opens (a listening socket, an HTTP route) that a shipped default configuration exposes to other hosts.  Code execution by an unauthorised party through such a surface, in any configuration. |
+| `major` | Any other silent wrong result.  Any other unauthorised access: a surface that only a configuration the user chose exposes to other hosts (a loopback default is not such an exposure), or an API that executes or trusts what it is handed while presenting itself as safe for data.  A loud failure (an exception, a refusal, a crash) whose only workaround is not to use the feature. |
 | `minor` | A loud failure with a workaround that keeps the feature usable.  A wrong statement in documentation or declared metadata where the computed values still meet the accuracy the library states for them.  A defect in performance, placement or a count of work done that changes no value describing or vouching for the solution.  A difference that appears only under `jax_enable_x64` and leaves the result no less accurate than the default float32 would.  A cosmetic defect. |
 | `enhancement` | Not a defect: a request for behaviour the library never claimed. |
 

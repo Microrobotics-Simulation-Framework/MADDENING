@@ -66,6 +66,14 @@ class TestPredictorCouplingGroup:
 #: ``{predictor: (graph, iteration counts so far)}``, see ``_run_with_predictor``.
 _PREDICTOR_RUNS: dict = {}
 
+#: A pair coupled strongly enough for the initial guess to matter: the
+#: coupling gain ``dt**2 * k / m`` is 0.4, so plain iteration takes 9
+#: passes a step.  The pair this used (``dt=0.001``, ``k=100``, gain
+#: 1e-4) converged in 2 passes whatever the guess -- every predictor, and
+#: an extrapolation six times too strong, read the same 2.00 -- so the
+#: test beside it could not fail.
+_PREDICTOR_PAIR = dict(dt=0.02, k=1000.0, c=2.0)
+
 
 class TestPredictorReducesIterations:
     """Test that predictors reduce coupling iterations."""
@@ -80,11 +88,11 @@ class TestPredictorReducesIterations:
         ``"none"`` graph instead of each compiling one.
         """
         if predictor not in _PREDICTOR_RUNS:
-            gm = _make_bidirectional_springs(dt=0.001, k=100.0, c=2.0)
+            gm = _make_bidirectional_springs(**_PREDICTOR_PAIR)
             gm.add_coupling_group(
                 ["spring_a", "spring_b"],
                 max_iterations=30,
-                tolerance=1e-8,
+                tolerance=1e-6,
                 diagnostics=True,
                 predictor=predictor,
             )
@@ -106,8 +114,16 @@ class TestPredictorReducesIterations:
         assert all(i >= 1 for i in iters)
 
     def test_linear_predictor_reduces_iterations(self):
-        """Linear predictor should reduce average iteration count
-        compared to no predictor (after initial ramp-up)."""
+        """``2*x_n - x_{n-1}`` saves passes, after the history fills.
+
+        Measured on ``_PREDICTOR_PAIR`` (jaxlib 0.11.0, CPU): 9.00 passes a
+        step without a predictor and 8.00 with the linear one, every step
+        after the ramp-up.  The assertion used to be "no worse than one
+        pass *more*" on a pair that took 2 passes whatever the guess, and
+        it held with the extrapolation six times too strong
+        (``7*x_n - 6*x_{n-1}``); on this pair that fault reads 9.00, the
+        same as no predictor, and fails the half-pass margin below.
+        """
         iters_none = self._run_with_predictor("none", n_steps=40)
         iters_linear = self._run_with_predictor("linear", n_steps=40)
 
@@ -116,9 +132,9 @@ class TestPredictorReducesIterations:
         avg_none = sum(iters_none[5:]) / len(iters_none[5:])
         avg_linear = sum(iters_linear[5:]) / len(iters_linear[5:])
 
-        # Linear predictor should do no worse (and ideally better)
-        assert avg_linear <= avg_none + 1.0, (
-            f"Linear predictor avg={avg_linear}, no predictor avg={avg_none}"
+        assert avg_linear <= avg_none - 0.5, (
+            f"Linear predictor avg={avg_linear}, no predictor avg={avg_none}: "
+            f"the extrapolated guess should save at least half a pass a step"
         )
 
     def test_predictor_converges_to_same_result(self):

@@ -33,8 +33,8 @@
     },
     "sharded_heat": {
       "retrace_count": 1,
-      "jaxpr_primitive_count": 138,
-      "hlo_op_count": 118
+      "jaxpr_primitive_count": 140,
+      "hlo_op_count": 120
     },
     "coupled_diagnostics": {
       "retrace_count": 1,

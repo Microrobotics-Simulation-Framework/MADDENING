@@ -14,8 +14,11 @@ three are the timing goals::
 
     indivisible  checklist 5: a grid the mesh cannot split is refused by
                  the stencil and pointwise wrappers with both numbers
-                 named, and the unstructured wrapper takes the same cell
-                 count and matches the unsharded node.  -> indivisible.json
+                 named (the stencil refusal saying the unstructured
+                 wrapper is not a way out for a stencil node), and the
+                 unstructured wrapper takes an uneven split of a node
+                 written for it and matches the unsharded node.
+                                                    -> indivisible.json
     halo         checklist 2: ``halo_exchange`` on a 1-D and a 2-D device
                  mesh for every boundary mode and halo widths 1 and 2, and
                  ``exchange_unstructured`` under both transports, forward
@@ -1407,8 +1410,9 @@ def run_indivisible(args, out: dict) -> dict:
         entry["pencil"] = {"mesh": [2, nz], "shape": [rows, cols], "raised": kind,
                            "message": msg}
 
-    # The rule is the stencil path's: the unstructured wrapper carries a
-    # padded layout and takes an uneven split.
+    # The rule is the Cartesian wrappers': the unstructured wrapper carries
+    # a padded layout and takes an uneven split -- for a node written for
+    # its partition layout (a ring here), not for a stencil node.
     n = ny_bad * nx + (1 if (ny_bad * nx) % D == 0 else 0)
     edges = ring_edges(n)
     pa, how = partition_cells(n, edges, D, "contiguous")
@@ -1441,9 +1445,15 @@ def indivisible_checks(results: list, n_devices: int) -> list:
     checks = [
         check_that(f"stencil {ny_bad}x{nx} on {D} devices: ValueError at construction",
                    kind == "ValueError", msg[:300]),
-        check_that("stencil refusal names the cell count, the device count and the "
-                   "unstructured alternative",
-                   _names_both(msg, ny_bad, D) and "ShardedUnstructuredNode" in msg),
+        # Until 0.4.0 the refusal recommended ShardedUnstructuredNode, and this
+        # check asked for that name; the wrapper now refuses a stencil node
+        # (it hands update_padded the partition layout), and the refusal says
+        # so.  The name alone would pass either message.
+        check_that("stencil refusal names the cell count, the device count and that "
+                   "the unstructured wrapper is not a way out for a stencil node",
+                   _names_both(msg, ny_bad, D)
+                   and "ShardedUnstructuredNode is not a way out for a stencil node" in msg
+                   and "or use ShardedUnstructuredNode" not in msg),
         check_that(f"stencil {ny_ok}x{nx} (divisible) is accepted",
                    st["divisible_raised"] is None, st.get("divisible_message", "")[:300]),
     ]

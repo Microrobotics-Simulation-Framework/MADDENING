@@ -211,6 +211,20 @@ def _a_case_the_runner_does_not_run(rp, d):
     return ["hybrid"]
 
 
+def _a_stencil_refusal_that_recommends_the_unstructured_wrapper(rp, d):
+    """The stencil refusal as it read before 0.4.0, recommending the wrapper
+    that now refuses a stencil node, with its check still recorded as passed.
+    The check used to ask only for the wrapper's name, which both messages
+    carry."""
+    st = d["indivisible"][0]["results"][0]["stencil"]
+    head = st["message"].split("  ShardedUnstructuredNode is not a way out")[0]
+    assert head != st["message"], st["message"]
+    st["message"] = (head.rstrip(".").replace(", or run on", ", run on")
+                     + ", or use ShardedUnstructuredNode, which carries an explicit "
+                     "padded layout and accepts any (device, cell) pair.")
+    return ["indivisible"]
+
+
 #: (seed, a phrase the status of every affected item must contain; ``None``:
 #: the item must read ``FAILED``).
 _SEEDS = [
@@ -241,6 +255,10 @@ _SEEDS = [
     (_device_list_and_count_disagree,
      "its environment lists 4 device(s) but records n_devices_visible 8"),
     (_a_case_the_runner_does_not_run, "holds case(s) the runner does not run"),
+    (_a_stencil_refusal_that_recommends_the_unstructured_wrapper,
+     "check value(s) disagree with its results: 'stencil refusal names the cell count, "
+     "the device count and that the unstructured wrapper is not a way out for a stencil "
+     "node' records True, its results give False"),
 ]
 
 

@@ -169,6 +169,9 @@ guidance; the itemized changes follow.
 ### Changed
 - **`scripts/report_test_durations.py` labels each shard's compilation cache from the hits its report records**: `warm` only when a restored cache served most lookups, else `restored but unused (cold)`, with every shard's hit rate; it warns when a `--cache-mode off` run records cache lookups in more than one file, and no longer offers a skipped or failed allowlisted test as removable.
   Action: none; compare times by a shard's label, not by whether it restored a cache. Pull requests that add or remove a slow mark, remove a test or edit the allowlist now run CI cold.
+- **New sharding refusals of silently-wrong input**: `ShardedUnstructuredNode` refuses a node with a non-empty `halo_width()` and one whose per-cell state is not one row per layout cell, and `partition_value` a value of the wrong length (MADD-ANO-037, -039);
+  `ShardedStencilNode` refuses an empty `axis_map` (MADD-ANO-042); `halo_exchange` refuses a `boundary` dict key naming no exchanged mesh axis (MADD-ANO-041).
+  Action: shard a stencil node with `ShardedStencilNode` (only a pointwise node goes to the unstructured wrapper for an indivisible grid); build the layout from the node's cells; map a mesh axis; fix the misspelt axis name.
 - **`GraphManager.from_dict` warns when it rebuilds a sharded node unsharded**: a config carries no device mesh, so the node comes back as the node it wraps; the `UserWarning` names the wrapper, the settings the config recorded and the `replace_node` call that wraps it again (MADD-ANO-036, silent since 0.2.0).
   Action: re-wrap after loading when the run must be sharded; filter the warning when an unsharded reload is what you want.
 - **New refusals where a sharded wrapper or `PUT /graph/params` accepted silently-wrong input**: the route refuses a value that changes a node's state shape (`n_cells`), a structural value the node's constructor refuses, `LBMPipeNode`'s geometry and a write no probe copy can decide; `ShardedUnstructuredNode` refuses a per-cell input on a full partition not in global order, and a state not in partition layout;
@@ -296,6 +299,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Sharded wrappers, round-2 audit**: `ShardedUnstructuredNode` no longer steps a Cartesian stencil node on the partition layout (a `HeatNode` rod ran 43 K off; MADD-ANO-037, since 0.3.0) nor drops a node's cells past the layout's count, and `shard_info["n_local"]` gives each shard its own cell count so an integral can leave the padding out (MADD-ANO-039, since 0.3.0);
+  both wrappers place a domain integral carried in the state as the step returns it, so an integral-emitting node runs in a graph (MADD-ANO-040, since 0.2.1); `ShardedStencilNode` fills a sharded static's global halos periodically under `boundary="periodic"` (MADD-ANO-038, since 0.2.1).
+  Action: re-run periodic sharded results whose node reads a static in its halo; mask a domain integral on an uneven partition with `jnp.arange(n_local_max) < shard_info["n_local"]`.
 - **FMU bridge and the multi-GPU session verdict**: `FmuTcpBridge.stop()` returns within five seconds and logs any worker still inside a request, which then commits nothing; `set`/`get` refuse a non-integer value reference (`10.9`, `"10"` and `true` addressed variables 10 and 1); `FmuSidecar.set_fmu_state` refuses a snapshot whose nodes, fields or parameters differ from the model, as `set_state` does, and `set_state` keeps a node without state fields.
   `run_pod.py --summarise` closes a checklist item only from files on the current schema, from one commit, with `n_devices` within the devices they saw, holding every case the runner runs and exactly the checks it derives from their results under `LIMITS`; other files read `INVALID`.
   Action: send integer value references; restore snapshots that carry the model's parameters; re-run session goals whose files come from another commit or runner version.
@@ -621,6 +627,8 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-037 to 042 (new, resolved in this release)**: `ShardedUnstructuredNode` stepped a Cartesian stencil node wrong, dropped cells past its layout's count and gave no way to leave padding out of an integral (all since 0.3.0); both sharded wrappers placed a domain integral in the state like a grid field (since 0.2.1);
+  a sharded static was edge-filled under a periodic wrapper (since 0.2.1); `halo_exchange` ignored an unknown `boundary` key and `ShardedStencilNode` accepted an empty `axis_map` (since 0.2.0).  See `### Fixed` and `### Changed`
 - **MADD-ANO-034, 036 (new, resolved in this release)**: a walled `LBMNode` reloaded with no walls (since 0.1.0; see `### Fixed`); a config round trip dropped a node's sharding with no word (since 0.2.0; now a warning, see `### Changed`).
   **MADD-ANO-035 (new, open)**: on a balanced partition not in global order, `ShardedUnstructuredNode` reads a global-order state written with `set_node_state` as partition layout, so each cell steps from another cell's value (since 0.3.0).
   Convert the state with `partition_value` first, or renumber the cells with `np.argsort(partition_assignment, kind="stable")`; an explicit layout on the state write is planned for 0.5.0

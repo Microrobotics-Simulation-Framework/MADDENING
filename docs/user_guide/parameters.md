@@ -140,6 +140,23 @@ server asks the graph whether the running node would use the new value:
   value, rebuild the node: `DELETE /graph/nodes/{node}`, then
   `POST /graph/nodes` with the new value.
 
+A 200 also promises that the graph a save would reload runs what the
+running graph runs, so two more questions are asked, of the whole request
+at once and with the params `to_dict()` would carry (every other key's
+live value included, which a fit may have moved).  The node's constructor
+must take them: a `HeatNode` `thermal_diffusivity` past its Fourier
+limit, or a pipe's `rho_gas` above its `rho_liquid` (alone or written
+together with a new `rho_liquid`), is a 400.  And where the rebuilt node
+holds anything its constructor derives differently from the running one,
+both are traced on the same state and params and both initial states are
+built; a write they compute differently with is a 400 -- `LBMPipeNode`'s
+`G` crossing zero, which picks the single- or multiphase branch at
+construction.  A non-finite number anywhere in the request is a 400 before
+anything else, integers are bounded as in `POST /graph/nodes` (a 422), and
+a value that would change the state's layout, or take it past the API's
+state cap, is refused before a node of that size is built wherever its
+`initial_state()` can be evaluated abstractly.
+
 Before 0.4.0 such a write answered 200, was served by `GET`, was ignored by
 every step (even after `POST /graph/compile`) and was saved by `to_dict()`
 and `save_state()`, so the reloaded graph ran a different model.  The check

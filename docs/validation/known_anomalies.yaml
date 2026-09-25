@@ -127,7 +127,12 @@ anomalies:
           gives the same nan and the same silence.  length is trainable on the
           same terms.
       Both bypass the constructor and neither can be checked inside a traced
-      step without a host callback, which is why this entry stays open.  For
+      step without a host callback, which is why this entry stays open.
+      One route is closed: since 0.4.0 `PUT /graph/params` asks the
+      constructor about every value it writes, live leaves included, with
+      the params a saved graph would carry (MADD-ANO-048), so a
+      `thermal_diffusivity` or `length` written through the REST API past
+      the limit is a 400 and is not written.  For
       reference, the stable end of that rod decays rather than diverging: Fo =
       0.4 and Fo = 0.5 give max|T| = 0.675313 and 0.657864 after 60 steps with
       no boundary data, 0.550473 and 0.474083 under Dirichlet zeros.  (An
@@ -171,6 +176,8 @@ anomalies:
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_an_unstable_dt_passed_to_update_diverges_silently"
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_an_unstable_injected_thermal_diffusivity_diverges_silently"
       - "tests/nodes/test_heat_fourier_limit_bypass.py::test_the_stable_end_of_the_rod_decays_to_the_recorded_figures"
+      # The REST route is closed (MADD-ANO-048).
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_live_leaf_above_the_fourier_limit_is_refused_and_the_graph_still_saves"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-003"
@@ -2887,7 +2894,11 @@ anomalies:
       `from_dict()` reproduced (CPU, jaxlib 0.11.0), with one exception
       that is not a parameter write: an `LBMNode` built with a `wall_mask`
       does not keep the mask among its params, so its reload has no walls
-      with or without a write (also at v0.3.1).  The same drive through
+      with or without a write (also at v0.3.1).  The sweep changed each
+      number; it did not write one across a branch the constructor
+      chooses from it, and two such writes, found by a later audit and
+      closed before release, are MADD-ANO-047: `grid_points` on a uniform
+      `HeatNode` and `G = 0` on a multiphase `LBMPipeNode`.  The same drive through
       `ShardedStencilNode` (`HeatNode` at both orders, `LBMNode`), against an
       unsharded node built with the new value, found no difference either.
       A user-authored node that bakes a
@@ -4396,4 +4407,264 @@ anomalies:
       - "tests/core/test_subcycling_ratio_refusal.py::test_every_member_that_does_not_divide_is_named"
       - "tests/core/test_subcycling_ratio_refusal.py::test_a_member_that_divides_is_accepted_and_keeps_the_graphs_clock"
       - "tests/core/test_subcycling_ratio_refusal.py::test_the_tolerance_admits_float_noise_and_nothing_coarser"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-047"
+    title: "PUT /graph/params accepted a write that flipped a branch the node fixed at construction: the running graph kept the old branch, a saved graph reloaded the new one"
+    description: >
+      A node may decide a branch of its computation, and build what the
+      branch reads, from a parameter when it is constructed.  Writing that
+      parameter through `PUT /graph/params/{node}` rebuilt neither: the
+      route answered 200, `GET` echoed the value and `to_dict()` saved it,
+      while the running node kept stepping the branch it was built on, and
+      a reload built the other one.  Two built-in nodes were affected.
+      `HeatNode` chose its grid from `params["grid_points"]` on every trace
+      but built the coordinates the variable-dx stencil reads once, in
+      `__init__` (since 0.2.0): `grid_points` written into a uniform rod
+      switched the step onto the variable-dx stencil over the stale uniform
+      coordinates, so the running rod stayed uniform.  `LBMPipeNode` fixes
+      its single- or multiphase branch from `G != 0` at construction
+      (since 0.1.0): `G = 0` on a multiphase pipe left it multiphase, with
+      no interaction force once the step read the new `G`, while the saved
+      pipe reloaded single-phase.
+      Reproduced through the real endpoint (`git archive` of each tag, CPU,
+      jaxlib 0.11.0).  A 12-cell uniform rod (`dt = 0.05`,
+      `thermal_diffusivity = 1e-3`, a sinusoidal initial profile, both ends
+      given as external inputs) with a non-uniform `grid_points` written:
+      200, and the running rod against its `to_dict()` / `from_dict()`
+      reload differs by 147.38 K after 200 steps at v0.2.0 and v0.3.1, and
+      by 166.35 K on the 0.4.0 development tree before the fix (71479c7);
+      at v0.1.0, whose rod rebuilt its coordinates from the params on every
+      trace, the two agree (0.0 K).  A multiphase pipe (`nx, ny, nz = 8,
+      10, 10`, `G = -5`, `rho_liquid = 2.0`, `rho_gas = 0.2`,
+      `fill_fraction = 0.5`) with `G = 0` written: 200, and the tracer
+      differs by 0.6525 after ten steps at v0.1.0, v0.2.0 and v0.3.1, where
+      the running pipe did not read `G` at all (MADD-ANO-024's form), and by
+      0.6453 on 71479c7, where it read the new `G` inside the branch
+      construction had fixed.  MADD-ANO-024's resolution refused a value no
+      step reads; both of these are read, so both passed it.
+      Resolved in 0.4.0, in the route and in `HeatNode`.  The route asks,
+      before anything is written, whether the graph a save would reload
+      runs what the running graph runs: it builds the node from the params
+      a save would carry with the request applied, and where that node
+      holds anything its constructor derives differently from the running
+      node, traces both nodes' hooks on the same state and params and
+      builds both initial states; a difference is a 400 naming the
+      attributes, with nothing written.  A node that already differs from
+      its own rebuild before the write (a constructor that draws random
+      numbers, say) cannot have the difference blamed on the write and is
+      not refused on this ground.  `HeatNode` now fixes its grid at
+      construction together with the coordinates, so a written
+      `grid_points` is read by nothing the running rod computes and is
+      refused on that ground as well.  `G = -4.5` on a multiphase pipe, a
+      new `tau`, and a new `length` on a uniform rod are still accepted, and
+      the reload reproduces each.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the write is confirmed, reported and saved, and the running
+      graph computes a different model from the one its saved config
+      reloads, with no error or warning (147 K apart on a 12-cell rod,
+      0.65 in a phase indicator bounded by 1).  Graded `major`, as
+      MADD-ANO-024 is, for that silence and for the reload divergence.
+      `context_dependent` because it needs a run-time REST write that
+      changes a branch the node chose when it was built; a graph whose
+      parameters are set only through the constructor is unaffected.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+      - "maddening.nodes.heat.HeatNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: change `grid_points` on a `HeatNode`, or cross `G = 0`
+      on an `LBMPipeNode`, by rebuilding the node (`DELETE
+      /graph/nodes/{name}`, then `POST /graph/nodes`), never through `PUT
+      /graph/params`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The comparison runs only where the rebuilt node's attributes differ
+      from the running node's, and only for a node its class rebuilds from
+      its params (as `from_dict()` does).  It compares one trace of the
+      hooks with a zero for every declared boundary input, and the
+      initial state; a constructor-derived value that only an undeclared
+      input would reach is not seen.  Writes outside this route -- a
+      direct `gm.params` write, a fit -- are not asked this question: a fit
+      of a multiphase pipe's `G` through zero stays on the multiphase
+      branch while its saved config would not.  `G` crossing zero is the
+      only such write among the built-in nodes' trainable leaves.
+    verification:
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_grid_written_into_a_uniform_rod_is_refused_and_the_reload_matches"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_uniform_rod_keeps_its_stencil_when_grid_points_is_written_into_its_params"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_non_uniform_rod_refuses_both_a_new_grid_and_none"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_switching_a_multiphase_pipe_to_single_phase_is_refused_and_the_reload_matches"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_single_phase_pipe_refuses_a_nonzero_interaction_strength"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_compiled_multiphase_pipe_takes_writes_within_its_branch_and_the_reload_matches"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_uniform_rod_takes_a_new_length_and_the_reload_matches"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_constructor_derived_branch_is_refused_for_any_node"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_an_array_the_constructor_derives_from_a_live_value_is_refused"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_an_initial_condition_the_constructor_copied_from_a_live_value_is_refused"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_node_that_differs_from_its_own_rebuild_is_not_blamed_on_the_write"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-048"
+    title: "PUT /graph/params accepted values the node's own constructor refuses, so a graph saved after the write could not be loaded"
+    description: >
+      `to_dict()` saves each node as its class and params and `from_dict()`
+      calls the class with them, so a value the constructor refuses is one
+      a saved graph cannot load.  `PUT /graph/params/{node}` did not ask the
+      constructor.  At v0.1.0 to v0.3.1 it asked nothing: on a multiphase
+      `LBMPipeNode` (`G = -5`, `rho_liquid = 2.0`, `rho_gas = 0.2`)
+      `rho_gas = 3.0` and `tau = 0.45` were each answered 200 and saved,
+      and `from_dict()` raised `rho_liquid must be > rho_gas (got 2.0 <=
+      3.0)` and `tau must be > 0.5` (`git archive` of v0.1.0, v0.2.0 and
+      v0.3.1, CPU, jaxlib 0.11.0).  MADD-ANO-024's fix asked the
+      constructor about a *structural* key only, one key at a time and
+      against the constructor's own values, so on the 0.4.0 development
+      tree (71479c7) a live leaf of the params pytree still skipped it:
+      `rho_gas = 3.0` was answered 200, the running tracer read it (and was
+      clipped to [0, 1] without a word) and the save did not load; a
+      `HeatNode` (16 cells, `dt = 1`) took a `thermal_diffusivity` at
+      Fourier number 0.6, above the 0.5 its constructor refuses since 0.4.0
+      (MADD-ANO-009), and `from_dict()` raised "timestep 1.0 is unstable".
+      Two values each acceptable alone but not together (`rho_gas = 1.5`
+      with `rho_liquid = 1.0`), and a value refused only against a live
+      value a fit had moved, passed as well.
+      Resolved in 0.4.0: the route builds the node from the params a save
+      would carry -- the effective params, every live leaf included --
+      with every changed key of the request applied at once, before
+      anything is written, and a constructor refusal is a 400 naming the
+      key(s) and the constructor's message, with nothing written.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The loss is loud where it lands -- the saved config raises on load --
+      but it lands late, after the write was confirmed, reported and
+      saved, and by then the only record of the run cannot be reloaded.
+      In between the running graph computes with a value its constructor
+      refuses: a rod above its stability limit diverges (visibly), a pipe
+      whose gas is denser than its liquid clips its phase indicator
+      silently.  Graded `minor` because the failure announces itself at the
+      reload; the case for `major` is that silent clipping.
+      `context_dependent` because it needs a run-time REST write of a value
+      the constructor validates.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep a value written through `PUT /graph/params` within
+      what the node's constructor accepts -- construct the node with it
+      in-process first if unsure -- and check that a saved config reloads.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Asked of a node its class rebuilds from its params; one that is not
+      rebuilt that way (a wrapper, a node whose constructor takes other
+      arguments) is asked through the node it wraps, or not at all.  Writes
+      outside the route (`gm.params`, a fit) are not asked: a calibration
+      can still move `thermal_diffusivity` past the Fourier limit, which
+      MADD-ANO-002 records.
+    verification:
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_live_leaf_above_the_fourier_limit_is_refused_and_the_graph_still_saves"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_pipe_gas_density_above_its_liquid_density_is_refused"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_two_values_each_acceptable_alone_are_refused_together"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_the_constructor_is_asked_with_the_live_values_a_save_would_carry"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-049"
+    title: "A non-finite value written through PUT /graph/params was stored, then the reply failed with a 500, and every later GET /graph/params for the node failed too"
+    description: >
+      `PUT /graph/params/{node}` checked finiteness only for a live leaf of
+      the params pytree.  A structural value holding `NaN` or an infinity
+      (JSON's `NaN` / `Infinity`, or an integer literal too large to be a
+      float) was written into the node's params, and the reply, which
+      echoes them, failed in the JSON encoder (`allow_nan=False`): a 500
+      after the write.  From then on every `GET /graph/params/{node}`
+      failed the same way.  Reproduced with `grid_points = [0.1, NaN, 0.5,
+      0.9]` on a 4-cell `HeatNode` through the real endpoint at v0.1.0,
+      v0.2.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0) and
+      on the 0.4.0 development tree before the fix (71479c7): 500, the NaN
+      stored, and the next `GET /graph/params/rod` a 500.  `POST
+      /graph/nodes` has refused a non-finite parameter since 0.4.0.
+      Resolved in 0.4.0: every value in the request is checked for
+      finiteness before anything else, and a non-finite one is a 400
+      naming its path (`params.grid_points[1]: value must be finite`), with
+      nothing written.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the write answers 500 and the node's parameter endpoint stays
+      broken for the life of the process, so no wrong number is reported
+      as a right one, and a NaN that reaches the physics makes the results
+      NaN.  The harm is to availability and to the saved config, not to a
+      result anyone could mistake for valid.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: never send a non-finite number to `PUT
+      /graph/params`; to recover a node that took one, rebuild it (`DELETE
+      /graph/nodes/{name}`, then `POST /graph/nodes`).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known for the route.  A non-finite value set in-process on a
+      node's params still makes its `GET /graph/params` fail.
+    verification:
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_non_finite_structural_value_is_refused_before_anything_is_written"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-050"
+    title: "Two HeatNode rods coupled end to end are unstable above Fourier number 3/8 once the exchange converges, which each rod's constructor accepts up to 1/2"
+    description: >
+      Coupling two rods by making each one's end-cell temperature the
+      other's Dirichlet datum (`extract_last` into `left_temperature`,
+      `extract_first` into `right_temperature`) and converging the exchange
+      within the step with a coupling group gives a pair that is not one
+      continuous rod: `HeatNode` imposes the datum through the ghost
+      `2*T_b - T[0]` (the rod-end fix of MADD-ANO-007), and the converged
+      pair has an interface mode whose per-step amplification is -1 at
+      Fourier number `Fo = dt*alpha/dx**2 = 3/8` and grows past it.  Each
+      rod's constructor checks its own limit, 1/2 for fixed data, so
+      nothing refuses the pair.  Measured on the 0.4.0 development tree
+      (CPU, jaxlib 0.11.0): two rods of 8 or of 20 cells, `alpha = 0.1`,
+      length 1, started at 300 K and 360 K, `add_coupling_group(["a",
+      "b"], max_iterations=100, tolerance=1e-9)`.  After 60 steps the
+      largest departure from 330 K is 29.8 K at `Fo = 0.375`, 1.51e+06 K at
+      0.4 and 3.5e+31 K at 0.45, and the part of the field that alternates
+      in time is multiplied by -1.500 per step at 0.4 and -4.000 at 0.45 on
+      both grids; at 0.45 the field is non-finite from step 68 (8 cells) or
+      67 (20 cells).  No error or warning.  The same pair exchanging its
+      data without a coupling group (lagged by the schedule) stays within
+      its initial range at 0.45 over 200 steps.  At v0.3.1 (`git archive`, same
+      environment) the pair stays bounded at every Fourier number up to
+      0.45 with the group and without it: the old closure wrote the datum
+      into the end cell, which made the pair one continuous rod, so the
+      limit arrived with the 0.4.0 rod-end fix.  The coupling benchmark
+      fixtures refuse `Fo >= 3/8` for their heat slab pairs themselves.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent until it is not: a configuration every individual check
+      accepts grows an oscillation that flips sign every step and leaves
+      float range in under 70 steps at `Fo = 0.45`, with nothing
+      raised before the field is visibly wrong, and it is wrong for many
+      steps before it is non-finite.  Graded `major` because the pattern is
+      the natural way to couple two rods and the limit is not the one the
+      node documents for itself.  `context_dependent` because it needs rods
+      coupled end to end through their Dirichlet inputs, a converged
+      exchange, and a Fourier number between 3/8 and 1/2; a single rod, or
+      a pair below 3/8, is unaffected.
+    affected_components:
+      - "maddening.nodes.heat.HeatNode"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Keep `Fo = dt*alpha/dx**2 < 3/8` on rods coupled end to end through
+      their temperature inputs, whatever each rod's own constructor
+      accepts.  A compile-time stability check of coupled groups is
+      proposed for 0.5.0.
+    resolution_status: "open"
+    verification:
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_a_converged_end_to_end_pair_diverges_above_three_eighths"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_the_same_pair_below_three_eighths_stays_bounded"
+      - "tests/nodes/test_heat_coupled_pair_fourier_limit.py::test_one_rod_with_fixed_data_is_stable_at_the_same_fourier_number"
     github_issue: null

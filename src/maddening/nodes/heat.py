@@ -487,6 +487,7 @@ class HeatNode(SimulationNode):
             "1st-order in time -- temporal accuracy is O(dt)",
             "No convection or radiation terms",
             "Non-uniform grids are 2nd-order only; stencil_order=4 requires a uniform grid",
+            "Two rods coupled end to end -- each rod's end-cell temperature the other's Dirichlet datum, the exchange converged within the step by a coupling group -- are stable only below Fourier number 3/8, not the 1/2 each rod has for fixed data: the pair's interface mode is amplified by -1.5 per step at Fo = 0.4 and -4 at 0.45 (MADD-ANO-050).  Keep Fo < 3/8 on rods coupled that way; neither the constructor nor compile() checks it",
         ),
         validated_regimes=(
             ValidatedRegime("thermal_diffusivity", 1e-6, 1.0, "m^2/s"),
@@ -504,6 +505,7 @@ class HeatNode(SimulationNode):
         hazard_hints=(
             "CFL is checked only against the constructor's timestep, thermal_diffusivity and length; a calibrated or externally supplied dt/alpha can still go unstable silently (MADD-ANO-002)",
             "No runtime validation of thermal_diffusivity > 0",
+            "Two rods exchanging end-cell temperatures in a converged coupling group diverge above Fourier number 3/8, which each rod's own constructor check (limit 1/2) accepts; the growth alternates sign every step and leaves float range in under 70 steps at Fo = 0.45 (MADD-ANO-050)",
         ),
         implementation_map={
             "alpha * d^2T/dx^2 (diffusion)": "maddening.nodes.heat.HeatNode._compute_laplacian",
@@ -592,6 +594,11 @@ class HeatNode(SimulationNode):
                     f"n_cells ({n_cells})"
                 )
 
+        # Which grid this rod is, fixed here with the coordinates built
+        # below: see ``_is_nonuniform``.  Set before ``super().__init__``
+        # so nothing the base class calls can see the node without it.
+        self._nonuniform = gp_list is not None
+
         super().__init__(
             name,
             timestep,
@@ -668,6 +675,12 @@ class HeatNode(SimulationNode):
         correctly, because the gradient would at that point be missing
         the term through the grid.  See
         :meth:`~maddening.core.node.SimulationNode.static_data_deps`.
+
+        Which branch applies is the grid the node was *constructed* on
+        (``_is_nonuniform``), not the current ``params["grid_points"]``:
+        a uniform rod does not become a non-uniform one because a list
+        was written into its params, so it still declares nothing, and
+        such a write is refused as read by nothing the node computes.
         """
         if self._is_nonuniform:
             return {"grid_x": ("grid_points",)}
@@ -781,7 +794,22 @@ class HeatNode(SimulationNode):
 
     @property
     def _is_nonuniform(self) -> bool:
-        return self.params.get("grid_points") is not None
+        """Whether this rod was *constructed* on a non-uniform grid.
+
+        Decided in ``__init__``, together with the coordinates
+        ``_grid_x`` holds, and never re-read from ``self.params``.  The
+        branch and the coordinates it reads must come from the same
+        construction: until 0.4.0 this read ``params["grid_points"]``
+        live, so a ``grid_points`` written into a uniform rod's params
+        after construction (``PUT /graph/params`` answered 200) switched
+        the step to the variable-dx stencil on the stale *uniform*
+        coordinates -- the running rod stayed uniform while ``to_dict()``
+        saved, and a reload ran, the new grid (166 K apart after 200
+        steps on a 12-cell rod).  With the branch fixed here a written
+        ``grid_points`` is read by nothing the running node computes,
+        and the parameter write is refused on that ground.
+        """
+        return self._nonuniform
 
     @property
     def _grid_x(self):

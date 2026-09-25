@@ -50,6 +50,7 @@ import os
 import threading
 import time
 import uuid
+import warnings
 from pathlib import Path
 from typing import Annotated, Any, Iterable, Optional
 from urllib.parse import urlsplit
@@ -82,8 +83,16 @@ from maddening.api.auth import (
 )
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.graph_manager import GraphManager, _leaf_values_equal
-from maddening.core.node import SimulationNode
+from maddening.core.graph_manager import (
+    GraphManager,
+    _declared_boundary_zeros,
+    _hook_outputs,
+    _leaf_values_equal,
+    _node_with_params,
+    _NodeSpec,
+    _params_holders,
+)
+from maddening.core.node import SimulationNode, _method_accepts_params
 from maddening.viz.relay import StateRelay
 from maddening.viz.runner import RealtimeRunner
 
@@ -243,6 +252,19 @@ class SetNodeStateRequest(BaseModel):
 class SetNodeParamsRequest(BaseModel):
     params: dict[str, Any]
 
+    # The same bound as ``POST /graph/nodes``: the route builds the node
+    # with the new values to check them (its constructor, the state it
+    # would build), so an integer here is an array dimension exactly as
+    # it is there.  Without it ``PUT n_cells=3e7`` built a 30-million-cell
+    # rod and its state (+235 MB) before the layout check refused it.
+    @field_validator("params")
+    @classmethod
+    def _params_within_bounds(cls, value: dict[str, Any]) -> dict[str, Any]:
+        problem = _oversized_param(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
 
 class TrainSurrogateRequest(BaseModel):
     node_name: str
@@ -340,6 +362,290 @@ def _dry_run_node(node, state: Any = None) -> None:
     except Exception:  # noqa: BLE001 - descriptor is advisory
         bi = {}
     jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
+
+
+# ------------------------------------------------------------------
+# PUT /graph/params: what a write would do, asked before it is made
+# ------------------------------------------------------------------
+
+#: Raised when node code needs a value concretely under abstract
+#: evaluation.  They mean "this cannot be told without building it", never
+#: "the node refuses the value", so they never refuse a write.
+_NEEDS_CONCRETE_VALUES = (
+    jax.errors.ConcretizationTypeError,
+    jax.errors.TracerArrayConversionError,
+    jax.errors.TracerBoolConversionError,
+    jax.errors.TracerIntegerConversionError,
+    jax.errors.NonConcreteBooleanIndexError,
+    jax.errors.UnexpectedTracerError,
+)
+
+
+def _probe_pair_with(node: Any, changes: dict[str, Any]) -> Optional[tuple]:
+    """``(old, new)``: shallow copies of the node a write of every entry of
+    *changes* into ``node.params`` lands on, reading the current params and
+    the written ones -- the node, or the node a wrapper that cannot be
+    copied wraps (``_param_probe_pair``'s rule, for several keys at once).
+    ``None`` when no faithful copy can be made.  Nothing is constructed."""
+    shared = getattr(node, "params", None)
+    if not isinstance(shared, dict):
+        return None
+    for candidate in _params_holders(node):
+        old = _node_with_params(candidate, dict(shared))
+        new = _node_with_params(candidate, {**shared, **changes})
+        if old is not None and new is not None:
+            return old, new
+    return None
+
+
+def _abstract_initial_state(node: Any) -> tuple[str, Any]:
+    """``node.initial_state()`` evaluated for shapes and dtypes only.
+
+    ``("ok", shapes)``, ``("raises", exc)`` when the node's code raises
+    under abstract evaluation for a reason that is not a concrete value it
+    needed (a shape that does not broadcast, a validation error), or
+    ``("unknown", exc)`` when it needed one.  JAX operations are staged,
+    not run, so nothing of the state's size is allocated.
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return "ok", jax.eval_shape(node.initial_state)
+    except _NEEDS_CONCRETE_VALUES as exc:
+        return "unknown", exc
+    except Exception as exc:  # noqa: BLE001 - the node's own refusal
+        return "raises", exc
+
+
+def _abstract_layout(shapes: Any) -> dict[str, tuple]:
+    """``{field path: (shape, dtype)}`` of an abstract state."""
+    return {
+        jax.tree_util.keystr(path): (tuple(leaf.shape), str(leaf.dtype))
+        for path, leaf in jax.tree_util.tree_flatten_with_path(shapes)[0]
+    }
+
+
+def _state_write_reason_before_building(node: Any, changes: dict[str, Any]) -> Optional[str]:
+    """Why the state the node would build with *changes* written into its
+    params rules the write out, told without building anything: it holds
+    more than :data:`MAX_NODE_STATE_ELEMENTS` elements, it has another
+    layout than the running state, or ``initial_state()`` raises with it.
+    ``None`` when none of these holds or it cannot be told this way.
+
+    ``PUT /graph/params`` refuses every one of these outright, and the
+    checks that establish it on concrete values construct the node and
+    build its state *at the new size* first -- ``n_cells=3e7`` cost
+    +235 MB and half a second before the 400, and a pipe's ``nx``
+    multiplies into its whole volume.  This is asked first, on shallow
+    copies of the node (:func:`_probe_pair_with`, no constructor call)
+    evaluated abstractly (:func:`_abstract_initial_state`), so such a
+    write is refused before anything of its size exists.  It refuses only
+    on positive evidence, and only when the current params evaluate this
+    way too; a node whose ``initial_state`` needs concrete values is left
+    to the concrete checks.
+    """
+    pair = _probe_pair_with(node, changes)
+    if pair is None:
+        return None
+    old_status, old_shapes = _abstract_initial_state(pair[0])
+    if old_status != "ok":
+        return None
+    new_status, new_shapes = _abstract_initial_state(pair[1])
+    if new_status == "raises":
+        return (f"{type(node).__name__}.initial_state() raises with it "
+                f"({type(new_shapes).__name__}: {new_shapes})")
+    if new_status != "ok":
+        return None
+    n_elements = _state_elements(new_shapes)
+    if n_elements > MAX_NODE_STATE_ELEMENTS:
+        return (f"the node would hold {n_elements} state elements with it; at "
+                f"most {MAX_NODE_STATE_ELEMENTS} are accepted over the API "
+                "(this server is unauthenticated -- build a graph this size "
+                "in-process)")
+    was, now = _abstract_layout(old_shapes), _abstract_layout(new_shapes)
+    if was == now:
+        return None
+    changed = [
+        f"{field} {was.get(field, 'absent')} -> {now.get(field, 'absent')}"
+        for field in sorted(set(was) | set(now))
+        if was.get(field) != now.get(field)
+    ]
+    return (
+        "it changes the layout of the state the node builds ((shape, "
+        f"dtype) of {'; '.join(changed)}), and the running state keeps "
+        "its layout until it is reset: the step recompiled for the new "
+        "value would be traced against a state it was not written for"
+    )
+
+
+def _derived_attributes_that_differ(running: Any, rebuilt: Any) -> list[str]:
+    """Attributes other than ``params`` that *rebuilt* holds differently
+    from *running*: what the constructor derived from the params, compared.
+    Only the rebuilt node's attributes count -- one the running node
+    gained since it was constructed (a guard or a cache the graph set) is
+    not something a constructor derives."""
+    mine, theirs = vars(running), vars(rebuilt)
+    out = []
+    for name in sorted(set(theirs) - {"params"}):
+        if name not in mine:
+            out.append(name)
+            continue
+        a, b = mine[name], theirs[name]
+        if a is b:
+            continue
+        try:
+            if any(isinstance(v, (jax.Array, np.ndarray)) for v in (a, b)):
+                same = _leaf_values_equal(a, b)
+            else:
+                same = bool(a == b)
+        except Exception:  # noqa: BLE001 - not comparable: count it as changed
+            same = False
+        if not same:
+            out.append(name)
+    return out
+
+
+def _what_the_node_computes(spec, probe: Any, descended: bool, state: Any,
+                            leaves: Any) -> Optional[tuple]:
+    """``(jaxpr text, jaxpr constants, initial state)`` of *probe*'s hooks,
+    called the way the graph calls them (``update``, and the flux and
+    interface-correction hooks where it has them) on *state* with a zero
+    for every declared boundary input and *leaves* as the injected params,
+    and of its ``initial_state()``.  ``None`` when it cannot be told."""
+    probe_spec = _NodeSpec(
+        node=probe, update_fn=probe.update, timestep=spec.timestep,
+        accepts_params=(
+            _method_accepts_params(probe, "update") and leaves is not None
+            if descended else spec.accepts_params),
+        flux_accepts_params=(
+            _method_accepts_params(probe, "compute_boundary_fluxes")
+            and leaves is not None
+            if descended else spec.flux_accepts_params),
+    )
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            bi = _declared_boundary_zeros(probe)
+            closed = jax.make_jaxpr(
+                lambda st, b, p: _hook_outputs(probe_spec, st, b, p),
+            )(state, bi, leaves)
+            initial = probe.initial_state()
+    except Exception:  # noqa: BLE001 - cannot tell
+        return None
+    return str(closed.jaxpr), list(closed.consts), initial
+
+
+def _computes_the_same(a: tuple, b: tuple) -> list[str]:
+    """What differs between two :func:`_what_the_node_computes` results."""
+    (text_a, consts_a, init_a), (text_b, consts_b, init_b) = a, b
+    out = []
+    if text_a != text_b:
+        out.append("the step traces to a different computation")
+    elif len(consts_a) != len(consts_b) or not all(
+            _leaf_values_equal(x, y) for x, y in zip(consts_a, consts_b)):
+        out.append("the step closes over different constants")
+    if (jax.tree.structure(init_a) != jax.tree.structure(init_b)
+            or not _leaf_values_equal(init_a, init_b)):
+        out.append("initial_state() builds a different state")
+    return out
+
+
+def _saved_graph_write_reason(gm: GraphManager, owner: str, changes: dict[str, Any],
+                              live_before: Optional[dict],
+                              live_after: Optional[dict]) -> Optional[str]:
+    """Why the graph a save after writing *changes* reloads would not run
+    what the running graph runs with them, or ``None``.
+
+    ``to_dict()`` saves each node as its class and its effective params
+    (:meth:`~maddening.core.graph_manager.GraphManager.effective_node_params`),
+    and ``from_dict()`` calls the class with them.  So a 200 from ``PUT
+    /graph/params`` promises two things this asks of the whole request at
+    once, with the params a save would carry -- every other key's live
+    value included, which a fit may have moved:
+
+    1. **The constructor takes them.**  Until 0.4.0 only a structural key
+       was asked, one at a time and against the constructor's own values:
+       a ``HeatNode`` took a ``thermal_diffusivity`` at Fourier number 0.6
+       and an ``LBMPipeNode`` a ``rho_gas`` above its ``rho_liquid``, both
+       live leaves, and neither saved graph loaded.
+    2. **The node it builds computes what the running node computes.**
+       A constructor may derive a branch or an array from a value
+       (``LBMPipeNode``'s single-/multiphase switch from ``G != 0``); the
+       running node keeps what it derived, so a write can be *used* -- the
+       step reads the new ``G`` -- and still run another model than the
+       reload: ``G=0`` on a multiphase pipe stayed multiphase with no
+       interaction, while its save reloaded single-phase (0.645 apart in
+       the tracer after ten steps).  Asked only when the rebuilt node
+       holds some attribute differently from the running one, by tracing
+       both nodes' hooks with the same state and params, and building
+       both initial states.  A node that already differs from its own
+       rebuild before the write (a constructor that draws random numbers,
+       a value a fit moved that its constructor consumes) cannot be
+       blamed on this write and is not refused here.
+
+    Asked of the node, or of the node a wrapper wraps (whichever is
+    rebuilt from its params, as for ``_constructor_write_reason``); a node
+    that is not rebuilt from its params is not asked.
+    """
+    spec = gm._nodes[owner]
+    node = spec.node
+    shared = node.params
+    try:
+        effective = gm.effective_node_params(owner)
+    except Exception:  # noqa: BLE001 - the graph cannot say what it would save
+        return None
+    for candidate in _params_holders(node):
+        cls = type(candidate)
+
+        def build(params, cls=cls, candidate=candidate):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return cls(name=candidate.name, timestep=candidate.delta_t, **params)
+
+        try:
+            rebuilt_old = build(effective)
+        except Exception:  # noqa: BLE001 - not rebuilt from its params
+            continue
+        try:
+            rebuilt_new = build({**effective, **changes})
+        except Exception as exc:  # noqa: BLE001 - the constructor refuses it
+            return (
+                f"{cls.__name__}'s constructor refuses it ({type(exc).__name__}: "
+                f"{exc}), so a graph saved with it would not load"
+            )
+        differ = _derived_attributes_that_differ(candidate, rebuilt_new)
+        if not differ:
+            return None
+        probe_old = _node_with_params(candidate, dict(shared))
+        probe_new = _node_with_params(candidate, {**shared, **changes})
+        if probe_old is None or probe_new is None:
+            return None
+        descended = candidate is not node
+        try:
+            state = probe_old.initial_state() if descended else gm._state[owner]
+        except Exception:  # noqa: BLE001 - cannot tell
+            return None
+        running = _what_the_node_computes(spec, probe_new, descended, state, live_after)
+        reloaded = _what_the_node_computes(spec, rebuilt_new, descended, state, live_after)
+        if running is None or reloaded is None:
+            return None
+        differences = _computes_the_same(running, reloaded)
+        if not differences:
+            return None
+        before = _what_the_node_computes(spec, probe_old, descended, state, live_before)
+        rebuilt_before = _what_the_node_computes(spec, rebuilt_old, descended, state,
+                                                 live_before)
+        if before is None or rebuilt_before is None \
+                or _computes_the_same(before, rebuilt_before):
+            return None
+        return (
+            f"a graph saved with it would reload a node that computes "
+            f"something else: {cls.__name__} derives {differ} from its params "
+            "when it is constructed, the running node keeps what it derived "
+            "from the old value, and with the new value the running node and "
+            f"the reloaded one differ: {'; '.join(differences)}"
+        )
+    return None
 
 
 #: Methods a cross-origin page could use to change this server's state.
@@ -1141,11 +1447,36 @@ class SimulationServer:
             grid shape), sharded or not: the running state keeps its shape,
             and the step recompiled for the new value either failed on it
             or, sharded, stepped it on a grid it does not have.  And so is
-            a structural value the node's constructor refuses: a graph saved
-            with it could not be loaded.
+            a request whose values the node's constructor refuses, asked
+            with every changed key at once and the params a save would
+            carry: a graph saved with them could not be loaded.  And so is
+            one the running node would honour differently from the node a
+            saved graph rebuilds -- a constructor that derives a branch or
+            an array from the value (``LBMPipeNode``'s multiphase switch
+            from ``G != 0``) leaves the running node computing with what it
+            derived from the old one.
+
+            A non-finite number anywhere in the request is a 400 before
+            anything else.  Integers and element counts are bounded as in
+            ``POST /graph/nodes`` (a 422 from the request model), and a
+            value that would take the node's state past
+            :data:`MAX_NODE_STATE_ELEMENTS`, or change its layout, is
+            refused before any node or state is built with it wherever the
+            node's ``initial_state()`` can be evaluated abstractly.
             """
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
+            # Before anything else, and for every key, as POST /graph/nodes
+            # does: a non-finite structural value used to skip the live-leaf
+            # checks below, be written into node.params, and fail only in
+            # the reply's JSON encoder -- a 500 after the write, and every
+            # later GET /graph/params a 500 as well.
+            bad = _non_finite_param(req.params)
+            if bad is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"params.{bad}: value must be finite",
+                )
             node = self.gm._nodes[node_name].node
             live = self.gm.params.get("nodes", {}).get(node_name) or {}
             specs = self.gm.param_specs().get("nodes", {}).get(node_name, {})
@@ -1216,6 +1547,50 @@ class SimulationServer:
                     except ValueError as exc:
                         raise HTTPException(status_code=400, detail=str(exc))
                 staged[key] = new
+            # What the write would store in node.params, for every key that
+            # changes; an unchanged key has nothing to refuse.
+            ctor = node.params_pytree() if staged else {}
+            changes: dict[str, Any] = {}
+            for key, value in req.params.items():
+                if key in staged:
+                    ref = ctor.get(key, live.get(key))
+                    if ref is not None and _leaf_values_equal(staged[key], ref):
+                        continue
+                    changes[key] = np.asarray(staged[key]).tolist()
+                else:
+                    if key in node.params and _same_param_value(node.params[key], value):
+                        continue
+                    changes[key] = value
+
+            def refused(keys, reason: str, *, reported: bool = False) -> HTTPException:
+                what = ("a new value for this parameter" if len(keys) == 1
+                        else "these values together")
+                also = ("  The write would be reported, and saved by to_dict() / "
+                        "save_state(), as the value in force." if reported else "")
+                return HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{', '.join(keys)}: node '{node_name}' cannot take {what} "
+                        f"while it runs: {reason}.{also}  Nothing was written; to "
+                        "change it, rebuild the node (DELETE "
+                        f"/graph/nodes/{node_name}, then POST /graph/nodes with "
+                        "the new value)."
+                    ),
+                )
+
+            # A state of another layout -- or over the API's state cap -- is
+            # refused whatever else is true of the value, and the checks
+            # below that establish it on concrete values build the node and
+            # its state at the new size first.  Told here without building
+            # anything, where the node's initial_state() can be evaluated
+            # abstractly.  One key at a time, like the checks it precedes:
+            # a key that changes the layout on its own is refused by the
+            # first of them, so every node built below has the running
+            # node's state layout.
+            for key, node_value in changes.items():
+                reason = _state_write_reason_before_building(node, {key: node_value})
+                if reason is not None:
+                    raise refused([key], reason)
             # A value the node consumed when it was constructed (a wall
             # mask, an assembled operator, a copy of an initial condition)
             # is not rebuilt by writing node.params: the write would be
@@ -1224,48 +1599,36 @@ class SimulationServer:
             # before anything is written, by the graph's own decision
             # (``GraphManager._unused_node_write_reason``), which is the
             # one that refuses the same leaf written into gm.params alone.
-            ctor = node.params_pytree() if staged else {}
-            for key, value in req.params.items():
-                if key in staged:
-                    ref = ctor.get(key, live.get(key))
-                    if ref is not None and _leaf_values_equal(staged[key], ref):
-                        continue            # unchanged: nothing to refuse
-                    node_value = np.asarray(staged[key]).tolist()
-                else:
-                    if key in node.params and _same_param_value(node.params[key], value):
-                        continue
-                    node_value = value
+            for key, node_value in changes.items():
                 # A structural value is checked against the node's own
-                # constructor: the saved graph is rebuilt through it.
+                # constructor: the saved graph is rebuilt through it.  (Every
+                # key, together and with a save's params, is checked below.)
                 shape_reason = (
                     self.gm._constructor_write_reason(node_name, key, node_value)
                     if key not in staged else None
                 ) or self.gm._state_shape_write_reason(node_name, key, node_value)
                 if shape_reason is not None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"{key}: node '{node_name}' cannot take a new value "
-                            f"for this parameter while it runs: {shape_reason}.  "
-                            "Nothing was written; to change it, rebuild the "
-                            f"node (DELETE /graph/nodes/{node_name}, then POST "
-                            "/graph/nodes with the new value)."
-                        ),
-                    )
+                    raise refused([key], shape_reason)
                 reason = self.gm._unused_node_write_reason(node_name, key, node_value)
                 if reason is not None:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=(
-                            f"{key}: node '{node_name}' cannot take a new value "
-                            f"for this parameter while it runs: {reason}.  The "
-                            "write would be reported, and saved by to_dict() / "
-                            "save_state(), as the value in force.  Nothing was "
-                            "written; to change it, rebuild the node (DELETE "
-                            f"/graph/nodes/{node_name}, then POST /graph/nodes "
-                            "with the new value)."
-                        ),
-                    )
+                    raise refused([key], reason, reported=True)
+            # And the graph a save after the write would reload must load,
+            # and run what the running graph runs: the constructor asked
+            # with every changed key at once and every other key's live
+            # value (a live leaf used to skip it), and a node whose
+            # constructor derives something from the value -- a branch, an
+            # array -- asked whether the rebuilt node computes what the
+            # running one does with it.
+            saved = {k: v for k, v in changes.items() if k in node.params}
+            if saved:
+                accepts = self.gm._nodes[node_name].accepts_params
+                reason = _saved_graph_write_reason(
+                    self.gm, node_name, saved,
+                    dict(live) if accepts else None,
+                    {**live, **staged} if accepts else None,
+                )
+                if reason is not None:
+                    raise refused(list(saved), reason)
             for key, value in req.params.items():
                 if key in staged:
                     # After a compile ``live`` *is* gm.params' leaf dict and

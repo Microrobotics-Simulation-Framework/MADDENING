@@ -850,6 +850,58 @@ def _refuse_colliding_group_keys(groups) -> None:
             slots[slot] = group.nodes
 
 
+#: Relative tolerance on "``macro_dt / node_dt`` is a whole number" for a
+#: sub-cycled group.  Timesteps are decimal floats, so an exact ratio such
+#: as ``0.01 / 0.001`` computes as ``10.000000000000002``: a few float64
+#: ulps (~1e-15 relative) of representation noise, which this must admit.
+#: A genuine mismatch is a decimal digit off (``0.01 / 0.003``, 11% off)
+#: and must not be admitted.  At 1e-9 the rounded divider drifts the
+#: member's clock by at most one sub-step in a billion macro steps, far
+#: below anything a simulation can resolve, and it is the tolerance the
+#: multi-rate scheduler already uses for its base timestep
+#: (:func:`_float_gcd`).
+_SUBCYCLING_RATIO_RTOL = 1e-9
+
+
+def _subcycling_ratio_errors(group, nodes) -> list[str]:
+    """``ERROR:`` issues for sub-cycled members whose timestep does not divide.
+
+    A sub-cycled node takes ``round(macro_dt / node_dt)`` sub-steps of its
+    own timestep per coupling pass (:func:`_group_dividers`), so unless the
+    ratio is a whole number it covers ``divider * node_dt`` per macro step,
+    not ``macro_dt``: its clock drifts from the rest of the graph by a
+    fixed fraction of every step, silently.  ``0.003`` in a group whose
+    macro timestep is ``0.01`` took three sub-steps and covered ``0.009``.
+    Refused, naming the two nearest timesteps that do divide.
+    """
+    names = sorted(n for n in group.nodes if n in nodes)
+    if not names:
+        return []
+    macro = max(nodes[n].timestep for n in names)
+    errors = []
+    for n in names:
+        node_dt = nodes[n].timestep
+        ratio = macro / node_dt
+        whole = max(round(ratio), 1)
+        if abs(ratio - whole) <= _SUBCYCLING_RATIO_RTOL * ratio:
+            continue
+        below, above = max(math.floor(ratio), 1), math.ceil(ratio)
+        nearest = sorted({macro / above, macro / below}, reverse=True)
+        errors.append(
+            f"ERROR: coupling group {names}: node {n!r} has timestep "
+            f"{node_dt:.6g}, which does not divide the group's macro timestep "
+            f"{macro:.6g} (ratio {ratio:.6g}).  A sub-cycled node takes a whole "
+            f"number of sub-steps per coupling pass, so it would take "
+            f"{whole} of {node_dt:.6g} and cover {whole * node_dt:.6g} per "
+            f"macro step instead of {macro:.6g}.  Give it a timestep that "
+            f"divides {macro:.6g} -- the nearest are "
+            + " and ".join(f"{t:.6g} ({macro:.6g}/{round(macro / t)})"
+                           for t in nearest)
+            + " -- or change the macro timestep."
+        )
+    return errors
+
+
 def _group_dividers(group, nodes):
     """Evaluations of each node per coupling pass under ``subcycling=True``, or ``None``.
 
@@ -5475,6 +5527,8 @@ class GraphManager:
                     f"group must share the same timestep.  Set "
                     f"subcycling=True to enable mixed-timestep coupling."
                 )
+            elif len(group_timesteps) > 1:
+                issues.extend(_subcycling_ratio_errors(group, self._nodes))
             coupled_nodes |= group.nodes
 
         # Cycle detection (only on edges with valid endpoints)
@@ -7004,6 +7058,24 @@ class GraphManager:
               0.0 while the stiffness gradient was 0.8-4.8% off (the
               random signs moved stiffness and mass by the same
               relative amount, and the dynamics see only their ratio).
+
+              *Its own rounding.*  The curvature factor is the
+              difference of two Jacobian-vector products of the map,
+              and where the curvature along the step is only a few
+              float32 ulps of those products the bound carries their
+              rounding: two compilations of the same step can disagree
+              in its leading digit.  Measured on a pair whose map is
+              bilinear in its state and a coupled constant: 2.01e-06
+              unbatched and 1.84e-06 under ``jax.vmap`` for the same
+              step -- the products one ulp apart between the two
+              programs, their difference twelve ulps -- against a true
+              relative error of 9.5e-07, so both hold.  That is the
+              float32 resolution of the gradient itself (about
+              ``amplification * eps``), not a defect of batching: under
+              ``vmap`` the forward state, ``iterations``, ``residual``
+              and ``amplification`` are bit-identical, and the spectral
+              keys agree to a few ulps (the Arnoldi's batched linear
+              algebra rounds differently too).
 
               **This is a statement about the gradient, not about the
               solve.**  On a map that is affine in its state with

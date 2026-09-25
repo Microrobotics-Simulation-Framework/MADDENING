@@ -6,7 +6,7 @@ imposes the datum through the ghost ``2*T_b - T[0]``, so the converged
 pair is not one continuous rod: it has an interface mode whose per-step
 amplification is exactly -1 at Fo = 3/8, -1.5 at 0.4 and -4 at 0.45 --
 while the constructor accepts each rod up to its own fixed-data limit of
-1/2.  Nothing refuses such a graph (MADD-ANO-049, open).
+1/2.  Nothing refuses such a graph (MADD-ANO-050, open).
 
 These tests pin what stays open, so that a fix -- or a drifted figure --
 fails here: the growth rate on either side of the limit, and the single

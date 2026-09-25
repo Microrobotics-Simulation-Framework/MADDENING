@@ -31,18 +31,13 @@ from __future__ import annotations
 
 import functools
 import math
-import re
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import pytest
-import yaml
 
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
-
-_REPO = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
@@ -702,24 +697,8 @@ def test_before_a_step_and_after_reset_state_the_gradient_bound_is_nan():
     assert math.isnan(float(gm._state["_meta"][slot]))
 
 
-# ---------------------------------------------------------------------------
-# The key list, where it is quoted
-# ---------------------------------------------------------------------------
-
-
-def test_the_anomaly_registry_quotes_the_reported_keys_exactly():
-    """MADD-ANO-005's key list is the report's key set, not a paraphrase.
-
-    The registry entry states "the reported keys are exactly [...]".  A
-    sentence like that goes stale silently when a key is added, so it is
-    read back and compared with what ``coupling_diagnostics()`` returns.
-    """
-    registry = yaml.safe_load(
-        (_REPO / "docs" / "validation" / "known_anomalies.yaml").read_text())
-    entry = next(a for a in registry["anomalies"] if a["anomaly_id"] == "MADD-ANO-005")
-    match = re.search(r"reported keys are exactly\s*\[([^\]]*)\]", entry["description"])
-    assert match, "MADD-ANO-005 no longer quotes the key list"
-    quoted = set(re.findall(r"'([a-z_]+)'", match.group(1)))
-    gm = _curved_graph("log", max_iterations=4)
-    gm.step()
-    assert quoted == set(gm.coupling_diagnostics()["a+b"])
+# MADD-ANO-005 quotes the key set ``coupling_diagnostics()`` reports.  That
+# quotation is read back and compared with a step of ``_curved_graph`` in
+# tests/compliance/test_registry_quotes_the_diagnostics_keys.py: the
+# registry is under docs/, and a docs-only change runs the compliance job
+# alone, so a test that reads it has to live there.

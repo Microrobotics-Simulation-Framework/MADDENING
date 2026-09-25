@@ -595,11 +595,31 @@ def test_the_budget_step_can_fail_the_job():
     script = re.sub(r"\$\{\{.*?\}\}", "EXPR", step["run"])
     for undo in ("--fail-over", "||", "set +e"):
         assert undo not in script, f"the budget step contains {undo!r}"
-    # `${{ matrix.shard }}` -> `{{matrix.shard}}`, one shell word.
-    last = shlex.split(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", r"{{\1}}", _commands(step["run"])[-1]))
+    # The gate is the whole of the step's last command: anything chained
+    # after it (`; true`, `| tee`, `&& ...`, `&`) decides the step's exit
+    # code instead.  `${{ matrix.shard }}` -> `{{matrix.shard}}`, one word.
+    last = _shell_words(re.sub(r"\$\{\{\s*(.*?)\s*\}\}", r"{{\1}}", _commands(step["run"])[-1]))
+    operators = [w for w in last if w and set(w) <= set(";&|<>()")]
+    assert not operators, f"the gate is not the whole last command: {operators} in {last}"
     assert last[:3] == ["python", "scripts/report_test_durations.py",
                         "test-results-shard{{matrix.shard}}.xml"], last
     assert last[last.index("--allowlist") + 1] == "tests/duration_allowlist.txt"
+
+
+def _shell_words(command):
+    """Words and shell operators, as a POSIX shell splits them."""
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+@pytest.mark.parametrize("tail", ["; true", ";true", " | tee gate.log", " || true", " && true",
+                                  " &", " > /dev/null"])
+def test_the_budget_step_check_sees_anything_chained_after_the_gate(tail):
+    command = ("python scripts/report_test_durations.py test-results-shard{{matrix.shard}}.xml "
+               "--allowlist tests/duration_allowlist.txt --markdown /dev/null")
+    assert not [w for w in _shell_words(command) if set(w) <= set(";&|<>()")]
+    assert [w for w in _shell_words(command + tail) if set(w) <= set(";&|<>()")], tail
 
 
 def _render(text, values):
@@ -835,3 +855,57 @@ def test_a_skipped_or_failed_allowlisted_test_is_not_called_removable(gate, tmp_
     assert "`tests/a/test_x.py::test_passed_fast`" in removable
     for name in ("test_skipped", "test_failed", "test_errored"):
         assert name not in removable, name
+
+
+
+def _lane(tmp_path, shards, modes, allow_text):
+    """Run the "Summarise the lane" step on ``shards`` ({n: cases}) and ``modes`` ({n: mode})."""
+    (step,) = [s for s in _ci()["jobs"]["test-durations"]["steps"]
+               if s.get("name") == "Summarise the lane"]
+    work = tmp_path / "work"
+    (work / "results").mkdir(parents=True)
+    (work / "tests").mkdir()
+    (work / "scripts").symlink_to(REPO_ROOT / "scripts")
+    (work / "tests" / "duration_allowlist.txt").write_text(allow_text)
+    for n, cases in shards.items():
+        _report(work / "results", *cases, name=f"test-results-shard{n}.xml")
+    for n, mode in modes.items():
+        (work / "results" / f"cache-mode-shard{n}.txt").write_text(mode + "\n")
+    summary = tmp_path / "summary.md"
+    proc = subprocess.run(["bash", "-e", "-c", _render(step["run"], {"matrix.jax-version": "0.10.2"})],
+                          cwd=work, capture_output=True, text=True, timeout=120,
+                          env={**os.environ, "PATH": _shim(tmp_path),
+                               "GITHUB_STEP_SUMMARY": str(summary)})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return summary.read_text(), proc.stdout
+
+
+@pytest.mark.parametrize("reports, listed", [(4, True), (3, False)])
+def test_a_lane_missing_a_shards_report_lists_no_allowlist_entry_as_removable(
+        tmp_path, reports, listed):
+    """An allowlisted test absent from three shards' reports may be on the fourth.
+
+    Every shard wrote its cache mode (the budget step writes it before the
+    gate, so a shard whose test step crashed without a report still has
+    one): all four are ``cold``, so only the missing report can keep the
+    entry off the removable list.  With all four reports the same entry is
+    listed -- the fixture can express what the step guards.
+    """
+    shards = {n: [_case(f"tests/s{n}/test_x.py", "test_t", 0.2)] for n in range(1, reports + 1)}
+    md, out = _lane(tmp_path, shards, {n: "cold" for n in (1, 2, 3, 4)},
+                    "tests/s9/test_gone.py::test_elsewhere # kept: x\n")
+    assert "**Compilation cache: cold**" in md
+    assert ("may be removable" in md) is listed, md
+    assert ("only 3 of 4 shard reports" in out) is (not listed), out
+
+
+def test_the_lane_summary_labels_each_shard_from_its_hits(tmp_path):
+    """End to end through the workflow step: four shards restored a cache, one did not use it."""
+    def lookups(hits, misses):
+        return [_case("tests/a/test_x.py", "test_t", 0.1,
+                      jax={"jax_cache_hits": hits, "jax_cache_misses": misses})]
+    shards = {1: lookups(3856, 521), 2: lookups(625, 2916), 3: lookups(6334, 1), 4: lookups(4195, 0)}
+    md, _ = _lane(tmp_path, shards, {n: "warm" for n in shards}, "# empty\n")
+    assert "**Compilation cache: mixed**" in md
+    assert "shard 2 restored but unused (cold), 625 of 3541 lookups hit (18%)" in md
+    assert "shard 3 warm, 6334 of 6335 lookups hit (100%)" in md

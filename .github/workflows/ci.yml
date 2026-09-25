@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.classify.outputs.code }}
+      cold: ${{ steps.classify.outputs.cold }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,8 +70,8 @@ jobs:
           git fetch --no-tags --depth=1 origin "$BASE_REF" 2>/dev/null || true
           base="$(git merge-base "origin/$BASE_REF" HEAD || true)"
           if [ -z "$base" ]; then
-            echo "no diff base; running every lane"
-            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+            echo "no diff base; running every lane, cold"
+            echo "code=true" >> "$GITHUB_OUTPUT"; echo "cold=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           changed="$(git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD)"
           if [ -z "$changed" ]; then
@@ -89,6 +90,18 @@ jobs:
           done <<< "$changed"
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code lanes needed: $code"
+          # A cold test run (see "Compilation cache mode") when the diff can
+          # move a compile cost onto another test: a slow mark added or
+          # removed, a test function removed (deleted, renamed or moved),
+          # or the allowlist or the shard assignment edited.
+          cold=false
+          if grep -qxE 'tests/duration_allowlist\.txt|tests/_sharding\.py' <<< "$changed" \
+              || git diff -U0 --no-renames "$base" HEAD -- 'tests/*.py' \
+                 | grep -qE '^[-+][^-+].*mark\.slow|^-[[:space:]]*(async[[:space:]]+)?def[[:space:]]+test'; then
+            cold=true
+          fi
+          echo "cold=$cold" >> "$GITHUB_OUTPUT"
+          echo "cold test run needed: $cold"
 
   test:
     needs: changes
@@ -185,19 +198,26 @@ jobs:
 
       - name: Compilation cache mode
         # Pull requests run WARM: they restore the base branch's XLA
-        # compilation cache and never save one.  Everything a PR adds or
-        # changes therefore compiles from scratch on every push -- its
-        # programs are not in the base cache -- so the time budget still
-        # sees a new slow test on the PR that introduces it.  (If PRs saved,
+        # compilation cache and never save one.  A program a PR adds or
+        # changes is not in the base cache, so it compiles from scratch on
+        # every push and the time budget sees what it costs.  (If PRs saved,
         # a second push would read the first push's cache and a new 25 s
-        # test would pass at 8 s.)  Pushes to main / release/** -- i.e.
-        # after a merge -- run COLD: start empty, report every compile at
-        # full cost, and save the result as the cache the next PRs restore.
-        # `[cold-ci]` in a PR's head commit message forces a cold run, for
-        # before/after numbers when optimising tests.
+        # test would pass at 8 s.)  A cost that MOVES is another matter: the
+        # first test to compile a shared program pays for every later test
+        # that reuses it, so when a PR slow-marks, deletes or moves that
+        # test the next one inherits the compile, reads it from the base
+        # cache here and looks fast, and the cold run after the merge fails
+        # it.  So a PR whose diff does that runs COLD (the `changes` job's
+        # `cold` output).  Not seen: a new test placed before an existing
+        # one that shares its program.  Pushes to main / release/** -- i.e.
+        # after a merge -- run COLD: start empty, compile each program in
+        # full the first time the run needs it, and save the result as the
+        # cache the next PRs restore.  `[cold-ci]` in a PR's head commit
+        # message forces a cold run, for before/after numbers.
         id: cc
         env:
           GH_TOKEN: ${{ github.token }}
+          COLD_DIFF: ${{ needs.changes.outputs.cold }}
         run: |
           mode=warm
           if [ "${{ github.event_name }}" != "pull_request" ]; then
@@ -205,11 +225,14 @@ jobs:
           else
             msg=$(gh api "repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}" --jq .commit.message || true)
             case "$msg" in *"[cold-ci]"*) mode=cold ;; esac
+            if [ "$COLD_DIFF" = "true" ]; then mode=cold; fi
           fi
-          # XLA:CPU compiles for the host's instruction set and the runner
-          # pool mixes CPU models, so an executable is only reused on the
-          # model that built it.  A PR landing on a model with no cache yet
-          # just runs cold.
+          # XLA:CPU compiles for the host's instruction set.  What keeps an
+          # executable off a host it was not built for is JAX's own cache
+          # key, which includes the CPU's features; the CPU model here only
+          # raises the hit rate.  Runners reporting one model can still
+          # differ in features, and then the restored cache goes unused:
+          # the lane summary labels each shard from its hits, not this.
           model=$(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2- | xargs)
           cpu=$(printf '%s' "$model" | sha256sum | cut -c1-12)
           echo "mode=$mode" >> "$GITHUB_OUTPUT"

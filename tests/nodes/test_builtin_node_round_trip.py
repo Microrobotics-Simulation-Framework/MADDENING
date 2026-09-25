@@ -168,24 +168,19 @@ def _usd_installed() -> bool:
         return False
 
 
-RELOADS = [
-    pytest.param(_reload_json, id="json-config"),
-    pytest.param(_reload_usd, id="usd", marks=pytest.mark.skipif(
-        not _usd_installed(), reason="usd-core not installed")),
-]
+usd_only = pytest.mark.skipif(not _usd_installed(), reason="usd-core not installed")
 
 
 #: Cases whose compile alone is over the per-test budget on a CI runner
-#: (the part-full two-phase pipe, ~9 s here on 3 cores): the slow lane runs them.
+#: (the part-full two-phase pipe, ~9 s here on 3 cores): the slow lane runs
+#: their config reload.  Their USD reload is not slow-marked, and is a test
+#: of its own so that nothing marks it: only `test-usd` installs usd-core
+#: and it runs no slow test (nor judges test time), so a slow mark there
+#: would run it nowhere.  The other lanes skip it.
 SLOW_CASES = {"lbm_pipe"}
 
 
-@pytest.mark.parametrize("reload", RELOADS)
-@pytest.mark.parametrize("case", [
-    pytest.param(case, marks=pytest.mark.slow) if case in SLOW_CASES else case
-    for case in sorted(CASES)
-])
-def test_a_reloaded_built_in_node_writes_builds_and_steps_as_the_original(case, reload):
+def _check_reload(case: str, reload) -> None:
     original, config, initial, trajectory = _original(case)
     reloaded = reload(original)
     reloaded.compile()
@@ -193,6 +188,20 @@ def test_a_reloaded_built_in_node_writes_builds_and_steps_as_the_original(case, 
     assert json.dumps(reloaded.to_dict(), sort_keys=True) == config
     _assert_identical(_initial_state(reloaded, case), initial)
     _assert_identical(_trajectory(reloaded, case), trajectory)
+
+
+@pytest.mark.parametrize("case", [
+    pytest.param(case, marks=pytest.mark.slow) if case in SLOW_CASES else case
+    for case in sorted(CASES)
+])
+def test_a_config_reloaded_built_in_node_writes_builds_and_steps_as_the_original(case):
+    _check_reload(case, _reload_json)
+
+
+@usd_only
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_a_usd_reloaded_built_in_node_writes_builds_and_steps_as_the_original(case):
+    _check_reload(case, _reload_usd)
 
 
 def test_every_built_in_node_has_a_round_trip_case():

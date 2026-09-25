@@ -32,13 +32,29 @@ Once the anomaly is confirmed and understood:
 3. Run `python -m maddening.compliance check-anomalies docs/validation/known_anomalies.yaml` to validate
 4. Cross-reference the GitHub Issue number in the YAML entry
 
+### Which defects get an entry
+
+- **Every defect a released version carried**, whatever its severity.
+- **Every `critical` or `major` defect found during a development cycle, even
+  if no release carried it**: `affected_versions: "none"`, resolved in the
+  release the cycle builds towards (MADD-ANO-018, 019 and 054 are examples).
+- A `minor` defect introduced and fixed within one cycle needs no entry; the
+  CHANGELOG and the fixing commit are its record.
+
+A `### Security` bullet in the CHANGELOG that meets either condition cites its
+entry.  The release gate below says when an entry falls due.
+
 ### Phase 3: Verification
 
 When the anomaly is resolved:
 
 1. Update the YAML entry with resolution status and version
 2. Add or update verification tests that demonstrate the fix
-3. Never delete anomaly entries — mark them as resolved
+3. Never delete anomaly entries — mark them as resolved.  A number that must be
+   retired goes in `_RETIRED_ANOMALY_IDS` (`tests/compliance/test_soup_evidence.py`)
+   with its reason, and only a closed entry (`resolved` or `duplicate`), or a
+   number no commit ever recorded, can be retired; `scripts/check_anomalies.py`
+   refuses anything else
 
 ### Release Gate (Three-Tier Model)
 

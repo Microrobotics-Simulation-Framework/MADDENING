@@ -247,5 +247,5 @@ the path here is a mock on a small mesh
 ## See also
 
 * {doc}`node_authoring` — the inner-node side of the contract.
-* {doc}`stability_report` — current @stability tagging of the
+* {doc}`stability_report` — current `@stability` tagging of the
   sharding API surface.

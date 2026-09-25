@@ -20,6 +20,20 @@ What the naive version of this got wrong, and why each matters:
   wrap onto the next line (``[see\n@Key, p. 3]``); and an entry inside
   ``@comment{...}`` is not an entry.  All three passed with an undefined
   key (audit_040_p4_1, C8-C10).
+* Only bracketed citations were read, so Pandoc's in-text form -- ``As
+  @Key shows``, outside any bracket -- cited an undefined key and passed
+  (audit_040_p4_2, C5).  It is read now, in prose only: fenced code
+  blocks, inline code spans and HTML comments are blanked first, so a
+  decorator written as code (`` `@stability` ``) is not a citation, and an
+  address (``me@example.org``) never was, because an ``@`` after a letter
+  starts none.  A decorator or handle written in prose *is* read, as Pandoc
+  would read it, and fails naming itself; put it in backticks.
+
+What this still does not read: a citation inside an *indented* (four-space)
+code block is read as prose, because telling one from a continuation
+paragraph needs the whole Markdown grammar; fence code instead.  And a
+bracketed citation is read wherever it is, code spans included, as it
+always was (the allowlisted syntax examples below live in code spans).
 
 Unused bibliography entries are reported as warnings (non-blocking).
 
@@ -91,6 +105,12 @@ _CITE_KEY = re.compile(
 _NOT_A_BRACKET_END = r"(?:[^\]\n]|\n(?![ \t]*\n))"
 _CITE_BRACKET = re.compile(
     r"\[(" + _NOT_A_BRACKET_END + r"*?@" + _NOT_A_BRACKET_END + r"+)\]")
+# A fence line opens or closes a fenced code block: three or more backticks
+# or tildes, indented at most three spaces.
+_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# An inline code span: a run of backticks, the shortest text, the same run.
+_INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", re.S)
+_HTML_COMMENT = re.compile(r"<!--.*?-->", re.S)
 # ``@comment{...}`` / ``@comment(...)``: its contents are not entries.  An
 # entry wrapped in one still counted as defined (audit_040_p4_1, C10).
 _BIB_COMMENT = re.compile(r"@comment\s*([{(])", re.IGNORECASE)
@@ -205,10 +225,69 @@ def extract_citations(md_path: str) -> list[tuple[int, str]]:
     return citations
 
 
-def scan_directory(scan_dir: str) -> list[tuple[str, int, str]]:
-    """Recursively find all ``[@Key]`` citations in .md files under scan_dir.
+def _blank(match: re.Match) -> str:
+    """The match with every character but a newline turned into a space."""
+    return re.sub(r"[^\n]", " ", match.group(0))
 
-    Returns ``(filepath, line_number, key)`` triples.
+
+def _prose_only(text: str) -> str:
+    """``text`` with fenced code, inline code and HTML comments blanked.
+
+    Blanked, not deleted, so offsets and line numbers still point at the
+    source.  An unclosed fence runs to the end of the file, as CommonMark
+    reads it.
+    """
+    lines = text.splitlines(keepends=True)
+    out, fence = [], None
+    for line in lines:
+        match = _FENCE_LINE.match(line)
+        if fence is None and match:
+            fence = match.group(1)
+            out.append(re.sub(r"[^\n]", " ", line))
+            continue
+        if fence is not None:
+            # A closing fence is the same character, at least as long.
+            if match and match.group(1)[0] == fence[0] and len(match.group(1)) >= len(fence) \
+                    and not line[match.end():].strip():
+                fence = None
+            out.append(re.sub(r"[^\n]", " ", line))
+            continue
+        out.append(line)
+    prose = "".join(out)
+    prose = _HTML_COMMENT.sub(_blank, prose)
+    return _INLINE_CODE.sub(_blank, prose)
+
+
+def extract_in_text_citations(md_path: str) -> list[tuple[int, str]]:
+    """Pandoc in-text citations (``@Key says``) in a Markdown file's prose.
+
+    Returns ``(line_number, key)`` pairs.  A key inside a citation bracket
+    is :func:`extract_citations`' and is not returned here too; code and
+    comments are not read at all (:func:`_prose_only`).
+    """
+    with open(md_path) as f:
+        text = f.read()
+    prose = _prose_only(text)
+    prose = _CITE_BRACKET.sub(_blank, prose)
+    citations = []
+    for key_match in _CITE_KEY.finditer(prose):
+        braced, bare = key_match.groups()
+        key = braced if braced is not None else bare.rstrip(_KEY_PUNCTUATION)
+        if key:
+            citations.append((prose.count("\n", 0, key_match.start()) + 1, key))
+    return citations
+
+
+#: The two citation forms :func:`scan_directory` reports.
+BRACKETED = "bracketed"
+IN_TEXT = "in-text"
+
+
+def scan_directory(scan_dir: str) -> list[tuple[str, int, str, str]]:
+    """Recursively find every citation in .md files under scan_dir.
+
+    Returns ``(filepath, line_number, key, form)``, ``form`` being
+    :data:`BRACKETED` (``[@Key]``) or :data:`IN_TEXT` (``@Key`` in prose).
     """
     results = []
     for root, _dirs, files in os.walk(scan_dir):
@@ -217,7 +296,9 @@ def scan_directory(scan_dir: str) -> list[tuple[str, int, str]]:
                 continue
             fpath = os.path.join(root, fname)
             for lineno, key in extract_citations(fpath):
-                results.append((fpath, lineno, key))
+                results.append((fpath, lineno, key, BRACKETED))
+            for lineno, key in extract_in_text_citations(fpath):
+                results.append((fpath, lineno, key, IN_TEXT))
     return results
 
 
@@ -254,7 +335,7 @@ def main(argv=None) -> int:
     cited_keys = set()
     verified = 0
     declined: list[str] = []
-    for fpath, lineno, key in citations:
+    for fpath, lineno, key, form in citations:
         try:
             relpath = os.path.relpath(fpath, _REPO_ROOT)
         except ValueError:  # pragma: no cover - different drive
@@ -269,7 +350,13 @@ def main(argv=None) -> int:
             continue
         cited_keys.add(key)
         verified += 1
-        if key not in bib_keys:
+        if key not in bib_keys and form == IN_TEXT:
+            errors.append(
+                f"{relpath}:{lineno}: @{key} (an in-text citation: an @-word "
+                f"in prose) not found in {bib_path}.  If it is a decorator, "
+                f"a handle or an address rather than a citation, put it in "
+                f"backticks")
+        elif key not in bib_keys:
             errors.append(f"{relpath}:{lineno}: [@{key}] not found in {bib_path}")
 
     # Report unused bib entries (warning, non-blocking)

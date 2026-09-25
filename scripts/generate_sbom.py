@@ -192,10 +192,12 @@ def finalise(raw: dict, *, pyproject: dict, install: str, probe: dict,
     for dep in sbom.get("dependencies", []):
         dep = dict(dep)
         if dep.get("ref") in (old_ref, new_ref):
-            # cyclonedx-py links the root to every installed package its
-            # Requires-Dist names, extras included: in a core install that
-            # made equinox (installed for lineax, named by [surrogates]) a
-            # "direct" dependency.  The declared set is the truth.
+            # cyclonedx-py (7.4) takes the root's edges from pyproject's
+            # ``dependencies`` chained with *every* ``optional-dependencies``
+            # group, and links whichever of those are installed.  In a core
+            # install that made equinox (installed for lineax, named by
+            # [surrogates] and [all]) a "direct" dependency.  The install's
+            # declared set is the truth.
             dep = {"ref": new_ref, "dependsOn": sorted(set(edges))}
             root_seen = True
         elif old_ref and old_ref in dep.get("dependsOn", []):

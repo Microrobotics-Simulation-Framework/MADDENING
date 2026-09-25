@@ -143,9 +143,9 @@ the geometry import path.  The rest are left out on purpose:
 
 - `cuda12` and `tpu` install hardware runtimes, and GPU is not a verified
   configuration: CI runs on CPU (MADD-ANO-001).  On 2026-09-25 `cuda12`
-  resolved fifteen more wheels on Linux: JAX's CUDA plugin and thirteen
-  NVIDIA CUDA libraries.  A GPU deployment records its own SBOM.  The cloud
-  Docker image installs `jax[cuda12]` with `.[server]`, and
+  resolved fifteen more wheels on Linux: JAX's two CUDA plugin wheels and
+  thirteen NVIDIA CUDA libraries.  A GPU deployment records its own SBOM.
+  The cloud Docker image installs `jax[cuda12]` with `.[server]`, and
   `python scripts/generate_sbom.py --extra cuda12+server --output-dir <dir>`
   records that combination.
 - `all`, `dev` and `ci` describe a developer's workstation, not a deployment.
@@ -198,16 +198,16 @@ above are generated from this tree at the version `pyproject.toml` declares,
 which their names carry.  They are not the release SBOM.  The release step,
 done by the maintainer:
 
-1. On the release commit, after the version bump and before the tag, run
-   `python scripts/generate_sbom.py` (it needs `uv` and network access).  It
-   builds the wheel from that tree, resolves each install afresh, writes
-   `maddening-<version>-<install>.cdx.json` for the new version, removes the
-   previous version's files and runs the check.  Until this is done, the
-   check fails on the version bump, which makes the step hard to skip.
-2. Update the file names in the table above to the new version (the check
-   fails until they match), and commit the SBOMs with the release commit.
-3. Tag that commit, and attach the four `.cdx.json` files to the GitHub
-   release as assets.
+1. On the release commit, after the version bump and before the tag,
+   change the version in the file names in the table above.
+2. Run `python scripts/generate_sbom.py` (it needs `uv` and network
+   access).  It builds the wheel from that tree, resolves each install
+   afresh, writes `maddening-<version>-<install>.cdx.json` for the new
+   version, removes the previous version's files, and runs the check.
+   Until both steps are done the check fails on the version bump, which
+   makes them hard to skip.
+3. Commit the SBOMs with the release commit, tag that commit, and attach
+   the four `.cdx.json` files to the GitHub release as assets.
 
 ## 7. Anomaly Management Policy
 

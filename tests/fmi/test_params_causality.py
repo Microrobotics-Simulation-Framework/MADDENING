@@ -293,6 +293,10 @@ _SNAPSHOT_CASES = [
      "FMU state param spring.params.stiffness: value does not fit its type float32"),
     ("param", "ball", "elasticity", np.float32(1.5), "elasticity'\\]=1.5 above bound 1.0"),
     ("param", "ball", "elasticity", np.float32(0.25), None),
+    ("state", "spring", "position", np.zeros(3, np.float32),
+     r"^FMU state spring\.position: shape \(3,\) != \(\)$"),
+    ("param", "spring", "stiffness", np.zeros(2, np.float32),
+     r"^FMU state param spring\.params\.stiffness: shape \(2,\) != \(\)$"),
 ]
 
 
@@ -355,7 +359,8 @@ class TestSnapshotValues:
 
     @pytest.mark.parametrize("kind, owner, key, value, refusal", _SNAPSHOT_CASES,
                              ids=["nan_state", "inf_param", "overflow_param",
-                                  "out_of_bounds_param", "healthy_param"])
+                                  "out_of_bounds_param", "healthy_param",
+                                  "misshapen_state", "misshapen_param"])
     def test_set_fmu_state_refuses_what_the_bridge_set_state_refuses(
             self, gm, kind, owner, key, value, refusal):
         """The two restore paths share their checks, so they cannot drift:

@@ -74,18 +74,23 @@ def _square_pair():
 
 @pytest.fixture(scope="module")
 def diverging():
-    """Five samples, four one-step windows; window 2 starts at 30 and diverges."""
+    """Six samples, five one-step windows; window 2 starts at 30 and diverges.
+
+    Windows 0-1 and 3-4 are each three samples long, so the two halves
+    the masked loss is compared against share one compiled program.
+    """
     gm = _square_pair()
     gm.step()
     xa, xb = float(gm._state["a"]["x"]), float(gm._state["b"]["x"])
     gm.reset_state()
-    obs = {"a": {"x": jnp.full((5,), xa, jnp.float32).at[2].set(30.0)},
-           "b": {"x": jnp.full((5,), xb, jnp.float32).at[2].set(30.0)}}
+    obs = {"a": {"x": jnp.full((6,), xa, jnp.float32).at[2].set(30.0)},
+           "b": {"x": jnp.full((6,), xb, jnp.float32).at[2].set(30.0)}}
     return gm, obs
 
 
-def _loss(gm, obs, mask=True):
-    def f(p):
+def _loss(gm, mask=True):
+    """``(params, observations) -> loss``, one window per sample."""
+    def f(p, obs):
         return sysid.windowed_loss(gm, p, obs, obs_fn=lambda s: s["a"]["x"], window=1,
                                    mask_unconverged=mask)
     return f
@@ -98,20 +103,17 @@ def _samples(obs, lo, hi):
 def test_the_diverging_window_is_non_finite_and_unconverged(diverging):
     """The precondition, checked rather than assumed."""
     gm, obs = diverging
-    assert not np.isfinite(float(_loss(gm, obs, mask=False)(gm.params)))
+    assert not np.isfinite(float(_loss(gm, mask=False)(gm.params, obs)))
 
 
 def test_a_diverged_window_leaves_a_finite_gradient_of_the_other_windows(diverging):
-    """Masked over all four windows = windows 0-1 plus window 3, value and gradient."""
+    """Masked over all five windows = windows 0-1 plus windows 3-4, value and gradient."""
     gm, obs = diverging
-    loss, grad = jax.value_and_grad(_loss(gm, obs))(gm.params)
-    parts = [_samples(obs, 0, 3), _samples(obs, 3, 5)]      # windows 0-1, window 3
-    want_loss = 0.0
-    want_grad = None
-    for part in parts:
-        v, g = jax.value_and_grad(_loss(gm, part))(gm.params)
-        want_loss += float(v)
-        want_grad = g if want_grad is None else jax.tree.map(jnp.add, want_grad, g)
+    value_and_grad = jax.jit(jax.value_and_grad(_loss(gm)))
+    loss, grad = value_and_grad(gm.params, obs)
+    halves = [value_and_grad(gm.params, _samples(obs, lo, lo + 3)) for lo in (0, 3)]
+    want_loss = sum(float(v) for v, _ in halves)
+    want_grad = jax.tree.map(jnp.add, halves[0][1], halves[1][1])
     assert np.isfinite(float(loss)) and float(loss) == pytest.approx(want_loss, rel=1e-6)
     for got, want in zip(jax.tree.leaves(grad), jax.tree.leaves(want_grad)):
         assert np.all(np.isfinite(np.asarray(got))), grad
@@ -160,11 +162,14 @@ class Affine(SimulationNode):
         return {"x": self.params["gain"] * u + self.params["bias"]}
 
 
-#: A Gauss-Seidel pair contracting at ``0.9**2 = 0.81`` per pass, stopped
-#: at a cap of 20 passes from a start about 5 from its fixed point: the
-#: last residual is near 0.07 and the estimate about five times that, so
-#: a tolerance of 0.1 sits between them.
+#: A Gauss-Seidel pair contracting at about 0.8 per pass (amplification
+#: near 5), stopped at a cap of 8 passes from a start about 5 from its
+#: fixed point: the residual it reports is near 0.045 and the estimate
+#: about five times that, so a tolerance of 0.1 sits between them.
 TOLERANCE = 0.1
+CAP = 8
+#: The pair's fixed point: ``a = 0.9 b + 1``, ``b = 0.9 a``.
+FIXED_POINT = {"a": 1.0 / (1.0 - 0.81), "b": 0.9 / (1.0 - 0.81)}
 
 
 def _affine_pair():
@@ -173,7 +178,7 @@ def _affine_pair():
     gm.add_node(Affine("b", 0.9, 0.0))
     gm.add_edge("b", "a", "x", "u")
     gm.add_edge("a", "b", "x", "u")
-    gm.add_coupling_group(["a", "b"], max_iterations=20, tolerance=TOLERANCE)
+    gm.add_coupling_group(["a", "b"], max_iterations=CAP, tolerance=TOLERANCE)
     gm.compile()
     return gm
 
@@ -189,14 +194,15 @@ def estimate_over_threshold():
     threshold, _ = convergence_criterion(gm._coupling_groups[0])
     # The configuration that tells the two criteria apart, checked.
     assert report["ratio_usable"] is True, report
-    assert report["iterations"] == 20, report
+    assert report["iterations"] == CAP, report
     assert report["residual"] <= threshold < report["error_estimate"], report
     assert report["converged"] is False, report
-    # Sample 1 is window 0's target and window 1's start: slightly off the
-    # step's end, so window 0 has a loss to drop, and near enough the fixed
+    # Sample 1 is window 0's target and window 1's start: next to the fixed
     # point (the nodes ignore their own state, so a start is only the
-    # solve's initial guess) that window 1 converges and must be kept.
-    start1 = {n: {"x": after[n]["x"] + 0.05} for n in ("a", "b")}
+    # solve's initial guess), so window 1 converges and must be kept, and
+    # away from where window 0 stopped, so window 0 has a loss to drop.
+    start1 = {n: {"x": jnp.float32(FIXED_POINT[n] + 0.01)} for n in ("a", "b")}
+    assert abs(float(after["a"]["x"]) - float(start1["a"]["x"])) > 0.05
     gm2 = _affine_pair()
     for n in ("a", "b"):
         gm2.set_node_state(n, start1[n])

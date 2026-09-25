@@ -107,7 +107,11 @@ Three settings that are nearly always right and are not in the table:
   the cap sets the size of its least-squares problem.
 * **Turn on `strict_convergence` for training and calibration runs.**
   The implicit-function-theorem gradient is only valid at a converged
-  fixed point.
+  fixed point.  It checks only the solves a step keeps: not a multi-rate
+  base step on which the group does not fire, and not the step-doubling
+  estimate's full step or a rejected attempt under `run_adaptive*`, so
+  the adaptive controller can still recover by rejecting a step whose
+  coupling did not converge.
 * **Leave `linear_solver` at `"gmres"` on anything grid-shaped.** The
   `"dense"` alternative is exact and is sometimes offered as the thing
   to try when the adjoint struggles; on a grid it cannot run at all.

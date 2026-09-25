@@ -8419,14 +8419,15 @@ class GraphManager:
                 dt = max(dt * factor, dt_min)
 
                 if dt <= dt_min:
-                    # Cannot shrink further; accept with warning
+                    # Cannot shrink further; accept with warning -- unless
+                    # a solve the step would keep did not converge.
+                    _raise_if_a_kept_solve_failed(
+                        strict_messages, (verdicts_1, verdicts_2))
                     warnings.warn(
                         f"Adaptive stepper hit dt_min={dt_min} at t={t:.6g} "
                         f"(error={error_norm:.3e}). Accepting step.",
                         stacklevel=2,
                     )
-                    _raise_if_a_kept_solve_failed(
-                        strict_messages, (verdicts_1, verdicts_2))
                     state = state_half
                     t += dt_min
                     n_steps += 1

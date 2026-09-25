@@ -177,8 +177,11 @@ class ShardedUnstructuredNode(SimulationNode):
       the mesh axis (the partial sums from each shard are summed).
       Such a key is not a per-cell field: when the state carries it (a
       node that declares its initial value, or a graph feeding a step's
-      output back) it is replicated, not partitioned, and reaches
-      ``update_padded`` unchanged.
+      output back) it is placed as the step returns it -- replicated
+      once reduced, stacked along the mesh axis when not -- rather than
+      partitioned, and reaches ``update_padded`` unpadded: the reduced
+      value, or this shard's slice of the stacked one (a leading axis of
+      length one).
     * Any other key raises ``ValueError`` — we cannot infer a
       partition spec for unknown outputs.
 
@@ -408,13 +411,12 @@ class ShardedUnstructuredNode(SimulationNode):
         global_state = self._inner.initial_state()
         sharded = {}
         sharding = NamedSharding(self._mesh, P(self._mesh_axis))
-        replicated = NamedSharding(self._mesh, P())
         integrals = set(self._inner.domain_integral_fields())
         for k, arr in global_state.items():
             arr = jnp.asarray(arr)
             if k in integrals:
-                # A domain integral is one value for the whole domain, not
-                # a per-cell field: replicated, as the step returns it.
+                # A domain integral is not a per-cell field: it is placed
+                # as the step returns it, replicated once reduced.
                 # Partitioned, a scalar raised an IndexError here.  A
                 # per-shard (unreduced) integral comes back stacked along
                 # the mesh axis, so its initial value is stacked too, and a
@@ -423,7 +425,9 @@ class ShardedUnstructuredNode(SimulationNode):
                     arr = jnp.broadcast_to(
                         arr, (self._layout.n_devices,) + tuple(arr.shape),
                     )
-                sharded[k] = jax.device_put(arr, replicated)
+                sharded[k] = jax.device_put(
+                    arr, NamedSharding(self._mesh, self._integral_spec(k)),
+                )
                 continue
             per_shard = partition_value(
                 value=jax.device_get(arr), layout=self._layout,
@@ -598,11 +602,14 @@ class ShardedUnstructuredNode(SimulationNode):
             return cached
 
         # A domain integral fed back as state (a graph's second step) is
-        # one replicated value, not a per-cell field: ``P(mesh_axis)`` on
-        # it was "too long" for a scalar and the step failed.
+        # not a per-cell field: it is placed as the step returns it --
+        # replicated once reduced, stacked along the mesh axis when not.
+        # ``P(mesh_axis)`` on a reduced scalar was "too long" for it and
+        # the step failed.
         integrals = set(self._inner.domain_integral_fields())
         state_specs = {
-            k: (P() if k in integrals else P(self._mesh_axis)) for k in state
+            k: (self._integral_spec(k) if k in integrals else P(self._mesh_axis))
+            for k in state
         }
         cell_bi = self._cell_boundary_inputs(boundary_inputs)
         bi_specs = {
@@ -612,10 +619,8 @@ class ShardedUnstructuredNode(SimulationNode):
         static_specs = {k: P(self._mesh_axis) for k in self._sharded_static}
         out_specs = {**state_specs}
         for k in integrals:
-            if self._integral_is_reduced(k):
-                out_specs[k] = P()  # fully replicated after psum
-            else:
-                out_specs[k] = P(self._mesh_axis)  # per-shard values stacked
+            # fully replicated after psum, or the per-shard values stacked
+            out_specs[k] = self._integral_spec(k)
 
         local_fn = functools.partial(self._local_update_fn, cell_bi=cell_bi)
 
@@ -629,6 +634,10 @@ class ShardedUnstructuredNode(SimulationNode):
         fn = jax.jit(sm)
         self._sharded_cache[key] = fn
         return fn
+
+    def _integral_spec(self, key: str) -> P:
+        """Where domain integral ``key`` lives, as the step returns it."""
+        return P() if self._integral_is_reduced(key) else P(self._mesh_axis)
 
     def _integral_is_reduced(self, key: str) -> bool:
         """Is domain integral ``key`` summed over the mesh axis?
@@ -791,8 +800,8 @@ class ShardedUnstructuredNode(SimulationNode):
             # collapsed for us — local arrays now have shape (n_local_max, *).
 
             # 1. Halo-exchange each state field.
-            #    A domain integral carried in the state is one replicated
-            #    value, not a per-cell field: passed through unchanged.
+            #    A domain integral carried in the state is not a per-cell
+            #    field: passed through unpadded.
             padded_state = {}
             for k, arr in local_state.items():
                 if k in integrals:

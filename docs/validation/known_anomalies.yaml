@@ -3999,37 +3999,48 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-040"
-    title: "ShardedUnstructuredNode could not host a node with a domain integral in a GraphManager"
+    title: "The sharded wrappers placed a domain integral carried in the state like a grid field: an integral-emitting node could not run in a graph"
     description: >
-      `ShardedUnstructuredNode` partitioned every state field with
-      `P(mesh_axis)`, a domain integral included.  A node that returns an
-      integral stepped once; fed its own output back -- which is what a
-      graph's second `step()` does -- the scalar integral was given a
-      partition spec "too long" for it and the step failed.  A node that
-      declares the integral's initial value, which a `run_scan` carry needs,
-      failed earlier, with an `IndexError` from `initial_state` partitioning
-      a 0-d array.  `ShardedStencilNode` gives integrals `P()` and was not
-      affected.  Reproduced on the 0.4.0 tree before the fix (71479c7) and
-      at v0.3.0 and v0.3.1 (`git archive` of each tag, same environment).
-      Loud, not silent: every failure is an exception.
-      Resolved in 0.4.0: a domain integral carried in the state is
-      replicated -- `P()` in and out, placed replicated by `initial_state`,
-      passed to `update_padded` unchanged -- and a per-shard (unreduced)
-      integral's initial value is stacked along the mesh axis, as the step
-      returns it.  Such a node now runs three `step()`s and a `run_scan`,
-      matching the unsharded graph.
+      A node that returns a domain integral carries it in its state when it
+      declares the integral's initial value (which a `run_scan` carry needs)
+      or when a graph feeds a step's output back (a second `step()`).  Both
+      wrappers then placed the integral like a per-cell field.
+      `ShardedUnstructuredNode` partitioned it with `P(mesh_axis)`: a scalar
+      integral fed back was given a partition spec "too long" for it and the
+      step failed, and one declared in `initial_state` failed earlier, with
+      an `IndexError` from partitioning a 0-d array.  `ShardedStencilNode`
+      split it along the sharded spatial axis: a scalar escaped (it has no
+      such axis), but a vector integral -- a 3-component drag on two devices
+      -- failed with an `IndivisibleError` from
+      `device_put`, and in the 0.4.0 development tree with a false "3
+      cells" refusal at construction; a per-shard (unreduced) integral,
+      new in this cycle, fed back by a graph was refused as a grid "changed
+      by a parameter".  Reproduced on the 0.4.0 tree before the fix
+      (71479c7), and at v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each
+      tag, same environment) -- the unstructured cases from v0.3.0, where
+      that wrapper first shipped, the stencil vector case from v0.2.1, where
+      domain integrals did.  Loud, not silent: every failure is an
+      exception.
+      Resolved in 0.4.0: in both wrappers a domain integral carried in the
+      state is placed exactly as the step returns it -- replicated once
+      reduced, stacked along its unreduced mesh axes otherwise, by
+      `initial_state` and on the way into the step -- and reaches
+      `update_padded` unpadded.  Such a node runs three `step()`s and a
+      `run_scan` under either wrapper, matching the unsharded graph.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
       Every failure raised; no wrong number was ever returned.  It blocked a
-      documented configuration (an integral-emitting node on the
-      unstructured path inside a graph) rather than corrupting one.
+      documented configuration (an integral-emitting node inside a graph)
+      rather than corrupting one.
     affected_components:
       - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
-    affected_versions: ">=0.3.0, <0.4.0"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.1, <0.4.0"
     workaround: >
       Before 0.4.0: step the wrapper directly and drop the integral key from
-      the state before each step.
+      the state before each step; do not declare a vector integral in
+      `initial_state` under `ShardedStencilNode`.
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
@@ -4038,6 +4049,9 @@ anomalies:
       - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_domain_integral_fed_back_as_state_steps_again"
       - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_declaring_its_integral_runs_in_a_graph_like_the_unsharded_node"
       - "tests/cloud/multigpu/test_unstructured_layout_contract.py::test_a_node_without_an_initial_integral_steps_in_a_graph"
+      - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_a_vector_domain_integral_in_the_state_runs_in_a_graph_like_the_unsharded_node"
+      - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_a_per_shard_domain_integral_fed_back_by_a_graph_steps_again"
+      - "tests/cloud/multigpu/test_stencil_domain_integral_state.py::test_the_initial_value_of_an_integral_is_placed_as_the_step_returns_it"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-041"

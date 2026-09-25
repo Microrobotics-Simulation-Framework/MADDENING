@@ -102,7 +102,7 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-037 | ShardedUnstructuredNode accepted a Cartesian stencil node and stepped it wrong, every cell, with no error | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
 | MADD-ANO-038 | ShardedStencilNode edge-filled a sharded static's global halos under a periodic wrapper | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.2.1, <0.4.0 |
 | MADD-ANO-039 | ShardedUnstructuredNode dropped the cells a node had past the layout's count, and gave a node no way to leave padding out of an integral | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
-| MADD-ANO-040 | ShardedUnstructuredNode could not host a node with a domain integral in a GraphManager | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
+| MADD-ANO-040 | The sharded wrappers placed a domain integral carried in the state like a grid field: an integral-emitting node could not run in a graph | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.2.1, <0.4.0 |
 | MADD-ANO-041 | halo_exchange ignored a per-axis boundary key naming no exchanged mesh axis, and that axis took the edge fill | `minor` | `context_dependent` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
 | MADD-ANO-042 | ShardedStencilNode accepted an empty axis_map and sharded nothing | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
 

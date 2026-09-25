@@ -230,8 +230,11 @@ What 0.4.0 added:
 * refusals of a node declaring a Cartesian `halo_width()` and of a node
   whose cell count is not the layout's (both silently wrong before);
 * a domain integral carried in the state (a graph's second step, or an
-  initial value the node declares) is replicated rather than partitioned,
-  so such a node runs in a `GraphManager`;
+  initial value the node declares) is placed as the step returns it —
+  replicated once reduced, stacked along the mesh axis otherwise — rather
+  than partitioned, so such a node runs in a `GraphManager` (the stencil
+  wrapper had the same defect for a vector or per-shard integral, fixed the
+  same way);
 * the session runner `benchmarks/multigpu/run_pod.py` (and its CPU
   `--dry-run`).
 

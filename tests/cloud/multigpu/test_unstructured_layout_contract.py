@@ -61,6 +61,8 @@ class _Source(SimulationNode):
     def __init__(self, n, *, mask=True, with_total=False, stacked=False):
         super().__init__(name="src", timestep=0.1)
         self.n, self._mask, self._with_total, self._stacked = n, mask, with_total, stacked
+        #: Shapes of the integral ``update_padded`` was handed (trace time).
+        self.seen_total = []
 
     def initial_state(self):
         state = {"x": jnp.arange(1.0, self.n + 1.0, dtype=jnp.float32)}
@@ -84,6 +86,8 @@ class _Source(SimulationNode):
     def update_padded(self, state_padded, boundary_inputs, dt, *,
                       static_padded=None, shard_info=None):
         _, n_local_max = shard_info[0]
+        if "total" in state_padded:
+            self.seen_total.append(tuple(state_padded["total"].shape))
         x = state_padded["x"][:n_local_max] + dt
         if self._mask:
             x_owned = jnp.where(jnp.arange(n_local_max) < shard_info["n_local"], x, 0.0)
@@ -330,9 +334,11 @@ def test_a_node_declaring_its_integral_runs_in_a_graph_like_the_unsharded_node(s
     layout = _chain_layout(8, 2)
     ref = _graph(_Source(8, with_total=True))
     ref.run_scan(3)
-    gm = _graph(ShardedUnstructuredNode(_Source(8, with_total=True, stacked=stacked),
-                                        mesh, layout))
+    inner = _Source(8, with_total=True, stacked=stacked)
+    gm = _graph(ShardedUnstructuredNode(inner, mesh, layout))
     gm.run_scan(3)
+    # Unpadded: the reduced value, or this shard's slice of the stacked one.
+    assert inner.seen_total and set(inner.seen_total) == {(1,) if stacked else ()}
     total = np.asarray(gm.get_node_state("src")["total"])
     want = float(np.asarray(ref.get_node_state("src")["total"]))
     if stacked:

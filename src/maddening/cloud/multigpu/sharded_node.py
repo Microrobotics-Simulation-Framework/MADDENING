@@ -525,6 +525,16 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     note recommended it, and a ``HeatNode`` wrapped that way stepped
     every cell wrong without an error.)
 
+    **A domain integral carried in the state is not a grid field.**  A
+    node that declares its integral's initial value, or a graph feeding a
+    step's output back, puts the integral in the state; it is placed as
+    the step returns it -- replicated once reduced over every mesh axis,
+    stacked along the unreduced axes of ``domain_integral_axes()``
+    otherwise -- and handed to ``update_padded`` unpadded (a per-shard
+    one as this shard's slice).  Before 0.4.0 it was split and
+    halo-padded like a grid field, which a vector integral could not
+    survive.
+
     **An empty** ``axis_map`` **is refused.**  It would shard no spatial
     axis: every device would run the whole node, which is the unsharded
     node at the cost of a wrapper.  Before 0.4.0 an ``LBMNode`` wrapped
@@ -742,10 +752,14 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 state = self._inner.initial_state()
             except Exception:  # noqa: BLE001 - construction must not depend on it
                 state = {}
+        # A domain integral is not a grid field: it is never split along a
+        # spatial axis (a 3-vector drag on two devices used to be refused
+        # here as "3 cells").
+        integrals = set(self._inner.domain_integral_fields())
         for mesh_axis, spatial_axis in self._axis_map.items():
             n_devices = int(self._mesh.shape[mesh_axis])
             for field, arr in state.items():
-                if jnp.ndim(arr) <= spatial_axis:
+                if field in integrals or jnp.ndim(arr) <= spatial_axis:
                     continue
                 _check_shard_divisible(
                     wrapper=type(self).__name__, owner=self._inner.name,
@@ -769,10 +783,40 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     def initial_state(self) -> dict:
         state = self._inner.initial_state()
         self._check_divisible_extents(state)
-        return {
-            field: jax.device_put(arr, self._sharding_for_field(arr))
-            for field, arr in state.items()
-        }
+        integrals = set(self._inner.domain_integral_fields())
+        out = {}
+        for field, arr in state.items():
+            if field in integrals:
+                out[field] = self._place_integral(field, arr)
+            else:
+                out[field] = jax.device_put(arr, self._sharding_for_field(arr))
+        return out
+
+    def _integral_spec(self, key: str) -> P:
+        """The placement of domain integral ``key``, as the step returns it.
+
+        Replicated (``P()``) once reduced over every mesh axis; stacked
+        along the unreduced axes (one leading dimension each) otherwise.
+        """
+        _, unreduced = self._integral_reduction(key)
+        return P(*unreduced) if unreduced else P()
+
+    def _place_integral(self, key: str, arr) -> jax.Array:
+        """An initial value of domain integral ``key``, placed as a step returns it.
+
+        Until 0.4.0 an integral in ``initial_state`` was placed like a grid
+        field, sharded along the spatial axes: a scalar was left alone by
+        luck, a 3-vector on two devices failed (``IndivisibleError``, then
+        a false "3 cells" refusal).  A per-shard (unreduced) integral's
+        value is stacked along its unreduced mesh axes, so a scan carry
+        keeps its shape.
+        """
+        _, unreduced = self._integral_reduction(key)
+        arr = jnp.asarray(arr)
+        if unreduced:
+            lead = tuple(int(self._mesh.shape[a]) for a in unreduced)
+            arr = jnp.broadcast_to(arr, lead + tuple(arr.shape))
+        return jax.device_put(arr, NamedSharding(self._mesh, self._integral_spec(key)))
 
     def state_fields(self) -> list[str]:
         return self._inner.state_fields()
@@ -937,8 +981,12 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
 
         def _local_update(local_state, local_bi, local_dt, local_static,
                           local_params, *, grid_bi=frozenset()):
-            # 1. Halo-pad state.
-            padded = {f: _pad_like_state(arr) for f, arr in local_state.items()}
+            # 1. Halo-pad state.  A domain integral carried in the state
+            #    is not a grid field: passed through unpadded.
+            padded = {
+                f: (arr if f in integrals else _pad_like_state(arr))
+                for f, arr in local_state.items()
+            }
 
             # 1b. Grid-shaped boundary inputs (a per-cell body force, a
             #     wall-mask update) arrive as this shard's slice and are
@@ -1049,7 +1097,13 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         if fn is not None:
             return fn
 
-        state_specs = {f: self._spec_for_field(arr) for f, arr in state.items()}
+        # A domain integral fed back as state is placed as the step returns
+        # it, not split along a spatial axis like a grid field.
+        integrals = set(self._inner.domain_integral_fields())
+        state_specs = {
+            f: (self._integral_spec(f) if f in integrals else self._spec_for_field(arr))
+            for f, arr in state.items()
+        }
         grid_bi = self._grid_shaped_boundary_inputs(state, boundary_inputs)
         bi_specs = {
             k: (self._spec_for_field(jnp.asarray(v)) if k in grid_bi else P())
@@ -1291,7 +1345,14 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             except Exception:  # noqa: BLE001 - cannot tell: check nothing
                 shapes = {}
             self._inner_state_shapes = shapes
+        # A domain integral is not on the grid; a per-shard one is stacked
+        # along the mesh, so its shape is not the node's.  Compared, a
+        # per-shard integral fed back by a graph was refused as a grid
+        # "changed by a parameter".
+        integrals = set(self._inner.domain_integral_fields())
         for field, arr in state.items():
+            if field in integrals:
+                continue
             want = shapes.get(field)
             got = tuple(jnp.shape(arr))
             if want is not None and got != want:

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import functools
 import json
 import os
 import re
@@ -64,6 +65,35 @@ def _render(text: str, values: dict[str, str]) -> str:
         assert expr in values, f"the test does not know the expression {expr!r}; add it"
         return values[expr]
     return re.sub(r"\$\{\{(.*?)\}\}", sub, text)
+
+
+def _literals(tree: ast.AST) -> tuple[list[tuple[int, str]], set[str]]:
+    """A module's string constants ``(line, value)`` and the module names it imports.
+
+    ``from a import b`` records both ``a`` and ``a.b``, so ``from maddening
+    import usd`` reads as an import of ``maddening.usd``.
+    """
+    strings, imports = [], set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            strings.append((node.lineno, node.value))
+        elif isinstance(node, ast.Import):
+            imports.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            imports.add(node.module)
+            imports.update(f"{node.module}.{a.name}" for a in node.names)
+    return strings, imports
+
+
+@functools.lru_cache(maxsize=None)
+def _test_modules() -> dict[str, tuple[list[tuple[int, str]], set[str]]]:
+    """``_literals`` of every test module outside tests/compliance, parsed once."""
+    out = {}
+    for path in sorted((REPO_ROOT / "tests").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if not rel.startswith("tests/compliance/"):
+            out[rel] = _literals(ast.parse(path.read_text(encoding="utf-8"), filename=rel))
+    return out
 
 
 def _logical_lines(script: str) -> list[str]:
@@ -154,16 +184,21 @@ def _docs_patterns() -> list[str]:
     return m.group(1).split("|")
 
 
+@functools.lru_cache(maxsize=None)
+def _as_regex(patterns: tuple[str, ...]) -> re.Pattern:
+    # POSIX `case` semantics, which fnmatch shares: `*` matches `/` too.
+    return re.compile("|".join(fnmatch.translate(p) for p in patterns))
+
+
 def _names_a_docs_path(literal: str, patterns: list[str], docs_only_names: set[str]) -> bool:
     if not literal or len(literal) > 300 or any(c.isspace() for c in literal):
         return False                                # prose, not a path
+    docs = _as_regex(tuple(patterns))
     parts = [p for p in literal.replace("\\", "/").split("/") if p not in ("", ".", "..")]
     for i in range(len(parts)):
         tail = "/".join(parts[i:])
-        # POSIX `case` semantics, which fnmatch shares: `*` matches `/` too.
         # `tail + "/"` catches a directory component: `ROOT / "docs" / ...`.
-        if any(fnmatch.fnmatchcase(tail, p) or fnmatch.fnmatchcase(tail + "/", p)
-               for p in patterns):
+        if docs.match(tail) or docs.match(tail + "/"):
             return True
     return bool(parts) and parts[-1] in docs_only_names
 
@@ -194,16 +229,11 @@ def test_no_test_outside_compliance_reads_a_path_the_classifier_calls_docs():
                        if p.is_file() and not any(fnmatch.fnmatchcase(p.name, pat)
                                                   for pat in patterns)}
     offenders = []
-    for path in sorted((REPO_ROOT / "tests").rglob("*.py")):
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel.startswith("tests/compliance/"):
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and _names_a_docs_path(node.value, patterns, docs_only_names)
-                    and f"{rel}: {node.value}" not in NOT_A_DOCS_READ):
-                offenders.append(f"{rel}:{node.lineno}: {node.value!r}")
+    for rel, (strings, _) in _test_modules().items():
+        for lineno, value in strings:
+            if (_names_a_docs_path(value, patterns, docs_only_names)
+                    and f"{rel}: {value}" not in NOT_A_DOCS_READ):
+                offenders.append(f"{rel}:{lineno}: {value!r}")
     assert not offenders, (
         "these tests name a path the change classifier calls documentation, so a "
         "docs-only pull request would skip them; move the part that reads it into "
@@ -382,27 +412,19 @@ USD_NOT_NEEDED = {
 }
 
 
-def _needs_usd(tree: ast.AST) -> bool:
-    """Imports pxr / maddening.usd, or skips on them, anywhere in the module."""
+def _needs_usd(literals: tuple[list[tuple[int, str]], set[str]]) -> bool:
+    """Imports pxr / maddening.usd, or names one as a string (importorskip, find_spec)."""
     def is_usd(name: str) -> bool:
         return name in ("pxr", "maddening.usd") or name.startswith(("pxr.", "maddening.usd."))
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import) and any(is_usd(a.name) for a in node.names):
-            return True
-        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and (
-                is_usd(node.module)
-                or (node.module == "maddening" and any(a.name == "usd" for a in node.names))):
-            return True
-        if isinstance(node, ast.Constant) and isinstance(node.value, str) and is_usd(node.value):
-            return True                             # importorskip("pxr"), find_spec("pxr"), ...
-    return False
+    strings, imports = literals
+    return any(is_usd(m) for m in imports) or any(is_usd(v) for _, v in strings)
 
 
 def _examples_needing_usd() -> list[str]:
     root = REPO_ROOT / "src" / "maddening" / "examples"
     return sorted(p.relative_to(root).as_posix() for p in root.rglob("*.py")
-                  if _needs_usd(ast.parse(p.read_text(encoding="utf-8"))))
+                  if _needs_usd(_literals(ast.parse(p.read_text(encoding="utf-8")))))
 
 
 def _usd_job_targets() -> list[str]:
@@ -438,13 +460,9 @@ def test_every_test_that_needs_usd_core_runs_in_the_job_that_installs_it():
     """
     targets = _usd_job_targets()
     assert _selected("tests/usd/test_x.py", targets), "test-usd no longer runs tests/usd/"
-    missing = []
-    for path in sorted((REPO_ROOT / "tests").rglob("*.py")):
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        if rel.startswith(("tests/usd/", "tests/compliance/")) or rel in USD_NOT_NEEDED:
-            continue
-        if _needs_usd(ast.parse(path.read_text(encoding="utf-8"))) and not _selected(rel, targets):
-            missing.append(rel)
+    missing = [rel for rel, literals in _test_modules().items()
+               if not rel.startswith("tests/usd/") and rel not in USD_NOT_NEEDED
+               and _needs_usd(literals) and not _selected(rel, targets)]
     assert not missing, f"these need usd-core but test-usd does not run them: {missing}"
     if _examples_needing_usd():
         smoke = "tests/test_examples_smoke.py::test_example_imports_resolve_against_the_library"

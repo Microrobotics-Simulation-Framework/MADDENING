@@ -51,14 +51,15 @@ class _Affine(SimulationNode):
         return {"x": self.params["gain"] * u + self.params["bias"]}
 
 
-def _pair(tolerance, **kw):
+def _pair(tolerance, solver="ift", **kw):
     gm = GraphManager()
     gm.add_node(_Affine("a", 0.9, 1.0))
     gm.add_node(_Affine("b", 0.9, 0.0))
     gm.add_edge("b", "a", "x", "u")
     gm.add_edge("a", "b", "x", "u")
+    # ``"ift"`` records its verdict always; ``"fori"`` only with diagnostics.
     gm.add_coupling_group(["a", "b"], max_iterations=200, tolerance=tolerance,
-                          diagnostics=True, **kw)
+                          solver=solver, diagnostics=solver == "fori", **kw)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")     # solver="fori" is deprecated
         gm.compile()

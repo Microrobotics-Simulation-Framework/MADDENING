@@ -104,13 +104,19 @@ def _slots(gm):
             for k, v in gm._state["_meta"].items() if k.startswith(prefix)}
 
 
+def _comparable(report):
+    """The report with NaN (a key not computed) made equal to itself."""
+    return {k: ("nan" if isinstance(v, float) and v != v else v)
+            for k, v in report.items()}
+
+
 def test_the_report_between_firings_is_the_last_applied_solve():
     """Every base step after a firing reports that firing's solve, exactly."""
-    gm = _graph(diagnostics=True)
+    gm = _graph()
     applied = None
     for step in range(2 * DIVIDER + 2):
         gm.step()
-        report = dict(gm.coupling_diagnostics()[KEY])
+        report = _comparable(gm.coupling_diagnostics()[KEY])
         slots = _slots(gm)
         if step % DIVIDER == 0:
             applied = (report, slots)
@@ -158,7 +164,7 @@ def test_the_linear_predictor_learns_only_from_applied_solves():
     with it: 8.7e12 at the second firing and 2.1e27 at the third.
     """
     fixed_point = 4.0 / 3.0         # a = 0.5 * (0.5 * a) + 1 at phase 0
-    gm = _graph(diagnostics=True, predictor="linear")
+    gm = _graph(predictor="linear")
     for step in range(2 * DIVIDER + 1):
         gm.step()
         if step % DIVIDER == 0:
@@ -170,7 +176,7 @@ def test_the_linear_predictor_learns_only_from_applied_solves():
 
 
 def test_the_imvj_warm_start_is_carried_only_from_applied_solves():
-    gm = _graph(diagnostics=True, acceleration="iqn-imvj", jacobian_reuse=3)
+    gm = _graph(acceleration="iqn-imvj", jacobian_reuse=3)
     gm.step()
     fired = _slots(gm)
     for _ in range(DIVIDER - 1):
@@ -182,7 +188,7 @@ def test_the_imvj_warm_start_is_carried_only_from_applied_solves():
 
 
 def test_the_profiler_counts_each_applied_solve_once():
-    gm = _graph(diagnostics=True)
+    gm = _graph()
     report = profile_graph(gm, n_steps=2, n_warmup=0, counts=False,
                            measure_coupling=False, n_stat_steps=2 * DIVIDER)
     stats = report.coupling_iter_stats[KEY]
@@ -234,3 +240,35 @@ def test_a_group_does_not_solve_on_a_step_it_does_not_fire_on():
     fired = [per_step[0], per_step[DIVIDER]]
     assert all(n > 0 for n in fired), per_step
     assert per_step[1:DIVIDER] == [0] * (DIVIDER - 1), per_step
+
+
+def test_a_batched_step_keeps_each_elements_firing_rule():
+    """Under ``vmap`` over states at different phases the ``cond`` runs both
+    branches, so the selects and the gated strict check are what keep a
+    non-firing element's solve out.
+
+    One element fires (step count 10); the other is at phase 5, where the
+    discarded solve does not contract, with ``strict_convergence=True``.
+    The batched step must equal the two steps taken one at a time.
+    """
+    gm = _graph(predictor="linear", strict_convergence=True)
+    step = gm._build_step_fn()
+    ext = gm._default_external_inputs()
+    states = []
+    for count in range(16):
+        if count in (10, 15):
+            states.append(gm._state)
+        gm.step()
+    assert [int(s["_meta"]["step_count"]) % DIVIDER for s in states] == [0, 5]
+    one_at_a_time = [gm._compiled_step(s, ext) for s in states]
+    batched = jax.jit(jax.vmap(step, in_axes=(0, None)))(
+        jax.tree.map(lambda a, b: jnp.stack([a, b]), *states), ext)
+    for i, single in enumerate(one_at_a_time):
+        element = jax.tree.map(lambda leaf, i=i: leaf[i], batched)
+        for name in ("a", "b"):
+            np.testing.assert_allclose(np.asarray(element[name]["x"]),
+                                       np.asarray(single[name]["x"]), rtol=1e-6)
+        for slot, value in single["_meta"].items():
+            np.testing.assert_allclose(
+                np.asarray(element["_meta"][slot], np.float64),
+                np.asarray(value, np.float64), rtol=1e-6, err_msg=f"{i} {slot}")

@@ -86,7 +86,9 @@ def _graph(solver):
     gm.add_edge("a", "b", "x", "u")
     gm.add_coupling_group(["a", "b"], acceleration="iqn-imvj",
                           jacobian_reuse=REUSE, max_iterations=30,
-                          tolerance=1e-5, solver=solver, diagnostics=True)
+                          tolerance=1e-5, solver=solver,
+                          # ``"ift"`` reports always; ``"fori"`` only with this.
+                          diagnostics=solver == "fori")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")     # solver="fori" is deprecated
         gm.compile()

@@ -71,7 +71,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 3
+    assert doc["schema_version"] == 4
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -97,8 +97,12 @@ def test_every_goal_records_checks_and_passes_them_in_the_dry_run(dry_run_dir, g
     failed = [c for c in doc["checks"] if not c["passed"]]
     assert not failed, failed
     assert doc["passed"] is True
+    rp = _runner_module()
     for c in doc["checks"]:
-        assert set(c) >= {"name", "value", "limit", "passed"}
+        assert set(c) >= {"name", "value", "limit", "sense", "passed"}
+        assert c["sense"] in rp.SENSES
+        # on four devices every case runs, and every record re-derives
+        assert rp.check_status(c) == "passed", c
 
 
 @pytest.mark.slow
@@ -145,14 +149,28 @@ def test_halo_json_is_bit_exact_on_every_boundary_mode_width_and_mesh(dry_run_di
 
 @pytest.mark.slow
 def test_stencil_and_hybrid_json_match_their_unsharded_nodes(dry_run_dir):
-    (s,) = _load(dry_run_dir, "stencil")["results"]
-    assert s["input_partitioned"] is True
-    assert s["forward"]["parity_f"]["max_rel"] < 1e-5
-    assert s["gradient"]["parity_grad_initial_field"]["max_rel"] < 1e-5
-    assert s["gradient"]["parity_grad_diffusivity"] < 1e-5
-    for side in ("sharded", "unsharded"):
-        _check_timing(s["forward"][side]["rollout"])
-        _check_timing(s["gradient"][side]["grad"])
+    """Periodic, edge (the wrapper's default) and Dirichlet ends, each
+    forward and adjoint against the unsharded node.  Periodic alone let a
+    wrapper whose unsharded halo axes always wrapped pass the goal."""
+    doc = _load(dry_run_dir, "stencil")
+    by_boundary = {s["boundary"]: s for s in doc["results"]}
+    assert len(doc["results"]) == 3
+    assert set(by_boundary) == {"periodic", "edge", "dirichlet"}
+    for boundary, s in by_boundary.items():
+        assert s["cells"] == 16 * 16, boundary
+        assert s["input_partitioned"] is True
+        assert s["forward"]["parity_f"]["max_rel"] < 1e-5
+        assert s["gradient"]["parity_grad_initial_field"]["max_rel"] < 1e-5
+        assert s["gradient"]["parity_grad_diffusivity"] < 1e-5
+        for side in ("sharded", "unsharded"):
+            _check_timing(s["forward"][side]["rollout"])
+            _check_timing(s["gradient"][side]["grad"])
+        assert sum(c["name"].startswith(f"16x16 {boundary} ")
+                   or c["name"].startswith(f"16x16 {boundary}:") for c in doc["checks"]) == 8
+    # the three conditions are different models: nothing here compares a
+    # mode with itself under another name
+    losses = {b: s["gradient"]["unsharded"]["loss"] for b, s in by_boundary.items()}
+    assert len(set(losses.values())) == 3, losses
     (h,) = _load(dry_run_dir, "hybrid")["results"]
     assert h["sharded"]["partitioned"] is True
     assert h["correction_rel"] > 1e-3            # the correction is part of the answer
@@ -278,6 +296,19 @@ def test_summarise_does_not_close_the_checklist_from_a_dry_run(dry_run_dir):
     for goal in _GOALS:
         assert f"{goal:<12} cpu" in out
     assert "Coupled group" in out and "Stencil wrapper" in out and "Halo exchange" in out
+    assert "Checks not run" not in out and "Failed checks" not in out     # 4 devices
+    for boundary in ("periodic", "edge", "dirichlet"):
+        assert f"16x16    {boundary:<9} f " in out, out
+
+
+def test_the_stencil_goal_runs_every_boundary_at_its_smallest_size():
+    rp = _runner_module()
+    assert rp.STENCIL_BOUNDARIES == ("periodic", "edge", "dirichlet")
+    assert rp.stencil_cases([1024, 256]) == [(1024, "periodic"), (256, "periodic"),
+                                             (256, "edge"), (256, "dirichlet")]
+    assert rp.stencil_cases(list(rp.GPU_CELLS))[:3] == [
+        (100_000, "periodic"), (100_000, "edge"), (100_000, "dirichlet")]
+    assert len(rp.stencil_cases(list(rp.GPU_CELLS))) == 5
 
 
 def test_summarise_of_an_empty_directory_fails_clearly(tmp_path):
@@ -564,22 +595,84 @@ def test_check_helpers_fail_closed():
     assert rp.check("x", float("nan"), 1e-5)["passed"] is False     # NaN is not "small"
     assert rp.check("x", 0.0, rp.LIMITS["exact"])["passed"] is True
     assert rp.check("x", 1e-30, rp.LIMITS["exact"])["passed"] is False
+    assert rp.check("x", 1e-6, 1e-5)["sense"] == "<="
+    assert rp.check_that("y", True)["sense"] == "=="
     assert rp.finish_checks({}, [])["passed"] is False               # nothing compared
     assert rp.finish_checks({}, [rp.check_that("y", True)])["passed"] is True
     assert rp.finish_checks({}, [rp.check_that("y", True), rp.check_that("z", False)])[
         "passed"] is False
+    # a check not run is recorded, never passes, and makes the goal incomplete
+    skipped = rp.check_not_run("pencil", "needs 4 devices")
+    assert skipped["passed"] is False and skipped["not_run"] is True
+    assert rp.check_status(skipped) == "not run"
+    assert rp.finish_checks({}, [rp.check_that("y", True), skipped])["passed"] is False
     assert rp._rel_each([1.0, 2.0], [1.0, 2.0 + 2e-6]) == pytest.approx(1e-6, rel=1e-3)
+
+
+@pytest.mark.parametrize("record, status", [
+    ({"value": 0.5, "limit": 0.0, "sense": "<=", "passed": True}, "inconsistent"),
+    ({"value": 0.0, "limit": 0.0, "sense": "<=", "passed": False}, "inconsistent"),
+    ({"value": float("nan"), "limit": 1.0, "sense": "<=", "passed": True}, "inconsistent"),
+    ({"value": False, "limit": True, "sense": "==", "passed": True}, "inconsistent"),
+    ({"value": 0.5, "limit": 0.0, "sense": ">=", "passed": True}, "inconsistent"),  # unknown
+    ({"value": "0.0", "limit": 0.0, "sense": "<=", "passed": True}, "inconsistent"),
+    ({"value": 0.5, "limit": 0.0, "passed": True}, "inconsistent"),        # schema 3
+    ({"value": 0.5, "limit": 0.0, "sense": "<=", "passed": False}, "failed"),
+    ({"value": 1e-7, "limit": 1e-5, "sense": "<=", "passed": True}, "passed"),
+    ({"value": 1e-7, "limit": 1e-5, "passed": True}, "passed"),            # schema 3
+    ({"value": True, "limit": True, "passed": True}, "passed"),            # schema 3
+    ({"value": None, "limit": None, "not_run": True, "passed": True}, "inconsistent"),
+])
+def test_check_status_rederives_pass_fail_from_the_value_and_limit(record, status):
+    assert _runner_module().check_status({"name": "c", **record}) == status
+
+
+def test_summarise_does_not_trust_a_recorded_pass(tmp_path, capsys):
+    """A check with value 0.5 against limit 0.0, recorded ``passed: true``,
+    read PASS / CLOSED: the summary counted the flags."""
+    rp = _runner_module()
+    docs = _all_goal_docs()
+    docs["halo"][0]["checks"][0].update(value=0.5, limit=0.0, sense="<=", passed=True)
+    status = rp.checklist_status(docs)
+    assert status[2][0] == "FAILED", status[2]
+    assert rp.goal_verdict(docs["halo"]) == "FAIL"
+    _write_checklist_docs(tmp_path, docs)
+    assert _summarise_without_tables(rp, tmp_path) == 3
+    out = capsys.readouterr().out
+    assert ("[halo] halo parity: 5.000e-01 (limit 0.0) -- recorded passed=True, but the "
+            "value fails its limit") in out
+    # the file-level flag is re-derived too
+    docs = _all_goal_docs()
+    docs["hybrid"][0]["passed"] = False
+    assert rp.checklist_status(docs)[4][0] == "FAILED"
 
 
 def test_the_checklist_closes_only_on_a_real_gpu_run_with_enough_devices():
     rp = _runner_module()
     closed = rp.checklist_status(_all_goal_docs())
     assert [s for s, _ in closed.values()] == ["CLOSED"] * 6
-    for kw in ({"dry_run": True}, {"platform": "cpu"}, {"n_devices": 2}):
+    for kw in ({"dry_run": True}, {"platform": "cpu"}):
         status = rp.checklist_status(_all_goal_docs(**kw))
         assert all(s.startswith("open: passed on CPU") for s, _ in status.values()), (kw, status)
-    fewer = rp.checklist_status(_all_goal_docs(n_devices=2, allow_fewer_devices=True))
-    assert all(s == "CLOSED" for s, _ in fewer.values())
+    # --allow-fewer-devices is about the transport ranking: on 2 devices a
+    # halo from the wrong neighbour passes every check, so fewer than four
+    # devices never close an item, whatever the flag says
+    for n_devices in (2, 3):
+        for allow in (False, True):
+            status = rp.checklist_status(_all_goal_docs(n_devices=n_devices,
+                                                        allow_fewer_devices=allow))
+            assert all(s == "open: passed on fewer than 4 devices"
+                       for s, _ in status.values()), (n_devices, allow, status)
+    assert not rp.closes_the_gap(_goal_doc("halo", n_devices=2, allow_fewer_devices=True))
+    assert rp.closes_the_gap(_goal_doc("halo", n_devices=4))
+    # a check not run keeps its items open; one that claims to have passed fails them
+    docs = _all_goal_docs()
+    docs["halo"][0]["checks"].append(_runner_module().check_not_run("2d pencil", "needs 4"))
+    docs["halo"][0]["passed"] = False
+    assert rp.goal_verdict(docs["halo"]) == "INCOMPLETE"
+    assert rp.checklist_status(docs)[2] == ("open", "halo INCOMPLETE")
+    docs["halo"][0]["checks"][-1]["passed"] = True
+    assert rp.checklist_status(docs)[2][0] == "FAILED"
     # one failed goal fails every item it decides, and only those
     docs = _all_goal_docs()
     docs["coupled"] = [_goal_doc("coupled", passed=False)]
@@ -595,23 +688,46 @@ def test_the_checklist_closes_only_on_a_real_gpu_run_with_enough_devices():
     assert rp.checklist_status(docs)[1][0] == "open"
 
 
-def test_summarise_exits_3_and_lists_a_failed_check(tmp_path, capsys):
-    rp = _runner_module()
-    for goal, doc in _all_goal_docs().items():
+def _write_checklist_docs(directory: Path, docs: dict) -> None:
+    for goal, (doc, *_) in docs.items():
         if goal in ("exchange", "forward", "gradient"):
             continue                    # the timing tables need full results
-        if goal == "halo":
-            doc = [_goal_doc("halo", passed=False)]
-        (tmp_path / f"{goal}.json").write_text(json.dumps(doc[0]), encoding="utf-8")
+        (directory / f"{goal}.json").write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _summarise_without_tables(rp, directory: Path) -> int:
     monkey_tables = rp._print_checklist_goal_tables
     try:
         rp._print_checklist_goal_tables = lambda docs: None
-        assert rp.summarise(tmp_path) == 3
+        return rp.summarise(directory)
     finally:
         rp._print_checklist_goal_tables = monkey_tables
+
+
+def test_summarise_exits_3_and_lists_a_failed_check(tmp_path, capsys):
+    rp = _runner_module()
+    docs = _all_goal_docs()
+    docs["halo"] = [_goal_doc("halo", passed=False)]
+    _write_checklist_docs(tmp_path, docs)
+    assert _summarise_without_tables(rp, tmp_path) == 3
     out = capsys.readouterr().out
     assert "[halo] halo parity: 1.000e-02 (limit 1e-05)" in out
     assert "2  halo exchange at the shard and global boundaries" in out and "FAILED" in out
+
+
+def test_summarise_lists_checks_not_run_and_exits_0(tmp_path, capsys):
+    rp = _runner_module()
+    docs = _all_goal_docs()
+    docs["indivisible"][0]["checks"].append(rp.check_not_run("pencil refusal", "needs 4"))
+    docs["indivisible"][0]["passed"] = False
+    _write_checklist_docs(tmp_path, docs)
+    assert _summarise_without_tables(rp, tmp_path) == 0
+    out = capsys.readouterr().out
+    assert "Checks not run" in out and "[indivisible] pencil refusal -- needs 4" in out
+    assert "5  an indivisible grid is refused" in out
+    line = next(ln for ln in out.splitlines() if ln.startswith("5  "))
+    assert "open  [indivisible INCOMPLETE]" in line and "CLOSED" not in line
+    assert "Failed checks" not in out
 
 
 def test_halo_reference_encodes_the_documented_boundary_fill():
@@ -636,6 +752,49 @@ def test_halo_reference_encodes_the_documented_boundary_fill():
     assert padded[:, 0].tolist() == [0, 1, 2, 3, 4, 5, 4, 5, 6, 7, 8, 0]
     # each owned cell once, plus once more per halo slot it fills
     assert grad[:, 0].tolist() == [1, 1, 1, 2, 2, 1, 1, 1]
+
+
+@pytest.mark.slow
+def test_a_two_device_run_records_the_cases_it_cannot_run():
+    """On 2 devices the 2-D pencil cases have no mesh and a halo from the
+    wrong neighbour cannot show; each is a check *not run*, so the goal
+    reads incomplete instead of passing on what it could reach."""
+    rp = _runner_module()
+    args = SimpleNamespace(n_devices=2, cells=[64], synthetic="grid", partition="contiguous",
+                           mesh=None, steps=1)
+    for run, expected in ((rp.run_halo, {"2d pencil mesh", "1d mesh: left and right"}),
+                          (rp.run_indivisible, {"pencil (2-D mesh) refusal"})):
+        doc = run(args, {})
+        not_run = [c for c in doc["checks"] if c.get("not_run")]
+        assert {next(e for e in expected if c["name"].startswith(e)) for c in not_run} \
+            == expected, not_run
+        assert all(c["passed"] for c in doc["checks"] if not c.get("not_run"))
+        assert doc["passed"] is False
+        assert rp.goal_verdict([{**doc, "environment": {"platform": "gpu"}}]) == "INCOMPLETE"
+
+
+@pytest.mark.slow
+def test_the_stencil_goal_fails_when_unsharded_halo_axes_always_wrap(monkeypatch):
+    """The fault the periodic-only goal could not see: the wrapper fills
+    the halo of an axis it does not shard periodically whatever
+    ``boundary`` says.  Only the ``"edge"`` case can fail on it -- periodic
+    wraps anyway and Dirichlet overwrites those halos -- so it must."""
+    from maddening.cloud.multigpu import sharded_node
+
+    rp = _runner_module()
+    rp._load_backend()
+    real = sharded_node._global_edge_halos
+
+    def always_wrap(left, right, *, spatial_axis, halo, boundary):
+        return real(left, right, spatial_axis=spatial_axis, halo=halo, boundary="periodic")
+
+    monkeypatch.setattr(sharded_node, "_global_edge_halos", always_wrap)
+    args = SimpleNamespace(n_devices=2, cells=[64], steps=2, grad_steps=2, warmup=0,
+                           repeats=1)
+    doc = rp.run_stencil(args, {})
+    failed = {c["name"].split()[1].rstrip(":") for c in doc["checks"] if not c["passed"]}
+    assert failed == {"edge"}, [c["name"] for c in doc["checks"] if not c["passed"]]
+    assert doc["passed"] is False
 
 
 def test_checklist_goals_refuse_a_single_device():

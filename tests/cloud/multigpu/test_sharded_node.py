@@ -91,6 +91,42 @@ class TestShardedPointwiseNodeConstruction:
         with pytest.raises(NotImplementedError, match="Multi-axis"):
             ShardedPointwiseNode(node, mesh, shard_axes=(0, 1))
 
+    @pytest.mark.parametrize("shard_axis", [0, 2])
+    def test_a_node_with_nothing_to_shard_is_refused_naming_its_fields(self, shard_axis):
+        """A field too short to have the shard axis is replicated; a node
+        none of whose fields has it was accepted and ran whole on every
+        device, sharding nothing and saying nothing (a spring's 0-d state;
+        ``shard_axes=(2,)`` on 1-D fields).  Refused at construction."""
+        from maddening.nodes.spring import SpringDamperNode
+
+        mesh = create_device_mesh(n_devices=1)
+        spring = SpringDamperNode("s", timestep=0.01, stiffness=30.0)
+        with pytest.raises(ValueError) as excinfo:
+            ShardedPointwiseNode(spring, mesh, shard_axes=(shard_axis,))
+        message = str(excinfo.value)
+        assert f"cannot shard SpringDamperNode 's' along array axis {shard_axis}" in message
+        assert "'position' (0-d), 'velocity' (0-d)" in message
+        assert "nothing would be sharded" in message
+        vector = PointwiseNode(name="pw", timestep=0.01, n_elements=8)
+        with pytest.raises(ValueError, match=r"'values' \(1-d\), 'velocities' \(1-d\)"):
+            ShardedPointwiseNode(vector, mesh, shard_axes=(2,))
+        ShardedPointwiseNode(vector, mesh, shard_axes=(0,))    # the axis they have
+
+    def test_one_field_with_the_axis_is_enough(self):
+        """A 0-d field beside a sharded one is replicated, as documented."""
+
+        class Mixed(PointwiseNode):
+            def initial_state(self):
+                return {**super().initial_state(), "clock": jnp.float32(0.0)}
+
+            def update(self, state, boundary_inputs, dt):
+                return {**super().update(state, boundary_inputs, dt),
+                        "clock": state["clock"] + dt}
+
+        sharded = ShardedPointwiseNode(Mixed(name="m", timestep=0.01, n_elements=8),
+                                       create_device_mesh(n_devices=1))
+        assert sharded.initial_state()["clock"].shape == ()
+
 
 class TestShardedPointwiseNodeHaloWidthOnRealNodes:
     def test_heat_node_has_halo(self):

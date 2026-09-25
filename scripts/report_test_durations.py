@@ -14,11 +14,14 @@ under ``--watch-over`` (1 s)
 between ``--watch-over`` and ``--slow-over`` (1-5 s)
     The watch list: shown in the summary, worth optimising, not an error.
 over ``--slow-over`` (5 s)
-    Belongs under ``@pytest.mark.slow`` -- which still runs three times a
-    week in ``slow-tests.yml`` -- unless it can be made much faster, or it
-    guards something important enough to pay for on every push.  A kept
-    test goes on the allowlist *with the reason*.  Unlisted tests over
-    this line get a warning annotation on the run.
+    Belongs under ``@pytest.mark.slow`` -- which still runs in
+    ``slow-tests.yml``: on a schedule three times a week on ``main`` only
+    (GitHub runs a scheduled workflow on the default branch), and on a
+    release branch only when someone dispatches it by hand -- unless it
+    can be made much faster, or it guards something important enough to
+    pay for on every push.  A kept test goes on the allowlist *with the
+    reason*.  Unlisted tests over this line get a warning annotation on
+    the run.
 over ``--fail-over`` (20 s)
     An unlisted test this slow fails the job.
 
@@ -35,27 +38,41 @@ tests that actually drag the lane: the ten slowest tests took 17 minutes.
 Why a test is slow
 ------------------
 When the run sets ``MADDENING_TEST_JAX_TIMING=1``, ``tests/_jax_timing.py``
-records each test's JAX tracing, lowering, XLA compile and cache-read time
-as JUnit properties, and the summary splits every slow test into
+records each test's JAX tracing, lowering, XLA compile and cache-read time,
+and how many processes it started, as JUnit properties, and the summary
+splits every slow test into
 
 * **compiling** -- XLA backend compilation, the only part a persistent
-  compilation cache removes;
+  compilation cache removes.  JAX's compile timer wraps the whole
+  compile-or-read-the-cache call, so on a cache hit what it times *is*
+  the cache read; the read is subtracted here and shown on its own;
+* **cache read** -- reading compiled programs back from the persistent
+  cache, which a warm run pays and a cold run does not;
 * **tracing / lowering** -- building the program in Python; no cache
   removes it;
 * **running** -- the rest: executing, Python overhead, I/O, and anything a
   subprocess does (its JAX events are not seen here).
   An un-jitted ``for`` loop over ``node.update`` lands here.
 
+JAX's timers can overlap (on jax 0.10.2 a test's tracing has summed to
+more than its wall time), so a share is capped at 100% and the diagnosis
+says when the parts add up to more than the whole.
+
 Subtracting the compile time gives the time a warm cache cannot remove, on
 any run, cold or warm.  A test still over the policy line after that is
 listed under *Slow even with a warm cache*: it needs a code change, not a
-cache.
+cache -- unless it started a process, whose compiles are invisible here
+and which inherits the cache directory.  Those are listed separately as
+*work in a subprocess (not measured here)*.  (A report written before the
+process count was recorded cannot tell; there, a test with no JAX activity
+at all in the pytest process is put in that list.)
 
 Warm and cold runs
 ------------------
 ``--cache-mode`` says what the run's compilation cache was: ``off`` (none),
 ``cold`` (started empty), ``warm`` (restored from an earlier run), or
-``mixed`` (a lane whose shards differed).  A
+``mixed`` (a lane whose shards differed, or one where a shard's mode was
+not recorded).  A
 warm run's times are not comparable with a cold run's, so the header says
 which it was, and a warm run does not list allowlist entries as removable
 -- a test that is only fast because its compile was cached is still slow.
@@ -91,8 +108,12 @@ set), GitHub annotations to stdout, and exits
 
 * 0 -- within budget,
 * 1 -- an unlisted test over ``--fail-over``,
-* 2 -- nothing to judge: a report missing, unreadable, or with no test
-  cases.  A gate with nothing to read does not pass.
+* 2 -- nothing to judge: a report missing, unreadable, with no test
+  cases, or holding only collection errors (a test file that fails to
+  import stops pytest before any test runs).  A gate with nothing to read
+  does not pass.  When only some of several reports are collection
+  errors, those are left out, a warning names them, and no allowlist entry
+  is listed as removable.
 """
 
 from __future__ import annotations
@@ -112,6 +133,12 @@ ANNOTATION_LIMIT = 10
 #: The properties ``tests/_jax_timing.py`` writes.
 JAX_PROPERTIES = ("jax_trace_s", "jax_lower_s", "jax_compile_s", "jax_cache_read_s",
                   "jax_cache_hits", "jax_cache_misses")
+#: Processes the test started (``tests/_jax_timing.py``); absent from
+#: reports written before it was recorded, which is kept as ``None``.
+SUBPROCESS_PROPERTY = "subprocesses"
+
+#: The ``message`` pytest's JUnit writer gives a file that failed to import.
+COLLECTION_FAILURE = "collection failure"
 
 CACHE_MODES = ("off", "cold", "warm", "mixed")
 
@@ -125,10 +152,24 @@ class TestTime(NamedTuple):
     #: ``{property: value}`` from ``tests/_jax_timing.py``; ``None`` when
     #: the run did not record them.
     jax: dict | None = None
+    #: The entry pytest writes for a test file that failed to import.
+    collection_error: bool = False
+
+    @property
+    def cache_read(self) -> float:
+        """Reading programs back from the persistent cache; a warm run pays it."""
+        return self.jax["jax_cache_read_s"] if self.jax else 0.0
 
     @property
     def compiling(self) -> float:
-        return self.jax["jax_compile_s"] if self.jax else 0.0
+        """XLA compilation proper: what a warm cache removes.
+
+        JAX times ``backend_compile_duration`` around the whole
+        compile-or-read-the-cache call, and records the cache read
+        (``cache_retrieval_time_sec``) *inside* it, so on a hit the
+        "compile" is the read.  Taking the read out leaves the compile.
+        """
+        return max(0.0, self.jax["jax_compile_s"] - self.cache_read) if self.jax else 0.0
 
     @property
     def building(self) -> float:
@@ -139,13 +180,45 @@ class TestTime(NamedTuple):
     def running(self) -> float:
         if not self.jax:
             return self.seconds
-        spent = self.compiling + self.building + self.jax["jax_cache_read_s"]
+        # The compile timer already contains the cache read: subtract each once.
+        spent = self.compiling + self.cache_read + self.building
         return max(0.0, self.seconds - spent)
 
     @property
     def uncacheable(self) -> float:
-        """What is left once a warm cache has removed the XLA compile."""
+        """What is left once a warm cache has removed the XLA compile.
+
+        The cache read stays in: a warm run is the run that pays it.
+        """
         return max(0.0, self.seconds - self.compiling)
+
+    @property
+    def overcounted(self) -> bool:
+        """JAX's timers add up to more than the test's wall time.
+
+        They can overlap (seen on jax 0.10.2: tracing alone over 100% of a
+        test), so the split is then an approximation, and says so.
+        """
+        if not self.jax:
+            return False
+        return self.building + self.compiling + self.cache_read > self.seconds * 1.001 + 0.01
+
+    @property
+    def subprocess_work(self) -> bool:
+        """Part of the test ran in another process, whose JAX events are not seen here.
+
+        A child inherits the compilation cache directory, so a warm cache
+        may speed it up although this process recorded no compile.  A
+        report from before the process count was recorded cannot say; a
+        test with no JAX activity at all in the pytest process is then
+        counted here rather than called uncacheable.
+        """
+        if not self.jax:
+            return False
+        started = self.jax.get(SUBPROCESS_PROPERTY)
+        if started is not None:
+            return started > 0
+        return not any(self.jax[k] for k in JAX_PROPERTIES)
 
 
 class ReportError(Exception):
@@ -178,7 +251,10 @@ def _jax_properties(case: ET.Element) -> dict | None:
     if not any(k in props for k in JAX_PROPERTIES):
         return None
     try:
-        return {k: float(props.get(k) or 0.0) for k in JAX_PROPERTIES}
+        out: dict = {k: float(props.get(k) or 0.0) for k in JAX_PROPERTIES}
+        started = props.get(SUBPROCESS_PROPERTY)
+        out[SUBPROCESS_PROPERTY] = float(started) if started is not None else None
+        return out
     except ValueError as exc:
         raise ReportError(f"unreadable JAX timing property: {exc}") from exc
 
@@ -194,9 +270,10 @@ def read_report(path: Path) -> list[TestTime]:
     out = []
     for case in root.iter("testcase"):
         nodeid, file = _nodeid(case)
-        outcome = "passed"
+        outcome, detail = "passed", None
         for tag in ("failure", "error", "skipped"):
-            if case.find(tag) is not None:
+            detail = case.find(tag)
+            if detail is not None:
                 outcome = tag
                 break
         line = case.get("line")
@@ -205,6 +282,8 @@ def read_report(path: Path) -> list[TestTime]:
             line=int(line) + 1 if line is not None else None,  # 0-based in the XML
             seconds=float(case.get("time") or 0.0), outcome=outcome,
             jax=_jax_properties(case),
+            collection_error=(outcome == "error" and detail is not None
+                              and detail.get("message") == COLLECTION_FAILURE),
         ))
     return out
 
@@ -239,19 +318,25 @@ def _escape(text: str) -> str:
 
 
 def diagnose(t: TestTime) -> str:
-    """Name the largest of running / tracing+lowering / compiling."""
+    """Name the largest of running / tracing+lowering / compiling / cache read."""
     if not t.jax:
         return ""
-    share = {"running": t.running, "tracing/lowering": t.building, "compiling": t.compiling}
+    share = {"running": t.running, "tracing/lowering": t.building, "compiling": t.compiling,
+             "cache read": t.cache_read}
     what = max(share, key=share.get)
-    pct = 100 * share[what] / t.seconds if t.seconds else 0
+    # Capped: overlapping timers can put one part over the whole.
+    pct = min(100.0, 100 * share[what] / t.seconds) if t.seconds else 0
     hint = {
-        "running": "un-jitted loop, heavy compute, or a subprocess",
+        "running": ("work in a subprocess (not measured here)" if t.subprocess_work
+                    else "un-jitted loop, heavy compute, or a subprocess"),
         "tracing/lowering": "large or repeatedly rebuilt program; no cache removes this",
         "compiling": (f"{int(t.jax['jax_cache_misses'])} cache misses"
                       if t.jax["jax_cache_hits"] + t.jax["jax_cache_misses"]
                       else "a compilation cache would remove this"),
+        "cache read": "reading compiled programs back; a warm run pays this",
     }[what]
+    if t.overcounted:
+        hint += "; JAX's timers add up to more than the wall time, so the split is approximate"
     return f"{what} {pct:.0f}%: {hint}"
 
 
@@ -268,7 +353,10 @@ def judge(tests, allow, *, watch_over, slow_over, fail_over):
         "slow": [t for t in ranked if t.seconds > slow_over],
         "new_slow": [t for t in ranked if t.seconds > slow_over and t.nodeid not in allow],
         "failing": [t for t in ranked if t.seconds > fail_over and t.nodeid not in allow],
-        "slow_warm": [t for t in ranked if t.jax and t.uncacheable > slow_over],
+        "slow_warm": [t for t in ranked if t.jax and t.uncacheable > slow_over
+                      and not t.subprocess_work],
+        "slow_subprocess": [t for t in ranked if t.jax and t.uncacheable > slow_over
+                            and t.subprocess_work],
         "allow_absent": sorted(set(allow) - set(by_id)),
         "allow_fast": [t for t in ranked if t.nodeid in allow and t.seconds <= slow_over],
     }
@@ -297,17 +385,18 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
                  "unchanged programs were skipped, so these times are lower than a cold "
                  "run's; new and changed programs still compiled."),
         "mixed": ("**Compilation cache: mixed** -- some shards restored a cache and some ran "
-                  "cold (a shard whose runner CPU model had no cache yet), so these times mix "
-                  "warm and cold."),
+                  "cold (a shard whose runner CPU model had no cache yet), or a shard did not "
+                  "record its mode, so these times may mix warm and cold."),
     }.get(cache_mode, "**Compilation cache: not stated.**")
     if timed:
         hits = sum(t.jax["jax_cache_hits"] for t in timed)
         misses = sum(t.jax["jax_cache_misses"] for t in timed)
         split = [sum(t.running for t in timed), sum(t.building for t in timed),
-                 sum(t.compiling for t in timed)]
+                 sum(t.compiling for t in timed), sum(t.cache_read for t in timed)]
         cache_line += (f" Cache hits {int(hits)}, misses {int(misses)}. Of the test time: "
                        f"running {_fmt(split[0])}, tracing/lowering {_fmt(split[1])}, "
-                       f"XLA compile {_fmt(split[2])}.")
+                       f"XLA compile {_fmt(split[2])} (cache reads excluded), "
+                       f"cache reads {_fmt(split[3])}.")
     lines += [cache_line, "",
               "| band | tests | time | share |",
               "|---|---:|---:|---:|",
@@ -326,20 +415,35 @@ def markdown(verdict, allow, *, title, watch_over, slow_over, fail_over, top, ca
                   f"Still over {slow_over:g} s once XLA compilation is taken away. A cache "
                   "cannot fix these; they need a code change (jit or `lax.scan` a Python "
                   "loop, build the program once and reuse it) or `@pytest.mark.slow`.", "",
-                  "| without compile | running | tracing/lowering | test | allowlist |",
-                  "|---:|---:|---:|---|---|"]
+                  "| without compile | running | tracing/lowering | cache read | test | allowlist |",
+                  "|---:|---:|---:|---:|---|---|"]
         for t in verdict["slow_warm"]:
             lines.append(f"| {_fmt(t.uncacheable)} | {_fmt(t.running)} | {_fmt(t.building)} "
+                         f"| {_fmt(t.cache_read)} | `{t.nodeid}` | {allow.get(t.nodeid, '')} |")
+        lines.append("")
+    if verdict["slow_subprocess"]:
+        lines += [f"### Work in a subprocess (not measured here) ({len(verdict['slow_subprocess'])})", "",
+                  f"Over {slow_over:g} s once this process's XLA compilation is taken away, "
+                  "but part of their work ran in a child process, whose tracing and compiling "
+                  "this split cannot see. The child inherits the compilation cache directory, "
+                  "so a warm cache may still speed them up: compare a warm run before calling "
+                  "them slow even with a warm cache.", "",
+                  "| without in-process compile | processes started | test | allowlist |",
+                  "|---:|---:|---|---|"]
+        for t in verdict["slow_subprocess"]:
+            started = t.jax.get(SUBPROCESS_PROPERTY)
+            lines.append(f"| {_fmt(t.uncacheable)} "
+                         f"| {'not recorded' if started is None else int(started)} "
                          f"| `{t.nodeid}` | {allow.get(t.nodeid, '')} |")
         lines.append("")
     lines += [f"### Slowest {min(top, len(ranked))} tests", ""]
     if timed:
-        lines += ["| time | running | tracing/lowering | compiling | why | test | allowlist |",
-                  "|---:|---:|---:|---:|---|---|---|"]
+        lines += ["| time | running | tracing/lowering | compiling | cache read | why | test | allowlist |",
+                  "|---:|---:|---:|---:|---:|---|---|---|"]
         for t in ranked[:top]:
             lines.append(f"| {_fmt(t.seconds)} | {_fmt(t.running)} | {_fmt(t.building)} "
-                         f"| {_fmt(t.compiling)} | {diagnose(t)} | `{t.nodeid}` "
-                         f"| {allow.get(t.nodeid, '')} |")
+                         f"| {_fmt(t.compiling)} | {_fmt(t.cache_read)} | {diagnose(t)} "
+                         f"| `{t.nodeid}` | {allow.get(t.nodeid, '')} |")
     else:
         lines += ["| time | test | allowlist |", "|---:|---|---|"]
         for t in ranked[:top]:
@@ -395,7 +499,8 @@ def main(argv=None) -> int:
     p.add_argument("--fail-over", type=float, default=20.0,
                    help="an unlisted test slower than this fails; 0 disables the gate")
     p.add_argument("--cache-mode", choices=CACHE_MODES,
-                   help="the run's compilation cache: off, cold (started empty) or warm")
+                   help="the run's compilation cache: off, cold (started empty), warm, "
+                        "or mixed (shards differed, or a shard's mode is unknown)")
     p.add_argument("--markdown", type=Path,
                    default=Path(os.environ["GITHUB_STEP_SUMMARY"]) if os.environ.get("GITHUB_STEP_SUMMARY") else None,
                    help="append the summary here (default: $GITHUB_STEP_SUMMARY)")
@@ -408,14 +513,27 @@ def main(argv=None) -> int:
         p.error("need 0 < --watch-over <= --slow-over <= --fail-over (or --fail-over 0)")
 
     try:
-        tests = [t for r in args.reports for t in read_report(r)]
+        reports = [(r, read_report(r)) for r in args.reports]
+        # A file that fails to import stops pytest after collection, so its
+        # report holds one collection-error entry and no test ran: it is a
+        # missing report, not a fast one.
+        broken = [r for r, cases in reports if cases and all(t.collection_error for t in cases)]
+        tests = [t for r, cases in reports if r not in broken for t in cases]
         if not tests:
-            raise ReportError(f"no test cases in {', '.join(map(str, args.reports))}")
+            raise ReportError(
+                f"no test ran: every test case in {', '.join(map(str, broken))} is a "
+                "collection error (a test file failed to import)" if broken else
+                f"no test cases in {', '.join(map(str, args.reports))}")
         allow = read_allowlist(args.allowlist)
     except ReportError as exc:
         print(f"::error title=Test durations::{_escape(str(exc))}")
         print(f"report_test_durations: {exc}", file=sys.stderr)
         return 2
+    if broken:
+        print("::warning title=Test durations::" + _escape(
+            f"left out {', '.join(map(str, broken))}: only collection errors, no test ran; "
+            "no allowlist entry is listed as removable"))
+        args.no_removable = True
 
     fail_over = args.fail_over or float("inf")
     verdict = judge(tests, allow, watch_over=args.watch_over,
@@ -440,7 +558,8 @@ def main(argv=None) -> int:
           f"{args.watch_over:g}-{args.slow_over:g} s watch band; "
           f"{len(verdict['slow'])} over {args.slow_over:g} s "
           f"({len(verdict['new_slow'])} not allowlisted; "
-          f"{len(verdict['slow_warm'])} slow even with a warm cache); "
+          f"{len(verdict['slow_warm'])} slow even with a warm cache; "
+          f"{len(verdict['slow_subprocess'])} with work in a subprocess, not measured here); "
           + (f"{len(verdict['failing'])} unlisted over {args.fail_over:g} s."
              if args.fail_over else "hard line off (--fail-over 0)."))
     return 1 if verdict["failing"] else 0

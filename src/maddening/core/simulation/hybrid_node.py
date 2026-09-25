@@ -11,9 +11,9 @@ at coarse dt, then add it to the coarse physics output to match
 fine-dt accuracy.
 
 The HybridNode delegates ``initial_state``, ``boundary_input_spec``,
-``compute_boundary_fluxes``, ``interface_dof_indices``, and
-``compute_interface_correction`` to the wrapped physics node,
-so it is a drop-in replacement in the graph.
+``compute_boundary_fluxes``, ``interface_dof_indices``,
+``compute_interface_correction`` and ``update_evaluations`` to the
+wrapped physics node, so it is a drop-in replacement in the graph.
 """
 
 from __future__ import annotations
@@ -111,6 +111,18 @@ class HybridNode(SimulationNode):
 
     def boundary_input_spec(self):
         return self.physics_node.boundary_input_spec()
+
+    def update_evaluations(self) -> Optional[float]:
+        """The physics node's declaration.
+
+        The correction adds one rounding per output entry, which the
+        per-evaluation allowance already covers, so the count is the
+        physics node's.  Without this a sub-stepping node lost its
+        declaration when wrapped, and a coupling group containing it read
+        its float floor as one evaluation (``spectral_usable=False`` at
+        the floor, where the unwrapped node's group was usable).
+        """
+        return self.physics_node.update_evaluations()
 
     def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
         if params is not None and _method_accepts_params(

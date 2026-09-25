@@ -327,8 +327,12 @@ anomalies:
       ShardedNode on 0.1.0; likewise ShardedStencilNode from 0.2.0 and
       ShardedUnstructuredNode from 0.3.0), or write to the inner node's params
       dict and recompile, which measured at v0.2.0 and v0.3.1 reaches the
-      physics under all three wrappers; do not rely on PUT /graph/params for
-      a sharded node.
+      physics under all three wrappers -- but under ShardedStencilNode and
+      ShardedUnstructuredNode only if the graph has not stepped since the
+      wrapper was built: once it has, a node on the three-argument contract
+      keeps the value its first step was traced with (MADD-ANO-032), so build
+      a new wrapper after the write instead.  Do not rely on PUT /graph/params
+      for a sharded node.
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     verification:
@@ -652,7 +656,7 @@ anomalies:
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound"
       - "tests/core/test_coupling_gradient_error_bound.py::test_a_parameter_that_sits_at_zero_is_still_probed"
       - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_reads_nan_and_unusable_where_nothing_was_computed"
-      - "tests/core/test_coupling_gradient_error_bound.py::test_the_anomaly_registry_quotes_the_reported_keys_exactly"
+      - "tests/compliance/test_registry_quotes_the_diagnostics_keys.py::test_the_anomaly_registry_quotes_the_reported_keys_exactly"
       - "tests/core/test_coupling_precision_floor.py::test_a_stalled_float32_iterate_is_not_reported_at_its_fixed_point"
       - "tests/core/test_coupling_report_flags_read_their_conditions.py::test_converged_reads_the_error_estimate_not_the_residual"
       - "tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space"
@@ -2802,13 +2806,38 @@ anomalies:
       REST route writes the node's params as well as `gm.params`, so the
       comparison could not see it.
       Resolved in 0.4.0 by refusing rather than rebuilding.  The route asks
-      the graph before anything is written: a leaf the compiled step (or
-      the node's hooks, given every declared boundary input) reads from the
-      injected params is used from the next step; a structural value whose
-      trace changes is written and recompiled; a value that changes what
-      `initial_state()` returns takes effect at the next `/sim/reset`; a
-      `static_data_deps` key and anything else is a 400 naming the key and
-      the reason, with nothing written.  `POST /checkpoint/load` runs the
+      the graph before anything is written, and a refusal is a 400 naming
+      the key and the reason, with nothing written.  Refused: a
+      `static_data_deps` key; a structural value the node's own constructor
+      refuses (a saved graph is loaded through it); a value that changes the
+      fields, shapes or dtypes of the state `initial_state()` builds; and a
+      write whose use no copy of the node can establish.  Accepted: a leaf
+      the compiled step (or the node's hooks, given every declared boundary
+      input) reads from the injected params, used from the next step; a
+      structural value whose trace changes, written and recompiled; and,
+      failing both, a value that changes what `initial_state()` returns,
+      which takes effect at the next `/sim/reset`.  Everything else is
+      refused.  The node's code runs on a shallow copy reading the new
+      value; a wrapper that closes over the node it wraps (both sharded
+      wrappers) cannot be copied, and the node it wraps -- which shares its
+      params dict, and whose physics it distributes -- is asked instead.
+      The first fix, as merged, left four routes open, all found and closed
+      before release.  A part-full `LBMPipeNode` (`fill_fraction=0.5`) reads
+      `pipe_radius` again in `initial_state()`, which passed as "takes
+      effect at the next reset": `pipe_radius=0.5` on a pipe built at 0.8
+      answered 200, and after `/sim/reset` the velocity was bit-identical to
+      the 0.8 graph while `to_dict()` saved 0.5 and the reload ran a pipe
+      5.667e-03 away; the node now declares its geometry in
+      `static_data_deps`.  `HeatNode`'s `n_cells`, which changes the state's
+      shape, passed the same way: unsharded, `PUT n_cells=17` answered 200
+      and the next `/sim/step` a 500; sharded, the step answered 200 with
+      the 16 cells stepped at `dx = L/17` and the right rod end never
+      closed, 8.467e-02 from the correct step.  `stencil_order=3` passed as
+      a structural value whose trace changes: the rod kept its 2nd-order
+      stencil and the saved graph raised on load.  And a node no faithful
+      copy could be made of -- every sharded wrapper, and a node holding a
+      method bound to itself -- had its structural writes accepted unseen,
+      used or not.  `POST /checkpoint/load` runs the
       same refusal after loading and undoes the load when it fires.  The
       same class was closed on the FMI surface before release, where the
       paths are new in 0.4.0 and so never shipped the defect: the model
@@ -2844,14 +2873,29 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      The refusal detects "no path at all", as the graph-level check does.
-      A value a node consumes at construction and also reads again later
-      still passes -- `pipe_radius` on a pipe with `fill_fraction < 1`,
-      whose `initial_state` reads it too -- so a node that bakes a
-      parameter should declare it in `static_data_deps`, which is refused
-      outright.  A value nothing reads anywhere is refused as well: it
-      cannot make a reload differ, but telling it apart would mean
-      constructing the node again.
+      The refusal detects "no path at all" in the node's code, as the
+      graph-level check does, so a value a node consumes at construction
+      and also reads again later passes unless the node declares it in
+      `static_data_deps`, which is refused outright.  No built-in node is
+      left in that position: every numeric, boolean and string constructor
+      parameter of the built-in node classes (all but `HealthCheckNode`,
+      whose one parameter is a nested dict), in fifteen configurations (a
+      part-full and a multiphase pipe, both `HeatNode` stencils and its
+      non-uniform grid, a walled `LBMNode` among them), was written through
+      the route -- numbers and booleans changed, strings made invalid -- and
+      every write the route accepted gave a graph that `to_dict()` /
+      `from_dict()` reproduced (CPU, jaxlib 0.11.0), with one exception
+      that is not a parameter write: an `LBMNode` built with a `wall_mask`
+      does not keep the mask among its params, so its reload has no walls
+      with or without a write (also at v0.3.1).  The same drive through
+      `ShardedStencilNode` (`HeatNode` at both orders, `LBMNode`), against an
+      unsharded node built with the new value, found no difference either.
+      A user-authored node that bakes a
+      parameter and reads it again, in `initial_state()` or its hooks, must
+      declare it.  For a wrapper that cannot be copied, the wrapped node's
+      own `update` stands in for the wrapper's distributed step.  A value
+      nothing reads anywhere is refused as well: it cannot make a reload
+      differ, but telling it apart would mean constructing the node again.
     verification:
       - "tests/api/test_params_endpoint_constructed_values.py::test_wavelet_mass_is_refused_and_the_saved_graph_still_matches_the_running_one"
       - "tests/api/test_params_endpoint_constructed_values.py::test_pipe_radius_is_refused_and_the_saved_graph_still_matches_the_running_one"
@@ -2860,6 +2904,12 @@ anomalies:
       - "tests/api/test_params_endpoint_constructed_values.py::test_an_initial_condition_copied_at_construction_is_refused"
       - "tests/api/test_params_endpoint_constructed_values.py::test_a_leaf_the_step_reads_is_written_and_used"
       - "tests/api/test_params_endpoint_constructed_values.py::test_a_checkpoint_carrying_another_constructed_value_is_refused_and_not_loaded"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_pipe_geometry_the_initial_fill_also_reads_is_refused_and_the_reload_matches"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_a_value_that_changes_the_state_shape_is_refused_and_nothing_is_written"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_a_structural_value_the_constructor_refuses_is_refused"
+      - "tests/api/test_params_endpoint_constructed_values.py::test_a_node_no_copy_can_be_made_of_is_refused_rather_than_assumed_to_use_the_write"
+      - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_write_to_a_value_the_wrapped_node_copied_at_construction_is_refused"
+      - "tests/cloud/multigpu/test_sharded_heat_params_and_grid_inputs.py::test_a_rest_write_of_the_cell_count_is_refused_on_a_sharded_rod"
       - "tests/fmi/test_params_the_step_cannot_read.py::test_a_pipe_exports_what_its_step_reads_and_not_its_geometry"
       - "tests/fmi/test_params_the_step_cannot_read.py::test_the_sidecar_refuses_a_value_its_step_would_ignore"
       - "tests/fmi/test_params_the_step_cannot_read.py::test_a_snapshot_cannot_install_a_value_the_step_cannot_read"
@@ -3431,6 +3481,139 @@ anomalies:
       - "tests/nodes/test_heat.py::test_an_unconnected_fourth_order_end_is_insulated"
       - "tests/nodes/test_heat.py::test_an_unconnected_second_order_end_is_insulated"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-032"
+    title: "After a parameter write and compile(), the sharded wrappers kept computing with what they had built from the old value: a legacy node's constant, and ShardedStencilNode's halo width"
+    description: >
+      Both wrappers keep a `jax.jit(shard_map(...))` per input signature
+      (the shapes and dtypes of state, boundary inputs and sharded statics,
+      `static_data_hash()` and the structure of the params pytree).  A node
+      on the three-argument contract reads its constants from `self.params`
+      while it is traced, so each cached function holds the constant of the
+      moment it was first called, and a jitted function hands back that
+      trace for the same argument shapes.  Nothing dropped the cache: not
+      the write, and not `GraphManager.compile()`, which calls
+      `invalidate_static_cache()` on every node for exactly this purpose but
+      reached only the per-device copy of the statics.  So once the graph
+      had stepped, a write followed by a recompile -- what `PUT
+      /graph/params` does for such a node, and the documented way to change
+      a structural constant -- left the sharded step on the old value while
+      the unsharded node took the new one, with no error.  A write before
+      the first step was taken was unaffected (nothing was cached yet), and
+      a node that takes the injected `params` is unaffected (its leaves are
+      arguments of the cached function, not constants of its trace).
+      Measured on a 16-cell periodic diffusion `u += dt * D * lap(u)`
+      reading `D` from `self.params`, two devices, CPU, jaxlib 0.11.0: one
+      step at `D = 0.1`, `D = 2.0` written into the node's params,
+      `compile()`, one more step -- the sharded field is 2.98e-08 from a
+      second step at the old `D` and 7.42e-02 from one at the new `D`; the
+      unsharded field is exactly the new-`D` step.  Through `PUT
+      /graph/params` on the 0.4.0 development tree before the fix the
+      route answered 200 and the numbers were the same.  Under
+      `ShardedUnstructuredNode`, an 8-cell decay `x *= (1 - w)` with `w`
+      moved from 0.5 to 0.9 read `[0.25, 0.5, 0.75]` (the old `w`) where
+      `[0.05, 0.1, 0.15]` was due.
+      Reproduced at v0.2.0, v0.3.0 and v0.3.1 (`git archive` of each tag,
+      same environment, same numbers; `ShardedUnstructuredNode` from
+      v0.3.0, where it first shipped).  At those tags `PUT /graph/params`
+      did not reach the wrapped node at all (MADD-ANO-004), so the route
+      was not a path there; the direct write into the node's params and a
+      recompile was, and it is the workaround MADD-ANO-004 records for
+      those versions, which therefore held only while no step had run.
+      The cache dates from the stencil wrapper's first commit (3601f55).
+      `ShardedStencilNode` also fixed its halo layout at construction --
+      the exchange width per axis, from `halo_width()` -- while it stripped
+      the node's current `halo_width()`, so a node whose halo follows a
+      parameter was mis-sliced after a write: `HeatNode`'s halo is 1 cell
+      at `stencil_order=2` and 2 at 4, and a 16-cell rod on four devices
+      written to order 4 and recompiled (before any step, so no stale
+      trace) stepped a field 3.9e-02 from both the order-2 and the order-4
+      step, at v0.2.0, v0.3.1 and in this cycle alike; through `PUT
+      /graph/params` on the 0.4.0 tree before the fix it answered 200.
+      Resolved in 0.4.0: `invalidate_static_cache()` drops the compiled
+      functions and rebuilds the per-shard update on both wrappers, and the
+      stencil wrapper reads its halo layout from the node each time it
+      builds it, so every `compile()` traces the wrapped node afresh with
+      the halo it declares.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A confirmed parameter change the sharded solver silently did not
+      apply, while the same graph unsharded did: the output is
+      self-consistent and describes the model before the change.  Graded
+      `major`, as MADD-ANO-004 is, for that silence.  `context_dependent`
+      because it needs a sharded stencil or unstructured node on the
+      three-argument contract, a write to one of its constants at run time,
+      and a step taken before the write; a node calibrated through the
+      params pytree, and a graph whose constants are set at construction,
+      are unaffected.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.cloud.multigpu.sharded_unstructured.ShardedUnstructuredNode"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: set the value before wrapping the node, or build a new
+      wrapper after writing it (a new wrapper has nothing cached).  A
+      recompile alone does not help once the graph has stepped.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A wrapper's `update()` called on its own, outside a graph, still
+      reuses its compiled step until `compile()` (or
+      `invalidate_static_cache()`) is called, where the unwrapped node's
+      `update()` reads its params afresh on every call; a graph recompiles
+      on every write that marks it dirty, so the graph path is covered.
+    verification:
+      - "tests/cloud/multigpu/test_sharded_params.py::test_a_legacy_nodes_param_write_reaches_the_sharded_step_after_a_recompile"
+      - "tests/cloud/multigpu/test_sharded_heat_params_and_grid_inputs.py::test_a_stencil_order_write_reaches_a_sharded_rod_after_a_recompile"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-033"
+    title: "ShardedStencilNode stepped with dt rounded to float32 under jax_enable_x64"
+    description: >
+      `ShardedStencilNode.update` passed `dt` into its `shard_map` as
+      `jnp.asarray(dt, dtype=jnp.float32)`, whatever precision the graph
+      runs in.  Under `jax_enable_x64` a float64 stencil node therefore
+      stepped with `float32(dt)` when sharded -- for `dt = 0.1`, 0.1 +
+      1.49e-09, 1.5e-08 relative -- and with the exact `dt` unsharded.
+      `ShardedUnstructuredNode` never cast, so the two wrappers also
+      disagreed with each other.  Measured on a float64 decaying diffusion
+      (16 cells, `k = 1`, `D = 0.1`, periodic, two devices, CPU, jaxlib
+      0.11.0): after 1000 steps of `dt = 0.1` the sharded field is 1.66e-06
+      relative from the unsharded one, against a float64 epsilon of
+      2.2e-16, and the gap grows with the simulated time.  Without x64 the
+      state and `dt` are both float32 and nothing differs.  Reproduced at
+      v0.2.0, v0.3.0 and v0.3.1 (`git archive` of each tag, same
+      environment, the same 1.6568e-06); the cast dates from the wrapper's
+      first commit (3601f55).
+      Resolved in 0.4.0: `dt` is passed as given (`jnp.asarray(dt)`).  A
+      Python float stays weakly typed, so a float32 state still steps in
+      float32 and a float64 one in float64; in the measurement above the
+      sharded and unsharded fields are now bit-identical.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent, but small: a relative error of about 1.5e-08 in the time step,
+      accumulating linearly (1.7e-06 relative over 1000 steps above).  It
+      matters only where float64 precision was enabled for a reason -- a
+      long integration, a tight comparison against an unsharded or
+      reference run -- and there it quietly returned float32-grade time
+      stepping.  `context_dependent` because it needs `jax_enable_x64`, a
+      float64 stencil node, sharding, and a `dt` that is not exactly
+      representable in float32.
+    affected_components:
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: choose a `dt` exactly representable in float32 (a
+      binary fraction such as 0.125), or run the node unsharded where
+      float64 time stepping matters.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/cloud/multigpu/test_sharded_stencil_node.py::test_a_float64_node_steps_with_a_float64_dt_when_sharded"
 
   - anomaly_id: "MADD-ANO-034"
     title: "run_adaptive / run_adaptive_scan advanced a sub-cycled node by its rate divider times dt on every adaptive step"

@@ -185,11 +185,16 @@ def test_a_var_keyword_update_padded_is_calibratable_under_both_sharded_wrappers
 # ---------------------------------------------------------------------------
 
 
+#: Four springs, one per device: ``ShardedPointwiseNode`` refuses a node
+#: with nothing to shard, which a single spring's 0-d state is.
+_SPRINGS = dict(initial_position=[2.0, 1.5, 1.0, 0.5], initial_velocity=[0.0] * 4)
+
+
 def _pointwise_params_pair():
     from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
     from maddening.nodes.spring import SpringDamperNode
 
-    inner = SpringDamperNode("s", 0.01, stiffness=10.0, initial_position=2.0)
+    inner = SpringDamperNode("s", 0.01, stiffness=10.0, **_SPRINGS)
     mesh = create_device_mesh(shape=(4,))
     return inner, ShardedPointwiseNode(inner, mesh, shard_axes=(0,))
 
@@ -285,7 +290,7 @@ def _sharded_spring_graph(stiffness):
 
     gm = GraphManager()
     gm.add_node(ShardedPointwiseNode(
-        SpringDamperNode("s", 0.01, stiffness=stiffness, initial_position=2.0),
+        SpringDamperNode("s", 0.01, stiffness=stiffness, **_SPRINGS),
         create_device_mesh(shape=(4,)), shard_axes=(0,),
     ))
     gm.compile()
@@ -296,7 +301,7 @@ def _position_after(gm, steps=5):
     gm.reset_state()
     for _ in range(steps):
         gm.step()
-    return float(gm.get_node_state("s")["position"])
+    return np.asarray(gm.get_node_state("s")["position"])
 
 
 def _client(gm):
@@ -322,8 +327,9 @@ def test_a_rest_param_write_to_a_sharded_node_changes_the_trajectory():
     assert response.json()["params"]["stiffness"] == 1000.0
 
     written = _position_after(gm)
-    assert written == pytest.approx(_position_after(_sharded_spring_graph(1000.0)))
-    assert written != pytest.approx(_position_after(_sharded_spring_graph(10.0)))
+    np.testing.assert_allclose(written, _position_after(_sharded_spring_graph(1000.0)),
+                               rtol=1e-6)
+    assert not np.allclose(written, _position_after(_sharded_spring_graph(10.0)), rtol=1e-6)
 
 
 def _rest_stencil_graph(diffusivity):
@@ -432,7 +438,7 @@ def test_a_gm_params_write_reaches_a_pointwise_wrapped_update():
     def graph(k):
         gm = GraphManager()
         gm.add_node(ShardedPointwiseNode(
-            SpringDamperNode("s", 0.01, stiffness=k, rest_length=0.6, initial_position=2.0),
+            SpringDamperNode("s", 0.01, stiffness=k, rest_length=0.6, **_SPRINGS),
             create_device_mesh(shape=(4,)), shard_axes=(0,)))
         gm.compile()
         return gm
@@ -469,3 +475,157 @@ def test_an_injected_heat_constant_reaches_the_sharded_stencil_update(leaf, valu
     np.testing.assert_allclose(np.asarray(injected["temperature"]), np.asarray(built["temperature"]),
                                rtol=1e-6)
     assert not np.allclose(np.asarray(base["temperature"]), np.asarray(built["temperature"]))
+
+
+# ---------------------------------------------------------------------------
+# A node on the three-argument contract reads its constants from
+# ``self.params`` when it is traced.  A write followed by a recompile has to
+# reach the sharded step: both wrappers kept a jitted ``shard_map`` per
+# input signature, which ``compile()`` did not drop, so the recompiled
+# graph called a trace holding the old constant (the REST route answered
+# 200 and the physics did not move).
+# ---------------------------------------------------------------------------
+
+
+def _legacy_diffusion(D=0.1):
+    from maddening.core.node import SimulationNode
+
+    class LegacyDiffusion(SimulationNode):
+        """``u <- u + dt*D*lap(u)``, periodic, ``D`` read from ``self.params``."""
+
+        def __init__(self):
+            super().__init__("d", 0.1, D=D)
+
+        def halo_width(self):
+            return {0: 1}
+
+        def initial_state(self):
+            u = np.sin(np.linspace(0.0, 2 * np.pi, 16, endpoint=False))
+            return {"u": jnp.asarray(u, jnp.float32)}
+
+        def _new(self, up, dt):
+            return up[1:-1] + dt * self.params["D"] * (up[2:] - 2 * up[1:-1] + up[:-2])
+
+        def update(self, state, boundary_inputs, dt):
+            return {"u": self._new(jnp.pad(state["u"], 1, mode="wrap"), dt)}
+
+        def update_padded(self, state_padded, boundary_inputs, dt, *,
+                          static_padded=None, shard_info=None):
+            return {"u": state_padded["u"].at[1:-1].set(self._new(state_padded["u"], dt))}
+
+    return LegacyDiffusion()
+
+
+def _legacy_decay(w=0.5):
+    from maddening.core.node import SimulationNode
+
+    class LegacyDecay(SimulationNode):
+        """``x <- x * (1 - w)``, ``w`` read from ``self.params``."""
+
+        def __init__(self):
+            super().__init__("d", 0.1, w=w)
+
+        def initial_state(self):
+            return {"x": jnp.arange(1, 17, dtype=jnp.float32)}
+
+        def update(self, state, boundary_inputs, dt):
+            return {"x": state["x"] * (1.0 - self.params["w"])}
+
+        def update_padded(self, state_padded, boundary_inputs, dt, *,
+                          static_padded=None, shard_info=None):
+            n = shard_info[0][1]
+            return {"x": state_padded["x"][:n] * (1.0 - self.params["w"])}
+
+    return LegacyDecay()
+
+
+def _legacy_graph(kind, value):
+    """``(gm, inner, field, read)`` for a legacy node under ``kind``'s wrapper."""
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+    from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
+
+    mesh = create_device_mesh(shape=(4,))
+    if kind == "stencil":
+        inner = _legacy_diffusion(value)
+        wrapped = ShardedStencilNode(inner, mesh, {"devices": 0}, boundary="periodic")
+        field = "u"
+
+        def read(gm):
+            return np.asarray(gm.get_node_state("d")["u"])
+    else:
+        inner = _legacy_decay(value)
+        pa = (np.arange(16) % 4).astype(np.int32)
+        edges = np.array([[i, (i + 1) % 16] for i in range(16)], dtype=np.int32)
+        layout = build_unstructured_partition(partition_assignment=pa, edges=edges,
+                                              n_devices=4)
+        wrapped = ShardedUnstructuredNode(inner, mesh, layout)
+        field = "x"
+
+        def read(gm):
+            return np.asarray(wrapped.gather_global(gm.get_node_state("d"))["x"])
+    gm = GraphManager()
+    gm.add_node(wrapped)
+    gm.compile()
+    return gm, inner, field, read
+
+
+_LEGACY_WRITES = {"stencil": ("D", 0.1, 2.0), "unstructured": ("w", 0.5, 0.9)}
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+@pytest.mark.parametrize("surface", ["rest", "node_params_and_compile"])
+@pytest.mark.parametrize("kind", list(_LEGACY_WRITES))
+def test_a_legacy_nodes_param_write_reaches_the_sharded_step_after_a_recompile(kind, surface):
+    """One step at the old value (which traces the sharded step), the write,
+    one more step: the second must use the new value, as unsharded."""
+    from fastapi.testclient import TestClient
+    from maddening.api.server import SimulationServer
+
+    key, old, new = _LEGACY_WRITES[kind]
+    gm, inner, field, read = _legacy_graph(kind, old)
+    client = TestClient(SimulationServer({}, gm).create_app(),
+                        raise_server_exceptions=False)
+    assert client.post("/sim/step", json={}).status_code == 200
+    if surface == "rest":
+        response = client.put("/graph/params/d", json={"params": {key: new}})
+        assert response.status_code == 200, response.text
+        assert client.post("/sim/step", json={}).status_code == 200
+    else:
+        inner.params[key] = new
+        gm.compile()
+        gm.step()
+
+    build = _legacy_diffusion if kind == "stencil" else _legacy_decay
+    first = build(old).update(build(old).initial_state(), {}, 0.1)
+    with_new = np.asarray(build(new).update(first, {}, 0.1)[field])
+    with_old = np.asarray(build(old).update(first, {}, 0.1)[field])
+    np.testing.assert_allclose(read(gm), with_new, rtol=1e-6, atol=1e-7)
+    assert not np.allclose(read(gm), with_old, rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+@pytest.mark.parametrize("kind", list(_LEGACY_WRITES))
+def test_a_rest_write_to_a_value_the_wrapped_node_copied_at_construction_is_refused(kind):
+    """The REST route decides a structural write on a copy of the node that
+    reads the new value.  A sharded wrapper closes over the node it wraps,
+    so no faithful copy of it can be made; the route used to accept every
+    such write on the stencil wrapper unseen, and on the unstructured one
+    its copy shared the original's compiled-function cache -- answering
+    with the original's trace and leaving its own behind.  The wrapped
+    node, which shares the params dict, is asked instead: a value it copied
+    in ``__init__`` is refused, one its step reads (above) is accepted, and
+    the wrapper's cache is not touched by the asking."""
+    from fastapi.testclient import TestClient
+    from maddening.api.server import SimulationServer
+
+    gm, inner, _, _ = _legacy_graph(kind, _LEGACY_WRITES[kind][1])
+    inner.params["baked"] = 3.0
+    inner._baked = 3.0           # copied at construction, never read again
+    wrapped = gm._nodes["d"].node
+    client = TestClient(SimulationServer({}, gm).create_app(),
+                        raise_server_exceptions=False)
+    response = client.put("/graph/params/d", json={"params": {"baked": 9.0}})
+    assert response.status_code == 400, response.text
+    assert "trace identically" in response.json()["detail"]
+    assert inner.params["baked"] == 3.0 and not gm._dirty
+    assert wrapped._sharded_cache == {}

@@ -18,9 +18,11 @@ unsharded group" cannot pass on two copies of the same wrong answer.
 
 Before this module nothing under ``tests/`` put a partitioned array inside
 a coupling group.  ``test_sharded_wrapper_coupling_hooks.py`` couples a
-``ShardedPointwiseNode`` to a relay under ``solver="ift"``, forward only,
-but the wrapped spring's state is 0-d: it lives whole on one device and
-nothing is partitioned.  ``test_coupled_sharded.py`` couples two sharded
+``ShardedPointwiseNode`` to a relay under ``solver="ift"``, forward only;
+its wrapped spring's state was 0-d, living whole on one device, until the
+wrapper began refusing a node with nothing to shard, and it is now a batch
+of independent springs, one per device, with nothing exchanged between
+shards.  ``test_coupled_sharded.py`` couples two sharded
 nodes by staggered edges, with no group and a 10% tolerance; the graph
 property in ``test_property_sharded_equals_unsharded.py`` drives a sharded
 node through a one-way edge; ``test_graph_multigpu.py`` places whole nodes
@@ -372,6 +374,18 @@ def adjoint(request):
     return solver, out
 
 
+# Both adjoint tests are slow-marked for the cost of the `adjoint` fixture:
+# per solver it compiles `jax.value_and_grad` through a scan of the coupled
+# step twice (sharded and unsharded group), and under the default solver
+# the backward pass carries the implicit-function-theorem adjoint, a GMRES
+# solve per step.  Measured 2026-09-25 on 3 pinned cores (jaxlib 0.11.0):
+# 13.9 s of fixture setup for the default solver and 7.4 s for "fori",
+# where the forward tests above take ~2 s.  Per push, the forward tests
+# cover this group, and a gradient through a sharded node (outside any
+# coupling group) is covered by
+# tests/cloud/multigpu/test_sharded_gradient.py::test_gradient_matches_the_unsharded_node.
+# No per-push test differentiates through a coupling group with a sharded
+# member; slow-tests.yml is where these two run.
 @pytest.mark.slow
 def test_the_adjoint_matches_the_group_with_the_unsharded_inner_node(adjoint):
     solver, out = adjoint

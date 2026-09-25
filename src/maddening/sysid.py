@@ -167,11 +167,67 @@ def observations_from_history(
     )
 
 
-def _leading_len(tree) -> int:
-    leaves = jax.tree.leaves(tree)
-    if not leaves:
-        raise ValueError("observations pytree has no leaves")
-    return int(leaves[0].shape[0])
+def _leaf_name(path) -> str:
+    """``node.field`` spelling of a pytree path, for error messages."""
+    parts = []
+    for key in path:
+        for attr in ("key", "idx", "name"):
+            if hasattr(key, attr):
+                parts.append(str(getattr(key, attr)))
+                break
+        else:
+            parts.append(str(key))
+    return ".".join(parts) or "<root>"
+
+
+#: Leaves named per length in the ragged-axis refusal before it abbreviates.
+_RAGGED_NAMES_SHOWN = 4
+
+
+def _leading_len(tree, what: str = "observations") -> int:
+    """The leading (time or window) axis every leaf of *tree* shares.
+
+    Every leaf is checked, not only the first.  The callers index each
+    leaf with ``dynamic_index_in_dim`` / ``dynamic_slice_in_dim``, which
+    *clamp* an out-of-range start instead of failing, so a leaf shorter
+    than the rest would be compared against its own last sample repeated
+    -- a finite, biased loss, non-zero at the true parameters -- and a
+    leaf longer than the first would have its tail ignored.  Both are
+    refused here, naming the leaves and their lengths.
+
+    Raises
+    ------
+    ValueError
+        If *tree* has no leaves, if a leaf has no leading axis, or if the
+        leaves' leading axes disagree.
+    """
+    flat, _ = jax.tree_util.tree_flatten_with_path(tree)
+    if not flat:
+        raise ValueError(f"{what} pytree has no leaves")
+    by_length: dict[int, list[str]] = {}
+    for path, leaf in flat:
+        shape = np.shape(leaf)
+        if len(shape) == 0:
+            raise ValueError(
+                f"{what} leaf {_leaf_name(path)!r} is a scalar; every leaf "
+                "needs a leading axis"
+            )
+        by_length.setdefault(int(shape[0]), []).append(_leaf_name(path))
+    if len(by_length) > 1:
+        groups = []
+        for length, names in sorted(by_length.items()):
+            shown = ", ".join(repr(n) for n in names[:_RAGGED_NAMES_SHOWN])
+            more = len(names) - _RAGGED_NAMES_SHOWN
+            groups.append(
+                f"{length}: {shown}" + (f" (+{more} more)" if more > 0 else "")
+            )
+        raise ValueError(
+            f"{what} leaves disagree on the leading axis ({'; '.join(groups)}); "
+            "every leaf must have the same length, or a window would read a "
+            "clamped sample instead of data"
+        )
+    (length,) = by_length
+    return length
 
 
 def _group_thresholds(gm) -> list[tuple[str, str, float, float]]:
@@ -262,6 +318,9 @@ def windowed_loss(
         :func:`observations_from_history` produces.  The full state is
         needed because each window *resets* the simulation to it; the
         measured subset the loss compares is selected by ``obs_fn``.
+        Every leaf must have the same leading length ``T``; leaves that
+        disagree are refused, naming them (a shorter leaf would otherwise
+        be read past its end, which JAX clamps to its last sample).
     obs_fn : callable
         Maps a state pytree with a leading time axis to the measured
         quantities (a pytree of arrays, same leading axis).
@@ -290,7 +349,8 @@ def windowed_loss(
         recent applied solve between the base steps it fires on.
     window_states : pytree, optional
         Multiple shooting: free initial **user states** per window, a
-        pytree with leading axis ``n_windows = (T - 1) // window``
+        pytree whose every leaf has leading axis
+        ``n_windows = (T - 1) // window``
         (:func:`init_window_states` seeds it from the observations).
         Differentiate the loss with respect to these too and optimise
         them jointly with ``params`` (:func:`fit_multiple_shooting`).
@@ -368,12 +428,12 @@ def windowed_loss(
         return (state, ok), user
 
     if window_states is not None:
-        n_ws = _leading_len(window_states)
+        window_states = {k: v for k, v in window_states.items() if k != _META_KEY}
+        n_ws = _leading_len(window_states, "window_states")
         if n_ws != n_windows:
             raise ValueError(
                 f"window_states has leading axis {n_ws}, expected n_windows={n_windows}"
             )
-        window_states = {k: v for k, v in window_states.items() if k != _META_KEY}
 
     def _window(w, _):
         start = w * window

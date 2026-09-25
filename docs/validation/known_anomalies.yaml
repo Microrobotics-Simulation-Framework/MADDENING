@@ -4923,10 +4923,12 @@ anomalies:
       simulation's process, as its user.  The bridge authenticates nobody
       (MADD-ANO-023) and needs no `hello` first, so on its default bind --
       loopback, an ephemeral port -- that was any local process of any
-      user, and on a non-loopback `host` anyone on the network.  An FMU
-      state blob is also something an importer stores and hands back
-      later, so a crafted blob planted in an importer's saved session would
-      have run when the session was restored.
+      user, and on a non-loopback `host` anyone on the network.  The port
+      was not the only way in: the C wrapper's `fmi3DeserializeFMUState`
+      copied the importer's serialized bytes verbatim and
+      `fmi3SetFMUState` sent them to the bridge as that blob, so a crafted
+      serialized state stored with an importer's saved session would have
+      run when the session was restored.
 
       Introduced with the bridge in 2efcaea and fixed in 0bd041e, both on
       2026-09-16, during the 0.4.0 development line.  No tagged release

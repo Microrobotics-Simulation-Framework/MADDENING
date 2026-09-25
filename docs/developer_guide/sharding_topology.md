@@ -164,23 +164,32 @@ the equivalent expressed as a graph with the same number of cells.
 For the MICROROBOTICA Light cloud-rendered demos at 30 fps the gap is
 load-bearing — that's why we keep both paths.
 
-For the v0.3.0 unstructured substrate the toy test is 16 cells and the
-intermediate smoke is 1024 cells; v0.4.0 work will tune the sparse
-halo exchange for real-mesh sizes (10⁴–10⁶ cells) and add NCCL
-fast-paths for actual GPUs.
+The unstructured path is tested on CPU virtual devices only: a 16-cell
+toy mesh, a 1024-cell smoke, and a 10⁵-cell ring in the slow lane for
+the two transports' bit identity.  How it performs at real-mesh sizes
+(10⁴–10⁶ cells) under NCCL on actual GPUs has not been measured; the
+tooling for that session is `benchmarks/multigpu/run_pod.py`.
 
-## v0.4.0 commitment (hard downstream gate)
+## What 0.4.0 does with the unstructured contract
 
-By MADDENING v0.4.0 (MIME v0.5.0) the unstructured sharded path must
-support a real FVM `FVMFluidNode` in MIME.  That commitment is what
-makes the v0.3.0 contract load-bearing: the constructor signature,
-`update_padded` plumbing, output classification, and partition-
-assignment handoff documented above are
-``@stability(stable)``-ready.  Any breaking change here cascades into
-a MIME rewrite; v0.4.0 hardens, it doesn't redesign.
+The surface documented above has been `@stability(STABLE)` since v0.3.0:
+the constructor signature, `update_padded` plumbing, output
+classification and partition-assignment handoff of
+`ShardedUnstructuredNode`.  0.4.0 kept it, and redesigned none of it.
+What 0.4.0 added:
 
-If you find a flaw in the v0.3.0 contract while implementing v0.4.0,
-fix it back in v0.3.0 — surface the break here, not in v0.4.0.
+* the per-neighbour `ppermute` transport and `exchange_traffic(layout)`
+  (see "Halo-exchange transport" above);
+* per-cell boundary inputs, sharded like state, with a global-order
+  input refused;
+* the session runner `benchmarks/multigpu/run_pod.py` (and its CPU
+  `--dry-run`).
+
+What 0.4.0 does not do: validate the path on real multi-GPU hardware.
+The default transport stays `all_to_all` until NCCL timings from that
+session justify a change, and the only FVM-shaped node that has run on
+the path here is a mock on a small mesh
+(`tests/cloud/multigpu/test_a6_contract_stress.py`).
 
 ## See also
 

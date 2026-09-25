@@ -21,17 +21,17 @@ Class hierarchy:
     ├── ShardedStencilNode     (Cartesian, axis-aligned halos)        v0.2.1
     └── ShardedUnstructuredNode (graph-partition, sparse halos)       v0.3.0 (this)
 
-v0.4.0 commitment
------------------
-MIME's ``FVMFluidNode`` will subclass this in v0.4.0.  The
-constructor signature + ``update_padded`` plumbing + output
-classification + partition-assignment handoff documented here is
-``@stability(stable)``-ready: v0.4.0 hardens the implementation
-(production-grade sparse halo exchange, real-mesh-size testing,
-NCCL fast-path), it does not redesign the surface.
-
-If a real design flaw emerges during v0.3.0 implementation, fix it
-in v0.3.0 — surface a breaking change here, not in v0.4.0.
+What 0.4.0 does
+---------------
+The constructor signature, ``update_padded`` plumbing, output
+classification and partition-assignment handoff documented here have
+been ``@stability(STABLE)`` since v0.3.0, and 0.4.0 kept them.  It
+added the per-neighbour ``exchange="ppermute"`` transport (bit-identical
+to the default ``all_to_all``) and sharded per-cell boundary inputs.  It
+did not validate the path on real multi-GPU hardware: the default
+transport stays ``all_to_all`` until NCCL timings justify a change, and
+the path is tested on CPU virtual devices only
+(``docs/developer_guide/sharding_topology.md``).
 """
 
 from __future__ import annotations

@@ -183,8 +183,11 @@ def test_the_two_solvers_return_the_same_steps_on_generated_spectra(case, data):
     structure, group = _SOLVER_CASES[case]
     gdef = cg.STRUCTURES[structure]
     values = data.draw(cg.drawn_values(gdef))
+    # ``"fori"`` reports only with ``diagnostics=True``; ``"ift"`` always
+    # reports, and its diagnostics compile the spectral machinery that the
+    # on/off oracle below owns -- so it is left off here.
     fori = cg.trajectory(_compiled(structure, _key(group), "fori", True), gdef, values, _STEPS)
-    ift = cg.trajectory(_compiled(structure, _key(group), "ift", True), gdef, values, _STEPS)
+    ift = cg.trajectory(_compiled(structure, _key(group), "ift", False), gdef, values, _STEPS)
     assert_solvers_agree(gdef, group, fori, ift, values)
 
 
@@ -216,7 +219,8 @@ def test_the_two_solvers_return_the_same_steps_on_generated_graphs(data):
     note(f"{gdef}\n{group}")
     fori = cg.trajectory(cg.build_graph(gdef, dict(group, solver="fori", diagnostics=True)),
                          gdef, values, _STEPS)
-    ift = cg.trajectory(cg.build_graph(gdef, dict(group, solver="ift", diagnostics=True)),
+    ift = cg.trajectory(cg.build_graph(gdef, dict(group, solver="ift",
+                                                  diagnostics=data.draw(st.booleans()))),
                         gdef, values, _STEPS)
     assert_solvers_agree(gdef, group, fori, ift, values)
 
@@ -261,7 +265,18 @@ _DIAGNOSTICS_CASES = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_DIAGNOSTICS_CASES))
+def _diagnostics_cases():
+    """``ift-iqn-imvj-predictor`` costs 8 s on CI (the spectral machinery
+    compiled for a three-node, two-dimensional group) and runs slow; the
+    per-push ift case is ``ift-aitken-interface-jacobi``, beside the chain-5
+    cells of ``test_coupling_diagnostics_leave_the_state_alone.py``."""
+    for case in sorted(_DIAGNOSTICS_CASES):
+        slow = case == "ift-iqn-imvj-predictor"
+        yield pytest.param(case, marks=(pytest.mark.slow,) if slow else ())
+
+
+# Per push: tests/property/test_differential_coupling_solvers.py::test_diagnostics_leave_every_returned_value_bit_identical[ift-aitken-interface-jacobi]
+@pytest.mark.parametrize("case", list(_diagnostics_cases()))
 # Costly tier, for the same reason as the solver cases above.
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
@@ -298,11 +313,19 @@ def _gradient(gm, gdef, values, steps):
             for nm, p in grads["nodes"].items()}
 
 
-# Per push: the seed-0 cases of this test; seeds 1 and 2 are slow-marked
-# (each gradient retraces the rollout un-jitted, ~4 s a draw on CI).
-@pytest.mark.parametrize("seed", [0, pytest.param(1, marks=pytest.mark.slow),
-                                  pytest.param(2, marks=pytest.mark.slow)])
-@pytest.mark.parametrize("solver", ["ift", "fori"])
+def _gradient_cases():
+    """``ift``, seed 0, per push (allowlisted: the only per-push check that
+    ``diagnostics=True`` leaves the IFT adjoint bit-identical, 11-15 s on
+    CI for the backward compile of two graphs); the rest slow."""
+    for solver in ("ift", "fori"):
+        for seed in (0, 1, 2):
+            slow = not (solver == "ift" and seed == 0)
+            yield pytest.param(solver, seed, id=f"{solver}-{seed}",
+                               marks=(pytest.mark.slow,) if slow else ())
+
+
+# Per push: tests/property/test_differential_coupling_solvers.py::test_diagnostics_leave_gradients_through_run_scan_bit_identical[ift-0]
+@pytest.mark.parametrize("solver,seed", list(_gradient_cases()))
 def test_diagnostics_leave_gradients_through_run_scan_bit_identical(solver, seed):
     """``jax.grad`` through ``run_scan`` is the same bits with or without them.
 

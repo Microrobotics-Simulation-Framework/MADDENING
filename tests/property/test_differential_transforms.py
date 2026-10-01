@@ -164,8 +164,8 @@ def test_a_batched_sweep_starts_each_member_at_its_own_multirate_phase():
     starts, finals = [], []
     for phase in range(3):
         cg.set_initial(gm, values)
-        if phase:
-            gm.run_scan(phase, params=params)
+        for _ in range(phase):      # one scan length for every phase: one compile
+            gm.run_scan(1, params=params)
         starts.append({**{nm: dict(s) for nm, s in cg.snapshot(gm).items()},
                        "_meta": {k: np.asarray(v) for k, v in gm._state["_meta"].items()}})  # noqa: SLF001
         gm.run_scan(4, params=params)
@@ -345,9 +345,11 @@ def test_a_vmapped_coupled_step_is_the_step_per_member(case, data):
     assert_vmapped_step_matches(gdef, gm, values, data.draw(st.integers(0, 2**31 - 1)))
 
 
-# Per push: tests/property/test_differential_transforms.py::test_a_vmapped_gradient_is_the_gradient_per_member[ift-iqn-predictor]
-@pytest.mark.parametrize("case", ["ift-iqn-predictor",
-                                  pytest.param("fori-fixed-mixed", marks=pytest.mark.slow)])
+# Slow: the batched and unbatched backward programs compile in 11 s on CI.
+# Per push: tests/property/test_differential_transforms.py::test_a_vmapped_coupled_step_is_the_step_per_member[ift-iqn-predictor]
+# (the forward under vmap; the batched gradient is checked in the slow lane only).
+@pytest.mark.slow
+@pytest.mark.parametrize("case", ["ift-iqn-predictor", "fori-fixed-mixed"])
 # Costly tier: per example, a batched gradient and three unbatched ones.
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())

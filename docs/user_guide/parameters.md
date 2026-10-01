@@ -594,11 +594,24 @@ tells you (MADD-ANO-022).** A mapping built from a node's coordinates
 (the point reference `{"node": "rod", "field": "grid_x"}`, or the same
 array passed by hand) computes its weights once, from the grid as it was
 constructed. On the default, uniform `HeatNode`, `grid_x` is derived from
-`length`, and `length` is trainable. Calibrating `length` through
-`gm.params` therefore moves the rod and leaves the mapped edge
-interpolating from the old grid. `compile()` accepts the graph, no
+`length`, and `length` is trainable. Calibrating `length` -- a fit, or any
+`params=` pytree you pass -- therefore moves the rod and leaves the mapped
+edge interpolating from the old grid. `compile()` accepts the graph, no
 warning is raised, and the reference's recorded hash still matches,
 because the static array itself never changed.
+
+*Writing* the new value into the running graph is refused (MADD-ANO-063):
+a `gm.params` write is a `ValueError` at the next run, `check_params`,
+`to_dict()` and `save_state()`; `PUT /graph/params` is a 400 naming the
+mapped edge and the field; `POST /checkpoint/load` refuses and undoes a
+checkpoint carrying one; and an exported FMU leaves the parameter out of its
+tunable set. The graph asks whether the node rebuilt with the value reads a
+referenced field differently, because the node would use the value while
+the mapping kept the old points, and the saved config would not load. Until
+0.4.0's fix such a write was taken, the graph ran on the old weights, and
+`to_dict()` wrote a config whose mapping `from_dict()` refused to rebuild.
+So the result of a fit through the mapped edge cannot be written back; the
+fit itself is not refused.
 
 What you would see, measured on an 8-cell rod calibrated from `length`
 1.0 to 1.25 and mapped onto a 16-cell rod:

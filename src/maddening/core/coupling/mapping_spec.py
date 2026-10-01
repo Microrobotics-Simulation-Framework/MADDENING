@@ -70,6 +70,17 @@ source rod calibrated from ``length`` 1.0 to 1.25 and mapped onto a
 Nothing refuses the graph or warns, and the recorded ``sha256`` still
 matches, because the static itself never changed.
 
+A new value *written* into the running graph is refused, though
+(MADD-ANO-063): a ``gm.params`` write at the next run, ``to_dict()`` or
+``save_state()``, ``PUT /graph/params`` with a 400, a checkpoint at
+``POST /checkpoint/load``, and an exported FMU leaves the parameter out of
+its tunable set.  The graph rebuilds the node with and without the value
+and refuses it when a referenced field moves, because the node would use
+the value while the mapping kept the old points, and the saved config
+would not load (``from_dict`` rebuilds the mapping from the new points,
+which the recorded ``sha256`` refuses).  What is not a write -- a fit's
+traced parameters, a caller's own ``params=`` -- is not asked.
+
 Until a fix lands (being scoped for 0.5.0), use one of these:
 
 * declare the parameter non-trainable when a mapped edge references a
@@ -974,7 +985,22 @@ def _node_field(graph, node_name: str, field_name: str) -> np.ndarray:
             f"point reference names unknown node {node_name!r}; the graph has "
             f"{sorted(names)}"
         )
-    node = graph.get_node(node_name)
+    return _node_point_field(graph.get_node(node_name), node_name, field_name)
+
+
+def _node_point_field(node: Any, node_name: str, field_name: str) -> np.ndarray:
+    """The point set a ``{"node": node_name, "field": field_name}``
+    reference reads from ``node``: its ``static_data[field_name]`` (a
+    ``StaticArray`` unwrapped) or, failing that, an array-valued
+    constructor parameter ``node.params[field_name]``.
+
+    The node-level half of the graph resolver (:func:`make_point_resolver`),
+    so a node outside any graph -- one rebuilt from candidate params, to
+    ask whether a write would move the points a mapping was built from
+    (``GraphManager._mapping_point_write_reason``) -- is read by the same
+    rule.  A field that is absent, or not a numeric point set, is a
+    :class:`PointReferenceError`.
+    """
     static = getattr(node, "static_data", None) or {}
     if not isinstance(static, dict):
         static = {}

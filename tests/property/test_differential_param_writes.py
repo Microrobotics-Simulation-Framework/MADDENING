@@ -267,15 +267,15 @@ def test_a_heat_diffusivity_written_past_the_fourier_limit_is_refused_or_reloads
     check_params_write(gm, REGISTRY, "rod", {"thermal_diffusivity": jnp.float32(0.6 / 256)})
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "differential: a gm.params length for a uniform rod whose grid_x an interface "
-    "mapping references is computed with (on the mapping weights built for the old "
-    "grid) and to_dict() then refuses to save the graph; pending fix"))
 def test_a_rod_length_under_a_mapping_reference_runs_as_its_reload():
+    """A ``gm.params`` length for a uniform rod whose ``grid_x`` an interface
+    mapping references used to be computed with (the rod on the new length,
+    the mapping on the old grid's weights) and saved as a config that did not
+    load.  Refused at the next run and by ``to_dict()`` now."""
     from tests.property.test_differential_rest_params import rods_mapped_by_grid
 
     gm = rods_mapped_by_grid()
-    check_params_write(gm, REGISTRY, "a", {"length": jnp.float32(1.5)})
+    assert check_params_write(gm, REGISTRY, "a", {"length": jnp.float32(1.5)}) == "refused"
 
 
 # ---------------------------------------------------------------------------

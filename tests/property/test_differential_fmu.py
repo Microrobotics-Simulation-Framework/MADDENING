@@ -42,7 +42,6 @@ export cannot be addressed by ``set``).
 from __future__ import annotations
 
 import base64
-import dataclasses
 import io
 import math
 import socket
@@ -51,7 +50,7 @@ from typing import Any, Optional
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import given, settings
+from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
@@ -193,6 +192,12 @@ class Model:
         ))
 
 
+def _nan_canonical(values: np.ndarray) -> np.ndarray:
+    """``values`` with every NaN replaced by the one quiet NaN the JSON
+    wire's ``"NaN"`` token decodes to."""
+    return np.where(np.isnan(values), np.float64(np.nan), values)
+
+
 def _copy_params(params: dict) -> dict:
     return {s: {o: dict(v) for o, v in owners.items()} for s, owners in params.items()}
 
@@ -289,7 +294,12 @@ class Paths:
         vals = self.values()
         names = [v.name for v in self.m.md.variables if not v.is_clock]
         for other in ("sidecar", "graph"):
-            a, b = vals["bridge"], vals[other]
+            # The JSON wire writes a NaN as the token "NaN", which has no sign
+            # and no payload (``json_codec``): a NaN the sidecar holds with
+            # its sign bit set reads back positive over the wire.  So a NaN
+            # is compared as a NaN, and every other value bit for bit (the
+            # states below, which no wire carries, stay bit for bit too).
+            a, b = _nan_canonical(vals["bridge"]), _nan_canonical(vals[other])
             if a.tobytes() != b.tobytes():
                 bad = [n for n, x, y in zip(names, a, b)
                        if np.float64(x).tobytes() != np.float64(y).tobytes()]
@@ -708,15 +718,13 @@ def test_the_three_fmu_paths_agree_on_a_generated_graph(data):
 
     recipe = data.draw(graph_recipes(kinds=ALL_NODE_KINDS, max_nodes=3,
                                      allow_mappings=False), label="recipe")
-    if not _within_declared_bounds(recipe.build()):
-        # ``strategies`` draws ParamSpec bounds as metadata, so a recipe may
-        # start outside them; an FMU then refuses to restore its own
-        # snapshot, which is pinned on its own
-        # (``test_an_fmu_restores_its_own_snapshot_whatever_its_parameters``).
-        # A calibrated leaf can be pushed past its node's own bound too
-        # (``param_overrides`` scales by up to 2), so both go.
-        recipe = dataclasses.replace(recipe, spec_overrides=(), param_overrides=())
+    # ``strategies`` draws ParamSpec bounds as metadata, so a recipe may start
+    # outside them, and a calibrated leaf may be pushed past its node's own
+    # bound (``param_overrides`` scales by up to 2).  Both are drawn: an FMU
+    # restores its own snapshot whatever its parameters
+    # (``test_an_fmu_restores_its_own_snapshot_whatever_its_parameters``).
     note(f"recipe: {recipe}")
+    event(f"starts inside its declared bounds: {_within_declared_bounds(recipe.build())}")
     model = Model.build(recipe.build)
     run_sequence(model, data.draw(_ops(model), label="ops"))
 
@@ -741,16 +749,13 @@ def _spring_with_a_bound_it_starts_outside():
     return gm
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "differential: the FMU (bridge set_state and FmuSidecar.set_fmu_state alike) "
-    "refuses to restore its own get_state snapshot when a parameter starts outside "
-    "its declared ParamSpec bounds, while GraphManager.load_state restores the same "
-    "graph's checkpoint; pending fix"))
 def test_an_fmu_restores_its_own_snapshot_whatever_its_parameters():
     """Found by ``test_the_three_fmu_paths_agree_on_a_generated_graph``.  The
     graph runs with ``stiffness = 30`` under a declared lower bound of 50
-    (bounds are metadata to a graph); the FMU exports it, steps it, and then
-    cannot restore the state it handed out itself."""
+    (bounds are metadata to a graph); the FMU exported it, stepped it, and
+    then could not restore the state it had handed out itself (bridge
+    ``set_state`` and ``FmuSidecar.set_fmu_state`` alike), while
+    ``GraphManager.load_state`` restored the graph's checkpoint."""
     model = Model.build(_spring_with_a_bound_it_starts_outside, "out-of-bounds")
     paths = Paths(model)
     try:

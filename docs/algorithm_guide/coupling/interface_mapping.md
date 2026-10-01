@@ -165,9 +165,14 @@ the `label` hyper-parameter.  Reading `describe()` back with
 A node reference is resolved **once**, when the mapping is built. If the
 static it names is derived from a trainable parameter, such as a uniform
 `HeatNode`'s `grid_x`, which is built from `length`, then calibrating
-that parameter through `gm.params` leaves the weights at the
-constructor's geometry. Nothing refuses it or warns. This is
-**MADD-ANO-022**. See
+that parameter -- a fit, or any `params=` pytree -- leaves the weights at
+the constructor's geometry. Nothing refuses it or warns. This is
+**MADD-ANO-022**. A value *written* into the running graph is refused
+(**MADD-ANO-063**): `gm.params` at the next run, `to_dict()` and
+`save_state()`, `PUT /graph/params` with a 400, a checkpoint at
+`POST /checkpoint/load`, and an exported FMU leaves the parameter fixed,
+because the node would use it while the mapping kept the old points and a
+saved config would not load. See
 [Calibrating a parameter that a mapped edge's grid derives from](../../user_guide/parameters.md#calibrating-a-parameter-that-a-mapped-edges-grid-derives-from)
 for what it does to a fit and for the workarounds.
 

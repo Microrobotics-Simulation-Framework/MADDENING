@@ -373,8 +373,10 @@ def test_when_every_candidate_is_flat_the_hold_is_the_excited_projector_bit_for_
     """A degenerate fit the earlier guard held correctly must be held to the
     same bits: when the curvature test confirms every candidate, the hold
     is ``theta0 + (V Vᵀ) (theta - theta0)`` with ``V`` the excited
-    eigenvectors of the gradient Gram, formed in that order -- not the
-    mathematically equal ``moved - U Uᵀ moved``, which rounds differently.
+    eigenvectors of the gradient Gram, exactly as 0.4.0-dev formed it.
+    (The mathematically equal ``moved - U Uᵀ moved`` differs from it in
+    float64 by about 1e-16, which the cast back to float32 absorbs, so this
+    pins the result and not the form; the form is for float64 runs.)
     """
     tracker = _ExcitationTracker(3, np.float32)
     rng = np.random.default_rng(7)
@@ -546,7 +548,8 @@ def _spy(monkeypatch, name):
     return seen
 
 
-@pytest.mark.parametrize("fitter", ["fit", "fit_lm", "fit_multiple_shooting"])
+@pytest.mark.parametrize("fitter", ["fit", "fit_lm", "fit_lm-accepted-last",
+                                    "fit_multiple_shooting"])
 def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, fitter):
     """Each fitter's loss, gradient and curvature, as the guard receives
     them, are those of its own objective at the iterate it selected --
@@ -555,12 +558,18 @@ def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, 
     objective in ``theta`` at the *selected* window states.  The scale
     degeneracy is flat everywhere, so a curvature test taken at the start,
     or at the seed window states, would hold it all the same and only this
-    comparison would notice."""
+    comparison would notice.
+
+    ``fit_lm`` twice, once per way it obtains ``J`` at the selected iterate:
+    a run that ends on a rejected step is still at the iterate whose ``J``
+    it formed last and reuses it; a run whose last step was accepted has
+    never formed ``J`` there and must, rather than reuse the one before."""
     from jax.flatten_util import ravel_pytree
 
     gm, obs = degenerate
     hold = _spy(monkeypatch, "_hold_undetermined_directions")
-    curvature = _spy(monkeypatch, "_gauss_newton_flatness" if fitter == "fit_lm"
+    lm = fitter.startswith("fit_lm")
+    curvature = _spy(monkeypatch, "_gauss_newton_flatness" if lm
                      else "_hessian_flatness")
     obs_fn = lambda h: h["s"]["position"]           # noqa: E731
     start = _with(gm, {"stiffness": 45.0, "damping": 3.0})
@@ -574,9 +583,14 @@ def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, 
         loss = jax.jit(lambda p: windowed_loss(gm, p, obs, obs_fn=obs_fn, window=10))
         res = fit(gm, loss, params=start, n_iter=300, lr=0.2, notify_every=0)
         objective = lambda t: loss(physical(t))          # noqa: E731
-    elif fitter == "fit_lm":
+    elif lm:
         residual = _trajectory_residual(gm, 60)
-        res = fit_lm(gm, residual, params=start, n_iter=20, notify_every=0)
+        accepted_last = fitter == "fit_lm-accepted-last"
+        res = fit_lm(gm, residual, params=start, n_iter=3 if accepted_last else 20,
+                     notify_every=0)
+        # Which path: one past ``losses`` is an iterate the loop never formed
+        # ``J`` at; the last entry of ``losses`` is one it did.
+        assert res.best_iteration == len(res.losses) - (0 if accepted_last else 1)
         objective = lambda t: 0.5 * jnp.sum(residual(physical(t)) ** 2)   # noqa: E731
     else:
         res, ws = fit_multiple_shooting(gm, obs, obs_fn=obs_fn, window=10,
@@ -588,9 +602,9 @@ def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, 
 
     assert res.excited_rank == 2 and res.hold_declined is False
     (_, theta, _, selected_objective, method), = hold["calls"]
-    assert method == fitter
+    assert method == ("fit_lm" if lm else fitter)
     loss_sel, grad_sel = selected_objective.reference()
-    if fitter == "fit_lm":
+    if lm:
         assert loss_sel == pytest.approx(res.best_loss, rel=1e-5, abs=1e-12)
     else:
         assert loss_sel == res.best_loss            # same compiled function, same point
@@ -599,7 +613,7 @@ def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, 
     np.testing.assert_allclose(grad_sel, np.asarray(jax.grad(objective)(theta)),
                                rtol=1e-3, atol=1e-3 * scale)
     (args,) = curvature["calls"]
-    if fitter == "fit_lm":
+    if lm:
         J = np.asarray(args[0], dtype=np.float64)
         J_ref = np.asarray(jax.jacfwd(lambda t: residual(physical(t)))(theta), np.float64)
         np.testing.assert_allclose(J, J_ref, rtol=1e-4, atol=1e-6 * np.abs(J_ref).max())

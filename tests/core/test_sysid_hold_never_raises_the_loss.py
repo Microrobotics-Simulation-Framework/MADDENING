@@ -299,19 +299,32 @@ def test_a_hold_through_a_bound_is_declined():
 # The tolerance, from both sides
 # ---------------------------------------------------------------------------
 
-#: ``2**10 * eps32 * |1.0| + 0.5 * 2.0 * (16 * |spacing([1, 1])|)**2`` --
-#: ``2**-13 + 2**-37``.  Written out rather than recomputed from the
-#: implementation's formula, so that changing the formula fails these
-#: tests instead of moving them with it.
-_TOL_L1_SCALE2_F32 = 0.00012207031977595761
+#: The tolerance at three points, each term isolated, written out rather
+#: than recomputed from the implementation's formula so that changing the
+#: formula fails these tests instead of moving them with it.  ``d`` is a
+#: 16-ulp perturbation of each coordinate of ``(1, 1)`` in float32,
+#: ``16 * sqrt(2) * 2**-23``.
+#:
+#: ``loss_sel = 1``, curvature 2: ``2**10 * eps32 + d**2`` = ``2**-13 + 2**-37``.
+_TOL_RELATIVE = 0.00012207031977595761
+#: ``loss_sel = 0``, curvature 2: ``0.5 * 2 * d**2`` = ``2**-37``.
+_TOL_QUANTISATION = 7.275957614183426e-12
+#: ``loss_sel = 0``, gradient ``(3, 4)``, curvature 0: ``5 * d``.
+_TOL_GRADIENT = 1.348699152348609e-05
+
+_TOLERANCE_CASES = {
+    "relative": (1.0, None, 2.0, _TOL_RELATIVE),
+    "quantisation": (0.0, None, 2.0, _TOL_QUANTISATION),
+    "gradient": (0.0, np.array([3.0, 4.0]), 0.0, _TOL_GRADIENT),
+}
 
 
-def _helper_case(loss_held, *, flat=True):
+def _helper_case(loss_held, *, loss_sel=1.0, grad_sel=None, scale=2.0):
     """The shared hold on a 2-D problem with known numbers: gradients only
-    along ``e0``, so ``e1`` is the one candidate; the selected iterate is
-    ``(1, 1.25)`` from a start at ``(1, 1)``, so holding ``e1`` lands
-    exactly on the start, whose float32 spacing is ``2**-23`` per
-    coordinate; ``loss_sel = 1``, no gradient term, curvature scale 2."""
+    along ``e0``, so ``e1`` is the one candidate, and the curvature test
+    calls it flat; the selected iterate is ``(1, 1.25)`` from a start at
+    ``(1, 1)``, so holding ``e1`` lands exactly on the start, whose
+    float32 spacing is ``2**-23`` per coordinate."""
     tracker = _ExcitationTracker(2, np.float32)
     for _ in range(4):
         tracker.observe(np.array([1.0, 0.0], dtype=np.float32))
@@ -319,33 +332,67 @@ def _helper_case(loss_held, *, flat=True):
     theta = jnp.asarray([1.0, 1.25], dtype=jnp.float32)
     objective = _SelectedObjective(
         loss=lambda th: loss_held,
-        reference=lambda: (1.0, None),
-        flatness=lambda candidates, spanned: (np.eye(1), np.array([flat]), 2.0),
+        reference=lambda: (loss_sel, grad_sel),
+        flatness=lambda candidates, spanned: (np.eye(1), np.array([True]), scale),
     )
     return theta, theta0, _hold_undetermined_directions(
         tracker, theta, theta0, objective, "test")
 
 
-def test_a_rise_just_inside_the_tolerance_is_held():
+@pytest.mark.parametrize("term", sorted(_TOLERANCE_CASES))
+def test_a_rise_just_inside_the_tolerance_is_held(term):
+    loss_sel, grad_sel, scale, tol = _TOLERANCE_CASES[term]
     _, theta0, (out, rank, drift, declined) = _helper_case(
-        1.0 + _TOL_L1_SCALE2_F32 * (1.0 - 1e-6))
+        loss_sel + tol * (1.0 - 1e-6), loss_sel=loss_sel, grad_sel=grad_sel, scale=scale)
     assert declined is False and rank == 1 and drift == 0.25
     np.testing.assert_array_equal(np.asarray(out), np.asarray(theta0))
 
 
-def test_a_rise_just_outside_the_tolerance_is_declined():
+@pytest.mark.parametrize("term", sorted(_TOLERANCE_CASES))
+def test_a_rise_just_outside_the_tolerance_is_declined(term):
+    loss_sel, grad_sel, scale, tol = _TOLERANCE_CASES[term]
     with pytest.warns(RuntimeWarning, match="would raise the loss"):
         theta, _, (out, rank, drift, declined) = _helper_case(
-            1.0 + _TOL_L1_SCALE2_F32 * (1.0 + 1e-6))
+            loss_sel + tol * (1.0 + 1e-6), loss_sel=loss_sel, grad_sel=grad_sel,
+            scale=scale)
     assert declined is True and rank == 1 and drift == 0.25
     assert np.asarray(out).tobytes() == np.asarray(theta).tobytes()
 
 
-def test_a_non_finite_held_loss_is_declined():
+@pytest.mark.parametrize("value", [float("nan"), float("-inf"), float("inf")])
+def test_a_non_finite_held_loss_is_declined(value):
+    """``-inf`` is below every bound, so it is the finiteness test, not the
+    comparison, that has to refuse it."""
     with pytest.warns(RuntimeWarning, match="would raise the loss"):
-        theta, _, (out, _, _, declined) = _helper_case(float("nan"))
+        theta, _, (out, _, _, declined) = _helper_case(value)
     assert declined is True
     assert np.asarray(out).tobytes() == np.asarray(theta).tobytes()
+
+
+def test_when_every_candidate_is_flat_the_hold_is_the_excited_projector_bit_for_bit():
+    """A degenerate fit the earlier guard held correctly must be held to the
+    same bits: when the curvature test confirms every candidate, the hold
+    is ``theta0 + (V Vᵀ) (theta - theta0)`` with ``V`` the excited
+    eigenvectors of the gradient Gram, formed in that order -- not the
+    mathematically equal ``moved - U Uᵀ moved``, which rounds differently.
+    """
+    tracker = _ExcitationTracker(3, np.float32)
+    rng = np.random.default_rng(7)
+    basis = np.linalg.qr(rng.normal(size=(3, 3)))[0]
+    for _ in range(6):
+        tracker.observe((basis[:, :2] @ rng.normal(size=2)).astype(np.float32))
+    theta0 = jnp.asarray([0.3, -1.1, 2.0], dtype=jnp.float32)
+    theta = jnp.asarray([0.7, -0.2, 1.4], dtype=jnp.float32)
+    objective = _SelectedObjective(
+        loss=lambda th: 0.0, reference=lambda: (0.0, None),
+        flatness=lambda c, s: (np.eye(c.shape[1]), np.ones(c.shape[1], bool), 1.0))
+    out, rank, _, declined = _hold_undetermined_directions(
+        tracker, theta, theta0, objective, "test")
+    assert rank == 2 and declined is False
+    _, projector = tracker.projector()
+    moved = np.asarray(theta, np.float64) - np.asarray(theta0, np.float64)
+    expected = theta0 + jnp.asarray(projector @ moved, dtype=jnp.float32)
+    assert np.asarray(out).tobytes() == np.asarray(expected).tobytes()
 
 
 def test_a_candidate_with_curvature_is_neither_held_nor_counted():
@@ -373,8 +420,9 @@ def test_a_candidate_with_curvature_is_neither_held_nor_counted():
 
 #: ``sqrt(eps32)``, the Hessian test's relative cutoff.
 _SQRT_EPS32 = 0.00034526698300124393
-#: ``max(n, sqrt(m)) * eps32`` at ``n = m = 2``: ``fim``'s rank cutoff.
-_FIM_RTOL_N2_M2_F32 = 2.384185791015625e-07
+#: ``max(n, sqrt(m)) * eps32`` at ``n = 2, m = 16``: ``fim``'s rank cutoff,
+#: in the regime where its ``sqrt(m)`` term is the larger.
+_FIM_RTOL_N2_M16_F32 = 4.76837158203125e-07
 
 
 @pytest.mark.parametrize("factor, flat", [(1.0 - 1e-6, True), (1.0 + 1e-6, False)])
@@ -397,7 +445,10 @@ def test_the_hessian_test_reads_hu_not_the_quadratic_form():
 
 @pytest.mark.parametrize("factor, flat", [(1.0 - 1e-6, True), (1.0 + 1e-6, False)])
 def test_the_gauss_newton_cutoff_is_fims_rank_rule(factor, flat):
-    J = np.diag([1.0, np.sqrt(_FIM_RTOL_N2_M2_F32 * factor)])
+    """Sixteen residual rows, so ``sqrt(m) = 4`` beats ``n = 2``: a cutoff
+    that forgot the residual length would sit at half this one."""
+    J = np.zeros((16, 2))
+    J[0, 0], J[1, 1] = 1.0, np.sqrt(_FIM_RTOL_N2_M16_F32 * factor)
     W, flags, scale = _gauss_newton_flatness(J, np.array([[0.0], [1.0]]), np.float32)
     assert scale == 1.0 and bool(flags[0]) is flat
 
@@ -434,10 +485,29 @@ def test_without_a_hessian_the_flat_hold_is_still_checked_against_the_loss():
         return (_opaque(_d(p)) - (d0 - _SHIFT)) ** 2
 
     mask = _only(gm, "stiffness", "mass")
-    with pytest.warns(RuntimeWarning, match="Hessian-vector product"):
+    with pytest.warns(RuntimeWarning, match="Hessian-vector product raised") as record:
         res = fit(gm, loss, mask=mask, n_iter=60, lr=0.05)
     assert res.hold_declined is False and res.excited_rank == 1
     assert abs(float(_s(res.params)) - s0) < 1e-5
+    # Attributed to the line that called ``fit``, not to sysid's internals.
+    assert {w.filename for w in record} == {__file__}
+
+
+def test_a_non_finite_curvature_falls_back_to_the_gradient_test():
+    e0, e1 = np.array([[1.0], [0.0]]), np.array([[0.0], [1.0]])
+    with pytest.warns(RuntimeWarning, match="not finite"):
+        assert _hessian_flatness(lambda V: np.full((2, V.shape[1]), np.nan),
+                                 e1, e0, np.float32, "test") is None
+    J = np.array([[1.0, 0.0], [0.0, np.inf]])
+    with pytest.warns(RuntimeWarning, match="Jacobian at the selected iterate is not finite"):
+        assert _gauss_newton_flatness(J, e1, np.float32) is None
+
+
+def test_the_decline_warning_names_the_callers_line():
+    _, _, call = _flat_problem("fit", bumped=True)
+    with pytest.warns(RuntimeWarning, match="would raise the loss") as record:
+        call(True)
+    assert {w.filename for w in record} == {__file__}
 
 
 # ---------------------------------------------------------------------------

@@ -316,6 +316,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`hold_undetermined` no longer returns a fit's parameters above the loss it reached** (MADD-ANO-063, never released): a direction is held only if the
+  run's gradients missed it *and* the loss has no curvature there, and a hold that would raise the loss beyond rounding is refused (`FitResult.hold_declined`,
+  `RuntimeWarning`).  `fit_lm` on a well-posed bowl went 0.0 -> 0.22.  Action: re-run guarded fits from earlier 0.4.0 builds, or compare to `best_loss`.
 - **`ParamSpec.from_dict` refuses a non-boolean `trainable` or a non-numeric bound** (`"false"` read as trainable, `true` as 1.0): a saved
   graph carrying one fails to load, a USD stage warns and skips it.  **`run_pod.py`'s stencil, hybrid and coupled goals now fail on a
   broken stencil wrapper** (four seeded faults; schema 5, pencil mesh, D2Q9).  Action: write JSON booleans; re-run schema-4 dry runs.
@@ -662,6 +665,7 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-063 (new, never released)**: `hold_undetermined` held every direction a fit's gradients had not spanned, so a short or fast-converging fit came back above the loss it had reached (0.4.0 development builds only; see `### Fixed`)
 - **Severities defined; fourteen relabelled; four entries partially resolved**: `AnomalySeverity` now defines each level, and a silent wrong result is never `minor`, so MADD-ANO-005, 009, 025, 027, 029, 031, 038, 041, 048, 055, 057, 058 and 061 move to `major`, and 052 (a default-exposed route) to `critical`.
   MADD-ANO-032, 036, 047 and 049 are `partially_resolved`, not `resolved`: their routes outside a graph or the REST route are still live (see each `residual_risk`); the release notes' Known anomalies section now names every reachable entry, and a test keeps it so.
   Sharded nodes: iterate `update_padded`'s `shard_info` over its `int` keys only; `"n_local"` (unstructured wrapper) is the one string key.

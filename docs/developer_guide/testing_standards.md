@@ -472,15 +472,32 @@ answers as the unsharded one.
   scale.
 - *Domain integrals*: the summation-reordering bound
   `(n - 1) eps sum|t|`, plus the integrated grid field's own bound.
-- *Gradients*: an absolute bound built from a forward-mode pass of the
-  unsharded path (`gradient_bound`). It uses the absolute sum of the
-  gradient's terms before they cancel, the tangent, and the departure
-  from the initial state. A near-equilibrium state, whose gradient is a
-  small difference of large terms, gets the looser bound it needs. The
-  first version of this bound used a fixed allowance relative to `|g|`,
-  and an LBM channel one step from rest exceeded it: that was an error in
-  the oracle, not in the wrapper. The largest gradient difference
-  observed was 0.05 of the bound.
+- *Gradients*: the larger of two bounds (`gradient_bound`).
+  - *A derived base*, from a forward-mode pass of the unsharded path: the
+    absolute sum of the gradient's terms before they cancel, the tangent,
+    and the departure from the initial state. A near-equilibrium state,
+    whose gradient is a small difference of large terms, gets the looser
+    base it needs.
+  - *The gradient's measured sensitivity to reordering*: four times the
+    distance between the unsharded path's reverse-mode and forward-mode
+    gradients, in the run's own precision. The two compute one derivative
+    with every operation reordered, while sharding reorders only the
+    shard-boundary terms.
+
+  Each half was added after an oracle error, not a wrapper defect:
+
+  - The first version used a fixed allowance relative to `|g|`, and an LBM
+    channel one step from rest exceeded it.
+  - The base alone then failed in the slow lane, on an unstructured ring
+    with an empty shard, relaxed to nearly equal values. There
+    `d x / d rate` is a small difference of nearly equal numbers. The two
+    paths agree to 5e-13 in float64, while in float32 each is 1e-4 off
+    the float64 gradient, the sharded path the closer. Sharded and
+    unsharded differed by 0.5 times the forward/reverse distance in
+    float32 and 0.8 times in float64.
+
+  That case is a per-push witness. The largest well-conditioned gradient
+  difference observed was 0.05 of the base.
 - *Precision*: every bound is in units of the dtype's own `eps`, so a
   float64 run holds the sharded path to float64. A `dt` rounded to
   float32 under x64 (MADD-ANO-033) is a failure.

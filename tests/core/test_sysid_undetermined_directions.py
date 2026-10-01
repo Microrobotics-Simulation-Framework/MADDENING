@@ -25,7 +25,13 @@ module is the gradient:
   tests below assert the difference rather than eliding it.
 
 What is measured is that the guard removes that, and that it removes
-nothing else.
+nothing else.  Since the guard learned to confirm each direction its
+gradient test raises against the objective's curvature at the returned
+point, and to refuse a hold that would raise the loss, every guarded
+result here also asserts ``hold_declined is False``: the spring's scale is
+exactly flat, so a decline on it would be the guard failing at its one
+job.  The cases where it must decline, and the ones where 0.4.0-dev held
+directions the data determined, are ``test_sysid_hold_never_raises_the_loss.py``.
 """
 
 import os
@@ -196,10 +202,27 @@ def test_fitted_scale_is_the_starting_scale_for_every_budget(noisy_fit, lr, n_it
     start = _with(gm, START)
     res = fit(gm, loss, params=start, n_iter=n_iter, lr=lr, notify_every=0)
     assert res.excited_rank == 2, res.excited_rank
+    assert res.hold_declined is False
     assert res.undetermined_drift is not None and res.undetermined_drift > 1e-3
     # 1e-4 relative is ~3 float32 ulps on a quantity of order 5; the guard
     # zeroes this exactly in exact arithmetic.
     assert abs(_scale(res.params) / START_SCALE - 1.0) < 1e-4, _scale(res.params)
+
+
+def test_the_scale_is_held_at_the_budget_the_guard_was_built_for(noisy_fit):
+    """The guard was introduced after measuring the unguarded drift at
+    ``lr=0.2`` out to 10,000 iterations.  Now that each candidate must also
+    pass the curvature test and the loss check, it must still hold there.
+    Measured: the scale lands +7.6e-8 from the start, against -5.43%
+    unguarded, with ``undetermined_drift`` 0.097 removed and the loss of
+    the selected iterate unchanged."""
+    gm, loss = noisy_fit
+    held = fit(gm, loss, params=_with(gm, START), n_iter=10_000, lr=0.2,
+               notify_every=0)
+    assert held.excited_rank == 2 and held.hold_declined is False
+    assert held.undetermined_drift > 1e-2
+    assert abs(_scale(held.params) / START_SCALE - 1.0) < 1e-4, _scale(held.params)
+    assert float(loss(held.params)) <= held.best_loss * (1 + 2**-13) + 1e-12
 
 
 def test_the_fitted_scale_does_not_depend_on_the_optimiser_schedule(noisy_fit):
@@ -221,6 +244,7 @@ def test_the_fitted_scale_does_not_depend_on_the_optimiser_schedule(noisy_fit):
             for lr, n in schedule]
     for res, (lr, n) in zip(held, schedule):
         assert res.excited_rank == 2, (lr, n, res.excited_rank)
+        assert res.hold_declined is False, (lr, n)
     scales = [_scale(r.params) for r in held]
     assert max(scales) / min(scales) - 1.0 < 1e-4, dict(zip(map(str, schedule),
                                                             scales))
@@ -246,6 +270,7 @@ def test_holding_the_scale_does_not_cost_loss_or_the_identifiable_ratios(noisy_f
     raw = fit(gm, loss, hold_undetermined=False, **kw)
 
     l_held, l_raw = float(loss(held.params)), float(loss(raw.params))
+    assert held.hold_declined is False
     assert l_held <= l_raw * 1.001 + 1e-9, (l_held, l_raw)
     for num in ("stiffness", "damping"):
         a = (float(held.params["nodes"]["s"][num])
@@ -277,7 +302,7 @@ def test_a_well_posed_fit_gets_its_iterate_back_bit_for_bit(clean_fit):
     held = fit(gm, loss, **kw)
     raw = fit(gm, loss, hold_undetermined=False, **kw)
     assert held.excited_rank == 2, held.excited_rank
-    assert held.undetermined_drift == 0.0
+    assert held.undetermined_drift == 0.0 and held.hold_declined is False
     for key, value in held.params["nodes"]["s"].items():
         assert float(value) == float(raw.params["nodes"]["s"][key]), key
     assert float(held.params["nodes"]["s"]["mass"]) == 1.0
@@ -301,7 +326,7 @@ def test_a_rotating_null_direction_is_reported_as_full_rank(noisy_fit):
     held = fit(gm, loss, **kw)
     raw = fit(gm, loss, hold_undetermined=False, **kw)
     assert held.excited_rank == 3, held.excited_rank
-    assert held.undetermined_drift == 0.0
+    assert held.undetermined_drift == 0.0 and held.hold_declined is False
     for key, value in held.params["nodes"]["s"].items():
         assert float(value) == float(raw.params["nodes"]["s"][key]), key
 
@@ -317,7 +342,7 @@ def test_fewer_iterations_than_parameters_answers_none_not_full_rank(noisy_fit):
     held = fit(gm, loss, **kw)
     raw = fit(gm, loss, hold_undetermined=False, **kw)
     assert held.excited_rank is None
-    assert held.undetermined_drift is None
+    assert held.undetermined_drift is None and held.hold_declined is None
     for key, value in held.params["nodes"]["s"].items():
         assert float(value) == float(raw.params["nodes"]["s"][key]), key
 
@@ -333,6 +358,7 @@ def test_above_the_parameter_cap_the_guard_declines_and_says_so(
     start = _with(gm, START)
     held = fit(gm, loss, params=start, n_iter=200, lr=0.2, notify_every=0)
     assert held.excited_rank is None and held.undetermined_drift is None
+    assert held.hold_declined is None
 
 
 def test_hold_undetermined_refuses_a_non_bool(noisy_fit):
@@ -413,6 +439,7 @@ def test_fit_lm_unguarded_moves_along_the_scale_direction_but_converges(noisy):
     assert len(set(settled)) == 1, dict(zip(budgets[1:], settled))
     # LM reports the guard it did not run.
     assert raw[0].excited_rank is None and raw[0].undetermined_drift is None
+    assert raw[0].hold_declined is None
 
 
 @pytest.mark.parametrize("n_iter", [10, 60, 200])
@@ -427,6 +454,7 @@ def test_fit_lm_returns_the_starting_scale_for_every_budget(n_iter):
     res = fit_lm(gm, residual, params=_with(gm, START), n_iter=n_iter,
                  notify_every=0)
     assert res.excited_rank == 2, res.excited_rank
+    assert res.hold_declined is False
     assert res.undetermined_drift is not None and res.undetermined_drift > 1e-3
     assert abs(_scale(res.params) / START_SCALE - 1.0) < 1e-4, _scale(res.params)
 
@@ -445,6 +473,7 @@ def test_fit_lm_holding_costs_neither_loss_nor_the_identifiable_ratios():
         r = np.asarray(residual(p))
         return 0.5 * float(r @ r)
 
+    assert held.hold_declined is False
     assert sse(held.params) <= sse(raw.params) * 1.001 + 1e-9, (
         sse(held.params), sse(raw.params))
     for num in ("stiffness", "damping"):
@@ -476,7 +505,7 @@ def test_a_well_posed_fit_lm_gets_its_iterate_back_bit_for_bit():
     held = fit_lm(gm, residual, **kw)
     raw = fit_lm(gm, residual, hold_undetermined=False, **kw)
     assert held.excited_rank == 2, held.excited_rank
-    assert held.undetermined_drift == 0.0
+    assert held.undetermined_drift == 0.0 and held.hold_declined is False
     for key, value in held.params["nodes"]["s"].items():
         assert float(value) == float(raw.params["nodes"]["s"][key]), key
     assert float(held.params["nodes"]["s"]["mass"]) == 1.0
@@ -535,6 +564,7 @@ def test_multiple_shooting_scale_does_not_depend_on_the_schedule():
     for res, (lr, n) in zip(held, _MS_SCHEDULE):
         assert res.excited_rank == 2, (lr, n, res.excited_rank)
         assert res.undetermined_drift is not None
+        assert res.hold_declined is False, (lr, n)
     scales = [_scale(r.params) for r in held]
     assert max(scales) / min(scales) - 1.0 < 1e-4, dict(
         zip(map(str, _MS_SCHEDULE), scales))
@@ -572,6 +602,7 @@ def test_multiple_shooting_holding_the_scale_leaves_the_window_states_alone():
     raw, ws_raw = fit_multiple_shooting(gm, hold_undetermined=False, **kw)
 
     assert held.excited_rank == 2 and held.undetermined_drift > 1e-3
+    assert held.hold_declined is False
     assert _scale(held.params) != _scale(raw.params)      # the guard did fire
     seed = init_window_states(obs, WINDOW)
     assert any(
@@ -599,7 +630,7 @@ def test_a_well_posed_multiple_shooting_fit_gets_its_iterate_back_bit_for_bit():
     held, _ = fit_multiple_shooting(gm, **kw)
     raw, _ = fit_multiple_shooting(gm, hold_undetermined=False, **kw)
     assert held.excited_rank == 2, held.excited_rank
-    assert held.undetermined_drift == 0.0
+    assert held.undetermined_drift == 0.0 and held.hold_declined is False
     for key, value in held.params["nodes"]["s"].items():
         assert float(value) == float(raw.params["nodes"]["s"][key]), key
 

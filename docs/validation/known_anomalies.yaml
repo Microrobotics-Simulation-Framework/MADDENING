@@ -565,6 +565,40 @@ anomalies:
       exactly.  That fallback is reported, not silent:
       coupling_diagnostics()['ratio_usable'] is False and
       gradient_error_estimate is +inf.
+      A rejected ratio is not evidence that the sequence stopped
+      contracting, and the fallback is reached systematically, not only
+      on non-monotone sequences.  Each residual carries about its float
+      floor of rounding (the floor precision_limited reads), so the
+      ratio r_k / r_{k-1} carries about 2 floor / r_k, and a group
+      contracting at a rate within that of 1 reads rho >= 1 from noise:
+      at rho = 0.995 the ratio is noise within about 400 floors of the
+      floor.  Measured on the coupling differential harness's
+      single-mode fixtures (rate 0.99-0.995, started on the mode 1 to
+      1000 thresholds away, l2 and mixed norms at thresholds within a few
+      hundred floors; 2592 runs, jaxlib 0.11.0): 812 reported
+      converged=True more than twice the threshold from the exact
+      float64 fixed point, and 312 of those had a noise-rejected ratio
+      and precision_limited=False.  A group started within 1 / (1 - rho)
+      thresholds has a raw residual under the threshold from its first
+      pass, so the first noise-rejected ratio ends the solve: these
+      stopped up to 200 thresholds away (224 at worst), where the
+      estimate the ratio was meant for would have been r / (1 - rho),
+      100-200x the residual.
+      precision_limited does not see it: it reads the residual against
+      its floor, and the residual was a few floors above it.  Pinned by
+      tests/property/test_differential_fixed_point.py::test_a_rate_float32_cannot_tell_from_one_falls_back_to_the_raw_residual_test.
+      Not changed in 0.4.0, by decision: the remedy -- a ratio within its
+      own float resolution of 1 is not a pass while the residual is above
+      its floor -- would take a pass or two more on most groups at the
+      default tolerance, because for a small group CouplingGroup's
+      default tolerance=1e-6 sits at the l2 norm's float floor (9.5e-7 for
+      four float32 entries), and it would turn some converged=True
+      verdicts of slow groups into converged=False at the cap, which
+      strict_convergence raises on.  That is a behaviour change for the
+      0.5.0 cycle.  Until then read ratio_usable=False beside
+      converged=True as the raw residual test, and for a group whose rate
+      is near 1 use solver="ift" with diagnostics=True and read
+      spectral_error_bound.
       A second gap is about which state the bound is over rather than
       how tight it is, and it is not reported at all.
       convergence_norm="interface" takes the residual over the edge
@@ -3162,7 +3196,11 @@ anomalies:
       The two ends differ only by the in-pass change of a source
       scheduled before the sub-cycled node, so the modes coincide under
       Jacobi, for a source scheduled after the sub-cycled node, and at
-      exact stationarity, and nowhere else.
+      exact stationarity, and nowhere else -- coincide to float32
+      round-off, not to the bit: they compile to different programs, and
+      on sub-cycled two-node Jacobi groups of one to three dimensions 14
+      of 144 node-steps differed, by up to 1.8e-07 relative (two ulps;
+      CPU, jaxlib 0.11.0).
       Measured on two `SpringDamperNode`s coupled both ways (CPU, jaxlib
       0.11.0).  At timesteps 0.001 and 0.005 over 100 macro-steps with
       the fast node scheduled first, `boundary_interpolation` "constant",
@@ -5436,13 +5474,21 @@ anomalies:
       integer field was in its selection, named or reached through a flux
       edge (whose producer's whole state stands in for the flux).
       Resolved in 0.4.0: every acceleration acts on floating fields only,
-      as `solver="ift"` always iterated.  Such a leaf is recomputed from
-      the pre-step state on every pass, so its first-pass value is already
-      the converged one.  A non-floating field named in
+      as `solver="ift"` always iterated.  Such a leaf is computed by every
+      pass and is never relaxed.  A non-floating field named in
       `accelerated_fields` is dropped from the selection, and `compile()`
       refuses a selection that names no floating field.  A group whose
       state is all floating flattens exactly as before, and its floating
-      fields step bit-identically.
+      fields step bit-identically.  This entry used to add that such a
+      leaf "is recomputed from the pre-step state on every pass, so its
+      first-pass value is already the converged one".  That holds only for
+      a leaf computed from the pre-step state alone (a step counter); a
+      flag computed from a boundary input changes with the iterate, and
+      `solver="ift"`, which restored every non-floating field from the
+      first pass on that premise, returned it stale and froze it inside
+      the loop (MADD-ANO-063).  Both solvers now return a group's
+      non-floating fields as the pass computes them at the returned
+      floating state.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -5463,10 +5509,10 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      None known.  A field declared integer but meant to be relaxed would
-      now be left at its first-pass value; relaxation of such a field was
-      never meaningful, and the state it takes is the one
-      `acceleration="none"` gives.
+      None known.  A field declared integer but meant to be relaxed is now
+      computed by the pass at the returned floating state instead;
+      relaxation of such a field was never meaningful, and the state it
+      takes is the one `acceleration="none"` gives.
     verification:
       - "tests/core/test_coupling_non_float_leaves.py::test_wide_integer_leaves_survive_a_coupled_step"
       - "tests/core/test_coupling_non_float_leaves.py::test_an_integer_field_named_in_accelerated_fields_is_left_out"
@@ -5647,4 +5693,314 @@ anomalies:
       - "tests/nodes/test_heat_constructor_validation.py::test_a_diffusivity_that_is_negative_or_not_finite_is_refused"
       - "tests/nodes/test_heat_constructor_validation.py::test_grid_points_out_of_order_are_refused"
       - "tests/nodes/test_heat_constructor_validation.py::test_grid_points_that_are_not_finite_are_refused"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-063"
+    title: "solver=\"ift\" held a coupling group's non-floating fields at their first-pass values: a flag reading the iterate came back stale, and one read across an edge froze the map"
+    description: >
+      A node may compute an integer or boolean field from a boundary input
+      -- a contact flag reading a gap -- and such a field changes with the
+      coupling iterate.  During 0.4.0 development `solver="ift"` came to
+      keep only floating fields in its fixed-point vector (so integer
+      leaves no longer travelled through float32) and restored every other
+      field from the first pass, on the premise, stated in MADD-ANO-059's
+      resolution and in `_floating_accel_fields`, that such a field "is
+      recomputed from the pre-step state on every pass, so its first-pass
+      value is already the converged one".  That holds for a step counter
+      and not for a flag.  Two silent consequences, both found by the
+      coupling differential harness and measured on the development tree
+      (CPU, jaxlib 0.11.0):
+        - the returned flag described the first pass's input.  `a: x =
+          -0.5 u - 0.1`, `b: x = u`, `b` starting at +1 and `a` holding
+          `sign = u > 0`: `"ift"` returned `sign=True` beside `x = -1/15`,
+          where `"fori"`, which recomputes it every pass, returned False;
+        - a non-floating field carried by a group-internal edge stayed at
+          its first-pass value inside the loop, so a reader that takes it
+          from the iterate -- under `iteration_mode="jacobi"`, or scheduled
+          before its producer -- iterated a map the graph does not define.
+          `a` holding `open = u < 0.5` and `b: x = u + 0.2 open`, `b`
+          starting at +1: the only consistent fixed point has the gate
+          open (`x_b = 1/15`); `"ift"` under Jacobi returned `x_b = -1/15`
+          with `converged=True`, the fixed point of the map with the gate
+          held shut.
+      `solver="fori"` with an acceleration had a milder form of the first:
+      it took a group's non-floating fields from the raw pass that preceded
+      the returned iterate, which under a relaxation or a quasi-Newton step
+      is not that iterate's pass (an IQN group returned the stale flag on
+      its first step).  v0.3.0 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0) return the consistent flag and fixed point on both
+      reproducers under both solvers, with an `int32` flag (a `bool` field
+      in a coupled group raised `TypeError` there); v0.1.0 to v0.2.1 have
+      no `"ift"` solver.  No tagged release carried the defect.
+      Resolved in 0.4.0: both solvers return a group's non-floating fields
+      as the pass computes them at the returned floating state (one more
+      evaluation of the pass, of which XLA keeps only the arithmetic those
+      fields need, its floating inputs behind `stop_gradient`), and
+      `"ift"` evaluates a non-floating field an internal edge carries at
+      the iterate on every pass.  An all-floating group compiles to the
+      program it always did.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong: a returned flag contradicted the returned state, and
+      a group whose internal edge carries a flag converged, with
+      converged=True, to the fixed point of a different map.  Graded
+      `major` under the 0.4.0 definition (a silent wrong result is never
+      `minor`).  Not `critical`: it needs a non-floating field that depends
+      on the iterate, and the edge form also needs the reader to take it
+      from the iterate.  `context_dependent` because whether a stale flag
+      or a different branch's fixed point matters is a property of the
+      model.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.solver"
+      - "maddening.core.graph_manager.GraphManager.step"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: use solver="fori" without an acceleration, or carry the flag
+      as a float field.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A map that switches on a flag has a fixed point only where the flag
+      is consistent; where none exists (the flag flips on every pass) the
+      group reaches the cap with converged=False, as before.  Under "ift"
+      an edge-carried flag is evaluated at the iterate itself rather than
+      one pass behind it as under "fori", so the two solvers can take a
+      different number of passes to the same fixed point.  The IFT
+      derivative treats a flag as locally constant (zero derivative), as
+      the unrolled fori loop does.  A group with non-floating fields pays
+      one more pass per step, and one with an edge-carried one a second
+      per iteration, less whatever XLA eliminates.
+    verification:
+      - "tests/property/test_differential_coupling_solvers.py::test_a_flag_reading_a_coupled_input_agrees_between_the_solvers"
+      - "tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_an_iterate_dependent_flag_is_the_one_the_returned_state_computes"
+      - "tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_a_flag_read_across_an_internal_edge_iterates_with_the_solve"
+      - "tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_the_ift_gradient_is_the_fixed_points_with_the_leaves_present"
+      - "tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_the_ift_gradient_through_a_flag_edge_is_the_open_branchs"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-064"
+    title: "A coupling group in which a flux producer reads a flux failed with a bare KeyError under iteration_mode=\"jacobi\""
+    description: >
+      A flux edge carries a value `compute_boundary_fluxes` returns, not a
+      state field, and a coupling pass computes each producer's flux from
+      the previous iterate before it updates anything.  The Jacobi pass
+      resolved each producer's own inputs strictly and with no flux
+      dictionary, so a producer whose input is a flux edge -- two slabs
+      exchanging boundary fluxes, or one producer reading another's flux
+      one way -- raised `KeyError` naming the flux inside the traced step.
+      Measured at v0.1.0 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0): two relays with `q = 2 x` fluxes, `g0.q -> g1` and
+      `g1.q -> g0` (or `g1.x -> g0`), raised `KeyError: 'q'` under Jacobi;
+      Gauss-Seidel raised it on the mutual pair too.  During 0.4.0
+      development the Gauss-Seidel pass gained a two-sweep seed (the first
+      sweep tolerating a missing flux), and the Jacobi pass did not; the
+      coupling differential harness found it.
+      Resolved in 0.4.0: the Jacobi pass seeds producers' fluxes in two
+      sweeps exactly as the Gauss-Seidel pass does, wherever a producer in
+      the group reads a flux; a Jacobi group whose producers read only
+      state keeps its single sweep and its program.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the step raised before returning anything, so no wrong value
+      was reported.  The harm was a configuration the API accepted failing
+      with an error that named a field and no cause.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.iteration_mode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: couple flux producers that read each other's fluxes
+      under iteration_mode="gauss-seidel" (in 0.4.0 development builds;
+      neither mode stepped the mutual pair in a tagged release), or feed a
+      producer state fields rather than fluxes.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The seed is the Gauss-Seidel pass's: the second sweep reads the
+      first sweep's fluxes in schedule order, so a flux that depends on
+      another flux which depends on a third is seeded one sweep behind;
+      exact for fluxes that depend on state only, which is every flux the
+      built-in nodes compute, and the converged fixed point is the same.
+    verification:
+      - "tests/property/test_differential_leaves.py::test_two_flux_producers_exchanging_fluxes_step_under_jacobi"
+      - "tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point"
+      - "tests/core/test_coupling_jacobi_flux_seed.py::test_a_jacobi_pass_seeds_in_two_sweeps_only_where_a_producer_reads_a_flux"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-065"
+    title: "After jax.grad through run_scan, set_node_state wrote into the traced state and the next entry point discarded the write; reset_state raised on a predictor group"
+    description: >
+      `step()` / `run_scan()` assign their result into the graph, so a
+      loss that calls one leaves tracers in it when `jax.grad` returns.
+      Since early in 0.4.0 development every stepper puts the graph back
+      to its last untraced state first (`_recover_from_escaped_tracers`,
+      "called from every entry point"), and its warning names
+      `set_node_state` / `reset_state` / `load_state` as the remedy.  Six
+      entry points did not call it.  `set_node_state` wrote into the traced
+      state and the next `step()` put the graph back over it, so the run
+      continued from the state before the transform with no error: a
+      spring written to 0.25 stepped on from 1.0 (silent).  `reset_state`
+      sized a predictor group's history seed from the traced slot and
+      raised `UnexpectedTracerError`, so the remedy failed on any group
+      with `predictor` set.  `get_node_state` and
+      `resolve_boundary_inputs` raised `ConcretizationTypeError`;
+      `add_node` wrote into the traced state and the next step raised
+      `KeyError` on the new node; `remove_node` left the removed node's
+      state behind.  Measured on the 0.4.0 development tree (CPU, jaxlib
+      0.11.0).  No tagged release has the recovery, or a `params` argument
+      to differentiate `run_scan` through, so none carried the defect.
+      Resolved in 0.4.0: all six, and `validate`, put the graph back first;
+      `reset_state` does it without the warning, since it replaces the
+      whole state.  Inside a transform the call does nothing, so a traced
+      multi-step loop still works.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` for the set_node_state form: a state written after
+      differentiating was silently discarded and the simulation continued
+      from a different state.  The other five forms were loud.  Not
+      `critical`: it needs a write between a transform and the next entry
+      point, and only development builds carried it.  `context_dependent`
+      because whether the discarded state matters depends on the program.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.set_node_state"
+      - "maddening.core.graph_manager.GraphManager.reset_state"
+      - "maddening.core.graph_manager.GraphManager.get_node_state"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: call coupling_diagnostics() or step() once after
+      differentiating, before writing the state.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The recovery restores the state from before the transform, as the
+      steppers always did; a caller who wanted the traced final state must
+      take it from the transform's output.  Code outside GraphManager that
+      reads gm._state directly is not covered.
+    verification:
+      - "tests/property/test_differential_coupling_solvers.py::test_reset_state_after_differentiating_through_run_scan_restores_the_graph"
+      - "tests/core/test_escaped_tracer_recovery_at_every_entry_point.py::test_set_node_state_after_grad_survives_the_next_step"
+      - "tests/core/test_escaped_tracer_recovery_at_every_entry_point.py::test_reset_state_after_grad_resets_quietly"
+      - "tests/core/test_escaped_tracer_recovery_at_every_entry_point.py::test_add_node_after_grad_keeps_the_new_node"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-066"
+    title: "Under acceleration=\"fixed\" with relaxation below 1/(1+sqrt(rho)), a coupling group stopping on its first loop pass understated its distance about 2x and reported converged"
+    description: >
+      0.4.0's convergence criterion compares an estimate of the distance
+      to the fixed point, omega r / (1 - rho), with the threshold
+      (MADD-ANO-005).  Under acceleration="fixed" omega is the relaxation,
+      and the series is exact once rho is the relaxed iteration's rate
+      1 - omega (1 - rho_F).  But every loop starts with one plain,
+      unrelaxed pass, and the first loop pass took its ratio from that
+      pass's residual, so it read the map's own rate rho_F (as
+      sqrt(rho_F)) and scaled it by omega: omega r / (1 - sqrt(rho_F))
+      falls short of r / (1 - rho_F) whenever omega < 1 / (1 + sqrt(rho_F)).
+      Found by the coupling differential harness on the 0.4.0 development
+      tree (CPU, jaxlib 0.11.0): a two-node pair at rate 0.5, relaxation
+      0.3, started two thresholds from its fixed point, stopped after one
+      pass with ratio_usable=True, an error_estimate of 0.72 thresholds and
+      converged=True, 1.41 thresholds away, under both solvers.  The
+      estimate-based criterion is new in 0.4.0; no tagged release carried
+      the defect.
+      Resolved in 0.4.0: on its first loop pass only, an under-relaxed
+      "fixed" group translates the rate it read into the relaxed
+      iteration's -- the amplification is divided by the relaxation, which
+      makes the estimate r / (1 - sqrt(rho_F)), never below the distance on
+      one mode -- in both solvers' loops and in the reported amplification.
+      Over-relaxation and every other acceleration are untouched, and so
+      is their program.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong: converged=True about twice the threshold from the
+      fixed point, with ratio_usable=True, in the one regime the
+      documentation called exact.  Graded `major` (a silent wrong result is
+      never `minor`).  Not `critical`: only under-relaxed fixed groups that
+      stop on their first loop pass, by at most the factor
+      1 / (omega (1 + sqrt(rho))).  `context_dependent` for the same reason
+      as MADD-ANO-005.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup.relaxation"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: allow at least a second loop pass (relaxation >= 1 /
+      (1 + sqrt(rho)), or a tighter tolerance).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The first-pass estimate reads the rate through the sqrt guard's
+      single seed, so on one mode it is r / (1 - sqrt(rho)), conservative
+      by 1 + sqrt(rho); a group close enough still stops there, correctly.
+      Under-relaxed groups that used to stop on the first loop pass take
+      more passes.  The other conditions MADD-ANO-005 lists -- a rate read
+      off a mode that is not the slowest, a non-metric measure -- still
+      apply.
+    verification:
+      - "tests/property/test_differential_fixed_point.py::test_converged_on_the_first_pass_under_under_relaxation_is_within_the_threshold"
+      - "tests/core/test_coupling_first_pass_relaxed_rate.py::test_converged_is_within_the_threshold_under_under_relaxation"
+      - "tests/core/test_coupling_first_pass_relaxed_rate.py::test_both_solvers_stop_on_the_same_pass_and_report_the_same_verdict"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-067"
+    title: "The adaptive steppers' error norm read integer and boolean state leaves: a bool raised, a uint32 wrapped and a counter moved the step sequence"
+    description: >
+      `run_adaptive` and `run_adaptive_scan` estimate the local error by
+      step doubling, as the RMS over every element of
+      `|fine - coarse| / (atol + rtol max(|fine|, |coarse|))`, and
+      `_tree_error_norm` took it over every leaf of the user state.  A
+      `bool` cannot be subtracted, so a graph holding one raised
+      `TypeError` in both steppers.  A `uint32` difference wraps modulo
+      2**32, so an unread tag read as an error of order one: on a single
+      explicit-Euler node with a linear-congruential tag,
+      `run_adaptive(2.0, dt_initial=0.25, atol=rtol=1e-4, dt_min=1e-3)`
+      accepted 2001 steps at `dt_min`, each with its "hit dt_min" warning,
+      where the same node without the tag took 60, and
+      `run_adaptive_scan(2.0, max_steps=300)` stopped at t = 0.296 with no
+      warning.  An `int32` counter is `k + 2` after the two half steps and
+      `k + 1` after the full step by construction, so it added a term and
+      an element to the RMS: 50 accepted steps instead of 60 on that node,
+      and the state moved with them.  Measured at v0.1.0, v0.2.0, v0.2.1,
+      v0.3.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0) and
+      on the 0.4.0 development tree, where the coupling differential
+      harness found it on a two-node pair (199,981 rejections in 199,991
+      attempts with a tag; 77 accepted steps becoming 65 with a counter).
+      Resolved in 0.4.0: the norm reads floating (and complex) leaves only;
+      an integer, boolean or PRNG-key leaf adds neither a term nor an
+      element, so a graph steps exactly as it would without it, and an
+      all-floating state is measured exactly as before.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong for the integer forms: a counter changed the accepted
+      steps and so the trajectory, and a tag made run_adaptive_scan stop at
+      a fraction of t_end reporting only a smaller final_t.  Graded `major`
+      (a silent wrong result is never `minor`); the bool form was loud.
+      Not `critical`: run_adaptive warned on every step it accepted at
+      dt_min, and final_t told a reader of run_adaptive_scan where it
+      stopped.  `context_dependent` because whether the step sequence
+      matters depends on the program.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep integer, boolean and PRNG-key fields out of graphs
+      stepped adaptively (carry a counter as a float field), or step them
+      at a fixed dt.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  A floating field that is the same in both estimates
+      still counts as an element of the RMS, the convention adaptive ODE
+      solvers use, so an unread float field still dilutes the norm.
+    verification:
+      - "tests/property/test_differential_schedules.py::test_a_non_float_leaf_nothing_reads_does_not_change_the_adaptive_steps"
+      - "tests/property/test_differential_schedules.py::test_adaptive_stepping_runs_a_graph_with_a_boolean_leaf"
+      - "tests/core/test_adaptive_error_norm_reads_floating_leaves_only.py::test_a_non_floating_leaf_adds_neither_a_term_nor_an_element"
     github_issue: null

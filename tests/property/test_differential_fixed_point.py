@@ -218,6 +218,59 @@ def test_converged_means_within_the_threshold_on_generated_cycles(data):
 
 
 # ---------------------------------------------------------------------------
+# A characterised limitation: a rate float32 cannot tell from 1
+# ---------------------------------------------------------------------------
+
+#: ``(m, norm, threshold, seed, head start)``: one coupling mode at rate
+#: 0.995, started on the mode, each measured to stop with its ratio rejected
+#: 30 to 100 thresholds from the fixed point (jaxlib 0.11.0).
+_NOISE_REJECTED = [(2, "l2", 1e-5, 2, 100.0), (2, "l2", 1e-5, 0, 100.0),
+                   (3, "mixed", 1e-4, 2, 30.0), (2, "mixed", 1e-4, 2, 30.0)]
+
+
+def test_a_rate_float32_cannot_tell_from_one_falls_back_to_the_raw_residual_test():
+    """A *contracting* sequence's ratio can read ``>= 1``: then the raw test decides.
+
+    ``error_amplification`` rejects a ratio ``r_k / r_{k-1} >= 1``, and the
+    criterion falls back to the raw residual test with
+    ``ratio_usable=False`` -- documented, and meant for a sequence that is
+    not contracting.  But each residual carries about ``floor`` of float32
+    rounding, so the ratio carries about ``2 floor / r``: at rate 0.995 it
+    is noise once the residual is within ~400 floors of its floor, and a
+    monotone single-mode contraction reads ``>= 1`` often.  The group then
+    reports ``converged=True`` on the raw residual, here 30-100 thresholds
+    from its fixed point (the estimate would have been ``r / (1 - 0.995)``,
+    200x the residual), and ``precision_limited`` -- which reads the
+    residual against its floor, not the ratio -- stays False.  This pins
+    the documented fallback on every case and the reach of the limitation
+    on at least one (MADD-ANO-005's residual risk); a criterion that stopped
+    treating such a rejection as a pass (see the anomaly) would fail the
+    second assertion, and the docs would change with it.
+    """
+    far = []
+    for m, norm, thr, seed, head in _NOISE_REJECTED:
+        group = dict(acceleration="none", max_iterations=60, convergence_norm=norm,
+                     diagnostics=True)
+        group.update({"tolerance": thr} if norm == "l2" else {"rtol": thr})
+        gdef, gm = _single_mode_graph(m, 1, False, _key(cg.live_knobs(group)))
+        values = cg.draw_values(np.random.default_rng(seed), gdef, 0.995, rank_one=True,
+                                nonnormal=bool(seed % 2))
+        pre = {nm: {"x": np.zeros(gdef.n)} for nm in gdef.group_nodes}
+        exact = cg.exact_fixed_point(gdef, values, pre, {}, dt=1.0)
+        start, lam = _start_on_the_mode(gdef, values, exact, group, head, 1.0)
+        assert 0.99 < lam < 1.0, "fixture premise: a monotone contraction near 1"
+        state, _m, _r = cg.trajectory(gm, gdef, start, 1)[0]
+        d = gm.coupling_diagnostics()[gdef.key]
+        dist = cg.group_distance(gm, gdef, group, state, exact)
+        if d["converged"] and not d["ratio_usable"]:
+            # The documented fallback, exactly: the raw residual decided.
+            assert d["error_estimate"] == d["residual"] <= _threshold(group)
+            if dist > 10 * _threshold(group) and not d["precision_limited"]:
+                far.append(dist / _threshold(group))
+    assert far, "no case stopped on a noise-rejected ratio far from its fixed point"
+
+
+# ---------------------------------------------------------------------------
 # A usable spectral bound bounds the true distance, whatever the spectrum
 # ---------------------------------------------------------------------------
 

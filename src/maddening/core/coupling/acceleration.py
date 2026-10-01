@@ -439,7 +439,13 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     always ``>= 1`` — when the estimate must be rejected: a
     non-decreasing residual (``rho >= 1``, so there is no contraction
     to extrapolate), a zero or non-finite predecessor, or a non-finite
-    current residual.  Callers fall back to the raw residual test and
+    current residual.  ``rho >= 1`` can also be float rounding on a
+    sequence that *is* contracting: each residual carries about its
+    float floor of rounding (:func:`residual_precision_floor`), so the
+    ratio carries about ``2 floor / residual``, and at a rate within
+    that of 1 noise alone rejects it (a rate of 0.995 is noise within
+    about 400 floors).  The fallback then decides on the raw residual,
+    far from the fixed point (MADD-ANO-005's residual risk).  Callers fall back to the raw residual test and
     report that they did; see
     ``GraphManager.coupling_diagnostics``' ``ratio_usable``.  Rejecting
     is deliberate: a trusted bad estimate is worse than an honest

@@ -454,7 +454,10 @@ What that means in practice:
   Both ends of the interpolation are end-of-step estimates, so
   "constant" and "linear" differ only by the in-pass change of a source
   scheduled *before* the sub-cycled node: nothing under Jacobi, nothing
-  for a source scheduled after it, and nothing at exact stationarity.
+  for a source scheduled after it, and nothing at exact stationarity --
+  up to float32 round-off, since the two modes compile to different
+  programs (on sub-cycled two-node Jacobi groups, 130 of 144 node-steps
+  bit-identical and the rest within 1.8e-07 relative, two ulps).
   On the pair at timesteps 0.001 / 0.005 with the fast node scheduled
   first, the three modes are bit-identical over 100 macro-steps, and
   4.458e-02 from a uniform-rate reference in every mode, at v0.1.0,

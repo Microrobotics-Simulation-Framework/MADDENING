@@ -1246,7 +1246,12 @@ def _fixed_point_while(
        quasi-Newton step, which is not a multiple of ``F(x) - x``.
     4. *A non-monotone ratio* — the one that is caught.  ``rho >= 1``,
        a zero predecessor or a non-finite residual reject the estimate
-       and ``ratio_usable`` records it.
+       and ``ratio_usable`` records it.  A rejection is not proof of a
+       non-monotone sequence: the ratio carries about
+       ``2 floor / r_k`` of float rounding, so a contraction at a rate
+       within that of 1 reads ``rho >= 1`` from noise, and the raw
+       residual test decides (measured up to 200 thresholds from the
+       fixed point at rate 0.995; MADD-ANO-005).
 
     ``ratio_usable`` therefore reports exactly condition 4 and nothing
     else: a usable *ratio*, not a valid *bound*.  That is why it is no
@@ -7293,6 +7298,19 @@ class GraphManager:
               ``max_iterations=1``, where there is no pair of residuals
               to take a ratio of.  The criterion then falls back to the
               raw residual test, which is what ``converged`` reports.
+              **``False`` does not mean the sequence stopped
+              contracting.**  Each residual carries about its float
+              floor of rounding, so the ratio carries about
+              ``2 floor / residual``, and a group contracting at a rate
+              near 1 reads ``rho >= 1`` from noise once its residual is
+              within about ``2 floor / (1 - rho)`` of the floor: a
+              monotone single-mode group at rate 0.995 stopped this way
+              up to 200 thresholds from its fixed point -- wherever its
+              raw residual already met the threshold -- with
+              ``precision_limited=False`` (which reads the residual
+              against its floor, not the ratio).  Read
+              ``ratio_usable=False`` beside ``converged=True`` as the
+              raw residual test and nothing more (MADD-ANO-005).
 
               *Renamed during 0.4.0's development* from
               ``"bound_valid"``, which asserted all four conditions while

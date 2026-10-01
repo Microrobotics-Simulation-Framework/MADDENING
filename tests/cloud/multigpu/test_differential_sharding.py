@@ -323,9 +323,10 @@ def test_gather_global_passes_a_listed_per_shard_integral_through_when_a_shard_h
 
 #: Two devices, two cells each, and no edge between the shards: the
 #: partition has no ghost cell.
+#: The subprocess inherits this process's environment, so it sees the
+#: devices the directory conftest arranged (the only place allowed to set
+#: them; ``test_conftest_device_policy.py``).
 _ZERO_GHOST_SCRIPT = textwrap.dedent("""
-    import os
-    os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
     import jax, jax.numpy as jnp, numpy as np
     from maddening.cloud.multigpu.device_mesh import create_device_mesh
     from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition

@@ -12,17 +12,18 @@ history, IQN-IMVJ warm starts, diagnostics).  Stated over:
   server's checkpoint root, crossed with the in-process calls;
 * generated multi-node graphs and the costly nodes, in the slow lane.
 
-Three paths are compared against the uninterrupted run for each split:
+For each split the checkpoint is loaded into a second graph of the same
+family -- newly built, or one that has already stepped past *k* -- whose
+parameter leaves have been moved first, so every slot and every leaf has
+to be overwritten by the checkpoint rather than merely kept.  Then:
 
-1. **fresh** -- the checkpoint loaded into a newly built graph;
-2. **ran ahead** -- loaded into a graph that has already stepped past *k*
-   (every slot must be overwritten, none merely kept);
-3. **reset** -- ``reset_state()`` after stepping is a freshly compiled
-   graph, ``_meta`` seeds included (the state a checkpoint of step 0 holds).
-
-The restored state is compared field for field *before* stepping, ``_meta``
-included, so a slot a checkpoint drops is caught even where it would not
-move the trajectory (a diagnostic counter).
+1. the restored state (``_meta`` included) and parameters equal the saved
+   ones field for field *before* stepping, so a slot a checkpoint drops is
+   caught even where it would not move the trajectory (a diagnostic
+   counter);
+2. ``N`` more steps equal the uninterrupted run;
+3. ``reset_state()`` gives the state of a freshly compiled graph, ``_meta``
+   seeds included (the state a checkpoint of step 0 holds).
 
 Tolerance: none.  ``run`` re-enters one compiled step, so a rollout split
 anywhere is bit-identical to an unsplit one.

@@ -7,8 +7,10 @@ what the running graph runs -- and when it answers 4xx, nothing may have been
 written.  Stated over **generated** writes to every cheap built-in node
 (``node_catalogue.KINDS``): valid values, values on and past their
 ``ParamSpec`` bounds, non-finite and oversized numbers, wrong types, unknown
-keys, initial conditions, structural constructor arguments and
-cross-parameter pairs.
+keys, initial conditions, structural constructor arguments, cross-parameter
+pairs, and a valid key beside a refused one -- sometimes on a graph whose
+``gm.params`` a calibration has already moved away from the constructor's
+values.
 
 The oracle, for every write:
 

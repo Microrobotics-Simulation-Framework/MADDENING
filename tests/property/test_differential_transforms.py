@@ -430,8 +430,6 @@ def test_transforms_agree_on_generated_graphs(data):
     group = data.draw(cg.group_configs(gdef, caps=(1, 2, 5, 12)))
     group = dict(group, solver=data.draw(st.sampled_from(["ift", "fori"])),
                  diagnostics=data.draw(st.booleans()))
-    group = cg.steer_around_known_crashes(gdef, group)
-    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
     note(f"{gdef}\n{group}")
     gm = cg.build_graph(gdef, group)
     values = data.draw(cg.drawn_values(gdef, rhos=(0.3, 0.9, 0.99)))

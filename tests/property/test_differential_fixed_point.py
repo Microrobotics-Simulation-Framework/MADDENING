@@ -139,12 +139,6 @@ def assert_converged_means_within_threshold(gdef, gm, group, values, head_start,
          f"{dict(d)}")
     if not d["converged"] or d["precision_limited"]:
         return
-    if (omega * (1.0 + abs(lam) ** 0.5) < 1.0 and d["iterations"] == 1):
-        # The strict xfail at the end of this module: an exit on the first
-        # loop pass under this much under-relaxation reads the unrelaxed
-        # pass's rate.  Stepped around here so the property stays about
-        # everything else; the xfail must flip when it is fixed.
-        return
     if not d["ratio_usable"]:
         # Documented: a rejected ratio degrades ``converged`` to the raw
         # residual test, and says so.  That fallback is held below, not
@@ -221,6 +215,61 @@ def test_converged_means_within_the_threshold_on_generated_cycles(data):
     assert_converged_means_within_threshold(
         gdef, gm, group, values, data.draw(st.sampled_from(_HEAD_STARTS)),
         data.draw(st.sampled_from([1.0, -1.0])))
+
+
+# ---------------------------------------------------------------------------
+# A characterised limitation: a rate float32 cannot tell from 1
+# ---------------------------------------------------------------------------
+
+#: ``(m, norm, threshold, seed, head start)``: one coupling mode at rate
+#: 0.995, started on the mode 100 thresholds out, each measured to stop on a
+#: noise-rejected ratio 99.5-99.7 thresholds from the fixed point on jaxlib
+#: 0.10.2, 0.11.0 and 0.11.2 (so did every seed 0-5 tried, and the same
+#: graph under the mixed norm at 22-30 thresholds).  One graph, one compile.
+_NOISE_REJECTED = [(2, "l2", 1e-5, 0, 100.0), (2, "l2", 1e-5, 2, 100.0),
+                   (2, "l2", 1e-5, 3, 100.0)]
+
+
+def test_a_rate_float32_cannot_tell_from_one_falls_back_to_the_raw_residual_test():
+    """A *contracting* sequence's ratio can read ``>= 1``: then the raw test decides.
+
+    ``error_amplification`` rejects a ratio ``r_k / r_{k-1} >= 1``, and the
+    criterion falls back to the raw residual test with
+    ``ratio_usable=False`` -- documented, and meant for a sequence that is
+    not contracting.  But each residual carries about ``floor`` of float32
+    rounding, so the ratio carries about ``2 floor / r``: at rate 0.995 it
+    is noise once the residual is within ~400 floors of its floor, and a
+    monotone single-mode contraction reads ``>= 1`` often.  The group then
+    reports ``converged=True`` on the raw residual, here about 100 thresholds
+    from its fixed point (the estimate would have been ``r / (1 - 0.995)``,
+    200x the residual), and ``precision_limited`` -- which reads the
+    residual against its floor, not the ratio -- stays False.  This pins
+    the documented fallback on every case and the reach of the limitation
+    on at least one (MADD-ANO-005's residual risk); a criterion that stopped
+    treating such a rejection as a pass (see the anomaly) would fail the
+    second assertion, and the docs would change with it.
+    """
+    far = []
+    for m, norm, thr, seed, head in _NOISE_REJECTED:
+        group = dict(acceleration="none", max_iterations=60, convergence_norm=norm,
+                     diagnostics=True)
+        group.update({"tolerance": thr} if norm == "l2" else {"rtol": thr})
+        gdef, gm = _single_mode_graph(m, 1, False, _key(cg.live_knobs(group)))
+        values = cg.draw_values(np.random.default_rng(seed), gdef, 0.995, rank_one=True,
+                                nonnormal=bool(seed % 2))
+        pre = {nm: {"x": np.zeros(gdef.n)} for nm in gdef.group_nodes}
+        exact = cg.exact_fixed_point(gdef, values, pre, {}, dt=1.0)
+        start, lam = _start_on_the_mode(gdef, values, exact, group, head, 1.0)
+        assert 0.99 < lam < 1.0, "fixture premise: a monotone contraction near 1"
+        state, _m, _r = cg.trajectory(gm, gdef, start, 1)[0]
+        d = gm.coupling_diagnostics()[gdef.key]
+        dist = cg.group_distance(gm, gdef, group, state, exact)
+        if d["converged"] and not d["ratio_usable"]:
+            # The documented fallback, exactly: the raw residual decided.
+            assert d["error_estimate"] == d["residual"] <= _threshold(group)
+            if dist > 10 * _threshold(group) and not d["precision_limited"]:
+                far.append(dist / _threshold(group))
+    assert far, "no case stopped on a noise-rejected ratio far from its fixed point"
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +372,6 @@ def test_a_usable_spectral_bound_holds_on_generated_graphs(data):
     gdef = data.draw(cg.graph_defs(allow_nonlinear=False, leaves=()))
     group = data.draw(cg.group_configs(gdef, predictors=("none",), caps=(2, 5, 30, 200),
                                        thresholds=(1e-6, 1e-4, 1e-2)))
-    group = cg.steer_around_known_crashes(gdef, group)
     note(f"{gdef}\n{group}")
     gm = cg.build_graph(gdef, dict(group, diagnostics=True))
     values = data.draw(cg.drawn_values(gdef, rhos=(0.5, 0.9, 0.99, 0.999)))
@@ -378,10 +426,6 @@ def test_the_estimate_is_the_distance_for_fixed_relaxation_past_the_first_pass(s
     assert d["error_estimate"] == pytest.approx(dist, rel=1e-2)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "differential: under acceleration='fixed' with relaxation < 1/(1+sqrt(rho)), "
-    "an exit on the first loop pass scales the unrelaxed pre-loop pass's rate by "
-    "omega, understating the distance ~2x with converged=True; pending fix"))
 @pytest.mark.parametrize("solver", ["ift", "fori"])
 def test_converged_on_the_first_pass_under_under_relaxation_is_within_the_threshold(solver):
     """Converged => within the threshold, in the regime the docs call exact.
@@ -394,14 +438,25 @@ def test_converged_on_the_first_pass_under_under_relaxation_is_within_the_thresh
     the *unrelaxed* pass ``_run_coupling_inner`` ran before the loop --
     so on that pass the rate read is ``rho`` (as ``sqrt(rho)``, the seed
     filling both slots), not ``mu``, and ``omega r / (1 - sqrt(rho))``
-    falls short of ``r / (1 - rho)`` whenever ``omega < 1 / (1 + sqrt(rho))``.
-    Here (``rho = 0.5``, ``omega = 0.3``, two thresholds away): one pass,
-    ``ratio_usable=True``, ``error_estimate`` 0.72 thresholds,
-    ``converged=True`` -- and the state is 1.41 thresholds from the fixed
-    point.  Both solvers seed the same way (``first_r`` on the fori path).
+    fell short of ``r / (1 - rho)`` whenever ``omega < 1 / (1 + sqrt(rho))``.
+    Here (``rho = 0.5``, ``omega = 0.3``, two thresholds away) the group
+    stopped on that pass with ``ratio_usable=True``, ``error_estimate``
+    0.72 thresholds and ``converged=True``, 1.41 thresholds from the
+    fixed point.  The first pass now reads the relaxed rate the ratio
+    implies (``first_pass_relaxed_amplification``), the estimate there is
+    ``r / (1 - sqrt(rho))`` = 2.4 thresholds, and the group goes on to a
+    later pass where the estimate is the distance.  A first-pass exit
+    closer in, and the neighbouring relaxations:
+    ``tests/core/test_coupling_first_pass_relaxed_rate.py``.
     """
     d, dist = _relaxed_pair(solver, 0.3, 2.0e-4)
-    assert d["iterations"] == 1 and d["ratio_usable"]
-    assert not d["converged"] or dist <= 1e-4, (
-        f"converged=True on the first pass at {dist / 1e-4:.2f} thresholds "
-        f"(error_estimate {d['error_estimate'] / 1e-4:.2f})")
+    assert d["ratio_usable"] and d["converged"]
+    assert d["iterations"] > 1, "the first pass's estimate (2.4 thresholds) let it stop"
+    assert dist <= 1e-4, (
+        f"converged=True at {dist / 1e-4:.2f} thresholds "
+        f"(error_estimate {d['error_estimate'] / 1e-4:.2f}, {d['iterations']} passes)")
+    # Past the first pass the estimate is the distance, to its own float32
+    # resolution (``floor * amp + 2 omega floor amp**2``; the module docstring).
+    floor = residual_noise_floor("l2", 1e-6, 2)
+    amp = d["amplification"]
+    assert abs(d["error_estimate"] - dist) <= floor * amp + 2 * 0.3 * floor * amp ** 2

@@ -208,13 +208,6 @@ def test_the_two_solvers_return_the_same_steps_on_generated_graphs(data):
     """
     gdef = data.draw(cg.graph_defs())
     group = data.draw(cg.group_configs(gdef))
-    # A Jacobi group whose flux consumer is itself a flux producer, and a
-    # predictor under the mixed norm with an integer leaf in the group,
-    # both raise at trace (see the strict xfails in
-    # test_differential_leaves.py); the oracle is about the solvers, so
-    # those two configurations are steered around rather than rejected.
-    group = cg.steer_around_known_crashes(gdef, group)
-    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
     values = data.draw(cg.drawn_values(gdef))
     note(f"{gdef}\n{group}")
     fori = cg.trajectory(cg.build_graph(gdef, dict(group, solver="fori", diagnostics=True)),
@@ -364,8 +357,7 @@ def test_diagnostics_leave_generated_graphs_bit_identical(data, solver):
     :func:`test_diagnostics_leave_gradients_through_run_scan_bit_identical`.
     """
     gdef = data.draw(cg.graph_defs())
-    group = cg.steer_around_known_crashes(gdef, data.draw(cg.group_configs(gdef)))
-    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
+    group = data.draw(cg.group_configs(gdef))
     values = data.draw(cg.drawn_values(gdef))
     note(f"{gdef}\n{group}")
     gm_off = cg.build_graph(gdef, dict(group, solver=solver, diagnostics=False))
@@ -423,23 +415,23 @@ def test_a_flag_reading_a_coupled_input_is_computed_from_the_returned_iterate_un
     assert bool(s["a"]["sign"]) is False
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "differential: solver='ift' returns a bool/int leaf computed from the "
-    "first pass's coupled inputs, not from the returned iterate's (fori "
-    "recomputes it every pass); pending fix"))
 def test_a_flag_reading_a_coupled_input_agrees_between_the_solvers():
     """fori == ift on a non-float leaf that depends on the iterate.
 
     ``_run_ift_forward`` keeps only floating fields in the fixed-point
-    vector and restores every other field from ``state_after_first``, the
-    output of the *first* pass, on the premise -- stated in MADD-ANO-059's
-    resolution and in ``_floating_accel_fields`` -- that such a leaf "is
-    recomputed from the pre-step state on every pass, so its first-pass
-    value is already the converged one".  Nothing in the node contract
-    makes that so: a flag or a counter may read a boundary input (a
-    contact flag reads a gap), and then the ift state carries a flag
-    computed from an iterate the solve has long left, beside float fields
-    at the fixed point.
+    vector.  It used to restore every other field from
+    ``state_after_first``, the output of the *first* pass, on the premise
+    -- stated in MADD-ANO-059's resolution and in
+    ``_floating_accel_fields`` -- that such a leaf "is recomputed from the
+    pre-step state on every pass, so its first-pass value is already the
+    converged one".  Nothing in the node contract makes that so: a flag
+    may read a boundary input (a contact flag reads a gap), and the ift
+    state carried a flag computed from an iterate the solve had long left
+    (``sign=True`` beside ``x = -1/15``).  The non-floating fields are now
+    recomputed from the returned floating ones by one more evaluation of
+    the pass.  Neighbouring cases (every acceleration, a predictor under
+    every norm, sub-cycling, the gradient):
+    ``tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py``.
     """
     s_fori, _ = _sign_pair("fori")
     s_ift, _ = _sign_pair("ift")
@@ -447,21 +439,18 @@ def test_a_flag_reading_a_coupled_input_agrees_between_the_solvers():
     assert bool(s_ift["a"]["sign"]) == bool(s_fori["a"]["sign"])
 
 
-@pytest.mark.xfail(strict=True, raises=jax.errors.UnexpectedTracerError, reason=(
-    "differential: reset_state() after jax.grad through run_scan reads the "
-    "escaped tracers in a predictor group's _meta instead of recovering "
-    "first like every other entry point; pending fix"))
 def test_reset_state_after_differentiating_through_run_scan_restores_the_graph():
     """The remedy the recovery warning names must itself work.
 
     ``_recover_from_escaped_tracers`` is "called from every entry point"
     and its warning tells the user to "set the state you want explicitly
     (set_node_state / reset_state / load_state) after differentiating".
-    ``reset_state`` does not call it, and ``_meta_reset_seeds`` reads the
+    ``reset_state`` did not call it, and ``_meta_reset_seeds`` read the
     live predictor history -- the traced final state -- to size the seed,
-    so the documented remedy raises ``UnexpectedTracerError`` on any group
-    with ``predictor`` set.  Without a predictor every seed is a
-    ``zeros_like`` and the reset happens to survive.
+    so the documented remedy raised ``UnexpectedTracerError`` on any group
+    with ``predictor`` set.  It now puts the graph back first, quietly.
+    The other entry points that missed the call:
+    ``tests/core/test_escaped_tracer_recovery_at_every_entry_point.py``.
     """
     gdef = cg._cycle(2, 1, outside=False, leaves=())
     gm = cg.build_graph(gdef, dict(predictor="linear", tolerance=1e-5))

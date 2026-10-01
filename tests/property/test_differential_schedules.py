@@ -204,7 +204,6 @@ def test_generated_multirate_graphs_step_like_their_schedule(data):
     group = data.draw(cg.group_configs(gdef, caps=(1, 2, 5, 12, 30)))
     group = dict(group, solver=data.draw(st.sampled_from(["ift", "fori"])),
                  diagnostics=data.draw(st.booleans()))
-    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
     note(f"group_dt={group_dt} sink_dt={sink_dt} {group}")
     gm = cg.build_graph(gdef, group)
     ref = cg.HandUnrolledMultirate(gdef, group, gm.schedule, base_dt=1.0)
@@ -317,7 +316,6 @@ def test_generated_subcycled_groups_step_like_their_reference(data):
     group = data.draw(cg.group_configs(gdef, caps=(1, 2, 5, 20)))
     group = dict(group, solver=data.draw(st.sampled_from(["ift", "fori"])),
                  diagnostics=True)
-    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
     note(f"m={m} d={d} fast={fast} {group}")
     gm = cg.build_graph(gdef, dict(group, subcycling=True, boundary_interpolation="constant"))
     ref = cg.build_graph(gdef, group, substep={fast: d})
@@ -422,19 +420,13 @@ _H = 0.25
 _N = 4
 
 
-#: Leaves the adaptive oracles leave out, pending the strict xfails at the
-#: end of this module: the adaptive error norm subtracts every leaf, so a
-#: ``bool`` raises and a ``uint32`` wraps -- an unread tag reads an error of
-#: order one even at ``atol=1e9`` and the "pinned" stepper rejects.
-_ADAPTIVE_DROP = ("flag", "tag")
-
 #: Rates for the explicit-Euler nodes: the coupling gain a pass sees is
 #: ``dt * G``, so at ``dt = 0.25`` these are rates of about 0.3 and 0.9.
 _ODE_RHOS = (1.2, 3.6)
 
 
 def _adaptive_structure(structure):
-    return cg.STRUCTURES[structure].as_ode(-1.0).without_leaves(_ADAPTIVE_DROP)
+    return cg.STRUCTURES[structure].as_ode(-1.0)
 
 
 @functools.lru_cache(maxsize=None)
@@ -621,10 +613,9 @@ def test_generated_adaptive_runs_replay_and_keep_their_clocks(data):
     """
     gdef = data.draw(cg.graph_defs(allow_flux=False))
     gdef = gdef.with_leaves(cg.LEAF_POOL, names=[nd.name for nd in gdef.nodes])
-    gdef = gdef.as_ode(-1.0).without_leaves(_ADAPTIVE_DROP)
+    gdef = gdef.as_ode(-1.0)
     group = data.draw(cg.group_configs(gdef, caps=(1, 2, 5, 20)))
     group = dict(group, solver=data.draw(st.sampled_from(["ift", "fori"])))
-    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
     note(f"{gdef}\n{group}")
     full = gdef.with_timesteps({nd.name: _H for nd in gdef.nodes})
     half = gdef.with_timesteps({nd.name: _H / 2 for nd in gdef.nodes})
@@ -670,33 +661,25 @@ def _leaf_graph(gdef):
 
 
 @pytest.mark.parametrize("scan", [False, True], ids=["run_adaptive", "run_adaptive_scan"])
-@pytest.mark.parametrize("leaf", [
-    pytest.param("count", marks=pytest.mark.xfail(strict=True, reason=(
-        "differential: the adaptive error norm counts an int32 leaf (a counter "
-        "nothing reads changes the RMS and so the accepted dt sequence); "
-        "pending fix"))),
-    pytest.param("tag", marks=pytest.mark.xfail(strict=True, reason=(
-        "differential: the adaptive error norm subtracts a uint32 leaf, which "
-        "wraps, so an unread tag dominates the error and the controller "
-        "rejects nearly every step; pending fix"))),
-])
+@pytest.mark.parametrize("leaf", ["count", "tag", "flag"])
 def test_a_non_float_leaf_nothing_reads_does_not_change_the_adaptive_steps(leaf, scan):
     """Adaptive stepping with and without an integer leaf no edge reads.
 
-    ``_tree_error_norm`` maps over every leaf of the user state and
-    computes ``|fine - coarse| / (atol + rtol max(|fine|, |coarse|))``,
+    ``_tree_error_norm`` mapped over every leaf of the user state and
+    computed ``|fine - coarse| / (atol + rtol max(|fine|, |coarse|))``,
     then the RMS over every element.  A counter is ``k + 2`` after two
     half steps and ``k + 1`` after one full step *by construction*, so an
-    ``int32`` counter adds a term and an element: from ``2**24 + 1`` the
-    term is small and the extra element dilutes the RMS (77 accepted steps
-    become 65, and the state moves 0.7%); a counter from ``0`` would be
+    ``int32`` counter added a term and an element: from ``2**24 + 1`` the
+    term is small and the extra element diluted the RMS (77 accepted steps
+    became 65, and the state moved 0.7%); a counter from ``0`` would be
     ``1 / (atol + rtol k)`` and dominate.  A ``uint32`` tag's ``fine -
-    coarse`` wraps modulo ``2**32`` (199,981 rejections in 199,991
-    attempts; ``run_adaptive_scan`` ends at ``t = 0.0019`` of ``2.0`` when
-    ``max_steps`` runs out).  A ``bool`` cannot be subtracted at all (the
-    next test).  A *float* field that is the same in both estimates would
-    also dilute the RMS -- that is the RMS convention every adaptive ODE
-    solver uses, and not what this checks.
+    coarse`` wrapped modulo ``2**32`` (199,981 rejections in 199,991
+    attempts; ``run_adaptive_scan`` ended at ``t = 0.0019`` of ``2.0``
+    when ``max_steps`` ran out).  A ``bool`` could not be subtracted at
+    all (the next test).  The norm now reads floating leaves only.  A
+    *float* field that is the same in both estimates still dilutes the
+    RMS -- that is the RMS convention every adaptive ODE solver uses, and
+    not what this checks.
     """
     base_n, base_steps = _adaptive_dt_history((), scan)
     n, steps = _adaptive_dt_history((leaf,), scan)
@@ -704,11 +687,11 @@ def test_a_non_float_leaf_nothing_reads_does_not_change_the_adaptive_steps(leaf,
     assert np.array_equal(np.asarray(steps), np.asarray(base_steps))
 
 
-@pytest.mark.xfail(strict=True, raises=TypeError, reason=(
-    "differential: run_adaptive / run_adaptive_scan raise TypeError on any "
-    "graph with a bool state leaf (the error norm subtracts it); pending fix"))
 @pytest.mark.parametrize("scan", [False, True], ids=["run_adaptive", "run_adaptive_scan"])
 def test_adaptive_stepping_runs_a_graph_with_a_boolean_leaf(scan):
-    """``step`` / ``run_scan`` run this graph; the adaptive steppers raise."""
+    """``step`` / ``run_scan`` run this graph, and so do the adaptive steppers.
+
+    They raised ``TypeError``: the error norm subtracted the ``bool``.
+    """
     n, _steps = _adaptive_dt_history(("flag",), scan)
     assert n > 0

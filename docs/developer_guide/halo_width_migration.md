@@ -61,6 +61,7 @@ doesn't affect you.
 
 Replace the property override with a {meth}`halo_width` method:
 
+<!-- snippet: no-run, reason: legacy: the form removed in v0.3.0; defining it raises MigrationError -->
 ```{code-block} python
 :caption: Before (v0.2.x; FutureWarning in v0.2, MigrationError in v0.3.0)
 class MyStencilNode(SimulationNode):
@@ -72,6 +73,7 @@ class MyStencilNode(SimulationNode):
         ...
 ```
 
+<!-- snippet: no-run, reason: fragment: a node class excerpt with its method bodies elided -->
 ```{code-block} python
 :caption: After (v0.3.0+)
 class MyStencilNode(SimulationNode):
@@ -88,6 +90,7 @@ class MyStencilNode(SimulationNode):
 
 Pointwise nodes (no spatial neighbour access) return the empty dict:
 
+<!-- snippet: no-run, reason: fragment: a node class excerpt -->
 ```{code-block} python
 class MyPointwiseNode(SimulationNode):
     def halo_width(self) -> dict[int, int]:
@@ -109,6 +112,7 @@ message — `err.api_name`, `err.affected_class`, `err.replacement`,
 `err.migration_guide`.  Tools can introspect these without grepping
 the message:
 
+<!-- snippet: no-run, reason: external: my_pkg.legacy_node stands for the reader's module -->
 ```{code-block} python
 import importlib, traceback
 from maddening.warnings import MigrationError

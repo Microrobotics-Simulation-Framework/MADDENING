@@ -106,6 +106,7 @@ a non-zero `halo_width()` entry on that axis (otherwise there's
 no neighbour slab to exchange with).  Both invariants are checked
 at `ShardedStencilNode.__init__` time:
 
+<!-- snippet: no-run, reason: fragment: mesh is a device mesh and _build_pipe_mask the reader's helper -->
 ```python
 sharded = ShardedStencilNode(
     WallBouncebackLBM("lbm", 0.001, nx=128, ny=64, nz=64, pipe_radius=20),
@@ -254,6 +255,7 @@ rows at the end of its block; `n_owned` (a traced int32 scalar, added
 in 0.4.0) is its own count.  A domain integral on that path masks the
 padding out:
 
+<!-- snippet: no-run, reason: fragment: lines inside update_padded -->
 ```python
 _, n_local_max = shard_info[0]
 owned = jnp.arange(n_local_max) < shard_info["n_local"]

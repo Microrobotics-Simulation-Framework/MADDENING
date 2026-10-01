@@ -92,6 +92,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v --tb=short
 
 When writing code that uses an optional dependency, wrap the import with a try/except that tells the user which extra to install:
 
+<!-- snippet: no-run, reason: fragment: two import-guard patterns, excerpted from a module and from __getattr__ -->
 ```python
 # Module-level guard (for modules dedicated to one dep)
 try:

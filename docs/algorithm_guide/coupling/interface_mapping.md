@@ -5,6 +5,7 @@ When two coupled nodes discretise their shared interface differently
 needs a **mapping** that turns a field on the source interface into a
 field on the target interface before the node consumes it.
 
+<!-- snippet: no-run, reason: fragment: an edge on a fluid-solid graph; gm and the point sets are the reader's -->
 ```python
 from maddening.core.coupling.mapping import rbf_mapping
 
@@ -18,6 +19,7 @@ conversion, sign), then `additive` accumulation, exactly as before.
 
 ## The `Mapping` protocol
 
+<!-- snippet: no-run, reason: fragment: a summary of the Mapping protocol in maddening.core.coupling.mapping, not its definition -->
 ```python
 class Mapping(Protocol):
     kind: str; mode: str
@@ -189,6 +191,7 @@ quietly would hide a precision loss you did not ask for — a well-known
 source of numerical bugs that are very hard to trace back to their cause
 — so the error names the dtype and the fix:
 
+<!-- snippet: no-run, reason: fragment: fluid_pts and solid_pts are the reader's point sets -->
 ```python
 mapping = rbf_mapping(np.asarray(fluid_pts, dtype=np.float64),
                       np.asarray(solid_pts, dtype=np.float64))
@@ -266,6 +269,7 @@ Tell the factory where its points came from with `source_ref=` /
 matrix, which is never inlined — save it yourself with `numpy.save` next
 to the config):
 
+<!-- snippet: no-run, reason: fragment: an edge on a fluid-solid graph the guide does not build -->
 ```python
 gm.add_edge("fluid", "solid", "traction", "force",
             mapping=rbf_mapping(fluid_pts, solid_pts, mode="conservative",

@@ -17,6 +17,7 @@ importer (FMPy, OpenModelica, ...)      Python process
 
 ## Building and packaging
 
+<!-- snippet: no-run, reason: fragment: gm is the reader's graph; it also needs a C compiler and opens a TCP port -->
 ```python
 from maddening.fmi import (
     FmuTcpBridge, MODEL_IDENTIFIER, build_fmu_binary, build_model_description, write_fmu,

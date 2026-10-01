@@ -23,6 +23,7 @@ reproducers ``r5_bridge_wedge.py``, ``r5c_bare_connect.py``,
 ``benchmarks/results/audit_040_final/params-io/``).
 """
 
+import logging
 import os
 import socket
 import struct
@@ -276,6 +277,221 @@ def test_stop_ends_a_worker_parked_on_a_live_connection(monkeypatch):
         assert not bridge._busy.locked()
     finally:
         holder.close()
+
+
+# ------------------------------------------- stop() joins every worker it can
+
+_LONG_JOIN = 60.0
+"""A join budget no test here reaches: ``stop()`` returns when its workers
+have, not when the budget runs out, so its return time shows whether it
+waited for them."""
+
+_STILL_WAITING = 1.0
+"""How long ``stop()`` must still be running for the tests below to count it
+as waiting on a worker.  Without that wait it returns once the serve
+thread's 0.2 s accept timeout has let that thread join -- well inside this
+on any machine that runs the rest of the suite."""
+
+
+def _stop_in_background(bridge):
+    """``stop()`` on a thread: ``(thread, returned)``."""
+    returned = threading.Event()
+
+    def run():
+        bridge.stop()
+        returned.set()
+
+    thread = threading.Thread(target=run, name="test-stop", daemon=True)
+    thread.start()
+    return thread, returned
+
+
+def _blocking_step(bridge):
+    """The sidecar's step, held until released: ``(entered, release)``.
+
+    It returns the state it was given, so nothing after the release compiles
+    or takes time: once released, the worker's request ends at once.
+    """
+    entered, release = threading.Event(), threading.Event()
+    cfg = bridge._sidecar._config
+
+    def blocking(state, ext, params=None):
+        entered.set()
+        assert release.wait(timeout=60.0), "the test never released the step"
+        return state
+
+    bridge._sidecar._config = cfg.__class__(**{**cfg.__dict__, "step_fn": blocking})
+    return entered, release
+
+
+def test_stop_waits_for_a_worker_that_is_inside_a_request(monkeypatch, caplog):
+    """``stop()`` joins the workers it shut down, not only the serve thread.
+
+    The worker here is inside a step when ``stop()`` begins, so shutting its
+    connection down does not end it; only the join makes ``stop()`` wait.
+    Without the join, ``stop()`` returned as soon as the serve thread had,
+    with the worker still running and a warning that it was.  (The parked
+    worker of :func:`test_stop_ends_a_worker_parked_on_a_live_connection`
+    could not show this: the shutdown ends its read at once, and it is gone
+    before the serve thread's accept timeout lets that thread join.)"""
+    monkeypatch.setattr(tcp_bridge, "_STOP_JOIN_TIMEOUT", _LONG_JOIN)
+    _, bridge = _bridge(_shared_graph())
+    entered, release = _blocking_step(bridge)
+    bridge.start()
+    client = socket.create_connection(_endpoint(bridge), timeout=30)
+    stopper = None
+    try:
+        client.settimeout(30)
+        send_message(client, {"op": "hello"})
+        assert recv_message(client)["ok"]
+        send_message(client, {"op": "step", "dt": 0.01})
+        assert entered.wait(timeout=30.0), "the step never started"
+        with bridge._live_lock:
+            [worker] = [w for w in bridge._live_workers if w.is_alive()]
+
+        caplog.set_level(logging.WARNING, logger=tcp_bridge.__name__)
+        stopper, returned = _stop_in_background(bridge)
+        assert not returned.wait(timeout=_STILL_WAITING), (
+            "stop() returned while its worker was still inside a request: it did "
+            "not wait for the worker")
+        assert worker.is_alive()
+        release.set()
+        assert returned.wait(timeout=30.0), "stop() did not return once the worker ended"
+        assert not worker.is_alive(), "stop() returned before its worker ended"
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
+            "every thread ended inside the budget; stop() has nothing to warn about")
+        assert not bridge._busy.locked()
+    finally:
+        release.set()
+        client.close()
+        if stopper is not None:
+            stopper.join(timeout=30.0)
+
+
+class _ListenerThatHoldsItsNextConnection:
+    """The bridge's listening socket, holding back the next accepted
+    connection until ``release`` is set.
+
+    That is the ordering ``stop()``'s second sweep exists for, made
+    deterministic: the serve thread has accepted a connection but has not
+    yet registered it when the first sweep runs.
+    """
+
+    def __init__(self, real, release):
+        self._real = real
+        self._release = release
+        self.accepted = threading.Event()
+
+    def accept(self):
+        conn, addr = self._real.accept()
+        self.accepted.set()
+        if not self._release.wait(timeout=60.0):
+            conn.close()
+            raise OSError("the test never released the accepted connection")
+        return conn, addr
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_stop_waits_for_a_worker_registered_after_its_first_sweep(monkeypatch):
+    """A connection the serve thread accepted just before the listening
+    socket closed registers after ``stop()``'s first sweep of the live
+    connections; the second sweep, after the serve thread has joined, is
+    what finds it -- shuts it down and hands its worker to the join.
+    Without the second sweep ``stop()`` returned with that worker still
+    running.  The worker is held on entry here so that it is still running
+    when ``stop()`` would otherwise return."""
+    monkeypatch.setattr(tcp_bridge, "_STOP_JOIN_TIMEOUT", _LONG_JOIN)
+    _, bridge = _bridge(_shared_graph())
+    release_accept = threading.Event()
+    listener = _ListenerThatHoldsItsNextConnection(bridge._server, release_accept)
+    bridge._server = listener
+
+    real_sweep = bridge._shut_down_live_connections
+    sweeps = []
+
+    def sweep():
+        found = real_sweep()
+        # A copy: stop() unions the second sweep into the set the first
+        # returned, so recording that object would show the late worker in
+        # the first sweep as soon as the second had run.
+        sweeps.append(frozenset(found))
+        release_accept.set()             # the accept completes after the first sweep
+        return found
+
+    monkeypatch.setattr(bridge, "_shut_down_live_connections", sweep)
+
+    real_inner = bridge._serve_conn_inner
+    late_worker, let_it_go = threading.Event(), threading.Event()
+
+    def held_on_entry(conn):
+        late_worker.set()
+        assert let_it_go.wait(timeout=60.0), "the test never released the worker"
+        real_inner(conn)
+
+    monkeypatch.setattr(bridge, "_serve_conn_inner", held_on_entry)
+    bridge.start()
+    client = socket.create_connection(_endpoint(bridge), timeout=30)
+    stopper = None
+    try:
+        client.settimeout(30)
+        assert listener.accepted.wait(timeout=30.0), "the bridge never accepted"
+        stopper, returned = _stop_in_background(bridge)
+        assert late_worker.wait(timeout=30.0), "the held connection never got a worker"
+        assert sweeps and sweeps[0] == set(), "the connection registered before the first sweep"
+        with bridge._live_lock:
+            [worker] = [w for w in bridge._live_workers if w.is_alive()]
+        assert not returned.wait(timeout=_STILL_WAITING), (
+            "stop() returned while a connection registered after its first sweep "
+            "still had a running worker")
+        assert len(sweeps) == 2 and sweeps[1] == {worker}
+        let_it_go.set()
+        assert returned.wait(timeout=30.0)
+        assert not worker.is_alive(), "stop() returned before the late worker ended"
+        assert client.recv(1) == b"", "the late connection was served, not closed"
+    finally:
+        release_accept.set()
+        let_it_go.set()
+        client.close()
+        if stopper is not None:
+            stopper.join(timeout=30.0)
+
+
+def test_a_worker_that_starts_after_stop_serves_nothing():
+    """A worker whose thread starts once ``stop()`` has begun closes its
+    connection without reading from it.
+
+    It is the case the second sweep's join waits for (above), taken on its
+    own: the worker is run directly, after ``stop()``, on a connection
+    whose peer has already sent a complete ``hello``.  A worker that read
+    it would answer, holding the instance slot of a bridge that no longer
+    serves, and the peer would see a reply instead of end-of-file.  The
+    check is made twice in ``_serve_conn_inner`` -- on entry and in the
+    read loop's condition, before any read -- so either one alone keeps
+    this test passing; it fails when neither is made."""
+    _, bridge = _bridge(_shared_graph())
+    bridge.stop()
+    served = bridge.requests_served
+    ours, peer = socket.socketpair()
+    with peer:
+        peer.settimeout(10.0)
+        send_message(peer, {"op": "hello"})
+        worker = threading.Thread(target=bridge._serve_conn, args=(ours,),
+                                  name="maddening-fmu-conn", daemon=True)
+        worker.start()
+        worker.join(timeout=10.0)
+        assert not worker.is_alive(), "the worker read on after stop()"
+        try:
+            got = peer.recv(1)
+        except ConnectionResetError:
+            # Closed with the hello still unread: the kernel resets the
+            # connection rather than ending it, which says the same thing.
+            got = b""
+        assert got == b"", "a worker started after stop() answered a request"
+    assert bridge.requests_served == served
+    assert not bridge._busy.locked()
+    assert not bridge._live_conns and not bridge._live_workers
 
 
 # ---------------------------------------------------------- frame deadline

@@ -25,21 +25,29 @@ three are the timing goals::
                  and adjoint, against a NumPy reference -- bit for bit.
                                                     -> halo.json
     coupled      checklist 6: one ``ShardedStencilNode`` member and one
-                 replicated member in a single coupling group; forward
-                 rollout and ``jax.grad`` with respect to trained
-                 parameters of both, under the default solver and
-                 ``"fori"``, against the same group with the sharded
-                 member replaced by the node it wraps.  -> coupled.json
+                 replicated member in a single coupling group, on the
+                 pencil mesh, coupled through the field's domain integral
+                 and a grid-shaped input; forward rollout and ``jax.grad``
+                 with respect to trained parameters of both, under the
+                 default solver and ``"fori"``, against the same group
+                 with the sharded member replaced by the node it wraps and
+                 against a float64 model.           -> coupled.json
     stencil      checklist 1 and 3 for ``ShardedStencilNode``: a 2-D field
-                 with a sharded ``StaticArray``, forward rollout and the
-                 adjoint (initial field and a parameter) against the
-                 unsharded node, with periodic ends at every size and, at
-                 the smallest, ``"edge"`` ends (the wrapper's default)
-                 and Dirichlet ends held through a boundary input.
+                 that reads its sharded ``StaticArray`` in the halo, takes
+                 a grid-shaped source and carries a domain integral, and a
+                 D2Q9 lattice with a grid-shaped body force (its streaming
+                 reads the halo corners); forward rollout and the adjoint
+                 (initial state and a parameter) against the unsharded
+                 node.  Periodic ends at every size on the pencil mesh;
+                 at the smallest, the field under periodic, ``"edge"``
+                 (the wrapper's default) and Dirichlet ends and the
+                 lattice, each on the 1-D and the pencil mesh.
                                                     -> stencil.json
     hybrid       checklist 4: ``HybridNode(ShardedStencilNode(inner))`` in
-                 a graph, with a non-local correction, forward and adjoint
-                 against ``HybridNode(inner)``.    -> hybrid.json
+                 a graph on the pencil mesh, with a non-local correction
+                 and a grid-shaped source, forward (the field and its
+                 domain integral) and adjoint against
+                 ``HybridNode(inner)``.             -> hybrid.json
     exchange     NCCL ranking of the two unstructured halo-exchange
                  transports, ``all_to_all`` vs ``ppermute``, at 1e5-1e6
                  cells -- the measurement that decides whether ``ppermute``
@@ -62,7 +70,14 @@ as ``CHECK FAILED``, and the runner exits 1 when any check failed.  A case
 the device count cannot express (the 2-D pencil mesh below 4 or on an odd
 count; a neighbour-direction swap on 2) is recorded as a check *not run*
 and printed as ``CHECK NOT RUN``: not a failure, but the goal does not
-read complete.  ``--summarise DIR`` reads the JSON files back and prints
+read complete; the stencil, hybrid and coupled goals record their
+pencil-mesh cases that way on such a count.  Each of those three must fail
+on a stencil wrapper broken in any of four ways (a static's halos NaN,
+grid-shaped inputs zeroed, domain integrals halved, sharded axes after the
+first zero-filled at the global edges):
+``tests/cloud/multigpu/test_run_pod_seeded_faults.py`` seeds each into a
+scratch copy of the library and requires it.  ``--summarise DIR`` reads
+the JSON files back and prints
 the checklist verdict, the per-goal tables and the ``ppermute`` vs
 ``all_to_all`` recommendation.  It re-derives every check's pass/fail from
 its value, limit and sense rather than trusting the recorded flag, and
@@ -93,7 +108,7 @@ is about the ranking only: it never lets a checklist item close.
 
 Sizes default to the hardware: on GPUs the cell counts are
 ``1e5, 3e5, 1e6``; on CPU (or with ``--dry-run``) they are a few hundred
-cells so the whole script proves itself in well under a minute.
+cells so the whole script proves itself in a minute or two.
 ``--dry-run`` additionally pins JAX to the CPU backend with four virtual
 host devices when no accelerator backend was requested, so::
 
@@ -118,6 +133,7 @@ partition must use exactly ``--n-devices`` non-empty parts.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 from collections import Counter
@@ -154,7 +170,7 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 METHODS = ("all_to_all", "ppermute")
 MESH_AXIS = "devices"
 GPU_CELLS = (100_000, 300_000, 1_000_000)
@@ -244,7 +260,7 @@ exchange_unstructured = gather_value = partition_value = None
 jacobi_preconditioner = sharded_cg = ShardedUnstructuredNode = None
 SimulationNode = StaticArray = NeighbourMeanNode = None
 ShardedStencilNode = ShardedPointwiseNode = halo_exchange = None
-GraphManager = HybridNode = Field2D = FarField = Pointwise2D = None
+GraphManager = HybridNode = Field2D = FarField = Pointwise2D = LBMNode = None
 
 
 def _load_backend() -> None:
@@ -255,7 +271,7 @@ def _load_backend() -> None:
     global jacobi_preconditioner, sharded_cg, ShardedUnstructuredNode
     global SimulationNode, StaticArray, NeighbourMeanNode
     global ShardedStencilNode, ShardedPointwiseNode, halo_exchange
-    global GraphManager, HybridNode, Field2D, FarField, Pointwise2D
+    global GraphManager, HybridNode, Field2D, FarField, Pointwise2D, LBMNode
     if jax is not None:
         return
     # Benchmarks share the GPU with nothing else; not preallocating keeps
@@ -281,6 +297,7 @@ def _load_backend() -> None:
     from maddening.core import params as _params
     from maddening.core import static_data as _sd
     from maddening.core.simulation import hybrid_node as _hn
+    from maddening.nodes import lbm as _lbm
 
     jax, jnp, lax, shard_map, P, NamedSharding = _jax, _jnp, _lax, _shard_map, _P, _NamedSharding
     create_device_mesh = _dm.create_device_mesh
@@ -297,6 +314,7 @@ def _load_backend() -> None:
     halo_exchange = _halo.halo_exchange
     GraphManager = _gm.GraphManager
     HybridNode = _hn.HybridNode
+    LBMNode = _lbm.LBMNode
     SimulationNode = _node.SimulationNode
     StaticArray = _sd.StaticArray
     NeighbourMeanNode = _make_node_class(SimulationNode, StaticArray, jnp)
@@ -637,13 +655,34 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
     """The nodes of the checklist goals (class factory: JAX is imported late)."""
 
     class Field2D(SimulationNode):
-        """A 2-D field solver: diffusion relaxing towards a far field.
+        """A 2-D field solver: variable-coefficient diffusion relaxing towards
+        an ambient field, with a source.
 
-        ``f <- f + dt * (diffusivity * mask * lap(f) + exchange * (ambient - f))``
-        with the 5-point Laplacian.  Axis 0 is the one a
-        ``ShardedStencilNode`` shards; the halo along axis 1 is filled on
-        each device.  ``mask`` is a ``StaticArray(replication="shard")``,
-        so every sharded run also exercises the per-device static path.
+        ``f <- f + dt * (diffusivity * div(k grad f) + exchange * (ambient - f)
+        + smooth(source))``, in flux form on the 5-point stencil.  Each part
+        of it is there to make one path of ``ShardedStencilNode`` carry a
+        value into the answer, so that a fault on that path moves the
+        result (the ``stencil``, ``hybrid`` and ``coupled`` goals, and the
+        seeded-fault test that runs them against a broken wrapper):
+
+        * the conductance ``k`` of a face is the mean of the ``mask`` of
+          the two cells it joins, so every step reads ``mask`` one cell
+          into its halo.  ``mask`` is a ``StaticArray(replication="shard")``
+          along axis 0: the wrapper halo-exchanges it along that axis
+          (periodically under ``"periodic"``, the edge cell repeated
+          otherwise), and the node fills axis 1 itself by the same rule,
+          taking its own columns out of the full-width static by
+          ``shard_info`` when axis 1 is sharded too (a pencil mesh);
+        * ``source``, a grid-shaped boundary input, is read through a
+          5-point smoothing, so its halo counts as well as its interior;
+        * ``ambient`` is a scalar or a grid-shaped boundary input;
+        * ``averages``, ``[mean f, mean f**2]`` of the new field, is a
+          declared domain integral carried in the state (the wrapper sums
+          the shards' partial sums across the mesh).  Its name sorts
+          before ``f``, as the wrapper's state dict is iterated in sorted
+          order inside ``shard_map``: the local extent in ``shard_info``
+          must come from the grid field, not from the integral.
+
         ``update`` pads the whole field itself, ``update_padded`` receives
         the wrapper's halos, and both then run the same arithmetic:
         sharded, the node is the unsharded node up to where XLA places the
@@ -654,8 +693,8 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         repeats the edge cell -- the wrapper's fill of the same name does
         it, sharded -- and ``"dirichlet"`` holds the boundary input
         ``wall`` there: the wrapper fills ``"edge"`` and ``update_padded``
-        overwrites the halos at the *global* edges, finding them along
-        the sharded axis from ``shard_info``.
+        overwrites the halos at the *global* edges, finding them on each
+        sharded axis from ``shard_info``.
         """
 
         def __init__(self, name: str, ny: int, nx: int, *, diffusivity: float = 0.2,
@@ -679,20 +718,32 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         def state_fields(self) -> list:
             return ["f"]
 
+        def domain_integral_fields(self) -> set:
+            return {"averages"}
+
         @property
         def static_data(self) -> dict:
             return self._static
+
+        def _averages(self, f):
+            """``[sum f, sum f**2] / n_cells`` of ``f`` -- this block's share of the
+            global means when ``f`` is one block."""
+            n = self._shape[0] * self._shape[1]
+            return jnp.stack([jnp.sum(f), jnp.sum(f * f)]) / n
 
         def initial_state(self) -> dict:
             ny, nx = self._shape
             y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float32)[:, None]
             x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :]
-            f = (1.0 + np.sin(2 * np.pi * y) * np.cos(4 * np.pi * x)
-                 + 0.25 * np.cos(6 * np.pi * (x + y)))
-            return {"f": jnp.asarray(f.astype(np.float32))}
+            f = jnp.asarray((1.0 + np.sin(2 * np.pi * y) * np.cos(4 * np.pi * x)
+                             + 0.25 * np.cos(6 * np.pi * (x + y))).astype(np.float32))
+            return {"f": f, "averages": self._averages(f)}
 
         def boundary_input_spec(self) -> dict:
-            spec = {"ambient": BoundaryInputSpec(shape=(), description="far-field value")}
+            spec = {"ambient": BoundaryInputSpec(shape=(), description="far-field value, "
+                                                 "a scalar or one per cell"),
+                    "source": BoundaryInputSpec(shape=self._shape,
+                                                description="per-cell source")}
             if self.boundary == "dirichlet":
                 spec["wall"] = BoundaryInputSpec(shape=(), description="value beyond the grid")
             return spec
@@ -702,46 +753,83 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
                     "diffusivity": ParamSpec(bounds=(0.0, None), transform="log"),
                     "exchange": ParamSpec(bounds=(0.0, None), transform="log")}
 
-        @staticmethod
-        def _new(f_pad, mask, ambient, p, dt):
-            f = f_pad[1:-1, 1:-1]
-            lap = (f_pad[:-2, 1:-1] + f_pad[2:, 1:-1] + f_pad[1:-1, :-2]
-                   + f_pad[1:-1, 2:] - 4.0 * f)
-            return f + dt * (p["diffusivity"] * mask * lap + p["exchange"] * (ambient - f))
+        @property
+        def _pad_mode(self) -> str:
+            """How ``update`` fills the halo of the field and of a grid-shaped
+            input: as the wrapper's fill does (``"edge"`` under Dirichlet)."""
+            return {"periodic": "wrap", "edge": "edge", "dirichlet": "edge"}[self.boundary]
+
+        @property
+        def _static_mode(self) -> str:
+            """How a sharded static's halo is filled: the wrapper's rule."""
+            return "wrap" if self.boundary == "periodic" else "edge"
 
         @staticmethod
-        def _hold_walls(f_pad, wall, first, last):
-            """Dirichlet halos: rows beyond the global edge of axis 0 (``first``
-            / ``last``: this block holds that edge) and both columns of
-            axis 1, which is whole on every device here."""
-            f_pad = f_pad.at[0, :].set(jnp.where(first, wall, f_pad[0, :]))
-            f_pad = f_pad.at[-1, :].set(jnp.where(last, wall, f_pad[-1, :]))
-            return f_pad.at[:, 0].set(wall).at[:, -1].set(wall)
+        def _new(f_pad, mask_pad, ambient, source_pad, p, dt):
+            f = f_pad[1:-1, 1:-1]
+            m = mask_pad[1:-1, 1:-1]
+            div = sum(0.5 * (m + mask_pad[sl]) * (f_pad[sl] - f)
+                      for sl in ((slice(None, -2), slice(1, -1)), (slice(2, None), slice(1, -1)),
+                                 (slice(1, -1), slice(None, -2)), (slice(1, -1), slice(2, None))))
+            out = f + dt * (p["diffusivity"] * div + p["exchange"] * (ambient - f))
+            if source_pad is not None:
+                s = (0.5 * source_pad[1:-1, 1:-1]
+                     + 0.125 * (source_pad[:-2, 1:-1] + source_pad[2:, 1:-1]
+                                + source_pad[1:-1, :-2] + source_pad[1:-1, 2:]))
+                out = out + dt * s
+            return out
+
+        def _hold_walls(self, f_pad, wall, shard_info):
+            """Dirichlet halos: the rows and columns beyond a *global* edge.
+            A block holds an edge of a sharded axis when ``shard_info`` puts
+            it there; an axis not in ``shard_info`` is whole on the block."""
+            info = shard_info or {}
+            held = []
+            for axis in (0, 1):
+                local = f_pad.shape[axis] - 2
+                offset, extent = info.get(axis, (0, local))
+                held.append((offset == 0, offset + extent == self._shape[axis]))
+            (top, bottom), (left, right) = held
+            f_pad = f_pad.at[0, :].set(jnp.where(top, wall, f_pad[0, :]))
+            f_pad = f_pad.at[-1, :].set(jnp.where(bottom, wall, f_pad[-1, :]))
+            f_pad = f_pad.at[:, 0].set(jnp.where(left, wall, f_pad[:, 0]))
+            return f_pad.at[:, -1].set(jnp.where(right, wall, f_pad[:, -1]))
 
         def update(self, state, boundary_inputs, dt, *, params=None):
             p = self.params if params is None else {**self.params, **params}
             ambient = jnp.asarray(boundary_inputs.get("ambient", 0.0), jnp.float32)
-            mode = {"periodic": "wrap", "edge": "edge", "dirichlet": "edge"}[self.boundary]
-            f_pad = jnp.pad(state["f"], 1, mode=mode)
+            source = boundary_inputs.get("source")
+            source_pad = None if source is None else jnp.pad(
+                jnp.asarray(source, jnp.float32), 1, mode=self._pad_mode)
+            f_pad = jnp.pad(state["f"], 1, mode=self._pad_mode)
             if self.boundary == "dirichlet":
                 wall = jnp.asarray(boundary_inputs.get("wall", 0.0), jnp.float32)
-                f_pad = self._hold_walls(f_pad, wall, True, True)
-            mask = jnp.asarray(self._static["mask"].value)
-            return {"f": self._new(f_pad, mask, ambient, p, dt)}
+                f_pad = self._hold_walls(f_pad, wall, None)
+            mask_pad = jnp.pad(jnp.asarray(self._static["mask"].value), 1,
+                               mode=self._static_mode)
+            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
+            return {"f": new, "averages": self._averages(new)}
 
         def update_padded(self, state_padded, boundary_inputs, dt, *, static_padded=None,
                           shard_info=None, params=None):
             p = self.params if params is None else {**self.params, **params}
             ambient = jnp.asarray(boundary_inputs.get("ambient", 0.0), jnp.float32)
+            if ambient.ndim == 2:                  # grid-shaped: arrives halo-padded
+                ambient = ambient[1:-1, 1:-1]
+            source_pad = boundary_inputs.get("source")
             f_pad = state_padded["f"]
             if self.boundary == "dirichlet":
                 wall = jnp.asarray(boundary_inputs.get("wall", 0.0), jnp.float32)
-                offset, extent = (shard_info or {}).get(0, (0, f_pad.shape[0] - 2))
-                f_pad = self._hold_walls(f_pad, wall, offset == 0,
-                                         offset + extent == self._shape[0])
-            # The static is halo-exchanged along the sharded axis only.
-            mask = static_padded["mask"][1:-1]
-            return {"f": f_pad.at[1:-1, 1:-1].set(self._new(f_pad, mask, ambient, p, dt))}
+                f_pad = self._hold_walls(f_pad, wall, shard_info)
+            # The wrapper halo-exchanges the static along axis 0 only; it is
+            # whole along axis 1 on every device, so fill that axis here and
+            # take this block's columns (all of them unless axis 1 is sharded).
+            mask_pad = jnp.pad(static_padded["mask"], ((0, 0), (1, 1)), mode=self._static_mode)
+            width = f_pad.shape[1]
+            offset = (shard_info or {}).get(1, (0, width - 2))[0]
+            mask_pad = lax.dynamic_slice_in_dim(mask_pad, offset, width, axis=1)
+            new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
+            return {"f": f_pad.at[1:-1, 1:-1].set(new), "averages": self._averages(new)}
 
     class FarField(SimulationNode):
         """A replicated scalar solver: ``u <- u + dt * conductance * (field_mean - u)``."""
@@ -989,9 +1077,48 @@ def _is_partitioned(arr, n_devices: int) -> bool:
 
 
 def field_shape(cells: int, n_devices: int) -> tuple:
-    """``(ny, nx)`` of about ``cells`` cells, ``ny`` a multiple of the devices."""
+    """``(ny, nx)`` of about ``cells`` cells, both a multiple of the devices,
+    so that one shape splits on the 1-D mesh (``ny``) and on the
+    ``2 x (D/2)`` pencil mesh (``ny`` and ``nx``) alike."""
     side = max(int(round(math.sqrt(cells))), 2 * n_devices)
-    return -(-side // n_devices) * n_devices, side
+    up = -(-side // n_devices) * n_devices
+    return up, up
+
+
+#: The meshes the stencil wrapper runs on: the 1-D mesh shards axis 0 and
+#: fills axis 1 on each device; the ``2 x (D/2)`` pencil mesh shards both,
+#: so the wrapper exchanges two axes (and a node reading a corner reads one
+#: that crossed two).
+STENCIL_MESHES = ("1d", "2d")
+
+
+def stencil_mesh(label: str, n_devices: int) -> tuple:
+    """``(mesh, axis_map, mesh_shape)`` of mesh ``label`` over ``n_devices``."""
+    _load_backend()
+    if label == "1d":
+        return create_device_mesh(shape=(n_devices,)), {MESH_AXIS: 0}, (n_devices, 1)
+    if label == "2d":
+        if not _pencil_mesh_fits(n_devices):
+            raise ValueError(_pencil_mesh_needs(n_devices))
+        shape = (2, n_devices // 2)
+        return create_device_mesh(shape=shape), {"spatial_y": 0, "spatial_z": 1}, shape
+    raise ValueError(f"unknown mesh {label!r} (one of {STENCIL_MESHES})")
+
+
+def meshes_that_fit(n_devices: int) -> tuple:
+    """The ``STENCIL_MESHES`` this device count can build."""
+    return ("1d", "2d") if _pencil_mesh_fits(n_devices) else ("1d",)
+
+
+def graph_mesh(n_devices: int) -> str:
+    """The mesh the graph goals (``hybrid``, ``coupled``) run on: the pencil
+    mesh where it fits -- it is the one that exercises every exchange path
+    -- and the 1-D mesh otherwise, with the pencil recorded as not run."""
+    return meshes_that_fit(n_devices)[-1]
+
+
+def _mesh_shape_of(label: str, n_devices: int) -> tuple:
+    return (n_devices, 1) if label == "1d" else (2, n_devices // 2)
 
 
 def _host(tree):
@@ -1700,107 +1827,236 @@ def _loss_weight(ny: int, nx: int) -> np.ndarray:
     return (1.0 + 0.5 * np.cos(2 * np.pi * (x - 2 * y))).astype(np.float32)
 
 
-def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight, boundary_inputs):
+def _source_field(ny: int, nx: int) -> np.ndarray:
+    """The ``source`` the stencil goals feed ``Field2D``: smooth, of the
+    field's own size, and unlike the field (so it cannot hide in it)."""
+    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float32)[:, None]
+    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :]
+    return (0.5 * np.cos(2 * np.pi * (2 * x - y)) + 0.2 * np.sin(6 * np.pi * y)).astype(np.float32)
+
+
+#: The lattice case of the ``stencil`` goal: ``LBMNode`` on D2Q9, whose
+#: streaming reads the diagonal neighbours -- the halo corners, which on
+#: the pencil mesh hold cells that crossed both mesh axes.  Periodic, the
+#: one fill the node takes (``LBMNode.halo_boundary``).
+LBM_VISCOSITY = 0.1
+LBM_FORCE = 1e-3                # body force amplitude, lattice units
+
+
+def _lbm_start(ny: int, nx: int, node) -> dict:
+    """``LBMNode``'s equilibrium state with a smooth perturbation of ``f``, so
+    the populations stream something across the shard boundaries.
+
+    Large enough (velocities of a few 1e-2) that the velocity, a small
+    difference of populations of about 0.1, is well above float32
+    rounding of the populations: at 1e-3 the sharded and unsharded
+    velocities already differed by 4e-6 relative after three steps, from
+    a single-ulp difference in ``f``.
+    """
+    state = dict(node.initial_state())
+    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float32)[:, None, None]
+    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :, None]
+    q = np.arange(9, dtype=np.float32)[None, None, :]
+    pert = 0.2 * np.sin(2 * np.pi * (x + 2 * y) + 0.7 * q) * np.asarray(state["f"])
+    state["f"] = state["f"] + jnp.asarray(pert.astype(np.float32))
+    return state
+
+
+def _lbm_force(ny: int, nx: int) -> np.ndarray:
+    """A grid-shaped ``body_force``, ``(ny, nx, 2)``, varying across the grid."""
+    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float32)[:, None]
+    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :]
+    fx = np.sin(2 * np.pi * y) * np.ones_like(x)
+    fy = np.cos(2 * np.pi * x) * np.ones_like(y)
+    return (LBM_FORCE * np.stack([fx, fy], axis=-1)).astype(np.float32)
+
+
+#: What each node kind of the ``stencil`` goal compares forward (besides the
+#: rollout's loss and gradients), the parameter it differentiates with
+#: respect to, and the field its loss weighs.  ``averages`` is ``Field2D``'s
+#: domain integral.  The lattice's loss is a kinetic energy: a loss on
+#: ``f**2`` is nearly blind to the viscosity (the populations of a cell
+#: sum to its density whatever the viscosity), and its gradient came out
+#: of cancellation, 5e-5 apart between two correct programs.
+STENCIL_NODES = {
+    "field": {"fields": ("f", "averages"), "parameter": "diffusivity", "loss_of": "f"},
+    "lbm": {"fields": ("f", "velocity"), "parameter": "viscosity", "loss_of": "velocity"},
+}
+
+
+def _stencil_fns(node, steps: int, grad_steps: int, dt: float, weight, boundary_inputs,
+                 parameter: str, loss_of: str):
     """``(rollout, value_and_grad)``, both jitted, both through the public
-    ``update(..., params=)`` -- the call a graph traces into its step."""
-    def advance(f0, d, n):
-        def body(_, f):
-            return node.update({"f": f}, boundary_inputs, dt, params={"diffusivity": d})["f"]
-        return lax.fori_loop(0, n, body, f0)
+    ``update(..., params=)`` -- the call a graph traces into its step.
 
-    def loss(f0, d):
-        f = advance(f0, d, grad_steps)
-        return jnp.sum(weight * f * f) / f.size
+    ``rollout(state, p)`` returns the whole state after ``steps`` steps;
+    ``value_and_grad(f0, rest, p)`` differentiates the loss of a
+    ``grad_steps`` rollout from ``{**rest, "f": f0}`` with respect to the
+    initial ``f`` and to the parameter: the weighted mean square of field
+    ``loss_of``, plus the first of the ``averages`` where there are any.
+    """
+    def advance(state, p, n):
+        def body(_, s):
+            return node.update(s, boundary_inputs, dt, params={parameter: p})
+        return lax.fori_loop(0, n, body, state)
 
-    return (jax.jit(lambda f0, d: advance(f0, d, steps)),
-            jax.jit(jax.value_and_grad(loss, argnums=(0, 1))))
+    def loss(f0, rest, p):
+        final = advance({**rest, "f": f0}, p, grad_steps)
+        x = final[loss_of]
+        w = weight if x.ndim == weight.ndim else weight[..., None]
+        value = jnp.sum(w * x * x) / x.size
+        if "averages" in final:
+            value = value + final["averages"][0]
+        return value
+
+    return (jax.jit(lambda s, p: advance(s, p, steps)),
+            jax.jit(jax.value_and_grad(loss, argnums=(0, 2))))
 
 
-def stencil_cases(cells) -> list:
-    """``(cells, boundary)`` pairs the ``stencil`` goal runs: every
-    ``STENCIL_BOUNDARIES`` entry at the smallest size, ``"periodic"`` at
-    the others."""
+def stencil_cases(cells, n_devices: int) -> list:
+    """``(cells, node, boundary, mesh)`` cases the ``stencil`` goal runs.
+
+    At the smallest size: ``Field2D`` under every ``STENCIL_BOUNDARIES``
+    entry and the D2Q9 lattice, on every mesh this device count can build
+    (:func:`meshes_that_fit`).  At the other sizes: ``Field2D`` with
+    periodic ends on the goal's own mesh (:func:`graph_mesh`, the pencil
+    where it fits).
+    """
     smallest = min(cells)
-    return [(n, b) for n in cells
-            for b in (STENCIL_BOUNDARIES if n == smallest else ("periodic",))]
+    cases = []
+    for n in cells:
+        if n == smallest:
+            for mesh in meshes_that_fit(n_devices):
+                cases += [(n, "field", b, mesh) for b in STENCIL_BOUNDARIES]
+                cases.append((n, "lbm", "periodic", mesh))
+        else:
+            cases.append((n, "field", "periodic", graph_mesh(n_devices)))
+    return cases
+
+
+def _stencil_prefix(entry: dict) -> str:
+    (ny, nx), (py, pz) = entry["shape"], entry["mesh_shape"]
+    return f"{entry['node']} {entry['mesh']} {py}x{pz} {ny}x{nx} {entry['boundary']}"
+
+
+def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
+    """``(unsharded node, sharded node, boundary inputs, parameter value)``."""
+    if kind == "lbm":
+        def make():
+            return LBMNode("lbm", 1.0, grid_shape=(ny, nx), viscosity=LBM_VISCOSITY,
+                           lattice="D2Q9")
+        return (make(), ShardedStencilNode(make(), mesh, axis_map=axis_map, boundary="periodic"),
+                {"body_force": jnp.asarray(_lbm_force(ny, nx))}, jnp.float32(LBM_VISCOSITY))
+
+    def make():
+        return Field2D("field", ny, nx, exchange=0.3, boundary=boundary)
+    # "dirichlet" is the node's own condition over the wrapper's default
+    # "edge" fill; the other two are the wrapper's fill of that name.
+    sharded = ShardedStencilNode(make(), mesh, axis_map=axis_map,
+                                 boundary="edge" if boundary == "dirichlet" else boundary)
+    bi = {"source": jnp.asarray(_source_field(ny, nx))}
+    if boundary == "dirichlet":
+        bi["wall"] = jnp.float32(STENCIL_WALL)
+    return make(), sharded, bi, jnp.float32(0.2)
+
+
+def _placed_like(sharded, state: dict) -> dict:
+    """``state`` placed as the wrapper places a state it built: each grid
+    field partitioned over the mesh, each domain integral replicated."""
+    integrals = set(sharded.domain_integral_fields())
+    return {k: (sharded._place_integral(k, v) if k in integrals        # noqa: SLF001
+                else jax.device_put(v, sharded._sharding_for_field(v)))  # noqa: SLF001
+            for k, v in state.items()}
+
+
+def run_stencil_case(case, args) -> dict:
+    """One :func:`stencil_cases` case: forward rollout and adjoint of the
+    sharded node against the unsharded one, timed on both sides."""
+    _load_backend()
+    D = args.n_devices
+    n_hint, kind, boundary, mesh_label = case
+    mesh, axis_map, (py, pz) = stencil_mesh(mesh_label, D)
+    ny, nx = field_shape(n_hint, D)
+    spec = STENCIL_NODES[kind]
+    ref, sharded, bi, p = _stencil_pair(kind, ny, nx, boundary, mesh, axis_map)
+    start = _lbm_start(ny, nx, ref) if kind == "lbm" else dict(ref.initial_state())
+    states = {"unsharded": start, "sharded": _placed_like(sharded, start)}
+    dt = ref.delta_t
+    weight = jnp.asarray(_loss_weight(ny, nx))
+    entry = {"node": kind, "mesh": mesh_label, "mesh_shape": [py, pz], "cells": ny * nx,
+             "shape": [ny, nx], "boundary": boundary, "n_devices": D, "steps": args.steps,
+             "grad_steps": args.grad_steps, "parameter": spec["parameter"],
+             "input_partitioned": _is_partitioned(states["sharded"]["f"], D),
+             "forward": {}, "gradient": {}}
+    got = {}
+    for label, node in (("unsharded", ref), ("sharded", sharded)):
+        rollout, vg = _stencil_fns(node, args.steps, args.grad_steps, dt, weight, bi,
+                                   spec["parameter"], spec["loss_of"])
+        s0 = states[label]
+        f0, rest = s0["f"], {k: v for k, v in s0.items() if k != "f"}
+        fwd_compile_s, _ = compile_seconds(rollout, s0, p)
+        final = _host(rollout(s0, p))
+        t_fwd = timed(lambda: rollout(s0, p), warmup=args.warmup, repeats=args.repeats)
+        grad_compile_s, _ = compile_seconds(vg, f0, rest, p)
+        value, (g_f0, g_p) = vg(f0, rest, p)
+        t_grad = timed(lambda: vg(f0, rest, p), warmup=args.warmup, repeats=args.repeats)
+        got[label] = (final, float(value), np.asarray(jax.device_get(g_f0)), float(g_p))
+        entry["forward"][label] = {"compile_s": fwd_compile_s,
+                                   "rollout": {**t_fwd,
+                                               "ms_per_step": t_fwd["median_ms"] / args.steps}}
+        entry["gradient"][label] = {"compile_s": grad_compile_s, "grad": t_grad,
+                                    "loss": float(value), "grad_parameter": float(g_p)}
+    (s_s, l_s, gf_s, gp_s), (s_u, l_u, gf_u, gp_u) = got["sharded"], got["unsharded"]
+    entry["forward"]["parity"] = {field: _diff(s_s[field], s_u[field])
+                                  for field in spec["fields"]}
+    entry["gradient"]["parity_loss"] = _rel_each(l_s, l_u)
+    entry["gradient"]["parity_grad_initial_field"] = _diff(gf_s, gf_u)
+    entry["gradient"]["parity_grad_parameter"] = _rel_each(gp_s, gp_u)
+    fwd = entry["forward"]
+    print(f"[stencil] {_stencil_prefix(entry):>34} fwd "
+          f"{fwd['sharded']['rollout']['ms_per_step']:8.3f} ms/step (unsharded "
+          f"{fwd['unsharded']['rollout']['ms_per_step']:8.3f})  max_rel "
+          + " ".join(f"{k} {v['max_rel']:.1e}" for k, v in fwd["parity"].items())
+          + f"  grad f0 {entry['gradient']['parity_grad_initial_field']['max_rel']:.1e}"
+          f"  grad {spec['parameter']} {entry['gradient']['parity_grad_parameter']:.1e}")
+    return entry
 
 
 def run_stencil(args, out: dict) -> dict:
-    """A 2-D stencil field sharded along axis 0 against the unsharded node,
-    under each global-edge condition of :func:`stencil_cases`."""
+    """``Field2D`` and a D2Q9 lattice sharded on the 1-D and the pencil mesh
+    against the unsharded node, in every case of :func:`stencil_cases`."""
     _load_backend()
-    D = args.n_devices
-    mesh = _mesh_for(D)
-    results = []
-    for n_hint, boundary in stencil_cases(args.cells):
-        ny, nx = field_shape(n_hint, D)
-        ref = Field2D("field", ny, nx, exchange=0.3, boundary=boundary)
-        # "dirichlet" is the node's own condition over the wrapper's default
-        # "edge" fill; the other two are the wrapper's fill of that name.
-        sharded = ShardedStencilNode(
-            Field2D("field", ny, nx, exchange=0.3, boundary=boundary), mesh,
-            axis_map={MESH_AXIS: 0}, boundary="edge" if boundary == "dirichlet" else boundary)
-        bi = {"wall": jnp.float32(STENCIL_WALL)} if boundary == "dirichlet" else {}
-        dt, d = ref.delta_t, jnp.float32(0.2)
-        weight = jnp.asarray(_loss_weight(ny, nx))
-        f0 = {"unsharded": ref.initial_state()["f"], "sharded": sharded.initial_state()["f"]}
-        entry = {"cells": ny * nx, "shape": [ny, nx], "boundary": boundary, "n_devices": D,
-                 "steps": args.steps, "grad_steps": args.grad_steps,
-                 "input_partitioned": _is_partitioned(f0["sharded"], D),
-                 "forward": {}, "gradient": {}}
-        got = {}
-        for label, node in (("unsharded", ref), ("sharded", sharded)):
-            rollout, vg = _stencil_fns(node, args.steps, args.grad_steps, dt, weight, bi)
-            x = f0[label]
-            fwd_compile_s, _ = compile_seconds(rollout, x, d)
-            final = np.asarray(jax.device_get(rollout(x, d)))
-            t_fwd = timed(lambda: rollout(x, d), warmup=args.warmup, repeats=args.repeats)
-            grad_compile_s, _ = compile_seconds(vg, x, d)
-            value, (g_f0, g_d) = vg(x, d)
-            t_grad = timed(lambda: vg(x, d), warmup=args.warmup, repeats=args.repeats)
-            got[label] = (final, float(value), np.asarray(jax.device_get(g_f0)), float(g_d))
-            entry["forward"][label] = {"compile_s": fwd_compile_s,
-                                       "rollout": {**t_fwd,
-                                                   "ms_per_step": t_fwd["median_ms"] / args.steps}}
-            entry["gradient"][label] = {"compile_s": grad_compile_s, "grad": t_grad,
-                                        "loss": float(value), "grad_diffusivity": float(g_d)}
-        (f_s, l_s, gf_s, gd_s), (f_u, l_u, gf_u, gd_u) = got["sharded"], got["unsharded"]
-        entry["forward"]["parity_f"] = _diff(f_s, f_u)
-        entry["gradient"]["parity_loss"] = _rel_each(l_s, l_u)
-        entry["gradient"]["parity_grad_initial_field"] = _diff(gf_s, gf_u)
-        entry["gradient"]["parity_grad_diffusivity"] = _rel_each(gd_s, gd_u)
-        prefix = f"{ny}x{nx} {boundary}"
-        results.append(entry)
-        fwd = entry["forward"]
-        print(f"[stencil] {prefix:>21} fwd {fwd['sharded']['rollout']['ms_per_step']:8.3f} ms/step"
-              f" (unsharded {fwd['unsharded']['rollout']['ms_per_step']:8.3f})"
-              f"  max_rel f {fwd['parity_f']['max_rel']:.1e}"
-              f"  grad field {entry['gradient']['parity_grad_initial_field']['max_rel']:.1e}"
-              f"  grad d {entry['gradient']['parity_grad_diffusivity']:.1e}")
+    results = [run_stencil_case(case, args)
+               for case in stencil_cases(args.cells, args.n_devices)]
     out["results"] = results
-    return finish_checks(out, stencil_checks(results, D))
+    return finish_checks(out, stencil_checks(results, args.n_devices))
 
 
 def stencil_checks(results: list, n_devices: int) -> list:
     """The ``stencil`` goal's checks, from its ``results`` alone (see
     :func:`exchange_checks`)."""
     checks = []
+    if not _pencil_mesh_fits(n_devices):
+        checks.append(check_not_run(
+            "2d pencil mesh: Field2D under every boundary and the D2Q9 lattice, forward "
+            "and adjoint vs unsharded", _pencil_mesh_needs(n_devices)))
     for entry in results:
-        (ny, nx), fwd, grad = entry["shape"], entry["forward"], entry["gradient"]
-        prefix = f"{ny}x{nx} {entry['boundary']}"
-        gd_u = grad["unsharded"]["grad_diffusivity"]
-        checks.append(check_that(f"{prefix}: sharded field is partitioned over {n_devices} "
+        fwd, grad = entry["forward"], entry["gradient"]
+        prefix, param = _stencil_prefix(entry), entry["parameter"]
+        gp_u = grad["unsharded"]["grad_parameter"]
+        checks.append(check_that(f"{prefix}: sharded state is partitioned over {n_devices} "
                                  "devices", entry["input_partitioned"]))
-        checks += _parity_checks(f"{prefix} forward f vs unsharded", fwd["parity_f"],
-                                 LIMITS["forward"])
+        for field in STENCIL_NODES[entry["node"]]["fields"]:
+            checks += _parity_checks(f"{prefix} forward {field} vs unsharded",
+                                     fwd["parity"][field], LIMITS["forward"])
         checks.append(check(f"{prefix} loss vs unsharded rel", grad["parity_loss"],
                             LIMITS["gradient"]))
-        checks += _parity_checks(f"{prefix} d loss / d initial field vs unsharded",
+        checks += _parity_checks(f"{prefix} d loss / d initial f vs unsharded",
                                  grad["parity_grad_initial_field"], LIMITS["gradient"])
-        checks.append(check(f"{prefix} d loss / d diffusivity vs unsharded rel",
-                            grad["parity_grad_diffusivity"], LIMITS["gradient"]))
-        checks.append(check_that(f"{prefix} d loss / d diffusivity is not zero", gd_u != 0.0,
-                                 f"{gd_u:.6e}"))
+        checks.append(check(f"{prefix} d loss / d {param} vs unsharded rel",
+                            grad["parity_grad_parameter"], LIMITS["gradient"]))
+        checks.append(check_that(f"{prefix} d loss / d {param} is not zero", gp_u != 0.0,
+                                 f"{gp_u:.6e}"))
     return checks
 
 
@@ -1809,16 +2065,18 @@ def stencil_checks(results: list, n_devices: int) -> list:
 # ---------------------------------------------------------------------------
 
 
-def graph_value_and_grad(gm, steps: int, writes, loss_of_state):
+def graph_value_and_grad(gm, steps: int, writes, loss_of_state, external_inputs=None):
     """``jit(value_and_grad)`` of ``theta -> loss`` over ``steps`` graph steps.
 
     ``theta[k]`` is written into a copy of ``gm.params`` at
     ``writes[k] = (node, key)``; the step is the graph's own pure step
-    function, scanned, as ``maddening.sysid`` does.  The aux output is the
-    final state (``_meta`` included).  ``gm``'s own state is not advanced.
+    function, scanned, as ``maddening.sysid`` does, with
+    ``external_inputs`` held at every step (zeros where not given, as
+    ``run_scan`` does).  The aux output is the final state (``_meta``
+    included).  ``gm``'s own state is not advanced.
     """
     step_fn = gm._build_step_fn()  # noqa: SLF001
-    ext = gm._resolve_external_inputs(None)  # noqa: SLF001
+    ext = gm._resolve_external_inputs(external_inputs)  # noqa: SLF001
     state0 = gm._state  # noqa: SLF001
 
     def loss(theta):
@@ -1845,11 +2103,32 @@ def make_hybrid_correction(shift: int):
     return correction
 
 
+def _graph_mesh_entry(n_devices: int) -> tuple:
+    """``(label, mesh, axis_map, mesh_shape)`` of the graph goals' mesh."""
+    label = graph_mesh(n_devices)
+    mesh, axis_map, mesh_shape = stencil_mesh(label, n_devices)
+    return label, mesh, axis_map, mesh_shape
+
+
+def _pencil_not_run(goal_claim: str, n_devices: int) -> list:
+    """A graph goal's check not run on a device count with no pencil mesh."""
+    if _pencil_mesh_fits(n_devices):
+        return []
+    return [check_not_run(f"2d pencil mesh: {goal_claim}", _pencil_mesh_needs(n_devices))]
+
+
+def _graph_prefix(entry: dict) -> str:
+    (ny, nx), (py, pz) = entry["shape"], entry["mesh_shape"]
+    return f"{entry['mesh']} {py}x{pz} {ny}x{nx}"
+
+
 def run_hybrid(args, out: dict) -> dict:
-    """``HybridNode(ShardedStencilNode(inner))`` against ``HybridNode(inner)``."""
+    """``HybridNode(ShardedStencilNode(inner))`` against ``HybridNode(inner)``,
+    on the pencil mesh where it fits, with a grid-shaped ``source`` held
+    through an external input and ``Field2D``'s domain integral compared."""
     _load_backend()
     D = args.n_devices
-    mesh = _mesh_for(D)
+    mesh_label, mesh, axis_map, (py, pz) = _graph_mesh_entry(D)
     results = []
     writes = list(HYBRID_WRITES)
     theta = jnp.asarray([0.2, 0.3], jnp.float32)
@@ -1857,44 +2136,51 @@ def run_hybrid(args, out: dict) -> dict:
         ny, nx = field_shape(n_hint, D)
         shift = max(1, ny // (2 * D))
         correction = make_hybrid_correction(shift)
+        ext = {"field": {"source": jnp.asarray(_source_field(ny, nx))}}
 
         def graph(sharded: bool, _ny=ny, _nx=nx, _correction=correction):
             inner = Field2D("field", _ny, _nx, exchange=0.3)
-            physics = (ShardedStencilNode(inner, mesh, axis_map={MESH_AXIS: 0},
+            physics = (ShardedStencilNode(inner, mesh, axis_map=axis_map,
                                           boundary="periodic") if sharded else inner)
             gm = GraphManager()
             gm.add_node(HybridNode(physics, _correction))
+            gm.add_external_input("field", "source", shape=(_ny, _nx))
             gm.compile()
             return gm
 
-        entry = {"cells": ny * nx, "shape": [ny, nx], "n_devices": D, "steps": args.steps,
+        entry = {"mesh": mesh_label, "mesh_shape": [py, pz], "cells": ny * nx,
+                 "shape": [ny, nx], "n_devices": D, "steps": args.steps,
                  "grad_steps": args.grad_steps, "correction_shift_rows": shift}
         got = {}
         for label, sharded in (("unsharded", False), ("sharded", True)):
             gm = graph(sharded)
             t0 = time.perf_counter()
-            f = gm.run_scan(args.steps)["field"]["f"]
+            final_state = gm.run_scan(args.steps, external_inputs=ext)["field"]
+            f, averages = final_state["f"], final_state["averages"]
             jax.block_until_ready(f)
             scan_s = time.perf_counter() - t0
             # run_scan advanced that graph's state: the adjoint gets a fresh graph.
             vg = graph_value_and_grad(graph(sharded), args.grad_steps, writes,
-                                      lambda st: jnp.mean(st["field"]["f"] ** 2))
+                                      lambda st: jnp.mean(st["field"]["f"] ** 2),
+                                      external_inputs=ext)
             compile_s, _ = compile_seconds(vg, theta)
             (value, _final), grad = vg(theta)
             t_grad = timed(lambda: vg(theta), warmup=args.warmup, repeats=args.repeats)
-            got[label] = (np.asarray(jax.device_get(f)), float(value), np.asarray(grad))
+            got[label] = (np.asarray(jax.device_get(f)), np.asarray(jax.device_get(averages)),
+                          float(value), np.asarray(grad))
             entry[label] = {"run_scan_first_call_s": scan_s, "partitioned": _is_partitioned(f, D),
                             "compile_s": compile_s, "value_and_grad": t_grad,
                             "loss": float(value), "grad": np.asarray(grad).tolist()}
-        (f_s, l_s, g_s), (f_u, l_u, g_u) = got["sharded"], got["unsharded"]
+        (f_s, a_s, l_s, g_s), (f_u, a_u, l_u, g_u) = got["sharded"], got["unsharded"]
         corr = np.asarray(correction({"f": jnp.asarray(f_u)}, {}, 0.1)["f"])
         entry["correction_rel"] = float(np.max(np.abs(corr)) / np.max(np.abs(f_u)))
         entry["parity_f"] = _diff(f_s, f_u)
+        entry["parity_averages"] = _diff(a_s, a_u)
         entry["parity_loss"] = _rel_each(l_s, l_u)
         entry["parity_grad"] = _rel_each(g_s, g_u)
-        prefix = f"{ny}x{nx}"
         results.append(entry)
-        print(f"[hybrid] {prefix:>11} max_rel f {entry['parity_f']['max_rel']:.1e}  grad "
+        print(f"[hybrid] {_graph_prefix(entry):>17} max_rel f {entry['parity_f']['max_rel']:.1e}"
+              f"  averages {entry['parity_averages']['max_rel']:.1e}  grad "
               f"{entry['parity_grad']:.1e}  value+grad "
               f"{entry['sharded']['value_and_grad']['median_ms']:8.2f} ms (unsharded "
               f"{entry['unsharded']['value_and_grad']['median_ms']:8.2f})")
@@ -1906,10 +2192,11 @@ def hybrid_checks(results: list, n_devices: int) -> list:
     """The ``hybrid`` goal's checks, from its ``results`` alone (see
     :func:`exchange_checks`)."""
     params = ", ".join(key for _node, key in HYBRID_WRITES)
-    checks = []
+    checks = _pencil_not_run("HybridNode(ShardedStencilNode(inner)) forward and adjoint vs "
+                             "HybridNode(inner)", n_devices)
     for entry in results:
-        (ny, nx), g_u = entry["shape"], entry["unsharded"]["grad"]
-        prefix = f"{ny}x{nx}"
+        g_u = entry["unsharded"]["grad"]
+        prefix = _graph_prefix(entry)
         checks += [
             check_that(f"{prefix}: the field inside the hybrid is partitioned over {n_devices} "
                        "devices", entry["sharded"]["partitioned"]),
@@ -1918,6 +2205,8 @@ def hybrid_checks(results: list, n_devices: int) -> list:
                        f"{entry['correction_rel']:.3e}"),
             *_parity_checks(f"{prefix} run_scan f vs HybridNode(inner)", entry["parity_f"],
                             LIMITS["forward"]),
+            *_parity_checks(f"{prefix} run_scan domain integral averages vs HybridNode(inner)",
+                            entry["parity_averages"], LIMITS["forward"]),
             check(f"{prefix} loss vs HybridNode(inner) rel", entry["parity_loss"],
                   LIMITS["gradient"]),
             check(f"{prefix} d loss / d ({params}) vs HybridNode(inner) rel",
@@ -1928,16 +2217,29 @@ def hybrid_checks(results: list, n_devices: int) -> list:
     return checks
 
 
-def coupled_graph(ny: int, nx: int, mesh, solver: str):
+def _first(averages):
+    """The mean out of ``Field2D``'s ``averages`` (an edge transform)."""
+    return averages[0]
+
+
+def coupled_graph(ny: int, nx: int, mesh, solver: str, axis_map=None):
     """A ``Field2D`` member (sharded when ``mesh`` is given) and a replicated
-    ``FarField`` member in one coupling group."""
+    ``FarField`` member in one coupling group.
+
+    The field reaches the far field through its domain integral (the mean
+    in ``averages``), and the far field reaches the field as a grid-shaped
+    ``ambient`` (its value broadcast to every cell), so both of the
+    wrapper's paths for them are inside the group's fixed point and its
+    adjoint.
+    """
     field = Field2D("field", ny, nx, exchange=0.8)
     gm = GraphManager()
     gm.add_node(field if mesh is None else ShardedStencilNode(
-        field, mesh, axis_map={MESH_AXIS: 0}, boundary="periodic"))
+        field, mesh, axis_map=axis_map or {MESH_AXIS: 0}, boundary="periodic"))
     gm.add_node(FarField("far"))
-    gm.add_edge("field", "far", "f", "field_mean", transform=jnp.mean)
-    gm.add_edge("far", "field", "u", "ambient")
+    gm.add_edge("field", "far", "averages", "field_mean", transform=_first)
+    gm.add_edge("far", "field", "u", "ambient",
+                transform=functools.partial(jnp.broadcast_to, shape=(ny, nx)))
     kwargs = {} if solver == "ift" else {"solver": solver}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)      # solver="fori"
@@ -1961,25 +2263,27 @@ def coupled_model(field, theta, steps: int, u0: float) -> tuple:
 
     Independent of the graph machinery: at convergence each step solves
     both members' updates at once, each reading the other's *new* value --
-    ``f' = f + dt (D mask lap f + h (u' - f))`` and
-    ``u' = u + dt c (mean f' - u)``.  ``mean f'`` and ``u'`` satisfy a 2x2
-    linear system (``mean(mask lap f)`` is known from ``f``), and ``f'``
-    follows.  ``theta = (D, c, h)``; the field's own float32 initial state
-    and mask are widened exactly.
+    ``f' = f + dt (D div(k grad f) + h (u' - f))`` and
+    ``u' = u + dt c (mean f' - u)``, ``k`` the face-averaged mask of
+    ``Field2D`` on a periodic grid.  ``mean f'`` and ``u'`` satisfy a 2x2
+    linear system (``mean(div(k grad f))`` is known from ``f``), and
+    ``f'`` follows.  ``theta = (D, c, h)``; the field's own float32
+    initial state and mask are widened exactly.
     """
     d, c, h = (float(t) for t in theta)
     dt = float(np.float32(field.delta_t))
     f = np.asarray(field.initial_state()["f"], np.float64)
     mask = np.asarray(field.static_data["mask"].value, np.float64)
     u = float(np.float32(u0))
+    # (shift, axis) of each neighbour and the conductance of the face to it
+    faces = [((s, a), 0.5 * (mask + np.roll(mask, s, a))) for a in (0, 1) for s in (1, -1)]
     for _ in range(steps):
-        lap = (np.roll(f, 1, 0) + np.roll(f, -1, 0) + np.roll(f, 1, 1)
-               + np.roll(f, -1, 1) - 4.0 * f)
-        m, mean_lap = f.mean(), (mask * lap).mean()
+        div = sum(k * (np.roll(f, s, a) - f) for (s, a), k in faces)
+        m, mean_div = f.mean(), div.mean()
         m_new, u_new = np.linalg.solve(
             np.array([[1.0, -dt * h], [-dt * c, 1.0]]),
-            np.array([m + dt * d * mean_lap - dt * h * m, u - dt * c * u]))
-        f = f + dt * (d * mask * lap + h * (u_new - f))
+            np.array([m + dt * d * mean_div - dt * h * m, u - dt * c * u]))
+        f = f + dt * (d * div + h * (u_new - f))
         u = float(u_new)
     return f, u, float(np.mean(f ** 2) + u ** 2)
 
@@ -2001,7 +2305,7 @@ def run_coupled(args, out: dict) -> dict:
     and both against the float64 model of the coupled step."""
     _load_backend()
     D = args.n_devices
-    mesh = _mesh_for(D)
+    mesh_label, mesh, axis_map, (py, pz) = _graph_mesh_entry(D)
     writes = list(COUPLED_WRITES)
     theta = jnp.asarray([0.2, 2.0, 0.8], jnp.float32)
     iterations_key = "coupling_far+field_iterations"
@@ -2012,8 +2316,10 @@ def run_coupled(args, out: dict) -> dict:
 
     for n_hint in args.cells:
         ny, nx = field_shape(n_hint, D)
-        entry = {"cells": ny * nx, "shape": [ny, nx], "n_devices": D, "steps": args.grad_steps,
-                 "coupled_dof": ny * nx + 1, "max_iterations": COUPLED_MAX_ITERATIONS,
+        # The field, its two averages (a domain integral in its state) and u.
+        entry = {"mesh": mesh_label, "mesh_shape": [py, pz], "cells": ny * nx,
+                 "shape": [ny, nx], "n_devices": D, "steps": args.grad_steps,
+                 "coupled_dof": ny * nx + 2 + 1, "max_iterations": COUPLED_MAX_ITERATIONS,
                  "tolerance": COUPLED_TOLERANCE, "parameters": [f"{n}.{k}" for n, k in writes],
                  "solvers": {}}
         t0 = time.perf_counter()
@@ -2021,14 +2327,15 @@ def run_coupled(args, out: dict) -> dict:
         u0 = float(FarField("far").initial_state()["u"])
         theta64 = np.asarray(theta, np.float64)             # the float32 values, widened
         f_model, u_model, loss_model = coupled_model(model_field, theta64, args.grad_steps, u0)
+        averages_model = np.array([np.mean(f_model), np.mean(f_model ** 2)])
         grad_model = coupled_model_gradient(model_field, theta64, args.grad_steps, u0)
         entry["model"] = {"loss": loss_model, "grad": grad_model.tolist(),
                           "wall_s": time.perf_counter() - t0}
         for solver in COUPLED_SOLVERS:
             got, sol = {}, {}
             for label, m in (("unsharded", None), ("sharded", mesh)):
-                vg = graph_value_and_grad(coupled_graph(ny, nx, m, solver), args.grad_steps,
-                                          writes, loss_of)
+                vg = graph_value_and_grad(coupled_graph(ny, nx, m, solver, axis_map),
+                                          args.grad_steps, writes, loss_of)
                 t0 = time.perf_counter()
                 lowered = vg.lower(theta)
                 lowered.compile()
@@ -2039,27 +2346,31 @@ def run_coupled(args, out: dict) -> dict:
                 meta = final.get("_meta", {})
                 iterations = int(meta[iterations_key]) if iterations_key in meta else None
                 got[label] = (np.asarray(jax.device_get(f)), float(final["far"]["u"]),
-                              float(value), np.asarray(grad))
+                              float(value), np.asarray(grad),
+                              np.asarray(jax.device_get(final["field"]["averages"])))
                 sol[label] = {"compile_s": compile_s,
                               "value_and_grad": {**t, "ms_per_step": t["median_ms"] / args.grad_steps},
                               "loss": float(value), "grad": np.asarray(grad).tolist(),
                               "last_step_iterations": iterations,
                               "partitioned": _is_partitioned(f, D),
                               "device0_pinned_ops": _device0_pins(lowered)}
-            (f_s, u_s, l_s, g_s), (f_u, u_u, l_u, g_u) = got["sharded"], got["unsharded"]
+            (f_s, u_s, l_s, g_s, a_s), (f_u, u_u, l_u, g_u, a_u) = (got["sharded"],
+                                                                   got["unsharded"])
             sol["parity_f"] = _diff(f_s, f_u)
+            sol["parity_averages"] = _diff(a_s, a_u)
             sol["parity_u"] = _rel_each(u_s, u_u)
             sol["parity_loss"] = _rel_each(l_s, l_u)
             sol["parity_grad"] = _rel_each(g_s, g_u)
             sol["model"] = {
                 label: {"f": _diff(got[label][0], f_model),
+                        "averages": _diff(got[label][4], averages_model),
                         "u": _rel_each(got[label][1], u_model),
                         "loss": _rel_each(got[label][2], loss_model),
                         "grad": _rel_each(got[label][3], grad_model)}
                 for label in ("sharded", "unsharded")}
             entry["solvers"][solver] = sol
-            prefix = f"{ny}x{nx} {solver}"
-            print(f"[coupled] {prefix:>16} max_rel f {sol['parity_f']['max_rel']:.1e}  u "
+            prefix = f"{_graph_prefix(entry)} {solver}"
+            print(f"[coupled] {prefix:>22} max_rel f {sol['parity_f']['max_rel']:.1e}  u "
                   f"{sol['parity_u']:.1e}  grad {sol['parity_grad']:.1e}  vs model grad "
                   f"{max(v['grad'] for v in sol['model'].values()):.1e}  value+grad "
                   f"{sol['sharded']['value_and_grad']['median_ms']:8.2f} ms (unsharded "
@@ -2075,18 +2386,20 @@ def coupled_checks(results: list, n_devices: int) -> list:
     """The ``coupled`` goal's checks, from its ``results`` alone (see
     :func:`exchange_checks`)."""
     params = ", ".join(f"{node}.{key}" for node, key in COUPLED_WRITES)
-    checks = []
+    checks = _pencil_not_run("a sharded and a replicated member in one coupling group, "
+                             "forward and adjoint", n_devices)
     for entry in results:
-        ny, nx = entry["shape"]
         for solver in COUPLED_SOLVERS:
             sol = entry["solvers"][solver]
-            prefix = f"{ny}x{nx} {solver}"
+            prefix = f"{_graph_prefix(entry)} {solver}"
             g_u = sol["unsharded"]["grad"]
             for label in ("sharded", "unsharded"):
                 vs = sol["model"][label]
                 checks += [
                     check(f"{prefix} {label} field vs float64 model max_rel", vs["f"]["max_rel"],
                           LIMITS["forward"]),
+                    check(f"{prefix} {label} domain integral averages vs float64 model max_rel",
+                          vs["averages"]["max_rel"], LIMITS["forward"]),
                     check(f"{prefix} {label} far field and loss vs float64 model rel",
                           max(vs["u"], vs["loss"]), LIMITS["forward"]),
                     check(f"{prefix} {label} gradient vs float64 model differences rel",
@@ -2097,6 +2410,8 @@ def coupled_checks(results: list, n_devices: int) -> list:
                            sol["sharded"]["partitioned"]),
                 *_parity_checks(f"{prefix} field vs unsharded group", sol["parity_f"],
                                 LIMITS["forward"]),
+                *_parity_checks(f"{prefix} domain integral averages vs unsharded group",
+                                sol["parity_averages"], LIMITS["forward"]),
                 check(f"{prefix} far field vs unsharded group rel", sol["parity_u"],
                       LIMITS["forward"]),
                 check(f"{prefix} loss vs unsharded group rel", sol["parity_loss"],
@@ -2248,15 +2563,21 @@ def case_keys(goal: str, doc: dict) -> tuple[Counter, Counter]:
             un = r["unstructured"]
             got[("unstructured", un["cells"], tuple(sorted(un["methods"])))] += 1
     elif goal == "stencil":
-        want.update((field_shape(n, n_dev), b) for n, b in stencil_cases(cells))
-        got.update((_shape(r["shape"]), r.get("boundary")) for r in results)
+        want.update((kind, mesh, _mesh_shape_of(mesh, n_dev), field_shape(n, n_dev), b)
+                    for n, kind, b, mesh in stencil_cases(cells, n_dev))
+        got.update((r["node"], r["mesh"], _shape(r["mesh_shape"]), _shape(r["shape"]),
+                    r["boundary"]) for r in results)
     elif goal == "hybrid":
-        want.update(field_shape(n, n_dev) for n in cells)
-        got.update(_shape(r["shape"]) for r in results)
+        mesh = graph_mesh(n_dev)
+        want.update((mesh, _mesh_shape_of(mesh, n_dev), field_shape(n, n_dev)) for n in cells)
+        got.update((r["mesh"], _shape(r["mesh_shape"]), _shape(r["shape"])) for r in results)
     elif goal == "coupled":
         solvers = tuple(sorted(COUPLED_SOLVERS))
-        want.update((field_shape(n, n_dev), solvers) for n in cells)
-        got.update((_shape(r["shape"]), tuple(sorted(r["solvers"]))) for r in results)
+        mesh = graph_mesh(n_dev)
+        want.update((mesh, _mesh_shape_of(mesh, n_dev), field_shape(n, n_dev), solvers)
+                    for n in cells)
+        got.update((r["mesh"], _shape(r["mesh_shape"]), _shape(r["shape"]),
+                    tuple(sorted(r["solvers"]))) for r in results)
     else:
         raise ValueError(f"unknown goal {goal!r}")
     return want, got
@@ -2695,17 +3016,18 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
     if docs_by_goal.get("coupled"):
         print("\nCoupled group, sharded vs unsharded (max-rel; model = worst gradient against "
               "the float64 model; value+grad = one differentiated rollout)")
-        print(f"{'shape':>11} {'solver':<6} {'field':>8} {'far':>8} {'grad':>8} {'limit':>8} "
-              f"{'model':>8} {'sh ms':>9} {'unsh ms':>9} {'compile':>8} {'passes':>7} "
-              f"{'pinned':>6}")
+        print(f"{'mesh, shape':>17} {'solver':<6} {'field':>8} {'avgs':>8} {'far':>8} "
+              f"{'grad':>8} {'limit':>8} {'model':>8} {'sh ms':>9} {'unsh ms':>9} "
+              f"{'compile':>8} {'passes':>7} {'pinned':>6}")
         for doc in docs_by_goal["coupled"]:
             for r in doc["results"]:
-                shape = f"{r['shape'][0]}x{r['shape'][1]}"
+                shape = _graph_prefix(r)
                 for solver, sol in r["solvers"].items():
                     its = "/".join("-" if sol[k]["last_step_iterations"] is None
                                    else str(sol[k]["last_step_iterations"])
                                    for k in ("unsharded", "sharded"))
-                    print(f"{shape:>11} {solver:<6} {sol['parity_f']['max_rel']:8.1e} "
+                    print(f"{shape:>17} {solver:<6} {sol['parity_f']['max_rel']:8.1e} "
+                          f"{sol['parity_averages']['max_rel']:8.1e} "
                           f"{sol['parity_u']:8.1e} {sol['parity_grad']:8.1e} "
                           f"{LIMITS['coupled_gradient_' + solver]:8.0e} "
                           f"{max(v['grad'] for v in sol['model'].values()):8.1e} "
@@ -2714,16 +3036,16 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
                           f"{sol['sharded']['compile_s']:7.1f}s {its:>7} "
                           f"{sol['sharded']['device0_pinned_ops']:>6}")
     if docs_by_goal.get("stencil"):
-        print("\nStencil wrapper, sharded vs unsharded (max-rel; ms per step)")
+        print("\nStencil wrapper, sharded vs unsharded (node, mesh, shape, ends; max-rel; "
+              "ms per step)")
         for doc in docs_by_goal["stencil"]:
             for r in doc["results"]:
                 fw, gr = r["forward"], r["gradient"]
-                # schema 3 ran periodic ends only and did not record them
-                print(f"{r['shape'][0]:>5}x{r['shape'][1]:<5} {r.get('boundary', 'periodic'):<9} "
-                      f"f {fw['parity_f']['max_rel']:.1e}  "
-                      f"loss {gr['parity_loss']:.1e}  grad field "
-                      f"{gr['parity_grad_initial_field']['max_rel']:.1e}  grad d "
-                      f"{gr['parity_grad_diffusivity']:.1e}  fwd "
+                print(f"{_stencil_prefix(r):<34} "
+                      + "  ".join(f"{k} {v['max_rel']:.1e}" for k, v in fw["parity"].items())
+                      + f"  loss {gr['parity_loss']:.1e}  grad f0 "
+                      f"{gr['parity_grad_initial_field']['max_rel']:.1e}  grad "
+                      f"{r['parameter']} {gr['parity_grad_parameter']:.1e}  fwd "
                       f"{fw['sharded']['rollout']['ms_per_step']:.3f} vs "
                       f"{fw['unsharded']['rollout']['ms_per_step']:.3f} ms/step  grad "
                       f"{gr['sharded']['grad']['median_ms']:.2f} vs "
@@ -2732,7 +3054,8 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
         print("\nHybridNode(ShardedStencilNode(inner)) vs HybridNode(inner) (max-rel)")
         for doc in docs_by_goal["hybrid"]:
             for r in doc["results"]:
-                print(f"{r['shape'][0]:>5}x{r['shape'][1]:<5} f {r['parity_f']['max_rel']:.1e}  "
+                print(f"{_graph_prefix(r):<17} f {r['parity_f']['max_rel']:.1e}  averages "
+                      f"{r['parity_averages']['max_rel']:.1e}  "
                       f"loss {r['parity_loss']:.1e}  grad {r['parity_grad']:.1e}  correction "
                       f"{r['correction_rel']:.1e} of |f|  value+grad "
                       f"{r['sharded']['value_and_grad']['median_ms']:.2f} vs "

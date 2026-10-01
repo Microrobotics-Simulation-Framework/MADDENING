@@ -134,11 +134,43 @@ class ParamSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> "ParamSpec":
+        """The spec :meth:`to_dict` wrote (a saved graph, a USD stage).
+
+        ``trainable`` must be a JSON boolean, and each side of ``bounds``
+        ``null`` or a number; anything else is refused rather than
+        coerced.  Until 0.4.0 ``trainable`` went through ``bool()``, so
+        the strings ``"false"``, ``"no"`` and ``"0"`` all read as
+        trainable, and a bound went through ``float()``, so ``true`` read
+        as ``1.0`` and ``"2"`` as ``2.0`` past the refusals of
+        :meth:`__post_init__`.
+
+        Raises
+        ------
+        ValueError
+            If ``trainable`` is not a boolean, or a bound is not ``None``
+            or a real number (or is one :meth:`__post_init__` refuses).
+        """
+        trainable = d.get("trainable", True)
+        if not isinstance(trainable, bool):
+            raise ValueError(
+                f"ParamSpec.trainable must be true or false, got "
+                f"{type(trainable).__name__} {trainable!r}; a document that "
+                f"means 'not trainable' must say false, not a string or a "
+                f"number")
         # ``bounds`` may be serialised as JSON ``null`` (unbounded).
         lo, hi = d.get("bounds") or (None, None)
+
+        def _bound(b):
+            # A real number is widened to float as before; anything else
+            # (a bool, a string) goes to ``__post_init__`` as given, which
+            # refuses it by name.
+            if isinstance(b, numbers.Real) and not isinstance(b, bool):
+                return float(b)
+            return b
+
         return cls(
-            trainable=bool(d.get("trainable", True)),
-            bounds=(None if lo is None else float(lo), None if hi is None else float(hi)),
+            trainable=trainable,
+            bounds=(_bound(lo), _bound(hi)),
             transform=d.get("transform"),
             description=d.get("description", ""),
             units=d.get("units", ""),

@@ -102,7 +102,7 @@ def _r2_limit_loosened_in_the_record(rp, d):
 
 
 def _r3_results_disagree_with_checks(rp, d):
-    d["stencil"][0]["results"][0]["forward"]["parity_f"]["max_rel"] = 0.5
+    d["stencil"][0]["results"][0]["forward"]["parity"]["f"]["max_rel"] = 0.5
     d["halo"][0]["results"][0]["stencil_cases"][0]["forward_max_abs"] = 7.0
     return ["stencil", "halo"]
 
@@ -211,6 +211,22 @@ def _a_case_the_runner_does_not_run(rp, d):
     return ["hybrid"]
 
 
+def _the_pencil_mesh_cases_left_out(rp, d):
+    """A stencil file as a runner that knew only the 1-D mesh would write
+    it on four devices -- results and checks consistent, every one of
+    them passing -- and a hybrid file relabelled onto the 1-D mesh.  The
+    pencil cases are the ones a fault in the wrapper's second exchanged
+    axis fails; a file without them must not decide item 1."""
+    st = d["stencil"][0]
+    st["results"] = [r for r in st["results"] if r["mesh"] == "1d"]
+    st["checks"] = [c for c in st["checks"] if " 2d " not in c["name"]]
+    hy = d["hybrid"][0]
+    for r in hy["results"]:
+        r["mesh"], r["mesh_shape"] = "1d", [4, 1]
+    hy["checks"] = rp.hybrid_checks(hy["results"], 4)
+    return ["stencil", "hybrid"]
+
+
 def _a_stencil_refusal_that_recommends_the_unstructured_wrapper(rp, d):
     """The stencil refusal as it read before 0.4.0, recommending the wrapper
     that now refuses a stencil node, with its check still recorded as passed.
@@ -230,20 +246,20 @@ def _a_stencil_refusal_that_recommends_the_unstructured_wrapper(rp, d):
 _SEEDS = [
     (_r1_value_over_limit_flag_left_true, None),
     (_r2_limit_loosened_in_the_record,
-     "limit(s) differ from LIMITS: '16x16 periodic forward f vs unsharded max_rel' records "
-     "limit 1.0, the runner holds it to 1e-05"),
+     "limit(s) differ from LIMITS: 'field 1d 4x1 16x16 periodic forward f vs unsharded "
+     "max_rel' records limit 1.0, the runner holds it to 1e-05"),
     (_r3_results_disagree_with_checks, "check value(s) disagree with its results"),
     (_r4_all_but_one_check_deleted,
-     "lacks case(s) the runner runs for cells [256, 1024] on 4 devices: 16x16 edge, "
-     "16x16 dirichlet, 32x32 periodic"),
-    (_r5_an_older_runner_and_commit, "schema_version 3, not 4"),
+     "lacks case(s) the runner runs for cells [256, 1024] on 4 devices: field 1d 4x1 "
+     "16x16 edge, field 1d 4x1 16x16 dirichlet, lbm 1d 4x1 16x16 periodic (+5 more)"),
+    (_r5_an_older_runner_and_commit, "schema_version 3, not 5"),
     (_r6_one_goal_from_another_commit_and_host, "its files come from 2 commits"),
     (_r7_more_devices_than_the_environment_saw,
      "n_devices 4, but its environment saw 1 device(s)"),
     (_r8_partitioned_checks_deleted, "check(s) the runner derives from its results"),
-    (_r9_schema_from_the_future, "schema_version 99, not 4"),
+    (_r9_schema_from_the_future, "schema_version 99, not 5"),
     (_config_says_fewer_sizes_than_were_run,
-     "holds case(s) the runner does not run for its config: 32x32 periodic"),
+     "holds case(s) the runner does not run for its config: field 2d 2x2 32x32 periodic"),
     (_a_check_the_runner_never_emits,
      "check(s) the runner does not emit for its results: 'an extra reassurance'"),
     (_a_limit_tightened_in_the_record, "limit(s) differ from LIMITS"),
@@ -255,6 +271,7 @@ _SEEDS = [
     (_device_list_and_count_disagree,
      "its environment lists 4 device(s) but records n_devices_visible 8"),
     (_a_case_the_runner_does_not_run, "holds case(s) the runner does not run"),
+    (_the_pencil_mesh_cases_left_out, "case(s) the runner"),
     (_a_stencil_refusal_that_recommends_the_unstructured_wrapper,
      "check value(s) disagree with its results: 'stencil refusal names the cell count, "
      "the device count and that the unstructured wrapper is not a way out for a stencil "

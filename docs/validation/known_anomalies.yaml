@@ -4829,7 +4829,12 @@ anomalies:
       0.226 at `stencil_order=4`, on rods coupled end to end through their
       temperature inputs, whatever each rod's own constructor accepts.
       Below those figures on both rods the pair is stable, at mixed orders
-      too.  `compile()` warns when it finds such a pair past them, but it
+      too.  A chain of three or more rods shorter than about 20 cells each
+      has a slightly lower limit, down to 0.373 (order 2) and 0.2248
+      (order 4) for 5-cell rods, so keep such a chain below those.
+      `compile()` warns when it finds such a pair past them, but it
+      judges each pair against the pair figure, so a short-rod chain
+      between the chain and pair figures is not warned about, and it
       only recognises the built-in `extract_first` / `extract_last` edges
       between uniform `HeatNode`s in one coupling group.  A custom
       transform, a wrapped or non-uniform rod, or a sub-cycled pair of
@@ -5544,15 +5549,26 @@ anomalies:
       attempt made at `dt_min`, and was not affected.
       Resolved in 0.4.0: the accepted step advances the clock, the
       histories and the callback by the step it covered.
-    severity: "minor"
+    severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
-      Silently wrong time accounting, but only on a step the stepper
-      already warns about ("hit dt_min ... Accepting step"), and by at most
-      `dt_min / min_factor - dt_min` per such step.  `context_dependent`
-      because a run that never reaches `dt_min`, or sets `dt_min` far below
-      the steps it takes, is unaffected, while a run whose `dt_min` is
-      reached repeatedly reports a trajectory against the wrong times.
+      Silently wrong time accounting.  The reported time of a state is a
+      value describing the simulated system, and it was wrong by up to
+      `dt_min / min_factor - dt_min` per step accepted at `dt_min`.  The
+      warning that step emits ("hit dt_min ... Accepting step") is about
+      the step's error estimate, not the clock, and it reads as though the
+      step accepted were `dt_min`, the wrong figure.  Every later `t_history`
+      entry carried the offset with no warning at all, and the run stopped
+      past `t_end`.  Graded `major` under the 0.4.0 severity definition: a
+      silent wrong result is never `minor`.  It was graded `minor` when
+      first registered, because the step that starts the offset is one the
+      stepper already warns about.  Not `critical`: the stepper warns at
+      the step, a node integrating its own clock shows the offset, and
+      `run_adaptive_scan` avoids it.
+      `context_dependent` because a run that never reaches `dt_min`, or
+      sets `dt_min` far below the steps it takes, is unaffected, while a
+      run whose `dt_min` is reached repeatedly reports a trajectory against
+      the wrong times.
     affected_components:
       - "maddening.core.graph_manager.GraphManager.run_adaptive"
     affected_versions: ">=0.1.0, <0.4.0"

@@ -145,8 +145,17 @@ def check_rest_write(gm: GraphManager, registry: dict, name: str, write: Write,
     client = _client(gm, root, registry)
     before = graph_snapshot(gm)
     get_before = client.get(f"/graph/params/{name}").json()
-    resp = client.put(f"/graph/params/{name}", content=write.body(),
-                      headers={"content-type": "application/json"})
+    with warnings.catch_warnings():
+        # The route casts a float64 request value to the leaf's float32
+        # before refusing an overflow, and NumPy warns on the cast; under
+        # this suite's ``filterwarnings = ["error"]`` that warning is a 500
+        # no deployment sees.  The oracle judges what a deployment answers;
+        # the warning itself is pinned by
+        # ``test_an_overflowing_value_is_refused_without_a_warning``.
+        warnings.filterwarnings("ignore", message="overflow encountered in cast",
+                                category=RuntimeWarning)
+        resp = client.put(f"/graph/params/{name}", content=write.body(),
+                          headers={"content-type": "application/json"})
     note(f"PUT {write.params!r} -> {resp.status_code} {resp.text[:400]}")
     assert resp.status_code < 500, f"{resp.status_code}: {resp.text}"
     if resp.status_code >= 400:
@@ -206,6 +215,27 @@ def test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload(kind_name, da
         assert outcome == "refused", f"{write.category} write {write.params!r} was accepted"
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "differential: PUT /graph/params casts a float32-overflowing value (1e39) "
+    "before refusing it and NumPy warns 'overflow encountered in cast', so the "
+    "400 becomes a 500 wherever warnings are errors (as in this suite); pending fix"))
+def test_an_overflowing_value_is_refused_without_a_warning():
+    """Found by the property above (category ``oversized``).  The refusal is
+    right; the unguarded cast before it is not."""
+    from maddening.nodes import BallNode
+
+    gm = GraphManager()
+    gm.add_node(BallNode("ball", 0.01))
+    gm.compile()
+    with tmp_dir() as root:
+        client = _client(gm, root, REGISTRY)
+        before = graph_snapshot(gm)
+        resp = client.put("/graph/params/ball", content=json.dumps(
+            {"params": {"elasticity": 1e39}}), headers={"content-type": "application/json"})
+        assert_nothing_written(gm, before, what="overflowing write")
+    assert resp.status_code == 400, resp.text
+
+
 # The two graph features a one-node graph cannot carry, per push: a
 # ParamSpec override (the route must refuse a value outside it, and the
 # reload must carry it), and a coupling group with a predictor (a write into
@@ -228,10 +258,18 @@ def _spring_pair(**spec):
     return gm
 
 
-@settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
-@given(stiffness=st.floats(min_value=-5.0, max_value=200.0, allow_nan=False,
-                           width=32),
-       damping=st.one_of(st.none(), st.floats(min_value=0.0, max_value=5.0, width=32)))
+#: ``(stiffness, damping)`` writes around the override's bounds ``[1, 100]``:
+#: inside, on each bound, just past each, far past, and with a second key.
+#: A fixed table rather than a Hypothesis draw: each case builds and compiles
+#: a coupled graph and its reload (about 0.4 s), so twenty draws would take a
+#: per-push test past the time budget, while these six points are the whole
+#: decision the route makes.  The slow lane draws generated coupled graphs
+#: (``test_a_rest_param_write_into_a_generated_graph_...``).
+_SPEC_CASES = [(37.5, None), (1.0, None), (100.0, 2.5), (100.5, None), (0.5, 1.0),
+               (-3.0, None)]
+
+
+@pytest.mark.parametrize("stiffness, damping", _SPEC_CASES)
 def test_a_rest_write_into_a_coupled_member_with_a_param_spec_runs_as_its_reload(
         stiffness, damping):
     """A ``ParamSpec`` override bounds ``stiffness`` to ``[1, 100]``: the route

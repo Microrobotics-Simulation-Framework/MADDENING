@@ -239,6 +239,7 @@ gm.check_params(p)         # ValueError naming the first leaf out of range
 from maddening.sysid import (fim, fim_core, fit, observations_from_history,
                              windowed_loss)
 
+gm.reset_state()          # the spring from its initial position, not at rest
 init = {n: gm.get_node_state(n) for n in gm.node_names}
 _, hist = gm.run_scan_with_history(1000)
 obs = observations_from_history(init, hist)          # T = 1001 samples
@@ -246,6 +247,12 @@ obs = observations_from_history(init, hist)          # T = 1001 samples
 loss = lambda p: windowed_loss(
     gm, p, obs, obs_fn=lambda h: h["spring"]["position"], window=50)
 ```
+
+Record data that can tell the parameters apart.  `run_scan` leaves the
+graph at its final state, and the 1000 steps run above left the spring
+at rest, where its position moves by about `3e-5` and says almost
+nothing about `k` or `c`.  `gm.reset_state()` starts it again from
+`initial_position=0.5`, so the record holds the whole transient.
 
 `windowed_loss` is teacher-forced: every window restarts from the
 measured state, so gradients cannot compound over a long stiff rollout
@@ -386,10 +393,29 @@ times band where `precision_limited` fires on 97% of cases anyway.
 <!-- snippet: continues -->
 ```python
 gm.set_param_spec("spring", "mass", ParamSpec(trainable=False))
-res = fit(gm, loss, n_iter=300, lr=0.1)
-res.params["nodes"]["spring"]      # physical values, inside bounds
-res.losses                         # per-iteration loss
+start = jax.tree.map(lambda x: x, gm.params)
+start["nodes"]["spring"]["stiffness"] = jnp.asarray(45.0)    # the data's: 30
+start["nodes"]["spring"]["damping"] = jnp.asarray(3.0)       # the data's: 2
+res = fit(gm, loss, params=start, n_iter=300, lr=0.1)
+res.params["nodes"]["spring"]      # stiffness ~30, damping ~2: physical, inside bounds
+res.losses                         # per-iteration loss: 0.58 at the start, below 1e-10 by the end
+res.best_iteration, res.best_loss  # which iterate `params` is, and its loss
 ```
+
+`fit` returns the lowest-loss iterate it evaluated, which is not always
+its last.  Adam's step is about `lr` in size however small the gradient,
+so near a minimum it can step past it and end the run higher than it
+was, and a fit started right next to the minimum can walk away from it.
+`best_iteration` counts the updates that produced `params` (0 is the
+start) and indexes `losses`:
+`res.losses[res.best_iteration] == res.best_loss`, except when it equals
+`len(res.losses)`.  Then `params` is the iterate the last update
+produced, which the loop never evaluated, and `fit` evaluated it once
+more to compare it with the rest.  A run whose loss never rose returns
+its last iterate.  `fit_multiple_shooting` chooses the same way, taking
+the parameters and the window states from the same iterate, and `fit_lm`
+needs no choice: it accepts only a step that lowers the loss, so its last
+iterate is its lowest.
 
 `fit_lm` is the Gauss–Newton alternative: it reuses the `jacfwd`
 sensitivities `fim` computes, so with a handful of parameters it
@@ -417,10 +443,14 @@ gradient raises rather than continuing.
 gradient of a least-squares loss is `Jᵀr`, so a direction `v` with `Jv = 0`
 has `g·v = 0` at every iterate — but Adam's step is `−lr·D g` for a diagonal
 `D`, and `(D g)·v` is not zero, so plain Adam wanders inside the flat
-manifold.  The loss does not notice; the parameters do.  On the spring above,
-unguarded, the fitted scale of `(k, c, m)` lands anywhere from −7.5% to +46%
-of the value it started at depending only on `lr` and `n_iter`, with the loss
-unchanged in its first six digits.
+manifold.  The loss does not notice; the parameters do.  On a spring like
+the one above, observed with σ = 0.02 noise and fitted unguarded, the scale of
+`(k, c, m)` lands from −7.5% to −5.4% of the value it started at depending
+only on `lr`, with the loss unchanged in its first six digits, and Adam's
+iterate keeps drifting: +46% after 10,000 iterations at `lr=0.2` on a shorter
+record.  Returning the lowest-loss iterate does not help here, because along
+a flat direction which iterate is lowest is decided by rounding, not by the
+data.
 
 `fit` therefore accumulates the run's gradients and removes the net
 displacement's component along the directions none of them pointed in,
@@ -428,30 +458,48 @@ leaving those at the values you supplied — the data has not contradicted
 them.  The loss is flat there, so nothing is paid for it, and a fit whose
 gradients spanned everything gets its iterate back bit for bit.
 
-<!-- snippet: continues -->
-```python
-res = fit(gm, loss, n_iter=300, lr=0.1)
-res.excited_rank         # 2 of 3: the data left one direction undetermined
-res.undetermined_drift   # how far the raw iterate had drifted along it
-```
-
-`excited_rank is None` means the question was not answered, not that the
-answer was "full rank": fewer iterations than parameters, more than 512
-trainable leaves, or `hold_undetermined=False`.  The cutoff is numerical —
-a direction the data resolves *weakly* is kept, not held; for "well enough
-to use", read `crb` against a tolerance you declare.  And the degeneracy has
-to be a fixed direction in the unconstrained coordinates: `SpringDamperNode`
-gives `damping` the identity transform so that zero damping stays
-representable, which makes the scale direction `(c, 1, 1)` and rotates it as
-`c` moves.  Declare `transform="log"` on every parameter a scale degeneracy
-mixes — the coordinates `fim(scale="relative")` already assumes — and it
-becomes constant:
+The degeneracy has to be a fixed direction in the unconstrained
+coordinates, though.  `SpringDamperNode` gives `damping` the identity
+transform so that zero damping stays representable, which makes the scale
+direction `(c, 1, 1)` and rotates it as `c` moves; then no direction is
+null for the whole run, and the guard holds nothing.  Declare
+`transform="log"` on every parameter a scale degeneracy mixes — the
+coordinates `fim(scale="relative")` already assumes — and it becomes
+constant.  Then fit all three of `(k, c, m)`, and nothing else:
 
 <!-- snippet: continues -->
 ```python
 gm.set_param_spec("spring", "damping",
                   ParamSpec(bounds=(0.0, None), transform="log"))
+gm.set_param_spec("spring", "mass",                      # trainable again
+                  ParamSpec(bounds=(0.0, None), transform="log"))
+mask = jax.tree.map(lambda _: False, gm.params)          # see mask= below
+for key in ("stiffness", "damping", "mass"):
+    mask["nodes"]["spring"][key] = True
+res = fit(gm, loss, params=start, mask=mask, n_iter=300, lr=0.1)
+res.excited_rank         # 2 of 3: the data left one direction undetermined
+res.undetermined_drift   # how far the raw iterate had drifted along it (~1e-2)
 ```
+
+Without the `damping` line, the same fit reports an `excited_rank` of 3 and
+holds nothing.
+
+`excited_rank is None` means the question was not answered, not that the
+answer was "full rank".  That happens when:
+
+- `hold_undetermined=False`;
+- there are more than 512 trainable coordinates (array elements, not
+  leaves);
+- the run took fewer iterations than there are trainable coordinates, so a
+  direction no gradient has pointed along yet cannot be told from one that
+  none ever will; or
+- every gradient was zero, a degenerate spectrum with nothing to measure a
+  rank against: a fit started at an exact optimum, or a loss that reads none
+  of the trainable parameters.
+
+The cutoff is numerical — a direction the data resolves *weakly* is kept,
+not held; for "well enough to use", read `crb` against a tolerance you
+declare.
 
 **`fit_lm` and `fit_multiple_shooting` run the same guard**, on the same
 `hold_undetermined` keyword, and fill the same two fields.  Neither is immune
@@ -467,8 +515,8 @@ drift *converges*: on the spring above it settles 0.85% (noiseless) or 0.43%
 iteration 10 to 200.  `fit_multiple_shooting` is Adam, so it does not settle:
 2.0% to 4.8% across `lr` 0.01–0.2, a 3.0% spread that the schedule picks and
 the data has no opinion about.  Only the parameters are held there — the
-returned `window_states` are decision variables of that fit and come back as
-the optimiser left them.
+returned `window_states` are decision variables of that fit and come back
+from the selected iterate as the optimiser left them.
 
 All three fitters take a `mask=` that *narrows* `gm.trainable_mask()` —
 fit two of the three trainable constants, say.  It cannot widen it: a

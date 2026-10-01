@@ -875,6 +875,44 @@ relies on gets `equivalent="<why>"` and is asserted to survive. A live gap
 gets `gap="<what is unguarded>"` and runs as a strict xfail until a guard
 catches it.
 
+## Differential tests
+
+A differential test compares two paths through the library that must agree,
+over generated inputs, so a disagreement is found by CPU rather than by an
+audit. Each harness writes tests only: a disagreement it finds is pinned as
+`@pytest.mark.xfail(strict=True, reason="differential: ...; pending fix")`,
+so CI stays green and the fix must flip it. Each subsection below is owned
+by one harness.
+
+### State and I/O
+
+Files: `tests/property/test_differential_{rest_params,param_writes,checkpoint,serialisation,fmu}.py`,
+`tests/usd/test_usd_differential_round_trip.py`,
+`tests/cloud/multigpu/test_property_sharded_state_io_differential.py`.
+Shared scaffolding: `tests/property/node_catalogue.py` (every built-in
+node, with valid constructions and writes in named categories) and
+`tests/property/differential.py` (exact NaN-safe comparison, and a guard
+that points `HOME` at an empty directory and makes every cloud launcher
+raise). Every comparison is bit for bit: dtype, shape and bytes. No oracle
+takes a tolerance, because both sides run the same compiled computation.
+
+| Oracle | Paths compared | Covers | Cannot see |
+|---|---|---|---|
+| REST write is a reload | `PUT /graph/params/{node}` then run, against `to_dict` -> JSON -> `from_dict` with a checkpoint loaded, then run; and after `POST /sim/reset` against `reset_state()` on the reload. A 4xx must leave every node's params, every `gm.params` leaf, the whole state and the dirty flag unchanged; `GET` must equal what the step reads and what a save carries | Every cheap built-in node per push, with valid, boundary, out-of-bounds, non-finite, oversized, wrong-type, unknown, initial-condition, structural and cross-parameter writes; a coupled member with a `ParamSpec` override; the LBM, pipe and wavelet nodes and generated multi-node graphs in the slow lane; a sharded rod (re-wrapped reload) | A defect the constructor and the live step share; a write the catalogue does not propose |
+| `gm.params` / fit write is a reload | A write into `gm.params` (leaf by leaf, or the whole tree as `gm.params = fit(...).params`), run, against the saved config plus a checkpoint, run; and after `reset_state()` on both. A refused write must be refused by the next run and by `to_dict()` alike | In-bounds writes into every cheap node; the output of `maddening.sysid.fit`; calibration-like writes into generated graphs (slow); a sharded rod | Out-of-bounds and non-finite values (a graph does not check `gm.params` writes against `ParamSpec`; the REST route and the FMU do) |
+| Checkpoint resumes the run | `save_state` at step *k*, `load_state` into a fresh graph or one that ran ahead, then *N* steps, against the run that never stopped; the restored state is compared before stepping, `_meta` included; `reset_state()` must equal a freshly compiled graph | Every cheap node with calibrated params; predictor history, IQN-IMVJ warm starts, sub-cycling and multi-rate phase; the REST `/checkpoint/save` and `/load` routes crossed with the in-process calls; generated graphs, the costly nodes and a diagnostics group in the slow lane; a sharded rod | State outside `gm._state` and `gm.params`; a defect `save_state` and `load_state` share (one key scheme) |
+| Serialisation is the original | `to_dict` -> JSON -> `from_dict`, and a USD stage, against the original: config, structure, initial state, params, `param_specs()` and trajectory | Every built-in node with generated arguments; generated graphs over seven node kinds (`strategies.ALL_NODE_KINDS`), with coupling groups in the slow lane; a sharded rod reloads unsharded with a warning and, re-wrapped, bit for bit | A field both `to_dict` and `from_dict` ignore that changes nothing they compare |
+| Three FMU paths are one model | The TCP bridge over a socket, `FmuSidecar` driven in process, and the `GraphManager` itself, over generated `set` / `get` / `step` / `get_state` / `set_state` / `reset` sequences: every value and the full state agree after every operation; a parameter refused by the bridge's `set` is refused by `set_params` (same reason) and by `check_params`; an edited snapshot is refused by `set_state` and `set_fmu_state` with the same message and changes nothing | A uniform graph, a multi-rate graph with an array input, a coupled graph with a predictor per push; generated graphs in the slow lane | A defect in the compiled step (all three share it); input values, which only the bridge checks |
+
+Per push, each property stays under about 5 s on a CI runner by drawing
+values on a fixed graph shape (`EXAMPLES_COSTLY`), reusing compiled graphs
+where the oracle checks the reuse itself (a reset graph must equal a fresh
+one), or by a short fixed table where every case compiles. Every slow mark
+names its per-push sibling. Every property is `derandomize=True`, so CI
+draws the same examples on every run. Each oracle was mutation-tested on a
+scratch copy of `src/` (the PR that added them lists the mutants and the
+test that caught each).
+
 ## Test Organization
 
 ```

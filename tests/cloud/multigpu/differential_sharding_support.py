@@ -111,8 +111,8 @@ _PAD_MODE = {"edge": "edge", "zero": "constant", "periodic": "wrap"}
 _STATIC_PAD_MODE = {"edge": "edge", "zero": "edge", "periodic": "wrap"}
 
 #: Graph surfaces the oracle compares.
-SURFACES = ("step", "run", "run_scan", "scan_params", "write_compile",
-            "set_state", "gradient")
+SURFACES = ("write_compile", "scan_params", "set_state", "run_scan", "step",
+            "run", "gradient")
 #: The surfaces cheap enough for the per-push tests (the gradient compiles
 #: a reverse-mode scan per path and has per-push tests of its own).
 FORWARD_SURFACES = tuple(s for s in SURFACES if s != "gradient")
@@ -553,6 +553,7 @@ class UnstructuredConfig:
     steps: int
     seed: int
     surface: str
+    exchange: str = "all_to_all"   # or "ppermute"
     family: str = "unstructured"
 
     @property
@@ -763,6 +764,19 @@ def unstructured_node_class(contract: str):
 # ---------------------------------------------------------------------------
 
 
+# Every ``sampled_from`` below lists its richest value first, on purpose.
+# Hypothesis biases generation towards the first element of a
+# ``sampled_from`` and the low end of an ``integers``, and a per-push test
+# sees only ``EXAMPLES_COSTLY`` (20) examples.  Ordered the other way,
+# half of a per-push run was single-device on a one-cell grid and a
+# quarter mis-shaped inputs that end at a refusal, and the per-push tests
+# missed three of the harness mutants (a padded integral, and two dropped
+# ``params``) that the same oracle catches on a richer draw.  So: four
+# devices, the params contract, an integral, statics read in the halo, a
+# composition of wrappers and the write surfaces come first; the trivial
+# values stay reachable.
+
+
 def _counts(*wanted: int) -> list[int]:
     return [n for n in wanted if n <= N_AVAILABLE] or [1]
 
@@ -814,52 +828,53 @@ def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool]
                     surfaces=FORWARD_SURFACES, dtypes=("float32", "float64"),
                     max_steps: int = 3) -> StencilConfig:
     """A configuration of the stencil family (see the module docstring)."""
-    ndim = draw(st.sampled_from([1, 2])) if ndim is None else ndim
+    ndim = draw(st.sampled_from([2, 1])) if ndim is None else ndim
     if ndim == 1:
-        n_dev = draw(st.sampled_from(_counts(1, 2, 4)))
+        n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
         mesh_shape, axis_names, axis_map = (n_dev,), ("devices",), (("devices", 0),)
     else:
-        use_pencil = (draw(st.booleans()) if pencils is None else pencils) \
-            and N_AVAILABLE >= 4
+        use_pencil = (draw(st.sampled_from([True, False])) if pencils is None
+                      else pencils) and N_AVAILABLE >= 4
         if use_pencil:
             mesh_shape = draw(st.sampled_from([(2, 2), (1, 4), (4, 1)]))
             axis_names, axis_map = ("px", "py"), (("px", 0), ("py", 1))
         else:
-            n_dev = draw(st.sampled_from(_counts(1, 2, 4)))
+            n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
             mesh_shape, axis_names = (n_dev,), ("devices",)
             axis_map = (("devices", draw(st.sampled_from([0, 1]))),)
     sizes = dict(zip(axis_names, mesh_shape))
     block = {sa: int(sizes[ma]) for ma, sa in axis_map}
-    halo = tuple(draw(st.sampled_from([1, 2])) for _ in range(ndim))
+    halo = tuple(draw(st.sampled_from([2, 1])) for _ in range(ndim))
     # At least ``halo`` cells per shard: a halo wider than a shard is a
     # known late refusal with a test of its own.
     shape = tuple(block.get(a, 1) * draw(st.integers(halo[a], halo[a] + 2))
                   for a in range(ndim))
-    reads = draw(st.booleans())
-    source = draw(st.sampled_from(["none", "per_cell", "scalar", "misshapen"]))
+    reads = draw(st.sampled_from([True, False]))
+    source = draw(st.sampled_from(["per_cell", "scalar", "none", "misshapen"]))
     misshapen = ()
     if source == "misshapen":
         cands = _misshapen_candidates(shape, block, halo)
         misshapen = draw(st.sampled_from(cands))
-    integral = draw(st.sampled_from([None, "scalar", "vector", "per_shard"]))
-    wrapping = draw(st.sampled_from(["single", "nested", "hybrid"]))
+    integral = draw(st.sampled_from(["vector", "per_shard", "scalar", None]))
+    wrapping = draw(st.sampled_from(["nested", "hybrid", "single"]))
     if PENDING_NESTED_PER_SHARD_INTEGRAL and wrapping == "nested" and integral == "per_shard":
         integral = "vector"
     return StencilConfig(
         mesh_shape=tuple(mesh_shape), axis_names=tuple(axis_names),
         axis_map=tuple(axis_map), shape=shape, halo=halo,
-        fill=draw(st.sampled_from(FILLS)), declares=draw(st.booleans()),
-        contract=draw(st.sampled_from(["legacy", "params"])),
+        fill=draw(st.sampled_from(["periodic", "edge", "zero"])),
+        declares=draw(st.sampled_from([True, False])),
+        contract=draw(st.sampled_from(["params", "legacy"])),
         integral=integral,
         integral_name=draw(st.sampled_from(["a_total", "z_total"])),
-        integral_listed=draw(st.booleans()),
+        integral_listed=draw(st.sampled_from([True, False])),
         reads_shard_info=reads,
-        kappa=draw(st.sampled_from([None, "interior", "halo"])),
+        kappa=draw(st.sampled_from(["halo", "interior", None])),
         kappa_axis=draw(st.sampled_from(list(range(ndim)))),
-        table=draw(st.sampled_from([None, "interior", "halo"])) if reads else None,
+        table=draw(st.sampled_from(["halo", "interior", None])) if reads else None,
         source=source, misshapen_shape=misshapen,
-        gain=draw(st.booleans()),
-        faces=draw(st.booleans()) if reads else False,
+        gain=draw(st.sampled_from([True, False])),
+        faces=draw(st.sampled_from([True, False])) if reads else False,
         dtype=draw(st.sampled_from(list(dtypes))),
         wrapping=wrapping,
         steps=draw(st.integers(1, max_steps)),
@@ -871,12 +886,12 @@ def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool]
 @st.composite
 def pointwise_configs(draw, *, surfaces=FORWARD_SURFACES,
                       dtypes=("float32", "float64"), max_steps: int = 3) -> PointwiseConfig:
-    n_dev = draw(st.sampled_from(_counts(1, 2, 4)))
-    ndim = draw(st.sampled_from([1, 2]))
-    shard_axis = draw(st.sampled_from(list(range(ndim))))
-    shape = tuple((n_dev if a == shard_axis else 1) * draw(st.integers(1, 3))
+    n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
+    ndim = draw(st.sampled_from([2, 1]))
+    shard_axis = draw(st.sampled_from(list(range(ndim))[::-1]))
+    shape = tuple((n_dev if a == shard_axis else 1) * draw(st.integers(2, 3))
                   for a in range(ndim))
-    source = draw(st.sampled_from(["none", "per_cell", "scalar", "misshapen"]))
+    source = draw(st.sampled_from(["per_cell", "scalar", "none", "misshapen"]))
     misshapen = ()
     if source == "misshapen":
         cands = _misshapen_candidates(shape, {shard_axis: n_dev} if shard_axis == 0 else {},
@@ -884,10 +899,11 @@ def pointwise_configs(draw, *, surfaces=FORWARD_SURFACES,
         misshapen = draw(st.sampled_from(cands))
     return PointwiseConfig(
         n_devices=n_dev, shape=shape, shard_axis=shard_axis,
-        contract=draw(st.sampled_from(["legacy", "params"])),
-        total=draw(st.booleans()), source=source, misshapen_shape=misshapen,
-        gain=draw(st.booleans()), dtype=draw(st.sampled_from(list(dtypes))),
-        wrapping=draw(st.sampled_from(["single", "nested", "hybrid", "hybrid_inside"])),
+        contract=draw(st.sampled_from(["params", "legacy"])),
+        total=draw(st.sampled_from([True, False])), source=source,
+        misshapen_shape=misshapen, gain=draw(st.sampled_from([True, False])),
+        dtype=draw(st.sampled_from(list(dtypes))),
+        wrapping=draw(st.sampled_from(["nested", "hybrid_inside", "hybrid", "single"])),
         steps=draw(st.integers(1, max_steps)), seed=draw(st.integers(0, 2**16)),
         surface=draw(st.sampled_from(list(surfaces))),
     )
@@ -897,8 +913,8 @@ def pointwise_configs(draw, *, surfaces=FORWARD_SURFACES,
 def unstructured_configs(draw, *, surfaces=FORWARD_SURFACES,
                          dtypes=("float32", "float64"),
                          max_steps: int = 3) -> UnstructuredConfig:
-    n_dev = draw(st.sampled_from(_counts(1, 2, 4)))
-    kinds = ["uneven", "balanced_global"] + (["balanced_nonglobal"] if n_dev > 1 else [])
+    n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
+    kinds = ["uneven"] + (["balanced_nonglobal"] if n_dev > 1 else []) + ["balanced_global"]
     partition = draw(st.sampled_from(kinds))
     if partition == "uneven":
         n = draw(st.integers(max(3, n_dev), 3 * n_dev + 2))
@@ -913,20 +929,21 @@ def unstructured_configs(draw, *, surfaces=FORWARD_SURFACES,
             assignment = tuple(int(i % n_dev) for i in range(n))
     chords = tuple(draw(st.lists(st.tuples(st.integers(0, n - 1), st.integers(0, n - 1)),
                                  max_size=3)))
-    source = draw(st.sampled_from(["none", "per_cell", "scalar", "misshapen"]))
-    integral = draw(st.sampled_from([None, "scalar", "vector", "per_shard"]))
+    source = draw(st.sampled_from(["per_cell", "scalar", "none", "misshapen"]))
+    integral = draw(st.sampled_from(["vector", "per_shard", "scalar", None]))
     cfg = UnstructuredConfig(
         n_devices=n_dev, n_cells=n, assignment=assignment, partition=partition,
-        chords=chords, contract=draw(st.sampled_from(["legacy", "params"])),
+        chords=chords, contract=draw(st.sampled_from(["params", "legacy"])),
         integral=integral,
         integral_name=draw(st.sampled_from(["a_total", "z_total"])),
-        integral_listed=draw(st.booleans()),
-        weight=draw(st.sampled_from([None, "interior", "halo"])),
-        source=source, misshapen_len=0, gain=draw(st.booleans()),
+        integral_listed=draw(st.sampled_from([True, False])),
+        weight=draw(st.sampled_from(["halo", "interior", None])),
+        source=source, misshapen_len=0, gain=draw(st.sampled_from([True, False])),
         dtype=draw(st.sampled_from(list(dtypes))),
-        wrapping=draw(st.sampled_from(["single", "hybrid"])),
+        wrapping=draw(st.sampled_from(["hybrid", "single"])),
         steps=draw(st.integers(1, max_steps)), seed=draw(st.integers(0, 2**16)),
         surface=draw(st.sampled_from(list(surfaces))),
+        exchange=draw(st.sampled_from(["all_to_all", "ppermute"])),
     )
     if source == "misshapen":
         layout = unstructured_layout(cfg)
@@ -1108,7 +1125,7 @@ def _unstructured_case(cfg: UnstructuredConfig) -> Case:
         node = cls(cfg, layout)
         if sharded:
             node = ShardedUnstructuredNode(node, create_device_mesh(shape=(cfg.n_devices,)),
-                                           layout)
+                                           layout, exchange=cfg.exchange)
         return HybridNode(node, _correction) if cfg.wrapping == "hybrid" else node
 
     dt = _np_dtype(cfg.dtype)
@@ -1361,8 +1378,8 @@ def _lbm_case(cfg: LBMConfig) -> Case:
 
 @st.composite
 def heat_configs(draw, *, surfaces=FORWARD_SURFACES, max_steps: int = 4) -> HeatConfig:
-    n_dev = draw(st.sampled_from(_counts(1, 2, 4)))
-    order = draw(st.sampled_from([2, 4]))
+    n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
+    order = draw(st.sampled_from([4, 2]))
     halo = 1 if order == 2 else 2
     per = draw(st.integers(halo, halo + 3))
     n = n_dev * per
@@ -1373,9 +1390,9 @@ def heat_configs(draw, *, surfaces=FORWARD_SURFACES, max_steps: int = 4) -> Heat
         n += n_dev
     return HeatConfig(
         n_devices=n_dev, order=order, n_cells=n, nonuniform=nonuniform,
-        ends=draw(st.booleans()),
-        source=draw(st.sampled_from(["none", "per_cell", "scalar", "misshapen"])),
-        wrapping=draw(st.sampled_from(["single", "nested", "hybrid"])),
+        ends=draw(st.sampled_from([True, False])),
+        source=draw(st.sampled_from(["per_cell", "scalar", "none", "misshapen"])),
+        wrapping=draw(st.sampled_from(["nested", "hybrid", "single"])),
         steps=draw(st.integers(1, max_steps)), seed=draw(st.integers(0, 2**16)),
         surface=draw(st.sampled_from([s for s in surfaces if s != "set_state"]
                                      or list(surfaces))))
@@ -1394,11 +1411,11 @@ def lbm_configs(draw, *, lattices=("D2Q9", "D3Q19"), surfaces=FORWARD_SURFACES,
     """
     lattice = draw(st.sampled_from(list(lattices)))
     D = 2 if lattice == "D2Q9" else 3
-    if draw(st.booleans()) and N_AVAILABLE >= 4:
+    if draw(st.sampled_from([True, False])) and N_AVAILABLE >= 4:
         mesh_shape = draw(st.sampled_from([(2, 2), (1, 4), (4, 1)]))
         axis_names, axis_map = ("px", "py"), (("px", 0), ("py", 1))
     else:
-        n_dev = draw(st.sampled_from(_counts(1, 2, 4)))
+        n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
         mesh_shape, axis_names = (n_dev,), ("devices",)
         axis_map = (("devices", draw(st.sampled_from(list(range(D))))),)
     sizes = dict(zip(axis_names, mesh_shape))
@@ -1411,9 +1428,9 @@ def lbm_configs(draw, *, lattices=("D2Q9", "D3Q19"), surfaces=FORWARD_SURFACES,
     return LBMConfig(
         lattice=lattice, mesh_shape=tuple(mesh_shape), axis_names=tuple(axis_names),
         axis_map=tuple(axis_map), shape=tuple(shape),
-        force=draw(st.sampled_from(["none", "uniform", "per_cell", "misshapen"])),
+        force=draw(st.sampled_from(["per_cell", "uniform", "none", "misshapen"])),
         pressure=draw(st.booleans()),
-        wrapping=draw(st.sampled_from(["single", "nested", "hybrid"])),
+        wrapping=draw(st.sampled_from(["nested", "hybrid", "single"])),
         steps=draw(st.integers(1, max_steps)), seed=draw(st.integers(0, 2**16)),
         surface=draw(st.sampled_from([s for s in surfaces if s != "set_state"]
                                      or list(surfaces))))
@@ -1566,6 +1583,10 @@ def run_surface(case: Case, surface: str, sharded: bool):
                 return {"__refused__": "takes no 'params' keyword" in str(e)}
             return {"__refused__": False}
     elif surface == "write_compile":
+        # Run before the write, so a trace the write must invalidate
+        # exists: a recompile that kept the wrapper's compiled step would
+        # step the old value from here on (MADD-ANO-032).
+        gm.run_scan(n, ext)
         if cfg.contract == "params":
             leaf = gm.params["nodes"][case.name][param_name(cfg)]
             gm.params["nodes"][case.name][param_name(cfg)] = jnp.asarray(

@@ -145,7 +145,9 @@ def test_a_gradient_through_run_scan_is_the_unsharded_gradient(name):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.slow  # broad sibling of the two per-push stencil tests above
+# Per push: tests/cloud/multigpu/test_differential_sharding.py::test_a_generated_1d_stencil_graph_answers_as_the_unsharded_graph
+# Per push: tests/cloud/multigpu/test_differential_sharding.py::test_a_generated_2d_stencil_graph_on_pencils_and_slabs_answers_as_the_unsharded_graph
+@pytest.mark.slow  # every surface on every example at EXAMPLES_STANDARD depth: a few seconds an example, minutes in all, nearly all XLA compile
 @given(cfg=D.stencil_configs(surfaces=D.SURFACES, max_steps=4))
 @BROAD
 def test_the_full_stencil_matrix_answers_as_unsharded_on_every_surface(cfg):
@@ -154,7 +156,8 @@ def test_the_full_stencil_matrix_answers_as_unsharded_on_every_surface(cfg):
     D.check_config(cfg, surfaces=D.SURFACES)
 
 
-@pytest.mark.slow  # broad sibling of the per-push pointwise test
+# Per push: tests/cloud/multigpu/test_differential_sharding.py::test_a_generated_pointwise_graph_answers_as_the_unsharded_graph
+@pytest.mark.slow  # every surface on every example at EXAMPLES_STANDARD depth: a few seconds an example, minutes in all, nearly all XLA compile
 @given(cfg=D.pointwise_configs(surfaces=D.SURFACES, max_steps=4))
 @BROAD
 def test_the_full_pointwise_matrix_answers_as_unsharded_on_every_surface(cfg):
@@ -162,7 +165,8 @@ def test_the_full_pointwise_matrix_answers_as_unsharded_on_every_surface(cfg):
     D.check_config(cfg, surfaces=D.SURFACES)
 
 
-@pytest.mark.slow  # broad sibling of the per-push unstructured test
+# Per push: tests/cloud/multigpu/test_differential_sharding.py::test_a_generated_unstructured_graph_answers_as_the_unsharded_graph
+@pytest.mark.slow  # every surface on every example at EXAMPLES_STANDARD depth: a few seconds an example, minutes in all, nearly all XLA compile
 @given(cfg=D.unstructured_configs(surfaces=D.SURFACES, max_steps=4))
 @BROAD
 def test_the_full_unstructured_matrix_answers_as_unsharded_on_every_surface(cfg):
@@ -170,7 +174,8 @@ def test_the_full_unstructured_matrix_answers_as_unsharded_on_every_surface(cfg)
     D.check_config(cfg, surfaces=D.SURFACES)
 
 
-@pytest.mark.slow  # broad sibling of the per-push gradient test
+# Per push: tests/cloud/multigpu/test_differential_sharding.py::test_a_gradient_through_run_scan_is_the_unsharded_gradient
+@pytest.mark.slow  # a reverse-mode scan and a forward-mode pass compiled per path per example, over the whole matrix
 @given(cfg=st.one_of(D.stencil_configs(surfaces=("gradient",)),
                      D.pointwise_configs(surfaces=("gradient",)),
                      D.unstructured_configs(surfaces=("gradient",))))

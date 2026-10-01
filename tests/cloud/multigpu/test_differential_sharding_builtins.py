@@ -75,7 +75,8 @@ def test_a_generated_heat_rod_graph_answers_as_the_unsharded_rod(cfg):
     D.check_config(cfg)
 
 
-@pytest.mark.slow  # broad sibling of test_a_generated_heat_rod_graph_answers_as_the_unsharded_rod
+# Per push: tests/cloud/multigpu/test_differential_sharding_builtins.py::test_a_generated_heat_rod_graph_answers_as_the_unsharded_rod
+@pytest.mark.slow  # every surface on every example at EXAMPLES_STANDARD depth: a few seconds an example, minutes in all, nearly all XLA compile
 @given(cfg=D.heat_configs(surfaces=D.SURFACES, max_steps=6))
 @BROAD
 def test_the_full_heat_matrix_answers_as_unsharded_on_every_surface(cfg):
@@ -137,7 +138,9 @@ def test_a_d3q19_channel_graph_answers_as_the_unsharded_channel(name):
     D.check_config(_D3Q19_CASES[name])
 
 
-@pytest.mark.slow  # broad sibling of the per-push D2Q9 and D3Q19 tests
+# Per push: tests/cloud/multigpu/test_differential_sharding_builtins.py::test_a_generated_d2q9_channel_graph_answers_as_the_unsharded_channel
+# Per push: tests/cloud/multigpu/test_differential_sharding_builtins.py::test_a_d3q19_channel_graph_answers_as_the_unsharded_channel
+@pytest.mark.slow  # every surface, D2Q9 and D3Q19, varied grids: one LBM compile per path per surface, minutes in all
 @given(cfg=D.lbm_configs(surfaces=D.SURFACES))
 @BROAD
 def test_the_full_lbm_matrix_answers_as_unsharded_on_every_surface(cfg):
@@ -260,7 +263,8 @@ def test_the_non_dividing_grid_refusal_gives_advice_that_works_when_followed(
     _follow_the_advice(*_advice_case(n_dev, extent, pencil_axis))
 
 
-@pytest.mark.slow  # broad sibling of test_the_non_dividing_grid_refusal_gives_advice_that_works_when_followed
+# Per push: tests/cloud/multigpu/test_differential_sharding_builtins.py::test_the_non_dividing_grid_refusal_gives_advice_that_works_when_followed
+@pytest.mark.slow  # up to five sharded graphs compiled per example (the resized grid and each dividing device count)
 @given(drawn=_non_dividing())
 @BROAD
 def test_the_non_dividing_grid_refusal_advice_works_over_generated_grids(drawn):

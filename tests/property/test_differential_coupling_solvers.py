@@ -1,0 +1,423 @@
+"""Differential oracles: the two coupling solvers, and ``diagnostics`` on/off.
+
+Two pairs of paths that must agree, stated over generated coupled graphs
+of synthetic nodes (:mod:`tests.property.coupled_graphs`):
+
+**fori == ift.**  ``CouplingGroup.solver`` documents that the legacy
+``"fori"`` loop and the default ``"ift"`` while-loop "run the same passes,
+stop on the same pass and derive every value here by the same rule", and
+that the returned state "agrees to float32 round-off -- bit-identical on
+most graphs".  Where that parity is documented (``coupling_diagnostics``):
+above the norm's float32 floor ``iterations`` and ``converged`` agree; at or
+below it they "can disagree too", and the state then differs by about one
+residual.  So:
+
+* ``iterations`` and ``converged`` must be equal whenever the threshold is
+  above the floor (:func:`residual_noise_floor`, the derivation
+  ``tests/core/test_coupling_solver_equivalence.py`` makes);
+* where the iteration counts agree, the states agree to
+  ``_ULPS_PER_PASS`` units of float32 round-off per pass: the documented
+  difference is one ulp on a couple of components per pass (``while_loop``
+  and ``fori_loop`` bodies compile to differently rounded arithmetic), and
+  four per pass, summed without any help from the contraction, is the
+  stated slack;
+* non-float leaves are bit-identical, and equal to their closed form.
+
+**diagnostics on == off.**  ``diagnostics=True`` reports on the forward and
+must not change it (``test_coupling_diagnostics_leave_the_state_alone.py``
+pins that on ``chain-5``).  Here: states, ``iterations``, ``converged``, the
+warm-start slots (predictor history, IMVJ ``V``/``W``) and gradients through
+``run_scan``, **bitwise**, on both solvers -- the two settings run the same
+loop on the same inputs, so there is no rounding to excuse.
+
+What these oracles cannot see: anything both paths share -- the one-pass
+map, the norms, the criterion's arithmetic, the predictor -- and a
+specification error in the documented contract itself.  Those are the
+business of the fixed-point oracle (``test_differential_fixed_point.py``).
+"""
+
+from __future__ import annotations
+
+import functools
+import math
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from hypothesis import given, note, settings
+from hypothesis import strategies as st
+
+from tests.conftest import EXAMPLES_COSTLY
+from tests.core.test_coupling_solver_equivalence import residual_noise_floor
+from tests.property import coupled_graphs as cg
+
+#: Float32 round-off allowed per coupling pass between the two solvers'
+#: states, in ulps of each field's magnitude (module docstring).
+_ULPS_PER_PASS = 4
+
+#: The threshold must clear the norm's float32 floor by this factor for
+#: the documented iteration parity to be demanded.  Below it the criterion
+#: is made of rounding and the docs say the two loops may stop on
+#: different passes.
+_FLOOR_MARGIN = 4.0
+
+_STEPS = 3
+
+
+def _threshold(group: dict) -> float:
+    return float(group.get("tolerance", 1e-6)) if group.get(
+        "convergence_norm", "l2") == "l2" else 1.0
+
+
+def _n_float(state: dict, nodes) -> int:
+    return sum(int(np.asarray(v).size) for nm in nodes for v in state[nm].values()
+               if np.issubdtype(np.asarray(v).dtype, np.floating))
+
+
+def _parity_demanded(gdef, group, state) -> bool:
+    """Is the threshold above the norm's float32 floor (with margin)?"""
+    floor = residual_noise_floor(group.get("convergence_norm", "l2"),
+                                 group.get("rtol", 1e-6),
+                                 _n_float(state, gdef.group_nodes))
+    return _threshold(group) >= _FLOOR_MARGIN * floor
+
+
+def _sweeps(gdef, group) -> int:
+    return int(group.get("waveform_iterations", 1)) if group.get("subcycling") else 1
+
+
+def _check_leaves(gdef, state, step):
+    """Oracle 8 riding along: every non-float leaf at its closed form."""
+    for nd in gdef.nodes:
+        for field, want in cg.expected_leaves(nd, step).items():
+            got = np.asarray(state[nd.name][field])
+            assert got.dtype == want.dtype and got.tobytes() == want.tobytes(), (
+                f"{nd.name}.{field} = {got!r} after {step} steps, want {want!r}")
+
+
+def assert_solvers_agree(gdef, group, fori, ift):
+    """The fori == ift oracle on two trajectories of one configuration."""
+    for k, ((s_f, m_f, d_f), (s_i, m_i, d_i)) in enumerate(zip(fori, ift), start=1):
+        note(f"step {k}: fori {d_f} ift {d_i}")
+        _check_leaves(gdef, s_f, k)
+        _check_leaves(gdef, s_i, k)
+        same_passes = d_f["iterations"] == d_i["iterations"]
+        if _parity_demanded(gdef, group, s_f):
+            assert same_passes, (
+                f"step {k}: fori took {d_f['iterations']} passes, ift "
+                f"{d_i['iterations']}, with the threshold above the float floor")
+            assert d_f["converged"] == d_i["converged"], f"step {k}: verdicts differ"
+        if not same_passes:
+            # Below the floor the two loops may stop on adjacent passes;
+            # nothing finer than "about one residual" is promised, and the
+            # trajectories have parted, so later steps prove nothing.
+            return
+        passes = d_f["iterations"] * _sweeps(gdef, group)
+        bound = _ULPS_PER_PASS * cg.EPS32 * max(passes, 1)
+        gap = cg.relative_gap(s_f, s_i)
+        assert gap <= bound, (
+            f"step {k}: states {gap:.3e} apart relatively after {passes} "
+            f"identical passes (bound {bound:.3e})")
+
+
+@functools.lru_cache(maxsize=None)
+def _compiled(structure: str, group_items: tuple, solver: str, diagnostics: bool):
+    group = dict(group_items, solver=solver, diagnostics=diagnostics)
+    return cg.build_graph(cg.STRUCTURES[structure], group)
+
+
+def _key(group: dict) -> tuple:
+    return tuple(sorted(group.items()))
+
+
+#: Per-push configurations of the solver oracle: every acceleration, every
+#: norm, both iteration modes, both predictors with history, a cap of one,
+#: IMVJ carrying columns across steps, and the flux and non-linear
+#: structures.  Thresholds above the float floor, so parity is demanded.
+_SOLVER_CASES = {
+    "none-l2-gs-linear": ("triangle", dict(
+        acceleration="none", convergence_norm="l2", tolerance=1e-4,
+        max_iterations=40, predictor="linear")),
+    "aitken-mixed-jacobi": ("triangle", dict(
+        acceleration="aitken", convergence_norm="mixed", rtol=1e-3,
+        iteration_mode="jacobi", max_iterations=12)),
+    "fixed-interface-gs": ("triangle", dict(
+        acceleration="fixed", relaxation=1.3, convergence_norm="interface",
+        rtol=1e-3, max_iterations=40)),
+    "iqn-ils-l2-jacobi": ("triangle", dict(
+        acceleration="iqn-ils", convergence_norm="l2", tolerance=1e-4,
+        iteration_mode="jacobi", max_iterations=12)),
+    "iqn-imvj-l2-quadratic": ("triangle", dict(
+        acceleration="iqn-imvj", jacobian_reuse=3, convergence_norm="l2",
+        tolerance=1e-4, max_iterations=12, predictor="quadratic")),
+    "cap-one": ("triangle", dict(max_iterations=1, tolerance=1e-4)),
+    "flux-aitken": ("flux-pair", dict(
+        acceleration="aitken", tolerance=1e-4, max_iterations=12)),
+    "nonlinear-iqn-imvj-interface": ("nonlinear-ring", dict(
+        acceleration="iqn-imvj", jacobian_reuse=2, convergence_norm="interface",
+        rtol=1e-3, iteration_mode="jacobi", max_iterations=20)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_SOLVER_CASES))
+# Costly tier: every example is two three-step rollouts of compiled graphs
+# plus their host-side comparison, ~0.2 s on six cores.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(data=st.data())
+def test_the_two_solvers_return_the_same_steps_on_generated_spectra(case, data):
+    """fori == ift over drawn spectra of fixed structures (per push).
+
+    The structure and configuration are fixed per case, so each solver is
+    compiled once; Hypothesis draws the gains (rate up to 0.999, normal or
+    not), the biases' scale and the initial state, which reach the
+    compiled step as arguments.  Slow sibling:
+    :func:`test_the_two_solvers_return_the_same_steps_on_generated_graphs`.
+    """
+    structure, group = _SOLVER_CASES[case]
+    gdef = cg.STRUCTURES[structure]
+    values = data.draw(cg.drawn_values(gdef))
+    fori = cg.trajectory(_compiled(structure, _key(group), "fori", True), gdef, values, _STEPS)
+    ift = cg.trajectory(_compiled(structure, _key(group), "ift", True), gdef, values, _STEPS)
+    assert_solvers_agree(gdef, group, fori, ift)
+
+
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(data=st.data())
+def test_the_two_solvers_return_the_same_steps_on_generated_graphs(data):
+    """fori == ift with the structure and the configuration drawn too.
+
+    Every draw compiles two graphs, so this is the broad matrix: group
+    sizes 2-4, 1-3 dimensional fields, chords, flux edges, ``tanh``,
+    drivers, every acceleration, norm, mode, predictor and cap, and the
+    float32-floor threshold.  Per-push sibling:
+    :func:`test_the_two_solvers_return_the_same_steps_on_generated_spectra`.
+    """
+    gdef = data.draw(cg.graph_defs())
+    group = data.draw(cg.group_configs(gdef))
+    # A Jacobi group whose flux consumer is itself a flux producer, and a
+    # predictor under the mixed norm with an integer leaf in the group,
+    # both raise at trace (see the strict xfails in
+    # test_differential_leaves.py); the oracle is about the solvers, so
+    # those two configurations are steered around rather than rejected.
+    group = cg.steer_around_known_crashes(gdef, group)
+    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
+    values = data.draw(cg.drawn_values(gdef))
+    note(f"{gdef}\n{group}")
+    fori = cg.trajectory(cg.build_graph(gdef, dict(group, solver="fori", diagnostics=True)),
+                         gdef, values, _STEPS)
+    ift = cg.trajectory(cg.build_graph(gdef, dict(group, solver="ift", diagnostics=True)),
+                        gdef, values, _STEPS)
+    assert_solvers_agree(gdef, group, fori, ift)
+
+
+# ---------------------------------------------------------------------------
+# diagnostics on == off
+# ---------------------------------------------------------------------------
+
+
+#: The ``_meta`` slots whose presence does not depend on ``diagnostics``:
+#: warm starts always, and under ``"ift"`` the loop's own report.
+def _shared_slots(meta_off: dict, solver: str) -> list:
+    return sorted(meta_off)
+
+
+def assert_diagnostics_inert(gdef, solver, off, on):
+    for k, ((s0, m0, d0), (s1, m1, d1)) in enumerate(zip(off, on), start=1):
+        moved = cg.bitwise_differences(s0, s1)
+        assert not moved, f"{solver} step {k}: diagnostics=True moved {moved}"
+        slots = _shared_slots(m0, solver)
+        changed = [s for s in slots if s not in m1
+                   or m0[s].tobytes() != m1[s].tobytes()]
+        assert not changed, f"{solver} step {k}: diagnostics=True changed slots {changed}"
+        if solver == "ift":
+            assert d0["converged"] == d1["converged"]
+            assert d0["iterations"] == d1["iterations"]
+
+
+_DIAGNOSTICS_CASES = {
+    "ift-iqn-imvj-predictor": ("ift", "triangle", dict(
+        acceleration="iqn-imvj", jacobian_reuse=3, tolerance=1e-6,
+        max_iterations=12, predictor="linear")),
+    "ift-aitken-interface-jacobi": ("ift", "nonlinear-ring", dict(
+        acceleration="aitken", convergence_norm="interface", rtol=1e-4,
+        iteration_mode="jacobi", max_iterations=20)),
+    "fori-iqn-imvj-quadratic": ("fori", "triangle", dict(
+        acceleration="iqn-imvj", jacobian_reuse=2, tolerance=2e-7,
+        max_iterations=12, predictor="quadratic")),
+    "fori-fixed-mixed-flux": ("fori", "flux-pair", dict(
+        acceleration="fixed", relaxation=0.8, convergence_norm="mixed",
+        rtol=1e-4, max_iterations=20)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_DIAGNOSTICS_CASES))
+# Costly tier, for the same reason as the solver cases above.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(data=st.data())
+def test_diagnostics_leave_every_returned_value_bit_identical(case, data):
+    """States, ``iterations``, ``converged`` and warm starts, bitwise (per push).
+
+    Slow sibling:
+    :func:`test_diagnostics_leave_generated_graphs_bit_identical`.
+    """
+    solver, structure, group = _DIAGNOSTICS_CASES[case]
+    gdef = cg.STRUCTURES[structure]
+    values = data.draw(cg.drawn_values(gdef))
+    off = cg.trajectory(_compiled(structure, _key(group), solver, False), gdef, values, _STEPS)
+    on = cg.trajectory(_compiled(structure, _key(group), solver, True), gdef, values, _STEPS)
+    assert_diagnostics_inert(gdef, solver, off, on)
+
+
+def _gradient(gm, values, steps):
+    """``d sum(x of every group node after *steps*) / d params`` via ``run_scan``."""
+    cg.set_initial(gm, values)
+    names = list(gm._coupling_groups[0].nodes)  # noqa: SLF001
+
+    def loss(p):
+        out = gm.run_scan(steps, params=p)
+        return sum(jnp.sum(out[nm]["x"]) for nm in names)
+
+    grads = jax.grad(loss)(cg.params_for(gm, values))
+    cg.recover(gm)
+    return {nm: {k: np.asarray(v) for k, v in p.items()}
+            for nm, p in grads["nodes"].items()}
+
+
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(data=st.data())
+def test_diagnostics_leave_gradients_through_run_scan_bit_identical(solver, data):
+    """``jax.grad`` through ``run_scan`` is the same bits with or without them.
+
+    Under ``"ift"`` the backward pass is the implicit-function adjoint at
+    the returned state; ``diagnostics=True`` adds Jacobian-vector products
+    after the loop (the spectral and gradient bounds) behind
+    ``stop_gradient``, which must change no bit of the adjoint.  Under
+    ``"fori"`` it adds carries to the loop, which must change no bit of
+    the derivative through the iterates.
+    """
+    group = dict(acceleration="iqn-ils", tolerance=1e-5, max_iterations=12,
+                 predictor="linear")
+    gdef = cg.TRIANGLE
+    values = data.draw(cg.drawn_values(gdef, rhos=(0.3, 0.9, 0.99)))
+    off = _gradient(_compiled("triangle", _key(group), solver, False), values, 2)
+    on = _gradient(_compiled("triangle", _key(group), solver, True), values, 2)
+    moved = cg.bitwise_differences(off, on)
+    assert not moved, f"{solver}: diagnostics=True moved the gradient of {moved}"
+
+
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@given(data=st.data(), solver=st.sampled_from(["ift", "fori"]))
+def test_diagnostics_leave_generated_graphs_bit_identical(data, solver):
+    """diagnostics on == off with the structure and configuration drawn.
+
+    Per-push sibling:
+    :func:`test_diagnostics_leave_every_returned_value_bit_identical`.
+    """
+    gdef = data.draw(cg.graph_defs())
+    group = cg.steer_around_known_crashes(gdef, data.draw(cg.group_configs(gdef)))
+    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
+    values = data.draw(cg.drawn_values(gdef))
+    note(f"{gdef}\n{group}")
+    off = cg.trajectory(cg.build_graph(gdef, dict(group, solver=solver, diagnostics=False)),
+                        gdef, values, _STEPS)
+    on = cg.trajectory(cg.build_graph(gdef, dict(group, solver=solver, diagnostics=True)),
+                       gdef, values, _STEPS)
+    assert_diagnostics_inert(gdef, solver, off, on)
+
+
+# ---------------------------------------------------------------------------
+# A disagreement: a flag that reads a coupled input
+# ---------------------------------------------------------------------------
+
+
+def _sign_pair(solver, acceleration="none"):
+    """``a: x = -0.5 u - 0.1`` and ``b: x = u``, ``a`` holding ``sign = sum(u) > 0``.
+
+    ``b`` starts at ``+1`` and the fixed point is ``x = -1/15`` on both, so
+    ``a``'s input is positive on the first pass and negative at the fixed
+    point: a flag computed from the input changes sign during the solve.
+    """
+    gdef = cg.GraphDef(
+        n=1,
+        nodes=(cg.NodeDef("a", 1, leaves=("sign",)), cg.NodeDef("b", 1)),
+        edges=(cg.EdgeDef("b", "a", 0), cg.EdgeDef("a", "b", 0)),
+        group_nodes=("a", "b"))
+    values = {"a": {"G": [np.array([[-0.5]], np.float32)], "b": np.array([-0.1], np.float32),
+                    "x0": np.array([0.0], np.float32)},
+              "b": {"G": [np.array([[1.0]], np.float32)], "b": np.array([0.0], np.float32),
+                    "x0": np.array([1.0], np.float32)}}
+    gm = _compiled_sign(solver, acceleration, gdef)
+    s, _m, d = cg.trajectory(gm, gdef, values, 1)[0]
+    return s, d
+
+
+@functools.lru_cache(maxsize=None)
+def _compiled_sign(solver, acceleration, gdef):
+    return cg.build_graph(gdef, dict(solver=solver, acceleration=acceleration,
+                                     max_iterations=30, tolerance=1e-5, diagnostics=True))
+
+
+def test_a_flag_reading_a_coupled_input_is_computed_from_the_returned_iterate_under_fori():
+    """The control: plain ``fori`` recomputes the flag on every pass.
+
+    The returned flag is the one the node computes from the input of the
+    pass that produced the returned state, which is negative (``x =
+    -1/15``), so ``sign`` is ``False``.
+    """
+    s, d = _sign_pair("fori")
+    assert d["converged"]
+    assert float(s["b"]["x"][0]) == pytest.approx(-1.0 / 15.0, rel=1e-4)
+    assert bool(s["a"]["sign"]) is False
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "differential: solver='ift' returns a bool/int leaf computed from the "
+    "first pass's coupled inputs, not from the returned iterate's (fori "
+    "recomputes it every pass); pending fix"))
+def test_a_flag_reading_a_coupled_input_agrees_between_the_solvers():
+    """fori == ift on a non-float leaf that depends on the iterate.
+
+    ``_run_ift_forward`` keeps only floating fields in the fixed-point
+    vector and restores every other field from ``state_after_first``, the
+    output of the *first* pass, on the premise -- stated in MADD-ANO-059's
+    resolution and in ``_floating_accel_fields`` -- that such a leaf "is
+    recomputed from the pre-step state on every pass, so its first-pass
+    value is already the converged one".  Nothing in the node contract
+    makes that so: a flag or a counter may read a boundary input (a
+    contact flag reads a gap), and then the ift state carries a flag
+    computed from an iterate the solve has long left, beside float fields
+    at the fixed point.
+    """
+    s_fori, _ = _sign_pair("fori")
+    s_ift, _ = _sign_pair("ift")
+    assert float(s_ift["b"]["x"][0]) == pytest.approx(float(s_fori["b"]["x"][0]), rel=1e-6)
+    assert bool(s_ift["a"]["sign"]) == bool(s_fori["a"]["sign"])
+
+
+@pytest.mark.xfail(strict=True, raises=jax.errors.UnexpectedTracerError, reason=(
+    "differential: reset_state() after jax.grad through run_scan reads the "
+    "escaped tracers in a predictor group's _meta instead of recovering "
+    "first like every other entry point; pending fix"))
+def test_reset_state_after_differentiating_through_run_scan_restores_the_graph():
+    """The remedy the recovery warning names must itself work.
+
+    ``_recover_from_escaped_tracers`` is "called from every entry point"
+    and its warning tells the user to "set the state you want explicitly
+    (set_node_state / reset_state / load_state) after differentiating".
+    ``reset_state`` does not call it, and ``_meta_reset_seeds`` reads the
+    live predictor history -- the traced final state -- to size the seed,
+    so the documented remedy raises ``UnexpectedTracerError`` on any group
+    with ``predictor`` set.  Without a predictor every seed is a
+    ``zeros_like`` and the reset happens to survive.
+    """
+    gdef = cg._cycle(2, 1, outside=False, leaves=())
+    gm = cg.build_graph(gdef, dict(predictor="linear", tolerance=1e-5))
+    values = cg.draw_values(np.random.default_rng(0), gdef, 0.5)
+    params = cg.params_for(gm, values)
+    jax.grad(lambda p: jnp.sum(gm.run_scan(2, params=p)["g0"]["x"]))(params)
+    gm.reset_state()
+    assert np.asarray(gm.get_node_state("g0")["x"]).tobytes() == np.zeros(1, np.float32).tobytes()

@@ -401,8 +401,24 @@ def params_for(gm: GraphManager, values: dict) -> dict:
     return {**base, "nodes": nodes}
 
 
+def recover(gm: GraphManager) -> None:
+    """Put *gm* back after a transform left tracers in it, quietly.
+
+    ``jax.grad`` of a loss that calls ``run_scan`` leaves the traced final
+    state in the graph.  Every entry point but ``reset_state`` puts it
+    back first (with a ``RuntimeWarning``); ``reset_state`` does not, and
+    raises on a group with a predictor -- a strict xfail in
+    ``test_differential_coupling_solvers.py``.  So go through an entry
+    point that does.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "the graph held JAX tracers", RuntimeWarning)
+        gm.coupling_diagnostics()
+
+
 def set_initial(gm: GraphManager, values: dict) -> None:
     """Reset *gm* (state and coupling seeds) and write every node's ``x0``."""
+    recover(gm)
     gm.reset_state()
     for name, v in values.items():
         if name in gm.node_names:
@@ -619,3 +635,260 @@ def exact_fixed_point(gdef: GraphDef, values: dict, pre: dict, inputs: dict,
         c[i * n:(i + 1) * n] = ci
     x = np.linalg.solve(np.eye(len(c)) - M, c)
     return {nm: x[i * n:(i + 1) * n] for i, nm in enumerate(names)}
+
+
+def back_edges(gdef: GraphDef, schedule) -> set:
+    """The edges a step reads from the previous step's state.
+
+    The library's rule (``identify_back_edges``): an edge whose source is
+    not scheduled before its target.  Edges inside the coupling group are
+    excluded -- the group iterates them as forward edges.
+    """
+    pos = {nm: i for i, nm in enumerate(schedule)}
+    group = set(gdef.group_nodes)
+    return {e for e in gdef.edges
+            if pos[e.src] >= pos[e.dst] and not (e.src in group and e.dst in group)}
+
+
+class HandUnrolledMultirate:
+    """A multi-rate graph's semantics written out as a Python loop.
+
+    The library's multi-rate step runs every node and the coupling group
+    under a ``step_count % divider`` gate inside one compiled program.
+    This reference does the same scheduling by hand, with no gate in
+    sight: at base step ``k`` each block of the schedule either fires --
+    a node through its own jitted ``update``, the group through a
+    *uniform-rate* graph of its members alone, its outside inputs fed in
+    as external inputs -- or is skipped, and a skipped block's state is
+    simply not touched.  Back edges read the state at the start of the
+    base step, forward edges the state already updated in it.
+
+    The group's ``_meta`` slots (report, predictor history, IMVJ warm
+    start) live in the sub-graph, which only steps when the group fires:
+    that is the rule ``coupling_diagnostics()`` documents for a
+    multi-rate group, held here by construction rather than by a
+    ``lax.cond``.
+    """
+
+    def __init__(self, gdef: GraphDef, group: dict, schedule, base_dt: float):
+        self.gdef = gdef
+        self.schedule = list(schedule)
+        self.base_dt = float(base_dt)
+        self.back = back_edges(gdef, schedule)
+        gnames = set(gdef.group_nodes)
+        self.divider = {nd.name: int(round(nd.timestep / base_dt)) for nd in gdef.nodes}
+        sub = GraphManager()
+        for nd in gdef.nodes:
+            if nd.name in gnames:
+                sub.add_node(make_node(nd, gdef.n))
+        for e in gdef.internal_edges:
+            sub.add_edge(e.src, e.dst, e.field, f"u{e.port}")
+        self.feeds = [e for e in gdef.edges if e.dst in gnames and e.src not in gnames]
+        for e in self.feeds:
+            sub.add_external_input(e.dst, f"u{e.port}", shape=(gdef.n,))
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", "CouplingGroup solver='fori' is deprecated", DeprecationWarning)
+            sub.add_coupling_group(list(gdef.group_nodes), **live_knobs(group))
+        sub.compile()
+        self.sub = sub
+        self.nodes = {nd.name: make_node(nd, gdef.n) for nd in gdef.nodes
+                      if nd.name not in gnames}
+        self._updates = {nm: jax.jit(node.update) for nm, node in self.nodes.items()}
+
+    def _inputs(self, nm, new, full):
+        bi = {}
+        for e in self.gdef.edges:
+            if e.dst != nm:
+                continue
+            src = full if e in self.back else new
+            bi[f"u{e.port}"] = jnp.asarray(src[e.src][e.field])
+        return bi
+
+    def run(self, values: dict, n_steps: int, params_of=None):
+        """``(trajectory, group_meta_trajectory)`` over *n_steps* base steps.
+
+        The trajectory holds every node's state after each base step; the
+        meta trajectory the group's ``_meta`` slots after each base step.
+        """
+        sub = self.sub
+        sub.reset_state()
+        state = {}
+        for nd in self.gdef.nodes:
+            s = dict(make_node(nd, self.gdef.n).initial_state())
+            s["x"] = jnp.asarray(values[nd.name]["x0"], jnp.float32)
+            state[nd.name] = s
+        sub_params = params_for(sub, values)
+        node_params = {nm: {**{f"G{j}": jnp.asarray(G, jnp.float32)
+                               for j, G in enumerate(values[nm]["G"])},
+                            "b": jnp.asarray(values[nm]["b"], jnp.float32)}
+                       for nm in self.nodes}
+        gnames = list(self.gdef.group_nodes)
+        traj, metas = [], []
+        group_done = False
+        for k in range(n_steps):
+            full = {nm: dict(s) for nm, s in state.items()}
+            new = {nm: dict(s) for nm, s in state.items()}
+            group_done = False
+            for nm in self.schedule:
+                if nm in gnames:
+                    if group_done:
+                        continue
+                    group_done = True
+                    if k % self.divider[gnames[0]] != 0:
+                        continue
+                    for g in gnames:
+                        sub.set_node_state(g, new[g])
+                    ext = {}
+                    for e in self.feeds:
+                        src = full if e in self.back else new
+                        ext.setdefault(e.dst, {})[f"u{e.port}"] = jnp.asarray(src[e.src][e.field])
+                    sub.step(ext, params=sub_params)
+                    for g in gnames:
+                        new[g] = dict(sub.get_node_state(g))
+                    continue
+                if k % self.divider[nm] != 0:
+                    continue
+                nd = self.gdef.node(nm)
+                new[nm] = dict(self._updates[nm](
+                    new[nm], self._inputs(nm, new, full), nd.timestep,
+                    params=node_params[nm]))
+            state = new
+            traj.append({nm: {f: np.asarray(v) for f, v in s.items()} for nm, s in state.items()})
+            metas.append(group_meta(sub, self.gdef.key))
+        return traj, metas
+
+
+@st.composite
+def drawn_values(draw, gdef: GraphDef, *, rhos=(0.3, 0.9, 0.99, 0.999),
+                 rank_one: bool = False, bias_scales=(1e-3, 1.0, 1e3)):
+    """Values for *gdef*: a drawn rate, normality, seed and field scale.
+
+    The gains themselves come from a NumPy generator seeded by the draw
+    (the shrinkable part is the rate, the normality and the scale), so
+    one draw is one reproducible spectrum.
+    """
+    rho = draw(st.sampled_from(rhos))
+    nonnormal = draw(st.booleans())
+    seed = draw(st.integers(0, 2**32 - 1))
+    scale = draw(st.sampled_from(bias_scales))
+    return draw_values(np.random.default_rng(seed), gdef, rho, nonnormal=nonnormal,
+                       rank_one=rank_one, bias_scale=scale)
+
+
+def report(gm: GraphManager, gdef: GraphDef) -> Optional[dict]:
+    """The loop's own verdict from the ``_meta`` slots, or ``None``.
+
+    ``iterations``, ``total_iterations``, ``residual`` and ``converged``
+    exactly as ``coupling_diagnostics()`` derives them -- ``converged``
+    through the same :func:`reported_converged` and
+    :func:`convergence_criterion` it calls -- without the float-floor and
+    spectral computations the full report adds, which cost more than the
+    step being measured.  ``None`` where the group reports nothing (a
+    ``"fori"`` group without ``diagnostics``).
+    """
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        convergence_criterion,
+        reported_converged,
+    )
+
+    meta = group_meta(gm, gdef.key)
+    if "iterations" not in meta or int(meta["iterations"]) == 0:
+        return None
+    group = gm._coupling_groups[0]  # noqa: SLF001
+    threshold, scale = convergence_criterion(group)
+    it = int(meta["iterations"])
+    return {
+        "iterations": it,
+        "total_iterations": max(int(meta.get("total_iterations", it)), it),
+        "residual": float(meta["residual"]),
+        "converged": reported_converged(meta["residual"], meta.get("amplification", 0.0),
+                                        scale, threshold),
+    }
+
+
+def trajectory(gm: GraphManager, gdef: GraphDef, values: dict, steps: int) -> list:
+    """``[(state, group_meta, report or None)]`` after each of *steps* steps.
+
+    Starts from :func:`set_initial`, so the graph's previous state does
+    not leak into the measurement.
+    """
+    set_initial(gm, values)
+    params = params_for(gm, values)
+    out = []
+    for _ in range(steps):
+        gm.step(params=params)
+        out.append((snapshot(gm), group_meta(gm, gdef.key), report(gm, gdef)))
+    return out
+
+
+def _cycle(m: int, n: int, *, chords=(), flux_edge: Optional[int] = None,
+           outside: bool = True, leaves=LEAF_POOL, alpha=0.5, beta=1.0,
+           nonlinear: bool = False) -> GraphDef:
+    """A fixed structure: the cycle ``g0 -> g1 -> ... -> g0`` plus *chords*."""
+    names = [f"g{i}" for i in range(m)]
+    ports = {nm: 0 for nm in names}
+    edges: list = []
+    for src, dst in [(names[i], names[(i + 1) % m]) for i in range(m)] + [
+            (names[a], names[b]) for a, b in chords]:
+        edges.append(EdgeDef(src, dst, ports[dst]))
+        ports[dst] += 1
+    if flux_edge is not None:
+        e = edges[flux_edge]
+        edges[flux_edge] = EdgeDef(e.src, e.dst, e.port, "q")
+    flux_src = {e.src for e in edges if e.field == "q"}
+    nodes = [NodeDef(nm, ports[nm] + (1 if outside and nm == names[0] else 0),
+                     alpha=alpha, beta=beta, nonlinear=nonlinear, leaves=tuple(leaves),
+                     flux=nm in flux_src) for nm in names]
+    if outside:
+        edges.append(EdgeDef("drv", names[0], ports[names[0]]))
+        edges.append(EdgeDef(names[-1], "sink", 0))
+        nodes = ([NodeDef("drv", 0, alpha=1.0, beta=1.0, leaves=tuple(leaves))] + nodes
+                 + [NodeDef("sink", 1, alpha=0.5, leaves=tuple(leaves))])
+    return GraphDef(n=n, nodes=tuple(nodes), edges=tuple(edges), group_nodes=tuple(names))
+
+
+#: The per-push structures.  ``TRIANGLE`` carries every leaf kind and an
+#: outside driver and sink; ``FLUX_PAIR`` couples through a flux edge;
+#: ``NONLINEAR_RING`` is a four-node ring of ``tanh`` relays with a chord.
+TRIANGLE = _cycle(3, 2, chords=((0, 2),))
+FLUX_PAIR = _cycle(2, 1, flux_edge=0)
+NONLINEAR_RING = _cycle(4, 1, chords=((1, 3),), nonlinear=True)
+STRUCTURES = {"triangle": TRIANGLE, "flux-pair": FLUX_PAIR, "nonlinear-ring": NONLINEAR_RING}
+
+
+def steer_around_known_crashes(gdef: GraphDef, group: dict) -> dict:
+    """*group*, moved off a configuration known to raise at trace.
+
+    A Jacobi group in which a flux producer reads another node's flux
+    raises ``KeyError`` (the Jacobi pass resolves producers' inputs before
+    any flux exists; the Gauss-Seidel pass has a two-sweep seed for it).
+    Pinned as a strict xfail in ``test_differential_leaves.py``; oracles
+    that are about something else are steered to Gauss-Seidel instead.
+    """
+    producers = {nd.name for nd in gdef.nodes if nd.flux}
+    if group.get("iteration_mode") == "jacobi" and any(
+            e.field == "q" and e.dst in producers for e in gdef.edges):
+        return dict(group, iteration_mode="gauss-seidel")
+    return group
+
+
+#: Leaves the predictor's unflatten drops from the group's starting iterate.
+NON_FLOAT_LEAVES = ("count", "tag", "flag", "sign")
+
+
+def steer_leaves_around_known_crashes(gdef: GraphDef, group: dict) -> GraphDef:
+    """*gdef* without non-float group leaves where they are known to raise.
+
+    A predictor (``"linear"`` / ``"quadratic"``) under the ``"mixed"``
+    norm raises ``KeyError`` on a group node holding an integer or boolean
+    leaf: the predictor rebuilds the starting iterate from its floating
+    fields alone, and the mixed norm reads every field of it.  Pinned as a
+    strict xfail in ``test_differential_leaves.py``.
+    """
+    if group.get("predictor", "none") != "none" and group.get("convergence_norm") == "mixed":
+        return dataclasses.replace(gdef, nodes=tuple(
+            dataclasses.replace(nd, leaves=tuple(lf for lf in nd.leaves
+                                                 if lf not in NON_FLOAT_LEAVES))
+            if nd.name in gdef.group_nodes else nd for nd in gdef.nodes))
+    return gdef

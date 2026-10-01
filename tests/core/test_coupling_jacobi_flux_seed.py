@@ -155,3 +155,66 @@ def test_a_flux_reading_producer_beside_a_non_producer_steps_under_jacobi():
     assert gm.coupling_diagnostics()["g0+g1+r"]["converged"]
     np.testing.assert_allclose(
         [float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")], _exact(), rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Neighbouring paths that run the Jacobi pass: sub-cycling, adaptive, multi-rate
+# ---------------------------------------------------------------------------
+
+
+def _schedule_graph(*, dts=(1.0, 1.0), **group):
+    gm = GraphManager()
+    gm.add_node(Slab("g0", dts[0], g=0.2, b=1.0, x0=0.3))
+    gm.add_node(Slab("g1", dts[1], g=-0.3, b=0.5, x0=-0.4))
+    gm.add_edge("g0", "g1", "q", "u")
+    gm.add_edge("g1", "g0", "q", "u")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", ".*multi-rate.*")
+        gm.add_coupling_group(["g0", "g1"], **live_knobs(dict(
+            max_iterations=40, tolerance=1e-6, iteration_mode="jacobi", diagnostics=True,
+            **group)))
+        gm.compile()
+    return gm
+
+
+def test_a_subcycled_jacobi_group_of_flux_readers_steps_to_the_fixed_point():
+    """``g0`` sub-steps twice per pass; the nodes are algebraic, so the
+    fixed point is the uniform-rate one.  Constant interpolation: a flux
+    is not interpolated (MADD-ANO-060)."""
+    gm = _schedule_graph(dts=(0.5, 1.0), subcycling=True, boundary_interpolation="constant")
+    gm.step()
+    assert gm.coupling_diagnostics()["g0+g1"]["converged"]
+    np.testing.assert_allclose(
+        [float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")], _exact(), rtol=1e-5)
+
+
+def test_the_adaptive_steppers_run_a_jacobi_group_of_flux_readers():
+    gm = _schedule_graph()
+    _s, info = gm.run_adaptive(1.0, dt_initial=0.5, dt_max=0.5, atol=1e-3, rtol=1e-3)
+    assert info["n_steps"] >= 2
+    np.testing.assert_allclose(
+        [float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")], _exact(), rtol=1e-5)
+    gm.reset_state()
+    _s, _h, info = gm.run_adaptive_scan(1.0, max_steps=8, dt_initial=0.5, dt_max=0.5,
+                                        atol=1e-3, rtol=1e-3)
+    assert float(info["final_t"]) == pytest.approx(1.0)
+
+
+def test_a_multirate_jacobi_group_of_flux_readers_fires_and_holds():
+    """The group at twice the base step: it solves on firing steps only."""
+    gm = GraphManager()
+    gm.add_node(Slab("g0", 2.0, g=0.2, b=1.0, x0=0.3))
+    gm.add_node(Slab("g1", 2.0, g=-0.3, b=0.5, x0=-0.4))
+    gm.add_node(Reader("r", 1.0, g=1.0, b=0.0))
+    gm.add_edge("g0", "g1", "q", "u")
+    gm.add_edge("g1", "g0", "q", "u")
+    gm.add_edge("g1", "r", "x", "u")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", ".*multi-rate.*")
+        gm.add_coupling_group(["g0", "g1"], max_iterations=40, tolerance=1e-6,
+                              iteration_mode="jacobi")
+        gm.compile()
+    for _ in range(3):
+        gm.step()
+    np.testing.assert_allclose(
+        [float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")], _exact(), rtol=1e-5)

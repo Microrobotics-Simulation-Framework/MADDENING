@@ -452,11 +452,26 @@ record.  Returning the lowest-loss iterate does not help here, because along
 a flat direction which iterate is lowest is decided by rounding, not by the
 data.
 
-`fit` therefore accumulates the run's gradients and removes the net
-displacement's component along the directions none of them pointed in,
-leaving those at the values you supplied — the data has not contradicted
-them.  The loss is flat there, so nothing is paid for it, and a fit whose
-gradients spanned everything gets its iterate back bit for bit.
+`fit` therefore holds such directions at the values you supplied — the
+data has not contradicted them.  A direction is held only if it passes two
+tests.  First, none of the run's gradients pointed along it: `fit`
+accumulates them, and every gradient of a least-squares loss lies in the
+span the data can see.  That is necessary but not sufficient, because a
+short or fast-converging run's gradients need not span everything the data
+does determine.  So, second, the loss must have no curvature along it at the
+iterate `fit` returns, measured with Hessian-vector products there (`fit_lm`
+reads `JᵀJ` instead, with `fim`'s rank rule).  The net displacement along
+the directions that pass both is removed.
+
+Then the loss gets the last word.  The held point's loss is evaluated, and
+if it is above the selected iterate's by more than rounding — `2¹⁰·eps`
+relative (1.2e-4 in float32) plus what storing the held point in the working
+precision can cost — nothing is held, `res.hold_declined` is `True`, and a
+`RuntimeWarning` gives both losses.  So the guard never trades loss for
+reproducibility, and a fit with no direction passing both tests gets its
+iterate back bit for bit.  Earlier 0.4.0 development builds applied the
+first test alone: `fit_lm` on a well-posed four-parameter bowl reached a
+loss of 0.0 and came back at 0.22.
 
 The degeneracy has to be a fixed direction in the unconstrained
 coordinates, though.  `SpringDamperNode` gives `damping` the identity
@@ -479,6 +494,7 @@ for key in ("stiffness", "damping", "mass"):
 res = fit(gm, loss, params=start, mask=mask, n_iter=300, lr=0.1)
 res.excited_rank         # 2 of 3: the data left one direction undetermined
 res.undetermined_drift   # how far the raw iterate had drifted along it (~1e-2)
+res.hold_declined        # False: holding it cost no loss, so it was held
 ```
 
 Without the `damping` line, the same fit reports an `excited_rank` of 3 and
@@ -502,7 +518,7 @@ not held; for "well enough to use", read `crb` against a tolerance you
 declare.
 
 **`fit_lm` and `fit_multiple_shooting` run the same guard**, on the same
-`hold_undetermined` keyword, and fill the same two fields.  Neither is immune
+`hold_undetermined` keyword, and fill the same three fields.  Neither is immune
 for the reason it might look immune: the gradient is orthogonal to the null
 space, but no step rule here *is* the gradient.  Levenberg–Marquardt solves
 `(A + λ·diag(A))⁻¹g`, which is orthogonal to `null(A)` only where `diag(A)`

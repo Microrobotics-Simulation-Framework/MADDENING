@@ -141,10 +141,11 @@ def canonical(value: Any) -> Any:
 
 
 def jsonify_state(state: dict) -> dict:
-    """A GraphManager state dict in the shape ``GET /graph/state`` returns."""
-    from maddening.api.server import _jax_to_python
+    """A GraphManager state dict in the shape ``GET /graph/state`` returns
+    (a non-finite float as its quoted token, as the route writes it)."""
+    from maddening.api.server import _json_reply
 
-    return canonical(_jax_to_python(state))
+    return canonical(_json_reply(state))
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Every Python code block in the docs runs in CI** (`tests/compliance/test_docs_snippets.py`), sandboxed, or carries a
+  `<!-- snippet: no-run, reason: ... -->` marker whose imports and keywords are still checked; see the documentation
+  standards.  The README quick start, which overrode the removed `requires_halo`, now runs
 - **CI guard mutation test** (`tests/compliance/test_guard_mutations.py`, slow lane): seeded faults in the workflows, budget
   script, shard split, conftest, `pyproject.toml`, timing plugin, cache pruner and allowlist must each fail a guard test
   (83 of 87; 4 listed equivalents); anchors checked per push.  New guard: add its mutant (*Guard mutations*, testing_standards)

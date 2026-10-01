@@ -76,6 +76,7 @@ behaviour actually work are not breaking; say so in the CHANGELOG under
 3. **Warn at the call site.** `DeprecationWarning`, `stacklevel=2`, naming the
    replacement and the release that removes it:
 
+   <!-- snippet: no-run, reason: fragment: the call inside a deprecated alias's body -->
    ```python
    warnings.warn(
        "maddening.core.simulation.checkpoint.download_and_load_state moved to "

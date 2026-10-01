@@ -45,6 +45,7 @@ v0.3.0 makes the declaration mandatory.
 
 ### Wrap your `static_data` values explicitly
 
+<!-- snippet: no-run, reason: legacy: the bare-array form, a MigrationError since v0.3.0 -->
 ```{code-block} python
 :caption: Before (v0.2.x; FutureWarning in v0.2.1, MigrationError in v0.3.0)
 class MyNode(SimulationNode):
@@ -56,6 +57,7 @@ class MyNode(SimulationNode):
         }
 ```
 
+<!-- snippet: no-run, reason: fragment: a node class excerpt -->
 ```{code-block} python
 :caption: After (v0.3.0+)
 from maddening.core.static_data import StaticArray
@@ -97,6 +99,7 @@ def static_data(self) -> dict:
 A list/dict of arrays under a single `static_data` key still raises
 at `StaticArray.__post_init__`.  Unfold into multiple top-level keys:
 
+<!-- snippet: no-run, reason: fragment: dict entries, not a statement -->
 ```{code-block} python
 # WRONG -- raises TypeError
 "masks": [StaticArray(m1), StaticArray(m2)]
@@ -113,6 +116,7 @@ If you're authoring an unstructured / graph-partitioned node for
 declare any per-cell static data with the new `"partition"`
 replication and a partition-assignment array:
 
+<!-- snippet: no-run, reason: pseudo-code: the dots stand for the node's other arguments and code -->
 ```{code-block} python
 import numpy as np
 from maddening.core.static_data import StaticArray
@@ -146,6 +150,7 @@ unstructured-sharding contract.
 The {class}`~maddening.warnings.MigrationError` raised from
 `coerce_static_data_value` carries structured detail:
 
+<!-- snippet: no-run, reason: fragment: my_node is the reader's node -->
 ```{code-block} python
 from maddening.warnings import MigrationError
 

@@ -96,6 +96,7 @@ which wrapper a node is written for:
   `for axis, (offset, extent) in shard_info.items()` unpacks that scalar
   as a tuple and fails under `ShardedUnstructuredNode`:
 
+  <!-- snippet: no-run, reason: fragment: lines inside update_padded -->
   ```python
   for axis in (k for k in shard_info if isinstance(k, int)):
       offset, extent = shard_info[axis]

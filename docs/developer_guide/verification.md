@@ -55,6 +55,7 @@ ledger of which nodes have migrated to `params`.
 Failures list the shrunk counterexample. For programmatic access use
 `verify_node`, which returns a `dict[str, VerificationResult]`:
 
+<!-- snippet: no-run, reason: pseudo-code: my_node and bounds={...} are placeholders -->
 ```python
 from maddening.testing.verification import verify_node
 
@@ -67,6 +68,7 @@ for name, r in results.items():
 
 ### Opt-in physics checks
 
+<!-- snippet: no-run, reason: fragment: my_node is the reader's node -->
 ```python
 verify_node(
     my_node,
@@ -90,6 +92,7 @@ not declare, pass a fixed dict with `boundary_inputs={...}`.
 
 The strategies underneath the battery are public:
 
+<!-- snippet: no-run, reason: fragment: my_node is the reader's node -->
 ```python
 from hypothesis import given, settings
 from maddening.testing.strategies import node_states, bounded_dt, boundary_inputs_for
@@ -130,6 +133,7 @@ thresholds of the tests that already covered them; both are fixed in
 
 ### Declare the order
 
+<!-- snippet: no-run, reason: pseudo-code: the dots stand for the other NodeMeta fields -->
 ```python
 from maddening.core.compliance.metadata import DiscretizationOrder, NodeMeta
 
@@ -152,6 +156,7 @@ node can never look verified.
 
 ### Measure it
 
+<!-- snippet: no-run, reason: pseudo-code: error_at's body, alpha and node are the reader's -->
 ```python
 from maddening.testing.mms import (
     ManufacturedSolution, RefinementAxis, assert_node_order_verified,
@@ -276,6 +281,7 @@ term, no reference run — and yields the observed order of convergence, the
 extrapolated limit, and an error band on the finest solution
 [@Richardson1911; @Roache1994; @Celik2008; @ASMEVV20].
 
+<!-- snippet: no-run, reason: pseudo-code: flow_shape_at's body and node are the reader's -->
 ```python
 from maddening.testing.mms import RefinementAxis, assert_node_gci_verified
 

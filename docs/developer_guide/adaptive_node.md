@@ -224,6 +224,7 @@ for a batch `(..., n_max)`. On a square operator `(n_max, n_max)` it fills
 whole *columns* and leaves the rows untouched — silently. Mask rows with
 `mask[:, None]`:
 
+<!-- snippet: no-run, reason: fragment: two lines inside solve_frozen -->
 ```python
 A = self.mask_safe(mask[:, None], A, fill=0.0)   # rows
 A = self.mask_safe(mask, A, fill=0.0)            # columns
@@ -368,6 +369,7 @@ check still refuses to construct through.
   operation with `self.mask_safe(mask, operand, fill=1.0)` (the double-`where`
   idiom):
 
+  <!-- snippet: no-run, reason: fragment: two lines inside solve_frozen -->
   ```python
   d = self.mask_safe(mask, diagonal, fill=1.0)      # never 0 off the mask
   c = ift_linear_solve(lambda v: d * v, rhs, solver="cg")

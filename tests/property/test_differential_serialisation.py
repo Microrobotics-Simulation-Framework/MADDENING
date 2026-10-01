@@ -114,11 +114,13 @@ def test_a_generated_graph_of_every_node_kind_reloads_bit_for_bit(data):
     check_config_round_trip(recipe.build(), dict(NODE_REGISTRY))
 
 
-@settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
+@settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
 def test_to_dict_of_a_generated_graph_of_every_node_kind_is_idempotent(data):
-    """``to_dict(from_dict(to_dict(g))) == to_dict(g)``, with coupling groups;
-    no compile, so per push at the profile's depth."""
+    """``to_dict(from_dict(to_dict(g))) == to_dict(g)``, with coupling groups.
+    The reload is never compiled, but the recipe's own graph is (``build``
+    compiles), so this is a costly tier: at the profile's depth it took 5 s
+    on CI."""
     from tests.property.strategies import ALL_NODE_KINDS, NODE_REGISTRY, graph_recipes
 
     recipe = data.draw(graph_recipes(kinds=ALL_NODE_KINDS), label="recipe")

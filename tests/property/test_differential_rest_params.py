@@ -232,8 +232,14 @@ def test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload(kind_name, da
         lo, hi = kind.safe[calibrate]
         moved = np.clip(np.asarray(live[calibrate]) * np.float32(1.25), lo, hi)
         live[calibrate] = jnp.asarray(moved.astype(np.asarray(live[calibrate]).dtype))
+    # ``POST /sim/reset`` marks the graph dirty, and the recompile after it
+    # is the largest single cost of an example (a heat rod went past the
+    # per-push budget on CI); half the examples reset in process instead,
+    # which is the call the route makes before it marks the graph dirty.
+    rest_reset = data.draw(st.booleans(), label="reset through the route")
     with tmp_dir() as root:
-        outcome = check_rest_write(gm, REGISTRY, kind.name, write, root=root)
+        outcome = check_rest_write(gm, REGISTRY, kind.name, write, root=root,
+                                   rest_reset=rest_reset)
     event(f"{write.category}: {outcome}")
     if write.category in ("non_finite", "oversized", "wrong_type", "unknown", "invalid",
                           "mixed"):

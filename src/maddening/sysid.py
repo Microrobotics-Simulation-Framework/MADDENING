@@ -2813,10 +2813,14 @@ class FitResult:
         of the trainable coordinate count.  Less than that count means the
         data left the rest undetermined and ``params`` holds the value they
         started at.  ``None`` is **not** "full rank": it is "not measured"
-        -- ``hold_undetermined=False``, more trainable parameters than
-        :data:`_EXCITATION_MAX_PARAMS`, or fewer iterations than parameters,
-        where an unobserved direction cannot be told from an unobservable
-        one.
+        -- ``hold_undetermined=False``; more trainable coordinates (array
+        elements, not leaves) than :data:`_EXCITATION_MAX_PARAMS`; fewer
+        gradients than trainable coordinates, where an unobserved
+        direction cannot be told from an unobservable one; or a degenerate
+        spectrum -- every gradient the run saw was exactly zero (a start at
+        an exact optimum, or a loss that reads none of the trainable
+        parameters), so there is no largest direction to measure the
+        others against.
     ``undetermined_drift``
         How far the selected raw iterate had wandered along those
         undetermined directions before the guard removed it, as a Euclidean norm in the

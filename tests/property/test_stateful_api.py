@@ -673,18 +673,15 @@ def test_checkpoint_load_of_a_stale_structure_is_a_4xx_not_a_partial_restore(tmp
     assert client.get("/graph/state").json() == before
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Pending an API decision: a diverged simulation makes every endpoint that "
-    "reports state answer 500.  _jax_to_python emits Python floats and "
-    "Starlette's JSONResponse serialises with allow_nan=False, so once the "
-    "physics produces inf or NaN -- reachable with nothing but valid calls, "
-    "here a stiffness the explicit integrator cannot hold at this timestep -- "
-    "GET /graph/state, GET /graph/state/<node>, POST /sim/step and POST /sim/run "
-    "all raise inside the response encoder, and only POST /sim/reset gets the "
-    "server back.  Fixing it means deciding what a non-finite leaf looks like "
-    "on the wire (null? a string? a 409 naming the diverged node?), which "
-    "changes the public response schema and is not this branch's call."))
 def test_state_endpoints_stay_below_500_when_the_simulation_diverges(tmp_path):
+    """A diverged simulation made every endpoint that reports state answer
+    500: the replies handed Starlette bare floats, which it serialises with
+    ``allow_nan=False``.  Reachable with nothing but valid calls -- here a
+    stiffness the explicit integrator cannot hold at this timestep.  A
+    non-finite leaf is now the quoted token every MADDENING JSON surface
+    writes (``"NaN"``, ``"Infinity"``, ``"-Infinity"``,
+    :mod:`maddening.serialization.json_codec`), as ``GET /graph`` already
+    did."""
     client = _client(tmp_path)
     assert client.post("/graph/nodes", json={
         "type": "SpringDamperNode", "name": "s", "timestep": DT,
@@ -696,3 +693,7 @@ def test_state_endpoints_stay_below_500_when_the_simulation_diverges(tmp_path):
     assert client.get("/graph/state").status_code < 500
     assert client.get("/graph/state/s").status_code < 500
     assert client.post("/sim/step").status_code < 500
+    # The fixture diverges: the reply carries the tokens, not numbers.
+    from maddening.serialization.json_codec import NON_FINITE_TOKENS
+    reply = client.get("/graph/state/s").json()
+    assert any(v in NON_FINITE_TOKENS for v in reply.values() if isinstance(v, str)), reply

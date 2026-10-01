@@ -144,26 +144,19 @@ def check_rest_write(gm: GraphManager, registry: dict, name: str, write: Write,
     """Drive one write through the real route and hold it to the oracle.
 
     Returns ``"accepted"`` or ``"refused"``.  ``rest_reset=False`` resets the
-    running graph in process instead of through ``POST /sim/reset``, for a
-    graph whose reset reply cannot be encoded (a coupling group with
-    ``diagnostics=True``: pinned by
-    ``test_a_rest_reset_of_a_diagnostics_group_answers_like_the_in_process_reset``).
+    running graph in process instead of through ``POST /sim/reset`` -- the
+    call the route makes before it marks the graph dirty -- which saves the
+    recompile a route reset costs.
     """
     gm.run(WARM_STEPS)
     client = _client(gm, root, registry)
     before = graph_snapshot(gm)
     get_before = client.get(f"/graph/params/{name}").json()
-    with warnings.catch_warnings():
-        # The route casts a float64 request value to the leaf's float32
-        # before refusing an overflow, and NumPy warns on the cast; under
-        # this suite's ``filterwarnings = ["error"]`` that warning is a 500
-        # no deployment sees.  The oracle judges what a deployment answers;
-        # the warning itself is pinned by
-        # ``test_an_overflowing_value_is_refused_without_a_warning``.
-        warnings.filterwarnings("ignore", message="overflow encountered in cast",
-                                category=RuntimeWarning)
-        resp = client.put(f"/graph/params/{name}", content=write.body(),
-                          headers={"content-type": "application/json"})
+    # Under this suite's ``filterwarnings = ["error"]``: a warning the route
+    # raises on the way to its answer is a 500 here, and so a failure (the
+    # overflowing cast it used to make before refusing 1e39 was one).
+    resp = client.put(f"/graph/params/{name}", content=write.body(),
+                      headers={"content-type": "application/json"})
     note(f"PUT {write.params!r} -> {resp.status_code} {resp.text[:400]}")
     assert resp.status_code < 500, f"{resp.status_code}: {resp.text}"
     if resp.status_code >= 400:
@@ -246,13 +239,11 @@ def test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload(kind_name, da
         assert outcome == "refused", f"{write.category} write {write.params!r} was accepted"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "differential: PUT /graph/params casts a float32-overflowing value (1e39) "
-    "before refusing it and NumPy warns 'overflow encountered in cast', so the "
-    "400 becomes a 500 wherever warnings are errors (as in this suite); pending fix"))
 def test_an_overflowing_value_is_refused_without_a_warning():
-    """Found by the property above (category ``oversized``).  The refusal is
-    right; the unguarded cast before it is not."""
+    """Found by the property above (category ``oversized``).  The route cast
+    1e39 to the leaf's float32 before refusing it, and NumPy warned
+    ("overflow encountered in cast"): a 500 wherever warnings are errors, as
+    in this suite, and otherwise a 400 calling a finite value non-finite."""
     from maddening.nodes import BallNode
 
     gm = GraphManager()
@@ -265,6 +256,7 @@ def test_an_overflowing_value_is_refused_without_a_warning():
             {"params": {"elasticity": 1e39}}), headers={"content-type": "application/json"})
         assert_nothing_written(gm, before, what="overflowing write")
     assert resp.status_code == 400, resp.text
+    assert "does not fit its type float32" in resp.json()["detail"], resp.text
 
 
 def _diagnostics_pair():
@@ -280,15 +272,11 @@ def _diagnostics_pair():
     return gm
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "differential: POST /sim/reset (and GET /graph/state, POST /checkpoint/load) "
-    "answers 500 on a graph with a diagnostics=True coupling group: the reply "
-    "serialises _meta, whose spectral slots are seeded NaN, and the JSON encoder "
-    "refuses NaN -- after the reset has been applied; pending fix"))
 def test_a_rest_reset_of_a_diagnostics_group_answers_like_the_in_process_reset():
     """Found by the generated-graph property below.  The in-process reset
-    works; the route applies it and then fails to encode its own reply
-    (``SimulationServer._state_json`` returns ``gm._state`` with ``_meta``)."""
+    works; the route applied it and then failed to encode its own reply
+    (``SimulationServer._state_json`` returned ``gm._state`` with ``_meta``,
+    whose spectral slots are seeded NaN, to an encoder that refuses NaN)."""
     gm = _diagnostics_pair()
     gm.run(2)
     reference = _diagnostics_pair()
@@ -305,7 +293,14 @@ def rods_mapped_by_grid() -> GraphManager:
     """Two uniform rods joined by an RBF mapping whose point sets are
     references to each rod's ``grid_x`` -- the form ``to_dict`` re-resolves
     and hash-checks.  ``grid_x`` is built from ``length`` when a rod is
-    constructed."""
+    constructed.
+
+    The mapping is built from ``grid_x`` *as the rod holds it* (float32): a
+    reference's recorded hash covers the dtype, so points widened to float64
+    first describe another array, and ``to_dict()`` refused this graph
+    before any write -- which is how the pins below used to fail for the
+    wrong reason (``test_the_mapped_rods_save_and_reload_before_any_write``).
+    """
     from maddening.core.coupling.mapping import rbf_mapping
     from maddening.nodes import HeatNode
 
@@ -317,28 +312,45 @@ def rods_mapped_by_grid() -> GraphManager:
     gm.add_node(a)
     gm.add_node(b)
     gm.add_edge("a", "b", "temperature", "heat_source", mapping=rbf_mapping(
-        np.asarray(a.static_data["grid_x"].value, np.float64),
-        np.asarray(b.static_data["grid_x"].value, np.float64),
+        np.asarray(a.static_data["grid_x"].value),
+        np.asarray(b.static_data["grid_x"].value),
         source_ref={"node": "a", "field": "grid_x"},
         target_ref={"node": "b", "field": "grid_x"}))
     gm.compile()
     return gm
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError, reason=(
-    "differential: PUT /graph/params answers 200 to a new length for a uniform rod "
-    "whose grid_x an interface mapping references, then to_dict() refuses to save "
-    "the graph (the reference no longer describes the points the weights were built "
-    "from), while the running graph keeps stepping with those stale weights; "
-    "pending fix"))
+def test_the_mapped_rods_save_and_reload_before_any_write():
+    """The fixture can express the defect: unwritten, the graph saves, its
+    config reloads, and the reload steps bit for bit as the original -- so a
+    refusal or a disagreement below is the write's."""
+    gm = rods_mapped_by_grid()
+    gm.run(WARM_STEPS)
+    config = json.loads(json.dumps(gm.to_dict(), allow_nan=True))
+    with tmp_dir() as tmp:
+        ckpt = gm.save_state(checkpoint_path(tmp))
+        reloaded = reload_from_config(config, REGISTRY)
+        reloaded.load_state(ckpt)
+    assert_trees_identical(rollout(gm, N_STEPS), rollout(reloaded, N_STEPS),
+                           what="mapped rods against their reload")
+
+
 def test_a_rod_length_under_a_mapping_reference_is_refused_or_runs_as_its_reload():
     """Found while widening the generated writes to geometry: ``length`` is a
     live leaf of a uniform rod (its step reads it), so every check the route
-    makes passes; ``grid_x`` is derived from it at construction and never
-    rebuilt, and the mapping's ``MappingSpec`` points at ``grid_x``."""
+    made passed and it answered 200; ``grid_x`` is derived from it at
+    construction and never rebuilt, the mapping's ``MappingSpec`` points at
+    ``grid_x``, and the running graph kept the old grid's weights while the
+    saved config no longer loaded.  Refused now, naming the mapped edge."""
     gm = rods_mapped_by_grid()
     with tmp_dir() as root:
-        check_rest_write(gm, REGISTRY, "a", Write("geometry", {"length": 1.5}), root=root)
+        assert check_rest_write(gm, REGISTRY, "a", Write("geometry", {"length": 1.5}),
+                                root=root) == "refused"
+        resp = _client(gm, root, REGISTRY).put(
+            "/graph/params/a", json={"params": {"length": 1.5}})
+    assert resp.status_code == 400, resp.text
+    assert "a.temperature->b.heat_source" in resp.json()["detail"]
+    assert "grid_x" in resp.json()["detail"]
 
 
 # The two graph features a one-node graph cannot carry, per push: a
@@ -460,5 +472,5 @@ def test_a_rest_param_write_into_a_generated_graph_is_refused_whole_or_runs_as_i
     note(f"recipe: {recipe}")
     gm = recipe.build()
     with tmp_dir() as root:
-        check_rest_write(gm, dict(NODE_REGISTRY), name, write, root=root,
-                         rest_reset=not any(g.diagnostics for g in recipe.coupling_groups))
+        # Every reset through the route, a diagnostics group's included.
+        check_rest_write(gm, dict(NODE_REGISTRY), name, write, root=root)

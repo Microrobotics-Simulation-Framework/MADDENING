@@ -4616,9 +4616,161 @@ class GraphManager:
                         "when it was constructed; or one only an input this "
                         "graph does not connect would read)"
                     )
+                if reason is None:
+                    reason = self._mapping_point_leaf_reason(owner, key)
                 if reason is not None:
                     out[(owner, key)] = reason
         return out
+
+    # ------------------------------------------------------------------
+    # A write under an interface mapping's point reference
+    # ------------------------------------------------------------------
+
+    def _mapping_node_references(self, owner: str) -> list[tuple[str, str, str]]:
+        """``(edge key, point-set argument, field)`` for every
+        ``{"node": owner, "field": ...}`` point reference a mapped edge of
+        this graph was built from."""
+        out: list[tuple[str, str, str]] = []
+        for edge in self._edges:
+            spec = getattr(edge.mapping, "spec", None) if edge.mapping is not None else None
+            points = getattr(spec, "points", None)
+            if not isinstance(points, dict):
+                continue
+            for arg, ref in points.items():
+                if (isinstance(ref, dict) and ref.get("node") == owner
+                        and isinstance(ref.get("field"), str)):
+                    out.append((edge.key, arg, ref["field"]))
+        return out
+
+    def _mapped_points_moved_by(self, owner: str,
+                                changes: dict[str, Any]) -> Optional[list[tuple[str, str, str]]]:
+        """The point references of :meth:`_mapping_node_references` whose
+        points a node rebuilt with ``changes`` written into its params reads
+        differently from one rebuilt without them; ``[]`` when none moves,
+        ``None`` when that cannot be told (no reference to ``owner``, no key
+        of ``changes`` is a constructor parameter, or the node is not rebuilt
+        from its params -- the constructor refusing the new values is
+        :meth:`_constructor_write_reason`'s to report, not this).
+
+        Rebuilt the way :meth:`from_dict` rebuilds a saved node, from its
+        class and params -- the node, or the node a wrapper wraps, whichever
+        is rebuilt that way (:func:`_params_holders`) -- and the field read
+        by the rule a point reference resolves by
+        (``mapping_spec._node_point_field``).  Both sides are rebuilt, so
+        nothing about the live node (a sharded slice, a value a fit moved in
+        ``gm.params`` alone) enters the comparison: only ``changes`` does.
+        """
+        refs = self._mapping_node_references(owner)
+        spec = self._nodes.get(owner)
+        if not refs or spec is None:
+            return None
+        node = spec.node
+        shared = getattr(node, "params", None)
+        if not isinstance(shared, dict):
+            return None
+        changes = {k: v for k, v in changes.items() if k in shared}
+        if not changes:
+            return None
+        from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+            PointReferenceError,
+            _node_point_field,
+        )
+        for candidate in _params_holders(node):
+            cls = type(candidate)
+
+            def build(params, cls=cls, candidate=candidate):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    return cls(name=candidate.name, timestep=candidate.delta_t, **params)
+
+            try:
+                before = build(dict(shared))
+            except Exception:  # noqa: BLE001 - not rebuilt from its params
+                continue
+            try:
+                after = build({**shared, **changes})
+            except Exception:  # noqa: BLE001 - the constructor's refusal, reported elsewhere
+                return None
+            moved = []
+            for edge_key, arg, field_name in refs:
+                try:
+                    was = _node_point_field(before, owner, field_name)
+                except PointReferenceError:
+                    continue        # not this node's field: to_dict names a stale reference
+                try:
+                    now = _node_point_field(after, owner, field_name)
+                except PointReferenceError:
+                    moved.append((edge_key, arg, field_name))
+                    continue
+                if not _leaf_values_equal(was, now) or was.dtype != now.dtype:
+                    moved.append((edge_key, arg, field_name))
+            return moved
+        return None
+
+    def _mapping_point_write_reason(self, owner: str, changes: dict[str, Any]) -> Optional[str]:
+        """Why writing ``changes`` into node ``owner``'s params would leave
+        an interface mapping on the points of the old values, or ``None``.
+
+        A mapped edge built from a ``{"node", "field"}`` point reference
+        reads the node's field **once**, when the mapping is built; the
+        weights are fixed from then on (``mapping_spec``'s "A node
+        reference does not follow a calibrated parameter").  A field the
+        node *derives* from a parameter when it is constructed -- a uniform
+        ``HeatNode``'s ``grid_x``, built from ``length`` -- is therefore not
+        moved by a write of that parameter, even where the node's own step
+        reads the parameter itself (the rod's ``dx = length / n_cells``).
+        Such a write used to be taken: ``PUT /graph/params`` answered 200
+        and a ``gm.params`` write ran, the rod stepping with the new length
+        and the mapping interpolating from the old grid, and the config
+        :meth:`to_dict` then wrote did not load (:meth:`from_dict` rebuilds
+        the mapping from the new grid, and the recorded ``sha256`` refuses
+        it).  ``changes`` maps keys to the values ``node.params`` would hold.
+        """
+        return self._moved_points_reason(owner, self._mapped_points_moved_by(owner, changes))
+
+    def _moved_points_reason(self, owner: str,
+                             moved: Optional[list[tuple[str, str, str]]]) -> Optional[str]:
+        """The refusal for the point references ``moved`` names, or ``None``."""
+        if not moved:
+            return None
+        cls = type(self._nodes[owner].node).__name__
+        edges = sorted({edge_key for edge_key, _, _ in moved})
+        fields = sorted({f"{owner}.{field_name} ({arg})" for _, arg, field_name in moved})
+        return (
+            f"the interface mapping on edge {', '.join(repr(e) for e in edges)} was "
+            f"built from {', '.join(fields)}, which {cls} derives from it when it "
+            "is constructed, and a mapping reads its points once: the node would "
+            "run with the new value while the mapping kept the weights of the old "
+            "points, and a graph saved with it would not reload this one "
+            "(from_dict() rebuilds the mapping from the new points, which a "
+            "recorded sha256 refuses)"
+        )
+
+    def _mapping_point_leaf_reason(self, owner: str, key: str) -> Optional[str]:
+        """:meth:`_mapping_point_write_reason` for *any* new value of the
+        leaf: asked with the node's own value moved by half again (or by
+        half, if the constructor refuses that), for the callers that decide
+        once whether a leaf is a parameter at all -- an exported FMU's
+        tunable set (:meth:`_param_leaves_the_step_cannot_read`), where a
+        write reaches the compiled step directly and no later check sees
+        it.  ``None`` when the leaf moves no referenced point set, or that
+        cannot be told."""
+        spec = self._nodes.get(owner)
+        if spec is None or not self._mapping_node_references(owner):
+            return None
+        current = (getattr(spec.node, "params", None) or {}).get(key)
+        if current is None or isinstance(current, bool):
+            return None
+        try:
+            arr = np.asarray(current, dtype=np.float64)
+        except (TypeError, ValueError):
+            return None
+        for factor in (1.5, 0.5):
+            probe = np.where(arr == 0.0, 1.0, arr * factor)
+            moved = self._mapped_points_moved_by(owner, {key: probe.tolist()})
+            if moved is not None:
+                return self._moved_points_reason(owner, moved)
+        return None
 
     def _unused_node_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
         """Why a write of ``params[key] = value`` to node ``owner`` that
@@ -4941,6 +5093,25 @@ class GraphManager:
                 ctor = ctor_cache[owner].get(key)
                 if ctor is None or not _leaf_values_equal(value, ctor):
                     reason = self._baked_leaf_reason(owner, key)
+                    consequence = (
+                        "The value would be ignored by every run and then "
+                        "written out by to_dict() / save_state(), so a reloaded "
+                        "graph would run a different model from the one that "
+                        "produced these results.  To change it, rebuild the "
+                        "node with the new value (remove_node, then add_node)"
+                    )
+                    if reason is None and key in (getattr(spec.node, "params", None) or {}):
+                        # Read by the node's own step, and still not a value
+                        # the running graph can take: a mapped edge was
+                        # built from points the node derives from it.
+                        reason = self._mapping_point_write_reason(
+                            owner, {key: np.asarray(value).tolist()})
+                        consequence = (
+                            "To change it, rebuild the node "
+                            "with the new value and the mapped edge from its new "
+                            "points (remove_node, add_node, then add_edge with a "
+                            "mapping built from them)"
+                        )
                     if reason is not None:
                         where = "gm.params" if live else "params"
                         shown = ""
@@ -4949,13 +5120,8 @@ class GraphManager:
                                 np.asarray(ctor), precision=7, separator=", ")
                         raise ValueError(
                             f"{where}['nodes'][{owner!r}][{key!r}] differs from "
-                            f"the node's own value{shown}, but {reason}.  The value "
-                            "would be ignored by every run and then written out "
-                            "by to_dict() / save_state(), so a reloaded graph "
-                            "would run a different model from the one that "
-                            "produced these results.  To change it, rebuild the "
-                            "node with the new value (remove_node, then "
-                            "add_node); to drop the edit, restore the leaf or "
+                            f"the node's own value{shown}, but {reason}.  "
+                            f"{consequence}; to drop the edit, restore the leaf or "
                             "call gm.reset_params()."
                         )
                 if live:

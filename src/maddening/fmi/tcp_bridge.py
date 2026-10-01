@@ -117,13 +117,11 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.core.params import check_bounds
 from maddening.fmi.model_description import FMIVariable, ModelDescription
 from maddening.fmi.sidecar import (
     FmuSidecar,
     _checked_value,
     _key_set_error,
-    _not_tunable_error,
     _restored_leaf,
 )
 from maddening.serialization.json_codec import decode_non_finite
@@ -1231,8 +1229,14 @@ class FmuTcpBridge:
         An archive may only install values a ``set`` of the same variables
         would be allowed to install: every restored array goes through
         :func:`checked_value` (finite, and representable in the live
-        array's dtype) and the restored parameter tree through
-        ``check_bounds`` against the graph's declared ``ParamSpec``.  A snapshot
+        array's dtype, unless it is the value the FMU was instantiated
+        with: :meth:`FmuSidecar._initial_state_leaf
+        <maddening.fmi.sidecar.FmuSidecar._initial_state_leaf>`) and the
+        restored parameter tree through
+        the sidecar's restore check (tunability, and the declared
+        ``ParamSpec`` bounds of the values it would install:
+        :meth:`FmuSidecar._check_restored_params
+        <maddening.fmi.sidecar.FmuSidecar._check_restored_params>`).  A snapshot
         of a diverged model -- one holding ``inf`` or ``NaN`` -- therefore
         does not restore; the error names the field.
         """
@@ -1262,7 +1266,8 @@ class FmuTcpBridge:
                     # The leaf check FmuSidecar.set_fmu_state applies too: one
                     # function, so the two restore paths cannot drift apart.
                     new_state[node][field] = jnp.asarray(_restored_leaf(
-                        data[f"s/{node}/{field}"], live, what=f"FMU state {node}.{field}"))
+                        data[f"s/{node}/{field}"], live, what=f"FMU state {node}.{field}",
+                        initial=self._sidecar._initial_state_leaf(node, field)))  # noqa: SLF001
             params = self._sidecar.params
             new_params = None
             if params is not None:
@@ -1302,25 +1307,17 @@ class FmuTcpBridge:
                 raise ValueError("FMU state carries a non-finite time")
         if new_params is not None:
             # A parameter the step cannot read may not change through the
-            # archive either (``set`` cannot address it at all).
-            fixed = self._sidecar.fixed_params
-            live_nodes = (self._sidecar.params or {}).get("nodes", {})
-            for name, reason in fixed.items():
-                owner, _, key = name.partition(".params.")
-                if key not in live_nodes.get(owner, {}):
-                    continue
-                current = np.asarray(live_nodes[owner][key])
-                restored = np.asarray(new_params["nodes"][owner][key])
-                if restored.shape != current.shape or not np.array_equal(restored, current):
-                    raise _not_tunable_error(name, reason, current)
-            # The bounds the model description advertises, applied to the
-            # archive exactly as ``set`` applies them through
-            # ``FmuSidecar.set_params``.  Without this an importer could
-            # restore mass = -1.0 against a declared (0.1, 10.0) and the
-            # bridge would answer ok -- the documented guarantee is that it
-            # cannot silently tune a constant the graph declares invalid,
-            # and that has to hold for both doors into the parameter tree.
-            check_bounds(new_params, self._sidecar.param_specs or {})
+            # archive either (``set`` cannot address it at all), and the
+            # bounds the model description advertises hold for the values
+            # the archive would install.  Without the second an importer
+            # could restore mass = -1.0 against a declared (0.1, 10.0) and
+            # the bridge would answer ok.  Both through the sidecar's own
+            # restore check, the one FmuSidecar.set_fmu_state applies, so
+            # the two doors refuse the same snapshots with the same words --
+            # and both restore the FMU's own snapshot when a parameter was
+            # instantiated outside its bounds, as GraphManager.load_state
+            # restores the graph's checkpoint.
+            self._sidecar._check_restored_params(new_params)  # noqa: SLF001
         # every check passed: commit
         with self._committing("set_state"):
             self._sidecar._state = new_state                  # noqa: SLF001

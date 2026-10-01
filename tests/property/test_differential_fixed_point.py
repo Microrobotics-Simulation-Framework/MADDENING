@@ -222,10 +222,12 @@ def test_converged_means_within_the_threshold_on_generated_cycles(data):
 # ---------------------------------------------------------------------------
 
 #: ``(m, norm, threshold, seed, head start)``: one coupling mode at rate
-#: 0.995, started on the mode, each measured to stop with its ratio rejected
-#: 30 to 100 thresholds from the fixed point (jaxlib 0.11.0).
-_NOISE_REJECTED = [(2, "l2", 1e-5, 2, 100.0), (2, "l2", 1e-5, 0, 100.0),
-                   (3, "mixed", 1e-4, 2, 30.0), (2, "mixed", 1e-4, 2, 30.0)]
+#: 0.995, started on the mode 100 thresholds out, each measured to stop on a
+#: noise-rejected ratio 99.5-99.7 thresholds from the fixed point on jaxlib
+#: 0.10.2, 0.11.0 and 0.11.2 (so did every seed 0-5 tried, and the same
+#: graph under the mixed norm at 22-30 thresholds).  One graph, one compile.
+_NOISE_REJECTED = [(2, "l2", 1e-5, 0, 100.0), (2, "l2", 1e-5, 2, 100.0),
+                   (2, "l2", 1e-5, 3, 100.0)]
 
 
 def test_a_rate_float32_cannot_tell_from_one_falls_back_to_the_raw_residual_test():
@@ -238,7 +240,7 @@ def test_a_rate_float32_cannot_tell_from_one_falls_back_to_the_raw_residual_test
     rounding, so the ratio carries about ``2 floor / r``: at rate 0.995 it
     is noise once the residual is within ~400 floors of its floor, and a
     monotone single-mode contraction reads ``>= 1`` often.  The group then
-    reports ``converged=True`` on the raw residual, here 30-100 thresholds
+    reports ``converged=True`` on the raw residual, here about 100 thresholds
     from its fixed point (the estimate would have been ``r / (1 - 0.995)``,
     200x the residual), and ``precision_limited`` -- which reads the
     residual against its floor, not the ratio -- stays False.  This pins

@@ -188,16 +188,19 @@ def test_a_subcycled_jacobi_group_of_flux_readers_steps_to_the_fixed_point():
         [float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")], _exact(), rtol=1e-5)
 
 
-def test_the_adaptive_steppers_run_a_jacobi_group_of_flux_readers():
+@pytest.mark.parametrize("scan", [False, True], ids=["run_adaptive", "run_adaptive_scan"])
+def test_the_adaptive_steppers_run_a_jacobi_group_of_flux_readers(scan):
+    """One stepper per case: each compiles its own dt-parameterised step."""
     gm = _schedule_graph()
-    _s, info = gm.run_adaptive(1.0, dt_initial=0.5, dt_max=0.5, atol=1e-3, rtol=1e-3)
-    assert info["n_steps"] >= 2
+    kw = dict(dt_initial=0.5, dt_max=0.5, atol=1e-3, rtol=1e-3)
+    if scan:
+        _s, _h, info = gm.run_adaptive_scan(1.0, max_steps=8, **kw)
+        assert float(info["final_t"]) == pytest.approx(1.0)
+    else:
+        _s, info = gm.run_adaptive(1.0, **kw)
+        assert info["n_steps"] >= 2
     np.testing.assert_allclose(
         [float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")], _exact(), rtol=1e-5)
-    gm.reset_state()
-    _s, _h, info = gm.run_adaptive_scan(1.0, max_steps=8, dt_initial=0.5, dt_max=0.5,
-                                        atol=1e-3, rtol=1e-3)
-    assert float(info["final_t"]) == pytest.approx(1.0)
 
 
 def test_a_multirate_jacobi_group_of_flux_readers_fires_and_holds():

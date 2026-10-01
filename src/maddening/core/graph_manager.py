@@ -176,13 +176,13 @@ def _node_update(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
         return spec.update_fn(state, boundary_inputs, dt)
 
 
-def _is_stencil_wrapper(node) -> bool:
+def _is_stencil_wrapper(node: Any) -> bool:
     """A ``ShardedStencilNode`` (or subclass), asked without importing it."""
     return callable(getattr(node, "_xla_scan_hazards", None)) and callable(
         getattr(node, "_statics_replicated_over_devices", None))
 
 
-def _outermost_stencil_wrapper(node, _depth: int = 0):
+def _outermost_stencil_wrapper(node: Any, _depth: int = 0) -> Any:
     """The first ``ShardedStencilNode`` under ``node``, through the wrappers
     that hold their node as ``physics_node`` (``HybridNode``) or ``_inner``;
     ``None`` when there is none."""
@@ -195,7 +195,7 @@ def _outermost_stencil_wrapper(node, _depth: int = 0):
     return None
 
 
-def _innermost_wrapped(node):
+def _innermost_wrapped(node: Any) -> Any:
     """The node a chain of ``_inner`` wrappers ends at."""
     for _ in range(64):
         nxt = getattr(node, "_inner", None)

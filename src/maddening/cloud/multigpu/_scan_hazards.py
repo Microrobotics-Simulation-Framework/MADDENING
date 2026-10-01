@@ -109,7 +109,7 @@ class ScanHazard:
     node: str
     node_type: str
     static: str
-    shard_axis: int
+    shard_axis: Optional[int]
     replicated_over: tuple
     window: str
 

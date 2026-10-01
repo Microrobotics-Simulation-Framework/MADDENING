@@ -1274,7 +1274,10 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         :meth:`_xla_scan_hazards`'s question.
         """
         out: dict[str, tuple] = {}
-        for key, sa in self._sharded_static.items():
+        # Classified afresh, as every step does: ``_sharded_static`` is
+        # refreshed only when a step materialises the statics, and a node
+        # whose static_data gained a sharded key since must not be missed.
+        for key, sa in self._classify_sharded_static(self._inner.static_data).items():
             split = next((ma for ma, sax in self._axis_map.items()
                           if sax == sa.shard_axis), None)
             replicated = tuple((str(a), int(n)) for a, n in self._mesh.shape.items()
@@ -1302,6 +1305,8 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         replicated = self._statics_replicated_over_devices()
         if not replicated:
             return []
+        # Materialised first: it refreshes ``_sharded_static`` and rebuilds
+        # the local update when the statics' structure changed.
         static = self._materialise_sharded_statics()
         found: list = []
         jax.make_jaxpr(self._shard_mapped(state, boundary_inputs, static, params,

@@ -152,7 +152,7 @@ against it. It runs as the **Check STABLE API signatures** step of the
 
 ```console
 $ python scripts/check_stable_signatures.py
-OK: 13 STABLE surface(s), 223 member(s) unchanged
+OK: 17 STABLE surface(s), 248 member(s) (4 of them tagged in their own right) unchanged
 ```
 
 A difference fails with the recorded and current signatures side by side.

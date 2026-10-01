@@ -197,13 +197,20 @@ assert_node_order_verified(
    reason.  `OrderMeasurement.monotone` is the guard: an error that stops
    falling fails as an inconclusive study, not as a wrong order.
 4. **Read the band.**  `check_order` gates on the order over the *finest*
-   pair, accepting `[declared - 0.25, declared + 1.0]`.  The lower half comes
-   from measurement: across the three nodes covered, the finest pair lands
-   within 0.02 of theory while the coarsest pair of the same ladder sits up
-   to 0.16 low, and both defects found fall a full order or more short.  The
-   upper half catches a study that is not exercising the scheme at all — a
+   pair, accepting `[declared - 0.25, declared + 1.0]`.  Both halves come
+   from the ladders recorded in `maddening.testing.mms._ORDER_BAND_FIXTURES`.
+   The lower half: the largest honest shortfall at the finest pair is
+   **0.043** (the 4th-order `HeatNode` stencil's 3.957 against 4), while
+   both defects the harness found fell a full order or more short (1.001
+   against a declared 2, 0.954 against a declared 4).  The upper half
+   catches a study that is not exercising the scheme at all — a
    manufactured solution the discretisation represents exactly measures
-   nothing.
+   nothing — and the largest honest pairwise order recorded, **4.126** (the
+   cubic closure on `tanh_bump`, over its coarsest pair), sits inside it.
+   `DEFAULT_ORDER_SHORTFALL` and `DEFAULT_ORDER_EXCESS` carry the full
+   derivation, and
+   `tests/verification/test_mms_order.py::TestTheOrderBandIsJustifiedByTheseNumbers`
+   fails if a quoted figure drifts out of the band.
 
 ### What is covered
 
@@ -214,6 +221,10 @@ assert_node_order_verified(
 | `HeatNode` (`stencil_order=4`) | space | 4 | 3.957 | — |
 | `LBMNode` (D2Q9, periodic, Guo forcing [@Guo2002]) | space | 2 | 1.998 | MADD-VER-007 |
 | `RigidBodyNode` (symplectic Euler [@Hairer2006]) | time | 1 | 0.999 | MADD-VER-008 |
+| `SpringDamperNode` | time | 1 | 1.029 | MADD-VER-009 |
+| `BallNode` (smooth regime, no collision) | time | 1 | 1.002 | MADD-VER-010 |
+| `RigidBody2DNode` | time | 1 | 1.000 | MADD-VER-011 |
+| `HeartPumpNode` | time | 1 | 1.000 | MADD-VER-012 |
 | `WaveletAdaptiveNode` (full budget, periodic 1-D; Dirichlet and 2-D ladders in the same module) | space | 2 | 2.000 | MADD-VER-014 |
 
 The two HeatNode spatial rows were strict xfails when this harness landed,
@@ -221,7 +232,8 @@ measuring 1.001 (MADD-ANO-007) and 0.954 (MADD-ANO-008).  Both node defects
 are fixed in 0.4.0 and the xfails are now ordinary assertions; a strict xfail
 that starts passing is a failure, so the two had to land together.
 
-Every other node is undeclared and skips.  `LBMNode` declares no *temporal*
+The built-in nodes that declare no order — `LBMPipeNode`, `TableNode`,
+`HealthCheckNode` and the `AdaptiveNode` base class — skip.  `LBMNode` declares no *temporal*
 order on purpose: the lattice fixes `dx = dt = 1` and `update` ignores its
 `dt`, so there is no timestep to refine.
 
@@ -390,8 +402,11 @@ it — not a substitute for it.
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest tests/verification/
 ```
 
-`tests/verification/hypothesis/conftest.py` disables the Hypothesis deadline
-globally because the first example of every test pays JIT compilation.
+The root `tests/conftest.py` disables the Hypothesis deadline for every
+profile it registers (`dev`, the default, and `ci`; select one with
+`MADDENING_HYPOTHESIS_PROFILE`), because the first example of every test pays
+JIT compilation.  `tests/verification/hypothesis/conftest.py` configures
+nothing any more; it is kept as a signpost to the root file.
 
 ## Limitations
 

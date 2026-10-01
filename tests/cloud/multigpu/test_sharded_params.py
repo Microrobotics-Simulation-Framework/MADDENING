@@ -634,3 +634,60 @@ def test_a_rest_write_to_a_value_the_wrapped_node_copied_at_construction_is_refu
     assert "trace identically" in response.json()["detail"]
     assert inner.params["baked"] == 3.0 and not gm._dirty
     assert wrapped._sharded_cache == {}
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+@pytest.mark.parametrize("kind", list(_LEGACY_WRITES))
+def test_a_wrappers_own_update_keeps_its_compiled_step_until_the_cache_is_dropped(kind):
+    """MADD-ANO-032's residual, pinned as it stands (the entry is
+    ``partially_resolved``).  ``compile()`` drops the wrappers' compiled
+    steps, so the graph path takes a legacy node's param write (the test
+    above).  A wrapper's ``update()`` called on its own, outside a graph,
+    still reuses the step it traced first -- where the unwrapped node reads
+    its params afresh on every call -- until ``invalidate_static_cache()``.
+    When this fails, the direct path has been closed too: update the
+    registry entry rather than this expectation."""
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+    from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
+
+    key, old, new = _LEGACY_WRITES[kind]
+    mesh = create_device_mesh(shape=(4,))
+    if kind == "stencil":
+        build, field = _legacy_diffusion, "u"
+        inner = build(old)
+        wrapped = ShardedStencilNode(inner, mesh, {"devices": 0}, boundary="periodic")
+
+        def read(out):
+            return np.asarray(out[field])
+    else:
+        build, field = _legacy_decay, "x"
+        inner = build(old)
+        pa = np.repeat(np.arange(4), 4).astype(np.int32)   # global order
+        edges = np.array([[i, (i + 1) % 16] for i in range(16)], dtype=np.int32)
+        wrapped = ShardedUnstructuredNode(
+            inner, mesh,
+            build_unstructured_partition(partition_assignment=pa, edges=edges,
+                                         n_devices=4))
+
+        def read(out):
+            return np.asarray(wrapped.gather_global(out)[field])
+
+    state = wrapped.initial_state()
+    start = inner.initial_state()
+    at_old = np.asarray(build(old).update(start, {}, 0.1)[field])
+    at_new = np.asarray(build(new).update(start, {}, 0.1)[field])
+    assert not np.allclose(at_old, at_new)
+
+    np.testing.assert_allclose(read(wrapped.update(state, {}, 0.1)), at_old,
+                               rtol=1e-6, atol=1e-7)
+    inner.params[key] = new
+    # The unwrapped node takes the write on its next call ...
+    np.testing.assert_allclose(np.asarray(inner.update(start, {}, 0.1)[field]),
+                               at_new, rtol=1e-6, atol=1e-7)
+    # ... the wrapper's own update() does not: the residual.
+    np.testing.assert_allclose(read(wrapped.update(state, {}, 0.1)), at_old,
+                               rtol=1e-6, atol=1e-7)
+    # Dropping the cache, which every compile() does, is the documented way out.
+    wrapped.invalidate_static_cache()
+    np.testing.assert_allclose(read(wrapped.update(state, {}, 0.1)), at_new,
+                               rtol=1e-6, atol=1e-7)

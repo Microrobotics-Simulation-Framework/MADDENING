@@ -1102,6 +1102,18 @@ class SimulationNode(ABC):
             ``dict[int, tuple[Any, int]] | None``, spells only the
             ``int``-keyed entries.
 
+            **Iterate over the integer keys only; ``"n_local"`` is the
+            one string key.**  ``for axis, (offset, extent) in
+            shard_info.items()`` unpacks ``"n_local"``'s scalar as a
+            tuple and fails under ``ShardedUnstructuredNode``.  Filter
+            the keys instead::
+
+                for axis in (k for k in shard_info if isinstance(k, int)):
+                    offset, extent = shard_info[axis]
+
+            or index the axis you shard (``shard_info[0]``).  No other
+            ``str`` key is passed by any wrapper in 0.4.0.
+
         Sharded outputs
         ---------------
         Output keys must be either:

@@ -61,11 +61,11 @@ a boundary slice from a 1-D field).
 
 ```python
 gm.add_edge(
-    source_node="heat_rod",
-    target_node="ball",
-    source_field="temperature",        # shape (N,)
-    target_field="ambient_temperature",  # spec shape ()
-    transform=lambda T: T[N // 2],      # → scalar at midpoint
+    source="rod_a",
+    target="rod_b",
+    source_field="temperature",        # shape (n_cells,)
+    target_field="left_temperature",   # spec shape ()
+    transform=lambda T: T[-1],         # → the scalar at rod_a's right end
 )
 ```
 

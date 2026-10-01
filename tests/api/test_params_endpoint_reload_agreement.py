@@ -556,3 +556,53 @@ def test_the_state_cap_before_building_applies_the_servers_limit(monkeypatch):
     resp = _put(gm, "g", {"nx": 6})
     assert resp.status_code == 400, resp.text
     assert "24 state elements" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# What the route's fixes leave open (MADD-ANO-047 and 049, partially resolved)
+# ---------------------------------------------------------------------------
+# Both fixes live in the route, so a value that reaches a node's params some
+# other way -- a ``gm.params`` write, a fit, in-process code -- is not asked.
+# These pin that as it stands: the registry cites them for what is still
+# reachable.  When one fails, the route it pins has been closed; update the
+# registry entry and its ``residual_risk`` rather than the expectation here.
+
+
+def test_a_gm_params_write_of_g_through_zero_runs_another_model_than_its_reload():
+    """MADD-ANO-047's residual.  The route refuses ``G = 0`` on a multiphase
+    pipe (above); ``gm.params``, and so a fit, does not, and ``to_dict()``
+    saves it.  The running pipe keeps the multiphase branch it was built on
+    and the reload builds the single-phase one.  The branch is fixed at
+    construction (``_G``), so comparing it is the whole defect; stepping
+    both (0.65 apart in the tracer after ten steps, as the registry records)
+    would only add two compiles."""
+    gm = _pipe(compile=True)
+    gm.params["nodes"]["p"]["G"] = jnp.zeros_like(gm.params["nodes"]["p"]["G"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        config = gm.to_dict()
+        again = GraphManager.from_dict(config, REGISTRY)
+    saved = next(n for n in config["nodes"] if n["name"] == "p")
+    assert float(saved["params"]["G"]) == 0.0
+    assert gm.get_node("p")._G != 0.0, "the running pipe left its branch"
+    assert again.get_node("p")._G == 0.0
+
+
+def test_a_non_finite_structural_value_set_in_process_breaks_get():
+    """MADD-ANO-049's residual.  The route refuses a non-finite value; one
+    set on a node's params in-process is stored, and every ``GET`` for the
+    node, whose reply echoes the params, is a 500."""
+    gm = _graph(HeatNode("rod", 0.05, n_cells=4, thermal_diffusivity=1e-3))
+    gm.get_node("rod").params["grid_points"] = [0.1, float("nan"), 0.5, 0.9]
+    assert _client(gm).get("/graph/params/rod").status_code == 500
+
+
+@pytest.mark.parametrize("value, status", [(float("nan"), 500), (2e-3, 200)])
+def test_a_live_leaf_a_fit_drove_non_finite_breaks_get(value, status):
+    """The same through the params pytree: a calibration that diverged to
+    ``NaN`` leaves the node's ``GET`` a 500.  The finite control shows the
+    500 is the value's, not the in-process write's."""
+    gm = _graph(HeatNode("rod", 0.05, n_cells=4, thermal_diffusivity=1e-3))
+    gm.params["nodes"]["rod"]["thermal_diffusivity"] = jnp.asarray(value, jnp.float32)
+    response = _client(gm).get("/graph/params/rod")
+    assert response.status_code == status, response.text

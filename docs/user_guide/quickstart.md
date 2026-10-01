@@ -163,9 +163,9 @@ pip install maddening[runpod]
 
 # Set up credentials (one-time)
 mkdir -p ~/.maddening
-cp src/maddening/examples/cloud/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
+cp src/maddening/examples/cloud/config/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
 # Edit ~/.maddening/cloud_credentials.yaml with your RunPod API key
-# You can also choose a different path, in which case use the `creds` argument in the CloudLauncher constructor.
+# You can also choose a different path, in which case pass it as `credentials_path=` to the CloudLauncher constructor.
 ```
 
 ```python

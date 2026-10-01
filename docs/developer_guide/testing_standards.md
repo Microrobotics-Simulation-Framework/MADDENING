@@ -50,17 +50,19 @@ Location: `tests/verification/test_<name>_<benchmark>.py`
 Compare against analytical solutions or published reference data. Register with the `@verification_benchmark` decorator:
 
 ```python
-from maddening.core.validation import verification_benchmark
+from maddening.compliance import BenchmarkType, verification_benchmark
 
 @verification_benchmark(
     benchmark_id="MADD-VER-XXX",
     description="Analytical solution comparison for ...",
-    node_class="YourNode",
-    reference="AuthorYear",
+    node_type="YourNode",
+    benchmark_type=BenchmarkType.ANALYTICAL,
+    acceptance_criteria="Max error below the stated tolerance",
+    references=("AuthorYear",),
 )
 def test_your_node_analytical():
     """Compare YourNode output to analytical solution."""
-    node = YourNode("bench", timestep=0.001, ...)
+    node = YourNode("bench", timestep=0.001)  # plus your node's own parameters
     gm = GraphManager()
     gm.add_node(node)
     state = gm.run(n_steps=1000)

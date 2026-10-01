@@ -116,8 +116,13 @@ def test_add_node_after_grad_keeps_the_new_node():
     gm, _before = _differentiated()
     with pytest.warns(RuntimeWarning, match=_RECOVERED):
         gm.add_node(SpringDamperNode("c", 0.01, initial_position=2.0))
+    ref = GraphManager()
+    ref.add_node(SpringDamperNode("c", 0.01, initial_position=2.0))
+    ref.compile()
     gm.step()
-    assert float(gm.get_node_state("c")["position"]) == pytest.approx(2.0, abs=1e-3)
+    ref.step()
+    assert np.asarray(gm.get_node_state("c")["position"]).tobytes() == \
+        np.asarray(ref.get_node_state("c")["position"]).tobytes()
 
 
 def test_remove_node_after_grad_leaves_no_state_behind():

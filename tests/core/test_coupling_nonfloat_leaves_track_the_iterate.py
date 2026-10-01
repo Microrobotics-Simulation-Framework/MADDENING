@@ -93,7 +93,9 @@ def _pair(*, leaves=True, a_dt=1.0, **group):
     gm.add_node(Follower("b", 1.0))
     gm.add_edge("b", "a", "x", "u")
     gm.add_edge("a", "b", "x", "u")
-    cfg = dict(max_iterations=40, tolerance=1e-6)
+    # Jacobi contracts this pair at sqrt(0.5) per pass, rotating, and
+    # over-relaxation at 0.8: a cap that lets every configuration converge.
+    cfg = dict(max_iterations=120, tolerance=1e-6)
     cfg.update(group)
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "CouplingGroup solver='fori' is deprecated",
@@ -117,7 +119,7 @@ _ACCELERATIONS = [
     dict(acceleration="none"),
     dict(acceleration="aitken"),
     dict(acceleration="fixed", relaxation=0.6),
-    dict(acceleration="fixed", relaxation=1.2),
+    dict(acceleration="fixed", relaxation=1.1),
     dict(acceleration="iqn-ils"),
     dict(acceleration="iqn-imvj", jacobian_reuse=2),
 ]
@@ -217,3 +219,97 @@ def test_diagnostics_leave_the_flag_and_the_state_bit_identical():
         for field, value in gms[False].get_node_state(name).items():
             assert np.asarray(value).tobytes() == \
                 np.asarray(gms[True].get_node_state(name)[field]).tobytes(), (name, field)
+
+
+# ---------------------------------------------------------------------------
+# A non-floating field carried across a group-internal edge
+# ---------------------------------------------------------------------------
+
+
+class Gate(SimulationNode):
+    """``x = k u + c`` and ``open = u < 0.5``: a flag another member reads."""
+
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, k=K, c=C)
+
+    def initial_state(self):
+        return {"x": jnp.asarray(0.0, jnp.float32), "open": jnp.asarray(False)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(), dtype=jnp.float32,
+                                       default=jnp.asarray(0.0, jnp.float32))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        u = boundary_inputs.get("u", jnp.asarray(0.0, jnp.float32))
+        return {"x": (p["k"] * u + p["c"]).astype(jnp.float32), "open": u < 0.5}
+
+
+class Biased(Follower):
+    """``x = u + 0.2 * open``: reads the flag across the edge."""
+
+    def boundary_input_spec(self):
+        return {**super().boundary_input_spec(),
+                "open": BoundaryInputSpec(shape=(), dtype=jnp.bool_,
+                                          default=jnp.asarray(False))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        bias = jnp.where(boundary_inputs["open"], 0.2, 0.0).astype(jnp.float32)
+        return {"x": boundary_inputs["u"] + bias}
+
+
+def _gated(solver, mode, reader_first):
+    """The only consistent fixed point has the gate open: ``x_b = 1/15``.
+
+    ``b`` starts at ``+1``, so the gate is shut on the first pass; shut,
+    the pair would settle at ``-1/15``, where the gate must be open.  The
+    reader takes the flag from the iterate under Jacobi, and under
+    Gauss-Seidel when it is scheduled first.
+    """
+    gm = GraphManager()
+    nodes = [Gate("a", 1.0), Biased("b", 1.0)]
+    for node in (nodes[::-1] if reader_first else nodes):
+        gm.add_node(node)
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_edge("a", "b", "open", "open")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "CouplingGroup solver='fori' is deprecated",
+                                DeprecationWarning)
+        gm.add_coupling_group(["a", "b"], max_iterations=80, tolerance=1e-6, solver=solver,
+                              iteration_mode=mode, diagnostics=True)
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("mode, reader_first", [
+    ("jacobi", False), ("gauss-seidel", True), ("gauss-seidel", False)])
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+def test_a_flag_read_across_an_internal_edge_iterates_with_the_solve(solver, mode, reader_first):
+    """``"ift"`` held the flag at its first-pass value inside the loop.
+
+    The reader then iterated the map with the gate shut, and ``"ift"``
+    returned ``x_b = -1/15`` with ``converged=True`` -- the fixed point
+    of a map the graph does not define -- where ``"fori"``, carrying the
+    whole state, found ``1/15``.
+    """
+    gm = _gated(solver, mode, reader_first)
+    gm.step()
+    assert gm.coupling_diagnostics()["a+b"]["converged"]
+    assert float(gm.get_node_state("b")["x"]) == pytest.approx(1.0 / 15.0, rel=1e-4)
+    assert float(gm.get_node_state("a")["x"]) == pytest.approx(-2.0 / 15.0, rel=1e-4)
+    assert bool(gm.get_node_state("a")["open"]) is True
+
+
+def test_the_ift_gradient_through_a_flag_edge_is_the_open_branchs():
+    """``x_b* = (c + 0.2) / (1 - k)`` on the open branch: ``dx_b*/dc = 1 / (1 - k)``."""
+    gm = _gated("ift", "jacobi", False)
+
+    def loss(p):
+        return gm.run_scan(2, params=p)["b"]["x"]
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", "the graph held JAX tracers", RuntimeWarning)
+        g = jax.grad(loss)(gm.params)["nodes"]["a"]
+    assert float(g["c"]) == pytest.approx(1.0 / (1.0 - K), rel=1e-4)
+    assert float(g["k"]) == pytest.approx((C + 0.2) / (1.0 - K) ** 2, rel=1e-4)

@@ -218,9 +218,8 @@ def _floating_accel_fields(fields, state, group_nodes) -> Optional[dict]:
     always iterated on the floating fields only.  The leaf is *not*
     independent of the iterate in general -- a flag a node computes from
     a boundary input (a contact flag reading a gap) changes with it -- so
-    under ``"fori"`` it comes from the raw pass beside the relaxed
-    floating fields, and under ``"ift"`` it is recomputed from the
-    returned floating fields after the solve (``_run_ift_forward``).
+    both solvers recompute it from the returned floating state after the
+    solve (``_with_nonfloat_fields_at`` in ``_run_coupled_block_impl``).
 
     ``fields`` is ``None`` for "every field of every node in
     ``group_nodes``", or a ``{node: (field, ...)}`` mapping.  Returned
@@ -2781,6 +2780,52 @@ def _run_coupled_block_impl(
         # Run first iteration
         state_after_first = one_pass(new_state_inner)
 
+        # The group's non-floating fields (counters, flags, keys), and the
+        # rule both solvers return them by.  The fixed-point iteration
+        # acts on floating fields only, so what a solve returns is a
+        # floating state; the non-floating fields beside it are the ones
+        # the pass computes *at* that state -- as at a fixed point, where
+        # the pass that produced the state and the pass it produces are
+        # the same.  ``solver="ift"`` used to restore them from the first
+        # pass, on the premise that such a field depends on the pre-step
+        # state alone; a flag that reads a boundary input (a contact flag
+        # reading a gap) does not, and the returned flag described an
+        # input the solve had long left.  ``solver="fori"`` took them from
+        # the raw pass that preceded the returned iterate, which under an
+        # acceleration is not the pass of the returned floating state
+        # either.  Static: an all-floating group never builds the pass.
+        nonfloat_fields = {
+            nn: tuple(f for f in sorted(state_after_first[nn])
+                      if not jnp.issubdtype(
+                          jnp.asarray(state_after_first[nn][f]).dtype, jnp.floating))
+            for nn in group_node_names
+        }
+
+        def _with_nonfloat_fields_at(s_full):
+            """*s_full* with the group's non-floating fields recomputed at it.
+
+            One more evaluation of the pass, of which only those fields
+            are kept, so XLA keeps only the arithmetic that feeds them (a
+            counter's increment; a flag's boundary resolution).  The
+            floating inputs go in through ``stop_gradient``: nothing kept
+            from this pass has a derivative, and the floating state's --
+            the IFT rule's, or the unrolled loop's -- is untouched.
+            """
+            if not any(nonfloat_fields.values()):
+                return s_full
+            frozen = jax.tree.map(
+                lambda v: (jax.lax.stop_gradient(v)
+                           if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v),
+                s_full,
+            )
+            s_leaves = one_pass(frozen)
+            out = dict(s_full)
+            for nn in group_node_names:
+                if nonfloat_fields[nn]:
+                    out[nn] = {**s_full[nn],
+                               **{f: s_leaves[nn][f] for f in nonfloat_fields[nn]}}
+            return out
+
         if max_iters <= 1:
             # ``max_iterations=1`` is a legitimate "one staggered pass,
             # no iteration" request, so it reports like any other cap
@@ -2926,17 +2971,12 @@ def _run_coupled_block_impl(
             # first-pass value described an input the solve had long
             # left.  So the returned state's non-floating fields are
             # recomputed below, from the returned floating fields, by one
-            # more evaluation of the pass (``nonfloat_fields``).
+            # more evaluation of the pass (``_with_nonfloat_fields_at``).
             float_fields = {
                 nn: tuple(
                     f for f in sorted(template_state[nn])
                     if jnp.issubdtype(template_state[nn][f].dtype, jnp.floating)
                 )
-                for nn in group_node_names
-            }
-            nonfloat_fields = {
-                nn: tuple(f for f in sorted(template_state[nn])
-                          if f not in float_fields[nn])
                 for nn in group_node_names
             }
 
@@ -2974,8 +3014,38 @@ def _run_coupled_block_impl(
                     s[nn] = {**s[nn], **part[nn]}
                 return s
 
-            def _step_flat(x_full):
+            # Non-floating fields a group-internal edge carries (a flag
+            # one member computes and another reads).  ``_embed`` holds
+            # every non-floating field at its first-pass value, and a
+            # reader that takes such a field from the iterate -- under
+            # Jacobi, or scheduled before its producer -- then iterated a
+            # map with the field frozen: on a pair whose flag flips during
+            # the solve, ``"ift"`` converged to the fixed point of the
+            # frozen map with ``converged=True``, where ``"fori"``, which
+            # carries the whole state, found the consistent one.  So such
+            # fields are evaluated at the iterate itself: one more pass,
+            # of which only those fields are kept (XLA keeps only what
+            # feeds them).  At a fixed point that is the value the pass
+            # gives there, so the fixed point is the consistent one.
+            # Static: without such an edge the map is the one it always
+            # was.
+            live_nonfloat = sorted({
+                (e.source_node, e.source_field) for e in group_internal_list
+                if e.source_field in template_state.get(e.source_node, {})
+                and e.source_field not in float_fields.get(e.source_node, ())
+            })
+
+            def _embed_live(x_full):
                 s = _embed(x_full)
+                if not live_nonfloat:
+                    return s
+                s_nf = one_pass(s)
+                for nn, fld in live_nonfloat:
+                    s[nn] = {**s[nn], fld: s_nf[nn][fld]}
+                return s
+
+            def _step_flat(x_full):
+                s = _embed_live(x_full)
                 s_new = one_pass(s)
                 # The residual is the group's configured norm on the
                 # full per-node state, exactly as the fori path
@@ -3166,29 +3236,12 @@ def _run_coupled_block_impl(
                 # would help: ``_strict_check`` names it first.
                 final_est = estimated_error(final_res, final_amp, step_scale)
                 x_star_full = _strict_check(x_star_full, final_est)
-            s_star = _embed(x_star_full)
-            if any(nonfloat_fields.values()):
-                # The non-floating fields of the returned state, computed
-                # from its floating fields: the values the pass gives at
-                # ``x_star``, as at a fixed point, where the pass that
-                # produced the state and the pass it produces are the
-                # same.  ``_embed`` restored them from the first pass,
-                # which is right only for a field that never reads the
-                # iterate.  Only those fields are kept from this pass, so
-                # XLA keeps only the arithmetic that feeds them (a
-                # counter's increment; a flag's boundary resolution), and
-                # ``stop_gradient`` keeps it out of the linearisation:
-                # the IFT derivative of the floating state is untouched,
-                # and an integer field has none.  Static: a group whose
-                # state is all floating compiles to the program it
-                # always did.
-                s_leaves = one_pass(_embed(jax.lax.stop_gradient(x_star_full)))
-                s_star = dict(s_star)
-                for nn in group_node_names:
-                    if nonfloat_fields[nn]:
-                        s_star[nn] = {**s_star[nn], **{
-                            f: s_leaves[nn][f] for f in nonfloat_fields[nn]}}
-            final = _merge(template_state, s_star, jnp.array(False))
+            # ``_embed`` restores the non-floating fields from the first
+            # pass; they are recomputed at the returned floating state
+            # (``_with_nonfloat_fields_at``, the rule both solvers share).
+            final = _merge(template_state,
+                           _with_nonfloat_fields_at(_embed_live(x_star_full)),
+                           jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
                             spec_amp, grad_bound), (vw if vw else None))
 
@@ -3543,6 +3596,12 @@ def _run_coupled_block_impl(
                 _group_state_finite(final_state, group_node_names),
                 final_res, final_amp,
             )
+
+        # The non-floating fields of the returned state, by the rule the
+        # ift path applies (``_with_nonfloat_fields_at``): the raw pass
+        # they came from preceded the returned iterate, which under an
+        # acceleration is not that pass's output.
+        final_state = _with_nonfloat_fields_at(final_state)
 
         # Merge coupled nodes back into the full state
         r = {k: v for k, v in new_state_inner.items()}

@@ -95,7 +95,9 @@ def test_the_norm_traces_under_jit_with_every_leaf_kind():
     fine, coarse = _with(*_LEAVES["bool"])
     fine["a"]["tag"], coarse["a"]["tag"] = _LEAVES["uint32-wraps"]
     got = jax.jit(lambda f, c: _tree_error_norm(f, c, ATOL, RTOL))(fine, coarse)
-    assert float(got) == float(_tree_error_norm(*_floats(), ATOL, RTOL))
+    # Compiled against eager: the same arithmetic, fused differently.
+    assert float(got) == pytest.approx(float(_tree_error_norm(*_floats(), ATOL, RTOL)),
+                                       rel=1e-6)
 
 
 def test_build_adaptive_step_steps_a_state_with_a_flag_and_a_counter():

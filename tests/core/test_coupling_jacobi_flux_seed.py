@@ -61,16 +61,27 @@ class Reader(Slab):
     compute_boundary_fluxes = SimulationNode.compute_boundary_fluxes
 
 
-def _graph(mode, *, mutual=True, solver="ift", **group):
-    """``g0.q -> g1`` and ``g1.q -> g0`` (mutual) or ``g1.x -> g0``.
+#: ``x0 = 0.2 u0 + 1`` and ``x1 = -0.3 u1 + 0.5``, coupled three ways.  A
+#: flux edge carries ``q = 2 x``; ``g1`` is a :class:`Reader` (no flux) in
+#: the last, so there no producer reads a flux.
+_TOPOLOGIES = {
+    # both producers read the other's flux
+    "mutual": (Slab, ("g0", "g1", "q"), ("g1", "g0", "q")),
+    # a producer reads a flux one way (this raised too: any producer
+    # reading any flux did, whatever the order)
+    "one-way": (Slab, ("g0", "g1", "q"), ("g1", "g0", "x")),
+    # the flux's consumer produces none; the producer reads state
+    "consumer-produces-none": (Reader, ("g0", "g1", "q"), ("g1", "g0", "x")),
+}
 
-    Mutual: ``x0 = 0.2 (2 x1) + 1``, ``x1 = -0.3 (2 x0) + 0.5``.
-    """
+
+def _graph(mode, *, topology="mutual", solver="ift", **group):
+    second, e01, e10 = _TOPOLOGIES[topology]
     gm = GraphManager()
     gm.add_node(Slab("g0", 1.0, g=0.2, b=1.0, x0=0.3))
-    gm.add_node(Slab("g1", 1.0, g=-0.3, b=0.5, x0=-0.4))
-    gm.add_edge("g0", "g1", "q", "u")
-    gm.add_edge("g1", "g0", "q" if mutual else "x", "u")
+    gm.add_node(second("g1", 1.0, g=-0.3, b=0.5, x0=-0.4))
+    gm.add_edge(e01[0], e01[1], e01[2], "u")
+    gm.add_edge(e10[0], e10[1], e10[2], "u")
     cfg = dict(max_iterations=40, tolerance=1e-6, iteration_mode=mode, solver=solver,
                diagnostics=True, **group)
     with warnings.catch_warnings():
@@ -81,29 +92,33 @@ def _graph(mode, *, mutual=True, solver="ift", **group):
     return gm
 
 
-def _exact(mutual=True):
-    # x0 = 0.4 x1 + 1 (or 0.2 x1 + 1), x1 = -0.6 x0 + 0.5
-    a = 0.4 if mutual else 0.2
-    x0 = (1.0 + a * 0.5) / (1.0 + 0.6 * a)
-    return np.array([x0, -0.6 * x0 + 0.5])
+def _exact(topology="mutual"):
+    """``x0 = a x1 + 1``, ``x1 = c x0 + 0.5`` with the flux's factor 2 folded in."""
+    _second, e01, e10 = _TOPOLOGIES[topology]
+    c = -0.3 * (2.0 if e01[2] == "q" else 1.0)
+    a = 0.2 * (2.0 if e10[2] == "q" else 1.0)
+    x0 = (1.0 + a * 0.5) / (1.0 - a * c)
+    return np.array([x0, c * x0 + 0.5])
 
 
+@pytest.mark.parametrize("topology", ["mutual", "one-way"])
 @pytest.mark.parametrize("accel", ["none", "aitken", "iqn-ils"])
 @pytest.mark.parametrize("solver", ["ift", "fori"])
-def test_mutual_flux_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point(solver, accel):
+def test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point(
+        solver, accel, topology):
     states = {}
     for mode in ("jacobi", "gauss-seidel"):
-        gm = _graph(mode, solver=solver, acceleration=accel)
+        gm = _graph(mode, topology=topology, solver=solver, acceleration=accel)
         gm.step()
         assert gm.coupling_diagnostics()["g0+g1"]["converged"], mode
         states[mode] = np.array([float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")])
-    np.testing.assert_allclose(states["jacobi"], _exact(), rtol=1e-5)
-    np.testing.assert_allclose(states["gauss-seidel"], _exact(), rtol=1e-5)
+    np.testing.assert_allclose(states["jacobi"], _exact(topology), rtol=1e-5)
+    np.testing.assert_allclose(states["gauss-seidel"], _exact(topology), rtol=1e-5)
 
 
-@pytest.mark.parametrize("mutual, sweeps", [(True, 2), (False, 1)],
-                         ids=["producer-reads-a-flux", "producers-read-state"])
-def test_a_jacobi_pass_seeds_in_two_sweeps_only_where_a_producer_reads_a_flux(mutual, sweeps):
+@pytest.mark.parametrize("topology, sweeps", [
+    ("mutual", 2), ("one-way", 2), ("consumer-produces-none", 1)])
+def test_a_jacobi_pass_seeds_in_two_sweeps_only_where_a_producer_reads_a_flux(topology, sweeps):
     """Per traced pass, each producer's flux is computed once per seed sweep.
 
     The Jacobi pass computes fluxes only in its seed (never after an
@@ -111,13 +126,14 @@ def test_a_jacobi_pass_seeds_in_two_sweeps_only_where_a_producer_reads_a_flux(mu
     sweep where no producer reads a flux is the program the Jacobi pass
     always compiled to; two where one does is the Gauss-Seidel seed.
     """
-    gm = _graph("jacobi", mutual=mutual, solver="fori")
-    for name in ("g0", "g1"):      # ``compile()``'s own probes are not passes
+    gm = _graph("jacobi", topology=topology, solver="fori")
+    producers = [n for n in ("g0", "g1") if type(gm.get_node(n)) is Slab]
+    for name in producers:      # ``compile()``'s own probes are not passes
         gm.get_node(name).updates = gm.get_node(name).fluxes = 0
     gm.step()
     np.testing.assert_allclose(
-        [float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")], _exact(mutual), rtol=1e-5)
-    for name in ("g0", "g1"):
+        [float(gm.get_node_state(n)["x"]) for n in ("g0", "g1")], _exact(topology), rtol=1e-5)
+    for name in producers:
         node = gm.get_node(name)
         assert node.updates > 0
         assert node.fluxes == sweeps * node.updates, (name, node.fluxes, node.updates)

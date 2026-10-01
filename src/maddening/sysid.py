@@ -2681,6 +2681,60 @@ def _progress_notifier(gm, method: str, n_iter: int, notify_every: int):
     return _emit
 
 
+class _BestIterate:
+    """The lowest-loss iterate a fitter has evaluated so far.
+
+    Shared by :func:`fit` and :func:`fit_multiple_shooting`, so that both
+    choose the iterate they return by the same rule.  ``iteration`` counts
+    the updates that produced ``state``, which makes it an index into the
+    fitter's ``losses`` (``losses[k]`` is the loss of the iterate after
+    ``k`` updates).
+
+    A tie goes to the **later** iterate.  That is what keeps the result
+    bit-identical to the last iterate, which is what these fitters
+    returned before, whenever the loss never rose above an earlier value:
+    a run that is strictly or weakly decreasing returns exactly what it
+    returned before.  A non-finite loss is never selected; it is not
+    lower than anything.
+    """
+
+    def __init__(self, state) -> None:
+        self.state = state
+        self.iteration = 0
+        self.loss: Optional[float] = None
+
+    def offer(self, state, iteration: int, loss: float) -> None:
+        """Keep ``state`` if ``loss`` is at or below the best so far."""
+        if not math.isfinite(loss):
+            return
+        if self.loss is None or loss <= self.loss:
+            self.state, self.iteration, self.loss = state, int(iteration), loss
+
+
+def _offer_final_iterate(best: _BestIterate, state, n_updates: int,
+                         loss: float, method: str) -> None:
+    """Compare the iterate the last Adam update produced with the rest.
+
+    The loop evaluates an iterate *before* stepping from it, so when it
+    ends by exhausting ``n_iter`` the last update's result is the one
+    point it never evaluated.  The caller evaluates it once more, with the
+    same compiled function the loop used, so that the comparison is
+    between numbers computed the same way.  A non-finite loss there is
+    not raised -- nothing is stepped from that point, so nothing forces
+    the run to stop -- but that iterate is not returned either, and a
+    :class:`RuntimeWarning` names the iterate returned in its place.
+    """
+    if not math.isfinite(loss):
+        warnings.warn(
+            f"{method}: the last update produced a non-finite loss ({loss}); "
+            f"returning iterate {best.iteration}, the lowest-loss one evaluated "
+            f"(FitResult.best_iteration).",
+            RuntimeWarning, stacklevel=3,
+        )
+        return
+    best.offer(state, n_updates, loss)
+
+
 @stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True, kw_only=True)
 class FitResult:
@@ -2693,13 +2747,54 @@ class FitResult:
     and no warning.  Here the two adjacent ``bool``/``int`` fields make
     it worse than a shift -- ``converged`` and ``n_iter`` each accept
     the other's value silently, so a run that stopped at iteration 12
-    would read as converged.  No field has been inserted yet and no
-    caller built one positionally; ``kw_only`` is what keeps that true
-    for the next field.
+    would read as converged.  No field has been inserted yet (the two
+    added during 0.4.0 were appended) and no caller built one
+    positionally; ``kw_only`` is what keeps that true for the next field.
 
     ``params`` is a physical pytree (already mapped back through
     ``GraphManager.constrain``); ``losses[i]`` is the loss *before*
-    update ``i``; ``converged`` is whether ``losses[-1] <= tol``.
+    update ``i + 1`` -- the loss of the iterate ``i`` updates produced, so
+    ``losses[0]`` is the starting point's; ``converged`` is whether
+    ``losses[-1] <= tol``.
+
+    ``params`` is the **lowest-loss iterate the fitter evaluated**, not
+    necessarily its last; ``best_iteration`` says which.  Earlier 0.4.0
+    development builds returned the last iterate, and an optimiser with a
+    fixed step size can end a run above where it started: Adam's step is
+    about ``lr`` in size whatever the gradient's, so from a point whose
+    gradient is rounding noise it walks away.  One such fit started at loss
+    ``2.7e-8`` and returned parameters at ``1.9e-4``, and nothing in the
+    result said so.  A run whose loss never rose above an earlier value --
+    every well-behaved fit -- returns what it returned before, bit for
+    bit: a tie goes to the later iterate.
+
+    ``best_iteration``
+        How many updates produced ``params``; ``0`` is the start.  It
+        indexes ``losses``, so ``losses[best_iteration] == best_loss`` --
+        except when it equals ``len(losses)``.  Then ``params`` is the
+        iterate the *last* update produced, which the loop never evaluated
+        (it evaluates before it steps), and the fitter evaluated it once
+        after the loop to compare it with the rest.  That evaluation is
+        the selection's only cost: one call of :func:`fit`'s or
+        :func:`fit_multiple_shooting`'s compiled loss-and-gradient, made
+        only when the run used its whole budget.  It is not appended to
+        ``losses`` and not passed to ``callback`` or the observers.
+        :func:`fit_lm` never needs it: it accepts a step only when the
+        step lowers the loss, so its last iterate is always its lowest,
+        and it already holds that iterate's loss.  ``None`` only on a
+        ``FitResult`` no fitter built.
+    ``best_loss``
+        That iterate's loss as the fitter evaluated it: ``loss_fn``'s
+        value for :func:`fit`, the (weighted) ``0.5 ||r||²`` for
+        :func:`fit_lm`, and the windowed loss with its continuity penalty,
+        at the returned window states, for :func:`fit_multiple_shooting`.
+        It is the value *before* the ``hold_undetermined`` guard below,
+        which moves ``params`` only along directions it judged the loss to
+        be flat in, and it was computed from the optimiser's unconstrained
+        coordinates, so ``loss_fn(params)`` can differ from it in the last
+        bits: a ``log`` leaf round-trips as ``exp(log(p))``, which
+        ``params`` does not when it returns the start bit for bit.
+        ``None`` when nothing was evaluated (``n_iter=0``).
 
     Every leaf no step moved is the value that went in, bit for bit --
     not merely close -- so comparing a fit's input and output leaf by
@@ -2718,15 +2813,20 @@ class FitResult:
         of the trainable coordinate count.  Less than that count means the
         data left the rest undetermined and ``params`` holds the value they
         started at.  ``None`` is **not** "full rank": it is "not measured"
-        -- ``hold_undetermined=False``, more trainable parameters than
-        :data:`_EXCITATION_MAX_PARAMS`, or fewer iterations than parameters,
-        where an unobserved direction cannot be told from an unobservable
-        one.
+        -- ``hold_undetermined=False``; more trainable coordinates (array
+        elements, not leaves) than :data:`_EXCITATION_MAX_PARAMS`; fewer
+        gradients than trainable coordinates, where an unobserved
+        direction cannot be told from an unobservable one; or a degenerate
+        spectrum -- every gradient the run saw was exactly zero (a start at
+        an exact optimum, or a loss that reads none of the trainable
+        parameters), so there is no largest direction to measure the
+        others against.
     ``undetermined_drift``
-        How far the raw iterate had wandered along those undetermined
-        directions before the guard removed it, as a Euclidean norm in the
-        **unconstrained** coordinates (``log`` for a positive parameter, so
-        a drift of 0.04 there is a 4% drift in the parameter itself).
+        How far the selected raw iterate had wandered along those
+        undetermined directions before the guard removed it, as a Euclidean
+        norm in the **unconstrained** coordinates (``log`` for a positive
+        parameter, so a drift of 0.04 there is a 4% drift in the parameter
+        itself).
         ``0.0`` when the rank was full and nothing was removed; ``None``
         when ``excited_rank`` is.  It is a diagnostic, not a residual
         error: the value it reports has already been taken out of
@@ -2735,8 +2835,8 @@ class FitResult:
 
         For :func:`fit_multiple_shooting` it covers the **parameter** block
         only.  The window starts are that fit's own decision variables and
-        are returned as the optimiser left them, in the second element of
-        its result rather than in ``params``.
+        are returned unguarded, from the same iterate as ``params``, in
+        the second element of its result rather than in ``params``.
     """
     params: dict
     losses: np.ndarray
@@ -2744,6 +2844,8 @@ class FitResult:
     n_iter: int
     excited_rank: Optional[int] = None
     undetermined_drift: Optional[float] = None
+    best_iteration: Optional[int] = None
+    best_loss: Optional[float] = None
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -2816,8 +2918,8 @@ def fit(
     hold_undetermined : bool
         Keep the fitted parameters out of the directions the data does not
         determine, holding them at the values they started at.  **New in
-        0.4.0, and on by default**; ``False`` restores the pre-0.4.0
-        iterate exactly.
+        0.4.0, and on by default**; ``False`` returns the selected iterate
+        (see Returns) exactly as Adam produced it.
 
         Every gradient of a least-squares loss is ``Jᵀr``, so a direction
         ``v`` with ``Jv = 0`` has ``g·v = 0`` at every iterate: the data
@@ -2830,7 +2932,15 @@ def fit(
         the three drifts 3.4% by iteration 200 and **46% by iteration
         10,000**, with the loss unchanged in its first six digits, and
         ``mass`` lands anywhere from 1.33 to 1.90 depending only on the
-        budget.  :func:`fit_lm` and :func:`fit_multiple_shooting` drift too
+        budget.  Those figures are for the *last* iterate, which earlier
+        development builds returned.  Returning the lowest-loss iterate
+        does not remove the effect, because along an exactly flat direction
+        which iterate is lowest is decided by rounding.  Unguarded, on a
+        120-step record with σ = 0.02 noise, the lowest-loss iterate lands
+        −7.50%, −7.12% and −5.43% from the starting scale at ``lr`` 0.01,
+        0.05 and 0.2, for every budget from 200 to 10,000 iterations: the
+        learning rate still picks the answer.  :func:`fit_lm` and
+        :func:`fit_multiple_shooting` drift too
         — ``λ·diag(A)`` damping is no more orthogonal to the null space
         than Adam's preconditioner is — and since 0.4.0 all three run this
         same guard.  What differs is that LM's step vanishes with the
@@ -2857,6 +2967,24 @@ def fit(
         Declaring ``transform="log"`` on every parameter of a scale
         degeneracy is what makes it constant, and it is what
         ``fim(scale="relative")`` already assumes.
+
+    Returns
+    -------
+    FitResult
+        ``params`` is the **lowest-loss iterate** the run evaluated, with
+        :attr:`FitResult.best_iteration` and :attr:`FitResult.best_loss`
+        saying which and at what loss.  Adam's step is about ``lr`` in
+        size however small the gradient, so a run started at (or passing
+        through) a point whose gradient is rounding noise can end above it;
+        earlier 0.4.0 development builds returned the last iterate
+        regardless.  Ties go to
+        the later iterate, so a run whose loss never rose returns its last
+        iterate, bit for bit what it returned before.  When the run used
+        its whole budget, the iterate the last update produced is
+        evaluated once more (not appended to ``losses``, not reported to
+        ``callback``) so that it can be compared with the rest; a run
+        stopped by ``tol`` returns the iterate that met it, which is the
+        lowest by construction.
     """
     _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
     _check_hold_undetermined(hold_undetermined)
@@ -2892,6 +3020,7 @@ def fit(
     m = jnp.zeros_like(theta)
     v = jnp.zeros_like(theta)
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
+    best = _BestIterate(theta0)
     losses: list[float] = []
     converged = False
     i = 0
@@ -2903,6 +3032,8 @@ def fit(
             raise FloatingPointError(
                 f"non-finite loss or gradient at iteration {i} (loss={loss_f})"
             )
+        # ``theta`` here is the iterate ``i - 1`` updates produced.
+        best.offer(theta, i - 1, loss_f)
         if tracker is not None:
             # Before the ``tol`` break, not after the step: this gradient is
             # information about the loss surface whether or not it moved
@@ -2919,13 +3050,24 @@ def fit(
             break
         theta, m, v = adam_step(theta, m, v, g, jnp.asarray(i, theta.dtype))
 
+    if i > 0 and not converged:
+        # The budget ran out, so the last thing the loop did was an update
+        # whose result it never evaluated.  ``value_and_grad`` rather than a
+        # value-only function: the same compiled arithmetic as every entry
+        # of ``losses``, so the comparison is like for like and costs no
+        # compile.  The gradient is discarded -- in particular it is not
+        # folded into the tracker, which would change ``excited_rank`` for
+        # runs whose result is otherwise untouched.
+        _offer_final_iterate(best, theta, i, float(value_and_grad(theta)[0]), "fit")
+
     theta, excited_rank, undetermined_drift = _hold_undetermined_directions(
-        tracker, theta, theta0)
+        tracker, best.state, theta0)
 
     final = to_params(theta)
     return FitResult(
         params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
         excited_rank=excited_rank, undetermined_drift=undetermined_drift,
+        best_iteration=best.iteration, best_loss=best.loss,
     )
 
 
@@ -2960,17 +3102,27 @@ def fit_lm(
     ``lam_up``.  ``noise_std`` weights the residual as in :func:`fim`.
 
     Returns a :class:`FitResult` whose ``losses[i]`` is the (weighted)
-    ``0.5 ||r||²`` at the start of iteration ``i``; ``converged`` when
+    ``0.5 ||r||²`` at the start of iteration ``i + 1``; ``converged`` when
     the loss reached ``tol`` or the step norm in unconstrained
     coordinates fell below ``step_tol``.
+
+    Like :func:`fit`, it returns the **lowest-loss iterate** it evaluated,
+    and here that is always the last one: a step is accepted only when it
+    strictly lowers the loss, so every accepted iterate is below every
+    earlier one, and a rejected step changes nothing.  No extra
+    evaluation is needed to know it, and none is made.
+    :attr:`FitResult.best_iteration` is ``len(losses)`` when the run ended
+    on an accepted step (the loss of that iterate, ``best_loss``, is the
+    one the acceptance test computed) and ``len(losses) - 1`` when it
+    ended on ``tol`` or on a step no damping could make acceptable.
 
     Parameters
     ----------
     hold_undetermined : bool
         Keep the fitted parameters out of the directions the data does not
         determine, exactly as :func:`fit` does and by the same shared
-        machinery.  **New in 0.4.0, and on by default**; ``False`` restores
-        the pre-0.4.0 iterate exactly.
+        machinery.  **New in 0.4.0, and on by default**; ``False`` returns
+        the last iterate exactly as the Marquardt steps produced it.
 
         The gradient ``g = Jᵀr`` is orthogonal to ``null(J)``, but the step
         is not the gradient: the Marquardt solve is
@@ -3069,6 +3221,14 @@ def fit_lm(
     lam = float(lam0)
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
     losses: list[float] = []
+    # ``theta``'s update count and its loss as last evaluated.  No
+    # ``_BestIterate`` here: the acceptance test already makes the current
+    # iterate the lowest, and re-deciding it from ``losses`` would compare
+    # values from two compiled functions (``residual_and_jac`` records,
+    # ``residual_only`` accepts) that can disagree in the last ulp, so a
+    # converged run could hand back an older iterate for a rounding
+    # difference its own test had already decided the other way.
+    theta_iteration, theta_loss = 0, None
     converged = False
     i = 0
     for i in range(1, n_iter + 1):
@@ -3077,6 +3237,7 @@ def fit_lm(
         if not np.isfinite(loss) or not bool(jnp.all(jnp.isfinite(J))):
             raise FloatingPointError(f"non-finite residual or Jacobian at iteration {i}")
         losses.append(loss)
+        theta_iteration, theta_loss = i - 1, loss
         if tracker is not None:
             # ``J.T @ r`` is the same ``g`` ``_lm_step`` forms, recomputed
             # here rather than returned from it: the tracker must not
@@ -3107,6 +3268,7 @@ def fit_lm(
             if np.isfinite(loss_new) and loss_new < loss:
                 step_norm = float(jnp.linalg.norm(cand - theta))
                 theta = cand
+                theta_iteration, theta_loss = i, loss_new
                 lam = max(lam * lam_down, 1e-12)
                 accepted = True
                 break
@@ -3122,6 +3284,7 @@ def fit_lm(
     return FitResult(
         params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
         excited_rank=excited_rank, undetermined_drift=undetermined_drift,
+        best_iteration=theta_iteration, best_loss=theta_loss,
     )
 
 
@@ -3157,15 +3320,25 @@ def fit_multiple_shooting(
     single continuous trajectory and noisy observations at window starts
     do not seed every window with measurement error.
 
-    Returns ``(FitResult, window_states)``.
+    Returns ``(FitResult, window_states)``, both from the **lowest-loss
+    iterate** the run evaluated, chosen exactly as :func:`fit` chooses
+    (ties to the later iterate, so a run whose loss never rose returns
+    its last iterate bit for bit; the iterate the last update produced is
+    evaluated once more when the budget ran out).  The parameters and the
+    window states are one point of the joint objective, so they are
+    selected together: :attr:`FitResult.best_loss` is the loss of exactly
+    the pair returned.  This fitter needed the selection more than
+    :func:`fit` does: started at the truth, with every window state
+    stepped by Adam at a rate of ``lr``, it returned a loss of ``2e-1``
+    from a start of ``1e-13`` before it selected.
 
     Parameters
     ----------
     hold_undetermined : bool
         Keep the fitted **parameters** out of the directions the data does
         not determine, exactly as :func:`fit` does and by the same shared
-        machinery.  **New in 0.4.0, and on by default**; ``False`` restores
-        the pre-0.4.0 iterate exactly.
+        machinery.  **New in 0.4.0, and on by default**; ``False`` returns
+        the selected iterate exactly as Adam produced it.
 
         This is the same Adam step rule :func:`fit` uses, so it is
         :func:`fit`'s defect and not merely the consistency issue
@@ -3175,16 +3348,20 @@ def fit_multiple_shooting(
         mean of the three lands **−4.35%** at ``lr=0.01, n_iter=200``,
         **−4.80%** at 1,200, **−1.97%** at ``lr=0.2, n_iter=200`` and
         **−2.02%** at 1,200 — a 3.0% spread in the returned constants for a
-        loss that agrees to four digits.  Raising the budget to 4,000 moves
-        ``lr=0.2`` on again, to −2.31%, so it is not converging to a value
-        either.  Two runs on the same data return different physical
-        constants and neither is preferred by the objective.
+        loss that agrees to four digits.  Raising the budget to 4,000 moved
+        the last iterate at ``lr=0.2`` on again, to −2.31%, so it was not
+        converging to a value either.  Those are last iterates; the
+        lowest-loss iterates this fitter now returns land −4.35%, −4.80%,
+        −1.97% and −1.97% (and −1.97% at 4,000), the same 3.0% spread.
+        Two runs on the same data return different physical constants and
+        neither is preferred by the objective.
 
         Only ``theta`` is guarded.  The returned ``window_states`` are
         nuisance variables of the fit rather than constants a caller
         records as provenance, and a caller warm-starting from them needs
-        the values the optimiser actually reached; the gradient Gram is
-        accumulated over the parameter block alone, which is where
+        the values the optimiser actually reached at the selected iterate;
+        the gradient Gram is accumulated over the parameter block alone,
+        which is where
         :attr:`FitResult.excited_rank` counts its directions.  That block's
         gradient is still ``J_θᵀ r`` at every iterate, so a ``v`` with
         ``J_θ v = 0`` has ``g·v = 0``, which is the whole premise.
@@ -3236,6 +3413,7 @@ def fit_multiple_shooting(
     m_t = jnp.zeros_like(theta); v_t = jnp.zeros_like(theta)
     m_s = jnp.zeros_like(ws); v_s = jnp.zeros_like(ws)
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
+    best = _BestIterate((theta0, ws_flat0))
     losses: list[float] = []
     converged = False
     i = 0
@@ -3246,6 +3424,7 @@ def fit_multiple_shooting(
         if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g_t))) \
                 or not bool(jnp.all(jnp.isfinite(g_s))):
             raise FloatingPointError(f"non-finite loss or gradient at iteration {i}")
+        best.offer((theta, ws), i - 1, loss_f)
         if tracker is not None:
             # The parameter block's gradient only: the window states are
             # decision variables of this fit and are returned as the
@@ -3264,11 +3443,19 @@ def fit_multiple_shooting(
         theta, m_t, v_t = adam(theta, m_t, v_t, g_t, it, lr)
         ws, m_s, v_s = adam(ws, m_s, v_s, g_s, it, lr_s)
 
+    if i > 0 and not converged:
+        # As in ``fit``: the last update's result was never evaluated.
+        _offer_final_iterate(best, (theta, ws), i,
+                             float(value_and_grad(theta, ws)[0]),
+                             "fit_multiple_shooting")
+    theta, ws = best.state
+
     theta, excited_rank, undetermined_drift = _hold_undetermined_directions(
         tracker, theta, theta0)
 
     final = to_params(theta)
     return (FitResult(params=final, losses=np.asarray(losses), converged=converged,
                       n_iter=i, excited_rank=excited_rank,
-                      undetermined_drift=undetermined_drift),
+                      undetermined_drift=undetermined_drift,
+                      best_iteration=best.iteration, best_loss=best.loss),
             unravel_ws(ws))

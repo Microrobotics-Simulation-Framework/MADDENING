@@ -458,11 +458,17 @@ class TestTrainableContract:
                 mask=mask, n_iter=2)
         else:
             # Observations of a *more* damped spring, so the fit has a
-            # reason to move ``damping`` away from where it starts.
+            # reason to move ``damping`` away from where it starts.  The
+            # window states step at ``lr_states=1e-3``: at the default (the
+            # parameters' 0.05) the first joint step raised the loss from
+            # 3.6e-3 to 4.8e-2, so the fit -- which returns its lowest-loss
+            # iterate -- correctly returned the start, and the non-vacuity
+            # check below had only ever passed on a worse iterate.
             obs = _observe(gm, 12, _with_params(gm, "s", {"damping": 4.0}))
             result, _ = fit_multiple_shooting(
                 gm, obs, obs_fn=(lambda h: h["s"]["position"]), window=4,
-                mask=mask, n_iter=2, lr=0.05)
+                mask=mask, n_iter=2, lr=0.05, lr_states=1e-3)
+            assert result.best_iteration == 2, result.best_iteration
 
         assert float(result.params["nodes"]["s"]["stiffness"]) == before
         # Non-vacuity: the masked leaf did move, so the fit was not a

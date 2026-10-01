@@ -176,6 +176,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`maddening.sysid.fit` and `fit_multiple_shooting` return the lowest-loss iterate they evaluated, not the last**: Adam's ~`lr`-sized step could end a run above where it started (one fit went from loss `2.7e-8` to `1.9e-4`, unreported). `FitResult.best_iteration` and `best_loss` say which iterate was returned; a run whose loss never rose is bit-identical to before, and `fit_lm` already returned its lowest iterate.
+  Action: nothing for a fit that converged; where you relied on the last iterate, read `best_iteration` (it equals `len(losses)` when the last update's result was the lowest).
 - **`HeatNode` refuses more of what it used to run wrongly, and `compile()` warns about an unstable coupled pair**: a rod on `grid_points` is held to `dt*alpha/min(h_L*h_R) <= 1/2` (the Fourier check skipped it; MADD-ANO-002), and a non-positive `length` or `timestep`, a negative `thermal_diffusivity`, a non-finite one of these, or `grid_points` not strictly increasing raise `ValueError` (MADD-ANO-062).
   Two uniform rods coupled end to end through `extract_first`/`extract_last` in a coupling group, past their pair limit (3/8 at `stencil_order=2`, 0.226 at 4), get a `UserWarning` naming both rods and MADD-ANO-050; it is a warning, not a refusal.
   Action: give a refused rod a stable timestep or meaningful constants; for a warned pair use a smaller timestep or exchange the data without a coupling group, and check a pair the warning cannot recognise yourself.

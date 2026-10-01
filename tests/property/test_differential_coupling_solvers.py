@@ -470,3 +470,61 @@ def test_reset_state_after_differentiating_through_run_scan_restores_the_graph()
     jax.grad(lambda p: jnp.sum(gm.run_scan(2, params=p)["g0"]["x"]))(params)
     gm.reset_state()
     assert np.asarray(gm.get_node_state("g0")["x"]).tobytes() == np.zeros(1, np.float32).tobytes()
+
+
+# ---------------------------------------------------------------------------
+# IQN-IMVJ's W slot: zero exactly when float32 cannot resolve the response
+# ---------------------------------------------------------------------------
+
+
+def _two_springs(stiffness_a, stiffness_b, solver):
+    """Two springs anchored to each other, IQN-IMVJ with a reuse window.
+
+    The graph ``tests/property/test_differential_checkpoint.py`` carries,
+    where ``coupling_a+b_W`` never moved: the coupling gain one spring sees
+    of the other is ``dt**2 k / m``.
+    """
+    from maddening.core.graph_manager import GraphManager  # noqa: PLC0415
+    from maddening.nodes.spring import SpringDamperNode  # noqa: PLC0415
+
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("a", 0.01, stiffness=stiffness_a, rest_length=0.5,
+                                 initial_position=0.2, damping=0.5))
+    gm.add_node(SpringDamperNode("b", 0.01, stiffness=stiffness_b, rest_length=0.3,
+                                 initial_position=-0.4, damping=0.2))
+    gm.add_edge("a", "b", "position", "anchor_position")
+    gm.add_edge("b", "a", "position", "anchor_position")
+    gm.add_coupling_group(["a", "b"], max_iterations=6, tolerance=1e-8, solver=solver,
+                          predictor="quadratic", acceleration="iqn-imvj", jacobian_reuse=2)
+    gm.compile()
+    for _ in range(5):
+        gm.step()
+    meta = gm._state["_meta"]  # noqa: SLF001
+    positions = [float(gm.get_node_state(n)["position"]) for n in ("a", "b")]
+    return (np.asarray(meta["coupling_a+b_V"]), np.asarray(meta["coupling_a+b_W"]),
+            max(abs(p) for p in positions))
+
+
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+def test_imvj_records_the_output_response_wherever_float32_resolves_it(solver):
+    """``W`` is zero only where the raw output's response rounds to nothing.
+
+    ``iqn_ils_update`` stores ``V`` = differences of residuals and ``W`` =
+    differences of the *raw outputs* ``F(x_k) - F(x_{k-1})``.  On the
+    state/IO harness's graph (stiffness 40 and 30 at ``dt = 0.01``: a gain
+    ``dt**2 k / m`` of 0.004) the iterate moves by ~1.6e-07 between passes
+    -- that is ``V`` -- and the output responds by ``0.004`` of that,
+    ~7e-10, far below float32's resolution at ``|x| ~ 0.3`` (3e-08): ``W``
+    is exactly zero, correctly, and the quasi-Newton step reduces to the
+    plain one.  Make the gain resolvable (stiffness x100, gain 0.4) and
+    ``W`` fills, under both solvers.  A ``W`` that is never written would
+    fail the second half.
+    """
+    V, W, x = _two_springs(40.0, 30.0, solver)
+    assert np.any(V != 0.0) and not np.any(W != 0.0)
+    gain = 0.01 ** 2 * 40.0
+    assert gain * float(np.max(np.abs(V))) < float(np.spacing(np.float32(x))), (
+        "the zero W must be explained by float32 resolution")
+    V, W, _x = _two_springs(4000.0, 3000.0, solver)
+    assert int(np.sum(np.any(W != 0.0, axis=0))) >= 1, (
+        "a resolvable coupling must leave secant columns in W")

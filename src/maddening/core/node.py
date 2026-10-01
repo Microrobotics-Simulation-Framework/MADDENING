@@ -1143,6 +1143,13 @@ class SimulationNode(ABC):
         on the shards of one pencil row, or a per-slab integral.  An
         empty tuple means no reduction: the per-shard partial values are
         stacked.  Values must be floating-point.
+
+        "The mesh" is the axes that split the node's cells: a mesh axis
+        the wrapper does not shard along (one a ``ShardedStencilNode``'s
+        ``axis_map`` leaves unused, every axis but a
+        ``ShardedUnstructuredNode``'s own) holds a copy of the same block
+        on every device, and an integral is neither reduced nor stacked
+        over it; it is replicated along it.
         """
         return {}
 
@@ -1156,7 +1163,8 @@ class SimulationNode(ABC):
         every mesh axis.
 
         Declaring a key here tells :class:`ShardedStencilNode` to apply
-        ``jax.lax.psum`` across the full mesh after
+        ``jax.lax.psum`` across the full mesh (every mesh axis that splits
+        the grid; see :meth:`domain_integral_axes`) after
         :meth:`update_padded` returns.  Values must be floating-point
         (``psum`` on integer dtypes risks wrap).
 

@@ -586,9 +586,11 @@ under multi-GPU sharding:
 * {meth}`domain_integral_fields <maddening.core.node.SimulationNode.domain_integral_fields>` —
   declares output keys that are `jnp.sum`-over-lattice integrals
   (e.g. total drag force on an immersed body).  The wrapper applies
-  `lax.psum` across every mesh axis after `update_padded` returns,
-  so the host sees the correct global sum instead of per-shard
-  partials.  Default returns `set()`.
+  `lax.psum` across every mesh axis that splits the grid after
+  `update_padded` returns, so the host sees the correct global sum
+  instead of per-shard partials.  A mesh axis the `axis_map` leaves
+  unused holds a copy of the same block on every device and is not
+  summed over.  Default returns `set()`.
 
 Pointwise nodes ignore all three and keep using `update()`.  Stencil
 nodes that don't shard can still declare `static_data` for cache

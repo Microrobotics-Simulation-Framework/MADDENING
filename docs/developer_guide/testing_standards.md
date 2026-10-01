@@ -826,7 +826,8 @@ the wrapper delivers:
   - per-cell, scalar or mis-shaped inputs.
 
 Meshes: 1, 2 or 4 devices; the pencils (2, 2), (1, 4) and (4, 1),
-including their size-1 axes; and slabs of a 2-D grid. Wrappings: the
+including their size-1 axes; slabs of a 2-D grid; and a (2, 2) mesh whose
+`axis_map` uses one axis, the node replicated along the other. Wrappings: the
 wrapper alone; nested one level (stencil and pointwise);
 `HybridNode(wrapper)`; and the pointwise wrapper around a `HybridNode`.
 
@@ -912,6 +913,18 @@ the per-push tests catch each one.
 | `ShardedPointwiseNode` not forwarding `params` | generated pointwise; gradients; the examples |
 | The halo of an unsharded axis edge-filled whatever the fill | generated 2-D stencil; generated D2Q9; D3Q19; gradients |
 | `ShardedUnstructuredNode` not forwarding `params` | generated unstructured; gradients; the examples |
+| A mis-shaped per-cell input not refused by `ShardedUnstructuredNode`, or a slab-length one let through (MADD-ANO-064) | generated unstructured (the first); the slab-length case |
+| `gather_global` reading `state_fields()` before the integrals (MADD-ANO-065) | generated unstructured, through its `gather_global` cross-check; the two listed-integral cases |
+| A nested stencil wrapper placing its inner wrapper's already-stacked integral (MADD-ANO-066) | the nested per-shard case |
+| A domain integral summed over a mesh axis the `axis_map` leaves unused (MADD-ANO-067) | generated 1-D and 2-D stencil; the unused-axis integral cases |
+| A per-shard integral stacked over such an axis | generated 1-D stencil; the unused-axis integral cases |
+
+Two more faults are caught only beside the harness: an unused axis that
+`domain_integral_axes()` names, summed over
+(`test_unused_mesh_axis_integrals.py`), and the zero-size ghost tail of
+`exchange_unstructured` put back (`test_zero_ghost_exchange.py`, on every
+jaxlib; on 0.11.2 the subprocess crash test catches it too).  All eight
+faults of that round were caught (jaxlib 0.11.0).
 
 The first run of this table caught 13 of the 14 faults, three of them only
 through the fixed gradient set, and missed the stale compiled step. Both
@@ -932,12 +945,13 @@ causes were in the harness:
   documented contract (the static-halo fill rule, the `shard_info`
   layout), a harness that agrees with a wrong document agrees with a
   wrong wrapper.
-- *Its own assumptions*: a per-shard integral on a mesh axis the
-  `axis_map` leaves unused repeats its partials along that axis, so
-  "the partials sum to the total" does not hold there, and the harness
-  does not draw it.
 - *Excluded cases*: the cases excluded while a fix is pending
-  (`PENDING_*` in the support module).
+  (`PENDING_*` in the support module). One is left:
+  `PENDING_XLA_REPLICATED_STATIC_IN_SCAN`, an XLA miscompile inside
+  `lax.scan` (MADD-ANO-068), for which a sharded static read in the halo
+  beside a window at the `shard_info` offset is not drawn on a mesh that
+  replicates the static over an axis of two or more devices. Its exact
+  cases are strict xfails in `test_unused_mesh_axis_integrals.py`.
 - *Hardware*: real multi-GPU hardware and NCCL. The harness runs on
   virtual CPU devices only.
 - *Performance*.

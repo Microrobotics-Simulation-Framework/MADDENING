@@ -4741,9 +4741,9 @@ class GraphManager:
             f"built from {', '.join(fields)}, which {cls} derives from it when it "
             "is constructed, and a mapping reads its points once: the node would "
             "run with the new value while the mapping kept the weights of the old "
-            "points, and a graph saved with it would not load (from_dict() "
-            "rebuilds the mapping from the new points, which the recorded sha256 "
-            "refuses)"
+            "points, and a graph saved with it would not reload this one "
+            "(from_dict() rebuilds the mapping from the new points, which a "
+            "recorded sha256 refuses)"
         )
 
     def _mapping_point_leaf_reason(self, owner: str, key: str) -> Optional[str]:

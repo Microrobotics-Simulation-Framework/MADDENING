@@ -1,4 +1,5 @@
-"""An FMU restores its own snapshots when a parameter started outside its bounds.
+"""An FMU restores its own snapshots: a parameter started outside its bounds,
+and a state field it started non-finite.
 
 A graph runs whatever its constructor was given: ``ParamSpec.bounds`` are
 metadata to it, so a graph can be exported with a parameter outside its
@@ -13,7 +14,10 @@ applied to the values a restore would *install*: a value the parameter
 holds now, or held when the FMU was instantiated, is not a new value.
 Every value a snapshot of this FMU can carry is one of those or one
 ``set_params`` accepted, so its own snapshots restore -- and a forged
-out-of-bounds value is refused by both, with the same words.
+out-of-bounds value is refused by both, with the same words.  State follows
+the same rule: a non-finite value the FMU was instantiated with (a
+``diagnostics=True`` group's NaN-seeded spectral ``_meta`` slots) restores,
+and a field that became non-finite still does not.
 """
 
 from __future__ import annotations
@@ -161,3 +165,74 @@ def test_after_a_legal_set_the_instantiation_value_is_still_restorable(paths):
     with pytest.raises(ValueError, match="below bound 50"):
         sc.set_fmu_state(_with_stiffness_snapshot(sc, 40.0))
     assert _stiffness(sc) == 60.0
+
+
+# ---------------------------------------------------------------------------
+# The same rule for state: a non-finite value the FMU started with restores
+# ---------------------------------------------------------------------------
+
+def _diagnostics_model():
+    """A coupling group with ``diagnostics=True``: its spectral ``_meta``
+    slots are seeded NaN at instantiation, until a solve fills them."""
+    gm = GraphManager()
+    gm.add_node(BallNode("ball", 0.01, initial_position=1.0, gravity=-3.0))
+    gm.add_node(SpringDamperNode("spring", 0.01, stiffness=20.0, rest_length=0.5))
+    gm.add_edge("ball", "spring", "position", "anchor_position")
+    gm.add_edge("spring", "ball", "position", "table_position")
+    gm.add_coupling_group(["ball", "spring"], diagnostics=True, max_iterations=3)
+    gm.compile()
+    return gm, build_model_description(gm, model_name="d")
+
+
+@pytest.fixture(scope="module")
+def diagnostics_model():
+    return _diagnostics_model()
+
+
+def test_a_snapshot_of_the_nan_seeded_diagnostics_restores_on_both_paths(diagnostics_model):
+    """Found by the FMU differential property once it drew graphs starting
+    outside their bounds.  Both restore paths refused the snapshot taken at
+    instantiation ("_meta...rho_spectral: value must be finite") while
+    ``GraphManager.load_state`` restored the graph's checkpoint."""
+    gm, md = diagnostics_model
+    seeds = {k: float(v) for k, v in gm._state["_meta"].items()}   # noqa: SLF001
+    assert any(np.isnan(v) for v in seeds.values()), seeds
+    sc = _sidecar(diagnostics_model)
+    snap = sc.get_fmu_state()
+    sc.step(gm._default_external_inputs())                          # noqa: SLF001
+    sc.set_fmu_state(snap)
+    for key, value in seeds.items():
+        np.testing.assert_array_equal(np.asarray(sc.state["_meta"][key]), value)
+    bridge = FmuTcpBridge(_sidecar(diagnostics_model), md, master_dt=1e-2)
+    try:
+        blob = state_of(bridge.handle({"op": "get_state"}))
+        assert bridge.handle({"op": "step", "t": 0.0, "dt": 1e-2})["ok"]
+        assert bridge.handle({"op": "set_state", "state": blob}) == {"ok": True}
+    finally:
+        bridge.stop()
+
+
+def test_a_field_that_became_non_finite_still_does_not_restore(diagnostics_model):
+    """The documented refusal of a diverged model's snapshot is kept: a NaN
+    in a field that started finite is refused by both paths alike."""
+    gm, md = diagnostics_model
+    sc = _sidecar(diagnostics_model)
+    state, params = deserialize_fmu_state(sc.get_fmu_state(),
+                                          expected_schema_token=md.instantiation_token,
+                                          return_params=True)
+    state["spring"]["velocity"] = np.float32(np.nan)
+    snap = serialize_fmu_state(state=state, schema_token=md.instantiation_token, params=params)
+    with pytest.raises(ValueError, match=r"spring\.velocity: value must be finite") as exc:
+        sc.set_fmu_state(snap)
+    bridge = FmuTcpBridge(_sidecar(diagnostics_model), md, master_dt=1e-2)
+    try:
+        with np.load(io.BytesIO(state_of(bridge.handle({"op": "get_state"}))),
+                     allow_pickle=False) as data:
+            members = {k: data[k] for k in data.files}
+        members["s/spring/velocity"] = np.float32(np.nan)
+        buf = io.BytesIO()
+        np.savez(buf, **members)
+        reply = bridge.handle({"op": "set_state", "state": buf.getvalue()})
+    finally:
+        bridge.stop()
+    assert reply == {"ok": False, "error": f"ValueError: {exc.value}"}, reply

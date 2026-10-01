@@ -1229,7 +1229,10 @@ class FmuTcpBridge:
         An archive may only install values a ``set`` of the same variables
         would be allowed to install: every restored array goes through
         :func:`checked_value` (finite, and representable in the live
-        array's dtype) and the restored parameter tree through
+        array's dtype, unless it is the value the FMU was instantiated
+        with: :meth:`FmuSidecar._initial_state_leaf
+        <maddening.fmi.sidecar.FmuSidecar._initial_state_leaf>`) and the
+        restored parameter tree through
         the sidecar's restore check (tunability, and the declared
         ``ParamSpec`` bounds of the values it would install:
         :meth:`FmuSidecar._check_restored_params
@@ -1263,7 +1266,8 @@ class FmuTcpBridge:
                     # The leaf check FmuSidecar.set_fmu_state applies too: one
                     # function, so the two restore paths cannot drift apart.
                     new_state[node][field] = jnp.asarray(_restored_leaf(
-                        data[f"s/{node}/{field}"], live, what=f"FMU state {node}.{field}"))
+                        data[f"s/{node}/{field}"], live, what=f"FMU state {node}.{field}",
+                        initial=self._sidecar._initial_state_leaf(node, field)))  # noqa: SLF001
             params = self._sidecar.params
             new_params = None
             if params is not None:

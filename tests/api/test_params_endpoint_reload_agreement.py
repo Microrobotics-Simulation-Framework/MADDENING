@@ -588,21 +588,27 @@ def test_a_gm_params_write_of_g_through_zero_runs_another_model_than_its_reload(
     assert again.get_node("p")._G == 0.0
 
 
-def test_a_non_finite_structural_value_set_in_process_breaks_get():
-    """MADD-ANO-049's residual.  The route refuses a non-finite value; one
-    set on a node's params in-process is stored, and every ``GET`` for the
-    node, whose reply echoes the params, is a 500."""
+def test_a_non_finite_structural_value_set_in_process_reads_back_as_a_token():
+    """MADD-ANO-049's residual, closed.  The route refuses a non-finite
+    value; one set on a node's params in-process is stored, and every
+    ``GET`` for the node, whose reply echoes the params, was a 500.  The
+    reply now writes it as its quoted token, as ``GET /graph`` and the state
+    replies do."""
     gm = _graph(HeatNode("rod", 0.05, n_cells=4, thermal_diffusivity=1e-3))
     gm.get_node("rod").params["grid_points"] = [0.1, float("nan"), 0.5, 0.9]
-    assert _client(gm).get("/graph/params/rod").status_code == 500
+    response = _client(gm).get("/graph/params/rod")
+    assert response.status_code == 200, response.text
+    assert response.json()["grid_points"] == [0.1, "NaN", 0.5, 0.9]
 
 
-@pytest.mark.parametrize("value, status", [(float("nan"), 500), (2e-3, 200)])
-def test_a_live_leaf_a_fit_drove_non_finite_breaks_get(value, status):
+@pytest.mark.parametrize("value, served", [(float("nan"), "NaN"), (float("inf"), "Infinity"),
+                                           (2e-3, float(np.float32(2e-3)))])
+def test_a_live_leaf_a_fit_drove_non_finite_reads_back_as_a_token(value, served):
     """The same through the params pytree: a calibration that diverged to
-    ``NaN`` leaves the node's ``GET`` a 500.  The finite control shows the
-    500 is the value's, not the in-process write's."""
+    ``NaN`` left the node's ``GET`` a 500.  Now the token, and the finite
+    control is still a number."""
     gm = _graph(HeatNode("rod", 0.05, n_cells=4, thermal_diffusivity=1e-3))
     gm.params["nodes"]["rod"]["thermal_diffusivity"] = jnp.asarray(value, jnp.float32)
     response = _client(gm).get("/graph/params/rod")
-    assert response.status_code == status, response.text
+    assert response.status_code == 200, response.text
+    assert response.json()["thermal_diffusivity"] == served

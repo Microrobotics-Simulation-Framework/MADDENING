@@ -70,6 +70,17 @@ source rod calibrated from ``length`` 1.0 to 1.25 and mapped onto a
 Nothing refuses the graph or warns, and the recorded ``sha256`` still
 matches, because the static itself never changed.
 
+A new value *written* into the running graph is refused, though
+(MADD-ANO-063): a ``gm.params`` write at the next run, ``to_dict()`` or
+``save_state()``, ``PUT /graph/params`` with a 400, a checkpoint at
+``POST /checkpoint/load``, and an exported FMU leaves the parameter out of
+its tunable set.  The graph rebuilds the node with and without the value
+and refuses it when a referenced field moves, because the node would use
+the value while the mapping kept the old points, and the saved config
+would not load (``from_dict`` rebuilds the mapping from the new points,
+which the recorded ``sha256`` refuses).  What is not a write -- a fit's
+traced parameters, a caller's own ``params=`` -- is not asked.
+
 Until a fix lands (being scoped for 0.5.0), use one of these:
 
 * declare the parameter non-trainable when a mapped edge references a

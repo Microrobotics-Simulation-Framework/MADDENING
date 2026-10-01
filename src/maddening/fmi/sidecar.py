@@ -142,12 +142,23 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
     return cast
 
 
-def _restored_leaf(value: Any, live: Any, *, what: str) -> np.ndarray:
+def _restored_leaf(value: Any, live: Any, *, what: str,
+                   initial: Any = None) -> np.ndarray:
     """A snapshot leaf, checked against the live leaf it would replace.
 
     The shape must match and the value must pass :func:`_checked_value` in
     the live leaf's dtype.  A leaf with no live counterpart is checked in
     its own dtype (finite only).
+
+    ``initial`` is the leaf as the FMU was instantiated, when the caller
+    has it: a value equal to it (``NaN`` equal to ``NaN``) is one the FMU
+    held itself, so it restores even where it is not finite.  A coupling
+    group with ``diagnostics=True`` seeds its spectral ``_meta`` slots with
+    ``NaN`` until a solve fills them, so a snapshot taken at instantiation
+    or after a reset holds them, and both restore paths refused it while
+    ``GraphManager.load_state`` restored the graph's own checkpoint.  A
+    field that *became* non-finite -- a diverged model -- still does not
+    restore.
     """
     arr = np.asarray(value)
     if live is None:
@@ -155,6 +166,13 @@ def _restored_leaf(value: Any, live: Any, *, what: str) -> np.ndarray:
     live_arr = np.asarray(live)
     if arr.shape != live_arr.shape:
         raise ValueError(f"{what}: shape {arr.shape} != {live_arr.shape}")
+    if initial is not None and np.issubdtype(arr.dtype, np.inexact) \
+            and not bool(np.all(np.isfinite(arr))):
+        start = np.asarray(initial)
+        with np.errstate(over="ignore", invalid="ignore"):
+            cast = arr.astype(live_arr.dtype)
+        if start.shape == cast.shape and bool(np.array_equal(cast, start, equal_nan=True)):
+            return cast
     return _checked_value(arr, live_arr.dtype, what=what)
 
 
@@ -303,8 +321,10 @@ class FmuSidecar:
         self._params = (
             None if config.params is None else _copy_tree(config.params)
         )
-        #: The tree as instantiated, for the restore check
-        #: (:meth:`_check_restored_params`); never written.
+        #: The state and the parameter tree as instantiated, for the restore
+        #: checks (:meth:`_initial_state_leaf`, :meth:`_check_restored_params`);
+        #: never written.
+        self._initial_state = {n: dict(f) for n, f in config.initial_state.items()}
         self._initial_params = (
             None if config.params is None else _copy_tree(config.params)
         )
@@ -460,8 +480,11 @@ class FmuSidecar:
         bounds when the config carries ``param_specs``, unless it is the
         value the parameter holds now or held when the FMU was
         instantiated (:meth:`_check_restored_params`).  A
-        snapshot of a *diverged* model -- one holding ``inf`` or ``NaN`` --
-        therefore does not restore; the error names the field.  A sidecar
+        snapshot of a *diverged* model -- one holding ``inf`` or ``NaN`` the
+        FMU did not start with -- therefore does not restore; the error
+        names the field.  A non-finite value the FMU was instantiated with
+        restores (a ``diagnostics=True`` coupling group's spectral ``_meta``
+        slots are seeded ``NaN``).  A sidecar
         without a parameter tree ignores any parameters a snapshot
         carries.
 
@@ -492,7 +515,8 @@ class FmuSidecar:
         new_state: dict[str, dict[str, Any]] = {node: {} for node in self._state}
         for (node, field), live in live_state.items():
             new_state[node][field] = _restored_leaf(
-                got_state[(node, field)], live, what=f"FMU state {node}.{field}")
+                got_state[(node, field)], live, what=f"FMU state {node}.{field}",
+                initial=self._initial_state_leaf(node, field))
         new_params = None
         if self._params is not None:
             got_params = ({} if params is None
@@ -515,6 +539,16 @@ class FmuSidecar:
         self._state = new_state
         if new_params is not None:
             self._params = new_params
+
+    def _initial_state_leaf(self, node: str, field: str) -> Any:
+        """The state field as this FMU was instantiated, or ``None``.
+
+        A restore accepts a non-finite value equal to it
+        (:func:`_restored_leaf`): the FMU held it itself.  Read by
+        :meth:`set_fmu_state` and by the TCP bridge's ``set_state``, so the
+        two restore paths judge a snapshot alike.
+        """
+        return self._initial_state.get(node, {}).get(field)
 
     def _check_restored_params(self, new_params: dict) -> None:
         """Refuse a restored parameter tree that installs what

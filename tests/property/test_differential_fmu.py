@@ -42,7 +42,6 @@ export cannot be addressed by ``set``).
 from __future__ import annotations
 
 import base64
-import dataclasses
 import io
 import math
 import socket
@@ -51,7 +50,7 @@ from typing import Any, Optional
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import given, settings
+from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
@@ -708,15 +707,13 @@ def test_the_three_fmu_paths_agree_on_a_generated_graph(data):
 
     recipe = data.draw(graph_recipes(kinds=ALL_NODE_KINDS, max_nodes=3,
                                      allow_mappings=False), label="recipe")
-    if not _within_declared_bounds(recipe.build()):
-        # ``strategies`` draws ParamSpec bounds as metadata, so a recipe may
-        # start outside them; an FMU then refuses to restore its own
-        # snapshot, which is pinned on its own
-        # (``test_an_fmu_restores_its_own_snapshot_whatever_its_parameters``).
-        # A calibrated leaf can be pushed past its node's own bound too
-        # (``param_overrides`` scales by up to 2), so both go.
-        recipe = dataclasses.replace(recipe, spec_overrides=(), param_overrides=())
+    # ``strategies`` draws ParamSpec bounds as metadata, so a recipe may start
+    # outside them, and a calibrated leaf may be pushed past its node's own
+    # bound (``param_overrides`` scales by up to 2).  Both are drawn: an FMU
+    # restores its own snapshot whatever its parameters
+    # (``test_an_fmu_restores_its_own_snapshot_whatever_its_parameters``).
     note(f"recipe: {recipe}")
+    event(f"starts inside its declared bounds: {_within_declared_bounds(recipe.build())}")
     model = Model.build(recipe.build)
     run_sequence(model, data.draw(_ops(model), label="ops"))
 

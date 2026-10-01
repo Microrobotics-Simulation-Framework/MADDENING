@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **CI guard mutation test** (`tests/compliance/test_guard_mutations.py`, slow lane): seeded faults in the workflows, budget
+  script, shard split, conftest, `pyproject.toml`, timing plugin, cache pruner and allowlist must each fail a guard test
+  (83 of 87; 4 listed equivalents); anchors checked per push.  New guard: add its mutant (*Guard mutations*, testing_standards)
 - **CycloneDX SBOMs** in `docs/validation/sbom/` for the base install and the `server`, `surrogates` and `usd` extras, from a
   clean install of the wheel (`scripts/generate_sbom.py`), checked offline against `pyproject.toml` and the SOUP package
   (`scripts/check_sbom.py`, in CI).  Regenerated from the release commit before each tag; see `soup_package.md` §6

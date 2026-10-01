@@ -265,7 +265,7 @@ def test_a_checkpoint_loads_into_a_freshly_built_graph_of_each_meta_family(graph
     check_checkpoint(original, META_GRAPHS[graph](), pristine, split=5, ahead=0)
 
 
-# Per push: test_a_checkpoint_of_a_graph_with_meta_slots_resumes_the_uninterrupted_run
+# Per push: tests/property/test_differential_checkpoint.py::test_a_checkpoint_of_a_graph_with_meta_slots_resumes_the_uninterrupted_run
 @pytest.mark.slow  # a diagnostics group's compile: ~2.5 s, two per family
 @pytest.mark.parametrize("graph", sorted(SLOW_META_GRAPHS))
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
@@ -391,7 +391,7 @@ def test_a_checkpoint_of_a_param_the_node_cannot_read_makes_the_next_run_refuse(
 # Slow lane
 # ---------------------------------------------------------------------------
 
-# Per push: test_a_checkpoint_of_a_built_in_node_resumes_the_uninterrupted_run
+# Per push: tests/property/test_differential_checkpoint.py::test_a_checkpoint_of_a_built_in_node_resumes_the_uninterrupted_run
 @pytest.mark.slow  # an LBM / pipe / wavelet compile per example: 2-6 s each
 @pytest.mark.parametrize("kind_name", COSTLY_KINDS)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
@@ -404,7 +404,7 @@ def test_a_checkpoint_of_a_costly_node_resumes_the_uninterrupted_run(kind_name, 
                        ahead=data.draw(st.sampled_from([0, 2]), label="ahead"))
 
 
-# Per push: test_a_checkpoint_of_a_graph_with_meta_slots_resumes_the_uninterrupted_run
+# Per push: tests/property/test_differential_checkpoint.py::test_a_checkpoint_of_a_graph_with_meta_slots_resumes_the_uninterrupted_run
 @pytest.mark.slow  # a generated multi-node graph built and compiled per example
 @settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
 @given(data=st.data())

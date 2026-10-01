@@ -146,7 +146,7 @@ def test_every_built_in_node_has_a_catalogue_entry():
 # Slow lane
 # ---------------------------------------------------------------------------
 
-# Per push: test_a_built_in_node_with_generated_arguments_reloads_bit_for_bit
+# Per push: tests/property/test_differential_serialisation.py::test_a_built_in_node_with_generated_arguments_reloads_bit_for_bit
 @pytest.mark.slow  # an LBM / pipe / wavelet compile per example: 2-6 s each
 @pytest.mark.parametrize("kind_name", COSTLY_KINDS)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
@@ -157,7 +157,7 @@ def test_a_costly_built_in_node_with_generated_arguments_reloads_bit_for_bit(kin
     check_config_round_trip(kind.graph(kwargs), REGISTRY)
 
 
-# Per push: test_a_generated_graph_of_every_node_kind_reloads_bit_for_bit
+# Per push: tests/property/test_differential_serialisation.py::test_a_generated_graph_of_every_node_kind_reloads_bit_for_bit
 @pytest.mark.slow  # coupled graphs built and compiled per example
 @settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
 @given(data=st.data())

@@ -290,7 +290,7 @@ def test_a_rest_write_into_a_coupled_member_with_a_param_spec_runs_as_its_reload
 # Slow lane: the costly nodes, and generated multi-node graphs
 # ---------------------------------------------------------------------------
 
-# Per push: test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
+# Per push: tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
 @pytest.mark.slow  # an LBM / pipe / wavelet compile per example: 2-6 s each
 @pytest.mark.parametrize("kind_name", COSTLY_KINDS)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
@@ -341,7 +341,7 @@ def recipe_and_write(draw):
     return recipe, target.name, draw(writes(kind, kw), label="write")
 
 
-# Per push: test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
+# Per push: tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
 @pytest.mark.slow  # a generated multi-node graph built and compiled per example
 @settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
 @given(case=recipe_and_write())

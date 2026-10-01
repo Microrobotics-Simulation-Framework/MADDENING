@@ -229,6 +229,7 @@ def _pipe(G: float):
     return gm
 
 
+# Per push: tests/property/test_differential_param_writes.py::test_a_pipe_interaction_strength_written_within_its_branch_runs_as_its_reload
 @pytest.mark.slow  # two multiphase-pipe compiles: ~6 s on 3 cores
 @pytest.mark.xfail(strict=True, reason=(
     "differential: gm.params G=0 on a multiphase LBMPipeNode keeps the multiphase "
@@ -265,7 +266,7 @@ def test_a_heat_diffusivity_written_past_the_fourier_limit_is_refused_or_reloads
 # Slow lane
 # ---------------------------------------------------------------------------
 
-# Per push: test_a_param_write_inside_its_bounds_runs_as_its_reload
+# Per push: tests/property/test_differential_param_writes.py::test_a_param_write_inside_its_bounds_runs_as_its_reload
 @pytest.mark.slow  # an LBM / pipe / wavelet compile per example: 2-6 s each
 @pytest.mark.parametrize("kind_name", COSTLY_KINDS)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
@@ -295,7 +296,7 @@ def _calibrated_write(draw):
     return recipe, moved, draw(st.sampled_from(["leaf", "tree"]))
 
 
-# Per push: test_a_param_write_inside_its_bounds_runs_as_its_reload
+# Per push: tests/property/test_differential_param_writes.py::test_a_param_write_inside_its_bounds_runs_as_its_reload
 @pytest.mark.slow  # a generated multi-node graph built and compiled per example
 @settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
 @given(case=_calibrated_write())

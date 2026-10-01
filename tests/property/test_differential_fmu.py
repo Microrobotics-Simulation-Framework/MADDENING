@@ -642,7 +642,7 @@ def test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence(graph, dat
     run_sequence(model, data.draw(_ops(model), label="ops"), persistent=True)
 
 
-# Per push: test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence
+# Per push: tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence
 @pytest.mark.slow  # two graphs and a model description built per example
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())

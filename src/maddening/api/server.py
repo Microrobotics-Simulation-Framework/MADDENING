@@ -116,6 +116,58 @@ def _jax_to_python(value: Any) -> Any:
     return value
 
 
+def _json_reply(value: Any) -> Any:
+    """``_jax_to_python(value)`` with every non-finite float written as its
+    quoted token -- ``"NaN"``, ``"Infinity"``, ``"-Infinity"`` -- for a
+    reply body.
+
+    The encoding of every MADDENING JSON surface
+    (:mod:`maddening.serialization.json_codec`), and the one ``GET /graph``
+    already serves (``GraphManager.to_dict`` encodes its tree).  The state
+    replies used to hand Starlette bare floats, which it serialises with
+    ``allow_nan=False``: a graph with a ``diagnostics=True`` coupling group
+    (whose spectral ``_meta`` slots are seeded NaN until a solve fills
+    them), or a simulation that diverged, made ``GET /graph/state`` a 500 --
+    and ``POST /sim/reset``, ``POST /checkpoint/load`` and ``POST /sim/step``
+    a 500 *after* their change had been applied.  A float a reply cannot
+    carry is now written the way a config carries it, and
+    :func:`~maddening.serialization.json_codec.loads` (or a check for the
+    three strings) reads it back.
+    """
+    from maddening.serialization.json_codec import (  # noqa: PLC0415
+        encode_non_finite,
+    )
+    return encode_non_finite(_jax_to_python(value))
+
+
+def _unrepresentable(value: Any, dtype: Any) -> Optional[str]:
+    """Why a JSON *value* cannot be held by a leaf of float ``dtype``, or
+    ``None``: a finite number the dtype overflows to an infinity (``1e39``
+    into ``float32``).
+
+    Asked *before* ``jnp.asarray(value, dtype=...)``, because that cast is
+    where NumPy says so -- a ``RuntimeWarning`` ("overflow encountered in
+    cast"), a 500 wherever warnings are errors -- and the infinity it
+    produces was then refused as "must be finite", a value the caller never
+    sent.  The test of the FMU's own write paths
+    (``maddening.fmi.sidecar._checked_value``), with its words.  A value
+    that is not numeric at all is left to the cast, whose ``TypeError`` /
+    ``ValueError`` is the 400 it always was.
+    """
+    dt = np.dtype(dtype)
+    if not np.issubdtype(dt, np.floating):
+        return None
+    try:
+        wide = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    with np.errstate(over="ignore", invalid="ignore"):
+        narrow = wide.astype(dt)
+    if bool(np.any(np.isfinite(wide) & ~np.isfinite(narrow))):
+        return f"value does not fit its type {dt}"
+    return None
+
+
 def _python_to_jax(value: Any) -> Any:
     """Convert plain Python numbers/lists back to JAX arrays."""
     if isinstance(value, dict):
@@ -1081,10 +1133,12 @@ class SimulationServer:
         return self.runner
 
     def _state_json(self) -> dict:
-        return _jax_to_python(self.gm._state)
+        """The whole state, ``_meta`` included, as a reply body
+        (:func:`_json_reply`: a non-finite float is its quoted token)."""
+        return _json_reply(self.gm._state)
 
     def _node_state_json(self, name: str) -> dict:
-        return _jax_to_python(self.gm.get_node_state(name))
+        return _json_reply(self.gm.get_node_state(name))
 
     def _stop_runner(self) -> None:
         """Stop the runner if it's running. Safe to call multiple times."""
@@ -1400,6 +1454,10 @@ class SimulationServer:
             staged = {}
             for field, value in req.state.items():
                 want = jnp.asarray(live[field])
+                # As for PUT /graph/params: refused before the cast warns.
+                problem = _unrepresentable(value, want.dtype)
+                if problem is not None:
+                    raise HTTPException(status_code=400, detail=f"{field}: {problem}")
                 try:
                     arr = jnp.asarray(value, dtype=want.dtype)
                 except (TypeError, ValueError) as exc:
@@ -1425,7 +1483,7 @@ class SimulationServer:
             # The live pytree wins over the constructor value: it is what
             # the step uses after a fit or a checkpoint restore.
             live = self.gm.params.get("nodes", {}).get(node_name) or {}
-            return {**_jax_to_python(node.params), **_jax_to_python(live)}
+            return _json_reply({**_jax_to_python(node.params), **_jax_to_python(live)})
 
         @app.put("/graph/params/{node_name}", tags=["params"], response_model=None)
         def set_node_params(node_name: str, req: SetNodeParamsRequest) -> dict[str, Any]:
@@ -1523,6 +1581,13 @@ class SimulationServer:
                     continue
                 if key not in live:
                     continue
+                # Before the cast, which overflows 1e39 into float32's inf
+                # with a RuntimeWarning (a 500 under -W error) and so made
+                # the refusal below say "must be finite" of a finite value.
+                problem = _unrepresentable(value, live[key].dtype)
+                if problem is not None:
+                    raise HTTPException(status_code=400,
+                                        detail=f"{key}: {problem}, got {value!r}")
                 try:
                     new = jnp.asarray(value, dtype=live[key].dtype)
                 except (TypeError, ValueError) as exc:
@@ -1655,7 +1720,7 @@ class SimulationServer:
                 else:
                     node.params[key] = value
                     self.gm._dirty = True
-            shown = {**_jax_to_python(node.params), **_jax_to_python(live)}
+            shown = _json_reply({**_jax_to_python(node.params), **_jax_to_python(live)})
             return {"status": "ok", "params": shown}
 
         # -- checkpoint endpoints -------------------------------------------
@@ -2321,7 +2386,7 @@ class SimulationServer:
                             }
                         payload = {
                             "sim_time": sim_time,
-                            "state": _jax_to_python(state),
+                            "state": _json_reply(state),
                         }
                         await websocket.send_json(payload)
                     await asyncio.sleep(1.0 / target_fps[0])

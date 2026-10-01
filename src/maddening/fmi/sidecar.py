@@ -247,14 +247,18 @@ class SidecarConfig:
         and carried in the FMU state snapshot.
     param_specs : dict, optional
         ``GraphManager.param_specs()`` for the same graph.  When given,
-        :meth:`FmuSidecar.set_params` and :meth:`FmuSidecar.set_fmu_state`
-        reject a value outside a leaf's declared ``ParamSpec.bounds`` (the
-        ``min`` / ``max`` the model description advertises), so an
-        importer cannot drive the step with a constant the graph declares
-        invalid.  The FMU-state archive path in
-        :class:`maddening.fmi.tcp_bridge.FmuTcpBridge` checks against the
-        same declarations, so no door into the parameter tree is wider
-        than another.
+        :meth:`FmuSidecar.set_params` rejects a value outside a leaf's
+        declared ``ParamSpec.bounds`` (the ``min`` / ``max`` the model
+        description advertises), so an importer cannot drive the step with
+        a constant the graph declares invalid, and
+        :meth:`FmuSidecar.set_fmu_state` rejects a snapshot that would
+        install one -- a value the parameter neither holds now nor held
+        when the FMU was instantiated (a graph runs a value outside its
+        bounds, which are metadata to it, so an FMU can start outside them
+        and must restore its own snapshots).  The FMU-state archive path in
+        :class:`maddening.fmi.tcp_bridge.FmuTcpBridge` checks through the
+        same method (:meth:`FmuSidecar._check_restored_params`), so no door
+        into the parameter tree is wider than another.
     fixed_params : mapping of str to str, optional
         ``{"<node>.params.<key>": reason}`` for parameters the compiled step
         cannot read -- pass :attr:`ModelDescription.fixed_parameters
@@ -297,6 +301,11 @@ class FmuSidecar:
         self._config = config
         self._state = dict(config.initial_state)
         self._params = (
+            None if config.params is None else _copy_tree(config.params)
+        )
+        #: The tree as instantiated, for the restore check
+        #: (:meth:`_check_restored_params`); never written.
+        self._initial_params = (
             None if config.params is None else _copy_tree(config.params)
         )
         self._fixed: dict[str, str] = dict(config.fixed_params or {})
@@ -446,9 +455,11 @@ class FmuSidecar:
         parameter missing and none extra; every state leaf and every
         parameter must be finite and representable in the dtype (and have
         the shape) of the live leaf it replaces; a parameter the step
-        cannot read (``SidecarConfig.fixed_params``) may not change; and
-        the restored parameters must lie inside their declared
-        ``ParamSpec`` bounds when the config carries ``param_specs``.  A
+        cannot read (``SidecarConfig.fixed_params``) may not change; and a
+        restored parameter must lie inside its declared ``ParamSpec``
+        bounds when the config carries ``param_specs``, unless it is the
+        value the parameter holds now or held when the FMU was
+        instantiated (:meth:`_check_restored_params`).  A
         snapshot of a *diverged* model -- one holding ``inf`` or ``NaN`` --
         therefore does not restore; the error names the field.  A sidecar
         without a parameter tree ignores any parameters a snapshot
@@ -498,24 +509,59 @@ class FmuSidecar:
                 new_params[section][owner][key] = jnp.asarray(_restored_leaf(
                     got_params[(section, owner, key)], live,
                     what=f"FMU state param {owner}.params.{key}"))
-            # A snapshot is a door into the parameter tree like set_params:
-            # it may not install a new value for a parameter the step cannot
-            # read.  Checked before anything is committed.
-            live_nodes = self._params.get("nodes", {})
-            for name, reason in self._fixed.items():
-                node, _, key = name.partition(".params.")
-                if key not in live_nodes.get(node, {}):
-                    continue
-                current = live_nodes[node][key]
-                restored = new_params.get("nodes", {}).get(node, {}).get(key, current)
-                if not _same_leaf(restored, current):
-                    raise _not_tunable_error(name, reason, current)
-            # The declared bounds, through the same function the bridge's
-            # set_state applies them with, so the messages agree.
-            check_bounds(new_params, self._config.param_specs or {})
+            # Tunability and the declared bounds, through the one method the
+            # bridge's set_state calls too, before anything is committed.
+            self._check_restored_params(new_params)
         self._state = new_state
         if new_params is not None:
             self._params = new_params
+
+    def _check_restored_params(self, new_params: dict) -> None:
+        """Refuse a restored parameter tree that installs what
+        :meth:`set_params` could not: a new value for a parameter the step
+        cannot read (``fixed_params``), or a value outside a leaf's declared
+        ``ParamSpec.bounds`` that the parameter neither holds now nor held
+        when this FMU was instantiated.
+
+        The one check of :meth:`set_fmu_state` and of the TCP bridge's
+        ``set_state`` (:meth:`maddening.fmi.tcp_bridge.FmuTcpBridge._decode_state`),
+        so the two restore paths refuse the same snapshots with the same
+        words.  Bounds are checked on the values a restore would *install*,
+        not on every leaf, for the reason ``fixed_params`` already compares
+        with the current value: a graph runs whatever its constructor was
+        given, bounds being metadata to it, so an FMU can be instantiated
+        with a parameter outside them -- and it then refused to restore the
+        snapshot it had handed out itself, while ``GraphManager.load_state``
+        restored the same graph's checkpoint.  Every value a snapshot of this
+        FMU can hold is its instantiation value or one :meth:`set_params`
+        accepted (inside the bounds), so its own snapshots restore and a
+        forged out-of-bounds value is still refused.
+
+        Raises
+        ------
+        ValueError
+            Naming the first parameter refused; nothing is written.
+        """
+        live = self._params or {}
+        live_nodes = live.get("nodes", {})
+        for name, reason in self._fixed.items():
+            node, _, key = name.partition(".params.")
+            if key not in live_nodes.get(node, {}):
+                continue
+            current = live_nodes[node][key]
+            restored = new_params.get("nodes", {}).get(node, {}).get(key, current)
+            if not _same_leaf(restored, current):
+                raise _not_tunable_error(name, reason, current)
+        held = (live, self._initial_params or {})
+        installed: dict = {}
+        for section, owners in new_params.items():
+            for owner, leaves in (owners or {}).items():
+                for key, value in (leaves or {}).items():
+                    if any(_same_leaf(value, tree[section][owner][key]) for tree in held
+                           if key in tree.get(section, {}).get(owner, {})):
+                        continue
+                    installed.setdefault(section, {}).setdefault(owner, {})[key] = value
+        check_bounds(installed, self._config.param_specs or {})
 
     # -- Wire-level RPC -----------------------------------------------------
 

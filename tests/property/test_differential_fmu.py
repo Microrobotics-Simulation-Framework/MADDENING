@@ -741,16 +741,13 @@ def _spring_with_a_bound_it_starts_outside():
     return gm
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "differential: the FMU (bridge set_state and FmuSidecar.set_fmu_state alike) "
-    "refuses to restore its own get_state snapshot when a parameter starts outside "
-    "its declared ParamSpec bounds, while GraphManager.load_state restores the same "
-    "graph's checkpoint; pending fix"))
 def test_an_fmu_restores_its_own_snapshot_whatever_its_parameters():
     """Found by ``test_the_three_fmu_paths_agree_on_a_generated_graph``.  The
     graph runs with ``stiffness = 30`` under a declared lower bound of 50
-    (bounds are metadata to a graph); the FMU exports it, steps it, and then
-    cannot restore the state it handed out itself."""
+    (bounds are metadata to a graph); the FMU exported it, stepped it, and
+    then could not restore the state it had handed out itself (bridge
+    ``set_state`` and ``FmuSidecar.set_fmu_state`` alike), while
+    ``GraphManager.load_state`` restored the graph's checkpoint."""
     model = Model.build(_spring_with_a_bound_it_starts_outside, "out-of-bounds")
     paths = Paths(model)
     try:

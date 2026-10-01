@@ -144,26 +144,19 @@ def check_rest_write(gm: GraphManager, registry: dict, name: str, write: Write,
     """Drive one write through the real route and hold it to the oracle.
 
     Returns ``"accepted"`` or ``"refused"``.  ``rest_reset=False`` resets the
-    running graph in process instead of through ``POST /sim/reset``, for a
-    graph whose reset reply cannot be encoded (a coupling group with
-    ``diagnostics=True``: pinned by
-    ``test_a_rest_reset_of_a_diagnostics_group_answers_like_the_in_process_reset``).
+    running graph in process instead of through ``POST /sim/reset`` -- the
+    call the route makes before it marks the graph dirty -- which saves the
+    recompile a route reset costs.
     """
     gm.run(WARM_STEPS)
     client = _client(gm, root, registry)
     before = graph_snapshot(gm)
     get_before = client.get(f"/graph/params/{name}").json()
-    with warnings.catch_warnings():
-        # The route casts a float64 request value to the leaf's float32
-        # before refusing an overflow, and NumPy warns on the cast; under
-        # this suite's ``filterwarnings = ["error"]`` that warning is a 500
-        # no deployment sees.  The oracle judges what a deployment answers;
-        # the warning itself is pinned by
-        # ``test_an_overflowing_value_is_refused_without_a_warning``.
-        warnings.filterwarnings("ignore", message="overflow encountered in cast",
-                                category=RuntimeWarning)
-        resp = client.put(f"/graph/params/{name}", content=write.body(),
-                          headers={"content-type": "application/json"})
+    # Under this suite's ``filterwarnings = ["error"]``: a warning the route
+    # raises on the way to its answer is a 500 here, and so a failure (the
+    # overflowing cast it used to make before refusing 1e39 was one).
+    resp = client.put(f"/graph/params/{name}", content=write.body(),
+                      headers={"content-type": "application/json"})
     note(f"PUT {write.params!r} -> {resp.status_code} {resp.text[:400]}")
     assert resp.status_code < 500, f"{resp.status_code}: {resp.text}"
     if resp.status_code >= 400:
@@ -246,13 +239,11 @@ def test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload(kind_name, da
         assert outcome == "refused", f"{write.category} write {write.params!r} was accepted"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "differential: PUT /graph/params casts a float32-overflowing value (1e39) "
-    "before refusing it and NumPy warns 'overflow encountered in cast', so the "
-    "400 becomes a 500 wherever warnings are errors (as in this suite); pending fix"))
 def test_an_overflowing_value_is_refused_without_a_warning():
-    """Found by the property above (category ``oversized``).  The refusal is
-    right; the unguarded cast before it is not."""
+    """Found by the property above (category ``oversized``).  The route cast
+    1e39 to the leaf's float32 before refusing it, and NumPy warned
+    ("overflow encountered in cast"): a 500 wherever warnings are errors, as
+    in this suite, and otherwise a 400 calling a finite value non-finite."""
     from maddening.nodes import BallNode
 
     gm = GraphManager()
@@ -265,6 +256,7 @@ def test_an_overflowing_value_is_refused_without_a_warning():
             {"params": {"elasticity": 1e39}}), headers={"content-type": "application/json"})
         assert_nothing_written(gm, before, what="overflowing write")
     assert resp.status_code == 400, resp.text
+    assert "does not fit its type float32" in resp.json()["detail"], resp.text
 
 
 def _diagnostics_pair():
@@ -280,15 +272,11 @@ def _diagnostics_pair():
     return gm
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "differential: POST /sim/reset (and GET /graph/state, POST /checkpoint/load) "
-    "answers 500 on a graph with a diagnostics=True coupling group: the reply "
-    "serialises _meta, whose spectral slots are seeded NaN, and the JSON encoder "
-    "refuses NaN -- after the reset has been applied; pending fix"))
 def test_a_rest_reset_of_a_diagnostics_group_answers_like_the_in_process_reset():
     """Found by the generated-graph property below.  The in-process reset
-    works; the route applies it and then fails to encode its own reply
-    (``SimulationServer._state_json`` returns ``gm._state`` with ``_meta``)."""
+    works; the route applied it and then failed to encode its own reply
+    (``SimulationServer._state_json`` returned ``gm._state`` with ``_meta``,
+    whose spectral slots are seeded NaN, to an encoder that refuses NaN)."""
     gm = _diagnostics_pair()
     gm.run(2)
     reference = _diagnostics_pair()
@@ -484,5 +472,5 @@ def test_a_rest_param_write_into_a_generated_graph_is_refused_whole_or_runs_as_i
     note(f"recipe: {recipe}")
     gm = recipe.build()
     with tmp_dir() as root:
-        check_rest_write(gm, dict(NODE_REGISTRY), name, write, root=root,
-                         rest_reset=not any(g.diagnostics for g in recipe.coupling_groups))
+        # Every reset through the route, a diagnostics group's included.
+        check_rest_write(gm, dict(NODE_REGISTRY), name, write, root=root)

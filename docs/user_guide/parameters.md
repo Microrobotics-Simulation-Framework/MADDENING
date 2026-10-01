@@ -405,16 +405,17 @@ res.best_iteration, res.best_loss  # which iterate `params` is, and its loss
 `fit` returns the lowest-loss iterate it evaluated, which is not always
 its last.  Adam's step is about `lr` in size however small the gradient,
 so near a minimum it can step past it and end the run higher than it
-was; a fit started at the minimum walks away from it.  `best_iteration`
-counts the updates that produced `params` (0 is the start) and indexes
-`losses`, so `res.losses[res.best_iteration] == res.best_loss` -- except
-when it equals `len(res.losses)`: the iterate the last update produced
-is one the loop never evaluated, and `fit` evaluates it once more to
-compare it with the rest.  A run whose loss never rose returns its last
-iterate.  `fit_multiple_shooting` chooses the same way, taking the
-parameters and the window states from the same iterate, and `fit_lm`
-needs no choice: it accepts only a step that lowers the loss, so its
-last iterate is its lowest.
+was, and a fit started right next to the minimum can walk away from it.
+`best_iteration` counts the updates that produced `params` (0 is the
+start) and indexes `losses`:
+`res.losses[res.best_iteration] == res.best_loss`, except when it equals
+`len(res.losses)`.  Then `params` is the iterate the last update
+produced, which the loop never evaluated, and `fit` evaluated it once
+more to compare it with the rest.  A run whose loss never rose returns
+its last iterate.  `fit_multiple_shooting` chooses the same way, taking
+the parameters and the window states from the same iterate, and `fit_lm`
+needs no choice: it accepts only a step that lowers the loss, so its last
+iterate is its lowest.
 
 `fit_lm` is the Gauss–Newton alternative: it reuses the `jacfwd`
 sensitivities `fim` computes, so with a handful of parameters it

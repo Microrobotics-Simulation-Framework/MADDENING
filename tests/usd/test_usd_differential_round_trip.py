@@ -18,8 +18,6 @@ Tolerance: none.
 
 from __future__ import annotations
 
-import json
-
 from hypothesis import given, note, settings
 from hypothesis import strategies as st
 from pxr import Usd
@@ -34,7 +32,6 @@ from tests.property.differential import (
     assert_trees_identical,
     full_state,
     params_tree,
-    reload_from_config,
     rollout,
 )
 from tests.property.invariants import (
@@ -86,17 +83,15 @@ def test_a_built_in_node_with_generated_arguments_reloads_from_usd_bit_for_bit(
 
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
-def test_a_generated_graph_of_every_node_kind_reloads_from_usd_as_from_its_config(data):
-    """Config and stage are two spellings of one graph, with coupling groups,
-    mappings, transforms, ParamSpec overrides and calibrated leaves; each
-    reload is the original and so is the other."""
+def test_a_generated_graph_of_every_node_kind_reloads_from_usd_bit_for_bit(data):
+    """Coupling groups, mappings, transforms, ParamSpec overrides and
+    calibrated leaves over every node kind ``strategies`` can build."""
     from tests.property.strategies import ALL_NODE_KINDS, NODE_REGISTRY, graph_recipes
 
     recipe = data.draw(graph_recipes(kinds=ALL_NODE_KINDS, max_nodes=3), label="recipe")
     note(f"recipe: {recipe}")
-    registry = dict(NODE_REGISTRY)
-    from_usd = _reload_usd(recipe.build(), registry)
-    from_config = reload_from_config(
-        json.loads(json.dumps(recipe.build().to_dict(), allow_nan=True)), registry)
-    _check(recipe.build(), from_usd, what="usd")
-    _check(from_config, from_usd, what="config against usd")
+    # A rollout moves the graph it runs on, so the original and the reload
+    # are built for this comparison alone.  Config against original is the
+    # config half's (``test_differential_serialisation.py``); with this one
+    # it makes the two formats agree with each other.
+    _check(recipe.build(), _reload_usd(recipe.build(), dict(NODE_REGISTRY)), what="usd")

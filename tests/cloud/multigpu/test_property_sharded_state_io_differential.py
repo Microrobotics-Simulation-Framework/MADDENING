@@ -49,10 +49,15 @@ from tests.property.differential import (
     rollout,
     tmp_dir,
 )
-from tests.property.node_catalogue import KINDS, Write, writes
+from tests.property.node_catalogue import KINDS, floats32, writes
 
 _N_DEVICES = len(jax.devices())
-DEVICES = tuple(n for n in (2, 4) if n <= _N_DEVICES)
+#: Per push on two devices; four in the slow lane (each example compiles a
+#: fresh ``shard_map`` twice, ~5 s for twenty on 3 cores).  Each slow case's
+#: per-push sibling is the ``n_devices=2`` case of the same test.
+DEVICES = tuple(
+    pytest.param(n, marks=pytest.mark.slow) if n > 2 else n
+    for n in (2, 4) if n <= _N_DEVICES)
 N_STEPS = 3
 REGISTRY = {"HeatNode": HeatNode}
 
@@ -96,11 +101,8 @@ def _rod_kwargs(draw, n_devices: int):
     return {
         "n_cells": n,
         "length": length,
-        "thermal_diffusivity": draw(st.floats(min_value=1e-3,
-                                              max_value=min(1e-2, 0.1 * dx * dx / 0.01),
-                                              width=32)),
-        "initial_temperature": draw(st.lists(st.floats(0.0, 5.0, width=32),
-                                             min_size=n, max_size=n)),
+        "thermal_diffusivity": draw(floats32(1e-3, min(1e-2, 0.1 * dx * dx / 0.01))),
+        "initial_temperature": draw(st.lists(floats32(0.0, 5.0), min_size=n, max_size=n)),
     }
 
 

@@ -286,8 +286,12 @@ class NodeRecipe:
             "SpringDamperNode": ("stiffness", "damping", "mass", "rest_length"),
             "HeatNode": ("thermal_diffusivity",),
             "RigidBody2DNode": ("mass", "inertia", "gravity"),
+            # Not ``venous_pressure``: the pump reads it only while no
+            # ``backpressure`` edge arrives, and the graph refuses a value
+            # its step cannot read (loudly, which is right) -- a graph
+            # with such an edge would fail on the recipe, not the property.
             "HeartPumpNode": ("resistance", "compliance", "heart_rate",
-                              "stroke_volume", "venous_pressure"),
+                              "stroke_volume"),
             "RigidBodyNode": ("mass", "inertia", "gravity"),
         }[self.type_name]
 

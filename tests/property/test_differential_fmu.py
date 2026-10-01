@@ -73,6 +73,7 @@ from tests.property.differential import (
     no_cloud_launch,
     tmp_dir,
 )
+from tests.property.node_catalogue import f32, floats32
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -144,16 +145,31 @@ class Model:
     direct: GraphManager
     initial_state: dict
     initial_params: dict
+    label: str = "model"
+    #: ``(bridge, connection)`` kept open across sequences, or ``None``.
+    served: Optional[tuple] = None
+
+    def stop(self) -> None:
+        if self.served is not None:
+            bridge, conn = self.served
+            self.served = None
+            try:
+                conn.close()
+            finally:
+                bridge.stop()
+
+    def __repr__(self) -> str:          # printed in every falsifying example
+        return f"Model({self.label})"
 
     @classmethod
-    def build(cls, factory) -> "Model":
+    def build(cls, factory, label: str = "model") -> "Model":
         ref = factory()
         md = build_model_description(ref, model_name="Diff",
                                      model_identifier=MODEL_IDENTIFIER)
         direct = factory()
         return cls(ref, md, direct,
                    {n: dict(f) for n, f in ref._state.items()},  # noqa: SLF001
-                   _copy_params(ref.params))
+                   _copy_params(ref.params), label)
 
     @property
     def dt(self) -> float:
@@ -182,13 +198,25 @@ class Paths:
     with the inputs and time the sidecar and the graph do not hold
     themselves."""
 
-    def __init__(self, model: Model) -> None:
+    def __init__(self, model: Model, *, persistent: bool = False) -> None:
+        """``persistent``: serve this sequence from the model's long-lived
+        bridge and connection, reset first (a bridge's ``reset`` restores
+        the state, parameters, inputs and time it started with, which is
+        what a new bridge holds -- and the oracle checks it at the start of
+        every sequence).  Saves a bridge start and stop per example."""
         self.m = model
-        self.bridge = FmuTcpBridge(model.sidecar(), model.md, master_dt=model.dt)
-        self.bridge.start()
-        host, port = self.bridge.endpoint.split(":")
-        self.conn = socket.create_connection((host, int(port)), timeout=30)
-        assert self._wire({"op": "hello", "protocol": 2, "binary": False})["ok"]
+        self.persistent = persistent
+        if persistent and model.served is not None:
+            self.bridge, self.conn = model.served
+            assert self._wire({"op": "reset"}) == {"ok": True}
+        else:
+            self.bridge = FmuTcpBridge(model.sidecar(), model.md, master_dt=model.dt)
+            self.bridge.start()
+            host, port = self.bridge.endpoint.split(":")
+            self.conn = socket.create_connection((host, int(port)), timeout=30)
+            assert self._wire({"op": "hello", "protocol": 2, "binary": False})["ok"]
+            if persistent:
+                model.served = (self.bridge, self.conn)
         self.side = model.sidecar()
         self.side_inputs = self._zero_inputs()
         self.side_time = 0.0
@@ -203,9 +231,12 @@ class Paths:
 
     def close(self) -> None:
         try:
-            self.conn.close()
+            if not self.persistent:
+                try:
+                    self.conn.close()
+                finally:
+                    self.bridge.stop()
         finally:
-            self.bridge.stop()
             self._tmp.__exit__(None, None, None)
 
     def _zero_inputs(self) -> dict:
@@ -527,8 +558,9 @@ def _set_request(draw, model: Model):
             current = float(np.asarray(model.initial_params["nodes"][node][key]).ravel()[0])
             lo, hi = sorted((current * 0.5, current * 1.5)) if current else (0.0, 1.0)
             bounds = spec.bounds if spec is not None else (None, None)
+        lo, hi = f32(lo), f32(hi)
         if kind == "valid":
-            vals = [draw(st.floats(lo, hi, width=32, allow_subnormal=False)) for _ in range(n)]
+            vals = [draw(floats32(lo, hi)) for _ in range(n)]
         elif kind == "boundary":
             b = [x for x in bounds if x is not None] or [0.0]
             vals = [draw(st.sampled_from(b))] * n
@@ -561,8 +593,8 @@ def _ops(model: Model):
     ), min_size=1, max_size=10)
 
 
-def run_sequence(model: Model, ops: list) -> None:
-    paths = Paths(model)
+def run_sequence(model: Model, ops: list, *, persistent: bool = False) -> None:
+    paths = Paths(model, persistent=persistent)
     try:
         paths.assert_agree("at start")
         for op in ops:
@@ -589,9 +621,16 @@ def run_sequence(model: Model, ops: list) -> None:
 _MODELS: dict[str, Model] = {}
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _stop_served_bridges():
+    yield
+    for model in _MODELS.values():
+        model.stop()
+
+
 def _model(name: str) -> Model:
     if name not in _MODELS:
-        _MODELS[name] = Model.build(GRAPHS[name])
+        _MODELS[name] = Model.build(GRAPHS[name], name)
     return _MODELS[name]
 
 
@@ -600,7 +639,7 @@ def _model(name: str) -> Model:
 @given(data=st.data())
 def test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence(graph, data):
     model = _model(graph)
-    run_sequence(model, data.draw(_ops(model), label="ops"))
+    run_sequence(model, data.draw(_ops(model), label="ops"), persistent=True)
 
 
 # Per push: test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence

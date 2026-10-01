@@ -341,18 +341,20 @@ _ZERO_GHOST_SCRIPT = textwrap.dedent("""
         partition_assignment=np.array([0, 0, 1, 1], np.int32),
         edges=np.array([[0, 1], [2, 3]], np.int32), n_devices=2)
     assert layout.n_ghost_max == 0
-    grads = []
-    for sharded in (True, False):
+    grads = {}
+    for exchange in ("all_to_all", "ppermute", None):
         node = Decay()
-        if sharded:
-            node = ShardedUnstructuredNode(node, create_device_mesh(shape=(2,)), layout)
+        if exchange is not None:
+            node = ShardedUnstructuredNode(node, create_device_mesh(shape=(2,)), layout,
+                                           exchange=exchange)
         gm = GraphManager()
         gm.add_node(node)
         gm.compile()
         loss = lambda r: jnp.sum(
             gm.run_scan(2, params={"nodes": {"cells": {"rate": r}}})["cells"]["x"] ** 2)
-        grads.append(float(jax.grad(loss)(jnp.float32(0.5))))
-    assert abs(grads[0] - grads[1]) <= 1e-5 * abs(grads[1]), grads
+        grads[exchange] = float(jax.grad(loss)(jnp.float32(0.5)))
+    for exchange in ("all_to_all", "ppermute"):
+        assert abs(grads[exchange] - grads[None]) <= 1e-5 * abs(grads[None]), grads
     print("OK", grads)
 """)
 
@@ -364,9 +366,10 @@ def test_a_gradient_through_a_partition_without_ghosts_does_not_crash():
     ``exchange_unstructured`` returned ``concatenate([local, zeros((0,
     ...))])`` when the layout had no ghost cell, and the transpose of that
     inside a ``lax.scan`` crashed XLA's compiler on jaxlib 0.11.2.  It now
-    returns ``local`` itself.  CI runs this on 0.10.2 and 0.11.2; the
-    generated gradient tests draw such partitions too (every cell on one
-    device, or shards no edge joins).
+    returns ``local`` itself, under both transports (the ``ppermute`` one
+    built the same zero-size tail).  CI runs this on 0.10.2 and 0.11.2;
+    the generated gradient tests draw such partitions too (every cell on
+    one device, or shards no edge joins).
     """
     result = subprocess.run([sys.executable, "-c", _ZERO_GHOST_SCRIPT],
                             capture_output=True, text=True, timeout=300)

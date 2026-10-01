@@ -258,7 +258,7 @@ class Biased(Follower):
         return {"x": boundary_inputs["u"] + bias}
 
 
-def _gated(solver, mode, reader_first):
+def _gated(solver, mode, reader_first, **group):
     """The only consistent fixed point has the gate open: ``x_b = 1/15``.
 
     ``b`` starts at ``+1``, so the gate is shut on the first pass; shut,
@@ -277,7 +277,7 @@ def _gated(solver, mode, reader_first):
         warnings.filterwarnings("ignore", "CouplingGroup solver='fori' is deprecated",
                                 DeprecationWarning)
         gm.add_coupling_group(["a", "b"], max_iterations=80, tolerance=1e-6, solver=solver,
-                              iteration_mode=mode, diagnostics=True)
+                              iteration_mode=mode, diagnostics=True, **group)
     gm.compile()
     return gm
 
@@ -313,3 +313,21 @@ def test_the_ift_gradient_through_a_flag_edge_is_the_open_branchs():
         g = jax.grad(loss)(gm.params)["nodes"]["a"]
     assert float(g["c"]) == pytest.approx(1.0 / (1.0 - K), rel=1e-4)
     assert float(g["k"]) == pytest.approx((C + 0.2) / (1.0 - K) ** 2, rel=1e-4)
+
+
+@pytest.mark.parametrize("solver", ["ift", "fori"])
+def test_a_predictor_keeps_an_edge_carried_flag_in_the_iterate_it_starts_from(solver):
+    """The predictor's start keeps every non-floating field, not only for the norms.
+
+    Under Jacobi the reader takes the flag from the iterate the solve
+    starts from.  The predictor used to rebuild that iterate from its
+    floating fields alone, so the flag was missing and the first pass
+    raised ``KeyError: 'open'``; the norms checking a field is floating
+    before reading the old iterate do not help here.
+    """
+    gm = _gated(solver, "jacobi", False, predictor="linear")
+    for _ in range(4):
+        gm.step()
+        assert gm.coupling_diagnostics()["a+b"]["converged"]
+        assert float(gm.get_node_state("b")["x"]) == pytest.approx(1.0 / 15.0, rel=1e-4)
+        assert bool(gm.get_node_state("a")["open"]) is True

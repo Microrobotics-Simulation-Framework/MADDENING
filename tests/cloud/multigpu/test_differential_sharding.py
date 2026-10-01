@@ -255,8 +255,8 @@ def _listed_integral_config(listed: bool) -> D.UnstructuredConfig:
         dtype="float32", wrapping="single", steps=1, seed=3, surface="run_scan")
 
 
-def _gather_global_against_harness(listed: bool) -> None:
-    cfg = _listed_integral_config(listed)
+def _gather_global_against_harness(listed: bool, cfg=None) -> None:
+    cfg = _listed_integral_config(listed) if cfg is None else cfg
     case = D.build_case(cfg)
     gm, node = D.build_graph(case, True)
     gm.run_scan(cfg.steps)
@@ -285,3 +285,22 @@ def test_gather_global_passes_an_integral_listed_in_state_fields_through():
     numpy refuses.
     """
     _gather_global_against_harness(listed=True)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "differential: ShardedUnstructuredNode.gather_global silently permutes a "
+    "per-shard integral listed in state_fields() when no shard owns more than "
+    "one cell; pending fix"))
+def test_gather_global_passes_a_listed_per_shard_integral_through_when_a_shard_holds_one_cell():
+    """The silent form of the case above.
+
+    With ``n_local_max == 1`` the stacked per-shard values reshape to
+    ``(n_devices, 1)`` without complaint and are gathered as if they were
+    cells: on a partition where device ``d`` owns cell ``3 - d`` the four
+    shards' totals come back in reverse order, and nothing is raised.
+    """
+    _gather_global_against_harness(listed=True, cfg=D.UnstructuredConfig(
+        n_devices=4, n_cells=4, assignment=(3, 2, 1, 0), partition="balanced_nonglobal",
+        chords=(), contract="params", integral="per_shard", integral_name="a_total",
+        integral_listed=True, weight=None, source="none", misshapen_len=0, gain=False,
+        dtype="float32", wrapping="single", steps=1, seed=8, surface="run_scan"))

@@ -319,9 +319,12 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **`hold_undetermined` no longer returns a fit's parameters above the loss it reached** (MADD-ANO-063, never released): a direction is held only if the
+- **`hold_undetermined` no longer returns a fit's parameters above the loss it reached** (MADD-ANO-064, never released): a direction is held only if the
   run's gradients missed it *and* the loss has no curvature there, and a hold that would raise the loss beyond rounding is refused (`FitResult.hold_declined`,
   `RuntimeWarning`).  `fit_lm` on a well-posed bowl went 0.0 -> 0.22.  Action: re-run guarded fits from earlier 0.4.0 builds, or compare to `best_loss`.
+- **State and IO, from the differential harness** (MADD-ANO-063, 049): a write that moves the points a mapped edge was built from (a uniform `HeatNode`'s `length` under a mapping on its `grid_x`) is refused -- `PUT /graph/params` 400, `gm.params` at the next run, `to_dict` and `save_state`, `POST /checkpoint/load` undone, an FMU parameter fixed -- where it ran on the old mapping weights and saved a config that did not load;
+  state replies, `GET /graph/params` and `/ws/state` write a non-finite float as its `json_codec` token (a `diagnostics=True` group's NaN seeds made `POST /sim/reset`, `GET /graph/state` and `POST /checkpoint/load` a 500 after applying); `PUT /graph/params` and `/graph/state` refuse a float32-overflowing value before the cast (a 500 under `-W error`); the FMU bridge and sidecar restore their own snapshot when a parameter started outside its bounds or a state field started non-finite (a diagnostics group's NaN `_meta` seeds).
+  Action: read `"NaN"` / `"Infinity"` / `"-Infinity"` in a state reply (`json_codec.loads` decodes them); to change such a geometry parameter, rebuild the node and its mapped edge.
 - **`ParamSpec.from_dict` refuses a non-boolean `trainable` or a non-numeric bound** (`"false"` read as trainable, `true` as 1.0): a saved
   graph carrying one fails to load, a USD stage warns and skips it.  **`run_pod.py`'s stencil, hybrid and coupled goals now fail on a
   broken stencil wrapper** (four seeded faults; schema 5, pencil mesh, D2Q9).  Action: write JSON booleans; re-run schema-4 dry runs.
@@ -668,7 +671,8 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
-- **MADD-ANO-063 (new, never released)**: `hold_undetermined` held every direction a fit's gradients had not spanned, so a short or fast-converging fit came back above the loss it had reached (0.4.0 development builds only; see `### Fixed`)
+- **MADD-ANO-064 (new, never released)**: `hold_undetermined` held every direction a fit's gradients had not spanned, so a short or fast-converging fit came back above the loss it had reached (0.4.0 development builds only; see `### Fixed`)
+- **MADD-ANO-063 (new, never released)**: a write moving the points a mapped edge was built from ran on the old mapping weights and saved a config that did not load (see `### Fixed`); **MADD-ANO-049** is now resolved (an in-process non-finite parameter is served as a token, not a 500), and **MADD-ANO-022** narrowed: a write is refused, a fit through the mapped edge still uses the constructor's geometry
 - **Severities defined; fourteen relabelled; four entries partially resolved**: `AnomalySeverity` now defines each level, and a silent wrong result is never `minor`, so MADD-ANO-005, 009, 025, 027, 029, 031, 038, 041, 048, 055, 057, 058 and 061 move to `major`, and 052 (a default-exposed route) to `critical`.
   MADD-ANO-032, 036, 047 and 049 are `partially_resolved`, not `resolved`: their routes outside a graph or the REST route are still live (see each `residual_risk`); the release notes' Known anomalies section now names every reachable entry, and a test keeps it so.
   Sharded nodes: iterate `update_padded`'s `shard_info` over its `int` keys only; `"n_local"` (unstructured wrapper) is the one string key.

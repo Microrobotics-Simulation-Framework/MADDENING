@@ -2627,6 +2627,18 @@ anomalies:
       the step or by a mapping" would make the default `HeatNode` be
       refused again, which is why this release documents the limitation
       instead.
+
+      Narrowed in 0.4.0 by MADD-ANO-063: a new value of such a parameter
+      *written* into the running graph -- into `gm.params`, through `PUT
+      /graph/params`, by a loaded checkpoint, or as an exported FMU's
+      parameter -- is refused, naming the mapped edge, because the node
+      would use it while the mapping kept the old points and a saved config
+      would not load.  The graph itself is not refused, and what stays open
+      is everything that is not a write: a calibration (`sysid.fit`,
+      `fit_lm`, `fim`) or any caller's own `params=` pytree still computes
+      through the mapping with the constructor's geometry, as measured
+      above, and nothing refuses or warns about that.  Only writing its
+      result back into `gm.params` is refused.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -4696,10 +4708,17 @@ anomalies:
       on the 0.4.0 development tree before the fix (71479c7): 500, the NaN
       stored, and the next `GET /graph/params/rod` a 500.  `POST
       /graph/nodes` has refused a non-finite parameter since 0.4.0.
-      Partially resolved in 0.4.0: every value in the request is checked for
-      finiteness before anything else, and a non-finite one is a 400
-      naming its path (`params.grid_points[1]: value must be finite`), with
-      nothing written.
+      Resolved in 0.4.0, in two steps.  The route checks every value in the
+      request for finiteness before anything else, and a non-finite one is
+      a 400 naming its path (`params.grid_points[1]: value must be
+      finite`), with nothing written.  And every reply that echoes a node's
+      params writes a non-finite value as its quoted token (`"NaN"`,
+      `"Infinity"`, `"-Infinity"`; `maddening.serialization.json_codec`), as
+      `GET /graph` and the state replies do, so a non-finite value that
+      reaches a node's params in-process -- set on its params dict, or left
+      in `gm.params` by a calibration that diverged -- is served rather
+      than failing every `GET /graph/params/{node}` with a 500 (the same
+      change that made the state replies encode them).
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -4710,34 +4729,26 @@ anomalies:
       result anyone could mistake for valid.
     affected_components:
       - "maddening.api.server.SimulationServer"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Before 0.4.0: never send a non-finite number to `PUT
       /graph/params`; to recover a node that took one, rebuild it (`DELETE
       /graph/nodes/{name}`, then `POST /graph/nodes`).  From 0.4.0 the
-      route refuses one.  In-process, check a value for finiteness before
-      setting it on a node's params or writing it into `gm.params`, and
-      bound a calibrated parameter so that a diverging fit cannot leave it
-      non-finite; to recover, write a finite value back.
-    resolution_status: "partially_resolved"
+      route refuses one, and a value set non-finite in-process is served as
+      its token; write a finite value back to recover the node.
+    resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      Live in 0.4.0, which is why this entry is partially resolved rather
-      than resolved.  The route is closed; the reply is not.  A non-finite
-      value that reaches a node's params in-process -- set on the node's
-      params dict, or written into `gm.params`, which is where a
-      calibration that diverged to `NaN` leaves it -- makes every
-      `GET /graph/params/{node}` for that node a 500, because the reply
-      echoes the params and the encoder refuses a non-finite number.  Loud,
-      and no wrong number is reported, but the node's parameter endpoint is
-      unusable until the value is replaced.  Pinned by
-      test_a_non_finite_structural_value_set_in_process_breaks_get and
-      test_a_live_leaf_a_fit_drove_non_finite_breaks_get.
+      Nothing refuses a non-finite value set in-process: one written into a
+      node's params dict or into `gm.params` is stored, served as its
+      token, and, if the physics reads it, makes the results non-finite.
+      Bound a calibrated parameter so that a diverging fit cannot leave it
+      there.
     verification:
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_non_finite_structural_value_is_refused_before_anything_is_written"
-      # What stays open, pinned so that closing it fails.
-      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_non_finite_structural_value_set_in_process_breaks_get"
-      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_live_leaf_a_fit_drove_non_finite_breaks_get"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_non_finite_structural_value_set_in_process_reads_back_as_a_token"
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_live_leaf_a_fit_drove_non_finite_reads_back_as_a_token"
+      - "tests/api/test_state_replies_with_non_finite_values.py::test_a_non_finite_parameter_reads_back_as_a_token"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-050"
@@ -5650,6 +5661,99 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-063"
+    title: "A new value of a parameter from which a node derives the points of a mapped edge was taken by PUT /graph/params and gm.params, run with the old points' mapping weights, and saved as a config that does not load"
+    description: >
+      An interface mapping built from a `{"node": ..., "field": ...}` point
+      reference reads the node's field once, when the mapping is built
+      (`core/coupling/mapping_spec.py`).  A uniform `HeatNode` derives its
+      `grid_x` field from `length` when it is constructed, and its own step
+      reads `length` itself (`dx = length / n_cells`), so `length` is a live
+      leaf of `gm.params` that every check on a write found in use.
+      `PUT /graph/params/{node}` with a new `length` answered 200, and the
+      same value written into `gm.params` ran: the rod stepped on the new
+      length while the mapping interpolated with the weights of the old
+      grid.  `to_dict()` then wrote a config that `from_dict()` refused,
+      because it rebuilds the mapping from the rod's new grid and the
+      recorded `sha256` of the old one does not match (`MappingRebuildError`).
+      `save_state()` and `POST /checkpoint/load` carried the value the same
+      way, and an exported FMU advertised `length` as a tunable parameter
+      that its compiled step took into the same inconsistency.  It is the
+      live-write side of MADD-ANO-022, which records the mapping keeping its
+      constructor geometry when the parameter is calibrated.
+
+      Found by the state/IO differential harness on the 0.4.0 development
+      tree (b511d92, CPU, jaxlib 0.11.0): a 6-cell and a 5-cell rod joined
+      by an RBF mapping on both rods' `grid_x`, `length` written from 1.0 to
+      1.5, through the route and through `gm.params`.  The harness's own
+      fixture built its mapping from float64 copies of the float32 grid, so
+      `to_dict()` refused it before any write; with the grid taken as the
+      rod holds it, the write is taken, the graph runs and saves, and the
+      reload raises.  Introduced in the 0.4.0 development line with
+      node-field point references (3f697d3, 2026-09-16) and live parameter
+      writes.  v0.3.1 has neither a `mapping` keyword on `add_edge` nor
+      `gm.params`, so no tagged release carried it.
+
+      Resolved in 0.4.0.  A write is refused when the node rebuilt from its
+      params with the new value reads a referenced field differently from
+      the node rebuilt without it.  `PUT /graph/params` answers 400 naming
+      the edge and the field.  A `gm.params` write is refused at the next
+      `run`, `run_scan`, `check_params`, `to_dict()` and `save_state()`, as
+      every other value the running graph cannot take is.  `POST
+      /checkpoint/load` refuses such a checkpoint and undoes the load.  An
+      exported FMU leaves the parameter out of its tunable set, naming the
+      edge as the reason.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` because the running graph was silently wrong.  The
+      route answered 200, the node computed with the new value and the
+      mapped edge with the old geometry, and nothing said so until a saved
+      config failed to load, which a caller who never reloads does not see.
+      Graded `context_dependent` rather than `safety_relevant` because it
+      needs two choices at once: a mapped edge whose point reference names
+      a field the node derives from a parameter, and a write of that
+      parameter while the graph runs.  Whether a program does both is a
+      property of the program, and no in-tree caller does.  It is recorded
+      although no release carried it, because a major defect found in the
+      cycle is part of the evidence of how the release was verified.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+      - "maddening.core.graph_manager.GraphManager"
+      - "maddening.fmi.model_description.build_model_description"
+    affected_versions: "none"
+    workaround: >
+      None needed from 0.4.0.  On an earlier 0.4.0.dev0 build: do not write
+      a parameter from which a node derives the points of a mapped edge
+      while the graph runs.  Rebuild the node and the mapped edge with the
+      new value instead, or give the mapping explicit `inline` or `asset`
+      points, which a write does not move.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Only a write is refused.  A caller's own `params=` pytree and a traced
+      one (`sysid.fit`, `fit_lm`, `fim`, `run_scan(params=...)`) are not
+      writes, so a calibration through the mapped edge still computes with
+      the constructor's geometry.  That is MADD-ANO-022, which stays open.
+      The check rebuilds the node from its params, so a node that is not
+      rebuilt that way, and wraps no node that is, cannot be asked and is
+      not refused.  The FMU's decision is taken once, by probing the
+      parameter with the node's own value moved by half again (by half, if
+      the constructor refuses that).  A node whose field moved for some
+      values of a parameter and not for others could therefore be exported
+      with that parameter tunable; no in-tree node does that.
+    verification:
+      - "tests/property/test_differential_rest_params.py::test_a_rod_length_under_a_mapping_reference_is_refused_or_runs_as_its_reload"
+      - "tests/property/test_differential_param_writes.py::test_a_rod_length_under_a_mapping_reference_runs_as_its_reload"
+      - "tests/property/test_differential_rest_params.py::test_the_mapped_rods_save_and_reload_before_any_write"
+      - "tests/core/test_mapping_point_reference_writes.py::test_a_length_written_into_gm_params_under_a_reference_is_refused"
+      - "tests/core/test_mapping_point_reference_writes.py::test_the_route_refuses_a_length_under_a_reference_and_writes_nothing"
+      - "tests/core/test_mapping_point_reference_writes.py::test_the_checkpoint_route_refuses_and_undoes_a_moved_length"
+      - "tests/core/test_mapping_point_reference_writes.py::test_a_sharded_rod_under_a_reference_is_refused_the_same_way"
+      - "tests/core/test_mapping_point_reference_writes.py::test_an_fmu_does_not_export_a_length_a_mapping_was_built_from"
+      - "tests/core/test_mapping_point_reference_writes.py::test_a_value_that_moves_no_referenced_point_set_is_still_taken"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-064"
     title: "hold_undetermined held every direction a fit's gradients had not spanned, so a short or fast-converging fit returned parameters above the loss it had reached"
     description: >
       `hold_undetermined`, on by default in `fit`, `fit_lm` and

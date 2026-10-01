@@ -71,6 +71,7 @@ Connect nodes with {term}`edges <Edge>` to exchange data every timestep.
 Here a spring reacts to the ball's height and pushes back on it — the
 ball drives the spring, and the spring's force feeds into the ball:
 
+<!-- snippet: continues -->
 ```python
 import jax.numpy as jnp
 from maddening import GraphManager, SimulationNode
@@ -129,6 +130,7 @@ without breaking deliberate constructions.
 
 The entire {term}`graph step <Graph step>` is JIT-compiled and differentiable:
 
+<!-- snippet: continues -->
 ```python
 import jax
 
@@ -163,11 +165,12 @@ pip install maddening[runpod]
 
 # Set up credentials (one-time)
 mkdir -p ~/.maddening
-cp src/maddening/examples/cloud/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
+cp src/maddening/examples/cloud/config/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
 # Edit ~/.maddening/cloud_credentials.yaml with your RunPod API key
-# You can also choose a different path, in which case use the `creds` argument in the CloudLauncher constructor.
+# You can also choose a different path, in which case pass it as `credentials_path=` to the CloudLauncher constructor.
 ```
 
+<!-- snippet: no-run, reason: cloud: provisions a cloud GPU instance -->
 ```python
 from maddening.cloud.launcher import CloudLauncher
 

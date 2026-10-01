@@ -14,6 +14,12 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Every Python code block in the docs runs in CI** (`tests/compliance/test_docs_snippets.py`), sandboxed, or carries a
+  `<!-- snippet: no-run, reason: ... -->` marker whose imports and keywords are still checked; see the documentation
+  standards.  The README quick start, which overrode the removed `requires_halo`, now runs
+- **CI guard mutation test** (`tests/compliance/test_guard_mutations.py`, slow lane): seeded faults in the workflows, budget
+  script, shard split, conftest, `pyproject.toml`, timing plugin, cache pruner and allowlist must each fail a guard test
+  (83 of 87; 4 listed equivalents); anchors checked per push.  New guard: add its mutant (*Guard mutations*, testing_standards)
 - **CycloneDX SBOMs** in `docs/validation/sbom/` for the base install and the `server`, `surrogates` and `usd` extras, from a
   clean install of the wheel (`scripts/generate_sbom.py`), checked offline against `pyproject.toml` and the SOUP package
   (`scripts/check_sbom.py`, in CI).  Regenerated from the release commit before each tag; see `soup_package.md` §6
@@ -308,6 +314,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`ParamSpec.from_dict` refuses a non-boolean `trainable` or a non-numeric bound** (`"false"` read as trainable, `true` as 1.0): a saved
+  graph carrying one fails to load, a USD stage warns and skips it.  **`run_pod.py`'s stencil, hybrid and coupled goals now fail on a
+  broken stencil wrapper** (four seeded faults; schema 5, pencil mesh, D2Q9).  Action: write JSON booleans; re-run schema-4 dry runs.
 - **Coupling, second audit**: every acceleration acts on floating fields only (an integer, boolean or PRNG-key leaf raised a `TypeError` under `aitken` / `fixed` / IQN since 0.1.0, and `solver="fori"` rounded it through float32 during 0.4.0 development; MADD-ANO-059); `strict_convergence` under `run_adaptive*` raises only about a solve the stepper keeps; `windowed_loss(mask_unconverged=True)` drops a diverged window from the gradient too (it made the gradient NaN);
   `coupling_diagnostics()` judges the last step under the group that took it, not a replacement; after `jax.grad` of `run_scan` the graph is put back whatever its first node (`step()` raised `UnexpectedTracerError` on a coupled graph with lowercase node names); `run_adaptive` advances its clock by the step a `dt_min` accept keeps, not `dt_min` (MADD-ANO-061).
   Action: re-run `solver="fori"` results from accelerated groups holding integer state, masked sysid fits that saw a NaN gradient, and `run_adaptive` runs that warned "hit dt_min".
@@ -651,6 +660,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **Severities defined; fourteen relabelled; four entries partially resolved**: `AnomalySeverity` now defines each level, and a silent wrong result is never `minor`, so MADD-ANO-005, 009, 025, 027, 029, 031, 038, 041, 048, 055, 057, 058 and 061 move to `major`, and 052 (a default-exposed route) to `critical`.
+  MADD-ANO-032, 036, 047 and 049 are `partially_resolved`, not `resolved`: their routes outside a graph or the REST route are still live (see each `residual_risk`); the release notes' Known anomalies section now names every reachable entry, and a test keeps it so.
+  Sharded nodes: iterate `update_padded`'s `shard_info` over its `int` keys only; `"n_local"` (unstructured wrapper) is the one string key.
 - **MADD-ANO-062 (new, resolved in this release)**: `HeatNode` accepted a non-positive `length` or `timestep`, a negative `thermal_diffusivity` and `grid_points` out of order, and answered wrongly without a word (since 0.1.0; see `### Changed`)
 - **MADD-ANO-059, 060, 061 (new, resolved in this release)**: accelerating a coupling group holding an integer, boolean or PRNG-key leaf raised a `TypeError`; a group-internal flux edge read by the interface norm or a sub-cycled member's linear interpolation raised a bare `KeyError`; `run_adaptive` advanced its clock by `dt_min` on a `dt_min` accept whose state covered more (all since 0.1.0; see `### Fixed`, `### Changed`).
   **MADD-ANO-027** now says each extra waveform sweep applies at least one more pass, moving a converged state by about one residual

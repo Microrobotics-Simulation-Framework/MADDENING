@@ -16,6 +16,7 @@ between them must apply a unit conversion.  MADDENING supports this via:
 
 ### On edges
 
+<!-- snippet: no-run, reason: fragment: an edge on the fluid-body graph the guide describes -->
 ```python
 gm.add_edge(
     "fluid", "body", "drag_force", "force",
@@ -84,6 +85,7 @@ Physical conversion requires three parameters:
 
 ### Usage
 
+<!-- snippet: no-run, reason: fragment: the edges need the fluid-body graph the guide describes -->
 ```python
 from maddening.core.transforms import lbm_to_si_force, lbm_to_si_torque
 
@@ -115,6 +117,7 @@ The returned callables are:
 
 If you need named transforms for USD serialization, register them manually:
 
+<!-- snippet: no-run, reason: fragment: registers force_transform from the block above -->
 ```python
 from maddening.core.transforms import register_transform
 

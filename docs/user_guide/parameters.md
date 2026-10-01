@@ -13,6 +13,15 @@ at runtime — stiffness, mass, diffusivity, gravity.  `GraphManager.params`
 holds the compile-time snapshot:
 
 ```python
+import jax
+import jax.numpy as jnp
+from maddening import GraphManager
+from maddening.nodes import BallNode, SpringDamperNode
+
+gm = GraphManager()
+gm.add_node(SpringDamperNode("spring", 0.01, stiffness=30.0, damping=2.0,
+                             initial_position=0.5))
+gm.add_node(BallNode("ball", 0.01, elasticity=0.7))
 gm.compile()
 gm.params
 # {"nodes": {"spring": {"stiffness": Array(30.), "damping": Array(2.), ...},
@@ -26,6 +35,7 @@ recompiling, and `jax.grad` / `jax.jvp` / `jax.jacfwd` reach it — through
 coupling groups too, because the implicit-function-theorem rule carries
 the parameter dependence.
 
+<!-- snippet: continues -->
 ```python
 p = jax.tree.map(lambda x: x, gm.params)
 p["nodes"]["spring"]["stiffness"] = jnp.asarray(45.0)
@@ -43,6 +53,7 @@ jax.grad(loss)(gm.params)["nodes"]["spring"]["stiffness"]
 A node opts in by declaring a keyword-only `params` on `update` and reading
 its constants from it:
 
+<!-- snippet: continues -->
 ```python
 def update(self, state, boundary_inputs, dt, *, params=None):
     p = self.params if params is None else {**self.params, **params}
@@ -95,6 +106,7 @@ under x64 has float64 constants as well as float64 arithmetic.
 A node that exposes boundary fluxes takes `params` there too and reads
 the same constants from it:
 
+<!-- snippet: continues -->
 ```python
 def compute_boundary_fluxes(self, state, boundary_inputs, dt, *, params=None):
     p = self.params if params is None else {**self.params, **params}
@@ -209,6 +221,7 @@ Nodes declare specs for their own constants in `param_specs()`
 (`SpringDamperNode`: stiffness and mass are `log`-positive, damping is
 `>= 0`).  A graph overrides any of them:
 
+<!-- snippet: continues -->
 ```python
 from maddening.core.params import ParamSpec
 gm.set_param_spec("spring", "mass", ParamSpec(trainable=False))
@@ -221,6 +234,7 @@ gm.check_params(p)         # ValueError naming the first leaf out of range
 
 ## System identification: `maddening.sysid`
 
+<!-- snippet: continues -->
 ```python
 from maddening.sysid import (fim, fim_core, fit, observations_from_history,
                              windowed_loss)
@@ -241,6 +255,7 @@ unconverged, including a window that diverged).
 
 Before fitting, ask what the data can identify:
 
+<!-- snippet: continues, no-run, reason: fragment: residual stands for the reader's residual function -->
 ```python
 report = fim(lambda p: residual(p), gm.params, mask=gm.trainable_mask())
 report.rank                  # < len(param_names) => directions the data misses
@@ -269,6 +284,7 @@ scale from the parameter's `ParamSpec` instead — the width `hi - lo` of a
 finite `bounds`, a scale and not a location, so a symmetric range around
 zero is no longer a zero:
 
+<!-- snippet: continues, no-run, reason: fragment: residual stands for the reader's residual function -->
 ```python
 gm.set_param_spec("spring", "initial_velocity",
                   ParamSpec(trainable=False, bounds=(-1.0, 1.0)))
@@ -322,6 +338,7 @@ rounding, and name the parameters `scale="relative"` found at zero.  For
 a control loop, `fim_core` is the same computation with none of that —
 it returns device arrays, reads nothing back, and traces:
 
+<!-- snippet: continues, no-run, reason: fragment: residual_fn, params, i and tol are the reader's -->
 ```python
 core_fn = jax.jit(functools.partial(fim_core, residual_fn))
 core = core_fn(params)                       # no host sync at all
@@ -366,6 +383,7 @@ different `(rank, precision_limited)` on 0.39% of them, never above five
 times the rank cutoff, and 62% of the differences sit in the half-to-two
 times band where `precision_limited` fires on 97% of cases anyway.
 
+<!-- snippet: continues -->
 ```python
 gm.set_param_spec("spring", "mass", ParamSpec(trainable=False))
 res = fit(gm, loss, n_iter=300, lr=0.1)
@@ -410,6 +428,7 @@ leaving those at the values you supplied — the data has not contradicted
 them.  The loss is flat there, so nothing is paid for it, and a fit whose
 gradients spanned everything gets its iterate back bit for bit.
 
+<!-- snippet: continues -->
 ```python
 res = fit(gm, loss, n_iter=300, lr=0.1)
 res.excited_rank         # 2 of 3: the data left one direction undetermined
@@ -428,6 +447,7 @@ representable, which makes the scale direction `(c, 1, 1)` and rotates it as
 mixes — the coordinates `fim(scale="relative")` already assumes — and it
 becomes constant:
 
+<!-- snippet: continues -->
 ```python
 gm.set_param_spec("spring", "damping",
                   ParamSpec(bounds=(0.0, None), transform="log"))

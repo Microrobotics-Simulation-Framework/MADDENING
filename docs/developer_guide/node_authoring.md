@@ -73,6 +73,7 @@ docs/algorithm_guide/nodes/your_node.md # Algorithm documentation
 
 ### 1. Implement the Node
 
+<!-- snippet: no-run, reason: pseudo-code: the template's placeholders (value, shape_tuple, min_val, the dots) are the author's to fill -->
 ```python
 """YourNode -- one-line description."""
 
@@ -242,13 +243,15 @@ CI validates that every `[@Key]` citation in algorithm guides resolves to an ent
 - Register with `@verification_benchmark`:
 
 ```python
-from maddening.core.validation import verification_benchmark
+from maddening.compliance import BenchmarkType, verification_benchmark
 
 @verification_benchmark(
     benchmark_id="MADD-VER-XXX",
     description="Your benchmark description",
-    node_class="YourNode",
-    reference="AuthorYear",
+    node_type="YourNode",
+    benchmark_type=BenchmarkType.ANALYTICAL,
+    acceptance_criteria="Max error below 1e-3 against the analytical solution",
+    references=("AuthorYear",),
 )
 def test_your_analytical_comparison():
     ...
@@ -259,6 +262,7 @@ def test_your_analytical_comparison():
 - Test conservation laws and energy dissipation where applicable
 - See the [Verification Guide](verification.md) for the full checklist
 
+<!-- snippet: no-run, reason: pseudo-code: your_node and bounds={...} are placeholders -->
 ```python
 from maddening.testing.strategies import node_states, bounded_dt
 from hypothesis import given, settings
@@ -276,6 +280,7 @@ def test_your_node_always_finite(state, dt):
 
 ### 6. Apply the `@stability` Decorator
 
+<!-- snippet: no-run, reason: fragment: the decorator, excerpted from the template above -->
 ```python
 from maddening.core.compliance.stability import stability
 
@@ -485,6 +490,7 @@ for it.
 
 By default, if multiple edges write to the same boundary input, the last one wins ("replacive"). For inputs that should accumulate (e.g., forces from multiple sources), mark them as `"additive"`:
 
+<!-- snippet: no-run, reason: fragment: a dict entry and two edges, excerpted -->
 ```python
 # In boundary_input_spec():
 "force": BoundaryInputSpec(shape=(2,), coupling_type="additive")
@@ -596,15 +602,17 @@ docstring for the validation contract.
 
 ### Value coupling (most common)
 One node's state field feeds another's boundary input:
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
-from maddening.core.coupling_helpers import add_value_coupling
+from maddening.core.coupling.helpers import add_value_coupling
 add_value_coupling(gm, "ball", "spring", "position", "anchor_position")
 ```
 
 ### Flux coupling
 One node's flux output feeds another's boundary input:
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
-from maddening.core.coupling_helpers import add_flux_coupling
+from maddening.core.coupling.helpers import add_flux_coupling
 add_flux_coupling(gm, "rod_a", "rod_b", "right_heat_flux", "heat_source")
 ```
 A flux is computed by `compute_boundary_fluxes`, not held in the state, so
@@ -616,8 +624,9 @@ refuses both, naming the edge and the setting that works (`"mixed"` or
 
 ### Dirichlet-Neumann coupling
 The classic partitioned approach — one node gets a value BC, the other gets a flux BC:
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
-from maddening.core.coupling_helpers import add_dirichlet_neumann_pair
+from maddening.core.coupling.helpers import add_dirichlet_neumann_pair
 add_dirichlet_neumann_pair(
     gm,
     dirichlet_node="rod_a",  # receives temperature (value)
@@ -631,17 +640,30 @@ add_dirichlet_neumann_pair(
 ```
 
 ### Robin coupling
-Combines value and flux for better convergence:
+Feeds each node `alpha * value + (1 - alpha) * flux` of the other, for
+better convergence than a pure value exchange:
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
-from maddening.core.coupling_helpers import add_robin_coupling
+from maddening.core.coupling.helpers import add_robin_coupling
 add_robin_coupling(
-    gm, "rod_a", "rod_b",
-    value_field_a="temperature", flux_field_a="right_heat_flux",
-    value_field_b="temperature", flux_field_b="left_heat_flux",
-    input_a="right_temperature", input_b="left_temperature",
+    gm, "node_a", "node_b",
+    value_field_a="u", flux_field_a="q",
+    value_field_b="u", flux_field_b="q",
+    input_a="robin_in", input_b="robin_in",
     alpha=0.5,  # mixing: 0=pure Neumann, 1=pure Dirichlet
 )
+gm.add_coupling_group(["node_a", "node_b"])
 ```
+The names are a user node's: no built-in node has a Robin input, and a
+`HeatNode` pair cannot use this helper.  Two constraints decide that.  The
+helper takes no transforms, so every value and flux field must already have
+the shape of the input it feeds (a `HeatNode`'s `temperature` is per cell and
+its end-temperature inputs are scalars; use `add_dirichlet_neumann_pair`,
+which takes transforms, for a rod pair).  And the pair must be a coupling
+group: each node reads the other's flux, a flux exists only once its node has
+stepped, and outside a group one of the two reads would come before it (the
+step fails with a `KeyError` naming the flux field).  The value and the flux
+are added as they are, so choose `alpha` for fields in commensurate units.
 
 ## Transform Registration
 
@@ -660,6 +682,7 @@ def extract_right_boundary(T):
 
 Once registered, use either the callable or its string name in edges:
 
+<!-- snippet: no-run, reason: fragment: gm is a graph holding the named nodes -->
 ```python
 gm.add_edge("rod_a", "rod_b", "temperature", "left_temperature",
             transform="extract_right_boundary")

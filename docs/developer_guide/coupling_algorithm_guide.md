@@ -189,6 +189,7 @@ node read a bound 0.07–0.96x its true distance at `N` = 15–200 with
 counted without help; a node whose `update` loops over its own state
 must say so:
 
+<!-- snippet: no-run, reason: fragment: one method of a node class, excerpted -->
 ```python
 class SubSteppedNode(SimulationNode):
     def update_evaluations(self):

@@ -72,6 +72,33 @@ def test_stale_override_on_load_warns_instead_of_failing():
     assert gm2.param_specs()["nodes"]["s"]["mass"].trainable is False
 
 
+def test_an_override_whose_trainable_is_a_string_is_named_not_coerced():
+    """``"trainable": "false"`` used to load as a trainable override, with
+    nothing said (``bool("false")`` is True).  The loader keeps its policy
+    for an override it cannot apply -- warn, name it, load the rest -- and
+    the warning says why."""
+    import warnings
+
+    gm = _gm()
+    gm.set_param_spec("s", "mass", ParamSpec(trainable=False))
+    stage = Usd.Stage.CreateInMemory()
+    save_graph_to_usd(gm, stage)
+    prim = stage.GetPrimAtPath("/Simulation/nodes/s")
+    written = json.loads(prim.GetAttribute("maddening:paramSpecOverridesJson").Get())
+    assert written["mass"]["trainable"] is False
+    prim.GetAttribute("maddening:paramSpecOverridesJson").Set(
+        json.dumps({"mass": {**written["mass"], "trainable": "false"},
+                    "damping": ParamSpec(trainable=False).to_dict()}))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        gm2 = load_graph_from_usd(stage)
+    messages = [str(x.message) for x in w if issubclass(x.category, RuntimeWarning)]
+    assert any("s.mass" in m and "trainable must be true or false" in m
+               for m in messages), messages
+    gm2.compile()
+    assert gm2.param_specs()["nodes"]["s"]["damping"].trainable is False
+
+
 # --------------------------------------------------------------------------
 # What a stage can and cannot represent.  Both from the independent audit of
 # 2026-09-19 (``params-io``; reproducers ``r20_misc.py``, ``r2_usd_params.py``).

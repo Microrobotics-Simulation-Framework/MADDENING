@@ -59,13 +59,14 @@ are skipped — we cannot statically reason about what the transform
 will produce.  Use this when the mismatch is intentional (e.g. picking
 a boundary slice from a 1-D field).
 
+<!-- snippet: no-run, reason: fragment: an edge on a two-rod graph the guide does not build -->
 ```python
 gm.add_edge(
-    source_node="heat_rod",
-    target_node="ball",
-    source_field="temperature",        # shape (N,)
-    target_field="ambient_temperature",  # spec shape ()
-    transform=lambda T: T[N // 2],      # → scalar at midpoint
+    source="rod_a",
+    target="rod_b",
+    source_field="temperature",        # shape (n_cells,)
+    target_field="left_temperature",   # spec shape ()
+    transform=lambda T: T[-1],         # → the scalar at rod_a's right end
 )
 ```
 
@@ -82,6 +83,7 @@ handle the group:
 
 ### `except*`
 
+<!-- snippet: no-run, reason: fragment: gm is a graph with a mismatched edge -->
 ```python
 from maddening.warnings import ShapeMismatchError, DtypeMismatchError
 
@@ -97,6 +99,7 @@ except* DtypeMismatchError as eg:
 
 ### Version-agnostic — explicit iteration
 
+<!-- snippet: no-run, reason: fragment: gm is a graph with a mismatched edge -->
 ```python
 from maddening.warnings import (
     EdgeValidationError, ExceptionGroup,
@@ -119,6 +122,7 @@ except ExceptionGroup as eg:
 
 ### "I'm slicing a boundary from a 1-D field"
 
+<!-- snippet: no-run, reason: fragment: edges on a graph the guide does not build -->
 ```python
 # Before v0.2: silent at compile, surprise at runtime
 gm.add_edge("heat", "neighbor", "temperature", "wall_T")  # shape (N,) vs ()
@@ -133,6 +137,7 @@ gm.add_edge(
 
 ### "I'm passing kilonewtons but the target wants newtons"
 
+<!-- snippet: no-run, reason: fragment: an edge on a graph the guide does not build -->
 ```python
 gm.add_edge(
     "thruster", "body", "force", "F_external",
@@ -148,6 +153,7 @@ The transform suppresses the shape/dtype checks; the explicit
 
 ### "I have a synthetic test that needs the error"
 
+<!-- snippet: no-run, reason: fragment: gm is a graph with a mismatched edge -->
 ```python
 import pytest
 from maddening.warnings import ShapeMismatchError, ExceptionGroup
@@ -197,6 +203,7 @@ every shape/dtype mismatch into a single `ExceptionGroup`.  Unit
 mismatches still emit as warnings *before* the raise, so they show
 up in `caught` records too.
 
+<!-- snippet: no-run, reason: fragment: gm is a graph with mismatched edges -->
 ```python
 import warnings
 import pytest

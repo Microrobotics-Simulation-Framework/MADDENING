@@ -76,6 +76,7 @@ behaviour actually work are not breaking; say so in the CHANGELOG under
 3. **Warn at the call site.** `DeprecationWarning`, `stacklevel=2`, naming the
    replacement and the release that removes it:
 
+   <!-- snippet: no-run, reason: fragment: the call inside a deprecated alias's body -->
    ```python
    warnings.warn(
        "maddening.core.simulation.checkpoint.download_and_load_state moved to "
@@ -152,7 +153,7 @@ against it. It runs as the **Check STABLE API signatures** step of the
 
 ```console
 $ python scripts/check_stable_signatures.py
-OK: 13 STABLE surface(s), 223 member(s) unchanged
+OK: 17 STABLE surface(s), 248 member(s) (4 of them tagged in their own right) unchanged
 ```
 
 A difference fails with the recorded and current signatures side by side.

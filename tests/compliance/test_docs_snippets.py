@@ -140,7 +140,9 @@ EXPECTED_RUNNABLE = 39
 
 _FENCE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _MARKER = re.compile(r"^(?P<indent>[ \t]*)<!--\s*snippet:(?P<body>.*?)-->[ \t]*$")
-_MARKER_LIKE = re.compile(r"<!--\s*snippets?\b", re.I)
+#: A line that *starts* with an HTML comment naming a snippet.  Anchored, so
+#: prose that quotes a marker in backticks is not mistaken for one.
+_MARKER_LIKE = re.compile(r"^[ \t]*<!--\s*snippets?\b", re.I)
 _DIRECTIVE_OPTION = re.compile(r"^\s*:[\w-]+:")
 _MODULE_NAME = re.compile(r"^[A-Za-z_][\w]*(?:\.[A-Za-z_]\w*)*$")
 
@@ -751,12 +753,18 @@ def tree():
 
 #: Synthetic snippets run beside the real ones, in the same pool, to prove
 #: in every run that the runner can fail and that the sandbox holds.
+#: ``name: (code, "fail" or "pass", text the output must contain)``.  A
+#: failing canary must also name its doc line: it is placed at line 10 of
+#: ``docs/canary-<name>.md``, and its fault is on its last line of code.
 _CANARIES = {
     "bad-import": ("from maddening.core.no_such_module import nothing\n", "fail",
                    "ModuleNotFoundError"),
     "wrong-keyword": ("from maddening import GraphManager\n"
                       "GraphManager().add_edge('a', 'b', 'x', 'y', no_such_keyword=1)\n",
                       "fail", "no_such_keyword"),
+    "deprecated-call": ("import warnings\n"
+                        "warnings.warn('canary: a deprecated API', DeprecationWarning)\n",
+                        "fail", "DeprecationWarning"),
     "sandbox": ("import os, socket\n"
                 "assert os.listdir(os.environ['HOME']) == [], 'HOME is not empty'\n"
                 "assert os.getcwd() != os.environ['HOME']\n"
@@ -780,7 +788,7 @@ _CANARIES = {
 
 
 def _canary_unit(name: str, code: str) -> Unit:
-    return Unit((Snippet(Path(f"<canary:{name}>"), 0, code, Marker()),))
+    return Unit((Snippet(REPO_ROOT / "docs" / f"canary-{name}.md", 10, code, Marker()),))
 
 
 @pytest.fixture(scope="module")
@@ -862,12 +870,23 @@ def test_every_runnable_snippet_runs(snippet_results):
 
 
 def test_the_runner_fails_a_snippet_that_is_wrong(snippet_results):
-    """A bad import and a wrong keyword argument both fail, in this very run."""
-    for name, (_, expect, needle) in _CANARIES.items():
+    """A bad import, a wrong keyword and a deprecated call fail, in this very run.
+
+    And the traceback names the doc and the line the fault is on.
+    """
+    for name, (code, expect, needle) in _CANARIES.items():
         r = snippet_results["canaries"][name]
         if expect == "fail":
             assert r.returncode not in (0, None), f"canary {name!r} passed:\n{r.output}"
             assert needle in r.output, f"canary {name!r} failed for another reason:\n{r.output}"
+            line = 10 + len(code.splitlines())
+            assert f'canary-{name}.md", line {line}' in r.output, r.output
+
+
+def test_a_snippet_that_hangs_is_stopped(tmp_path):
+    (unit,) = units(_parse("```python\nimport time\ntime.sleep(30)\n```\n")[0])
+    result = run_unit(unit, tmp_path / "u", timeout=1.0)
+    assert result.returncode is None and "timed out" in result.output
 
 
 def test_the_sandbox_holds_and_runs_this_tree(snippet_results):

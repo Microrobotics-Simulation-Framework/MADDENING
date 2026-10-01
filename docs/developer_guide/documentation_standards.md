@@ -68,6 +68,80 @@ actually executed (not docstrings: one docstring can hold many examples). A
 doctest job that silently collects nothing exits 0 and gets counted as
 coverage. Raise `MIN_EXAMPLES` in the script when you add examples.
 
+## Code Blocks in the Docs Are Tests
+
+Every fenced ` ```python ` block (also `py`, `python3`, and MyST
+` ```{code-block} python `) in `docs/**/*.md`, `README.md`,
+`CONTRIBUTING.md` and `SECURITY.md` runs in CI, in the `compliance` job:
+
+```bash
+pytest tests/compliance/test_docs_snippets.py
+```
+
+Each runnable block runs once, in a fresh `python` process, with a
+timeout, its working directory a new temporary directory, `HOME` an empty
+one, `JAX_PLATFORMS=cpu` and `MPLBACKEND=Agg`. The environment is built
+from an allowlist, so no cloud credential or API token reaches it, and any
+connection or name lookup that is not loopback is refused. A traceback
+names the Markdown file and line. Deprecated API called from the snippet's
+own code (`DeprecationWarning` or `FutureWarning`) fails it. The blocks run
+in parallel, one process per CPU.
+
+A block that is not meant to run says so, with a reason, in an HTML comment
+on the line immediately before its opening fence and at the same
+indentation:
+
+```markdown
+<!-- snippet: no-run, reason: fragment: lines inside update_padded -->
+```
+
+| Marker item | Meaning |
+|---|---|
+| `no-run, reason: <category>: <why>` | Not executed. The category is one of the list below; the explanation is required. |
+| `continues` | Runs after the file's previous Python block, as one program in one process, and after whatever that block continues. A `no-run` block may carry it too: it is skipped and the chain runs on past it. The first block of a chain must run. |
+| `requires: <module> ...` | Skipped, with the reason printed, where a module is not installed (`usd-core` is `pxr`). It runs in the job that installs it; keep such blocks inside the `ci` and `usd` extras. |
+
+Items combine, separated by commas, with `reason:` last:
+`<!-- snippet: continues, no-run, reason: fragment: ... -->`.
+
+| Category | Use it for |
+|---|---|
+| `fragment` | An intentionally partial excerpt: a method body, a dict entry, or calls on a `gm` or node the prose builds but the block does not |
+| `pseudo-code` | Placeholders (`...`, `XXX`, `bounds={...}`) that stand for the reader's own code |
+| `legacy` | A removed or pre-migration API, shown for comparison |
+| `cloud` | Anything that names a cloud launch path (below) |
+| `network` | Needs network access or a remote service |
+| `gpu` | Needs a GPU or several devices |
+| `external` | Needs a file, package, tool or configuration outside this repository |
+
+Write a block so it runs if it is meant to: real imports, real keyword
+names, sizes small enough to finish in a few seconds. Fix a failing
+block's code rather than marking it `no-run`. A `no-run` block is not
+unchecked either: its `maddening` imports must resolve, every keyword
+argument it passes to a callable it imports from `maddening` must be one
+that callable takes, and every `gm.<method>(...)` it calls must exist on
+`GraphManager` with those keywords (every guide spells a graph `gm`). Only
+the import statements are executed, never the block.
+
+**Cloud launch paths never run.** A block that names `/cloud/launch`,
+`launch_vm`, `CloudSession(`, `CloudLauncher(`, `.launch(`, `sky.` or the
+`sky` CLI, `RUNPOD`, the `runpod` SDK, a cloud provider SDK, or `run_pod`
+without `--dry-run` must be marked `no-run` with the `cloud` category. The
+runner refuses such a block again before starting a process, and checks
+its imports by reading the source instead of importing anything.
+
+**How the marker renders.** An HTML comment is invisible on GitHub and in
+the MyST/Sphinx HTML build, and dropped from LaTeX output, so a marker
+changes nothing a reader sees. Two rules keep it that way, and the test
+enforces both: the marker sits on the line directly before the fence, with
+the fence's indentation (an unindented comment would end a list item), and
+it contains no `--`, which an HTML comment may not.
+
+The test also fails on a malformed or orphaned marker, an unknown item, a
+reason on a block that runs, and a change in the number of blocks that run:
+`EXPECTED_RUNNABLE` in the test is held equal to the count, so update it in
+the commit that adds a runnable block or marks one `no-run`.
+
 ## Math in Code
 
 - **Docstrings**: ASCII-art equations (e.g., `dT/dt = alpha * d^2T/dx^2`)

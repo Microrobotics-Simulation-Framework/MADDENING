@@ -28,6 +28,12 @@ from jax import lax
 from jax import shard_map
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 
+from maddening.cloud.multigpu._scan_hazards import (
+    ScanHazard,
+    active_probe,
+    analyse_update_padded,
+    window_label,
+)
 from maddening.cloud.multigpu.halo import (
     _BOUNDARY_MODES,
     _global_edge_halos,
@@ -1044,9 +1050,41 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 )
             return arr2
 
+        def _analyse_static_reads(padded, local_bi, local_dt, padded_static,
+                                  shard_info, extra_kwargs):
+            """How ``update_padded`` reads each sharded static (MADD-ANO-068).
+
+            One extra trace of the node, never compiled, with the statics
+            and the ``shard_info`` offsets as explicit inputs; see
+            :func:`~maddening.cloud.multigpu._scan_hazards.analyse_update_padded`.
+            """
+            if "static_padded" not in extra_kwargs:
+                return {}
+            keys = sorted(padded_static)
+            axes = sorted(shard_info) if "shard_info" in extra_kwargs else []
+
+            def traced(statics, offsets):
+                kwargs = dict(extra_kwargs)
+                kwargs["static_padded"] = dict(zip(keys, statics))
+                if axes:
+                    kwargs["shard_info"] = {
+                        sax: (off, shard_info[sax][1]) for sax, off in zip(axes, offsets)
+                    }
+                return inner.update_padded(padded, local_bi, local_dt, **kwargs)
+
+            closed = jax.make_jaxpr(traced)(
+                [padded_static[k] for k in keys], [shard_info[a][0] for a in axes])
+            layout = []
+            for k in keys:
+                descriptors = static_exchange[k]
+                axis = sharded_static[k].shard_axis
+                halo = int(descriptors[0][2]) if descriptors else 0
+                layout.append((k, axis, halo, int(padded_static[k].shape[axis])))
+            return analyse_update_padded(closed, layout)
+
         def _local_update(local_state, local_bi, local_dt, local_static,
                           local_params, *, grid_bi=frozenset(),
-                          local_extents=None):
+                          local_extents=None, analyse=None):
             # 1. Halo-pad state.  A domain integral carried in the state
             #    is not a grid field: passed through unpadded.
             padded = {
@@ -1104,6 +1142,10 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 extra_kwargs["shard_info"] = shard_info
             if accepts_params and local_params:
                 extra_kwargs["params"] = local_params
+            if analyse is not None:
+                analyse.append(_analyse_static_reads(
+                    padded, local_bi, local_dt, padded_static, shard_info,
+                    extra_kwargs))
             new_padded = inner.update_padded(
                 padded, local_bi, local_dt, **extra_kwargs
             )
@@ -1166,7 +1208,22 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         fn = self._sharded_cache.get(key)
         if fn is not None:
             return fn
+        # Bare shard_map outside jit incurs ~250ms/call of Python dispatch
+        # overhead on CPU; wrapping it in jit reduces that to microseconds.
+        # When ShardedStencilNode is used inside GraphManager's jitted step
+        # function the outer jit would absorb this anyway, but the eager
+        # path (standalone .update calls in tests) needs the explicit jit.
+        fn = jax.jit(self._shard_mapped(state, boundary_inputs, static, params))
+        self._sharded_cache[key] = fn
+        return fn
 
+    def _shard_mapped(self, state: dict, boundary_inputs: dict, static: dict,
+                      params=None, **local_kwargs):
+        """The ``shard_map`` of the local update for these input shapes.
+
+        ``local_kwargs`` reach the local update (``analyse=`` collects how
+        the node reads its statics; see :meth:`_xla_scan_hazards`).
+        """
         # A domain integral fed back as state is placed as the step returns
         # it, not split along a spatial axis like a grid field.
         integrals = set(self._inner.domain_integral_fields())
@@ -1196,21 +1253,81 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
 
         params_specs = jax.tree.map(lambda _: P(), params if params else {})
         local_extents = self._local_extents(state, static)
-        sm = shard_map(
+        return shard_map(
             functools.partial(self._local_update_fn, grid_bi=grid_bi,
-                              local_extents=local_extents),
+                              local_extents=local_extents, **local_kwargs),
             mesh=self._mesh,
             in_specs=(state_specs, bi_specs, P(), static_specs, params_specs),
             out_specs=out_specs,
         )
-        # Bare shard_map outside jit incurs ~250ms/call of Python dispatch
-        # overhead on CPU; wrapping it in jit reduces that to microseconds.
-        # When ShardedStencilNode is used inside GraphManager's jitted step
-        # function the outer jit would absorb this anyway, but the eager
-        # path (standalone .update calls in tests) needs the explicit jit.
-        fn = jax.jit(sm)
-        self._sharded_cache[key] = fn
-        return fn
+
+    def _statics_replicated_over_devices(self) -> dict[str, tuple]:
+        """``{key: ((mesh axis, devices), ...)}`` for each sharded static
+        replicated over a mesh axis of two or more devices.
+
+        A sharded static is split along the one mesh axis
+        :meth:`_spec_for_static_key` names for its ``shard_axis`` and
+        replicated over every other: an axis ``axis_map`` leaves unused,
+        and on a pencil the axis that splits the other spatial axis.  The
+        declaration half of the MADD-ANO-068 condition; whether the node
+        reads the static in the miscompiled pattern is
+        :meth:`_xla_scan_hazards`'s question.
+        """
+        out: dict[str, tuple] = {}
+        for key, sa in self._sharded_static.items():
+            split = next((ma for ma, sax in self._axis_map.items()
+                          if sax == sa.shard_axis), None)
+            replicated = tuple((str(a), int(n)) for a, n in self._mesh.shape.items()
+                               if a != split and int(n) >= 2)
+            if replicated:
+                out[key] = replicated
+        return out
+
+    def _xla_scan_hazards(self, state: dict, boundary_inputs: dict, dt,
+                          params=None) -> list[ScanHazard]:
+        """The statics XLA would miscompile this step for inside a loop.
+
+        MADD-ANO-068: on jaxlib 0.10.2 to 0.11.2 a step traced inside
+        ``lax.scan`` (or another loop) is compiled wrongly when the node
+        reads a sharded static in its halo, reads another array through a
+        window at a ``shard_info`` offset, and the static is replicated
+        over a mesh axis of two or more devices
+        (:meth:`_statics_replicated_over_devices`).  The node's
+        ``update_padded`` is traced once more, with the halos and
+        ``shard_info`` this step would hand it, and walked
+        (:func:`~maddening.cloud.multigpu._scan_hazards.analyse_update_padded`);
+        nothing is compiled.  Empty when no static is replicated that way,
+        which costs nothing.
+        """
+        replicated = self._statics_replicated_over_devices()
+        if not replicated:
+            return []
+        static = self._materialise_sharded_statics()
+        found: list = []
+        jax.make_jaxpr(self._shard_mapped(state, boundary_inputs, static, params,
+                                          analyse=found))(
+            state, boundary_inputs, jnp.asarray(dt), static, params if params else {})
+        node = self._inner
+        while isinstance(node, ShardedStencilNode):
+            node = node._inner
+        hazards: list[ScanHazard] = []
+        for key in sorted(replicated):
+            if not found:
+                # The local update was never traced: nothing was learnt,
+                # so every replicated static counts.
+                hazards.append(ScanHazard(
+                    node=self.name, node_type=type(node).__name__, static=key,
+                    shard_axis=self._sharded_static[key].shard_axis,
+                    replicated_over=replicated[key], window=""))
+                continue
+            halo = any(result.get(key, (False, []))[0] for result in found)
+            windows = [w for result in found for w in result.get(key, (False, []))[1]]
+            if halo and windows:
+                hazards.append(ScanHazard(
+                    node=self.name, node_type=type(node).__name__, static=key,
+                    shard_axis=self._sharded_static[key].shard_axis,
+                    replicated_over=replicated[key], window=window_label(windows)))
+        return hazards
 
     def _local_extents(self, state: dict, static: dict) -> dict[int, int]:
         """``{spatial_axis: cells per block}`` for every sharded axis.
@@ -1447,6 +1564,14 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             sharded axis's extent.
         """
         self._check_state_matches_inner(state)
+        probe = active_probe()
+        if probe is not None:
+            # A graph asking whether this step may go inside a loop
+            # (MADD-ANO-068): answer with the inputs the step really has.
+            entry = probe.setdefault(id(self), (self, []))
+            for hazard in self._xla_scan_hazards(state, boundary_inputs, dt, params):
+                if hazard not in entry[1]:
+                    entry[1].append(hazard)
         static_materialised = self._materialise_sharded_statics()
         fn = self._get_sharded_fn(state, boundary_inputs, static_materialised, params)
         return fn(

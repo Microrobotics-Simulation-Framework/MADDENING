@@ -15,8 +15,8 @@ over *every* built-in node rather than the five scalar kinds of
   ``table_position``) is live;
 * which **writes** to propose (:func:`writes`), in named categories:
   ``valid``, ``boundary``, ``invalid``, ``non_finite``, ``oversized``,
-  ``wrong_type``, ``unknown``, ``initial``, ``structural``, ``cross`` and
-  ``multi``.  A write is a ``{key: JSON value}`` request body; the oracle
+  ``wrong_type``, ``unknown``, ``initial``, ``structural``, ``cross``,
+  ``multi`` and ``mixed`` (a valid key beside a refused one).  A write is a ``{key: JSON value}`` request body; the oracle
   decides what the paths must do with it, the generator only proposes.
 
 ``cheap`` kinds compile and step in well under a second on a CI runner and
@@ -565,6 +565,20 @@ def writes(draw, kind: Kind, kwargs: dict, *,
                 return {key: draw(floats32(-1.0, 1.0))}
             return {key: draw(vec32(-1.0, 1.0, int(np.size(like))))}
         options["initial"] = initial_write
+
+    if safe and bounded:
+        def mixed():
+            # A valid key and a refused one in one request, in either order:
+            # "refused whole" means the valid one is not written either.
+            ok = options["valid"]()
+            bad = options["invalid"]()
+            if set(ok) & set(bad):
+                return bad
+            pairs = [*ok.items(), *bad.items()]
+            if draw(st.booleans()):
+                pairs.reverse()
+            return dict(pairs)
+        options["mixed"] = mixed
 
     if kind.structural is not None:
         options["structural"] = lambda: draw(kind.structural(kwargs))

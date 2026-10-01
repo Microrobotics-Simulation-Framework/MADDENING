@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import warnings
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -220,10 +221,20 @@ def test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload(kind_name, da
     write = data.draw(writes(kind, kwargs), label="write")
     event(f"category={write.category}")
     gm = kind.graph(kwargs)
+    # Sometimes a calibration has already moved a leaf in gm.params alone,
+    # so the live value and the constructor's differ when the request
+    # arrives: GET must serve the live one, and a save must carry it.
+    calibrate = data.draw(st.sampled_from(sorted(kind.safe) + [None]), label="calibrated")
+    if calibrate is not None:
+        live = gm.params["nodes"][kind.name]
+        lo, hi = kind.safe[calibrate]
+        moved = np.clip(np.asarray(live[calibrate]) * np.float32(1.25), lo, hi)
+        live[calibrate] = jnp.asarray(moved.astype(np.asarray(live[calibrate]).dtype))
     with tmp_dir() as root:
         outcome = check_rest_write(gm, REGISTRY, kind.name, write, root=root)
     event(f"{write.category}: {outcome}")
-    if write.category in ("non_finite", "oversized", "wrong_type", "unknown", "invalid"):
+    if write.category in ("non_finite", "oversized", "wrong_type", "unknown", "invalid",
+                          "mixed"):
         assert outcome == "refused", f"{write.category} write {write.params!r} was accepted"
 
 

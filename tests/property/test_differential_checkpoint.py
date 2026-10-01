@@ -78,9 +78,10 @@ def check_checkpoint(original: GraphManager, resumed: GraphManager, pristine: di
     ``original`` and ``resumed`` are two graphs of the family at their
     initial state (freshly built, or reset); ``pristine`` is the full state
     of a freshly compiled graph of the family.  ``resumed`` steps ``split +
-    ahead`` before the checkpoint is loaded into it (``ahead == 0`` on a
-    freshly built graph is the plain resume), so every slot it carries has
-    to be overwritten rather than merely kept.  Afterwards ``original`` is
+    ahead`` and has every parameter leaf its step reads moved
+    (:func:`_detune`) before the checkpoint is loaded into it (``ahead ==
+    0`` on a freshly built graph is the plain resume), so every slot and
+    every leaf it carries has to be overwritten rather than merely kept.  Afterwards ``original`` is
     reset and must hold ``pristine`` bit for bit, ``_meta`` seeds included;
     the same compiled step from the same state is the same rollout.
     """
@@ -89,6 +90,7 @@ def check_checkpoint(original: GraphManager, resumed: GraphManager, pristine: di
         path = original.save_state(checkpoint_path(tmp))
         saved_state, saved_params = full_state(original), params_tree(original)
         resumed.run(split + ahead)
+        _detune(resumed)
         resumed.load_state(path)
     assert_trees_identical(saved_state, full_state(resumed), what="restored state")
     assert_trees_identical(saved_params, params_tree(resumed), what="restored params")
@@ -96,6 +98,19 @@ def check_checkpoint(original: GraphManager, resumed: GraphManager, pristine: di
                            what="continued trajectory")
     original.reset_state()
     assert_trees_identical(pristine, full_state(original), what="reset state")
+
+
+def _detune(gm: GraphManager) -> None:
+    """Move every parameter leaf the step reads, so that only the checkpoint
+    can put it back: a resumed graph built like the original already holds
+    the original's values, and a ``load_state`` that skipped one would go
+    unseen."""
+    reads = gm._params_read_by_step() or set()  # noqa: SLF001
+    for owner, key in reads:
+        leaf = gm.params["nodes"][owner][key]
+        if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating):
+            gm.params["nodes"][owner][key] = (jnp.asarray(leaf) * 1.5 + 0.25).astype(
+                jnp.asarray(leaf).dtype)
 
 
 def check_fresh_family(build, *, split: int, ahead: int) -> None:

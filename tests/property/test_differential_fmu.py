@@ -192,6 +192,12 @@ class Model:
         ))
 
 
+def _nan_canonical(values: np.ndarray) -> np.ndarray:
+    """``values`` with every NaN replaced by the one quiet NaN the JSON
+    wire's ``"NaN"`` token decodes to."""
+    return np.where(np.isnan(values), np.float64(np.nan), values)
+
+
 def _copy_params(params: dict) -> dict:
     return {s: {o: dict(v) for o, v in owners.items()} for s, owners in params.items()}
 
@@ -288,7 +294,12 @@ class Paths:
         vals = self.values()
         names = [v.name for v in self.m.md.variables if not v.is_clock]
         for other in ("sidecar", "graph"):
-            a, b = vals["bridge"], vals[other]
+            # The JSON wire writes a NaN as the token "NaN", which has no sign
+            # and no payload (``json_codec``): a NaN the sidecar holds with
+            # its sign bit set reads back positive over the wire.  So a NaN
+            # is compared as a NaN, and every other value bit for bit (the
+            # states below, which no wire carries, stay bit for bit too).
+            a, b = _nan_canonical(vals["bridge"]), _nan_canonical(vals[other])
             if a.tobytes() != b.tobytes():
                 bad = [n for n, x, y in zip(names, a, b)
                        if np.float64(x).tobytes() != np.float64(y).tobytes()]

@@ -772,6 +772,176 @@ Each oracle was mutation-tested against a scratch copy of `src/` with at
 least one seeded fault, and each fault was caught. The PR that added the
 harness lists them.
 
+### Sharding wrappers
+
+**Oracle.** For a node and a composition of sharded wrappers around it,
+the graph built with the sharded composition and the same graph built
+with the node unwrapped give the same answer on every graph surface:
+`step`, `run`, `run_scan`, `run_scan(params=)`, a `gm.params` write (a
+`node.params` write for a node on the three-argument contract) followed
+by `compile()`, a `set_node_state` write followed by `run_scan`, and the
+gradient of a loss of `run_scan`'s final state. Otherwise the sharded
+composition must be refused loudly before it produces a state: at
+construction, at `compile()`, or at the first step. (`compile()` does not
+trace the step, so every check a wrapper makes in `update` fires at the
+first step.)
+
+**Where.** `tests/cloud/multigpu/differential_sharding_support.py` holds
+the generators, the two paths and the comparisons.
+`test_differential_sharding.py` covers the synthetic nodes and the
+`property_support` examples; `test_differential_sharding_builtins.py`
+covers the built-in nodes, the refusals and the known cases.
+
+**What is generated.** Three synthetic node families, one per wrapper.
+In each, the unsharded `update` and the per-shard `update_padded` call one
+shared kernel, so the only thing that can make the paths differ is what
+the wrapper delivers:
+
+- *Stencil* (`ShardedStencilNode`):
+  - grid and halo: a 1-D or 2-D grid, halo width 1 or 2 per axis, and a
+    global fill of `edge`, `zero` or `periodic`, declared through
+    `halo_boundary()` or not;
+  - contract: the legacy three-argument contract or the params contract;
+  - domain integral in the state: none, scalar, 2-vector or per-shard;
+    named to sort before or after the grid field; listed in
+    `state_fields()` or not;
+  - `shard_info`: read or not;
+  - statics: a sharded `StaticArray` read in the interior or in the halo,
+    and a replicated one read through the offsets;
+  - boundary inputs: per-cell, scalar or mis-shaped; a gain; face inputs
+    applied on the global edges;
+  - precision: float32 or float64.
+- *Pointwise* (`ShardedPointwiseNode`):
+  - a 1-D or 2-D state, sharded along either axis;
+  - the contract;
+  - per-cell, scalar or mis-shaped inputs;
+  - a whole-domain total in the state.
+- *Unstructured* (`ShardedUnstructuredNode`):
+  - partitions: uneven (an empty shard possible), balanced in global
+    order, and balanced out of global order;
+  - the exchange: `all_to_all` or `ppermute`;
+  - the contract and the integral kinds above, the integral masked with
+    `shard_info["n_local"]`;
+  - a partitioned weight read on owned cells only, or on ghosts too;
+  - per-cell, scalar or mis-shaped inputs.
+
+Meshes: 1, 2 or 4 devices; the pencils (2, 2), (1, 4) and (4, 1),
+including their size-1 axes; and slabs of a 2-D grid. Wrappings: the
+wrapper alone; nested one level (stencil and pointwise);
+`HybridNode(wrapper)`; and the pointwise wrapper around a `HybridNode`.
+
+Built-in nodes: `HeatNode` at orders 2 and 4, with rod-end temperatures
+and sources. A non-uniform rod must be refused sharded, and runs
+unsharded. `LBMNode` D2Q9 and D3Q19 channels, with walls and an obstacle,
+on slabs and pencils, with body force and pressure faces. A pressure face
+is refused on a split axis. `ShardedStencilNode(LBMPipeNode)` is refused.
+
+The non-dividing-grid refusal's advice is followed both ways: the next
+multiple, and each device count that divides. The sharded graph then
+answers as the unsharded one.
+
+**Tolerances.**
+
+- *Grid fields*: within `16 eps max(1, |field|)` per step, growing by at
+  most 1.5 per later step (`grid_atol`). The two paths run one kernel on
+  the same data, so they would agree bit for bit but for one thing:
+  XLA:CPU contracts `a*b + c` into a fused multiply-add inside a fusion,
+  and a `shard_map` is a fusion boundary the unsharded program does not
+  have. An FMA skips one rounding. Measured on jaxlib 0.11.0, every
+  float32 `a*b + c` of 10^5 matched the correctly rounded FMA, and 23%
+  differed from the split computation. The largest difference observed
+  over the generated matrix was 1/16 of the bound, one ulp of the field's
+  scale.
+- *Domain integrals*: the summation-reordering bound
+  `(n - 1) eps sum|t|`, plus the integrated grid field's own bound.
+- *Gradients*: the larger of two bounds (`gradient_bound`).
+  - *A derived base*, from a forward-mode pass of the unsharded path: the
+    absolute sum of the gradient's terms before they cancel, the tangent,
+    and the departure from the initial state. A near-equilibrium state,
+    whose gradient is a small difference of large terms, gets the looser
+    base it needs.
+  - *The gradient's measured sensitivity to reordering*: four times the
+    distance between the unsharded path's reverse-mode and forward-mode
+    gradients, in the run's own precision. The two compute one derivative
+    with every operation reordered, while sharding reorders only the
+    shard-boundary terms.
+
+  Each half was added after an oracle error, not a wrapper defect:
+
+  - The first version used a fixed allowance relative to `|g|`, and an LBM
+    channel one step from rest exceeded it.
+  - The base alone then failed in the slow lane, on an unstructured ring
+    with an empty shard, relaxed to nearly equal values. There
+    `d x / d rate` is a small difference of nearly equal numbers. The two
+    paths agree to 5e-13 in float64, while in float32 each is 1e-4 off
+    the float64 gradient, the sharded path the closer. Sharded and
+    unsharded differed by 0.5 times the forward/reverse distance in
+    float32 and 0.8 times in float64.
+
+  That case is a per-push witness. The largest well-conditioned gradient
+  difference observed was 0.05 of the base.
+- *Precision*: every bound is in units of the dtype's own `eps`, so a
+  float64 run holds the sharded path to float64. A `dt` rounded to
+  float32 under x64 (MADD-ANO-033) is a failure.
+
+**Budget.** The per-push tests draw one surface per example at the
+`EXAMPLES_COSTLY` depth, with `derandomize=True`. Gradients run on a fixed
+set per push. On a 6-core slice with CI's compilation-cache settings, the
+slowest per-push test takes 3.2 s warm and 9.4 s cold (the generated D2Q9
+test, allowlisted: one LBM compile per path per example). The rest take
+at most 2.7 s warm and 5.2 s cold. Each `@pytest.mark.slow` test is the broad
+version of a named per-push test: every surface on every example, at
+`EXAMPLES_STANDARD` depth, gradients over the whole matrix.
+
+**Harness mutants.** Each fault was seeded into a scratch copy of `src/`;
+the per-push tests catch each one.
+
+| Seeded fault | Per-push tests that catch it |
+|---|---|
+| `shard_info`'s extent read from the first state field in sorted order, a domain integral included (MADD-ANO-056) | generated 1-D stencil |
+| A sharded static's halo always edge-filled (the pre-0.4.0 rule) | generated 1-D and 2-D stencil; gradients |
+| A nested `ShardedStencilNode` not forwarding `params` | generated 1-D and 2-D stencil; generated heat rod; built-in gradients |
+| A per-cell input replicated instead of sharded: stencil wrapper | ten tests, every family the stencil wrapper serves |
+| A per-cell input replicated instead of sharded: unstructured wrapper | generated unstructured; gradients; the known balanced-partition refusal |
+| An integral summing the padding rows (`shard_info["n_local"]` set to `n_local_max`) | generated unstructured; gradients |
+| The gradient stopped at the stencil wrapper (`stop_gradient` on `params`) | gradients (synthetic and built-in) |
+| A recompile that keeps the stale compiled step (MADD-ANO-032) | generated 1-D and 2-D stencil |
+| A mis-shaped per-cell input not refused (MADD-ANO-057) | generated 1-D and 2-D stencil; generated D2Q9 |
+| The `shard_info` offset not scaled by the extent | generated 1-D and 2-D stencil; generated heat rod; gradients; the non-dividing-grid advice |
+| `dt` cast to float32 under x64 (MADD-ANO-033) | generated 1-D and 2-D stencil; gradients |
+| `ShardedPointwiseNode` not forwarding `params` | generated pointwise; gradients; the examples |
+| The halo of an unsharded axis edge-filled whatever the fill | generated 2-D stencil; generated D2Q9; D3Q19; gradients |
+| `ShardedUnstructuredNode` not forwarding `params` | generated unstructured; gradients; the examples |
+
+The first run of this table caught 13 of the 14 faults, three of them only
+through the fixed gradient set, and missed the stale compiled step. Both
+causes were in the harness:
+
+- Hypothesis biases generation towards the first element of a
+  `sampled_from`, so half of a 20-example per-push run was single-device
+  on a one-cell grid. The strategies now list their richest value first.
+- The write surface wrote before the graph had ever traced, so there was
+  no stale trace to keep. It now runs, writes, recompiles and runs again.
+
+**What it cannot see.**
+
+- *Code both paths share*: `GraphManager`, its params validation, and
+  the node's own kernel. A kernel that computes the wrong physics
+  computes it on both paths.
+- *Specification errors*: where the harness node follows the wrapper's
+  documented contract (the static-halo fill rule, the `shard_info`
+  layout), a harness that agrees with a wrong document agrees with a
+  wrong wrapper.
+- *Its own assumptions*: a per-shard integral on a mesh axis the
+  `axis_map` leaves unused repeats its partials along that axis, so
+  "the partials sum to the total" does not hold there, and the harness
+  does not draw it.
+- *Excluded cases*: the cases excluded while a fix is pending
+  (`PENDING_*` in the support module).
+- *Hardware*: real multi-GPU hardware and NCCL. The harness runs on
+  virtual CPU devices only.
+- *Performance*.
+
 ## Test Organization
 
 ```

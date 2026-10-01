@@ -1691,13 +1691,14 @@ def _gradient(case: Case, sharded: bool):
 
 
 def gradient_scales(case: Case) -> dict:
-    """The absolute sums :func:`gradient_bound` is built from, on the unsharded path.
+    """What :func:`gradient_bound` is built from, on the unsharded path.
 
-    From one forward-mode pass: the final state ``s``, its tangent
-    ``ds = d s / d theta`` and the departure ``dev = s - s0`` over every
-    floating field.  ``A = sum|2 dev ds|`` (the gradient's terms, before
-    they cancel), ``B = sum|ds|``, ``S = sum|dev|``, ``Q = sum dev**2``
-    (the loss), ``T = max|ds|`` and ``M = max|s|``.
+    One forward-mode pass gives the final state ``s``, its tangent
+    ``ds = d s / d theta``, the departure ``dev = s - s0`` over every
+    floating field, and the loss's own forward-mode derivative ``g_fwd``
+    in the run's precision.  ``A = sum|2 dev ds|`` (the gradient's terms
+    before they cancel), ``B = sum|ds|``, ``S = sum|dev|``, ``Q = sum
+    dev**2`` (the loss), ``T = max|ds|`` and ``M = max|s|``.
     """
     initial, theta0, run = _theta_runner(case, False)
 
@@ -1707,14 +1708,18 @@ def gradient_scales(case: Case) -> dict:
                  if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)]
         return jnp.concatenate(parts)
 
+    def both(t):
+        final = run(t)
+        return flat(final), loss_of(case, final, False, initial)
+
     s0 = np.asarray(flat(initial), np.float64)
-    s, ds = jax.jvp(lambda t: flat(run(t)), (theta0,), (jnp.ones_like(theta0),))
+    (s, _), (ds, g_fwd) = jax.jvp(both, (theta0,), (jnp.ones_like(theta0),))
     s, ds = np.asarray(s, np.float64), np.asarray(ds, np.float64)
     dev = s - s0
     return {"A": float(np.sum(np.abs(2.0 * dev * ds))), "B": float(np.sum(np.abs(ds))),
             "S": float(np.sum(np.abs(dev))), "Q": float(np.sum(dev * dev)),
             "T": float(np.max(np.abs(ds))), "M": float(np.max(np.abs(s))),
-            "n": int(s.size)}
+            "n": int(s.size), "g_fwd": float(g_fwd)}
 
 
 # ---------------------------------------------------------------------------
@@ -1840,40 +1845,47 @@ def _reverse_terms(cfg) -> int:
     return 2 * width + 9
 
 
-def gradient_bound(cfg, scales: dict) -> tuple[float, float]:
+def gradient_bound(cfg, scales: dict, g_rev: float) -> tuple[float, float]:
     """``(loss bound, gradient bound)``, absolute, for the two paths.
 
     The loss is ``L = sum dev**2`` and its gradient ``g = sum 2 dev ds``
-    (:func:`gradient_scales` names the sums).  Three sources of
-    difference, each bounded by the rule that any two orders of a sum of
+    (:func:`gradient_scales` names the sums).  The gradient bound is the
+    larger of two things.
+
+    **A derived base**, from the rule that any two orders of a sum of
     ``m`` terms differ by at most ``(m - 1) eps`` times its absolute sum:
+    the reverse pass reorders sums (the transpose of a halo exchange adds
+    a neighbour's cotangent into a cell after the cell's own stencil
+    terms; the loss is reduced per shard first), ``(n + steps * terms) *
+    eps * A``; the forward state may differ by :func:`grid_atol` per
+    cell, ``2 * grid_atol * B``; and the tangent by ``FMA_SITES * eps *
+    growth * T`` per cell, times ``2 S``.
 
-    * the reverse pass reorders sums -- the transpose of a halo exchange
-      adds a neighbour's cotangent into a cell after the cell's own
-      stencil terms, the loss is reduced per shard first -- so per cell
-      and step ``_reverse_terms`` terms, and ``n`` cells in the final
-      reduction: ``(n + steps * terms) * eps * A``;
-    * the forward state may already differ by :func:`grid_atol` per
-      cell, which moves ``g`` by at most ``2 * grid_atol * B`` and ``L``
-      by ``2 * grid_atol * S``;
-    * the tangent ``ds`` is computed through the same kernels and may
-      differ by ``FMA_SITES * eps * growth * T`` per cell, moving ``g`` by
-      at most that times ``2 S``.
-
-    ``A`` is the sum of the gradient's terms *before* they cancel, so the
-    bound is relative to that and not to ``|g|``: a near-equilibrium state
-    whose gradient is a small difference of large terms (an LBM channel
-    one step from rest) has a correspondingly looser bound, as it must.
+    **The gradient's own sensitivity to reordering, measured**: four times
+    the distance between the unsharded path's reverse-mode gradient
+    ``g_rev`` and its forward-mode one ``g_fwd``, in the same precision.
+    The two compute the same derivative with every operation in another
+    order; sharded and unsharded reverse modes reorder only the terms at
+    the shard boundaries.  The base above assumes the cancellation is in
+    the final reduction; it is not always.  On an unstructured ring
+    relaxed to nearly equal values, ``d x / d rate`` is built from
+    ``mean - owned``, a small difference of nearly equal numbers, and the
+    float32 gradient is 1e-4 off the float64 one on *either* path, with
+    the sharded path the closer of the two; sharded and unsharded then
+    differed by 0.5x the forward/reverse distance in float32 and 0.8x in
+    float64 (both paths agree to 5e-13 in float64).  The factor 4 allows
+    for comparing one sample of each.
     """
     eps = eps_of(cfg.dtype)
     growth = sum(STEP_GROWTH ** k for k in range(int(cfg.steps)))
     atol = FMA_SITES * eps * max(1.0, scales["M"]) * growth
     t_atol = FMA_SITES * eps * scales["T"] * growth
     n = scales["n"]
-    g_bound = ((n + cfg.steps * _reverse_terms(cfg)) * eps * scales["A"]
-               + 2.0 * atol * scales["B"] + 2.0 * t_atol * scales["S"])
+    base = ((n + cfg.steps * _reverse_terms(cfg)) * eps * scales["A"]
+            + 2.0 * atol * scales["B"] + 2.0 * t_atol * scales["S"])
+    measured = 4.0 * abs(g_rev - scales["g_fwd"])
     l_bound = n * eps * scales["Q"] + 2.0 * atol * scales["S"]
-    return l_bound, g_bound
+    return l_bound, max(base, measured)
 
 
 def assert_gradients_agree(case: Case, sharded, unsharded, context: str,
@@ -1882,7 +1894,7 @@ def assert_gradients_agree(case: Case, sharded, unsharded, context: str,
         return
     (ls, gs), (lu, gu) = sharded, unsharded
     scales = gradient_scales(case) if scales is None else scales
-    l_bound, g_bound = gradient_bound(case.cfg, scales)
+    l_bound, g_bound = gradient_bound(case.cfg, scales, gu)
     assert np.isfinite(gs) and np.isfinite(gu), f"{context}: {gs} {gu}"
     OBSERVED.append(("gradient", case.cfg.dtype, abs(gs - gu) / max(g_bound, 1e-300)))
     assert abs(ls - lu) <= l_bound, (

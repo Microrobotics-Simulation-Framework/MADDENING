@@ -119,6 +119,15 @@ _GRADIENT_CASES = {
         n_devices=4, shape=(2, 8), shard_axis=1, contract="params", total=True,
         source="per_cell", misshapen_shape=(), gain=True, dtype="float32",
         wrapping="nested", steps=3, seed=14, surface="gradient"),
+    # Found by the slow lane: one shard empty, a ring relaxed to nearly
+    # equal values, so d x / d rate is a small difference of nearly equal
+    # numbers and the float32 gradient is ill-conditioned on either path.
+    "unstructured-empty-shard-ill-conditioned": D.UnstructuredConfig(
+        n_devices=2, n_cells=3, assignment=(0, 0, 0), partition="uneven", chords=(),
+        contract="params", integral="vector", integral_name="a_total",
+        integral_listed=True, weight="halo", source="scalar", misshapen_len=0,
+        gain=True, dtype="float32", wrapping="hybrid", steps=4, seed=605,
+        surface="gradient"),
     "unstructured-uneven-per-shard-weights-hybrid": D.UnstructuredConfig(
         n_devices=4, n_cells=9, assignment=(0, 0, 0, 1, 3, 3, 1, 0, 3),
         partition="uneven", chords=((0, 4), (2, 7)), contract="params",

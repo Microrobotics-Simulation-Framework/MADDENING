@@ -58,6 +58,18 @@ def test_the_exchange_returns_the_local_block_unchanged(method, trailing):
     np.testing.assert_array_equal(np.asarray(got), np.asarray(values))
 
 
+@pytest.mark.parametrize("method", ["all_to_all", "ppermute"])
+def test_the_exchange_hands_back_the_very_array_it_was_given(method):
+    """No operation at all, so nothing for a transpose to trip on.
+
+    This is what holds on every jaxlib: the zero-size tail it replaced
+    gave the same values and shape, and only crashed on 0.11.2.
+    """
+    local = jnp.arange(2, dtype=jnp.float32)
+    assert exchange_unstructured(local, layout=_edge_disjoint_layout(), mesh_axis="devices",
+                                 method=method) is local
+
+
 def test_an_unknown_method_is_still_refused_on_a_layout_without_ghosts():
     with pytest.raises(ValueError, match="method must be 'all_to_all' or 'ppermute'"):
         exchange_unstructured(jnp.zeros(2), layout=_edge_disjoint_layout(),

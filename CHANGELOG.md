@@ -176,6 +176,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **A domain integral is neither summed nor stacked over a mesh axis a `ShardedStencilNode`'s `axis_map` leaves unused** (MADD-ANO-066):
+  releases summed it there, counting every block once per device along it (2x on a `(2, 2)` mesh), and a per-shard integral there now has
+  one leading axis per mesh axis that splits the grid.  Action: re-run sharded totals from such a mesh; drop the extra axis when reading per-shard values
 - **`maddening.sysid.fit` and `fit_multiple_shooting` return the lowest-loss iterate they evaluated, not the last**: Adam's ~`lr`-sized step could end a run above where it started (one fit went from loss `2.7e-8` to `1.9e-4`, unreported). `FitResult.best_iteration` and `best_loss` say which iterate was returned; a run whose loss never rose is bit-identical to before, and `fit_lm` already returned its lowest iterate.
   Action: nothing for a fit that converged; where you relied on the last iterate, read `best_iteration` (it equals `len(losses)` when the last update's result was the lowest).
 - **`HeatNode` refuses more of what it used to run wrongly, and `compile()` warns about an unstable coupled pair**: a rod on `grid_points` is held to `dt*alpha/min(h_L*h_R) <= 1/2` (the Fourier check skipped it; MADD-ANO-002), and a non-positive `length` or `timestep`, a negative `thermal_diffusivity`, a non-finite one of these, or `grid_points` not strictly increasing raise `ValueError` (MADD-ANO-062).
@@ -319,6 +322,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Sharding, from the differential harness**: `ShardedUnstructuredNode` refuses a per-cell input neither in partition layout nor broadcastable
+  (a slab-length one was read by every shard as its slab; MADD-ANO-063); `gather_global` passes an integral listed in `state_fields()` through
+  (MADD-ANO-064); a nested stencil wrapper starts a per-shard integral stacked once (MADD-ANO-065); zero-ghost reverse scans no longer segfault jaxlib 0.11.2
 - **`ParamSpec.from_dict` refuses a non-boolean `trainable` or a non-numeric bound** (`"false"` read as trainable, `true` as 1.0): a saved
   graph carrying one fails to load, a USD stage warns and skips it.  **`run_pod.py`'s stencil, hybrid and coupled goals now fail on a
   broken stencil wrapper** (four seeded faults; schema 5, pencil mesh, D2Q9).  Action: write JSON booleans; re-run schema-4 dry runs.
@@ -665,6 +671,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-063 to 066 (new, resolved in this release)**: the four sharding defects above (063, 064 and 066 since 0.2.1 or 0.3.0; 065 never released).
+  **MADD-ANO-067 (new, open)**: XLA (jaxlib 0.10.2 to 0.11.2) miscompiles a `ShardedStencilNode` step inside `run_scan` for a node reading a sharded
+  static replicated over a mesh axis in its halo beside a window at its `shard_info` offset; check such a node's `run_scan` against `step()`
 - **Severities defined; fourteen relabelled; four entries partially resolved**: `AnomalySeverity` now defines each level, and a silent wrong result is never `minor`, so MADD-ANO-005, 009, 025, 027, 029, 031, 038, 041, 048, 055, 057, 058 and 061 move to `major`, and 052 (a default-exposed route) to `critical`.
   MADD-ANO-032, 036, 047 and 049 are `partially_resolved`, not `resolved`: their routes outside a graph or the REST route are still live (see each `residual_risk`); the release notes' Known anomalies section now names every reachable entry, and a test keeps it so.
   Sharded nodes: iterate `update_padded`'s `shard_info` over its `int` keys only; `"n_local"` (unstructured wrapper) is the one string key.

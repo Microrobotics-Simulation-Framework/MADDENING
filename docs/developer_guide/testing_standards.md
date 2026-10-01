@@ -826,7 +826,8 @@ the wrapper delivers:
   - per-cell, scalar or mis-shaped inputs.
 
 Meshes: 1, 2 or 4 devices; the pencils (2, 2), (1, 4) and (4, 1),
-including their size-1 axes; and slabs of a 2-D grid. Wrappings: the
+including their size-1 axes; slabs of a 2-D grid; and a (2, 2) mesh whose
+`axis_map` uses one axis, the node replicated along the other. Wrappings: the
 wrapper alone; nested one level (stencil and pointwise);
 `HybridNode(wrapper)`; and the pointwise wrapper around a `HybridNode`.
 
@@ -932,12 +933,13 @@ causes were in the harness:
   documented contract (the static-halo fill rule, the `shard_info`
   layout), a harness that agrees with a wrong document agrees with a
   wrong wrapper.
-- *Its own assumptions*: a per-shard integral on a mesh axis the
-  `axis_map` leaves unused repeats its partials along that axis, so
-  "the partials sum to the total" does not hold there, and the harness
-  does not draw it.
 - *Excluded cases*: the cases excluded while a fix is pending
-  (`PENDING_*` in the support module).
+  (`PENDING_*` in the support module). One is left:
+  `PENDING_XLA_REPLICATED_STATIC_IN_SCAN`, an XLA miscompile inside
+  `lax.scan` (MADD-ANO-067), for which a sharded static read in the halo
+  beside a window at the `shard_info` offset is not drawn on a mesh that
+  replicates the static over an axis of two or more devices. Its exact
+  cases are strict xfails in `test_unused_mesh_axis_integrals.py`.
 - *Hardware*: real multi-GPU hardware and NCCL. The harness runs on
   virtual CPU devices only.
 - *Performance*.

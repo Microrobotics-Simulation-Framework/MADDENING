@@ -13,7 +13,7 @@ naming only it; a third mesh axis; nesting; a gradient through
 axis but its own this way and is the model followed.
 
 The XLA miscompile found while widening the differential harness to
-such meshes is pinned at the end as strict xfails (MADD-ANO-068).
+such meshes is pinned at the end as strict xfails (MADD-ANO-067).
 """
 
 from __future__ import annotations
@@ -135,13 +135,13 @@ def test_the_unstructured_wrapper_on_a_2d_mesh_answers_as_unsharded(integral, me
 
 
 # ---------------------------------------------------------------------------
-# MADD-ANO-068: XLA miscompiles a sharded static replicated over a mesh
+# MADD-ANO-067: XLA miscompiles a sharded static replicated over a mesh
 # axis inside lax.scan.  Strict xfails: an XLA that fixes it flips them,
 # and PENDING_XLA_REPLICATED_STATIC_IN_SCAN in the harness can then go.
 # ---------------------------------------------------------------------------
 
 _XLA_REASON = (
-    "MADD-ANO-068: XLA (jaxlib 0.10.2-0.11.2) miscompiles a ShardedStencilNode step "
+    "MADD-ANO-067: XLA (jaxlib 0.10.2-0.11.2) miscompiles a ShardedStencilNode step "
     "inside lax.scan when a sharded StaticArray is replicated over a mesh axis of 2+ "
     "devices and the node reads it in its halo and a replicated array through a window "
     "at its shard_info offset")

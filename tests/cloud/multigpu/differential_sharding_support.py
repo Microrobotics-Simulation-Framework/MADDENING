@@ -947,6 +947,10 @@ class Case:
     refusal: Optional[tuple] = None
     known: Optional[str] = None
     layout: Any = None
+    #: The unsharded node refuses the same configuration (a mis-shaped
+    #: input); otherwise the refusal is the sharded path's own and the
+    #: unsharded node runs.
+    unsharded_refuses: bool = False
 
 
 def _innermost(node):
@@ -1009,7 +1013,8 @@ def _stencil_case(cfg: StencilConfig) -> Case:
         return dict(state)
 
     return Case(cfg=cfg, make=make, externals=externals, gather=gather,
-                gather_traced=gather_traced, inner_of=_innermost, refusal=refusal)
+                gather_traced=gather_traced, inner_of=_innermost, refusal=refusal,
+                unsharded_refuses=cfg.source == "misshapen")
 
 
 def _pointwise_case(cfg: PointwiseConfig) -> Case:
@@ -1056,7 +1061,7 @@ def _pointwise_case(cfg: PointwiseConfig) -> Case:
 
     return Case(cfg=cfg, make=make, externals=externals, gather=gather,
                 gather_traced=lambda sharded, s: dict(s), inner_of=_innermost,
-                refusal=refusal)
+                refusal=refusal, unsharded_refuses=cfg.source == "misshapen")
 
 
 def layout_rows_of_global(layout) -> np.ndarray:
@@ -1132,12 +1137,260 @@ def _unstructured_case(cfg: UnstructuredConfig) -> Case:
 
     return Case(cfg=cfg, make=make, externals=externals, gather=gather,
                 gather_traced=gather_traced, inner_of=inner_of, refusal=refusal,
-                known=known, layout=layout)
+                known=known, layout=layout,
+                unsharded_refuses=cfg.source == "misshapen")
+
+
+# ---------------------------------------------------------------------------
+# Built-in nodes
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HeatConfig:
+    """A ``HeatNode`` rod, sharded along its one axis."""
+
+    n_devices: int
+    order: int                 # stencil_order, 2 or 4
+    n_cells: int
+    nonuniform: bool
+    ends: bool                 # left/right temperature inputs
+    source: str                # "none" | "per_cell" | "scalar" | "misshapen"
+    wrapping: str              # "single" | "nested" | "hybrid"
+    steps: int
+    seed: int
+    surface: str
+    dtype: str = "float32"
+    contract: str = "params"
+    integral: Optional[str] = None
+    family: str = "heat"
+
+
+@dataclass(frozen=True)
+class LBMConfig:
+    """An ``LBMNode`` channel with walls and an obstacle."""
+
+    lattice: str               # "D2Q9" | "D3Q19"
+    mesh_shape: tuple
+    axis_names: tuple
+    axis_map: tuple
+    shape: tuple
+    force: str                 # "none" | "uniform" | "per_cell" | "misshapen"
+    pressure: bool             # inlet/outlet pressure on the x faces
+    wrapping: str
+    steps: int
+    seed: int
+    surface: str
+    dtype: str = "float32"
+    contract: str = "params"
+    integral: Optional[str] = None
+    family: str = "lbm"
+
+
+#: The built-in node's differentiable constant each case writes and differentiates.
+BUILTIN_PARAM = {"heat": "thermal_diffusivity", "lbm": "viscosity"}
+
+
+def _heat_node(cfg: HeatConfig):
+    from maddening.nodes.heat import HeatNode  # noqa: PLC0415
+    n = cfg.n_cells
+    rng = np.random.default_rng(cfg.seed)
+    t0 = (300.0 + 40.0 * np.sin(np.linspace(0.0, 3.0, n))
+          + rng.standard_normal(n)).tolist()
+    alpha = 0.01
+    if cfg.nonuniform:
+        # Strictly increasing, inside the rod; Fourier number 0.2 on the
+        # node's own spacing (#167 refuses an unstable non-uniform rod).
+        from maddening.nodes.heat import _nonuniform_fourier_spacing  # noqa: PLC0415
+        gaps = 0.5 + rng.random(n)
+        x = np.cumsum(gaps)
+        x = (x - x[0]) / (x[-1] - x[0]) * 0.9 + 0.05
+        dt = 0.2 * _nonuniform_fourier_spacing(x.tolist()) / alpha
+        return HeatNode(NODE_NAME, dt, n_cells=n, thermal_diffusivity=alpha,
+                        initial_temperature=t0, stencil_order=2,
+                        grid_points=x.tolist())
+    dx = 1.0 / n
+    limit = 0.2 if cfg.order == 2 else 0.15
+    return HeatNode(NODE_NAME, limit * dx * dx / alpha, n_cells=n,
+                    thermal_diffusivity=alpha, initial_temperature=t0,
+                    stencil_order=cfg.order)
+
+
+def _heat_case(cfg: HeatConfig) -> Case:
+    def make(sharded: bool) -> SimulationNode:
+        node = _heat_node(cfg)
+        if not sharded:
+            return HybridNode(node, _heat_correction) if cfg.wrapping == "hybrid" else node
+        mesh = create_device_mesh(shape=(cfg.n_devices,))
+        wrapped = ShardedStencilNode(node, mesh, {"devices": 0}, boundary="edge")
+        if cfg.wrapping == "nested":
+            wrapped = ShardedStencilNode(wrapped, mesh, {"devices": 0}, boundary="edge")
+        elif cfg.wrapping == "hybrid":
+            wrapped = HybridNode(wrapped, _heat_correction)
+        return wrapped
+
+    def externals(sharded: bool) -> dict:
+        r = np.random.default_rng(cfg.seed + 1)
+        ext = {}
+        if cfg.ends:
+            ext["left_temperature"] = np.asarray(250.0, np.float32)
+            ext["right_temperature"] = np.asarray(380.0, np.float32)
+        n = cfg.n_cells
+        if cfg.source == "per_cell":
+            ext["heat_source"] = (5.0 * r.standard_normal(n)).astype(np.float32)
+        elif cfg.source == "scalar":
+            ext["heat_source"] = np.asarray(3.0, np.float32)
+        elif cfg.source == "misshapen":
+            bad = n // cfg.n_devices if cfg.n_devices > 1 else n + 1
+            if bad in (1, n):
+                bad = n + 1
+            ext["heat_source"] = r.standard_normal(bad).astype(np.float32)
+        return ext
+
+    refusal = known = None
+    misshapen = (ValueError, r"boundary input 'heat_source' has shape")
+    if cfg.nonuniform:
+        # Loud, at the first step; a mis-shaped source is refused first.
+        refusal = ("run", (NotImplementedError, ValueError),
+                   r"non-uniform grids under sharding"
+                   + (f"|{misshapen[1]}" if cfg.source == "misshapen" else ""))
+        known = "HeatNode.update_padded does not support a non-uniform grid"
+    elif cfg.source == "misshapen":
+        refusal = ("run",) + misshapen
+
+    def gather(sharded, state):
+        return {k: np.asarray(jax.device_get(v)) for k, v in state.items()}
+
+    return Case(cfg=cfg, make=make, externals=externals, gather=gather,
+                gather_traced=lambda sharded, st_: dict(st_), inner_of=_innermost,
+                refusal=refusal, known=known,
+                unsharded_refuses=cfg.source == "misshapen")
+
+
+def _heat_correction(state, boundary_inputs, dt):
+    t = state["temperature"]
+    return {"temperature": -1e-4 * dt * (t - 300.0)}
+
+
+def _lbm_node(cfg: LBMConfig):
+    from maddening.nodes.lbm import LBMNode  # noqa: PLC0415
+    shape = tuple(cfg.shape)
+    mask = np.zeros(shape, dtype=bool)
+    # Channel walls on the last axis, and a one-cell obstacle off-centre.
+    mask[..., 0] = True
+    mask[..., -1] = True
+    rng = np.random.default_rng(cfg.seed)
+    obstacle = tuple(int(rng.integers(0, n)) for n in shape[:-1]) + \
+        (int(rng.integers(1, shape[-1] - 1)),)
+    mask[obstacle] = True
+    return LBMNode(NODE_NAME, 1.0, grid_shape=shape, viscosity=0.1,
+                   lattice=cfg.lattice, wall_mask=mask)
+
+
+def _lbm_case(cfg: LBMConfig) -> Case:
+    axis_map = dict(cfg.axis_map)
+    D = len(cfg.shape)
+
+    def make(sharded: bool) -> SimulationNode:
+        node = _lbm_node(cfg)
+        if not sharded:
+            return HybridNode(node, _correction) if cfg.wrapping == "hybrid" else node
+        mesh = create_device_mesh(shape=tuple(cfg.mesh_shape), axis_names=tuple(cfg.axis_names))
+        wrapped = ShardedStencilNode(node, mesh, axis_map, boundary="periodic")
+        if cfg.wrapping == "nested":
+            wrapped = ShardedStencilNode(wrapped, mesh, axis_map, boundary="periodic")
+        elif cfg.wrapping == "hybrid":
+            wrapped = HybridNode(wrapped, _correction)
+        return wrapped
+
+    def externals(sharded: bool) -> dict:
+        r = np.random.default_rng(cfg.seed + 1)
+        ext = {}
+        if cfg.force == "uniform":
+            ext["body_force"] = (1e-4 * (1.0 + r.random(D))).astype(np.float32)
+        elif cfg.force == "per_cell":
+            ext["body_force"] = (1e-4 * r.standard_normal(tuple(cfg.shape) + (D,))
+                                 ).astype(np.float32)
+        elif cfg.force == "misshapen":
+            bad = (cfg.shape[0] + 1,) + tuple(cfg.shape[1:]) + (D,)
+            ext["body_force"] = (1e-4 * r.standard_normal(bad)).astype(np.float32)
+        if cfg.pressure:
+            ext["inlet_pressure"] = np.asarray(1.002 / 3.0, np.float32)
+            ext["outlet_pressure"] = np.asarray(0.998 / 3.0, np.float32)
+        return ext
+
+    sizes = dict(zip(cfg.axis_names, cfg.mesh_shape))
+    split_x = any(sa == 0 and sizes[ma] > 1 for ma, sa in cfg.axis_map)
+    refusal = None
+    if cfg.force == "misshapen":
+        refusal = ("run", ValueError, r"boundary input 'body_force' has shape")
+    elif cfg.pressure and split_x:
+        refusal = ("run", ValueError, r"imposes inlet_pressure")
+
+    def gather(sharded, state):
+        return {k: np.asarray(jax.device_get(v)) for k, v in state.items()}
+
+    return Case(cfg=cfg, make=make, externals=externals, gather=gather,
+                gather_traced=lambda sharded, st_: dict(st_), inner_of=_innermost,
+                refusal=refusal, unsharded_refuses=cfg.force == "misshapen")
+
+
+@st.composite
+def heat_configs(draw, *, surfaces=FORWARD_SURFACES, max_steps: int = 4) -> HeatConfig:
+    n_dev = draw(st.sampled_from(_counts(1, 2, 4)))
+    order = draw(st.sampled_from([2, 4]))
+    halo = 1 if order == 2 else 2
+    per = draw(st.integers(halo, halo + 3))
+    n = n_dev * per
+    while order == 4 and n < 5:
+        n += n_dev
+    nonuniform = draw(st.booleans()) if order == 2 else False
+    while nonuniform and n < 3:
+        n += n_dev
+    return HeatConfig(
+        n_devices=n_dev, order=order, n_cells=n, nonuniform=nonuniform,
+        ends=draw(st.booleans()),
+        source=draw(st.sampled_from(["none", "per_cell", "scalar", "misshapen"])),
+        wrapping=draw(st.sampled_from(["single", "nested", "hybrid"])),
+        steps=draw(st.integers(1, max_steps)), seed=draw(st.integers(0, 2**16)),
+        surface=draw(st.sampled_from([s for s in surfaces if s != "set_state"]
+                                     or list(surfaces))))
+
+
+@st.composite
+def lbm_configs(draw, *, lattices=("D2Q9", "D3Q19"), surfaces=FORWARD_SURFACES,
+                max_steps: int = 3) -> LBMConfig:
+    lattice = draw(st.sampled_from(list(lattices)))
+    D = 2 if lattice == "D2Q9" else 3
+    if draw(st.booleans()) and N_AVAILABLE >= 4:
+        mesh_shape = draw(st.sampled_from([(2, 2), (1, 4), (4, 1)]))
+        axis_names, axis_map = ("px", "py"), (("px", 0), ("py", 1))
+    else:
+        n_dev = draw(st.sampled_from(_counts(1, 2, 4)))
+        mesh_shape, axis_names = (n_dev,), ("devices",)
+        axis_map = (("devices", draw(st.sampled_from(list(range(D))))),)
+    sizes = dict(zip(axis_names, mesh_shape))
+    block = {sa: int(sizes[ma]) for ma, sa in axis_map}
+    shape = []
+    for a in range(D):
+        lo = 3 if a == D - 1 else 1     # room for two walls and a fluid row
+        c = draw(st.integers(lo, lo + 1)) if D == 2 else draw(st.integers(lo, lo))
+        shape.append(block.get(a, 1) * c)
+    return LBMConfig(
+        lattice=lattice, mesh_shape=tuple(mesh_shape), axis_names=tuple(axis_names),
+        axis_map=tuple(axis_map), shape=tuple(shape),
+        force=draw(st.sampled_from(["none", "uniform", "per_cell", "misshapen"])),
+        pressure=draw(st.booleans()),
+        wrapping=draw(st.sampled_from(["single", "nested", "hybrid"])),
+        steps=draw(st.integers(1, max_steps)), seed=draw(st.integers(0, 2**16)),
+        surface=draw(st.sampled_from([s for s in surfaces if s != "set_state"]
+                                     or list(surfaces))))
 
 
 def build_case(cfg) -> Case:
     return {"stencil": _stencil_case, "pointwise": _pointwise_case,
-            "unstructured": _unstructured_case}[cfg.family](cfg)
+            "unstructured": _unstructured_case, "heat": _heat_case,
+            "lbm": _lbm_case}[cfg.family](cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -1162,9 +1415,25 @@ def _ext(case: Case, sharded: bool) -> Optional[dict]:
     return {NODE_NAME: {k: jnp.asarray(v) for k, v in ext.items()}} if ext else None
 
 
+#: ``family -> (parameter a write surface moves, its constructed value)``.
+_PARAM = {"stencil": ("rate", 0.5), "pointwise": ("rate", 0.5),
+          "unstructured": ("rate", 0.5), "heat": ("thermal_diffusivity", 0.01),
+          "lbm": ("viscosity", 0.1)}
+
+
+def param_name(cfg) -> str:
+    return _PARAM[cfg.family][0]
+
+
 def written_rate(cfg) -> float:
-    """The value a write surface puts into ``rate`` (baseline 0.5)."""
-    return 0.5 * (1.0 + 0.5 * ((cfg.seed % 7) + 1) / 7.0)
+    """The value a write surface puts into :func:`param_name`.
+
+    Between 1.07 and 1.5 times the constructed value: far enough from it
+    that the trajectory moves by orders of magnitude more than any
+    tolerance, and inside every node's stability limit (a ``HeatNode``
+    built at Fourier number 0.2 or 0.15 stays below 1/2 and 5/16).
+    """
+    return _PARAM[cfg.family][1] * (1.0 + 0.5 * ((cfg.seed % 7) + 1) / 7.0)
 
 
 def _final(gm, case: Case, sharded: bool) -> dict:
@@ -1189,13 +1458,14 @@ def run_surface(case: Case, surface: str, sharded: bool):
     elif surface == "scan_params":
         if cfg.contract == "params":
             p = jax.tree.map(lambda x: x, gm.params)
-            leaf = p["nodes"][NODE_NAME]["rate"]
-            p["nodes"][NODE_NAME]["rate"] = jnp.asarray(written_rate(cfg), leaf.dtype)
+            leaf = p["nodes"][NODE_NAME][param_name(cfg)]
+            p["nodes"][NODE_NAME][param_name(cfg)] = jnp.asarray(written_rate(cfg),
+                                                                 leaf.dtype)
             gm.run_scan(n, ext, params=p)
         else:
             # A node on the three-argument contract is absent from
             # gm.params: an entry for it is refused, on both paths.
-            p = {"nodes": {NODE_NAME: {"rate": jnp.asarray(written_rate(cfg))}}}
+            p = {"nodes": {NODE_NAME: {param_name(cfg): jnp.asarray(written_rate(cfg))}}}
             try:
                 gm.run_scan(n, ext, params=p)
             except ValueError as e:
@@ -1205,11 +1475,11 @@ def run_surface(case: Case, surface: str, sharded: bool):
             return {"__refused__": False}
     elif surface == "write_compile":
         if cfg.contract == "params":
-            leaf = gm.params["nodes"][NODE_NAME]["rate"]
-            gm.params["nodes"][NODE_NAME]["rate"] = jnp.asarray(written_rate(cfg),
-                                                                leaf.dtype)
+            leaf = gm.params["nodes"][NODE_NAME][param_name(cfg)]
+            gm.params["nodes"][NODE_NAME][param_name(cfg)] = jnp.asarray(
+                written_rate(cfg), leaf.dtype)
         else:
-            case.inner_of(node).params["rate"] = written_rate(cfg)
+            case.inner_of(node).params[param_name(cfg)] = written_rate(cfg)
         gm.compile()
         gm.run_scan(n, ext)
     elif surface == "set_state":
@@ -1241,50 +1511,97 @@ def new_global_state(case: Case, gm, sharded: bool) -> dict:
     return out
 
 
-def loss_of(case: Case, state: dict, sharded: bool):
-    """Sum of squares of every field, a per-shard integral summed first."""
+def loss_of(case: Case, state: dict, sharded: bool, initial: dict):
+    """Sum of squared departures from the initial state, over every field.
+
+    The departure rather than the state itself: the built-in nodes start
+    far from zero (a rod near 300 K, populations near their weights), and
+    the sum of squares of such a state has a gradient that is a small
+    difference of large terms -- a comparison of rounding, not of the two
+    paths.  A per-shard integral is summed over its shards first.
+    """
     cfg = case.cfg
     g = case.gather_traced(sharded, state)
+    g0 = case.gather_traced(sharded, initial)
     total = 0.0
     for k, v in g.items():
+        d = v - g0[k]
         if k == getattr(cfg, "integral_name", None) and cfg.integral == "per_shard" and sharded:
-            lead = jnp.ndim(v) - len(cfg.integral_shape)
-            v = jnp.sum(v, axis=tuple(range(lead)))
-        total = total + jnp.sum(v * v)
+            lead = jnp.ndim(d) - len(cfg.integral_shape)
+            d = jnp.sum(d, axis=tuple(range(lead)))
+        if not jnp.issubdtype(jnp.asarray(d).dtype, jnp.floating):
+            continue
+        total = total + jnp.sum(d * d)
     return total
 
 
-def _gradient(case: Case, sharded: bool):
-    """``(loss, d loss / d theta)`` through ``run_scan``, on a fresh graph.
+def _theta_runner(case: Case, sharded: bool):
+    """``(initial state, theta0, theta -> final node state)`` on a fresh graph.
 
-    ``theta`` is ``rate`` through ``params=`` for a params-contract node,
-    and the external ``gain`` for a node on the three-argument contract
-    (which ``gm.params`` does not carry).
+    ``theta`` is the node's differentiable constant through ``params=``
+    for a params-contract node, and the external ``gain`` for a node on
+    the three-argument contract (which ``gm.params`` does not carry);
+    ``None`` when there is neither.
     """
     cfg = case.cfg
     gm, _ = build_graph(case, sharded)
     ext = _ext(case, sharded) or {NODE_NAME: {}}
     dtype = jnp.zeros((), _np_dtype(cfg.dtype)).dtype
-
+    initial = gm.get_node_state(NODE_NAME)
     if cfg.contract == "params":
         theta0 = jnp.asarray(written_rate(cfg), dtype)
 
-        def loss(theta):
-            final = gm.run_scan(cfg.steps, ext,
-                                params={"nodes": {NODE_NAME: {"rate": theta}}})
-            return loss_of(case, final[NODE_NAME], sharded)
+        def run(theta):
+            return gm.run_scan(cfg.steps, ext,
+                               params={"nodes": {NODE_NAME: {param_name(cfg): theta}}}
+                               )[NODE_NAME]
     else:
         if "gain" not in ext[NODE_NAME]:
             return None
         theta0 = jnp.asarray(0.75, dtype)
 
-        def loss(theta):
-            e = {NODE_NAME: {**ext[NODE_NAME], "gain": theta}}
-            final = gm.run_scan(cfg.steps, e)
-            return loss_of(case, final[NODE_NAME], sharded)
+        def run(theta):
+            return gm.run_scan(cfg.steps, {NODE_NAME: {**ext[NODE_NAME], "gain": theta}}
+                               )[NODE_NAME]
+    return initial, theta0, run
 
-    value, grad = jax.value_and_grad(loss)(theta0)
+
+def _gradient(case: Case, sharded: bool):
+    """``(loss, d loss / d theta)`` through ``run_scan`` (see :func:`_theta_runner`)."""
+    got = _theta_runner(case, sharded)
+    if got is None:
+        return None
+    initial, theta0, run = got
+    value, grad = jax.value_and_grad(
+        lambda t: loss_of(case, run(t), sharded, initial))(theta0)
     return float(value), float(grad)
+
+
+def gradient_scales(case: Case) -> dict:
+    """The absolute sums :func:`gradient_bound` is built from, on the unsharded path.
+
+    From one forward-mode pass: the final state ``s``, its tangent
+    ``ds = d s / d theta`` and the departure ``dev = s - s0`` over every
+    floating field.  ``A = sum|2 dev ds|`` (the gradient's terms, before
+    they cancel), ``B = sum|ds|``, ``S = sum|dev|``, ``Q = sum dev**2``
+    (the loss), ``T = max|ds|`` and ``M = max|s|``.
+    """
+    initial, theta0, run = _theta_runner(case, False)
+
+    def flat(state):
+        g = case.gather_traced(False, state)
+        parts = [jnp.ravel(v) for v in g.values()
+                 if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)]
+        return jnp.concatenate(parts)
+
+    s0 = np.asarray(flat(initial), np.float64)
+    s, ds = jax.jvp(lambda t: flat(run(t)), (theta0,), (jnp.ones_like(theta0),))
+    s, ds = np.asarray(s, np.float64), np.asarray(ds, np.float64)
+    dev = s - s0
+    return {"A": float(np.sum(np.abs(2.0 * dev * ds))), "B": float(np.sum(np.abs(ds))),
+            "S": float(np.sum(np.abs(dev))), "Q": float(np.sum(dev * dev)),
+            "T": float(np.max(np.abs(ds))), "M": float(np.max(np.abs(s))),
+            "n": int(s.size)}
 
 
 # ---------------------------------------------------------------------------
@@ -1395,52 +1712,71 @@ def assert_paths_agree(case: Case, sharded: dict, unsharded: dict, context: str)
                     f"bound {atol:.3e})")
 
 
-def gradient_rtol(cfg) -> float:
-    """Relative bound for a loss and its gradient computed through both paths.
-
-    Two parts.  The reverse pass reorders sums: the transpose of a halo
-    exchange adds a neighbour's cotangent into a cell after the cell's
-    own stencil contributions, where the unsharded transpose of the
-    padding adds them in another order, and the loss's sum of squares is
-    reduced per shard first.  A reordered sum of ``m`` terms moves by at
-    most ``(m - 1) eps`` of its absolute sum; per step a cell's cotangent
-    sums at most ``2 * sum(halo) + 9`` terms (stencil, static, source,
-    face and correction terms), and the loss sums every cell, so
-    ``(cells + steps * terms) * eps``.  And the forward state may differ
-    by :func:`grid_atol`, i.e. ``FMA_SITES * eps * growth`` relative to
-    the field's scale, which the loss (a sum of squares) at most doubles.
-    A factor of 4 on the first part covers the ratio between the
-    absolute-value sum and the gradient itself for the zero-mean data
-    the nodes start from.
-    """
+def _reverse_terms(cfg) -> int:
+    """Terms a cell's cotangent sums per step (stencil, statics, inputs, correction)."""
     if cfg.family == "stencil":
-        cells = int(np.prod(cfg.shape))
-        terms = 2 * sum(cfg.halo) + 9
-    elif cfg.family == "pointwise":
-        cells = int(np.prod(cfg.shape))
-        terms = 9
-    else:
-        cells = cfg.n_cells
-        width = int(_UnstructuredBase._neighbour_table(cfg).shape[1])
-        terms = 2 * width + 9
-    growth = sum(STEP_GROWTH ** k for k in range(int(cfg.steps)))
+        return 2 * sum(cfg.halo) + 9
+    if cfg.family == "pointwise":
+        return 9
+    if cfg.family == "heat":
+        return 2 * (1 if cfg.order == 2 else 2) + 9
+    if cfg.family == "lbm":
+        q = 9 if cfg.lattice == "D2Q9" else 19
+        return 2 * q + 9      # the Q streamed-in neighbours and the Q moment terms
+    width = int(_UnstructuredBase._neighbour_table(cfg).shape[1])
+    return 2 * width + 9
+
+
+def gradient_bound(cfg, scales: dict) -> tuple[float, float]:
+    """``(loss bound, gradient bound)``, absolute, for the two paths.
+
+    The loss is ``L = sum dev**2`` and its gradient ``g = sum 2 dev ds``
+    (:func:`gradient_scales` names the sums).  Three sources of
+    difference, each bounded by the rule that any two orders of a sum of
+    ``m`` terms differ by at most ``(m - 1) eps`` times its absolute sum:
+
+    * the reverse pass reorders sums -- the transpose of a halo exchange
+      adds a neighbour's cotangent into a cell after the cell's own
+      stencil terms, the loss is reduced per shard first -- so per cell
+      and step ``_reverse_terms`` terms, and ``n`` cells in the final
+      reduction: ``(n + steps * terms) * eps * A``;
+    * the forward state may already differ by :func:`grid_atol` per
+      cell, which moves ``g`` by at most ``2 * grid_atol * B`` and ``L``
+      by ``2 * grid_atol * S``;
+    * the tangent ``ds`` is computed through the same kernels and may
+      differ by ``FMA_SITES * eps * growth * T`` per cell, moving ``g`` by
+      at most that times ``2 S``.
+
+    ``A`` is the sum of the gradient's terms *before* they cancel, so the
+    bound is relative to that and not to ``|g|``: a near-equilibrium state
+    whose gradient is a small difference of large terms (an LBM channel
+    one step from rest) has a correspondingly looser bound, as it must.
+    """
     eps = eps_of(cfg.dtype)
-    return 4.0 * (cells + cfg.steps * terms) * eps + 2.0 * FMA_SITES * eps * growth
+    growth = sum(STEP_GROWTH ** k for k in range(int(cfg.steps)))
+    atol = FMA_SITES * eps * max(1.0, scales["M"]) * growth
+    t_atol = FMA_SITES * eps * scales["T"] * growth
+    n = scales["n"]
+    g_bound = ((n + cfg.steps * _reverse_terms(cfg)) * eps * scales["A"]
+               + 2.0 * atol * scales["B"] + 2.0 * t_atol * scales["S"])
+    l_bound = n * eps * scales["Q"] + 2.0 * atol * scales["S"]
+    return l_bound, g_bound
 
 
-def assert_gradients_agree(case: Case, sharded, unsharded, context: str) -> None:
+def assert_gradients_agree(case: Case, sharded, unsharded, context: str,
+                           scales: Optional[dict] = None) -> None:
     if sharded is None and unsharded is None:
         return
     (ls, gs), (lu, gu) = sharded, unsharded
-    rtol = gradient_rtol(case.cfg)
+    scales = gradient_scales(case) if scales is None else scales
+    l_bound, g_bound = gradient_bound(case.cfg, scales)
     assert np.isfinite(gs) and np.isfinite(gu), f"{context}: {gs} {gu}"
-    OBSERVED.append(("gradient", case.cfg.dtype,
-                     abs(gs - gu) / max(abs(gu), abs(gs), 1e-30) / rtol))
-    assert abs(ls - lu) <= rtol * max(abs(lu), 1e-30), (
-        f"{context}: loss {ls!r} vs {lu!r} (rtol {rtol:.2e})")
-    assert abs(gs - gu) <= rtol * max(abs(gu), abs(gs), 1e-30), (
-        f"{context}: gradient {gs!r} vs {gu!r}, relative "
-        f"{abs(gs - gu) / max(abs(gu), 1e-30):.2e} > {rtol:.2e}")
+    OBSERVED.append(("gradient", case.cfg.dtype, abs(gs - gu) / max(g_bound, 1e-300)))
+    assert abs(ls - lu) <= l_bound, (
+        f"{context}: loss {ls!r} vs {lu!r}, |diff| {abs(ls - lu):.3e} > bound {l_bound:.3e}")
+    assert abs(gs - gu) <= g_bound, (
+        f"{context}: gradient {gs!r} vs {gu!r}, |diff| {abs(gs - gu):.3e} > "
+        f"bound {g_bound:.3e} (scales {scales})")
 
 
 # ---------------------------------------------------------------------------
@@ -1501,12 +1837,16 @@ def check_config(cfg, *, surfaces: Optional[tuple] = None) -> dict:
         if case.refusal is not None and case.refusal[0] == "run":
             _, refused = _expect_refusal(
                 case, lambda: run_surface(case, "run_scan", True), "run", context)
-            # ...and the unsharded node refuses it too (a mis-shaped input),
-            # unless the refusal is the sharded path's own (known) one.
-            if case.known is None:
-                import pytest
-                with pytest.raises(Exception):
-                    run_surface(case, "run_scan", False)
+            # ...and a mis-shaped input is refused by the unsharded node too;
+            # any other refusal is the sharded path's own, and the
+            # unsharded node runs.
+            try:
+                run_surface(case, "run_scan", False)
+            except Exception:  # noqa: BLE001
+                assert case.unsharded_refuses, f"{context}: the unsharded node refused too"
+            else:
+                assert not case.unsharded_refuses, (
+                    f"{context}: the unsharded node took the mis-shaped input")
             return {"refused": "run", "known": case.known}
         done = {}
         for surface in surfaces:

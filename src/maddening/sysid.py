@@ -2758,11 +2758,11 @@ class FitResult:
     ``losses[-1] <= tol``.
 
     ``params`` is the **lowest-loss iterate the fitter evaluated**, not
-    necessarily its last; ``best_iteration`` says which.  Until 0.4.0
-    :func:`fit` returned its last iterate, and an optimiser with a fixed
-    step size can end a run above where it started: Adam's step is about
-    ``lr`` in size whatever the gradient's, so from a point whose gradient
-    is rounding noise it walks away.  One such fit started at loss
+    necessarily its last; ``best_iteration`` says which.  Earlier 0.4.0
+    development builds returned the last iterate, and an optimiser with a
+    fixed step size can end a run above where it started: Adam's step is
+    about ``lr`` in size whatever the gradient's, so from a point whose
+    gradient is rounding noise it walks away.  One such fit started at loss
     ``2.7e-8`` and returned parameters at ``1.9e-4``, and nothing in the
     result said so.  A run whose loss never rose above an earlier value --
     every well-behaved fit -- returns what it returned before, bit for
@@ -2823,9 +2823,10 @@ class FitResult:
         others against.
     ``undetermined_drift``
         How far the selected raw iterate had wandered along those
-        undetermined directions before the guard removed it, as a Euclidean norm in the
-        **unconstrained** coordinates (``log`` for a positive parameter, so
-        a drift of 0.04 there is a 4% drift in the parameter itself).
+        undetermined directions before the guard removed it, as a Euclidean
+        norm in the **unconstrained** coordinates (``log`` for a positive
+        parameter, so a drift of 0.04 there is a 4% drift in the parameter
+        itself).
         ``0.0`` when the rank was full and nothing was removed; ``None``
         when ``excited_rank`` is.  It is a diagnostic, not a residual
         error: the value it reports has already been taken out of
@@ -2931,9 +2932,9 @@ def fit(
         the three drifts 3.4% by iteration 200 and **46% by iteration
         10,000**, with the loss unchanged in its first six digits, and
         ``mass`` lands anywhere from 1.33 to 1.90 depending only on the
-        budget.  Those are the *last* iterates, which :func:`fit` returned
-        until it learned to return its lowest-loss one; that selection does
-        not remove the effect, because along an exactly flat direction
+        budget.  Those figures are for the *last* iterate, which earlier
+        development builds returned.  Returning the lowest-loss iterate
+        does not remove the effect, because along an exactly flat direction
         which iterate is lowest is decided by rounding.  Unguarded, on a
         120-step record with σ = 0.02 noise, the lowest-loss iterate lands
         −7.50%, −7.12% and −5.43% from the starting scale at ``lr`` 0.01,
@@ -2975,7 +2976,8 @@ def fit(
         saying which and at what loss.  Adam's step is about ``lr`` in
         size however small the gradient, so a run started at (or passing
         through) a point whose gradient is rounding noise can end above it;
-        before 0.4.0 the last iterate was returned regardless.  Ties go to
+        earlier 0.4.0 development builds returned the last iterate
+        regardless.  Ties go to
         the later iterate, so a run whose loss never rose returns its last
         iterate, bit for bit what it returned before.  When the run used
         its whole budget, the iterate the last update produced is
@@ -3119,8 +3121,8 @@ def fit_lm(
     hold_undetermined : bool
         Keep the fitted parameters out of the directions the data does not
         determine, exactly as :func:`fit` does and by the same shared
-        machinery.  **New in 0.4.0, and on by default**; ``False`` restores
-        the returned iterate exactly as the Marquardt steps produced it.
+        machinery.  **New in 0.4.0, and on by default**; ``False`` returns
+        the last iterate exactly as the Marquardt steps produced it.
 
         The gradient ``g = Jᵀr`` is orthogonal to ``null(J)``, but the step
         is not the gradient: the Marquardt solve is
@@ -3328,7 +3330,7 @@ def fit_multiple_shooting(
     the pair returned.  This fitter needed the selection more than
     :func:`fit` does: started at the truth, with every window state
     stepped by Adam at a rate of ``lr``, it returned a loss of ``2e-1``
-    from a start of ``1e-13`` before 0.4.0.
+    from a start of ``1e-13`` before it selected.
 
     Parameters
     ----------
@@ -3357,8 +3359,9 @@ def fit_multiple_shooting(
         Only ``theta`` is guarded.  The returned ``window_states`` are
         nuisance variables of the fit rather than constants a caller
         records as provenance, and a caller warm-starting from them needs
-        the values the optimiser actually reached at the selected iterate; the gradient Gram is
-        accumulated over the parameter block alone, which is where
+        the values the optimiser actually reached at the selected iterate;
+        the gradient Gram is accumulated over the parameter block alone,
+        which is where
         :attr:`FitResult.excited_rank` counts its directions.  That block's
         gradient is still ``J_θᵀ r`` at every iterate, so a ``v`` with
         ``J_θ v = 0`` has ``g·v = 0``, which is the whole premise.

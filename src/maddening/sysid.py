@@ -374,6 +374,9 @@ def windowed_loss(
     """
     if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
         gm.compile()
+    # The windows scan the graph step: a sharded node XLA miscompiles
+    # inside a loop is refused here as in ``run_scan`` (MADD-ANO-068).
+    gm._refuse_xla_loop_hazards("sysid.windowed_loss", scan=True)  # noqa: SLF001
     step_fn = gm._build_step_fn()  # noqa: SLF001
     # Completed and validated exactly as ``gm.step(external_inputs=)``
     # does: a fit whose forcing was silently dropped by a typo would

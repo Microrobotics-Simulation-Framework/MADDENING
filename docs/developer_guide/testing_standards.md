@@ -946,12 +946,15 @@ causes were in the harness:
   layout), a harness that agrees with a wrong document agrees with a
   wrong wrapper.
 - *Excluded cases*: the cases excluded while a fix is pending
-  (`PENDING_*` in the support module). One is left:
-  `PENDING_XLA_REPLICATED_STATIC_IN_SCAN`, an XLA miscompile inside
-  `lax.scan` (MADD-ANO-068), for which a sharded static read in the halo
-  beside a window at the `shard_info` offset is not drawn on a mesh that
-  replicates the static over an axis of two or more devices. Its exact
-  cases are strict xfails in `test_unused_mesh_axis_integrals.py`.
+  (`PENDING_*` in the support module). None is left. The last,
+  `PENDING_XLA_REPLICATED_STATIC_IN_SCAN` (an XLA miscompile inside a
+  loop, MADD-ANO-068), went when `GraphManager` began refusing such a
+  loop: the configurations are drawn again, and on every surface but
+  `step` and `run` the oracle requires the refusal where
+  `loop_refusal_expected` predicts it (naming the static and every mesh
+  axis it is copied along) instead of comparing the two paths. So the
+  harness checks that the refusal fires there and nowhere else, not
+  what XLA would have computed.
 - *Hardware*: real multi-GPU hardware and NCCL. The harness runs on
   virtual CPU devices only.
 - *Performance*.

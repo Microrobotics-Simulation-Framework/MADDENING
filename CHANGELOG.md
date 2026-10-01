@@ -176,6 +176,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`run_scan` and the other loop entry points refuse a `ShardedStencilNode` step XLA miscompiles inside a loop** (MADD-ANO-068, now `partially_resolved`): a node reading a sharded static in its halo beside a `shard_info`-offset window into another array, the static copied along a mesh axis of 2+ devices,
+  raises `RuntimeError` from `run_scan`, `run_scan_with_history`, `run_sweep`, `run_adaptive_scan` and `sysid.windowed_loss` (gradients included), and from every entry point in a coupling group; `step()` / `run()` keep working otherwise.
+  Action: use a mesh without the axis the static is copied along, or `step()` / `run()`; check a loop you write yourself around such a node against `step()`.
 - **A domain integral is neither summed nor stacked over a mesh axis a `ShardedStencilNode`'s `axis_map` leaves unused** (MADD-ANO-067):
   releases summed it there, counting every block once per device along it (2x on a `(2, 2)` mesh), and a per-shard integral there now has
   one leading axis per mesh axis that splits the grid.  Action: re-run sharded totals from such a mesh; drop the extra axis when reading per-shard values

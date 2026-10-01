@@ -277,6 +277,40 @@ machinery needed in user code.  The shard_map cache inside
 *identity* changes (a user replacing `self._mask` between steps)
 invalidate cleanly even when shape and dtype are unchanged.
 
+## A static copied along a mesh axis, inside a loop (MADD-ANO-068)
+
+On jaxlib 0.10.2 to 0.11.2, XLA compiles one kernel pattern wrongly when
+the step is traced inside a loop. The step reads a sharded static in its
+halo, reads another array through a window at a `shard_info` offset, and
+the static is copied along a mesh axis of two or more devices. A mesh
+axis the `axis_map` leaves unused copies it, and so does the other axis
+of a pencil. The result is silently wrong on the first kind of axis and
+fails to compile on the second. `jit` alone is right. `GraphManager`
+therefore refuses any path that loops over such a step:
+
+* `run_scan`, `run_scan_with_history`, `run_sweep`, `run_adaptive_scan`
+  and `sysid.windowed_loss`, gradients through them included;
+* every entry point, `step()` included, when the node is in a coupling
+  group, because the group's iteration loops over the update inside the
+  step.
+
+The `RuntimeError` names the node, the static and the mesh axis.
+
+The decision comes from your `update_padded` itself. The graph traces it
+once, never compiled, and walks the jaxpr. Each of the following keeps a
+node out of the refusal:
+
+* **read the static only in its interior**, with a `slice` (or a literal
+  `dynamic_slice`) inside `[halo, n - halo)` along its shard axis;
+* **don't window another array at a shard offset**. A window into the
+  static itself is fine: taking the static's own columns at
+  `shard_info[1]` is how the multi-device validation goals' 2-D field
+  reads a full-width static on a pencil;
+* **build the mesh from the axes the node is sharded along only.**
+
+A loop you write yourself around a wrapped node, such as a `lax.scan`
+over its `update`, is not guarded. Check it against `step()`.
+
 ## What's still TODO
 
 * ~~**Partial-axis psum.**~~  Done in v0.4.0: override

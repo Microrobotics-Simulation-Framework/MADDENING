@@ -734,6 +734,44 @@ draws the same examples on every run. Each oracle was mutation-tested on a
 scratch copy of `src/` (the PR that added them lists the mutants and the
 test that caught each).
 
+### Coupling and numerics
+
+`tests/property/test_differential_*.py`, over graphs of synthetic nodes
+from `tests/property/coupled_graphs.py`. Every node is `x <- alpha x_pre +
+sum G_j f(u_j) + b + beta dt` (or explicit Euler on the same right-hand
+side). The gains are drawn and rescaled to a drawn spectral radius (up to
+0.999, non-normal or rank one). Nodes can have `tanh` inputs, `int32`,
+`uint32` and `bool` leaves, an unread float field, a clock, and flux
+edges. A graph has a cycle, chords, a driver and a sink. A group of
+linear nodes has its fixed point as a float64 solve. The per-push cases
+fix the structure and configuration and draw the values, which reach the
+compiled step as parameters, so each case compiles once. Each slow-marked
+broad case draws the structure and configuration too, and names its
+per-push sibling.
+
+Two programs that evaluate the same arithmetic with different rounding
+(the two solvers' loops, a fused against an unrolled update, batched
+against unbatched kernels, eager against jitted) are held to *round-off
+per pass*: the forward error of each node's sum, `2 T eps sum |term|`,
+per coupling pass (`rounding_bound` in the kit). That is at least eight
+ulps of `|x|`, and more where large terms cancel, which a non-normal gain
+does.
+
+| Oracle | Paths | Tolerance | Cannot see |
+|---|---|---|---|
+| fori == ift | `solver="fori"` against `"ift"`: every acceleration, norm, mode, predictor, cap, flux edges, `tanh` | `iterations` and `converged` are equal when the threshold clears the norm's float32 floor (`residual_noise_floor`) by 4x, unless an estimate lies within its own rounding of the threshold (`criterion_is_resolved`). With equal passes, states agree to round-off per pass | The one-pass map, the norms and the criterion arithmetic, which both solvers share |
+| diagnostics on == off | the same group with `diagnostics` False and True, both solvers | Bitwise: states, `iterations`, `converged`, the predictor and IMVJ warm starts, and `jax.grad` through `run_scan` | A fault that moves both settings the same way |
+| converged => near the exact fixed point | the returned state against the float64 solve, measured in a NumPy restatement of the group's norm | Single coupling mode, iterate started on it, `none` or `fixed`: distance <= threshold + `floor * amp` + `2 omega floor amp**2`. That is the estimate's own float32 resolution, derived from its formula; at a rate of 0.99 it admits that float32 cannot certify the distance. `precision_limited` and `ratio_usable=False` groups are outside the claim, as documented. A usable `spectral_error_bound` must be >= the distance, with no slack, on general non-normal spectra under every acceleration | Non-linear groups (no closed form); the definition of "fixed point of the evaluated map" |
+| multi-rate == hand-unrolled | the gated multi-rate step against a Python loop that fires each block or leaves it alone, with the group as a uniform-rate sub-graph | Bitwise: a non-firing block's state and `_meta` are unchanged. States agree to round-off per pass; `iterations` are equal | A fault inside the coupled solve that both paths call |
+| sub-cycled == uniform-rate | `subcycling=True` with constant interpolation, against a hand-written node that sub-steps `d` times in a `lax.scan` at the macro timestep | Equal passes; round-off per pass. Clocks are bitwise equal to the reference's, and exact against the graph's time when `d` is a power of two. `quadratic` == `linear` bitwise (MADD-ANO-027). `linear` == `constant` to round-off under Jacobi or with the sub-cycled node first | The shared sub-step update |
+| adaptive at a pinned dt == run_scan | `run_adaptive`/`run_adaptive_scan` with `dt_min = dt_max`, against `run_scan` at half the timestep; replaying `dt_history` through the dt step | Round-off per pass. The replay is bitwise. Every node's clock equals the stepper's time (MADD-ANO-061), within the rounding of its float32 sum | The dt-parameterised step itself |
+| vmap == per-member, jit == eager | `run_sweep` against `run_scan` per member; `jax.vmap` of the step against the step; `vmap(grad)` against `grad`; `jax.disable_jit()` against `jit` | States to round-off per pass; `iterations` equal; the residual to the norm's float32 floor; `rho_spectral` to its Arnoldi residual + `sqrt(8 eps)` (a nearly defective non-normal Jacobian moves its eigenvalue by the square root of a perturbation); `gradient_relative_error_bound` within 25% (its ~8% is documented); gradients within 1e-4 relative | Every fault in the step, which is the same batched and unbatched |
+| int/uint32/bool leaves survive | each non-float leaf after `k` updates, against its closed form, in every configuration above and under sub-cycling, waveform sweeps, multi-rate, adaptive stepping and `vmap` | Bitwise, dtype included | A leaf that reads a coupled input (the solver oracle covers that) |
+
+Each oracle was mutation-tested against a scratch copy of `src/` with at
+least one seeded fault, and each fault was caught. The PR that added the
+harness lists them.
+
 ## Test Organization
 
 ```

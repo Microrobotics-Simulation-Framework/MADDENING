@@ -157,17 +157,25 @@ def test_fit_lm_on_a_well_posed_bowl_returns_the_minimum_it_reached(masked):
 def test_fit_lm_on_the_spring_one_percent_off_stays_at_its_minimum():
     """0.4.0-dev: loss 0.0, ``excited_rank`` 2 of 4, returned parameters at
     1.2e-4.  With the shipped specs the spring's scale direction rotates
-    (``damping`` is the identity), so whether the local scale direction
-    passes both tests here depends on how far ``c`` moved; measured, it
-    does, and the hold costs 4.5e-11, inside the quantisation term of the
-    tolerance.  Either way the loss stays where the fit put it."""
+    (``damping`` is the identity), and here the local scale direction
+    passes both tests, so the guard tries to hold it along its tangent --
+    off the curved flat set, at a real if tiny cost.  That cost is
+    platform-dependent: 4.5e-11 on jaxlib 0.11.0, inside the tolerance's
+    quantisation term (4.4e-10 here), so held; 2.0e-9 on 0.11.2, outside
+    it, so declined with a warning.  Both outcomes are the contract; what
+    is asserted is the loss, which either way stays at the rounding level
+    the fit reached, four decades below what 0.4.0-dev returned."""
     gm = _spring()
     residual = _trajectory_residual(gm, 200)
-    res = fit_lm(gm, residual, params=_with(gm, {"stiffness": 1.01 * 30.0}),
-                 n_iter=50)
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        res = fit_lm(gm, residual, params=_with(gm, {"stiffness": 1.01 * 30.0}),
+                     n_iter=50)
     assert res.best_loss == 0.0
     assert _half_sse(residual, res.params) <= 1e-9, _half_sse(residual, res.params)
-    assert res.excited_rank in (3, 4) and res.hold_declined is False
+    assert res.excited_rank in (3, 4)
+    declines = [w for w in record if "would raise the loss" in str(w.message)]
+    assert len(declines) == (1 if res.hold_declined else 0), (res.hold_declined, declines)
 
 
 def test_a_short_adam_run_on_the_bowl_returns_its_selected_iterate():
@@ -301,16 +309,19 @@ def test_a_hold_through_a_bound_is_declined():
 
 #: The tolerance at three points, each term isolated, written out rather
 #: than recomputed from the implementation's formula so that changing the
-#: formula fails these tests instead of moving them with it.  ``d`` is a
-#: 16-ulp perturbation of each coordinate of ``(1, 1)`` in float32,
-#: ``16 * sqrt(2) * 2**-23``.
+#: formula fails these tests instead of moving them with it.  The held
+#: point is ``(0, 4)`` in float32; one rounding of a coordinate ``u`` is
+#: ``eps32 * max(1, |u|)``, so ``(eps32, 4 eps32)`` -- the floor of 1 at
+#: ``u = 0``, where ``np.spacing`` would claim a denormal, and the scaling
+#: at ``u = 4`` -- and the perturbation is four of them:
+#: ``d = 4 * sqrt(17) * 2**-23``.
 #:
-#: ``loss_sel = 1``, curvature 2: ``2**10 * eps32 + d**2`` = ``2**-13 + 2**-37``.
-_TOL_RELATIVE = 0.00012207031977595761
-#: ``loss_sel = 0``, curvature 2: ``0.5 * 2 * d**2`` = ``2**-37``.
-_TOL_QUANTISATION = 7.275957614183426e-12
+#: ``loss_sel = 1``, curvature 2: ``2**10 * eps32 + d**2`` = ``2**-13 + 272 * 2**-46``.
+_TOL_RELATIVE = 0.00012207031636535248
+#: ``loss_sel = 0``, curvature 2: ``0.5 * 2 * d**2`` = ``272 * 2**-46``.
+_TOL_QUANTISATION = 3.865352482534945e-12
 #: ``loss_sel = 0``, gradient ``(3, 4)``, curvature 0: ``5 * d``.
-_TOL_GRADIENT = 1.348699152348609e-05
+_TOL_GRADIENT = 9.830249847454216e-06
 
 _TOLERANCE_CASES = {
     "relative": (1.0, None, 2.0, _TOL_RELATIVE),
@@ -322,14 +333,13 @@ _TOLERANCE_CASES = {
 def _helper_case(loss_held, *, loss_sel=1.0, grad_sel=None, scale=2.0):
     """The shared hold on a 2-D problem with known numbers: gradients only
     along ``e0``, so ``e1`` is the one candidate, and the curvature test
-    calls it flat; the selected iterate is ``(1, 1.25)`` from a start at
-    ``(1, 1)``, so holding ``e1`` lands exactly on the start, whose
-    float32 spacing is ``2**-23`` per coordinate."""
+    calls it flat; the selected iterate is ``(0, 4.25)`` from a start at
+    ``(0, 4)``, so holding ``e1`` lands exactly on the start."""
     tracker = _ExcitationTracker(2, np.float32)
     for _ in range(4):
         tracker.observe(np.array([1.0, 0.0], dtype=np.float32))
-    theta0 = jnp.asarray([1.0, 1.0], dtype=jnp.float32)
-    theta = jnp.asarray([1.0, 1.25], dtype=jnp.float32)
+    theta0 = jnp.asarray([0.0, 4.0], dtype=jnp.float32)
+    theta = jnp.asarray([0.0, 4.25], dtype=jnp.float32)
     objective = _SelectedObjective(
         loss=lambda th: loss_held,
         reference=lambda: (loss_sel, grad_sel),

@@ -2539,9 +2539,10 @@ _HOLD_SCALE_DIRECTIONS = 8
 #: precision's ``eps``: ``2**10``.
 _HOLD_LOSS_RTOL_EPS = 1024.0
 
-#: Per-coordinate perturbation, in units in the last place, whose effect
-#: on the loss is the absolute part of :func:`_hold_tolerance`.
-_HOLD_LOSS_ULPS = 16.0
+#: Roundings per coordinate whose effect on the loss is the absolute part
+#: of :func:`_hold_tolerance`; one rounding of a coordinate ``u`` is
+#: ``eps * max(1, |u|)``.
+_HOLD_LOSS_ROUNDINGS = 4.0
 
 
 class _ExcitationTracker:
@@ -2852,8 +2853,9 @@ def _hold_tolerance(loss_sel: float, grad_sel, scale: float, held, eps: float) -
 
     ``2**10 * eps * |L| + ||g|| * d + scale * d**2 / 2``, with ``L`` and
     ``g`` the loss and gradient at the selected iterate, ``d`` the length of
-    a :data:`_HOLD_LOSS_ULPS`-ulp perturbation of every coordinate of the
-    held point, and ``scale`` the objective's largest curvature.
+    a perturbation of :data:`_HOLD_LOSS_ROUNDINGS` roundings,
+    ``eps * max(1, |u|)`` each, in every coordinate ``u`` of the held point,
+    and ``scale`` the objective's largest curvature.
 
     The guard moves only along directions both of its tests call flat, so
     in exact arithmetic the loss does not move at all; what the tolerance
@@ -2869,22 +2871,34 @@ def _hold_tolerance(loss_sel: float, grad_sel, scale: float, held, eps: float) -
     about a thousand times its residual, a fit to 0.1%.  It is 1.2e-4 in
     float32 and 2.3e-13 in float64.
 
-    The absolute term is the *quantisation* of the held point: it is
-    stored in the working precision, so even an exactly flat move lands up
-    to an ulp off the flat set in every coordinate, and the loss pays for
-    that to first and second order.  It is what a fit at its precision
-    floor needs, where the relative term means nothing: noiselessly,
-    ``fit_lm`` reached ``1.2e-14`` and the held point ``2.5e-13``, a factor
-    of 20 that is all rounding.  ``16`` ulps leaves room for the transforms
-    each coordinate passes through.
+    The absolute term is the *quantisation* of the held point: even an
+    exactly flat move lands off the flat set by the rounding of every
+    coordinate, and the loss pays for that to first and second order.  It
+    is what a fit at its precision floor needs, where the relative term
+    means nothing: noiselessly, ``fit_lm`` reached ``1.2e-14`` and the held
+    point ``2.5e-13``, a factor of 20 that is all rounding.  A coordinate
+    rounds when it is stored, when its transform maps it (``exp`` and the
+    logistic round to ``eps`` of their result, which in ``log``
+    coordinates is ``eps`` absolute -- hence the floor of 1, without which
+    ``log 1 = 0`` would claim a denormal's rounding), and again in the
+    model's first use of it: four roundings.  Over the degenerate holds of
+    the spring fixtures (``fit``, ``fit_lm`` and ``fit_multiple_shooting``,
+    noiseless and σ = 0.02, 60 and 120 steps) the largest rise this term
+    alone had to admit was 0.43 of *one* rounding per coordinate, so four
+    leave a margin of 37.  It is deliberately not larger: a degeneracy that
+    rotates in the optimiser's coordinates is held along its tangent, off
+    the curved flat set, and what that costs is a real loss -- the spring
+    1% off paid 4.5e-11 on jaxlib 0.11.0 and 2.0e-9 on 0.11.2, against a
+    term of 4.4e-10 there, so one platform holds and the other declines.
 
     Against what the check exists to catch: on the four-parameter bowl the
     0.4.0-dev guard took ``fit_lm`` from 0.0 to 0.22, the spring 1% off from
     0.0 to 1.2e-4, and ten Adam steps from 0.32342 to 0.32367 -- a relative
     rise of 7.7e-4, six times the relative term.
     """
-    spacing = np.abs(np.spacing(np.asarray(held))).astype(np.float64)
-    d = _HOLD_LOSS_ULPS * float(np.linalg.norm(spacing))
+    held64 = np.asarray(held).astype(np.float64)
+    rounding = eps * np.maximum(1.0, np.abs(held64))
+    d = _HOLD_LOSS_ROUNDINGS * float(np.linalg.norm(rounding))
     g = 0.0 if grad_sel is None else float(np.linalg.norm(grad_sel))
     return (_HOLD_LOSS_RTOL_EPS * eps * abs(loss_sel)
             + g * d + 0.5 * max(scale, 0.0) * d * d)

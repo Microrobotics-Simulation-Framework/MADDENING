@@ -5727,14 +5727,17 @@ anomalies:
       Then the held point's loss, by the fitter's own compiled function,
       must not exceed the selected iterate's by more than
       `2**10 * eps * |loss|` (1.2e-4 relative in float32) plus the
-      first- and second-order loss cost of a 16-ulp perturbation of every
-      coordinate of the held point; otherwise nothing is held, `params` is
-      the selected iterate bit for bit, the new `FitResult.hold_declined`
-      is True and a RuntimeWarning gives both losses.  After the fix all
-      four cases above return the fit's own loss (the spring 1% off at
-      4.5e-11 from 0.0, inside the quantisation term), and the spring's
-      scale degeneracy is still held by all three fitters, to within 1e-7
-      of the start at `lr=0.2` for 200 to 10,000 iterations.
+      first- and second-order loss cost of perturbing every coordinate `u`
+      of the held point by four roundings, `eps * max(1, |u|)` each;
+      otherwise nothing is held, `params` is the selected iterate bit for
+      bit, the new `FitResult.hold_declined` is True and a RuntimeWarning
+      gives both losses.  After the fix all four cases above return the
+      fit's own loss to rounding (the spring 1% off, a degeneracy that
+      rotates in the optimiser's coordinates, is held at a cost of 4.5e-11
+      on jaxlib 0.11.0 and declined at 2.0e-9 on 0.11.2, against a
+      tolerance of 4.4e-10), and the spring's scale degeneracy under `log`
+      transforms is still held by all three fitters, to within 1e-7 of the
+      start at `lr=0.2` for 200 to 10,000 iterations.
       What remains: a hold may still raise the loss by up to that
       tolerance, which is rounding by design but is not zero.  A
       degeneracy that rotates in the optimiser's coordinates (mixed `log`

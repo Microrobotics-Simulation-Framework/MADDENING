@@ -2931,7 +2931,15 @@ def fit(
         the three drifts 3.4% by iteration 200 and **46% by iteration
         10,000**, with the loss unchanged in its first six digits, and
         ``mass`` lands anywhere from 1.33 to 1.90 depending only on the
-        budget.  :func:`fit_lm` and :func:`fit_multiple_shooting` drift too
+        budget.  Those are the *last* iterates, which :func:`fit` returned
+        until it learned to return its lowest-loss one; that selection does
+        not remove the effect, because along an exactly flat direction
+        which iterate is lowest is decided by rounding.  Unguarded, on a
+        120-step record with σ = 0.02 noise, the lowest-loss iterate lands
+        −7.50%, −7.12% and −5.43% from the starting scale at ``lr`` 0.01,
+        0.05 and 0.2, for every budget from 200 to 10,000 iterations: the
+        learning rate still picks the answer.  :func:`fit_lm` and
+        :func:`fit_multiple_shooting` drift too
         — ``λ·diag(A)`` damping is no more orthogonal to the null space
         than Adam's preconditioner is — and since 0.4.0 all three run this
         same guard.  What differs is that LM's step vanishes with the
@@ -3338,10 +3346,13 @@ def fit_multiple_shooting(
         mean of the three lands **−4.35%** at ``lr=0.01, n_iter=200``,
         **−4.80%** at 1,200, **−1.97%** at ``lr=0.2, n_iter=200`` and
         **−2.02%** at 1,200 — a 3.0% spread in the returned constants for a
-        loss that agrees to four digits.  Raising the budget to 4,000 moves
-        ``lr=0.2`` on again, to −2.31%, so it is not converging to a value
-        either.  Two runs on the same data return different physical
-        constants and neither is preferred by the objective.
+        loss that agrees to four digits.  Raising the budget to 4,000 moved
+        the last iterate at ``lr=0.2`` on again, to −2.31%, so it was not
+        converging to a value either.  Those are last iterates; the
+        lowest-loss iterates this fitter now returns land −4.35%, −4.80%,
+        −1.97% and −1.97% (and −1.97% at 4,000), the same 3.0% spread.
+        Two runs on the same data return different physical constants and
+        neither is preferred by the objective.
 
         Only ``theta`` is guarded.  The returned ``window_states`` are
         nuisance variables of the fit rather than constants a caller

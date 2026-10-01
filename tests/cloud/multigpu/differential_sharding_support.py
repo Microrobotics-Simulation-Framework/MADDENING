@@ -1383,7 +1383,15 @@ def heat_configs(draw, *, surfaces=FORWARD_SURFACES, max_steps: int = 4) -> Heat
 
 @st.composite
 def lbm_configs(draw, *, lattices=("D2Q9", "D3Q19"), surfaces=FORWARD_SURFACES,
-                max_steps: int = 3) -> LBMConfig:
+                max_steps: int = 3, vary_cells: bool = True) -> LBMConfig:
+    """An LBM channel configuration.
+
+    ``vary_cells=False`` fixes the cells per shard, so the grid shape
+    depends on the mesh alone: ``LBMNode``'s constructor and
+    ``initial_state`` run eagerly, and compile each operation afresh for
+    every new grid shape (about 0.4 s an example), which a per-push test
+    cannot afford on every draw.
+    """
     lattice = draw(st.sampled_from(list(lattices)))
     D = 2 if lattice == "D2Q9" else 3
     if draw(st.booleans()) and N_AVAILABLE >= 4:
@@ -1398,7 +1406,7 @@ def lbm_configs(draw, *, lattices=("D2Q9", "D3Q19"), surfaces=FORWARD_SURFACES,
     shape = []
     for a in range(D):
         lo = 3 if a == D - 1 else 1     # room for two walls and a fluid row
-        c = draw(st.integers(lo, lo + 1)) if D == 2 else draw(st.integers(lo, lo))
+        c = draw(st.integers(lo, lo + 1)) if (D == 2 and vary_cells) else lo
         shape.append(block.get(a, 1) * c)
     return LBMConfig(
         lattice=lattice, mesh_shape=tuple(mesh_shape), axis_names=tuple(axis_names),
@@ -1912,9 +1920,10 @@ def check_config(cfg, *, surfaces: Optional[tuple] = None) -> dict:
     with precision(cfg.dtype):
         case = build_case(cfg)
         context = f"{cfg}"
-        # Construction (and its predicted refusals).
-        _, refused = _expect_refusal(case, lambda: case.make(True), "construct", context)
-        if refused:
+        # Construction (and its predicted refusals).  Without a predicted
+        # construction refusal the first surface constructs it anyway.
+        if case.refusal is not None and case.refusal[0] == "construct":
+            _expect_refusal(case, lambda: case.make(True), "construct", context)
             return {"refused": "construct"}
         check_construction_refusals(case)
         surfaces = (cfg.surface,) if surfaces is None else surfaces

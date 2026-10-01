@@ -449,10 +449,18 @@ def test_every_fitter_returns_an_iterate_no_worse_than_any_it_evaluated(
     # (``test_sysid_hold_never_raises_the_loss.py``).
     res, reproduced = run(False)
     # The guard runs after the selection and never feeds back into it.
-    held, _ = run(True)
+    held, held_reproduced = run(True)
     np.testing.assert_array_equal(held.losses, res.losses)
     assert (held.best_iteration, held.best_loss) == (res.best_iteration, res.best_loss)
     gm.check_params(held.params)
+    # ... and never returns parameters above the selection's loss: within
+    # ``2**-13`` (its relative tolerance in float32) and a rounding-level
+    # floor.  Three of these cells went uphill under 0.4.0-dev's guard
+    # (fit_lm, unmasked and masked, shipped specs: 0.0 -> 0.22 and
+    # 0.279 -> 0.372; unmasked, transformed: 0.0 -> 3.2e-10).
+    assert held.hold_declined is False
+    assert held_reproduced <= reproduced * (1 + 2**-13) + 1e-12, (
+        held_reproduced, reproduced, held.excited_rank)
 
     gm.check_params(res.params)
     selected = (jax.tree.leaves(mask) if mask is not None

@@ -435,11 +435,9 @@ def recover(gm: GraphManager) -> None:
     """Put *gm* back after a transform left tracers in it, quietly.
 
     ``jax.grad`` of a loss that calls ``run_scan`` leaves the traced final
-    state in the graph.  Every entry point but ``reset_state`` puts it
-    back first (with a ``RuntimeWarning``); ``reset_state`` does not, and
-    raises on a group with a predictor -- a strict xfail in
-    ``test_differential_coupling_solvers.py``.  So go through an entry
-    point that does.
+    state in the graph.  Every entry point puts it back first, with a
+    ``RuntimeWarning`` (``reset_state`` without one, since it replaces
+    the whole state); this goes through one with the warning silenced.
     """
     if not getattr(gm, "_state_traced", True):
         return      # nothing to put back: skip the report's host-side cost
@@ -909,43 +907,6 @@ TRIANGLE = _cycle(3, 2, chords=((0, 2),))
 FLUX_PAIR = _cycle(2, 1, flux_edge=0)
 NONLINEAR_RING = _cycle(4, 1, chords=((1, 3),), nonlinear=True)
 STRUCTURES = {"triangle": TRIANGLE, "flux-pair": FLUX_PAIR, "nonlinear-ring": NONLINEAR_RING}
-
-
-def steer_around_known_crashes(gdef: GraphDef, group: dict) -> dict:
-    """*group*, moved off a configuration known to raise at trace.
-
-    A Jacobi group in which a flux producer reads another node's flux
-    raises ``KeyError`` (the Jacobi pass resolves producers' inputs before
-    any flux exists; the Gauss-Seidel pass has a two-sweep seed for it).
-    Pinned as a strict xfail in ``test_differential_leaves.py``; oracles
-    that are about something else are steered to Gauss-Seidel instead.
-    """
-    producers = {nd.name for nd in gdef.nodes if nd.flux}
-    if group.get("iteration_mode") == "jacobi" and any(
-            e.field == "q" and e.dst in producers for e in gdef.edges):
-        return dict(group, iteration_mode="gauss-seidel")
-    return group
-
-
-#: Leaves the predictor's unflatten drops from the group's starting iterate.
-NON_FLOAT_LEAVES = ("count", "tag", "flag", "sign")
-
-
-def steer_leaves_around_known_crashes(gdef: GraphDef, group: dict) -> GraphDef:
-    """*gdef* without non-float group leaves where they are known to raise.
-
-    A predictor (``"linear"`` / ``"quadratic"``) under the ``"mixed"``
-    norm raises ``KeyError`` on a group node holding an integer or boolean
-    leaf: the predictor rebuilds the starting iterate from its floating
-    fields alone, and the mixed norm reads every field of it.  Pinned as a
-    strict xfail in ``test_differential_leaves.py``.
-    """
-    if group.get("predictor", "none") != "none" and group.get("convergence_norm") == "mixed":
-        return dataclasses.replace(gdef, nodes=tuple(
-            dataclasses.replace(nd, leaves=tuple(lf for lf in nd.leaves
-                                                 if lf not in NON_FLOAT_LEAVES))
-            if nd.name in gdef.group_nodes else nd for nd in gdef.nodes))
-    return gdef
 
 
 def gauss_seidel_matrix(gdef: GraphDef, values: dict) -> np.ndarray:

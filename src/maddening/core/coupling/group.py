@@ -149,8 +149,8 @@ class CouplingGroup:
         ``ValueError`` here rather than failing inside the traced
         coupling loop.  Only floating-point fields are accelerated,
         here and under ``"aitken"`` / ``"fixed"``: an integer, boolean
-        or PRNG-key field is recomputed from the pre-step state on every
-        pass, so a named one is dropped from the selection, and
+        or PRNG-key field is computed by every pass and cannot be
+        relaxed, so a named one is dropped from the selection, and
         ``compile()`` refuses a selection that names no floating field.
         (Before 0.4.0, ``solver="fori"`` with ``"aitken"`` or
         ``"fixed"`` relaxed such fields through float32 and kept the
@@ -177,14 +177,18 @@ class CouplingGroup:
         estimates of the *end*-of-step value, never the
         beginning-of-step value (MADD-ANO-027), so the two differ only
         where a source node earlier in the same Gauss-Seidel pass has
-        already moved: they are bit-identical when every source of the
-        sub-cycled node is scheduled after it, under
-        ``iteration_mode="jacobi"`` (both ends are then the incoming
-        iterate), and at exact stationarity, and otherwise differ by
-        about the tolerance per step -- 2.7e-05 relative after 100
-        steps of a sub-cycled spring pair scheduled slow node first at
-        ``tolerance=1e-4``, and bit-identical over the same 100 steps
-        with the fast node first.  ``"quadratic"`` is meant to use three
+        already moved.  When every source of the sub-cycled node is
+        scheduled after it, under ``iteration_mode="jacobi"`` (both ends
+        are then the incoming iterate), and at exact stationarity, they
+        compute the same input -- but they compile to different
+        programs, so they agree to float32 round-off, not to the bit:
+        on sub-cycled two-node Jacobi groups of one to three dimensions,
+        130 of 144 node-steps were bit-identical and the rest within
+        1.8e-07 relative (two ulps); bit-identical over 100 steps of a
+        sub-cycled spring pair with the fast node first.  Otherwise
+        they differ by about the tolerance per step -- 2.7e-05 relative
+        after 100 steps of that pair scheduled slow node first at
+        ``tolerance=1e-4``.  ``"quadratic"`` is meant to use three
         successive iteration values, but no third value is ever
         supplied, so it is exactly ``"linear"``.
     jacobian_reuse : int

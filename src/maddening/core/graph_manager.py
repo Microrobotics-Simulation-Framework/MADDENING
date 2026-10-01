@@ -213,10 +213,13 @@ def _floating_accel_fields(fields, state, group_nodes) -> Optional[dict]:
     boolean or PRNG-key leaf that took that round trip came back rounded
     through float32 -- ``0xdeadbeef`` as ``0xdeadbf00``, ``2**24 + 1`` as
     ``2**24`` -- and the rounded value was the one the step kept.  Such a
-    leaf is recomputed from the pre-step state on every pass, so its
-    first-pass value is already the converged one and it has no place in
-    the relaxation; ``solver="ift"`` has always iterated on the floating
-    fields only.
+    leaf is computed by every pass and has no place in a relaxation, which
+    only means anything on a continuous quantity; ``solver="ift"`` has
+    always iterated on the floating fields only.  The leaf is *not*
+    independent of the iterate in general -- a flag a node computes from
+    a boundary input (a contact flag reading a gap) changes with it -- so
+    both solvers recompute it from the returned floating state after the
+    solve (``_with_nonfloat_fields_at`` in ``_run_coupled_block_impl``).
 
     ``fields`` is ``None`` for "every field of every node in
     ``group_nodes``", or a ``{node: (field, ...)}`` mapping.  Returned
@@ -1243,7 +1246,12 @@ def _fixed_point_while(
        quasi-Newton step, which is not a multiple of ``F(x) - x``.
     4. *A non-monotone ratio* — the one that is caught.  ``rho >= 1``,
        a zero predecessor or a non-finite residual reject the estimate
-       and ``ratio_usable`` records it.
+       and ``ratio_usable`` records it.  A rejection is not proof of a
+       non-monotone sequence: the ratio carries about
+       ``2 floor / r_k`` of float rounding, so a contraction at a rate
+       within that of 1 reads ``rho >= 1`` from noise, and the raw
+       residual test decides (measured up to 200 thresholds from the
+       fixed point at rate 0.995; MADD-ANO-005).
 
     ``ratio_usable`` therefore reports exactly condition 4 and nothing
     else: a usable *ratio*, not a valid *bound*.  That is why it is no
@@ -1432,16 +1440,36 @@ def _fixed_point_while(
     # -- is unchanged for every acceleration that is not on it.
     two_pass_exit = acceleration in _TWO_PASS_EXIT
 
-    amplification, error_of, step_scale_of = _bound_helpers()
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        first_pass_relaxed_amplification,
+        relaxes_first_pass,
+    )
+
+    raw_amplification, error_of, step_scale_of = _bound_helpers()
+    # Static: only an under-relaxed ``"fixed"`` loop reads which pass it
+    # is on, so every other loop's program is the one it always was.
+    relax_first = relaxes_first_pass(acceleration, relaxation)
     # Static: ``acceleration`` and ``relaxation`` are both nondiff
     # arguments of the custom_jvp, so this is a Python float and costs
     # nothing in the loop.
     step_scale = step_scale_of(acceleration, relaxation)
 
-    def _met(res, res_prev, res_prev2):
+    def amplification(res, res_prev, res_prev2, first=False):
+        """:func:`error_amplification`, relaxed on the loop's first pass.
+
+        ``first`` says the ratio is the first loop pass's, whose
+        predecessor is the unrelaxed pre-loop pass
+        (:func:`~maddening.core.coupling.acceleration.first_pass_relaxed_amplification`;
+        a no-op except under an under-relaxed ``"fixed"``).
+        """
+        return first_pass_relaxed_amplification(
+            raw_amplification(res, res_prev, res_prev2),
+            acceleration, relaxation, first)
+
+    def _met(res, res_prev, res_prev2, first):
         """The stopping criterion: the *estimated distance to the fixed
         point* is at or below ``threshold``, not merely the last step."""
-        est = error_of(res, amplification(res, res_prev, res_prev2),
+        est = error_of(res, amplification(res, res_prev, res_prev2, first),
                        step_scale)
         met = est <= threshold
         if two_pass_exit:
@@ -1456,7 +1484,9 @@ def _fixed_point_while(
     def cond(carry):
         _x, _x_meas, res, res_prev, res_prev2, i, _acc = carry
         first = i == jnp.int32(0)
-        above = jnp.logical_not(_met(res, res_prev, res_prev2))
+        # ``i`` bodies have run; ``res`` is the first loop pass's at 1.
+        above = jnp.logical_not(_met(res, res_prev, res_prev2,
+                                     relax_first and i == jnp.int32(1)))
         keep_going = jnp.logical_and(above, i < max_iter - 1)
         return jnp.logical_or(first, keep_going)
 
@@ -1503,7 +1533,8 @@ def _fixed_point_while(
     # ``x_next`` is exactly the one that most often crossed the
     # threshold -- so ``x_next`` is returned and one evaluation of
     # ``F`` measures it.  See the docstring.
-    criterion_met = _met(final_res, res_prev, res_prev2)
+    on_first_pass = relax_first and n_iters == jnp.int32(1)
+    criterion_met = _met(final_res, res_prev, res_prev2, on_first_pass)
     x_star = jnp.where(criterion_met, x_meas, x_next)
     loop_res = final_res
 
@@ -1515,9 +1546,13 @@ def _fixed_point_while(
     # being returned.  On the criterion that pair is
     # ``(res_prev, final_res)``; at the cap the extra evaluation makes
     # ``(final_res, res(x_star))`` the consecutive pair instead.
+    # The criterion's pair is the first loop pass's exactly when the loop
+    # stopped after one body; the cap's extra evaluation follows a
+    # relaxed step, so its pair never is.
     final_res, final_amp = jax.lax.cond(
         criterion_met,
-        lambda _x: (loop_res, amplification(loop_res, res_prev, res_prev2)),
+        lambda _x: (loop_res, amplification(loop_res, res_prev, res_prev2,
+                                            on_first_pass)),
         _measure_at_cap,
         x_star,
     )
@@ -2244,10 +2279,12 @@ def _run_coupled_block_impl(
         coupling_residual_mixed,
         error_amplification,
         estimated_error,
+        first_pass_relaxed_amplification,
         fixed_relaxation,
         flatten_coupled_state,
         iqn_ils_update,
         relaxation_step_scale,
+        relaxes_first_pass,
         unflatten_coupled_state,
     )
 
@@ -2257,6 +2294,10 @@ def _run_coupled_block_impl(
     # otherwise.  Static, and identical on both solver paths so
     # ``solver`` stays invisible in ``coupling_diagnostics()``.
     step_scale = relaxation_step_scale(group.acceleration, group.relaxation)
+    # Static: whether the first loop pass's amplification is relaxed
+    # (``first_pass_relaxed_amplification``), identically on both solver
+    # paths.  Only a loop for which it is true reads its pass index.
+    relax_first = relaxes_first_pass(group.acceleration, group.relaxation)
     group_node_names = list(group_schedule)
     _node_params = node_params.nodes if node_params is not None else {}
 
@@ -2322,6 +2363,26 @@ def _run_coupled_block_impl(
                 if edge.source_field not in src_fields and src_nn in flux_producing_nodes:
                     has_flux_edges = True
                     break
+
+    # How many sweeps the Jacobi pass seeds producers' fluxes in: two
+    # when a producer in the group reads a flux (it needs another
+    # producer's flux before it can compute its own; see
+    # ``one_pass_jacobi``), one otherwise.  Static, so a group that
+    # never needed the second sweep compiles to the program it always
+    # did.  ``one_pass_gs`` always takes two.
+    def _edge_reads_a_flux(edge):
+        src_nn = edge.source_node
+        return (src_nn in flux_producing_nodes
+                and edge.source_field not in new_state.get(src_nn, {}))
+
+    jacobi_flux_sweeps = (
+        (False, True)
+        if has_flux_edges and any(
+            _edge_reads_a_flux(edge)
+            for nn in group_node_names if nn in flux_producing_nodes
+            for edge in edges_by_target[nn])
+        else (True,)
+    )
 
     # Save the initial state for each node at the beginning of
     # the timestep -- this is what we always integrate FROM.
@@ -2587,15 +2648,22 @@ def _run_coupled_block_impl(
 
     def one_pass_jacobi(latest_results):
         """Jacobi: all nodes read from frozen previous-iteration state."""
-        # Pre-compute fluxes from previous iteration state
+        # Pre-compute fluxes from previous iteration state.  A producer
+        # whose own inputs include another producer's flux needs that
+        # flux before it can compute its own, so such a group seeds in
+        # two sweeps exactly as ``one_pass_gs`` does (the first tolerates
+        # a missing flux, the second has them all); a single strict
+        # sweep raised ``KeyError`` naming the flux at trace.  Every
+        # other group keeps the single sweep, and its program.
         flux_s: dict[str, dict] = {}
         if has_flux_edges:
-            for nn in group_node_names:
-                if nn in flux_producing_nodes:
-                    bi = _resolve_boundary(nn, latest_results)
-                    flux_s[nn] = _node_fluxes(
-                        nodes[nn], latest_results[nn], bi, _get_dt(nn), _np(nn),
-                    )
+            for strict in jacobi_flux_sweeps:
+                for nn in group_node_names:
+                    if nn in flux_producing_nodes:
+                        bi = _resolve_boundary(nn, latest_results, flux_s, strict=strict)
+                        flux_s[nn] = _node_fluxes(
+                            nodes[nn], latest_results[nn], bi, _get_dt(nn), _np(nn),
+                        )
 
         results = {}
         for nn in group_node_names:
@@ -2648,14 +2716,18 @@ def _run_coupled_block_impl(
                 s_new, s_old, group_node_names, group.atol,
             )
 
-    def _estimate(residual, prev_residual, prev2_residual):
+    def _estimate(residual, prev_residual, prev2_residual, first=False):
         """``(estimated distance to the fixed point, amplification)``.
 
         The criterion both solvers stop on.  See
         :func:`_fixed_point_while` for the argument and for what
-        happens when the ratio is rejected.
+        happens when the ratio is rejected.  ``first`` says this is the
+        loop's first pass, whose ratio spans the unrelaxed pre-loop pass
+        (``first_pass_relaxed_amplification``).
         """
-        amp = error_amplification(residual, prev_residual, prev2_residual)
+        amp = first_pass_relaxed_amplification(
+            error_amplification(residual, prev_residual, prev2_residual),
+            group.acceleration, group.relaxation, first)
         return estimated_error(residual, amp, step_scale), amp
 
     # Convergence threshold depends on norm type
@@ -2712,6 +2784,52 @@ def _run_coupled_block_impl(
 
         # Run first iteration
         state_after_first = one_pass(new_state_inner)
+
+        # The group's non-floating fields (counters, flags, keys), and the
+        # rule both solvers return them by.  The fixed-point iteration
+        # acts on floating fields only, so what a solve returns is a
+        # floating state; the non-floating fields beside it are the ones
+        # the pass computes *at* that state -- as at a fixed point, where
+        # the pass that produced the state and the pass it produces are
+        # the same.  ``solver="ift"`` used to restore them from the first
+        # pass, on the premise that such a field depends on the pre-step
+        # state alone; a flag that reads a boundary input (a contact flag
+        # reading a gap) does not, and the returned flag described an
+        # input the solve had long left.  ``solver="fori"`` took them from
+        # the raw pass that preceded the returned iterate, which under an
+        # acceleration is not the pass of the returned floating state
+        # either.  Static: an all-floating group never builds the pass.
+        nonfloat_fields = {
+            nn: tuple(f for f in sorted(state_after_first[nn])
+                      if not jnp.issubdtype(
+                          jnp.asarray(state_after_first[nn][f]).dtype, jnp.floating))
+            for nn in group_node_names
+        }
+
+        def _with_nonfloat_fields_at(s_full):
+            """*s_full* with the group's non-floating fields recomputed at it.
+
+            One more evaluation of the pass, of which only those fields
+            are kept, so XLA keeps only the arithmetic that feeds them (a
+            counter's increment; a flag's boundary resolution).  The
+            floating inputs go in through ``stop_gradient``: nothing kept
+            from this pass has a derivative, and the floating state's --
+            the IFT rule's, or the unrolled loop's -- is untouched.
+            """
+            if not any(nonfloat_fields.values()):
+                return s_full
+            frozen = jax.tree.map(
+                lambda v: (jax.lax.stop_gradient(v)
+                           if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating) else v),
+                s_full,
+            )
+            s_leaves = one_pass(frozen)
+            out = dict(s_full)
+            for nn in group_node_names:
+                if nonfloat_fields[nn]:
+                    out[nn] = {**s_full[nn],
+                               **{f: s_leaves[nn][f] for f in nonfloat_fields[nn]}}
+            return out
 
         if max_iters <= 1:
             # ``max_iterations=1`` is a legitimate "one staggered pass,
@@ -2846,13 +2964,19 @@ def _run_coupled_block_impl(
             # entries of ``template_state`` — into an explicit
             # ``consts`` pytree, so the IFT rule propagates
             # derivatives through them.
-            # Only floating fields live in the fixed-point vector.  An
-            # integer / boolean field (a counter, a flag) is recomputed
-            # from the pre-step state on every pass, so its first-pass
-            # value is already the converged one; keeping it out avoids
+            # Only floating fields live in the fixed-point vector: keeping
+            # an integer / boolean field (a counter, a flag) out avoids
             # float<->int casts in the loop and float0 tangents in the
             # IFT rule (which leaked tracers under reverse mode through
-            # a scan).
+            # a scan).  Inside the loop such a field keeps the value the
+            # first pass gave it.  That is its returned value only when
+            # the node computes it from the pre-step state alone (a step
+            # counter); a flag that reads a boundary input (a contact
+            # flag reading a gap) depends on the iterate, and the
+            # first-pass value described an input the solve had long
+            # left.  So the returned state's non-floating fields are
+            # recomputed below, from the returned floating fields, by one
+            # more evaluation of the pass (``_with_nonfloat_fields_at``).
             float_fields = {
                 nn: tuple(
                     f for f in sorted(template_state[nn])
@@ -2895,8 +3019,38 @@ def _run_coupled_block_impl(
                     s[nn] = {**s[nn], **part[nn]}
                 return s
 
-            def _step_flat(x_full):
+            # Non-floating fields a group-internal edge carries (a flag
+            # one member computes and another reads).  ``_embed`` holds
+            # every non-floating field at its first-pass value, and a
+            # reader that takes such a field from the iterate -- under
+            # Jacobi, or scheduled before its producer -- then iterated a
+            # map with the field frozen: on a pair whose flag flips during
+            # the solve, ``"ift"`` converged to the fixed point of the
+            # frozen map with ``converged=True``, where ``"fori"``, which
+            # carries the whole state, found the consistent one.  So such
+            # fields are evaluated at the iterate itself: one more pass,
+            # of which only those fields are kept (XLA keeps only what
+            # feeds them).  At a fixed point that is the value the pass
+            # gives there, so the fixed point is the consistent one.
+            # Static: without such an edge the map is the one it always
+            # was.
+            live_nonfloat = sorted({
+                (e.source_node, e.source_field) for e in group_internal_list
+                if e.source_field in template_state.get(e.source_node, {})
+                and e.source_field not in float_fields.get(e.source_node, ())
+            })
+
+            def _embed_live(x_full):
                 s = _embed(x_full)
+                if not live_nonfloat:
+                    return s
+                s_nf = one_pass(s)
+                for nn, fld in live_nonfloat:
+                    s[nn] = {**s[nn], fld: s_nf[nn][fld]}
+                return s
+
+            def _step_flat(x_full):
+                s = _embed_live(x_full)
                 s_new = one_pass(s)
                 # The residual is the group's configured norm on the
                 # full per-node state, exactly as the fori path
@@ -3087,7 +3241,12 @@ def _run_coupled_block_impl(
                 # would help: ``_strict_check`` names it first.
                 final_est = estimated_error(final_res, final_amp, step_scale)
                 x_star_full = _strict_check(x_star_full, final_est)
-            final = _merge(template_state, _embed(x_star_full), jnp.array(False))
+            # ``_embed`` restores the non-floating fields from the first
+            # pass; they are recomputed at the returned floating state
+            # (``_with_nonfloat_fields_at``, the rule both solvers share).
+            final = _merge(template_state,
+                           _with_nonfloat_fields_at(_embed_live(x_star_full)),
+                           jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
                             spec_amp, grad_bound), (vw if vw else None))
 
@@ -3298,7 +3457,8 @@ def _run_coupled_block_impl(
                      fprev) = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    est, _amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2,
+                                          relax_first and i == 1)
                     new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
@@ -3328,7 +3488,8 @@ def _run_coupled_block_impl(
                     s_cur, converged, prev_res, prev_res2 = carry
                     s_raw = one_pass(s_cur)
                     residual = _compute_residual(s_raw, s_cur)
-                    est, _amp = _estimate(residual, prev_res, prev_res2)
+                    est, _amp = _estimate(residual, prev_res, prev_res2,
+                                          relax_first and i == 1)
                     new_converged = converged | (est <= conv_threshold)
                     x_old = _flatten(s_cur)
                     x_raw = _flatten(s_raw)
@@ -3421,8 +3582,14 @@ def _run_coupled_block_impl(
                 # on 0.11.0 and not on 0.11.2).  The loop now carries only
                 # *selects* of residuals it already computes, which leave
                 # the forward bit-identical on 0.10.2, 0.11.0 and 0.11.2.
-                return loop_res, error_amplification(
-                    loop_res, frozen_prev[0], frozen_prev[1])
+                # A latch on the first loop pass froze that pass's pair,
+                # whose predecessor is the unrelaxed pre-loop pass
+                # (``first_pass_relaxed_amplification``): ``iter_count``
+                # stays 1 exactly then.
+                return loop_res, first_pass_relaxed_amplification(
+                    error_amplification(loop_res, frozen_prev[0], frozen_prev[1]),
+                    group.acceleration, group.relaxation,
+                    relax_first and iter_count == 1.0)
 
             final_res, final_amp = jax.lax.cond(
                 final_carry[1],
@@ -3434,6 +3601,12 @@ def _run_coupled_block_impl(
                 _group_state_finite(final_state, group_node_names),
                 final_res, final_amp,
             )
+
+        # The non-floating fields of the returned state, by the rule the
+        # ift path applies (``_with_nonfloat_fields_at``): the raw pass
+        # they came from preceded the returned iterate, which under an
+        # acceleration is not that pass's output.
+        final_state = _with_nonfloat_fields_at(final_state)
 
         # Merge coupled nodes back into the full state
         r = {k: v for k, v in new_state_inner.items()}
@@ -3492,21 +3665,28 @@ def _run_coupled_block_impl(
                 x_pred = 2.0 * x_n - x_nm1
 
             # Only apply if we have at least 2 stored states.  Only the
-            # floating fields are extrapolated; a counter or flag keeps
-            # its first-pass value.
+            # floating fields are extrapolated; a counter or flag is
+            # recomputed by the first pass like any other field.
             has_history = pred_count >= 2
             pred_fields = float_fields_of(new_state, group_node_names)
             x_cur = flatten_coupled_state(new_state, group_node_names, fields=pred_fields)
             x_use = jnp.where(has_history, x_pred, x_cur)
 
-            # Unflatten and update new_state with predicted values
+            # Unflatten and update new_state with predicted values.
+            # ``predicted`` holds the floating fields only, so they are
+            # merged over the node's state rather than replacing it: a
+            # replacement dropped the group's integer and boolean leaves
+            # from the iterate the solve starts from, and the mixed norm,
+            # which looked every field of the new iterate up in the old
+            # one, raised ``KeyError`` naming the leaf on the first
+            # residual.
             predicted = unflatten_coupled_state(
                 x_use, new_state, group_node_names, fields=pred_fields,
             )
             new_state = {k: v for k, v in new_state.items()}
             for nn in group_node_names:
                 if nn in predicted:
-                    new_state[nn] = predicted[nn]
+                    new_state[nn] = {**new_state[nn], **predicted[nn]}
 
     # ------------------------------------------------------------------
     # Run coupling (``waveform_iterations`` sweeps of it)
@@ -5284,6 +5464,10 @@ class GraphManager:
 
     def add_node(self, node: SimulationNode) -> None:
         """Register a node and initialise its state."""
+        # Into the state that is kept: added to a traced one (right after
+        # ``jax.grad`` of a loss that stepped the graph), the node's state
+        # was lost when the next entry point put the graph back.
+        self._recover_from_escaped_tracers()
         if node.name in self._nodes:
             raise ValueError(f"Node '{node.name}' already exists in the graph.")
         bad = [t for t in ("/", "#", "->") if t in node.name]
@@ -5455,6 +5639,7 @@ class GraphManager:
         state: every incoming edge (mapping, transform, additive) plus the
         zero defaults of its external inputs.  A debugging / inspection
         helper; the compiled step resolves edges itself."""
+        self._recover_from_escaped_tracers()
         if node_name not in self._nodes:
             raise KeyError(f"unknown node {node_name!r}")
         p = self._params_or_default(params)
@@ -5504,6 +5689,8 @@ class GraphManager:
 
     def remove_node(self, name: str) -> None:
         """Remove a node and all edges / external inputs that reference it."""
+        # From the state that is kept (see ``add_node``).
+        self._recover_from_escaped_tracers()
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
         del self._nodes[name]
@@ -5706,6 +5893,7 @@ class GraphManager:
 
     def validate(self) -> list[str]:
         """Check graph integrity.  Returns a list of warning/error strings."""
+        self._recover_from_escaped_tracers()
         issues: list[str] = []
         node_names = set(self._nodes.keys())
 
@@ -6057,8 +6245,8 @@ class GraphManager:
                         f"of {nn!r} (state fields: {sorted(have)})"
                     )
             # Only floating fields are accelerated: an integer, boolean or
-            # PRNG-key field is recomputed from the pre-step state on every
-            # pass, and relaxing it rounded it through float32
+            # PRNG-key field is computed by every pass and cannot be
+            # relaxed, and relaxing it rounded it through float32
             # (``_floating_accel_fields``).  Such a field is dropped from
             # the selection; a selection with nothing else in it would
             # leave the quasi-Newton problem empty, so it is refused here
@@ -6074,8 +6262,8 @@ class GraphManager:
                         f"accelerated_fields={dict(g.accelerated_fields)!r} of coupling "
                         f"group {sorted(g.nodes)} names no floating-point field.  Only "
                         "floating fields are accelerated: an integer, boolean or "
-                        "PRNG-key field is recomputed from the pre-step state on "
-                        "every pass.  Name at least one floating field, or leave "
+                        "PRNG-key field is computed by every pass and cannot be "
+                        "relaxed.  Name at least one floating field, or leave "
                         "accelerated_fields=None to use the interface fields."
                     )
 
@@ -7110,13 +7298,27 @@ class GraphManager:
             self._state_before_trace = None
         self._state = new_state
 
-    def _recover_from_escaped_tracers(self) -> None:
+    def _recover_from_escaped_tracers(self, *, warn: bool = True) -> None:
         """Put the graph back to the last untraced state, if it needs it.
 
-        Called from every entry point.  It costs one attribute test when
-        there is nothing to do, which is always except right after a
-        transform that stepped the graph.  Inside a transform it does
-        nothing, so a traced multi-step loop still works.
+        Called from every public entry point that reads or writes the
+        state: the steppers, ``compile``, ``coupling_diagnostics``,
+        ``save_state`` / ``load_state``, ``get_node_state`` /
+        ``set_node_state``, ``reset_state``, ``resolve_boundary_inputs``,
+        ``validate`` and ``add_node`` / ``remove_node``.  It costs one
+        attribute test when there is nothing to do, which is always
+        except right after a transform that stepped the graph.  Inside a
+        transform it does nothing, so a traced multi-step loop still
+        works.
+
+        ``warn=False`` is for an entry point that replaces the whole
+        state anyway (``reset_state``): the warning's advice -- set the
+        state you want explicitly -- is what the caller is doing, and
+        the state put back is never observed.  An entry point that missed
+        this call read the traced state: ``reset_state`` sized a
+        predictor group's seed from it and raised
+        ``UnexpectedTracerError``, and ``set_node_state`` wrote into it,
+        so the next entry point put the graph back over the write.
         """
         if not self._state_traced or not _outside_jax_trace():
             return
@@ -7129,6 +7331,8 @@ class GraphManager:
         self._state = restored
         self._state_traced = False
         self._state_before_trace = None
+        if not warn:
+            return
         warnings.warn(
             "the graph held JAX tracers left behind by a transform and has "
             "been put back to the state it had before it.  step() / run() / "
@@ -7260,6 +7464,19 @@ class GraphManager:
               ``max_iterations=1``, where there is no pair of residuals
               to take a ratio of.  The criterion then falls back to the
               raw residual test, which is what ``converged`` reports.
+              **``False`` does not mean the sequence stopped
+              contracting.**  Each residual carries about its float
+              floor of rounding, so the ratio carries about
+              ``2 floor / residual``, and a group contracting at a rate
+              near 1 reads ``rho >= 1`` from noise once its residual is
+              within about ``2 floor / (1 - rho)`` of the floor: a
+              monotone single-mode group at rate 0.995 stopped this way
+              up to 200 thresholds from its fixed point -- wherever its
+              raw residual already met the threshold -- with
+              ``precision_limited=False`` (which reads the residual
+              against its floor, not the ratio).  Read
+              ``ratio_usable=False`` beside ``converged=True`` as the
+              raw residual test and nothing more (MADD-ANO-005).
 
               *Renamed during 0.4.0's development* from
               ``"bound_valid"``, which asserted all four conditions while
@@ -8503,7 +8720,14 @@ class GraphManager:
         dt_initial : float
             Initial timestep guess.
         atol, rtol : float
-            Absolute and relative error tolerances.
+            Absolute and relative error tolerances.  The step-doubling
+            error is the RMS of ``|fine - coarse| / (atol + rtol
+            max(|fine|, |coarse|))`` over the *floating* state fields
+            only: an integer, boolean or PRNG-key leaf (a counter, a tag,
+            a flag) carries no truncation error and adds neither a term
+            nor an element.  Before 0.4.0 it was read too, so a ``bool``
+            raised ``TypeError``, a ``uint32`` wrapped and rejected almost
+            every step, and an ``int32`` counter moved the step sequence.
         dt_min, dt_max : float
             Timestep bounds.
         external_inputs : dict, optional
@@ -8788,6 +9012,10 @@ class GraphManager:
         are handed does not reach the simulation.  Use
         :meth:`set_node_state` for that.
         """
+        # After ``jax.grad`` of a loss that stepped the graph, the state
+        # holds tracers; hand back the state the graph is put back to,
+        # not a dict of escaped tracers.
+        self._recover_from_escaped_tracers()
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
         if name not in self._state:
@@ -8801,7 +9029,14 @@ class GraphManager:
         is how a differentiable initial condition is expressed -- and
         noted, so the graph can be put back afterwards rather than
         keeping the tracer (see ``_recover_from_escaped_tracers``).
+
+        Outside a transform the graph is put back first, so a write made
+        right after ``jax.grad`` of a loss that stepped the graph -- the
+        remedy the recovery warning names -- lands in the state that is
+        kept.  It used to land in the traced state, and the next entry
+        point put the graph back over it.
         """
+        self._recover_from_escaped_tracers()
         if name not in self._nodes:
             raise KeyError(f"No node named '{name}'.")
         state = _strong_typed(state)
@@ -8874,6 +9109,14 @@ class GraphManager:
         normalises them (weak types stripped), so the jitted step does not
         retrace after a reset, and ``_meta``'s structure is preserved.
         """
+        # A transform that stepped the graph (``jax.grad`` of a loss
+        # calling ``run_scan``) leaves tracers in it, and the predictor
+        # history's seed below is sized from the live slot: reading the
+        # traced one raised ``UnexpectedTracerError``, so the remedy the
+        # recovery warning names failed on any group with a predictor.
+        # Put back first like every other entry point -- quietly, since
+        # everything put back is about to be replaced.
+        self._recover_from_escaped_tracers(warn=False)
         # Every ``initial_state()`` first, then one commit: an
         # ``initial_state`` that raises (an ``AdaptiveNode`` at a Palais
         # trap) must not leave half the graph reset and half of it carrying

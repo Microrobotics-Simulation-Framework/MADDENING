@@ -516,8 +516,10 @@ def test_multiple_shooting_scale_does_not_depend_on_the_schedule():
     Measured unguarded: -4.35% at ``lr=0.01, n_iter=200``, -4.80% at 1200,
     -1.97% at ``lr=0.2, n_iter=200`` and -2.02% at 1200 -- a 3.0% spread in
     the answer for a loss that agrees to four digits.  Most of it is the
-    learning rate; extending the budget to 4,000 moves ``lr=0.2`` on to
-    -2.31%, so it has not settled either.
+    learning rate; extending the budget to 4,000 moved the last iterate at
+    ``lr=0.2`` on to -2.31%, so it had not settled either.  Those are last
+    iterates; the lowest-loss iterates the fitter returns since it selects
+    them land -4.35%, -4.80%, -1.97% and -1.97%, the same 3.0% spread.
 
     The ``hold_undetermined=False`` half is what makes this a regression
     test rather than a tautology: it asserts the defect is still there when

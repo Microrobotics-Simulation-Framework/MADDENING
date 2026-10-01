@@ -5944,21 +5944,21 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-068"
-    title: "XLA miscompiles a ShardedStencilNode step inside run_scan when a sharded static is replicated over a mesh axis and read in the halo beside a window at the shard's offset"
+    title: "XLA miscompiles a ShardedStencilNode step inside a loop (run_scan, a coupling group's iteration) when a sharded static is replicated over a mesh axis and read in the halo beside a window at the shard's offset"
     description: >
       On jaxlib 0.10.2, 0.11.0 and 0.11.2 (CPU), a `ShardedStencilNode`
-      step traced inside `lax.scan` -- `GraphManager.run_scan` and the
-      scans built on it, a gradient through one included -- is compiled
-      wrongly for a node that reads a sharded `StaticArray` in its halo and
-      a replicated array through a window at its `shard_info` offset (a
-      slice of the window and its shifted neighbours), when the static is
-      replicated over a mesh axis of two or more devices.  On a mesh axis
-      the `axis_map` leaves unused, every cell of a 4-cell rod on a
-      `(2, 2)` mesh came back 1e-3 to 1e-2 off after one step, finite and
-      silent; on a `(2, 2)` pencil whose static is split along one axis
-      only, the step failed to compile (`RET_CHECK failure ... Failed to
-      translate module to LLVM IR`).  The same step under `jit` alone --
-      `step()`, `run()` -- is right, and so is a mesh where the static is
+      step traced inside a loop -- `GraphManager.run_scan` and the scans
+      built on it, a gradient through one included, and the iteration of a
+      coupling group -- is compiled wrongly for a node that reads a sharded
+      `StaticArray` in its halo and another array through a window at its
+      `shard_info` offset (a slice of the window and its shifted
+      neighbours), when the static is replicated over a mesh axis of two or
+      more devices.  On a mesh axis the `axis_map` leaves unused, every
+      cell of a 4-cell rod on a `(2, 2)` mesh came back 1e-3 to 1e-2 off
+      after one step, finite and silent; on a `(2, 2)` pencil whose static
+      is split along one axis only, the step failed to compile (`RET_CHECK
+      failure ... Failed to translate module to LLVM IR`).  The same step
+      under `jit` alone is right, and so is a mesh where the static is
       replicated over no axis of two or more devices.  Disabling XLA's
       algebraic simplifier pass makes the scan right.  The miscompile
       reproduces without MADDENING: a closed-over sharded constant,
@@ -5967,35 +5967,109 @@ anomalies:
       `axis_index * 2`, gives a different answer under `jit(scan)` than
       under `jit`.  It does not occur on jaxlib 0.5.3, the newest release
       the 0.3.x pins allowed, so it arrives with 0.4.0's jax floor (0.10).
-      `HeatNode` and `LBMNode` on meshes with an unused axis (24
-      configurations) and the generated differential matrix outside this
-      combination are unaffected.  Found while widening the differential
-      sharding harness to meshes with an unused axis (CPU, 8 virtual
-      devices).
+      Found while widening the differential sharding harness to meshes
+      with an unused axis (CPU, 8 virtual devices).
+
+      Measured since: it depends on the loop, not on `scan` as such, and
+      no rule about the loop holds.  The pure-JAX reproducer and the rod
+      above are wrong in a loop of one iteration (`run_scan(1)`, a
+      one-pass `fori_loop` or `while_loop`) and right in one of 2, 3, 5 or
+      8, and right in a `while_loop` whose trip count is traced; yet with
+      the same rod in a coupling group under `solver="fori"`, `step()` was
+      3.4e-3 off whenever the group's loop made two or more passes and
+      right with one, while the `"ift"` and sub-cycling groups were right
+      on the same graph.  A window into the static itself is right: the
+      2-D field of the multi-device validation goals takes its own columns
+      out of its sharded static at `shard_info[1]` and is exact in
+      `run_scan` on `(2, 2)`, `(2, 4)`, `(4, 2)` and `(2, 8)` pencils
+      under all three of its boundary conditions.  Over the harness kernel
+      -- 11 meshes (rods and slabs on a mesh with an unused axis, pencils,
+      a third mesh axis), the static read in its halo or its interior, the
+      table read through a halo-wide window, a block-sized window or not at
+      all, face inputs windowed or not, edge and periodic fills; 192
+      configurations at `run_scan(1)` -- 22 miscompiled on each of jaxlib
+      0.10.2, 0.11.0 and 0.11.2, every one with the static read in its halo
+      and the table through a halo-wide window, under either fill.
+
+      Partially resolved in 0.4.0: `GraphManager` refuses the paths that
+      put such a step inside a loop, with a `RuntimeError` naming the node,
+      the static, the mesh axis, this entry and the workarounds.
+      `run_scan`, `run_scan_with_history`, `run_sweep`, `run_adaptive_scan`
+      and `sysid.windowed_loss` (and a gradient through any of them) refuse
+      any such node; `step()`, `run()` and `run_adaptive` refuse it only as
+      a member of a coupling group.  Which nodes read their statics that
+      way is decided from the node's own `update_padded`: one trace of the
+      graph step under `jax.eval_shape` (never compiled), in which the
+      wrapper traces `update_padded` once more with its sharded statics and
+      `shard_info` offsets as explicit inputs and walks the jaxpr.  A static
+      counts when it is replicated over a mesh axis of two or more devices,
+      some live use of it reads outside its interior, and a live
+      `dynamic_slice`, `dynamic_update_slice`, `gather` or `scatter` takes
+      an index derived from a `shard_info` offset (or `lax.axis_index`)
+      into an array not derived from that static alone.  A static read only
+      in its interior, one never read (`HeatNode`'s `grid_x`), a node with
+      no window, a window into the static itself and a node with no sharded
+      static (`LBMNode`) are not refused, and run and answer as the
+      unsharded graph.  On the 192 configurations above the refusal fires
+      on all 22 that miscompile and on 50 more (block-sized and face
+      windows, which measured right), on each of jaxlib 0.10.2, 0.11.0 and
+      0.11.2, and on none of the other 120.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
       Silent on a mesh with an unused axis: plausible values, every cell
       wrong, no error.  Graded `major` because a silent wrong result is
-      never `minor`.  `context_dependent` because it needs that kernel
-      pattern, a static replicated over a mesh axis of two or more
-      devices, and a scan; no built-in node measured shows it, and the
-      pencil form fails loudly.
+      never `minor`, and it stays `major` because the silent form is still
+      reachable outside the paths that now refuse it (see
+      `residual_risk`).  `context_dependent` because it needs that kernel
+      pattern, a static replicated over a mesh axis of two or more devices,
+      and a loop; no built-in node measured shows it.
     affected_components:
       - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.core.graph_manager.GraphManager.run_scan"
+      - "maddening.core.graph_manager.GraphManager.step"
     affected_versions: ">=0.4.0.dev0"
     workaround: >
-      For a node that reads a sharded static in its halo and a replicated
-      array through its `shard_info` offset, check a sharded `run_scan`
-      against `step()` or the unsharded node; run it with `step()` or
-      `run()`; or build the mesh from the axes the node is sharded along
-      only.  The differential sharding harness leaves this combination out
-      of its generated configurations while it is open
-      (`PENDING_XLA_REPLICATED_STATIC_IN_SCAN`), and the strict xfails below
-      flip when an XLA release fixes it.
-    resolution_status: "open"
+      Build the mesh from the axes the node is sharded along only (the
+      static is then replicated over no axis of two or more devices), or
+      advance the graph with `step()` / `run()`; a member of a coupling
+      group has to leave the group or the mesh has to lose the axis.  For a
+      loop written outside `GraphManager` around such a node -- a
+      `lax.scan` or `fori_loop` over its `update`, or over
+      `GraphManager._build_step_fn()` -- check the loop against `step()`
+      or the unsharded node.
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Live in 0.4.0, which is why this entry is partially resolved rather
+      than resolved: the compiler defect is upstream and unfixed, and only
+      the `GraphManager` entry points are guarded.  A loop a caller builds
+      around a `ShardedStencilNode` -- a `lax.scan` or `fori_loop` over its
+      `update`, or over the private `GraphManager._build_step_fn()` as the
+      multi-device validation goals' gradient helper does -- is not asked,
+      and the defect is reachable there silently.  The detection is a
+      structural reading of the kernel, conservative where it does not
+      recognise an operation, but blind to a shard offset that reaches the
+      node other than through `shard_info` or `lax.axis_index` (computed
+      on the host and closed over, say), and the trigger itself is
+      characterised by measurement, not by the compiler's source: a form
+      of the miscompile that needs no halo read of a sharded static beside
+      an offset window into another array would not be refused, though
+      none was found.  The refusal is also wider than the measured
+      trigger -- block-sized windows, and loop lengths that measured right
+      -- which is loud, not silent.  The pure-JAX tripwire
+      (`test_the_pure_jax_reproducer_still_miscompiles_inside_a_scan`)
+      fails on the first jaxlib that compiles the reproducer right, which
+      is when to re-measure and lift the refusal for that version.
     verification:
-      - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_a_static_replicated_over_an_unused_axis_scans_as_unsharded"
-      - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_a_profile_static_on_a_pencil_scans_as_unsharded"
-      - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_the_pure_jax_reproducer_is_right_inside_a_scan"
+      - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_run_scan_refuses_the_miscompiled_configurations_and_step_answers_as_unsharded"
+      - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_the_refusal_leaves_the_graph_where_it_was"
+      - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_the_pure_jax_reproducer_still_miscompiles_inside_a_scan"
+      - "tests/cloud/multigpu/test_loop_refusal_for_a_step_xla_miscompiles.py::test_every_entry_point_that_loops_over_the_step_refuses"
+      - "tests/cloud/multigpu/test_loop_refusal_for_a_step_xla_miscompiles.py::test_the_entry_points_that_do_not_loop_run_and_answer_as_unsharded"
+      - "tests/cloud/multigpu/test_loop_refusal_for_a_step_xla_miscompiles.py::test_a_member_of_a_coupling_group_is_refused_on_step_too"
+      - "tests/cloud/multigpu/test_loop_refusal_for_a_step_xla_miscompiles.py::test_a_neighbouring_configuration_is_not_refused_and_scans_as_unsharded"
+      - "tests/cloud/multigpu/test_loop_refusal_for_a_step_xla_miscompiles.py::test_the_refusal_names_every_axis_the_static_is_copied_along_and_no_other"
+      - "tests/cloud/multigpu/test_loop_refusal_for_a_step_xla_miscompiles.py::test_a_built_in_or_self_windowing_node_on_a_replicating_mesh_scans_as_unsharded"
+      - "tests/cloud/multigpu/test_loop_refusal_for_a_step_xla_miscompiles.py::test_a_wrapper_the_probe_did_not_reach_is_refused"
     github_issue: null

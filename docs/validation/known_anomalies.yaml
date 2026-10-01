@@ -5497,7 +5497,7 @@ anomalies:
       flag computed from a boundary input changes with the iterate, and
       `solver="ift"`, which restored every non-floating field from the
       first pass on that premise, returned it stale and froze it inside
-      the loop (MADD-ANO-064).  Both solvers now return a group's
+      the loop (MADD-ANO-069).  Both solvers now return a group's
       non-floating fields as the pass computes them at the returned
       floating state.
     severity: "minor"
@@ -5799,7 +5799,7 @@ anomalies:
       - "tests/core/test_mapping_point_reference_writes.py::test_a_value_that_moves_no_referenced_point_set_is_still_taken"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-064"
+  - anomaly_id: "MADD-ANO-069"
     title: "solver=\"ift\" held a coupling group's non-floating fields at their first-pass values: a flag reading the iterate came back stale, and one read across an edge froze the map"
     description: >
       A node may compute an integer or boolean field from a boundary input
@@ -5884,7 +5884,7 @@ anomalies:
       - "tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_the_ift_gradient_through_a_flag_edge_is_the_open_branchs"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-065"
+  - anomaly_id: "MADD-ANO-070"
     title: "A coupling group in which a flux producer reads a flux failed with a bare KeyError under iteration_mode=\"jacobi\""
     description: >
       A flux edge carries a value `compute_boundary_fluxes` returns, not a
@@ -5933,7 +5933,7 @@ anomalies:
       - "tests/core/test_coupling_jacobi_flux_seed.py::test_a_jacobi_pass_seeds_in_two_sweeps_only_where_a_producer_reads_a_flux"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-066"
+  - anomaly_id: "MADD-ANO-071"
     title: "After jax.grad through run_scan, set_node_state wrote into the traced state and the next entry point discarded the write; reset_state raised on a predictor group"
     description: >
       `step()` / `run_scan()` assign their result into the graph, so a
@@ -5991,7 +5991,7 @@ anomalies:
       - "tests/core/test_escaped_tracer_recovery_at_every_entry_point.py::test_add_node_after_grad_keeps_the_new_node"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-067"
+  - anomaly_id: "MADD-ANO-072"
     title: "Under acceleration=\"fixed\" with relaxation below 1/(1+sqrt(rho)), a coupling group stopping on its first loop pass understated its distance about 2x and reported converged"
     description: >
       0.4.0's convergence criterion compares an estimate of the distance
@@ -6051,7 +6051,7 @@ anomalies:
       - "tests/core/test_coupling_first_pass_relaxed_rate.py::test_both_solvers_stop_on_the_same_pass_and_report_the_same_verdict"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-068"
+  - anomaly_id: "MADD-ANO-073"
     title: "The adaptive steppers' error norm read integer and boolean state leaves: a bool raised, a uint32 wrapped and a counter moved the step sequence"
     description: >
       `run_adaptive` and `run_adaptive_scan` estimate the local error by

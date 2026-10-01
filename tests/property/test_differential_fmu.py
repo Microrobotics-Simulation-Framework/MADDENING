@@ -42,10 +42,10 @@ export cannot be addressed by ``set``).
 from __future__ import annotations
 
 import base64
+import dataclasses
 import io
 import math
 import socket
-from dataclasses import dataclass
 from typing import Any, Optional
 
 import jax.numpy as jnp
@@ -55,6 +55,7 @@ from hypothesis import given, note, settings
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
+from maddening.core.params import check_bounds
 from maddening.fmi import MODEL_IDENTIFIER, build_model_description
 from maddening.fmi.fmu_state import deserialize_fmu_state, serialize_fmu_state
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
@@ -134,20 +135,22 @@ GRAPHS = {"plant": _plant, "multirate": _multirate, "coupled": _coupled}
 # The three paths
 # ---------------------------------------------------------------------------
 
-@dataclass
 class Model:
     """One graph family exported once: the reference graph whose compiled
     step the sidecars share, its model description, and a second graph
-    built the same way for the direct path."""
+    built the same way for the direct path.
 
-    ref: GraphManager
-    md: Any
-    direct: GraphManager
-    initial_state: dict
-    initial_params: dict
-    label: str = "model"
-    #: ``(bridge, connection)`` kept open across sequences, or ``None``.
-    served: Optional[tuple] = None
+    A plain class rather than a dataclass: Hypothesis prints a dataclass
+    argument of a strategy field by field, and these fields are graphs and a
+    model description."""
+
+    def __init__(self, ref: GraphManager, md: Any, direct: GraphManager,
+                 initial_state: dict, initial_params: dict, label: str = "model") -> None:
+        self.ref, self.md, self.direct = ref, md, direct
+        self.initial_state, self.initial_params, self.label = (
+            initial_state, initial_params, label)
+        #: ``(bridge, connection)`` kept open across sequences, or ``None``.
+        self.served: Optional[tuple] = None
 
     def stop(self) -> None:
         if self.served is not None:
@@ -302,73 +305,119 @@ class Paths:
 # Operations
 # ---------------------------------------------------------------------------
 
+def _value_problem(var, chunk: np.ndarray) -> Optional[str]:
+    """The bridge's value check on one variable's slice (``checked_value``):
+    finite, and representable in the variable's dtype."""
+    if not np.all(np.isfinite(chunk)):
+        return f"variable {var.name!r}: value must be finite"
+    with np.errstate(over="ignore", invalid="ignore"):
+        if not np.all(np.isfinite(chunk.astype(var.dtype))):
+            return f"variable {var.name!r}: value does not fit its type {var.dtype}"
+    return None
+
+
 def op_set(paths: Paths, names: list[str], values: list[float]) -> None:
+    """One ``set`` through the bridge, held against the sidecar's and the
+    graph's opinion of the same values.
+
+    The request is split the way the bridge splits it -- every value
+    reference resolved and sized first, then each variable's slice checked in
+    order -- so a request naming one variable twice is judged slice by
+    slice, and the last slice of a parameter is the one written.
+    """
     md = paths.m.md
     by_name = {v.name: v for v in md.variables}
     vrs = [by_name[n].value_reference if n in by_name else 99_999 for n in names]
     reply = paths._wire({"op": "set", "vr": vrs, "values": values})
-    note(f"set {dict(zip(names, values))} -> {reply}")
-    # Split the request as the bridge does: per variable, its slice of values.
-    params: dict[str, Any] = {}
-    inputs: list[tuple[str, str, np.ndarray]] = []
+    note(f"set {list(zip(names, values))} -> {reply}")
+
+    staged: list[tuple[Any, np.ndarray]] = []
     expected_error: Optional[str] = None
     pos = 0
     for name in names:
         var = by_name.get(name)
         if var is None:
-            expected_error = expected_error or "unknown value reference"
+            expected_error = "unknown value reference"
             break
         n = int(np.prod(var.shape)) if var.shape else 1
-        chunk = np.asarray(values[pos:pos + n], np.float64)
+        chunk = np.asarray(values[pos:pos + n], np.float64).reshape(-1)
         pos += n
         if chunk.size != n:
-            expected_error = expected_error or "expects"
+            expected_error = "expects"
             break
-        if var.causality == "parameter":
-            params[name] = chunk.reshape(var.shape or ())
-        elif var.causality == "input":
-            if not np.all(np.isfinite(chunk)):
-                expected_error = expected_error or "must be finite"
-            with np.errstate(over="ignore"):
-                if not np.all(np.isfinite(chunk.astype(var.dtype))):
-                    expected_error = expected_error or "does not fit"
-            node, field = var.node_field()
-            inputs.append((node, field, chunk.reshape(var.shape or ()).astype(var.dtype)))
-        else:
-            expected_error = expected_error or "read-only"
+        staged.append((var, chunk.reshape(var.shape or ())))
     if expected_error is None and pos != len(values):
         expected_error = "trailing values"
+    params: dict[str, np.ndarray] = {}
+    inputs: list[tuple[str, str, np.ndarray]] = []
+    value_error: Optional[tuple[Any, np.ndarray, str]] = None
+    if expected_error is None:
+        for var, chunk in staged:
+            # The bridge checks finiteness for every variable first (an
+            # output included), then representability for the writable ones.
+            problem = _value_problem(var, chunk)
+            if problem is not None and (var.causality in ("parameter", "input")
+                                        or "finite" in problem):
+                value_error = (var, chunk, problem)
+                expected_error = problem
+                break
+            if var.causality == "parameter":
+                params[var.name] = chunk
+            elif var.causality == "input":
+                node, field = var.node_field()
+                inputs.append((node, field, chunk.astype(var.dtype)))
+            else:
+                expected_error = f"variable {var.name!r} ({var.causality}) is read-only"
+                break
 
-    # The sidecar's opinion on the parameters, and the graph's.
-    side_error = None
-    if params and expected_error is None:
-        try:
+    if value_error is not None:
+        var, chunk, problem = value_error
+        assert reply == {"ok": False, "error": f"ValueError: {problem}"}, (reply, problem)
+        if var.causality == "parameter":
+            # The sidecar's own check of the same value names it differently
+            # (``parameter 'x'``) and gives the same reason.
             probe = paths.m.sidecar()
-            probe._params = _copy_params(paths.side.params)            # noqa: SLF001
+            with pytest.raises(ValueError) as caught:
+                probe.set_params({var.name: chunk})
+            assert reply["error"].endswith(str(caught.value).split(": ", 1)[-1]), (
+                reply["error"], str(caught.value))
+        return
+    if expected_error is not None:
+        assert reply["ok"] is False and expected_error in reply["error"], (
+            reply, expected_error)
+        return
+
+    # Every slice passed the bridge's value check: what remains is the
+    # sidecar's (bounds, tunability) and the graph's (check_params).
+    side_error = None
+    if params:
+        probe = paths.m.sidecar()
+        probe._params = _copy_params(paths.side.params)            # noqa: SLF001
+        try:
             probe.set_params(dict(params))
         except (KeyError, ValueError) as exc:
             side_error = exc
     graph_refuses = False
-    if params and expected_error is None:
-        candidate = _copy_params(paths.m.direct.params)
+    if params:
+        # The graph's opinion of the written leaves alone: a generated graph
+        # may hold *other* leaves outside their declared bounds (bounds are
+        # metadata to a graph), which no write is to blame for.
+        written: dict = {"nodes": {}}
         for name, arr in params.items():
             node, _, key = name.partition(".params.")
-            ref = np.asarray(candidate["nodes"][node][key])
-            with np.errstate(over="ignore", invalid="ignore"):
-                candidate["nodes"][node][key] = jnp.asarray(arr.astype(ref.dtype))
+            ref = np.asarray(paths.m.direct.params["nodes"][node][key])
+            written["nodes"].setdefault(node, {})[key] = jnp.asarray(arr.astype(ref.dtype))
         try:
-            paths.m.direct.check_params(candidate)
+            check_bounds(written, paths.m.direct.param_specs())
         except ValueError:
             graph_refuses = True
-
-    if expected_error is not None or side_error is not None:
-        assert reply["ok"] is False, (f"the bridge accepted what should be refused "
-                                      f"({expected_error or side_error}): {reply}")
-        if side_error is not None and expected_error is None:
-            tail = str(side_error).split(": ", 1)[-1]
-            assert reply["error"].endswith(tail), (reply["error"], str(side_error))
-            assert graph_refuses, (
-                f"the sidecar refused {params} ({side_error}) and check_params took it")
+    if side_error is not None:
+        assert reply["ok"] is False, (f"the bridge accepted what the sidecar refuses "
+                                      f"({side_error}): {reply}")
+        assert reply["error"].endswith(str(side_error).split(": ", 1)[-1]), (
+            reply["error"], str(side_error))
+        assert graph_refuses, (
+            f"the sidecar refused {params} ({side_error}) and check_params took it")
         return
     assert reply == {"ok": True}, reply
     assert not graph_refuses, f"check_params refuses {params}, which the FMU took"
@@ -535,6 +584,13 @@ BAD_STATES = ("nan_state", "inf_param", "overflow_param", "out_of_bounds_param",
 def _set_request(draw, model: Model):
     writable = model.variables("input") + model.variables("parameter")
     readonly = model.variables("output")
+    if not writable:
+        # A graph with nothing to set (two tables): every set is a refusal.
+        writable = readonly
+    if not writable:
+        # Nothing exported at all (a deprecated node exports no STABLE
+        # surface): the one set left is of a name the FMU does not have.
+        return ("set", ["no.such.variable"], [1.0])
     specs = model.ref.param_specs()["nodes"]
     names, values = [], []
     for _ in range(draw(st.integers(min_value=1, max_value=3))):
@@ -651,6 +707,57 @@ def test_the_three_fmu_paths_agree_on_a_generated_graph(data):
 
     recipe = data.draw(graph_recipes(kinds=ALL_NODE_KINDS, max_nodes=3,
                                      allow_mappings=False), label="recipe")
+    if not _within_declared_bounds(recipe.build()):
+        # ``strategies`` draws ParamSpec bounds as metadata, so a recipe may
+        # start outside them; an FMU then refuses to restore its own
+        # snapshot, which is pinned on its own
+        # (``test_an_fmu_restores_its_own_snapshot_whatever_its_parameters``).
+        # A calibrated leaf can be pushed past its node's own bound too
+        # (``param_overrides`` scales by up to 2), so both go.
+        recipe = dataclasses.replace(recipe, spec_overrides=(), param_overrides=())
     note(f"recipe: {recipe}")
     model = Model.build(recipe.build)
     run_sequence(model, data.draw(_ops(model), label="ops"))
+
+
+def _within_declared_bounds(gm: GraphManager) -> bool:
+    try:
+        check_bounds(gm.params, gm.param_specs())
+    except ValueError:
+        return False
+    return True
+
+
+def _spring_with_a_bound_it_starts_outside():
+    from maddening.core.params import ParamSpec
+
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("spring", 0.01, stiffness=30.0, rest_length=0.4))
+    gm.add_external_input("spring", "anchor_position")
+    gm.compile()
+    # A graph takes a ParamSpec as metadata and runs regardless.
+    gm.set_param_spec("spring", "stiffness", ParamSpec(bounds=(50.0, None)))
+    return gm
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "differential: the FMU (bridge set_state and FmuSidecar.set_fmu_state alike) "
+    "refuses to restore its own get_state snapshot when a parameter starts outside "
+    "its declared ParamSpec bounds, while GraphManager.load_state restores the same "
+    "graph's checkpoint; pending fix"))
+def test_an_fmu_restores_its_own_snapshot_whatever_its_parameters():
+    """Found by ``test_the_three_fmu_paths_agree_on_a_generated_graph``.  The
+    graph runs with ``stiffness = 30`` under a declared lower bound of 50
+    (bounds are metadata to a graph); the FMU exports it, steps it, and then
+    cannot restore the state it handed out itself."""
+    model = Model.build(_spring_with_a_bound_it_starts_outside, "out-of-bounds")
+    paths = Paths(model)
+    try:
+        op_step(paths, 2)
+        op_get_state(paths)
+        op_step(paths, 1)
+        # The graph's own checkpoint restores; the FMU's own snapshot must too.
+        op_set_state(paths, 0)
+        paths.assert_agree("after restoring the FMU's own snapshot")
+    finally:
+        paths.close()

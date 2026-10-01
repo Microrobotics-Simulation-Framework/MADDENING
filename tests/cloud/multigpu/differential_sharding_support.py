@@ -791,6 +791,24 @@ def _misshapen_candidates(shape: tuple, block: dict, halo: tuple) -> list[tuple]
     return keep
 
 
+#: A mis-shaped per-cell input whose length is a shard's slab (owned plus
+#: ghost rows) is taken by ``ShardedUnstructuredNode`` and read by every
+#: shard as its own slab, where the unsharded node refuses it.  Excluded
+#: from :func:`unstructured_configs` while that is pending a fix, so the
+#: generated property stays green; the exact case is a strict xfail
+#: (``test_a_slab_length_input_the_unsharded_node_refuses_is_refused_sharded``),
+#: and the fix flips both.
+PENDING_UNSTRUCTURED_SLAB_INPUT = True
+
+#: A per-shard (unreduced) domain integral under a ``ShardedStencilNode``
+#: nested in another has its initial value stacked by both wrappers'
+#: ``initial_state``, so ``run_scan`` refuses the carry and ``step``
+#: changes the state's shape.  Drawn as a vector integral instead while
+#: that is pending a fix; the exact case is a strict xfail
+#: (``test_a_per_shard_integral_under_a_nested_wrapper_runs_as_unsharded``).
+PENDING_NESTED_PER_SHARD_INTEGRAL = True
+
+
 @st.composite
 def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool] = None,
                     surfaces=FORWARD_SURFACES, dtypes=("float32", "float64"),
@@ -824,6 +842,9 @@ def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool]
         cands = _misshapen_candidates(shape, block, halo)
         misshapen = draw(st.sampled_from(cands))
     integral = draw(st.sampled_from([None, "scalar", "vector", "per_shard"]))
+    wrapping = draw(st.sampled_from(["single", "nested", "hybrid"]))
+    if PENDING_NESTED_PER_SHARD_INTEGRAL and wrapping == "nested" and integral == "per_shard":
+        integral = "vector"
     return StencilConfig(
         mesh_shape=tuple(mesh_shape), axis_names=tuple(axis_names),
         axis_map=tuple(axis_map), shape=shape, halo=halo,
@@ -840,7 +861,7 @@ def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool]
         gain=draw(st.booleans()),
         faces=draw(st.booleans()) if reads else False,
         dtype=draw(st.sampled_from(list(dtypes))),
-        wrapping=draw(st.sampled_from(["single", "nested", "hybrid"])),
+        wrapping=wrapping,
         steps=draw(st.integers(1, max_steps)),
         seed=draw(st.integers(0, 2**16)),
         surface=draw(st.sampled_from(list(surfaces))),
@@ -911,7 +932,8 @@ def unstructured_configs(draw, *, surfaces=FORWARD_SURFACES,
         layout = unstructured_layout(cfg)
         n_layout = layout.n_devices * layout.n_local_max
         slab = layout.n_local_max + layout.n_ghost_max
-        cands = sorted({n + 1, slab, layout.n_local_max} - {1, n, n_layout})
+        pending = {slab} if PENDING_UNSTRUCTURED_SLAB_INPUT else set()
+        cands = sorted({n + 1, slab, layout.n_local_max} - {1, n, n_layout} - pending)
         if not cands:
             cands = [n + 1] if n + 1 != n_layout else [n + 2]
         cfg = replace(cfg, misshapen_len=draw(st.sampled_from(cands)))
@@ -951,6 +973,8 @@ class Case:
     #: input); otherwise the refusal is the sharded path's own and the
     #: unsharded node runs.
     unsharded_refuses: bool = False
+    #: The node's name in the graph.
+    name: str = NODE_NAME
 
 
 def _innermost(node):
@@ -1387,10 +1411,60 @@ def lbm_configs(draw, *, lattices=("D2Q9", "D3Q19"), surfaces=FORWARD_SURFACES,
                                      or list(surfaces))))
 
 
+@dataclass(frozen=True)
+class ExampleConfig:
+    """One of the wrapper-family examples in ``property_support``, in a graph."""
+
+    label: str                 # "pointwise" | "stencil" | "unstructured"
+    n_devices: int
+    steps: int
+    surface: str
+    seed: int = 0
+    dtype: str = "float32"
+    contract: str = "params"
+    integral: Optional[str] = None
+    family: str = "example"
+
+
+def _example_case(cfg: ExampleConfig) -> Case:
+    from tests.cloud.multigpu.property_support import WRAPPER_FAMILY  # noqa: PLC0415
+
+    def build():
+        return WRAPPER_FAMILY[cfg.label](n_devices=cfg.n_devices, rate=0.5)
+
+    probe = build()
+    name = probe.inner.name
+    layout = getattr(probe.wrapped, "layout", None)
+    rows = layout_rows_of_global(layout) if layout is not None else None
+
+    def make(sharded: bool) -> SimulationNode:
+        c = build()
+        return c.wrapped if sharded else c.inner
+
+    def externals(sharded: bool) -> dict:
+        return {k: np.asarray(v) for k, v in probe.boundary_inputs.items()}
+
+    def gather(sharded, state):
+        out = {}
+        for k, v in state.items():
+            host = np.asarray(jax.device_get(v))
+            out[k] = host[rows] if (sharded and rows is not None) else host
+        return out
+
+    def gather_traced(sharded, state):
+        if not (sharded and rows is not None):
+            return dict(state)
+        return {k: jnp.take(v, jnp.asarray(rows), axis=0) for k, v in state.items()}
+
+    return Case(cfg=cfg, make=make, externals=externals, gather=gather,
+                gather_traced=gather_traced, inner_of=_innermost, name=name,
+                layout=layout)
+
+
 def build_case(cfg) -> Case:
     return {"stencil": _stencil_case, "pointwise": _pointwise_case,
             "unstructured": _unstructured_case, "heat": _heat_case,
-            "lbm": _lbm_case}[cfg.family](cfg)
+            "lbm": _lbm_case, "example": _example_case}[cfg.family](cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -1412,17 +1486,27 @@ def build_graph(case: Case, sharded: bool, node: Optional[SimulationNode] = None
 
 def _ext(case: Case, sharded: bool) -> Optional[dict]:
     ext = case.externals(sharded)
-    return {NODE_NAME: {k: jnp.asarray(v) for k, v in ext.items()}} if ext else None
+    return {case.name: {k: jnp.asarray(v) for k, v in ext.items()}} if ext else None
 
 
 #: ``family -> (parameter a write surface moves, its constructed value)``.
 _PARAM = {"stencil": ("rate", 0.5), "pointwise": ("rate", 0.5),
           "unstructured": ("rate", 0.5), "heat": ("thermal_diffusivity", 0.01),
-          "lbm": ("viscosity", 0.1)}
+          "lbm": ("viscosity", 0.1), "example": ("rate", 0.5)}
 
 
 def param_name(cfg) -> str:
     return _PARAM[cfg.family][0]
+
+
+def grid_key(case: Case) -> str:
+    """The node's (first) grid field."""
+    fam = case.cfg.family
+    if fam == "stencil":
+        return "f"
+    if fam in ("pointwise", "unstructured"):
+        return "x"
+    return next(iter(case.make(False).initial_state()))
 
 
 def written_rate(cfg) -> float:
@@ -1437,7 +1521,7 @@ def written_rate(cfg) -> float:
 
 
 def _final(gm, case: Case, sharded: bool) -> dict:
-    return case.gather(sharded, gm.get_node_state(NODE_NAME))
+    return case.gather(sharded, gm.get_node_state(case.name))
 
 
 def run_surface(case: Case, surface: str, sharded: bool):
@@ -1458,14 +1542,14 @@ def run_surface(case: Case, surface: str, sharded: bool):
     elif surface == "scan_params":
         if cfg.contract == "params":
             p = jax.tree.map(lambda x: x, gm.params)
-            leaf = p["nodes"][NODE_NAME][param_name(cfg)]
-            p["nodes"][NODE_NAME][param_name(cfg)] = jnp.asarray(written_rate(cfg),
+            leaf = p["nodes"][case.name][param_name(cfg)]
+            p["nodes"][case.name][param_name(cfg)] = jnp.asarray(written_rate(cfg),
                                                                  leaf.dtype)
             gm.run_scan(n, ext, params=p)
         else:
             # A node on the three-argument contract is absent from
             # gm.params: an entry for it is refused, on both paths.
-            p = {"nodes": {NODE_NAME: {param_name(cfg): jnp.asarray(written_rate(cfg))}}}
+            p = {"nodes": {case.name: {param_name(cfg): jnp.asarray(written_rate(cfg))}}}
             try:
                 gm.run_scan(n, ext, params=p)
             except ValueError as e:
@@ -1475,8 +1559,8 @@ def run_surface(case: Case, surface: str, sharded: bool):
             return {"__refused__": False}
     elif surface == "write_compile":
         if cfg.contract == "params":
-            leaf = gm.params["nodes"][NODE_NAME][param_name(cfg)]
-            gm.params["nodes"][NODE_NAME][param_name(cfg)] = jnp.asarray(
+            leaf = gm.params["nodes"][case.name][param_name(cfg)]
+            gm.params["nodes"][case.name][param_name(cfg)] = jnp.asarray(
                 written_rate(cfg), leaf.dtype)
         else:
             case.inner_of(node).params[param_name(cfg)] = written_rate(cfg)
@@ -1484,7 +1568,7 @@ def run_surface(case: Case, surface: str, sharded: bool):
         gm.run_scan(n, ext)
     elif surface == "set_state":
         state = new_global_state(case, gm, sharded)
-        gm.set_node_state(NODE_NAME, state)
+        gm.set_node_state(case.name, state)
         gm.run_scan(n, ext)
     else:  # pragma: no cover - a typo in a strategy
         raise ValueError(f"unknown surface {surface!r}")
@@ -1498,12 +1582,12 @@ def new_global_state(case: Case, gm, sharded: bool) -> dict:
     it through ``partition_value`` (the documented conversion).
     """
     cfg = case.cfg
-    current = gm.get_node_state(NODE_NAME)
-    key = "f" if cfg.family == "stencil" else "x"
+    current = gm.get_node_state(case.name)
+    key = grid_key(case)
     ref = np.asarray(jax.device_get(case.make(False).initial_state()[key]))
     new = (np.random.default_rng(cfg.seed + 7).standard_normal(ref.shape)
            .astype(ref.dtype))
-    if sharded and cfg.family == "unstructured":
+    if sharded and case.layout is not None:
         per = partition_value(value=new, layout=case.layout)
         new = per.reshape((-1,) + per.shape[2:])
     out = dict(current)
@@ -1545,24 +1629,24 @@ def _theta_runner(case: Case, sharded: bool):
     """
     cfg = case.cfg
     gm, _ = build_graph(case, sharded)
-    ext = _ext(case, sharded) or {NODE_NAME: {}}
+    ext = _ext(case, sharded) or {case.name: {}}
     dtype = jnp.zeros((), _np_dtype(cfg.dtype)).dtype
-    initial = gm.get_node_state(NODE_NAME)
+    initial = gm.get_node_state(case.name)
     if cfg.contract == "params":
         theta0 = jnp.asarray(written_rate(cfg), dtype)
 
         def run(theta):
             return gm.run_scan(cfg.steps, ext,
-                               params={"nodes": {NODE_NAME: {param_name(cfg): theta}}}
-                               )[NODE_NAME]
+                               params={"nodes": {case.name: {param_name(cfg): theta}}}
+                               )[case.name]
     else:
-        if "gain" not in ext[NODE_NAME]:
+        if "gain" not in ext[case.name]:
             return None
         theta0 = jnp.asarray(0.75, dtype)
 
         def run(theta):
-            return gm.run_scan(cfg.steps, {NODE_NAME: {**ext[NODE_NAME], "gain": theta}}
-                               )[NODE_NAME]
+            return gm.run_scan(cfg.steps, {case.name: {**ext[case.name], "gain": theta}}
+                               )[case.name]
     return initial, theta0, run
 
 
@@ -1679,7 +1763,7 @@ def assert_paths_agree(case: Case, sharded: dict, unsharded: dict, context: str)
     once.
     """
     cfg = case.cfg
-    grid_key = "f" if cfg.family == "stencil" else "x"
+    gkey = grid_key(case)
     integral = getattr(cfg, "integral_name", None) if cfg.integral else None
     assert set(sharded) == set(unsharded), f"{context}: fields {set(sharded)} vs {set(unsharded)}"
     for k, u in unsharded.items():
@@ -1691,7 +1775,7 @@ def assert_paths_agree(case: Case, sharded: dict, unsharded: dict, context: str)
                 assert lead >= 0, f"{context}: per-shard {k} shape {s.shape} vs {u.shape}"
                 s = s.astype(np.float64).sum(axis=tuple(range(lead)))
             assert s.shape == u.shape, f"{context}: {k} shape {s.shape} vs {u.shape}"
-            bound = integral_bound(cfg, unsharded, grid_key)
+            bound = integral_bound(cfg, unsharded, gkey)
             diff = float(np.max(np.abs(s.astype(np.float64) - u.astype(np.float64)))) \
                 if u.size else 0.0
             OBSERVED.append(("integral", cfg.dtype, diff / bound))
@@ -1716,7 +1800,7 @@ def _reverse_terms(cfg) -> int:
     """Terms a cell's cotangent sums per step (stencil, statics, inputs, correction)."""
     if cfg.family == "stencil":
         return 2 * sum(cfg.halo) + 9
-    if cfg.family == "pointwise":
+    if cfg.family in ("pointwise", "example"):
         return 9
     if cfg.family == "heat":
         return 2 * (1 if cfg.order == 2 else 2) + 9

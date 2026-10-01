@@ -324,6 +324,9 @@ guidance; the itemized changes follow.
 ### Fixed
 - **Coupling harness findings** (MADD-ANO-070 to 074, new, resolved): a group's integer/boolean fields are those the pass gives at the returned state, on both solvers (`ift` returned first-pass flags and froze edge-carried ones); predictor + mixed norm with such a field, Jacobi with a flux-reading producer, `reset_state`/`set_node_state` after `jax.grad`, under-relaxed `fixed` stopping on its first pass (~2x short) and the adaptive norm on integer leaves all fixed.
   `boundary_interpolation`'s "bit-identical under Jacobi" is round-off; a near-1 rate's noise-rejected ratio falls back to the raw test (MADD-ANO-005).  Action: re-run `run_adaptive*` results from graphs holding integer leaves.
+- **`hold_undetermined` no longer returns a fit's parameters above the loss it reached** (MADD-ANO-069, never released): a direction is held only if the
+  run's gradients missed it *and* the loss has no curvature there, and a hold that would raise the loss beyond rounding is refused (`FitResult.hold_declined`,
+  `RuntimeWarning`).  `fit_lm` on a well-posed bowl went 0.0 -> 0.22.  Action: re-run guarded fits from earlier 0.4.0 builds, or compare to `best_loss`.
 - **Sharding, from the differential harness**: `ShardedUnstructuredNode` refuses a per-cell input neither in partition layout nor broadcastable
   (a slab-length one was read by every shard as its slab; MADD-ANO-064); `gather_global` passes an integral listed in `state_fields()` through
   (MADD-ANO-065); a nested stencil wrapper starts a per-shard integral stacked once (MADD-ANO-066); zero-ghost reverse scans no longer segfault jaxlib 0.11.2
@@ -676,6 +679,7 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-069 (new, never released)**: `hold_undetermined` held every direction a fit's gradients had not spanned, so a short or fast-converging fit came back above the loss it had reached (0.4.0 development builds only; see `### Fixed`)
 - **MADD-ANO-064 to 067 (new, resolved in this release)**: the four sharding defects above (064, 065 and 067 since 0.2.1 or 0.3.0; 066 never released).
   **MADD-ANO-068 (new, open)**: XLA (jaxlib 0.10.2 to 0.11.2) miscompiles a `ShardedStencilNode` step inside `run_scan` for a node reading a sharded
   static replicated over a mesh axis in its halo beside a window at its `shard_info` offset; check such a node's `run_scan` against `step()`

@@ -6046,6 +6046,118 @@ anomalies:
       - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_the_pure_jax_reproducer_is_right_inside_a_scan"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-069"
+    title: "hold_undetermined held every direction a fit's gradients had not spanned, so a short or fast-converging fit returned parameters above the loss it had reached"
+    description: >
+      `hold_undetermined`, on by default in `fit`, `fit_lm` and
+      `fit_multiple_shooting`, exists to keep a fit out of directions the
+      data cannot determine -- the spring's `(k, c, m)` common scale, along
+      which Adam drifts by an amount the learning rate and the budget
+      choose.  It accumulated the run's gradients and held, at their
+      starting values, every direction they had not spanned.  Not spanned
+      is necessary for a direction the data cannot see, because every
+      gradient of a least-squares loss lies in the row space of `J`, but it
+      is not sufficient: a short or fast-converging run's gradients need
+      not span the directions the data does determine.  The guard then
+      removed real progress and returned parameters uphill of the fit's own
+      result, with no warning and nothing in the `FitResult` to say so:
+        - `fit_lm` on a closed-form four-parameter bowl, every direction
+          determined: the fit reached a loss of 0.0, the guard reported
+          `excited_rank` 1 of 4 and returned parameters at 0.22 (masked to
+          two parameters: 0.279 became 0.372);
+        - `fit_lm` on a spring with `(stiffness, damping, mass,
+          rest_length)` trainable, started with stiffness 1% off: 0.0
+          became 1.2e-4, at `excited_rank` 2 of 4;
+        - ten Adam steps of `fit` at `lr=0.01` on the bowl: `excited_rank`
+          3 of 4, and the result moved off the selected iterate, from
+          0.32342 to 0.32367;
+        - a hold could also cross a bound: a parameter with the identity
+          transform clipped at 0, held back along a flat direction, was
+          clipped by `constrain` and moved a combination the data
+          determined.
+      Introduced in 6018ec9 for `fit` (2026-09-20) and extended to `fit_lm`
+      and `fit_multiple_shooting` in 77c0b0d (2026-09-21), both during the
+      0.4.0 development line.  No tagged release carried it: v0.1.0 to
+      v0.3.1 have no `hold_undetermined`.  Found while making
+      `fit` return its lowest-loss iterate (CPU, jaxlib 0.11.0) and pinned
+      as a strict xfail until this fix.  It is recorded under the
+      registry's rule for defects no release carried: a critical or major
+      one found during the cycle gets an entry.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` because it was a silent wrong result on the default
+      path of all three fitters: the returned constants were not the ones
+      the fit had found, the loss they reproduce was higher than
+      `best_loss` said, and no field or warning said so.  It bit well-posed
+      fits, the case a caller has least reason to inspect, and `fit_lm` --
+      the fitter recommended for a handful of physical constants, which
+      converges in a few nearly parallel steps -- was the most exposed.
+      Not `critical`: the trigger is a short or fast-converging run, the
+      size of the error is bounded by how far the fit moved, and
+      `hold_undetermined=False` returned the fit's own result.
+      `context_dependent` because whether a calibration's constants being
+      off by part of the fit's own progress matters is a property of the
+      program that uses them.
+    affected_components:
+      - "maddening.sysid.fit"
+      - "maddening.sysid.fit_lm"
+      - "maddening.sysid.fit_multiple_shooting"
+      - "maddening.sysid.FitResult"
+    affected_versions: "none"
+    workaround: >
+      None needed from 0.4.0.  On a 0.4.0.dev0 build between 6018ec9 and the
+      fix: pass `hold_undetermined=False`, or compare the loss of the
+      returned `params` with the lowest entry of `losses` and refit
+      unguarded when it is higher.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Resolved by making the gradient test one of two and adding a check.
+      A direction is held only if no gradient of the run pointed along it
+      *and* the objective has no curvature along it at the selected iterate:
+      `JᵀJ` for `fit_lm`, read with `fim`'s own rank cutoff
+      (`max(n, sqrt(m)) * eps` of its largest eigenvalue), and for `fit` and
+      `fit_multiple_shooting` the loss's Hessian, through Hessian-vector
+      products along the candidates and up to 8 of the most-excited
+      directions, at `sqrt(eps)` of the largest singular value they show.
+      Then the held point's loss, by the fitter's own compiled function,
+      must not exceed the selected iterate's by more than
+      `2**10 * eps * |loss|` (1.2e-4 relative in float32) plus the
+      first- and second-order loss cost of perturbing every coordinate `u`
+      of the held point by four roundings, `eps * max(1, |u|)` each;
+      otherwise nothing is held, `params` is the selected iterate bit for
+      bit, the new `FitResult.hold_declined` is True and a RuntimeWarning
+      gives both losses.  After the fix all four cases above return the
+      fit's own loss to rounding (the spring 1% off, a degeneracy that
+      rotates in the optimiser's coordinates, is held at a cost of 4.5e-11
+      on jaxlib 0.11.0 and declined at 2.0e-9 on 0.11.2, against a
+      tolerance of 4.4e-10), and the spring's scale degeneracy under `log`
+      transforms is still held by all three fitters, to within 1e-7 of the
+      start at `lr=0.2` for 200 to 10,000 iterations.
+      What remains: a hold may still raise the loss by up to that
+      tolerance, which is rounding by design but is not zero.  A
+      degeneracy that rotates in the optimiser's coordinates (mixed `log`
+      and identity transforms on the parameters it mixes) is usually not
+      held and is reported full rank, as before; when it is held, the hold
+      follows the local tangent and the check bounds what that costs.
+      `fit_multiple_shooting` reads the Hessian with its window states
+      fixed, so a direction the window states could compensate for is left
+      unheld.  A loss whose Hessian-vector product cannot be formed falls
+      back to the gradient test, still under the loss check, with a
+      RuntimeWarning.  Fewer gradients than trainable coordinates still
+      answers `excited_rank=None`, though the curvature test could now
+      answer it.
+    verification:
+      - "tests/core/test_sysid_hold_never_raises_the_loss.py::test_fit_lm_on_a_well_posed_bowl_returns_the_minimum_it_reached"
+      - "tests/core/test_sysid_hold_never_raises_the_loss.py::test_fit_lm_on_the_spring_one_percent_off_stays_at_its_minimum"
+      - "tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_short_adam_run_on_the_bowl_returns_its_selected_iterate"
+      - "tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_that_would_raise_the_loss_is_declined_and_said_so"
+      - "tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_through_a_bound_is_declined"
+      - "tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_the_guard_does_not_raise_the_loss_of_a_well_posed_fit"
+      - "tests/core/test_sysid_undetermined_directions.py::test_the_scale_is_held_at_the_budget_the_guard_was_built_for"
+    github_issue: null
+
   - anomaly_id: "MADD-ANO-070"
     title: "solver=\"ift\" held a coupling group's non-floating fields at their first-pass values: a flag reading the iterate came back stale, and one read across an edge froze the map"
     description: >

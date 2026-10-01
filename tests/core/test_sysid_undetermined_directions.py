@@ -571,11 +571,16 @@ def test_multiple_shooting_scale_does_not_depend_on_the_schedule():
     for s in scales:
         assert abs(s / START_SCALE - 1.0) < 1e-4, s
 
+    # The unguarded half needs only to show the dependence is there, and the
+    # two 200-iteration schedules already span -4.35% to -1.97%; the two
+    # 1,200-iteration fits it skips were a third of this test's time once
+    # every guarded fit also compiled the curvature test.
+    unguarded = [s for s in _MS_SCHEDULE if s[1] == 200]
     raw = [_scale(fit_multiple_shooting(gm, lr=lr, n_iter=n,
                                         hold_undetermined=False, **kw)[0].params)
-           for lr, n in _MS_SCHEDULE]
+           for lr, n in unguarded]
     assert max(raw) / min(raw) - 1.0 > 1e-2, (
-        dict(zip(map(str, _MS_SCHEDULE), raw)),
+        dict(zip(map(str, unguarded), raw)),
         "the unguarded schedule dependence this test exists for did not "
         "reproduce",
     )

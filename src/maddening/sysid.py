@@ -2837,8 +2837,11 @@ def _hvp_columns(grad_fn, theta, extra, V):
     ``theta``, one forward-over-reverse product per column of ``V``.
 
     ``lax.map`` evaluates the products one after another, so the memory is
-    one product's whatever the number of columns.  Compiled per call:
-    ``grad_fn`` closes over the fitter's own objective.
+    one product's whatever the number of columns.  ``grad_fn`` is the
+    fitter's own compiled loss-and-gradient, so the product reuses its
+    trace instead of tracing the objective from Python again -- tracing was
+    half of what the product cost on the spring fixtures.  The product
+    itself is compiled once per call.
     """
     def products(t, ex, vs):
         return jax.lax.map(
@@ -3451,7 +3454,7 @@ def fit(
 
     def _flatness(candidates, spanned):
         return _hessian_flatness(
-            lambda V: _hvp_columns(lambda t: jax.grad(objective)(t), selected, (), V),
+            lambda V: _hvp_columns(lambda t: value_and_grad(t)[1], selected, (), V),
             candidates, spanned, selected.dtype, "fit")
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
@@ -3912,7 +3915,7 @@ def fit_multiple_shooting(
         # fixed: the guard moves only ``theta``, and does so with ``ws``
         # where the optimiser left them.
         return _hessian_flatness(
-            lambda V: _hvp_columns(lambda t, w: jax.grad(objective)(t, w),
+            lambda V: _hvp_columns(lambda t, w: value_and_grad(t, w)[1][0],
                                    selected, (ws,), V),
             candidates, spanned, selected.dtype, "fit_multiple_shooting")
 

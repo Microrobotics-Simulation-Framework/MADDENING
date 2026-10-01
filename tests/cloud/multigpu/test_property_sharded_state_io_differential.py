@@ -27,7 +27,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from hypothesis import given, note, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from maddening.api.server import SimulationServer
@@ -39,6 +39,7 @@ from maddening.surrogates.replace import replace_node
 
 from tests.conftest import EXAMPLES_COSTLY
 from tests.property.differential import (
+    note,
     assert_nothing_written,
     assert_trees_identical,
     canonical,

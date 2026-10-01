@@ -73,6 +73,20 @@ def no_cloud_launch() -> Iterator[None]:
     assert not attempts, f"cloud launch attempted: {attempts}"
 
 
+def note(message: str) -> None:
+    """``hypothesis.note`` inside a property, ``print`` outside one: the
+    oracles here are called from pinned reproducers too, where Hypothesis
+    refuses a note (and a strict xfail would then pass for the wrong
+    reason)."""
+    from hypothesis import note as hypothesis_note
+    from hypothesis.errors import InvalidArgument
+
+    try:
+        hypothesis_note(message)
+    except InvalidArgument:
+        print(message)
+
+
 # ---------------------------------------------------------------------------
 # Exact comparison
 # ---------------------------------------------------------------------------

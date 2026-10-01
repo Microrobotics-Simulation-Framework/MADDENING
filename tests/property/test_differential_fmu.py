@@ -51,7 +51,7 @@ from typing import Any, Optional
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import given, note, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
@@ -70,6 +70,7 @@ from maddening.nodes import BallNode, HeatNode, SpringDamperNode, TableNode
 
 from tests.conftest import EXAMPLES_COSTLY, EXAMPLES_STANDARD
 from tests.property.differential import (
+    note,
     assert_trees_identical,
     no_cloud_launch,
     tmp_dir,
@@ -740,7 +741,7 @@ def _spring_with_a_bound_it_starts_outside():
     return gm
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "differential: the FMU (bridge set_state and FmuSidecar.set_fmu_state alike) "
     "refuses to restore its own get_state snapshot when a parameter starts outside "
     "its declared ParamSpec bounds, while GraphManager.load_state restores the same "

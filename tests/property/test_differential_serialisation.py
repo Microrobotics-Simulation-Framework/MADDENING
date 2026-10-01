@@ -37,7 +37,7 @@ import json
 
 import numpy as np
 import pytest
-from hypothesis import given, note, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import maddening.nodes as builtin_nodes
@@ -47,6 +47,7 @@ from maddening.core.node import SimulationNode
 
 from tests.conftest import EXAMPLES_COSTLY, EXAMPLES_STANDARD
 from tests.property.differential import (
+    note,
     assert_trees_identical,
     full_state,
     params_tree,

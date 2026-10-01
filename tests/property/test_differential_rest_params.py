@@ -47,7 +47,7 @@ import warnings
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from hypothesis import event, given, note, settings
+from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
 from maddening.api.server import SimulationServer, _jax_to_python
@@ -56,6 +56,7 @@ from maddening.core.params import ParamSpec
 
 from tests.conftest import EXAMPLES_COSTLY, EXAMPLES_STANDARD
 from tests.property.differential import (
+    note,
     assert_nothing_written,
     assert_trees_identical,
     canonical,
@@ -226,7 +227,7 @@ def test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload(kind_name, da
         assert outcome == "refused", f"{write.category} write {write.params!r} was accepted"
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "differential: PUT /graph/params casts a float32-overflowing value (1e39) "
     "before refusing it and NumPy warns 'overflow encountered in cast', so the "
     "400 becomes a 500 wherever warnings are errors (as in this suite); pending fix"))
@@ -260,7 +261,7 @@ def _diagnostics_pair():
     return gm
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "differential: POST /sim/reset (and GET /graph/state, POST /checkpoint/load) "
     "answers 500 on a graph with a diagnostics=True coupling group: the reply "
     "serialises _meta, whose spectral slots are seeded NaN, and the JSON encoder "
@@ -279,6 +280,46 @@ def test_a_rest_reset_of_a_diagnostics_group_answers_like_the_in_process_reset()
         assert_trees_identical(full_state(reference), full_state(gm), what="reset state")
         assert resp.status_code == 200, resp.text
         assert client.get("/graph/state").status_code == 200
+
+
+def rods_mapped_by_grid() -> GraphManager:
+    """Two uniform rods joined by an RBF mapping whose point sets are
+    references to each rod's ``grid_x`` -- the form ``to_dict`` re-resolves
+    and hash-checks.  ``grid_x`` is built from ``length`` when a rod is
+    constructed."""
+    from maddening.core.coupling.mapping import rbf_mapping
+    from maddening.nodes import HeatNode
+
+    gm = GraphManager()
+    a = HeatNode("a", 0.01, n_cells=6, length=1.0, thermal_diffusivity=0.005,
+                 initial_temperature=np.linspace(1.0, 2.0, 6).tolist())
+    b = HeatNode("b", 0.01, n_cells=5, length=1.0, thermal_diffusivity=0.005,
+                 initial_temperature=0.5)
+    gm.add_node(a)
+    gm.add_node(b)
+    gm.add_edge("a", "b", "temperature", "heat_source", mapping=rbf_mapping(
+        np.asarray(a.static_data["grid_x"].value, np.float64),
+        np.asarray(b.static_data["grid_x"].value, np.float64),
+        source_ref={"node": "a", "field": "grid_x"},
+        target_ref={"node": "b", "field": "grid_x"}))
+    gm.compile()
+    return gm
+
+
+@pytest.mark.xfail(strict=True, raises=ValueError, reason=(
+    "differential: PUT /graph/params answers 200 to a new length for a uniform rod "
+    "whose grid_x an interface mapping references, then to_dict() refuses to save "
+    "the graph (the reference no longer describes the points the weights were built "
+    "from), while the running graph keeps stepping with those stale weights; "
+    "pending fix"))
+def test_a_rod_length_under_a_mapping_reference_is_refused_or_runs_as_its_reload():
+    """Found while widening the generated writes to geometry: ``length`` is a
+    live leaf of a uniform rod (its step reads it), so every check the route
+    makes passes; ``grid_x`` is derived from it at construction and never
+    rebuilt, and the mapping's ``MappingSpec`` points at ``grid_x``."""
+    gm = rods_mapped_by_grid()
+    with tmp_dir() as root:
+        check_rest_write(gm, REGISTRY, "a", Write("geometry", {"length": 1.5}), root=root)
 
 
 # The two graph features a one-node graph cannot carry, per push: a

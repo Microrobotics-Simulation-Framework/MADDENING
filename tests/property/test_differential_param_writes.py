@@ -42,13 +42,14 @@ import warnings
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import event, given, note, settings
+from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
 
 from tests.conftest import EXAMPLES_COSTLY, EXAMPLES_STANDARD
 from tests.property.differential import (
+    note,
     assert_trees_identical,
     checkpoint_path,
     full_state,
@@ -122,10 +123,14 @@ def check_params_write(gm: GraphManager, registry: dict, owner: str, leaves: dic
     except ValueError as exc:
         note(f"to_dict refused: {exc}")
         before = full_state(gm)
-        with pytest.raises(ValueError, match="differs from the node's own value"):
-            gm.run(1)
-        with pytest.raises(ValueError, match="differs from the node's own value"):
-            gm.run_scan(1)
+        for label, run in (("run", lambda: gm.run(1)), ("run_scan", lambda: gm.run_scan(1))):
+            try:
+                run()
+            except ValueError as run_exc:
+                assert "differs from the node's own value" in str(run_exc), str(run_exc)
+            else:
+                raise AssertionError(
+                    f"to_dict() refused the write ({exc}) and {label}() computed with it")
         assert_trees_identical(before, full_state(gm), what="state after a refused run")
         return "refused"
     with tmp_dir() as tmp:
@@ -231,7 +236,7 @@ def _pipe(G: float):
 
 # Per push: tests/property/test_differential_param_writes.py::test_a_pipe_interaction_strength_written_within_its_branch_runs_as_its_reload
 @pytest.mark.slow  # two multiphase-pipe compiles: ~6 s on 3 cores
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "differential: gm.params G=0 on a multiphase LBMPipeNode keeps the multiphase "
     "branch its constructor fixed while the saved config reloads single-phase "
     "(MADD-ANO-047 residual: writes outside the REST route are not asked); pending fix"))
@@ -260,6 +265,17 @@ def test_a_heat_diffusivity_written_past_the_fourier_limit_is_refused_or_reloads
                          thermal_diffusivity=0.2 / 256, initial_temperature=300.0))
     gm.compile()
     check_params_write(gm, REGISTRY, "rod", {"thermal_diffusivity": jnp.float32(0.6 / 256)})
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "differential: a gm.params length for a uniform rod whose grid_x an interface "
+    "mapping references is computed with (on the mapping weights built for the old "
+    "grid) and to_dict() then refuses to save the graph; pending fix"))
+def test_a_rod_length_under_a_mapping_reference_runs_as_its_reload():
+    from tests.property.test_differential_rest_params import rods_mapped_by_grid
+
+    gm = rods_mapped_by_grid()
+    check_params_write(gm, REGISTRY, "a", {"length": jnp.float32(1.5)})
 
 
 # ---------------------------------------------------------------------------

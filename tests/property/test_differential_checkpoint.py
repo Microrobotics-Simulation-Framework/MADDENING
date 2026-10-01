@@ -42,7 +42,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from hypothesis import given, note, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from maddening.api.server import SimulationServer
@@ -51,6 +51,7 @@ from maddening.nodes import BallNode, HeatNode, SpringDamperNode
 
 from tests.conftest import EXAMPLES_COSTLY, EXAMPLES_STANDARD
 from tests.property.differential import (
+    note,
     assert_trees_identical,
     checkpoint_path,
     full_state,

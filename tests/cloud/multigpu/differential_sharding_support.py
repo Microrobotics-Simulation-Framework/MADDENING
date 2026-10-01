@@ -822,6 +822,17 @@ PENDING_UNSTRUCTURED_SLAB_INPUT = True
 #: (``test_a_per_shard_integral_under_a_nested_wrapper_runs_as_unsharded``).
 PENDING_NESTED_PER_SHARD_INTEGRAL = True
 
+#: Reverse mode through ``run_scan`` of a ``ShardedUnstructuredNode`` whose
+#: partition has no ghost cell at all (no edge crosses a shard boundary --
+#: every cell on one device, for instance) segfaults XLA's compiler on
+#: jaxlib 0.11.2: ``exchange_unstructured`` returns the local block joined
+#: to a zero-size ghost tail, and the scan's transpose of it crashes the
+#: process.  A segfault cannot be an xfail in-process, so the gradient
+#: surface is skipped on such partitions while that is pending a fix; the
+#: exact case runs in a subprocess, a strict xfail on jaxlib 0.11.2
+#: (``test_a_gradient_through_a_partition_without_ghosts_does_not_crash``).
+PENDING_ZERO_GHOST_REVERSE_SCAN = True
+
 
 @st.composite
 def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool] = None,
@@ -1681,6 +1692,9 @@ def _theta_runner(case: Case, sharded: bool):
 
 def _gradient(case: Case, sharded: bool):
     """``(loss, d loss / d theta)`` through ``run_scan`` (see :func:`_theta_runner`)."""
+    if (PENDING_ZERO_GHOST_REVERSE_SCAN and case.layout is not None
+            and int(case.layout.n_ghost_max) == 0):
+        return None
     got = _theta_runner(case, sharded)
     if got is None:
         return None

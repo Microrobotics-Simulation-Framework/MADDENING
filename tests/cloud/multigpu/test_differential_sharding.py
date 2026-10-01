@@ -23,7 +23,12 @@ the whole matrix, gradients included.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import textwrap
+
 import jax
+import jaxlib
 import numpy as np
 import pytest
 from hypothesis import given, settings
@@ -119,11 +124,12 @@ _GRADIENT_CASES = {
         n_devices=4, shape=(2, 8), shard_axis=1, contract="params", total=True,
         source="per_cell", misshapen_shape=(), gain=True, dtype="float32",
         wrapping="nested", steps=3, seed=14, surface="gradient"),
-    # Found by the slow lane: one shard empty, a ring relaxed to nearly
-    # equal values, so d x / d rate is a small difference of nearly equal
-    # numbers and the float32 gradient is ill-conditioned on either path.
-    "unstructured-empty-shard-ill-conditioned": D.UnstructuredConfig(
-        n_devices=2, n_cells=3, assignment=(0, 0, 0), partition="uneven", chords=(),
+    # Found by the slow lane (on (0, 0, 0), which has no ghost cells; see
+    # the zero-ghost test below): a ring relaxed to nearly equal values,
+    # so d x / d rate is a small difference of nearly equal numbers and the
+    # float32 gradient is ill-conditioned on either path.
+    "unstructured-relaxed-ring-ill-conditioned": D.UnstructuredConfig(
+        n_devices=2, n_cells=3, assignment=(0, 0, 1), partition="uneven", chords=(),
         contract="params", integral="vector", integral_name="a_total",
         integral_listed=True, weight="halo", source="scalar", misshapen_len=0,
         gain=True, dtype="float32", wrapping="hybrid", steps=4, seed=605,
@@ -313,3 +319,77 @@ def test_gather_global_passes_a_listed_per_shard_integral_through_when_a_shard_h
         chords=(), contract="params", integral="per_shard", integral_name="a_total",
         integral_listed=True, weight=None, source="none", misshapen_len=0, gain=False,
         dtype="float32", wrapping="single", steps=1, seed=8, surface="run_scan"))
+
+
+#: Two devices, two cells each, and no edge between the shards: the
+#: partition has no ghost cell.
+_ZERO_GHOST_SCRIPT = textwrap.dedent("""
+    import os
+    os.environ["XLA_FLAGS"] = "--xla_force_host_platform_device_count=2"
+    import jax, jax.numpy as jnp, numpy as np
+    from maddening.cloud.multigpu.device_mesh import create_device_mesh
+    from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
+    from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
+    from maddening.core.graph_manager import GraphManager
+    from maddening.core.node import SimulationNode
+
+    class Decay(SimulationNode):
+        def __init__(self):
+            super().__init__(name="cells", timestep=1.0, rate=0.5)
+        def initial_state(self):
+            return {"x": jnp.arange(4, dtype=jnp.float32) + 1.0}
+        def update(self, state, boundary_inputs, dt, *, params=None):
+            p = self.params if params is None else {**self.params, **params}
+            return {"x": state["x"] - p["rate"] * state["x"]}
+        def update_padded(self, state_padded, boundary_inputs, dt, *,
+                          static_padded=None, shard_info=None, params=None):
+            p = self.params if params is None else {**self.params, **params}
+            return {"x": state_padded["x"] - p["rate"] * state_padded["x"]}
+
+    layout = build_unstructured_partition(
+        partition_assignment=np.array([0, 0, 1, 1], np.int32),
+        edges=np.array([[0, 1], [2, 3]], np.int32), n_devices=2)
+    assert layout.n_ghost_max == 0
+    grads = []
+    for sharded in (True, False):
+        node = Decay()
+        if sharded:
+            node = ShardedUnstructuredNode(node, create_device_mesh(shape=(2,)), layout)
+        gm = GraphManager()
+        gm.add_node(node)
+        gm.compile()
+        loss = lambda r: jnp.sum(
+            gm.run_scan(2, params={"nodes": {"cells": {"rate": r}}})["cells"]["x"] ** 2)
+        grads.append(float(jax.grad(loss)(jnp.float32(0.5))))
+    assert abs(grads[0] - grads[1]) <= 1e-5 * abs(grads[1]), grads
+    print("OK", grads)
+""")
+
+
+def _jaxlib_at_least(*version: int) -> bool:
+    parts = tuple(int(p) for p in jaxlib.__version__.split(".")[:3] if p.isdigit())
+    return parts >= version
+
+
+@pytest.mark.xfail(_jaxlib_at_least(0, 11, 2), strict=True, reason=(
+    "differential: reverse mode through run_scan of a ShardedUnstructuredNode on a "
+    "partition with no ghost cells segfaults XLA on jaxlib 0.11.2 (exchange_unstructured's "
+    "zero-size ghost tail); pending fix"))
+def test_a_gradient_through_a_partition_without_ghosts_does_not_crash():
+    """Found by the harness on CI's jaxlib 0.11.2 lane; jaxlib 0.10.2 and 0.11.0 run it.
+
+    Run in a subprocess: a segfault would take the test process with it.
+    ``exchange_unstructured`` returns ``concatenate([local, zeros((0, ...))])``
+    when the layout has no ghost cell, and the transpose of that inside a
+    ``lax.scan`` crashes XLA's compiler.  Returning ``local`` itself avoids
+    the crash (checked on jaxlib 0.11.2 against a scratch copy of the
+    source).  The generated harness skips the gradient surface on such
+    partitions while this is pending
+    (``PENDING_ZERO_GHOST_REVERSE_SCAN``).
+    """
+    result = subprocess.run([sys.executable, "-c", _ZERO_GHOST_SCRIPT],
+                            capture_output=True, text=True, timeout=300)
+    assert result.returncode == 0, (
+        f"exit {result.returncode} (a negative code is a signal: -11 is SIGSEGV)\n"
+        f"{result.stderr[-2000:]}")
+    assert result.stdout.startswith("OK"), result.stdout

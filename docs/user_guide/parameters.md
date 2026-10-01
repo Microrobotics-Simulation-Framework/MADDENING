@@ -22,7 +22,6 @@ gm = GraphManager()
 gm.add_node(SpringDamperNode("spring", 0.01, stiffness=30.0, damping=2.0,
                              initial_position=0.5))
 gm.add_node(BallNode("ball", 0.01, elasticity=0.7))
-gm.add_edge("ball", "spring", "position", "anchor_position")
 gm.compile()
 gm.params
 # {"nodes": {"spring": {"stiffness": Array(30.), "damping": Array(2.), ...},

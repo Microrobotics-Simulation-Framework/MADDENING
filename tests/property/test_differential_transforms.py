@@ -19,7 +19,8 @@ Stated over generated coupled graphs of synthetic nodes
 Tolerances.  ``tests/core/test_coupling_gradient_bound_under_vmap.py``
 pins the states and the loop's slots bit-identical under ``vmap`` on a
 scalar group.  With ``n x n`` gains the batched program reduces and
-multiplies in different kernels, so: states to ``_ULPS`` per pass,
+multiplies in different kernels, so: states to the forward error of each
+node's sum per pass (:func:`~tests.property.coupled_graphs.rounding_bound`),
 ``iterations`` equal, the residual (a cancellation) to the norm's
 float32 floor (:func:`residual_noise_floor`), ``rho_spectral`` to its
 own Arnoldi residual -- the resolution the key documents for a Ritz
@@ -53,7 +54,6 @@ from tests.conftest import EXAMPLES_COSTLY
 from tests.core.test_coupling_solver_equivalence import residual_noise_floor
 from tests.property import coupled_graphs as cg
 
-_ULPS = 4
 _STEPS = 3
 _BATCH = 3
 
@@ -90,10 +90,6 @@ def _member(tree, b):
     return jax.tree.map(lambda x: np.asarray(x[b]), tree)
 
 
-def _float_ulps_bound(passes):
-    return _ULPS * cg.EPS32 * max(passes, 1)
-
-
 # ---------------------------------------------------------------------------
 # run_sweep == run_scan per member
 # ---------------------------------------------------------------------------
@@ -117,7 +113,7 @@ def assert_sweep_matches_members(gdef, gm, values, seed, steps=_STEPS):
     for b, single in enumerate(singles):
         got = _member(batched, b)
         gap = cg.relative_gap(got, single)
-        assert gap <= _float_ulps_bound(passes), (
+        assert gap <= cg.rounding_bound(gdef, values, single, passes), (
             f"member {b}: run_sweep {gap:.3e} from run_scan")
         for nd in gdef.nodes:
             for f, want in cg.expected_leaves(nd, steps).items():
@@ -180,7 +176,7 @@ def test_a_batched_sweep_starts_each_member_at_its_own_multirate_phase():
         got = _member(batched, b)
         moved = cg.bitwise_differences(got, want)
         gap = cg.relative_gap(got, want)
-        assert gap <= _float_ulps_bound(4 * 12), (
+        assert gap <= cg.rounding_bound(gdef, values, want, 4 * 12), (
             f"member at phase {b}: {gap:.3e} from the graph continued from that phase "
             f"({moved})")
 
@@ -261,8 +257,10 @@ def assert_vmapped_step_matches(gdef, gm, values, seed, steps=_STEPS):
         user_got = {k: v for k, v in got.items() if k != "_meta"}
         user_want = {k: v for k, v in want.items() if k != "_meta"}
         gap = cg.relative_gap(user_got, user_want)
-        assert gap <= _float_ulps_bound(passes), f"member {b}: vmap {gap:.3e} from the loop"
-        meta_g, meta_w = got["_meta"], want["_meta"]
+        assert gap <= cg.rounding_bound(gdef, values, user_want, passes), (
+            f"member {b}: vmap {gap:.3e} from the loop")
+        # A uniform-rate graph whose fori group reports nothing has no _meta.
+        meta_g, meta_w = got.get("_meta", {}), want.get("_meta", {})
         for slot in ("iterations", "total_iterations"):
             k = f"coupling_{key}_{slot}"
             if k in meta_w:
@@ -304,13 +302,15 @@ def assert_vmapped_gradient_matches(gdef, gm, values, seed, steps=2):
         got = _member(batched, b)["nodes"]
         want = jax.tree.map(np.asarray, single)["nodes"]
         # The adjoint is a GMRES solve whose iterate rounds like the
-        # forward; the forward agreed to _ULPS per pass, and the gradient
+        # forward; the forward agreed to round-off per pass, and the gradient
         # amplifies it by at most the conditioning the forward did.
         gap = cg.relative_gap(got, want)
         assert gap <= 1e-4, f"member {b}: vmap(grad) {gap:.3e} from grad per member"
 
 
 _VMAP_CASES = {
+    "ift-iqn-predictor": ("triangle", dict(acceleration="iqn-ils", tolerance=1e-5,
+                                           max_iterations=12, predictor="linear")),
     "ift-iqn-diagnostics": ("triangle", dict(acceleration="iqn-ils", tolerance=1e-5,
                                              max_iterations=12, diagnostics=True,
                                              predictor="linear")),
@@ -322,7 +322,18 @@ _VMAP_CASES = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_VMAP_CASES))
+def _vmap_cases(per_push):
+    """``ift-iqn-diagnostics`` compiles the spectral and gradient bounds into
+    a batched and an unbatched program (14 s on CI), so it runs in the slow
+    lane; the bound under ``vmap`` is read per push by
+    ``tests/core/test_coupling_gradient_bound_through_a_vmapped_step.py``."""
+    for case in sorted(_VMAP_CASES):
+        slow = case == "ift-iqn-diagnostics" or case not in per_push
+        yield pytest.param(case, marks=(pytest.mark.slow,) if slow else ())
+
+
+# Per push: tests/property/test_differential_transforms.py::test_a_vmapped_coupled_step_is_the_step_per_member[ift-iqn-predictor]
+@pytest.mark.parametrize("case", list(_vmap_cases(_VMAP_CASES)))
 # Costly tier: per example, a batched and three unbatched rollouts.
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
@@ -334,7 +345,9 @@ def test_a_vmapped_coupled_step_is_the_step_per_member(case, data):
     assert_vmapped_step_matches(gdef, gm, values, data.draw(st.integers(0, 2**31 - 1)))
 
 
-@pytest.mark.parametrize("case", ["ift-iqn-diagnostics", "fori-fixed-mixed"])
+# Per push: tests/property/test_differential_transforms.py::test_a_vmapped_gradient_is_the_gradient_per_member[ift-iqn-predictor]
+@pytest.mark.parametrize("case", ["ift-iqn-predictor",
+                                  pytest.param("fori-fixed-mixed", marks=pytest.mark.slow)])
 # Costly tier: per example, a batched gradient and three unbatched ones.
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
@@ -370,9 +383,9 @@ def assert_eager_matches_jit(gdef, gm, values, steps=2):
     passes = steps * int(gm._coupling_groups[0].max_iterations)  # noqa: SLF001
     gap = cg.relative_gap({k: v for k, v in got.items() if k != "_meta"},
                           {k: v for k, v in want.items() if k != "_meta"})
-    assert gap <= _float_ulps_bound(passes), f"eager {gap:.3e} from jit"
+    assert gap <= cg.rounding_bound(gdef, values, want, passes), f"eager {gap:.3e} from jit"
     k = f"coupling_{gdef.key}_iterations"
-    if k in want["_meta"]:
+    if k in want.get("_meta", {}):
         assert int(got["_meta"][k]) == int(want["_meta"][k]), "eager and jit took different passes"
 
 

@@ -177,9 +177,16 @@ class SubStepped(SimulationNode):
 
     def update(self, state, boundary_inputs, dt, *, params=None):
         sub = jnp.asarray(dt, jnp.float32) / jnp.float32(self._d)
-        for _ in range(self._d):
-            state = self._inner.update(state, boundary_inputs, sub, params=params)
-        return state
+
+        def body(s, _):
+            return self._inner.update(s, boundary_inputs, sub, params=params), None
+
+        # A scan, not a Python loop: unrolled, XLA folds the repeated
+        # ``+ sub`` of a constant sub-step into one addition of ``d * sub``
+        # (measured: a clock reading 1.5 where nine sequential float32
+        # additions of 1/6 read 1.4999999), which is not the arithmetic the
+        # sub-cycled member performs.
+        return jax.lax.scan(body, state, None, length=self._d)[0]
 
     def update_evaluations(self):
         return self._d
@@ -434,6 +441,8 @@ def recover(gm: GraphManager) -> None:
     ``test_differential_coupling_solvers.py``.  So go through an entry
     point that does.
     """
+    if not getattr(gm, "_state_traced", True):
+        return      # nothing to put back: skip the report's host-side cost
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "the graph held JAX tracers", RuntimeWarning)
         gm.coupling_diagnostics()
@@ -1021,3 +1030,41 @@ def note(message: str) -> None:
         _note(message)
     except InvalidArgument:
         pass
+
+
+def rounding_bound(gdef: GraphDef, values: dict, state: dict, passes: int) -> float:
+    """How far two programs evaluating the same passes may drift apart, relatively.
+
+    Two compilations of one node update (fused or not, batched or not,
+    eager or jitted) evaluate the same sum ``alpha x + b + beta dt + sum_j
+    G_j f(u_j)`` with different rounding.  The forward error of a sum of
+    ``T`` terms is at most ``gamma_T sum |term|`` (``gamma_T ~ T eps``), so
+    two evaluations differ by at most ``2 gamma_T sum |term|`` -- many ulps
+    of ``|x|`` when large terms cancel, which a non-normal gain does.  Per
+    node that is ``2 T eps`` times ``max_i sum |term_i| / max |x|``,
+    evaluated here on *state*; *passes* such differences are allowed to
+    accumulate (a contraction does not grow them; its transient is not
+    counted).
+    """
+    worst, terms = 1.0, 1
+    incoming: dict = {}
+    for e in gdef.edges:
+        incoming.setdefault(e.dst, []).append(e)
+    for nd in gdef.nodes:
+        if nd.name not in state or "x" not in state[nd.name]:
+            continue
+        v = values[nd.name]
+        x = np.abs(np.asarray(state[nd.name]["x"], np.float64))
+        acc = abs(nd.alpha) * x + np.abs(np.asarray(v["b"], np.float64))
+        acc = acc + (0.0 if nd.ode else abs(nd.beta) * nd.timestep)
+        for e in incoming.get(nd.name, []):
+            u = np.abs(np.asarray(state[e.src]["x"], np.float64)) * (2.0 if e.field == "q" else 1.0)
+            if nd.nonlinear:
+                u = np.tanh(u)
+            acc = acc + np.abs(np.asarray(v["G"][e.port], np.float64)) @ u
+        if nd.ode:
+            acc = x + nd.timestep * acc
+        ref = max(float(np.max(x)), 1e-30)
+        worst = max(worst, float(np.max(acc)) / ref)
+        terms = max(terms, 3 + gdef.n * nd.n_inputs)
+    return max(passes, 1) * 2.0 * terms * EPS32 * worst

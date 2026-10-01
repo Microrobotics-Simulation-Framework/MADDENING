@@ -34,10 +34,11 @@ graph at half the timestep.  Replaying ``run_adaptive``'s accepted
 ``dt_history`` through that step reproduces its state, and every node's
 clock reads the time the stepper reports (MADD-ANO-061).
 
-Tolerances.  Two separately compiled programs evaluate the same arithmetic,
-so they may round differently by an ulp per pass (as the two solvers do,
-``test_differential_coupling_solvers.py``): states agree to
-``_ULPS_PER_PASS`` per pass, counted over every pass of the run.  The
+Tolerances.  Two separately compiled programs evaluate the same arithmetic
+with different rounding (as the two solvers do,
+``test_differential_coupling_solvers.py``): states agree to the forward
+error of each node's sum per pass, counted over every pass of the run
+(:func:`~tests.property.coupled_graphs.rounding_bound`).  The
 multi-rate gate and the replay, which compare a program with *itself*, are
 bitwise; clocks are dyadic sums and are compared exactly.
 
@@ -62,9 +63,6 @@ from hypothesis import strategies as st
 from tests.conftest import EXAMPLES_COSTLY
 from tests.core.test_coupling_solver_equivalence import residual_noise_floor
 from tests.property import coupled_graphs as cg
-
-_ULPS_PER_PASS = 4
-
 
 def _key(group: dict) -> tuple:
     return tuple(sorted(group.items()))
@@ -145,7 +143,7 @@ def assert_multirate_matches_hand_unrolled(gdef, gm, ref, values, n_steps):
             assert int(ameta["iterations"]) == int(rmetas[k]["iterations"]), (
                 f"base step {k}: {int(ameta['iterations'])} passes against the "
                 f"hand-unrolled loop's {int(rmetas[k]['iterations'])}")
-        bound = _ULPS_PER_PASS * cg.EPS32 * max(passes, 1)
+        bound = cg.rounding_bound(gdef, values, after, passes)
         gap = cg.relative_gap(after, rtraj[k])
         assert gap <= bound, (
             f"base step {k}: {gap:.3e} from the hand-unrolled loop (bound {bound:.3e})")
@@ -238,18 +236,25 @@ def _subcycled_pair(m, d, fast, chords, group_items, interp):
     return gdef, gm, ref
 
 
-def assert_subcycled_matches_reference(gdef, group, d, fast, sub, ref, steps=4):
+def assert_subcycled_matches_reference(gdef, group, d, fast, sub, ref, values):
     passes = 0
     for k, ((s, _m, r), (s_ref, _mr, r_ref)) in enumerate(zip(sub, ref), start=1):
         updates = {nd.name: k * (d if nd.name == fast else 1) for nd in gdef.nodes}
         _leaves_at(gdef, s, updates)
         _leaves_at(gdef, s_ref, updates)
         for nm in gdef.group_nodes:
-            # Exact: every clock is a sum of dyadic timesteps.
-            assert float(s[nm]["clock"]) == k * _MACRO, (
+            # Exactly the reference's clock: both sum the same float32
+            # sub-steps.  Against the graph's time it is exact when the
+            # sub-step is dyadic (``d`` a power of two) and otherwise off
+            # by the rounding of ``k d`` float32 additions of ``T / d``.
+            assert s[nm]["clock"].tobytes() == s_ref[nm]["clock"].tobytes(), (
+                f"step {k}: {nm}'s clock {float(s[nm]['clock'])!r} against the "
+                f"reference's {float(s_ref[nm]['clock'])!r}")
+            n_adds = k * (d if nm == fast else 1)
+            slack = 0.0 if d & (d - 1) == 0 else n_adds * cg.EPS32 * k * _MACRO
+            assert abs(float(s[nm]["clock"]) - k * _MACRO) <= slack, (
                 f"step {k}: {nm}'s clock reads {float(s[nm]['clock'])!r}, the graph's "
                 f"time is {k * _MACRO!r}")
-            assert s[nm]["clock"].tobytes() == s_ref[nm]["clock"].tobytes()
         if r is not None and r_ref is not None:
             assert r["iterations"] == r_ref["iterations"], (
                 f"step {k}: the sub-cycled group took {r['iterations']} passes, "
@@ -258,7 +263,7 @@ def assert_subcycled_matches_reference(gdef, group, d, fast, sub, ref, steps=4):
             passes += r["iterations"] * d
         else:
             passes += int(group.get("max_iterations", 10)) * d
-        bound = _ULPS_PER_PASS * cg.EPS32 * max(passes, 1)
+        bound = cg.rounding_bound(gdef, values, s, passes)
         gap = cg.relative_gap(s, s_ref)
         assert gap <= bound, (
             f"step {k}: sub-cycled state {gap:.3e} from the uniform-rate "
@@ -291,7 +296,7 @@ def test_a_subcycled_group_steps_like_its_uniform_rate_reference(case, data):
     values = data.draw(cg.drawn_values(gdef, rhos=(0.3, 0.9, 0.99)))
     sub = cg.trajectory(gm, gdef, values, 4)
     reference = cg.trajectory(ref, gdef, values, 4)
-    assert_subcycled_matches_reference(gdef, group, d, fast, sub, reference)
+    assert_subcycled_matches_reference(gdef, group, d, fast, sub, reference, values)
 
 
 # Slow: structure and configuration are drawn, so every example builds and
@@ -319,7 +324,7 @@ def test_generated_subcycled_groups_step_like_their_reference(data):
     values = data.draw(cg.drawn_values(gdef, rhos=(0.3, 0.9, 0.99)))
     assert_subcycled_matches_reference(
         gdef, group, d, fast, cg.trajectory(gm, gdef, values, 4),
-        cg.trajectory(ref, gdef, values, 4))
+        cg.trajectory(ref, gdef, values, 4), values)
 
 
 def _interp_runs(m, d, fast, group, values, interps, steps=3):
@@ -350,12 +355,12 @@ def test_linear_interpolation_is_constant_where_documented_and_quadratic_is_line
     are different compiled programs, and like the two solvers they round
     an ulp apart now and then (measured: 9.2e-08 relative at the second
     step of a two-dimensional Jacobi group), so the claim held here is
-    ``_ULPS_PER_PASS`` per pass with equal pass counts.  Otherwise -- a
+    the rounding bound per pass with equal pass counts.  Otherwise -- a
     fast node whose sources move earlier in the pass -- the docstring says
     they differ by "about the tolerance per step", which is not a bound
     anything derives, so nothing is asserted there.
     """
-    group = dict(iteration_mode=mode, tolerance=1e-4, max_iterations=40, diagnostics=True)
+    group = dict(iteration_mode=mode, tolerance=1e-4, max_iterations=40)
     gdef = _subcycled(3, 4, fast)
     values = data.draw(cg.drawn_values(gdef, rhos=(0.3, 0.6)))
     runs = _interp_runs(3, 4, fast, group, values, ("constant", "linear", "quadratic"))
@@ -379,12 +384,15 @@ def test_linear_interpolation_is_constant_where_documented_and_quadratic_is_line
                     f"constant took {r_c['iterations']}, with both verdicts resolved")
                 return
             passes += r_l["iterations"] * 4
-            bound = _ULPS_PER_PASS * cg.EPS32 * passes
+            bound = cg.rounding_bound(gdef, values, s_l, passes)
             assert gap <= bound, (
                 f"step {k + 1}: linear and constant interpolation {gap:.3e} apart where "
                 f"documented to coincide ({mode}, fast node {fast}; bound {bound:.3e})")
 
 
+# Slow: three sub-cycling graphs compiled for one assertion, 16 s on CI.
+# Per push: tests/core/test_coupling_waveform_report.py::test_each_later_sweep_moves_a_converged_state_by_about_one_residual
+@pytest.mark.slow
 def test_each_later_waveform_sweep_adds_at_least_one_pass():
     """Decided behaviour, pinned: a sweep is a restart that starts with a pass.
 
@@ -395,7 +403,7 @@ def test_each_later_waveform_sweep_adds_at_least_one_pass():
     """
     gdef = _subcycled(2, 2, "g1")
     values = cg.draw_values(np.random.default_rng(7), gdef, 0.5)
-    base = dict(tolerance=1e-4, max_iterations=60, diagnostics=True)
+    base = dict(tolerance=1e-4, max_iterations=60)
     one = cg.trajectory(cg.build_graph(gdef, dict(base, subcycling=True)), gdef, values, 2)
     for w in (2, 3):
         many = cg.trajectory(cg.build_graph(
@@ -476,7 +484,7 @@ def assert_pinned_adaptive_is_run_scan(gdef, gm, ref, values, fast=None, d=1):
         updates = {nd.name: 2 * _N * (d if nd.name == fast else 1) for nd in gdef.nodes}
         _leaves_at(gdef, got, updates)
         passes = 2 * _N * int(gm._coupling_groups[0].max_iterations) * d  # noqa: SLF001
-        bound = _ULPS_PER_PASS * cg.EPS32 * passes
+        bound = cg.rounding_bound(gdef, values, got, passes)
         gap = cg.relative_gap(got, want)
         assert gap <= bound, (
             f"{label} pinned at dt={_H}: {gap:.3e} from run_scan at {_H / 2} (bound {bound:.3e})")
@@ -494,11 +502,20 @@ _ADAPTIVE_CASES = {
 }
 
 
-@pytest.mark.parametrize("case", sorted(_ADAPTIVE_CASES))
-# Costly tier: per example, two adaptive runs and one scan of compiled graphs.
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
-@given(data=st.data())
-def test_adaptive_stepping_at_a_pinned_dt_is_run_scan_at_half_the_timestep(case, data):
+def _adaptive_params():
+    """The sub-cycled case per push (it also holds MADD-ANO-046's adaptive
+    half); the other cases and the second draw in the slow lane: each is
+    two graphs and ``run_adaptive``'s per-call compile, 11-15 s on CI."""
+    for case in sorted(_ADAPTIVE_CASES):
+        for seed in (0, 1):
+            per_push = case == "triangle-subcycled" and seed == 0
+            yield pytest.param(case, seed, id=f"{case}-{seed}",
+                               marks=() if per_push else (pytest.mark.slow,))
+
+
+# Per push: tests/property/test_differential_schedules.py::test_adaptive_stepping_at_a_pinned_dt_is_run_scan_at_half_the_timestep[triangle-subcycled-0]
+@pytest.mark.parametrize("case,seed", list(_adaptive_params()))
+def test_adaptive_stepping_at_a_pinned_dt_is_run_scan_at_half_the_timestep(case, seed):
     """``run_adaptive`` / ``run_adaptive_scan`` pinned == ``run_scan`` (per push).
 
     ``dt_min = dt_max = dt_initial`` and an ``atol`` no error reaches, so
@@ -506,12 +523,14 @@ def test_adaptive_stepping_at_a_pinned_dt_is_run_scan_at_half_the_timestep(case,
     steps, i.e. ``run_scan`` of the same graph built at ``dt / 2``.  The
     sub-cycled case also checks that a fast member's sub-steps cover the
     step (MADD-ANO-046's adaptive half): its clock reads the stepper's
-    time exactly.  Slow sibling:
-    :func:`test_generated_adaptive_runs_replay_and_keep_their_clocks`.
+    time exactly.  Fixed draws rather than a property: ``run_adaptive``
+    jits its step afresh on every call, a compile per run.  Slow sibling
+    (drawn): :func:`test_generated_adaptive_runs_replay_and_keep_their_clocks`.
     """
     structure, group, fast = _ADAPTIVE_CASES[case]
     gdef, gm, ref = _adaptive_pair(structure, _key(group), fast)
-    values = data.draw(cg.drawn_values(gdef, rhos=_ODE_RHOS))
+    values = cg.draw_values(np.random.default_rng(seed), gdef, _ODE_RHOS[seed % 2],
+                            nonnormal=bool(seed % 2))
     assert_pinned_adaptive_is_run_scan(gdef, gm, ref, values, fast=fast,
                                        d=2 if fast else 1)
 
@@ -566,7 +585,9 @@ def assert_adaptive_replays_and_keeps_its_clock(gdef, gm, values, *, atol, dt_mi
     assert not moved, f"replaying dt_history moved {moved}"
 
 
-@pytest.mark.parametrize("seed", [0, 1, 2])
+# Per push: the seed-0 cases of this test; seed 1 is slow-marked (a
+# compile per run_adaptive call).
+@pytest.mark.parametrize("seed", [0, pytest.param(1, marks=pytest.mark.slow)])
 @pytest.mark.parametrize("atol,dt_min", [(1e-2, 1e-3), (1e-7, 0.1)])
 def test_adaptive_runs_replay_their_accepted_steps_and_keep_their_clocks(atol, dt_min, seed):
     """Replaying ``dt_history`` reproduces ``run_adaptive`` bitwise (per push).

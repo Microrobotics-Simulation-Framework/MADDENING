@@ -19,12 +19,14 @@ residual.  So:
   (:func:`~tests.property.coupled_graphs.criterion_is_resolved`: the
   residual's floor, amplified through the rate estimate), where an ulp
   decides the pass;
-* where the iteration counts agree, the states agree to
-  ``_ULPS_PER_PASS`` units of float32 round-off per pass: the documented
-  difference is one ulp on a couple of components per pass (``while_loop``
-  and ``fori_loop`` bodies compile to differently rounded arithmetic), and
-  four per pass, summed without any help from the contraction, is the
-  stated slack;
+* where the iteration counts agree, the states agree to float32
+  round-off: the documented difference is about one ulp on a couple of
+  components per pass (``while_loop`` and ``fori_loop`` bodies compile to
+  differently rounded arithmetic), and the bound allowed is the forward
+  error of each node's sum, ``2 T eps sum |term|``, per pass, summed
+  without any help from the contraction
+  (:func:`~tests.property.coupled_graphs.rounding_bound`) -- at least
+  eight ulps of ``|x|`` a pass, more where large terms cancel;
 * non-float leaves are bit-identical, and equal to their closed form.
 
 **diagnostics on == off.**  ``diagnostics=True`` reports on the forward and
@@ -55,10 +57,6 @@ from hypothesis import strategies as st
 from tests.conftest import EXAMPLES_COSTLY
 from tests.core.test_coupling_solver_equivalence import residual_noise_floor
 from tests.property import coupled_graphs as cg
-
-#: Float32 round-off allowed per coupling pass between the two solvers'
-#: states, in ulps of each field's magnitude (module docstring).
-_ULPS_PER_PASS = 4
 
 #: The threshold must clear the norm's float32 floor by this factor for
 #: the documented iteration parity to be demanded.  Below it the criterion
@@ -100,7 +98,7 @@ def _check_leaves(gdef, state, step):
                 f"{nd.name}.{field} = {got!r} after {step} steps, want {want!r}")
 
 
-def assert_solvers_agree(gdef, group, fori, ift):
+def assert_solvers_agree(gdef, group, fori, ift, values):
     """The fori == ift oracle on two trajectories of one configuration."""
     for k, ((s_f, m_f, d_f), (s_i, m_i, d_i)) in enumerate(zip(fori, ift), start=1):
         note(f"step {k}: fori {d_f} ift {d_i}")
@@ -122,7 +120,7 @@ def assert_solvers_agree(gdef, group, fori, ift):
             # trajectories have parted, so later steps prove nothing.
             return
         passes = d_f["iterations"] * _sweeps(gdef, group)
-        bound = _ULPS_PER_PASS * cg.EPS32 * max(passes, 1)
+        bound = cg.rounding_bound(gdef, values, s_f, passes)
         gap = cg.relative_gap(s_f, s_i)
         assert gap <= bound, (
             f"step {k}: states {gap:.3e} apart relatively after {passes} "
@@ -187,7 +185,7 @@ def test_the_two_solvers_return_the_same_steps_on_generated_spectra(case, data):
     values = data.draw(cg.drawn_values(gdef))
     fori = cg.trajectory(_compiled(structure, _key(group), "fori", True), gdef, values, _STEPS)
     ift = cg.trajectory(_compiled(structure, _key(group), "ift", True), gdef, values, _STEPS)
-    assert_solvers_agree(gdef, group, fori, ift)
+    assert_solvers_agree(gdef, group, fori, ift, values)
 
 
 # Slow: structure and configuration are drawn, so every example builds and
@@ -220,7 +218,7 @@ def test_the_two_solvers_return_the_same_steps_on_generated_graphs(data):
                          gdef, values, _STEPS)
     ift = cg.trajectory(cg.build_graph(gdef, dict(group, solver="ift", diagnostics=True)),
                         gdef, values, _STEPS)
-    assert_solvers_agree(gdef, group, fori, ift)
+    assert_solvers_agree(gdef, group, fori, ift, values)
 
 
 # ---------------------------------------------------------------------------
@@ -281,10 +279,14 @@ def test_diagnostics_leave_every_returned_value_bit_identical(case, data):
     assert_diagnostics_inert(gdef, solver, off, on)
 
 
-def _gradient(gm, values, steps):
-    """``d sum(x of every group node after *steps*) / d params`` via ``run_scan``."""
+def _gradient(gm, gdef, values, steps):
+    """``d sum(x of every group node after *steps*) / d params`` via ``run_scan``.
+
+    ``run_scan`` leaves the traced final state in the graph, which
+    :func:`~tests.property.coupled_graphs.recover` puts back afterwards.
+    """
+    names = list(gdef.group_nodes)
     cg.set_initial(gm, values)
-    names = list(gm._coupling_groups[0].nodes)  # noqa: SLF001
 
     def loss(p):
         out = gm.run_scan(steps, params=p)
@@ -296,10 +298,12 @@ def _gradient(gm, values, steps):
             for nm, p in grads["nodes"].items()}
 
 
+# Per push: the seed-0 cases of this test; seeds 1 and 2 are slow-marked
+# (each gradient retraces the rollout un-jitted, ~4 s a draw on CI).
+@pytest.mark.parametrize("seed", [0, pytest.param(1, marks=pytest.mark.slow),
+                                  pytest.param(2, marks=pytest.mark.slow)])
 @pytest.mark.parametrize("solver", ["ift", "fori"])
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
-@given(data=st.data())
-def test_diagnostics_leave_gradients_through_run_scan_bit_identical(solver, data):
+def test_diagnostics_leave_gradients_through_run_scan_bit_identical(solver, seed):
     """``jax.grad`` through ``run_scan`` is the same bits with or without them.
 
     Under ``"ift"`` the backward pass is the implicit-function adjoint at
@@ -307,14 +311,17 @@ def test_diagnostics_leave_gradients_through_run_scan_bit_identical(solver, data
     after the loop (the spectral and gradient bounds) behind
     ``stop_gradient``, which must change no bit of the adjoint.  Under
     ``"fori"`` it adds carries to the loop, which must change no bit of
-    the derivative through the iterates.
+    the derivative through the iterates.  Fixed draws: each gradient
+    retraces the rollout.  Slow sibling (drawn graphs):
+    :func:`test_diagnostics_leave_generated_graphs_bit_identical`.
     """
     group = dict(acceleration="iqn-ils", tolerance=1e-5, max_iterations=12,
                  predictor="linear")
     gdef = cg.TRIANGLE
-    values = data.draw(cg.drawn_values(gdef, rhos=(0.3, 0.9, 0.99)))
-    off = _gradient(_compiled("triangle", _key(group), solver, False), values, 2)
-    on = _gradient(_compiled("triangle", _key(group), solver, True), values, 2)
+    values = cg.draw_values(np.random.default_rng(seed), gdef, (0.3, 0.9, 0.99)[seed],
+                            nonnormal=bool(seed % 2))
+    off = _gradient(_compiled("triangle", _key(group), solver, False), gdef, values, 2)
+    on = _gradient(_compiled("triangle", _key(group), solver, True), gdef, values, 2)
     moved = cg.bitwise_differences(off, on)
     assert not moved, f"{solver}: diagnostics=True moved the gradient of {moved}"
 
@@ -326,21 +333,26 @@ def test_diagnostics_leave_gradients_through_run_scan_bit_identical(solver, data
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data(), solver=st.sampled_from(["ift", "fori"]))
 def test_diagnostics_leave_generated_graphs_bit_identical(data, solver):
-    """diagnostics on == off with the structure and configuration drawn.
+    """diagnostics on == off with the structure and configuration drawn,
+    gradients through ``run_scan`` included.
 
-    Per-push sibling:
-    :func:`test_diagnostics_leave_every_returned_value_bit_identical`.
+    Per-push siblings:
+    :func:`test_diagnostics_leave_every_returned_value_bit_identical` and
+    :func:`test_diagnostics_leave_gradients_through_run_scan_bit_identical`.
     """
     gdef = data.draw(cg.graph_defs())
     group = cg.steer_around_known_crashes(gdef, data.draw(cg.group_configs(gdef)))
     gdef = cg.steer_leaves_around_known_crashes(gdef, group)
     values = data.draw(cg.drawn_values(gdef))
     note(f"{gdef}\n{group}")
-    off = cg.trajectory(cg.build_graph(gdef, dict(group, solver=solver, diagnostics=False)),
-                        gdef, values, _STEPS)
-    on = cg.trajectory(cg.build_graph(gdef, dict(group, solver=solver, diagnostics=True)),
-                       gdef, values, _STEPS)
+    gm_off = cg.build_graph(gdef, dict(group, solver=solver, diagnostics=False))
+    gm_on = cg.build_graph(gdef, dict(group, solver=solver, diagnostics=True))
+    off = cg.trajectory(gm_off, gdef, values, _STEPS)
+    on = cg.trajectory(gm_on, gdef, values, _STEPS)
     assert_diagnostics_inert(gdef, solver, off, on)
+    moved = cg.bitwise_differences(_gradient(gm_off, gdef, values, 2),
+                                   _gradient(gm_on, gdef, values, 2))
+    assert not moved, f"{solver}: diagnostics=True moved the gradient of {moved}"
 
 
 # ---------------------------------------------------------------------------

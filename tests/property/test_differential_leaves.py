@@ -208,9 +208,10 @@ def test_non_float_leaves_survive_generated_configurations(data):
     gm = cg.build_graph(gdef, group)
     values = data.draw(cg.drawn_values(gdef))
     steps = 5 if schedule == "multirate" else _STEPS
+    base = min(nd.timestep for nd in gdef.nodes)   # the timesteps are 1 and div
     for k, (state, _m, _r) in enumerate(cg.trajectory(gm, gdef, values, steps), start=1):
         if schedule == "multirate":
-            updates = {nd.name: -(-k // int(nd.timestep)) for nd in gdef.nodes}
+            updates = {nd.name: -(-k // int(round(nd.timestep / base))) for nd in gdef.nodes}
         else:
             updates = {nd.name: k * (d if nd.name == fast else 1) for nd in gdef.nodes}
         assert_leaves(gdef, state, updates, f"step {k}: ")

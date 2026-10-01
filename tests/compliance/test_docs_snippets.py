@@ -42,7 +42,10 @@ Each runnable snippet (with whatever it continues) runs once, in a fresh
 ``HOME`` an empty one; ``JAX_PLATFORMS=cpu``; ``MPLBACKEND=Agg``; and an
 environment built from an allowlist, so no cloud credential or token in
 the parent's environment reaches it.  An audit hook refuses any socket
-connection or name lookup that is not loopback.  The code is compiled with
+connection or name lookup that is not loopback -- through Python's
+``socket`` module, which is what HTTP clients use; a C extension's own
+sockets (libzmq) are not seen, and there the static launch-path refusal,
+the empty ``HOME`` and the missing credentials are what hold.  The code is compiled with
 the Markdown file as its filename and its own line numbers, so a traceback
 points at the line in the doc.  Snippets run in parallel, one process per
 CPU of the test's affinity mask, each pinned to its own CPU.
@@ -580,9 +583,9 @@ def run_unit(unit: Unit, workdir: Path, cpu: int | None = None,
             cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
             text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        out = (exc.stdout or "") + (exc.stderr or "")
-        if isinstance(out, bytes):
-            out = out.decode("utf-8", "replace")
+        # On a timeout the captured output can be bytes even under text=True.
+        out = "".join(x.decode("utf-8", "replace") if isinstance(x, bytes) else (x or "")
+                      for x in (exc.stdout, exc.stderr))
         return Result(unit, None, out + f"\n[timed out after {timeout:.0f} s]",
                       time.perf_counter() - t0)
     return Result(unit, proc.returncode, proc.stdout + proc.stderr,

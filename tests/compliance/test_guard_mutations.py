@@ -480,6 +480,10 @@ def _params():
         yield pytest.param(m, id=m.id, marks=marks)
 
 
+# Slow-only on purpose: every mutant re-runs guard test files in a fresh copy
+# of the tree, minutes in all (docs/developer_guide/testing_standards.md,
+# "What only the slow lane checks").
+# Per push: tests/compliance/test_guard_mutations.py::test_every_mutant_anchor_matches_the_tree_exactly_once
 @pytest.mark.slow
 @pytest.mark.parametrize("mutant", list(_params()))
 def test_every_seeded_ci_fault_fails_a_guard(mutant, head_archive, guards_pass_unmutated, tmp_path,

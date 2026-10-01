@@ -2510,11 +2510,38 @@ def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
 #: from the other work sharing it and not a property of the code.  A caller
 #: who does not want the cost at all passes ``hold_undetermined=False``.
 #:
+#: When the Gram matrix leaves ``k`` directions unspanned, the guard pays
+#: once more, at the selected iterate, to ask the objective's curvature
+#: about them (:func:`_hold_undetermined_directions`): for :func:`fit_lm`
+#: the Jacobian it already computes, at most one extra evaluation of it;
+#: for :func:`fit` and :func:`fit_multiple_shooting` ``k`` plus up to
+#: :data:`_HOLD_SCALE_DIRECTIONS` Hessian-vector products, evaluated one
+#: after another so that the memory is one product's, and one compilation
+#: of them.  Then one or two evaluations of the loss for the check
+#: :func:`_hold_tolerance` describes.  A fit whose gradients spanned
+#: everything pays none of this.
+#:
 #: Above the cap the tracker is not built and
 #: :attr:`FitResult.excited_rank` is ``None`` -- "not measured", never
 #: "full rank", because a silent full-rank verdict would read as "no
 #: undetermined direction was found" when nothing looked.
 _EXCITATION_MAX_PARAMS = 512
+
+#: How many of the run's most-excited directions the Hessian test probes,
+#: besides the candidates, to put a scale on "no curvature".  Their
+#: Hessian-vector products bound ``||H||`` from below, so a scale that
+#: comes out low makes the test stricter -- fewer directions held, the
+#: fail-open side -- and never looser.  For ``n <= k + 8`` the probes are
+#: the whole space and the scale is exact.
+_HOLD_SCALE_DIRECTIONS = 8
+
+#: Relative part of :func:`_hold_tolerance`, in units of the working
+#: precision's ``eps``: ``2**10``.
+_HOLD_LOSS_RTOL_EPS = 1024.0
+
+#: Per-coordinate perturbation, in units in the last place, whose effect
+#: on the loss is the absolute part of :func:`_hold_tolerance`.
+_HOLD_LOSS_ULPS = 16.0
 
 
 class _ExcitationTracker:
@@ -2525,7 +2552,18 @@ class _ExcitationTracker:
     at *every* iterate, and the whole run's gradients stay inside the
     subspace the data can see.  ``G``'s near-null eigenvectors therefore
     name the directions no gradient ever pointed along -- the ones the
-    optimiser had no information about and must not have moved in.
+    optimiser had no information about.
+
+    That is a *necessary* condition for a direction the data cannot
+    determine, not a sufficient one, and this class is only the first of
+    the guard's two tests.  The converse fails on any run too short or too
+    fast to excite everything: Levenberg-Marquardt reaching the minimum of
+    a four-parameter bowl in a few nearly parallel steps leaves three
+    directions unspanned, every one of them determined, and holding them
+    put the returned parameters at a loss of 0.22 where the fit had
+    reached 0.0.  :func:`_hold_undetermined_directions` asks the
+    objective's curvature at the returned point about each candidate
+    before it holds anything.
 
     Pooling over the run rather than testing one gradient at a time is what
     makes the verdict robust: near convergence a single gradient is mostly
@@ -2554,15 +2592,36 @@ class _ExcitationTracker:
         self._gram += np.outer(gv, gv)
         self.count += 1
 
+    def split(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """``(eigvecs, excited)`` of ``G``, or ``None`` if it cannot say.
+
+        ``eigvecs`` are ``G``'s orthonormal eigenvectors in ascending order
+        of eigenvalue and ``excited`` flags those above the cutoff
+        described in :meth:`projector`; the rest are the directions no
+        gradient of the run pointed along.  ``None`` under the same two
+        conditions :meth:`projector` answers ``(None, None)``.
+        """
+        if self.count < self.n:
+            return None
+        evals, evecs = np.linalg.eigh(self._gram)
+        top = float(evals[-1])
+        if not np.isfinite(top) or top <= 0.0:
+            return None
+        cutoff = (max(self.n, math.sqrt(self.count)) * self.eps) ** 2 * top
+        return evecs, np.asarray(evals > cutoff)
+
     def projector(self) -> tuple[Optional[int], Optional[np.ndarray]]:
-        """``(excited_rank, P)`` for the excited subspace, or ``(None, None)``.
+        """``(rank, P)`` for the excited subspace, or ``(None, None)``.
 
         ``P`` is the orthogonal projector onto the span of the directions
         the gradients excited, and is ``None`` when the rank is full (there
         is nothing to remove, and returning the iterate untouched keeps it
         bit for bit).  ``(None, None)`` means the question was not answered:
         fewer gradients than parameters, so a direction can be unobserved
-        merely for want of iterations, or a degenerate spectrum.
+        merely for want of iterations, or a degenerate spectrum.  This is
+        the gradient test on its own; :attr:`FitResult.excited_rank` is
+        decided by it together with the curvature test
+        (:func:`_hold_undetermined_directions`).
 
         The cutoff is ``(max(n, sqrt(T)) * eps)**2`` of the largest
         eigenvalue, for ``n`` parameters and ``T`` gradients -- the same rule
@@ -2577,14 +2636,10 @@ class _ExcitationTracker:
         -- is :attr:`FIMReport.crb`'s, and answering it here would silently
         discard real, if weak, information.
         """
-        if self.count < self.n:
+        split = self.split()
+        if split is None:
             return None, None
-        evals, evecs = np.linalg.eigh(self._gram)
-        top = float(evals[-1])
-        if not np.isfinite(top) or top <= 0.0:
-            return None, None
-        cutoff = (max(self.n, math.sqrt(self.count)) * self.eps) ** 2 * top
-        keep = np.asarray(evals > cutoff)
+        evecs, keep = split
         rank = int(np.count_nonzero(keep))
         if rank == self.n:
             return rank, None
@@ -2636,9 +2691,188 @@ def _make_excitation_tracker(hold_undetermined, theta0) -> Optional[_ExcitationT
     return None
 
 
-def _hold_undetermined_directions(tracker, theta, theta0):
-    """``(theta, excited_rank, undetermined_drift)`` with the undetermined
-    component of ``theta - theta0`` removed.
+@dataclass(frozen=True)
+class _SelectedObjective:
+    """What the guard asks of a fitter's objective, at the selected iterate.
+
+    Each fitter builds one from the compiled functions its loop already
+    used, so that every number the guard compares is computed the way the
+    fitter computed its own.  All three are called lazily, and only when
+    the gradient test left a candidate direction: a fit whose gradients
+    spanned everything evaluates none of them.
+
+    ``loss(theta)``
+        The fitter's loss at a point of its trainable block, as a float.
+    ``reference()``
+        ``(loss, gradient)`` at the selected iterate, the loss by the same
+        function as ``loss`` so that the check compares like with like.
+    ``flatness(candidates, excited)``
+        The curvature test: ``(W, flat, scale)`` with ``W`` an orthogonal
+        ``k x k`` rotation of the candidate columns, ``flat`` flagging the
+        rotated directions along which the objective has no curvature,
+        and ``scale`` the curvature the tolerance's quantisation term uses;
+        or ``None`` when there is no curvature to ask
+        (:func:`_hessian_flatness` on a loss JAX cannot differentiate
+        twice).
+    """
+
+    loss: Callable[[Any], float]
+    reference: Callable[[], tuple[float, Optional[np.ndarray]]]
+    flatness: Callable[[np.ndarray, np.ndarray], Optional[tuple]]
+
+
+def _rotation_by_singular_values(M, k: int):
+    """``(W, s)``: ``M``'s right singular vectors as a ``k x k`` rotation,
+    and its singular values padded with zeros to ``k`` -- an ``m x k``
+    ``M`` with ``m < k`` maps the missing directions to nothing."""
+    _, s, wt = np.linalg.svd(M, full_matrices=True)
+    padded = np.zeros(k, dtype=np.float64)
+    padded[:s.size] = s
+    return wt.T, padded
+
+
+def _gauss_newton_flatness(J, candidates, dtype):
+    """The curvature test for :func:`fit_lm`, from ``J`` at the selected
+    iterate.
+
+    ``F = JᵀJ`` is the Gauss-Newton matrix Levenberg-Marquardt steps with
+    and, weighted by ``noise_std``, the Fisher information :func:`fim`
+    reports.  A direction ``u`` of the candidate span is flat when
+    ``uᵀFu = ||Ju||²`` is at or below ``rtol * max(eig(F))`` with
+    :func:`fim`'s own rank cutoff ``rtol = max(n, sqrt(m)) * eps``, so
+    :func:`fit_lm` holds a direction only if :func:`fim`, asked at the
+    point it returned and in its coordinates, would call it unresolved.
+
+    The quadratic form rather than ``||Fu||``: ``J``'s entries carry the
+    working precision's rounding, which leaves ``||Fv||`` of an exactly
+    null ``v`` at about ``eps * max(eig(F))`` -- a factor of ``n`` from the
+    cutoff -- while ``||Jv||²`` sits at ``eps²`` of it.  ``F`` is formed in
+    float64 from the working-precision ``J``.
+    """
+    Jd = np.asarray(J, dtype=np.float64)
+    m, n = Jd.shape
+    k = candidates.shape[1]
+    W, s = _rotation_by_singular_values(Jd @ candidates, k)
+    scale = float(np.linalg.norm(Jd, 2)) ** 2
+    rtol = _resolve_rank_rtol(dtype, n, None, n_residual=m)
+    return W, s * s <= rtol * scale, scale
+
+
+def _hessian_flatness(hvp, candidates, excited, dtype, method: str):
+    """The curvature test for :func:`fit` and :func:`fit_multiple_shooting`.
+
+    Their objective is a scalar, so there is no ``J`` to ask; the Hessian
+    at the selected iterate is.  ``hvp(V)`` returns ``H V`` for the columns
+    of ``V``.  A direction ``u`` of the candidate span is flat when
+    ``||Hu|| <= sqrt(eps) * scale``, ``scale`` being the largest singular
+    value of ``H`` over the candidates and the
+    :data:`_HOLD_SCALE_DIRECTIONS` most-excited directions -- a lower bound
+    on ``||H||``, so an underestimate makes the test stricter, not looser.
+
+    ``sqrt(eps)`` rather than :func:`fim`'s ``max(n, sqrt(m)) * eps``
+    because ``H`` is computed directly in the working precision, not as a
+    product of two factors: an exact null direction's ``||Hv||`` is about
+    ``eps * ||H||`` from rounding alone (measured 1e-8 to 2e-8 of the
+    largest eigenvalue in float32 on the spring's scale degeneracy), and
+    the number of terms the loss sums -- the ``sqrt(m)`` that would widen
+    it -- is not visible through a scalar loss.  The norm rather than the
+    quadratic form because the Hessian of a run that has not converged
+    need not be positive: ``uᵀHu = 0`` along a saddle direction is not
+    ``Hu = 0``.  The weakest direction the data resolves on the same
+    problem measures 6e-2, so the cutoff has two decades of margin on
+    the far side, and anything that slips under it must still pass the
+    gradient test and the loss check.
+
+    ``None`` -- no curvature test, the gradient test stands alone and the
+    loss check still applies -- when the Hessian-vector product cannot be
+    formed: a ``jax.custom_vjp`` in the loss, which forward-mode
+    differentiation refuses, is the usual reason.  A
+    :class:`RuntimeWarning` names the error.
+    """
+    k = candidates.shape[1]
+    top = excited[:, ::-1][:, :_HOLD_SCALE_DIRECTIONS]
+    try:
+        HV = np.asarray(hvp(np.concatenate([candidates, top], axis=1)),
+                        dtype=np.float64)
+    except Exception as exc:   # noqa: BLE001 - any failure means "no curvature"
+        warnings.warn(
+            f"{method}: hold_undetermined could not form the loss's "
+            f"Hessian-vector product to test the {k} direction(s) the run's "
+            f"gradients did not span ({type(exc).__name__}: {exc}); they are "
+            f"checked against the loss alone.",
+            RuntimeWarning, stacklevel=5,
+        )
+        return None
+    scale = float(np.linalg.norm(HV, 2))
+    W, s = _rotation_by_singular_values(HV[:, :k], k)
+    cutoff = math.sqrt(float(np.finfo(dtype).eps)) * scale
+    return W, s <= cutoff, scale
+
+
+def _hvp_columns(grad_fn, theta, extra, V):
+    """``H V`` for ``H`` the Jacobian of ``grad_fn(theta, *extra)`` in
+    ``theta``, one forward-over-reverse product per column of ``V``.
+
+    ``lax.map`` evaluates the products one after another, so the memory is
+    one product's whatever the number of columns.  Compiled per call:
+    ``grad_fn`` closes over the fitter's own objective.
+    """
+    def products(t, ex, vs):
+        return jax.lax.map(
+            lambda v: jax.jvp(lambda x: grad_fn(x, *ex), (t,), (v,))[1], vs)
+
+    tangents = jnp.asarray(np.asarray(V).T, dtype=theta.dtype)
+    return np.asarray(jax.jit(products)(theta, extra, tangents), dtype=np.float64).T
+
+
+def _hold_tolerance(loss_sel: float, grad_sel, scale: float, held, eps: float) -> float:
+    """How far the loss may rise for the hold to count as not raising it.
+
+    ``2**10 * eps * |L| + ||g|| * d + scale * d**2 / 2``, with ``L`` and
+    ``g`` the loss and gradient at the selected iterate, ``d`` the length of
+    a :data:`_HOLD_LOSS_ULPS`-ulp perturbation of every coordinate of the
+    held point, and ``scale`` the objective's largest curvature.
+
+    The guard moves only along directions both of its tests call flat, so
+    in exact arithmetic the loss does not move at all; what the tolerance
+    has to admit is rounding, of two kinds.
+
+    The relative term is the loss *evaluated* at a different but
+    equivalent point.  Every intermediate quantity rounds differently, and
+    a least-squares loss turns a relative rounding ``eps`` of its model
+    output into ``~eps * |y| / |r|`` of itself, ``y`` the signal and ``r``
+    the residual.  Measured on the spring's scale degeneracy the hold moved
+    the loss by 0 to 5.3 ``eps`` relative (``fit``, ``fit_lm`` and
+    ``fit_multiple_shooting``, σ = 0.02); ``2**10`` admits a signal up to
+    about a thousand times its residual, a fit to 0.1%.  It is 1.2e-4 in
+    float32 and 2.3e-13 in float64.
+
+    The absolute term is the *quantisation* of the held point: it is
+    stored in the working precision, so even an exactly flat move lands up
+    to an ulp off the flat set in every coordinate, and the loss pays for
+    that to first and second order.  It is what a fit at its precision
+    floor needs, where the relative term means nothing: noiselessly,
+    ``fit_lm`` reached ``1.2e-14`` and the held point ``2.5e-13``, a factor
+    of 20 that is all rounding.  ``16`` ulps leaves room for the transforms
+    each coordinate passes through.
+
+    Against what the check exists to catch: on the four-parameter bowl the
+    0.4.0-dev guard took ``fit_lm`` from 0.0 to 0.22, the spring 1% off from
+    0.0 to 1.2e-4, and ten Adam steps from 0.32342 to 0.32367 -- a relative
+    rise of 7.7e-4, six times the relative term.
+    """
+    spacing = np.abs(np.spacing(np.asarray(held))).astype(np.float64)
+    d = _HOLD_LOSS_ULPS * float(np.linalg.norm(spacing))
+    g = 0.0 if grad_sel is None else float(np.linalg.norm(grad_sel))
+    return (_HOLD_LOSS_RTOL_EPS * eps * abs(loss_sel)
+            + g * d + 0.5 * max(scale, 0.0) * d * d)
+
+
+def _hold_undetermined_directions(tracker, theta, theta0, objective: _SelectedObjective,
+                                  method: str):
+    """``(theta, excited_rank, undetermined_drift, hold_declined)``, with
+    the undetermined component of ``theta - theta0`` removed when that does
+    not raise the loss.
 
     The one implementation of the hold, shared by all three fitters: an
     optimiser-specific copy would let the three drift apart in exactly the
@@ -2649,22 +2883,88 @@ def _hold_undetermined_directions(tracker, theta, theta0):
     there -- and none of them is told anything about those directions by
     the data.
 
-    ``theta`` comes back untouched, and therefore bit for bit, whenever the
-    rank is full or the question could not be answered.
+    A direction is undetermined when it passes two tests, each necessary
+    for a direction the data cannot see and neither sufficient alone:
+
+    1. **No gradient of the run pointed along it**
+       (:class:`_ExcitationTracker`).  Alone, this is what 0.4.0
+       development builds used, and on a short or fast-converging run it
+       names directions the data determines perfectly well.
+    2. **The objective has no curvature along it at the selected
+       iterate** -- ``JᵀJ`` for :func:`fit_lm`
+       (:func:`_gauss_newton_flatness`), the loss's Hessian for the other
+       two (:func:`_hessian_flatness`).  Alone, it would hold a degeneracy
+       that rotates in the optimiser's coordinates along its local
+       tangent, off the curved flat set; requiring test 1 too keeps such a
+       run, whose gradients span everything, untouched and reported full
+       rank, as before.
+
+    Then the **loss check**: the held point's loss, by the fitter's own
+    compiled function, must not exceed the selected iterate's by more than
+    :func:`_hold_tolerance`.  If it does, nothing is held, ``theta`` comes
+    back as the selected iterate bit for bit, ``hold_declined`` is True and
+    a :class:`RuntimeWarning` gives both losses.  The hold is all or
+    nothing: the undetermined directions form a subspace, and when its
+    curvature is degenerate any basis of it is as good as another, so
+    "hold some of them" names no particular subset.
+
+    ``theta`` comes back untouched, and therefore bit for bit, whenever no
+    direction passes both tests or the question could not be answered.
+    When every candidate of test 1 passes test 2 the hold is computed
+    exactly as the 0.4.0 development builds computed it, so a degenerate
+    fit they held correctly is held to the same bits.
     """
     if tracker is None:
-        return theta, None, None
-    excited_rank, projector = tracker.projector()
-    if projector is None:
-        return theta, excited_rank, (None if excited_rank is None else 0.0)
+        return theta, None, None, None
+    split = tracker.split()
+    if split is None:
+        return theta, None, None, None
+    evecs, excited = split
+    n = tracker.n
+    if bool(excited.all()):
+        return theta, n, 0.0, False
+    candidates, spanned = evecs[:, ~excited], evecs[:, excited]
+    k = candidates.shape[1]
+    probe = objective.flatness(candidates, spanned)
+    if probe is None:
+        W, flat, scale = np.eye(k), np.ones(k, dtype=bool), 0.0
+    else:
+        W, flat, scale = probe
+        flat = np.asarray(flat, dtype=bool)
+    n_flat = int(np.count_nonzero(flat))
+    if n_flat == 0:
+        return theta, n, 0.0, False
     moved = (np.asarray(theta, dtype=np.float64)
              - np.asarray(theta0, dtype=np.float64))
-    kept = projector @ moved
+    if n_flat == k:
+        # Every candidate is flat: the projector onto the spanned
+        # directions, formed and applied as 0.4.0-dev formed it.
+        kept = (spanned @ spanned.T) @ moved
+    else:
+        undetermined = candidates @ W[:, flat]
+        kept = moved - undetermined @ (undetermined.T @ moved)
     drift = float(np.linalg.norm(moved - kept))
     # ``theta0 + kept``, not ``kept`` alone: the guard holds the
     # undetermined directions at the values they *started* at, which
     # is the one thing about them the data has not contradicted.
-    return theta0 + jnp.asarray(kept, dtype=theta0.dtype), excited_rank, drift
+    held = theta0 + jnp.asarray(kept, dtype=theta0.dtype)
+    loss_sel, grad_sel = objective.reference()
+    loss_held = objective.loss(held)
+    tol = _hold_tolerance(loss_sel, grad_sel, scale, held, tracker.eps)
+    if math.isfinite(loss_held) and loss_held <= loss_sel + tol:
+        return held, n - n_flat, drift, False
+    warnings.warn(
+        f"{method}: hold_undetermined found {n_flat} direction(s) the data "
+        f"does not determine at the returned point, but holding them at "
+        f"their starting values would raise the loss from {loss_sel:.9g} to "
+        f"{loss_held:.9g}, beyond the guard's tolerance of {tol:.3g}; "
+        f"params is the selected iterate, unheld (FitResult.hold_declined). "
+        f"The loss is flat along them where the fit ended but not on the way "
+        f"back to the start -- a degeneracy that curves in the optimiser's "
+        f"coordinates, for instance.",
+        RuntimeWarning, stacklevel=3,
+    )
+    return theta, n - n_flat, drift, True
 
 
 def _progress_notifier(gm, method: str, n_iter: int, notify_every: int):
@@ -2846,6 +3146,7 @@ class FitResult:
     undetermined_drift: Optional[float] = None
     best_iteration: Optional[int] = None
     best_loss: Optional[float] = None
+    hold_declined: Optional[bool] = None
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -3060,14 +3361,29 @@ def fit(
         # runs whose result is otherwise untouched.
         _offer_final_iterate(best, theta, i, float(value_and_grad(theta)[0]), "fit")
 
-    theta, excited_rank, undetermined_drift = _hold_undetermined_directions(
-        tracker, best.state, theta0)
+    selected = best.state
+
+    def _reference():
+        loss_sel, g_sel = value_and_grad(selected)
+        return float(loss_sel), np.asarray(g_sel, dtype=np.float64)
+
+    def _flatness(candidates, spanned):
+        return _hessian_flatness(
+            lambda V: _hvp_columns(lambda t: jax.grad(objective)(t), selected, (), V),
+            candidates, spanned, selected.dtype, "fit")
+
+    theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
+        tracker, selected, theta0,
+        _SelectedObjective(loss=lambda th: float(value_and_grad(th)[0]),
+                           reference=_reference, flatness=_flatness),
+        "fit")
 
     final = to_params(theta)
     return FitResult(
         params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
         excited_rank=excited_rank, undetermined_drift=undetermined_drift,
         best_iteration=best.iteration, best_loss=best.loss,
+        hold_declined=hold_declined,
     )
 
 
@@ -3229,6 +3545,10 @@ def fit_lm(
     # converged run could hand back an older iterate for a rounding
     # difference its own test had already decided the other way.
     theta_iteration, theta_loss = 0, None
+    # The last ``(r, J)`` the loop formed and the iterate it belongs to, so
+    # that the guard's curvature test reuses it when the run ended without
+    # moving off that iterate rather than forming it again.
+    rJ, rJ_iteration = None, None
     converged = False
     i = 0
     for i in range(1, n_iter + 1):
@@ -3238,6 +3558,7 @@ def fit_lm(
             raise FloatingPointError(f"non-finite residual or Jacobian at iteration {i}")
         losses.append(loss)
         theta_iteration, theta_loss = i - 1, loss
+        rJ, rJ_iteration = (r, J), i - 1
         if tracker is not None:
             # ``J.T @ r`` is the same ``g`` ``_lm_step`` forms, recomputed
             # here rather than returned from it: the tracker must not
@@ -3277,14 +3598,40 @@ def fit_lm(
             converged = accepted and step_norm < step_tol
             break
 
-    theta, excited_rank, undetermined_drift = _hold_undetermined_directions(
-        tracker, theta, theta0)
+    selected = theta
+    at_selected: dict = {}
+
+    def _rj_selected():
+        # Formed at most once, and not at all when the loop already did:
+        # the run ended on ``tol`` or on a rejected step, either way still
+        # at the iterate whose ``(r, J)`` it formed last.
+        if "rJ" not in at_selected:
+            at_selected["rJ"] = (rJ if rJ is not None and rJ_iteration == theta_iteration
+                                 else residual_and_jac(selected))
+        return at_selected["rJ"]
+
+    def _loss(th):
+        r_th = residual_only(th)
+        return 0.5 * float(jnp.sum(r_th * r_th))
+
+    def _reference():
+        r_sel, J_sel = _rj_selected()
+        return _loss(selected), np.asarray(J_sel.T @ r_sel, dtype=np.float64)
+
+    def _flatness(candidates, spanned):
+        return _gauss_newton_flatness(_rj_selected()[1], candidates, selected.dtype)
+
+    theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
+        tracker, selected, theta0,
+        _SelectedObjective(loss=_loss, reference=_reference, flatness=_flatness),
+        "fit_lm")
 
     final = to_params(theta)
     return FitResult(
         params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
         excited_rank=excited_rank, undetermined_drift=undetermined_drift,
         best_iteration=theta_iteration, best_loss=theta_loss,
+        hold_declined=hold_declined,
     )
 
 
@@ -3449,13 +3796,31 @@ def fit_multiple_shooting(
                              float(value_and_grad(theta, ws)[0]),
                              "fit_multiple_shooting")
     theta, ws = best.state
+    selected = theta
 
-    theta, excited_rank, undetermined_drift = _hold_undetermined_directions(
-        tracker, theta, theta0)
+    def _reference():
+        loss_sel, (g_sel, _) = value_and_grad(selected, ws)
+        return float(loss_sel), np.asarray(g_sel, dtype=np.float64)
+
+    def _flatness(candidates, spanned):
+        # The parameter block's Hessian at the selected window states, held
+        # fixed: the guard moves only ``theta``, and does so with ``ws``
+        # where the optimiser left them.
+        return _hessian_flatness(
+            lambda V: _hvp_columns(lambda t, w: jax.grad(objective)(t, w),
+                                   selected, (ws,), V),
+            candidates, spanned, selected.dtype, "fit_multiple_shooting")
+
+    theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
+        tracker, selected, theta0,
+        _SelectedObjective(loss=lambda th: float(value_and_grad(th, ws)[0]),
+                           reference=_reference, flatness=_flatness),
+        "fit_multiple_shooting")
 
     final = to_params(theta)
     return (FitResult(params=final, losses=np.asarray(losses), converged=converged,
                       n_iter=i, excited_rank=excited_rank,
                       undetermined_drift=undetermined_drift,
-                      best_iteration=best.iteration, best_loss=best.loss),
+                      best_iteration=best.iteration, best_loss=best.loss,
+                      hold_declined=hold_declined),
             unravel_ws(ws))

@@ -204,9 +204,11 @@ def test_a_run_whose_loss_never_rose_returns_its_last_iterate_bit_for_bit():
     returned, and it is exactly the iterate a run one iteration longer
     shows its callback next (Adam's iterates do not depend on ``n_iter``).
 
-    ``hold_undetermined=False``: the selection is what is measured here,
-    and on a run this short the guard moves the result (see
-    ``test_the_guard_does_not_raise_the_loss_of_a_well_posed_fit``)."""
+    ``hold_undetermined=False``: the selection is what is measured here.
+    On this very run the guard of earlier 0.4.0 development builds moved
+    the result off the selected iterate, uphill;
+    ``test_sysid_hold_never_raises_the_loss.py`` pins that it no longer
+    does."""
     gm = _spring()
     n = 10
     res = fit(gm, _bowl, n_iter=n, lr=0.01, hold_undetermined=False)
@@ -442,9 +444,9 @@ def test_every_fitter_returns_an_iterate_no_worse_than_any_it_evaluated(
             window_states=ws, continuity_weight=1.0))
 
     # Unguarded, so that "the parameters returned reproduce best_loss" is a
-    # statement about the selection alone: the guard moves params after it
-    # (and on these short runs can move them uphill -- see
-    # ``test_the_guard_does_not_raise_the_loss_of_a_well_posed_fit``).
+    # statement about the selection alone: the guard may move params after
+    # it, along directions it finds flat, and only when the loss agrees
+    # (``test_sysid_hold_never_raises_the_loss.py``).
     res, reproduced = run(False)
     # The guard runs after the selection and never feeds back into it.
     held, _ = run(True)
@@ -473,22 +475,24 @@ def test_every_fitter_returns_an_iterate_no_worse_than_any_it_evaluated(
 
 
 # ---------------------------------------------------------------------------
-# Found while writing the above, and not fixed here
+# The guard after the selection: it may not move a well-posed fit uphill
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "hold_undetermined holds every direction the run's gradients did not "
-    "span, and a short or fast-converging run's gradients need not span the "
-    "row space of J: on this identifiable four-parameter bowl fit_lm reaches "
-    "a loss of 0.0 and the guard returns parameters at 0.22.  Reported with "
-    "this PR; the guard is unchanged by it."))
 def test_the_guard_does_not_raise_the_loss_of_a_well_posed_fit():
     """Every direction of the bowl is determined by the data, so the guard
     should hold nothing, and whatever it does hold must leave the loss
-    where the fit left it."""
+    where the fit left it.
+
+    Found by this file's first version as a strict xfail: the guard of
+    earlier 0.4.0 development builds held every direction the run's
+    gradients had not spanned, reported ``excited_rank`` 1 of 4 here, and
+    returned parameters at 0.22 where ``fit_lm`` had reached 0.0.  The
+    fuller set of regressions is ``test_sysid_hold_never_raises_the_loss.py``.
+    """
     gm = _spring()
     start = _with(gm, {"stiffness": 33.0, "damping": 2.2, "rest_length": 1.05})
     res = fit_lm(gm, _bowl_residual, params=start, n_iter=6)
     assert _half_sse(_bowl_residual, res.params) <= res.best_loss + 1e-6, (
         res.excited_rank, res.undetermined_drift, res.best_loss)
+    assert res.excited_rank == 4 and res.hold_declined is False

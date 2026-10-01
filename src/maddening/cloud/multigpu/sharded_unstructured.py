@@ -508,6 +508,18 @@ class ShardedUnstructuredNode(SimulationNode):
         and cannot be told from it here; convert it with
         :func:`~maddening.cloud.multigpu.halo_unstructured.partition_value`
         before writing it.
+
+        Raises
+        ------
+        ValueError
+            When a state field is not in partition layout; when a
+            boundary input is in global cell order, or has the layout's
+            row count on a partition that does not keep global order (see
+            :meth:`_cell_boundary_inputs`); or when an input the node
+            declares per cell is neither in partition layout nor
+            broadcastable to its declared shape -- it would reach every
+            shard whole and be read as that shard's slab (see
+            :meth:`_refuse_misshapen_inputs`).
         """
         self._check_state_layout(state)
         # Materialise first: it refreshes ``self._sharded_static``, which

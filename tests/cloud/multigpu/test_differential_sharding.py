@@ -28,7 +28,6 @@ import sys
 import textwrap
 
 import jax
-import jaxlib
 import numpy as np
 import pytest
 from hypothesis import given, settings
@@ -201,7 +200,7 @@ def test_a_gradient_over_the_generated_matrix_is_the_unsharded_gradient(cfg):
 
 
 # ---------------------------------------------------------------------------
-# Disagreements found by the harness, pending a fix
+# Disagreements found by the harness, fixed: the exact cases it found
 # ---------------------------------------------------------------------------
 
 #: 4 cells on 4 devices in a ring: each shard owns 1 cell and has 2 ghosts,
@@ -216,26 +215,22 @@ _SLAB_INPUT = D.UnstructuredConfig(
     surface="run_scan")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "differential: ShardedUnstructuredNode replicates a per-cell input of the "
-    "wrong length instead of refusing it, and a slab-length one is read as each "
-    "shard's slab; pending fix"))
 def test_a_slab_length_input_the_unsharded_node_refuses_is_refused_sharded():
     """A per-cell input the unsharded node refuses must not run sharded.
 
     ``ShardedStencilNode`` refuses an input the node declares per cell
-    when it is neither the grid nor broadcastable to it (MADD-ANO-057);
-    ``ShardedUnstructuredNode._cell_boundary_inputs`` has no such check:
+    when it is neither the grid nor broadcastable to it (MADD-ANO-057).
+    ``ShardedUnstructuredNode._cell_boundary_inputs`` had no such check:
     any leading length other than the layout's rows or the global cell
-    count is replicated, and handed whole to every shard.  Here every
-    cell receives the source's first value.
+    count was replicated and handed whole to every shard, and here, where
+    the source's length is a shard's slab, every shard read it as its own
+    slab and the step ran.  The wrapper now refuses it before tracing,
+    naming the global shape the node declares (the harness asserts the
+    message, and that the unsharded node refuses too).
     """
     D.check_config(_SLAB_INPUT)
 
 
-@pytest.mark.xfail(strict=True, raises=TypeError, reason=(
-    "differential: a nested ShardedStencilNode stacks a per-shard integral's "
-    "initial value twice, so run_scan refuses the carry; pending fix"))
 @pytest.mark.parametrize("mesh_shape, axis_names, axis_map, shape", [
     ((2,), ("devices",), (("devices", 0),), (4,)),
     ((2, 2), ("px", "py"), (("px", 0), ("py", 1)), (2, 2)),
@@ -246,11 +241,13 @@ def test_a_per_shard_integral_under_a_nested_wrapper_runs_as_unsharded(
 
     ``ShardedStencilNode.initial_state`` places a per-shard integral by
     broadcasting its value over the unreduced mesh axes
-    (``_place_integral``).  When the node it wraps is itself a
-    ``ShardedStencilNode``, that node has already done so: the state
-    starts at ``(2, 2)`` on two devices where one step returns ``(2,)``,
-    ``step()`` silently changes the shape, and ``run_scan`` raises a
-    ``TypeError`` about the scan carry.
+    (``_place_integral``).  When the node it wraps was itself a
+    ``ShardedStencilNode``, it took the value from that wrapper's
+    ``initial_state``, already stacked, and stacked it again: the state
+    started at ``(2, 2)`` on two devices where one step returns ``(2,)``,
+    ``step()`` silently changed the shape, and ``run_scan`` raised a
+    ``TypeError`` about the scan carry.  The outer wrapper now places the
+    value the node itself builds.
     """
     D.check_config(D.StencilConfig(
         mesh_shape=mesh_shape, axis_names=axis_names, axis_map=axis_map,
@@ -288,31 +285,24 @@ def test_gather_global_agrees_with_the_harness_gather_for_an_unlisted_integral()
     _gather_global_against_harness(listed=False)
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError, reason=(
-    "differential: ShardedUnstructuredNode.gather_global reshapes a domain integral "
-    "listed in state_fields() as a per-cell field and raises; pending fix"))
 def test_gather_global_passes_an_integral_listed_in_state_fields_through():
     """``gather_global`` says domain integrals pass through unchanged.
 
-    It decides by ``state_fields()`` membership, and the default
+    It decided by ``state_fields()`` membership, and the default
     ``state_fields()`` lists every ``initial_state`` key, an integral
-    included: the scalar is reshaped to ``(n_devices, n_local_max)`` and
-    numpy refuses.
+    included: the scalar was reshaped to ``(n_devices, n_local_max)`` and
+    numpy refused.  It now recognises an integral first, as the step does.
     """
     _gather_global_against_harness(listed=True)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "differential: ShardedUnstructuredNode.gather_global silently permutes a "
-    "per-shard integral listed in state_fields() when no shard owns more than "
-    "one cell; pending fix"))
 def test_gather_global_passes_a_listed_per_shard_integral_through_when_a_shard_holds_one_cell():
     """The silent form of the case above.
 
-    With ``n_local_max == 1`` the stacked per-shard values reshape to
-    ``(n_devices, 1)`` without complaint and are gathered as if they were
+    With ``n_local_max == 1`` the stacked per-shard values reshaped to
+    ``(n_devices, 1)`` without complaint and were gathered as if they were
     cells: on a partition where device ``d`` owns cell ``3 - d`` the four
-    shards' totals come back in reverse order, and nothing is raised.
+    shards' totals came back in reverse order, and nothing was raised.
     """
     _gather_global_against_harness(listed=True, cfg=D.UnstructuredConfig(
         n_devices=4, n_cells=4, assignment=(3, 2, 1, 0), partition="balanced_nonglobal",
@@ -367,26 +357,16 @@ _ZERO_GHOST_SCRIPT = textwrap.dedent("""
 """)
 
 
-def _jaxlib_at_least(*version: int) -> bool:
-    parts = tuple(int(p) for p in jaxlib.__version__.split(".")[:3] if p.isdigit())
-    return parts >= version
-
-
-@pytest.mark.xfail(_jaxlib_at_least(0, 11, 2), strict=True, reason=(
-    "differential: reverse mode through run_scan of a ShardedUnstructuredNode on a "
-    "partition with no ghost cells segfaults XLA on jaxlib 0.11.2 (exchange_unstructured's "
-    "zero-size ghost tail); pending fix"))
 def test_a_gradient_through_a_partition_without_ghosts_does_not_crash():
-    """Found by the harness on CI's jaxlib 0.11.2 lane; jaxlib 0.10.2 and 0.11.0 run it.
+    """Found by the harness on CI's jaxlib 0.11.2 lane; jaxlib 0.10.2 and 0.11.0 ran it.
 
     Run in a subprocess: a segfault would take the test process with it.
-    ``exchange_unstructured`` returns ``concatenate([local, zeros((0, ...))])``
-    when the layout has no ghost cell, and the transpose of that inside a
-    ``lax.scan`` crashes XLA's compiler.  Returning ``local`` itself avoids
-    the crash (checked on jaxlib 0.11.2 against a scratch copy of the
-    source).  The generated harness skips the gradient surface on such
-    partitions while this is pending
-    (``PENDING_ZERO_GHOST_REVERSE_SCAN``).
+    ``exchange_unstructured`` returned ``concatenate([local, zeros((0,
+    ...))])`` when the layout had no ghost cell, and the transpose of that
+    inside a ``lax.scan`` crashed XLA's compiler on jaxlib 0.11.2.  It now
+    returns ``local`` itself.  CI runs this on 0.10.2 and 0.11.2; the
+    generated gradient tests draw such partitions too (every cell on one
+    device, or shards no edge joins).
     """
     result = subprocess.run([sys.executable, "-c", _ZERO_GHOST_SCRIPT],
                             capture_output=True, text=True, timeout=300)

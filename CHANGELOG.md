@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Every Python code block in the docs runs in CI** (`tests/compliance/test_docs_snippets.py`), sandboxed, or carries a
+  `<!-- snippet: no-run, reason: ... -->` marker whose imports and keywords are still checked; see the documentation
+  standards.  The README quick start, which overrode the removed `requires_halo`, now runs
 - **CycloneDX SBOMs** in `docs/validation/sbom/` for the base install and the `server`, `surrogates` and `usd` extras, from a
   clean install of the wheel (`scripts/generate_sbom.py`), checked offline against `pyproject.toml` and the SOUP package
   (`scripts/check_sbom.py`, in CI).  Regenerated from the release commit before each tag; see `soup_package.md` §6

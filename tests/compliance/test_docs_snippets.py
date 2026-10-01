@@ -1032,12 +1032,24 @@ def test_continues_joins_blocks_and_refuses_a_broken_chain():
     assert any("which is no-run" in e for e in errors)
 
 
-def test_a_launch_snippet_without_the_marker_is_refused_and_never_started(tmp_path):
+def test_a_launch_snippet_without_the_marker_is_refused_and_never_started(tmp_path,
+                                                                         monkeypatch):
+    """Refused by collection *and* by the runner, before any process starts.
+
+    The runner's refusal is tested with process creation stubbed to raise,
+    and every sample opens with ``raise SystemExit``, so that even with the
+    refusal broken (a mutation run) nothing here can reach a launch path.
+    """
+    def no_process(*args, **kwargs):
+        raise AssertionError(f"a launch-path snippet reached subprocess.run: {args!r}")
+
+    monkeypatch.setattr(subprocess, "run", no_process)
     for i, code in enumerate((
                  "from maddening.cloud.session import CloudSession\nCloudSession().launch(c)",
                  "requests.post('http://h/cloud/launch')", "launch_vm(cfg)",
                  "import sky\n", "sky.launch(task)", "os.environ['RUNPOD_API_KEY']",
                  "subprocess.run(['python', 'run_pod.py'])", "launcher.launch('j.yaml')")):
+        code = "raise SystemExit('never run')\n" + code
         snippets, errors = _parse(f"```python\n{code}\n```\n")
         assert any("launch path" in e for e in errors), code
         workdir = tmp_path / f"u{i}"

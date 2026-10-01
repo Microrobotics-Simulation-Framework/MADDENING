@@ -16,7 +16,9 @@ identical graphs as a test wants.
 
 What is drawn
 -------------
-node classes (ball, table, spring, heat, rigid-body-2D), timesteps that
+node classes (ball, table, spring, heat, rigid-body-2D by default; the
+heart pump and the 3-D rigid body on request, ``kinds=ALL_NODE_KINDS``),
+timesteps that
 are commensurate so multi-rate graphs are legal, node names including
 the awkward-but-legal ones (``"a-b"``, ``"a.b"``, ``"1st"``, a name with
 a space, a non-ASCII name), edges with and without a registered
@@ -107,7 +109,9 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.params import ParamSpec
 from maddening.core.transforms import scale
 from maddening.nodes.ball import BallNode
+from maddening.nodes.heart_pump import HeartPumpNode
 from maddening.nodes.heat import HeatNode
+from maddening.nodes.rigid_body import RigidBodyNode
 from maddening.nodes.rigid_body_2d import RigidBody2DNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.table import TableNode
@@ -126,6 +130,8 @@ NODE_REGISTRY: dict[str, type] = {
     "SpringDamperNode": SpringDamperNode,
     "HeatNode": HeatNode,
     "RigidBody2DNode": RigidBody2DNode,
+    "HeartPumpNode": HeartPumpNode,
+    "RigidBodyNode": RigidBodyNode,
 }
 
 #: Node names, including every kind of legal-but-awkward one.  ``add_node``
@@ -236,6 +242,12 @@ class NodeRecipe:
         if self.type_name == "RigidBody2DNode":
             return {"x": _Port((2,), "m"), "v": _Port((2,), "m/s"),
                     "angle": _Port((), "rad"), "omega": _Port((), "rad/s")}
+        if self.type_name == "HeartPumpNode":
+            return {"arterial_pressure": _Port((), "Pa"), "phase": _Port(()),
+                    "flow_rate": _Port(())}
+        if self.type_name == "RigidBodyNode":
+            return {"position": _Port((3,), "m"), "velocity": _Port((3,), "m/s"),
+                    "orientation": _Port((4,)), "angular_velocity": _Port((3,), "rad/s")}
         raise AssertionError(self.type_name)
 
     @property
@@ -256,6 +268,11 @@ class NodeRecipe:
         if self.type_name == "RigidBody2DNode":
             return {"force": _Port((2,), "N", additive=True),
                     "torque": _Port((), "N*m", additive=True)}
+        if self.type_name == "HeartPumpNode":
+            return {"backpressure": _Port((), "Pa")}
+        if self.type_name == "RigidBodyNode":
+            return {"force": _Port((3,), "N", additive=True),
+                    "torque": _Port((3,), "N*m", additive=True)}
         raise AssertionError(self.type_name)
 
     @property
@@ -269,6 +286,13 @@ class NodeRecipe:
             "SpringDamperNode": ("stiffness", "damping", "mass", "rest_length"),
             "HeatNode": ("thermal_diffusivity",),
             "RigidBody2DNode": ("mass", "inertia", "gravity"),
+            # Not ``venous_pressure``: the pump reads it only while no
+            # ``backpressure`` edge arrives, and the graph refuses a value
+            # its step cannot read (loudly, which is right) -- a graph
+            # with such an edge would fail on the recipe, not the property.
+            "HeartPumpNode": ("resistance", "compliance", "heart_rate",
+                              "stroke_volume"),
+            "RigidBodyNode": ("mass", "inertia", "gravity"),
         }[self.type_name]
 
 
@@ -309,9 +333,39 @@ _KWARGS: dict[str, st.SearchStrategy] = {
         "initial_angle": _f32(-1.0, 1.0),
         "initial_omega": _f32(-1.0, 1.0),
     }),
+    # A small stroke volume keeps the pump's outflow O(10), so an edge
+    # from it into any other kind's input stays finite over a rollout.
+    "HeartPumpNode": st.fixed_dictionaries({
+        "resistance": _f32(0.5, 2.0),
+        "compliance": _f32(0.5, 2.0),
+        "heart_rate": _f32(50.0, 90.0),
+        "stroke_volume": _f32(1.0, 5.0),
+        "venous_pressure": _f32(0.0, 2.0),
+        "systole_fraction": _f32(0.2, 0.5),
+        "initial_pressure": _f32(5.0, 10.0),
+    }),
+    # Tuples, not lists: a recipe is frozen and printed in every falsifying
+    # example.  ``constraints`` is a tuple of pairs for the same reason;
+    # ``NodeRecipe.params`` hands it over as a list of pairs, which the
+    # constructor's ``dict(constraints)`` takes.
+    "RigidBodyNode": st.fixed_dictionaries({
+        "mass": _f32(0.5, 2.0),
+        "inertia": st.tuples(_f32(0.5, 2.0), _f32(0.5, 2.0), _f32(0.5, 2.0)),
+        "gravity": st.tuples(_f32(-2.0, 2.0), _f32(-2.0, 2.0), _f32(-2.0, 2.0)),
+        "constraints": st.sampled_from([(), (("z", 0.0),)]),
+        "initial_position": st.tuples(_f32(-1.0, 1.0), _f32(-1.0, 1.0), _f32(-1.0, 1.0)),
+        "initial_velocity": st.tuples(_f32(-1.0, 1.0), _f32(-1.0, 1.0), _f32(-1.0, 1.0)),
+    }),
 }
 
-NODE_KINDS = tuple(_KWARGS)
+#: The kinds ``graph_recipes`` draws by default.  Fixed, not derived from
+#: ``_KWARGS``: the properties that already use the default were tuned on
+#: these five, and a kind added for the differential harness must not
+#: change what they draw.
+NODE_KINDS = ("BallNode", "TableNode", "SpringDamperNode", "HeatNode",
+              "RigidBody2DNode")
+#: Every kind this module can build; ``graph_recipes(kinds=ALL_NODE_KINDS)``.
+ALL_NODE_KINDS = tuple(_KWARGS)
 
 
 # ---------------------------------------------------------------------------
@@ -976,7 +1030,8 @@ def graph_recipes(
     if require_mapping:
         # A mapped edge needs an array-valued source and an array-valued
         # target interface; guarantee two nodes that have them.
-        kinds_with_arrays = tuple(k for k in kinds if k in ("HeatNode", "RigidBody2DNode"))
+        kinds_with_arrays = tuple(k for k in kinds if k in (
+            "HeatNode", "RigidBody2DNode", "RigidBodyNode"))
         if not kinds_with_arrays:
             kinds_with_arrays = ("HeatNode",)
         picked = [draw(st.sampled_from(kinds_with_arrays)) for _ in range(2)]

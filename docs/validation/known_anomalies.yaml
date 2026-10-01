@@ -5649,7 +5649,7 @@ anomalies:
       - "tests/nodes/test_heat_constructor_validation.py::test_grid_points_that_are_not_finite_are_refused"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-063"
+  - anomaly_id: "MADD-ANO-064"
     title: "ShardedUnstructuredNode read a per-cell input the length of a shard's slab as every shard's own slab, where the unsharded node refuses it"
     description: >
       `ShardedUnstructuredNode` shards a boundary input whose leading axis
@@ -5704,7 +5704,7 @@ anomalies:
       - "tests/cloud/multigpu/test_unstructured_misshapen_inputs.py::test_the_forms_the_unsharded_node_takes_still_run_sharded"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-064"
+  - anomaly_id: "MADD-ANO-065"
     title: "ShardedUnstructuredNode.gather_global reshaped a domain integral listed in state_fields() as a per-cell field: a scalar raised, and values one per shard came back reordered"
     description: >
       `gather_global`, documented to pass domain integrals through
@@ -5750,7 +5750,7 @@ anomalies:
       - "tests/cloud/multigpu/test_unstructured_gather_global_integrals.py::test_gather_global_of_the_initial_state_passes_the_integral_through"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-065"
+  - anomaly_id: "MADD-ANO-066"
     title: "A ShardedStencilNode nested in another stacked a per-shard domain integral's initial value twice, so step() changed the state's shape"
     description: >
       A per-shard (unreduced) domain integral is stacked along its
@@ -5792,7 +5792,7 @@ anomalies:
       - "tests/cloud/multigpu/test_nested_stencil_integral_placement.py::test_a_partial_axis_integral_under_a_nested_wrapper_starts_stacked_once"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-066"
+  - anomaly_id: "MADD-ANO-067"
     title: "ShardedStencilNode summed a domain integral over a mesh axis its axis_map leaves unused, counting every block once per device along it"
     description: >
       A mesh axis that `axis_map` does not use splits nothing: the state and
@@ -5832,7 +5832,7 @@ anomalies:
     resolution_version: "0.4.0"
     residual_risk: >
       The integral is correct on such a mesh; a node that also reads a
-      sharded static there inside `run_scan` can meet MADD-ANO-067.
+      sharded static there inside `run_scan` can meet MADD-ANO-068.
     verification:
       - "tests/cloud/multigpu/test_differential_sharding_builtins.py::test_a_domain_integral_on_a_mesh_axis_the_axis_map_leaves_unused_answers_as_unsharded"
       - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_the_unused_axis_is_neither_reduced_nor_stacked_over"
@@ -5840,7 +5840,7 @@ anomalies:
       - "tests/cloud/multigpu/test_unused_mesh_axis_integrals.py::test_a_gradient_through_run_scan_with_an_integral_on_an_unused_axis"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-067"
+  - anomaly_id: "MADD-ANO-068"
     title: "XLA miscompiles a ShardedStencilNode step inside run_scan when a sharded static is replicated over a mesh axis and read in the halo beside a window at the shard's offset"
     description: >
       On jaxlib 0.10.2, 0.11.0 and 0.11.2 (CPU), a `ShardedStencilNode`

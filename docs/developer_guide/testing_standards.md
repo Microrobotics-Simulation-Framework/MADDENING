@@ -913,10 +913,10 @@ the per-push tests catch each one.
 | `ShardedPointwiseNode` not forwarding `params` | generated pointwise; gradients; the examples |
 | The halo of an unsharded axis edge-filled whatever the fill | generated 2-D stencil; generated D2Q9; D3Q19; gradients |
 | `ShardedUnstructuredNode` not forwarding `params` | generated unstructured; gradients; the examples |
-| A mis-shaped per-cell input not refused by `ShardedUnstructuredNode`, or a slab-length one let through (MADD-ANO-063) | generated unstructured (the first); the slab-length case |
-| `gather_global` reading `state_fields()` before the integrals (MADD-ANO-064) | generated unstructured, through its `gather_global` cross-check; the two listed-integral cases |
-| A nested stencil wrapper placing its inner wrapper's already-stacked integral (MADD-ANO-065) | the nested per-shard case |
-| A domain integral summed over a mesh axis the `axis_map` leaves unused (MADD-ANO-066) | generated 1-D and 2-D stencil; the unused-axis integral cases |
+| A mis-shaped per-cell input not refused by `ShardedUnstructuredNode`, or a slab-length one let through (MADD-ANO-064) | generated unstructured (the first); the slab-length case |
+| `gather_global` reading `state_fields()` before the integrals (MADD-ANO-065) | generated unstructured, through its `gather_global` cross-check; the two listed-integral cases |
+| A nested stencil wrapper placing its inner wrapper's already-stacked integral (MADD-ANO-066) | the nested per-shard case |
+| A domain integral summed over a mesh axis the `axis_map` leaves unused (MADD-ANO-067) | generated 1-D and 2-D stencil; the unused-axis integral cases |
 | A per-shard integral stacked over such an axis | generated 1-D stencil; the unused-axis integral cases |
 
 Two more faults are caught only beside the harness: an unused axis that
@@ -948,7 +948,7 @@ causes were in the harness:
 - *Excluded cases*: the cases excluded while a fix is pending
   (`PENDING_*` in the support module). One is left:
   `PENDING_XLA_REPLICATED_STATIC_IN_SCAN`, an XLA miscompile inside
-  `lax.scan` (MADD-ANO-067), for which a sharded static read in the halo
+  `lax.scan` (MADD-ANO-068), for which a sharded static read in the halo
   beside a window at the `shard_info` offset is not drawn on a mesh that
   replicates the static over an axis of two or more devices. Its exact
   cases are strict xfails in `test_unused_mesh_axis_integrals.py`.

@@ -57,7 +57,10 @@ consumed when it was constructed (`LBMPipeNode.pipe_radius`) or declares in
 `static_data_deps` (`WaveletAdaptiveNode.mass`), or one only an unconnected
 input would read (a ball's `elasticity` with no table) would be a knob that
 does nothing, so it is left out and listed, with the reason, in
-`md.fixed_parameters`.  The bridge applies that list to its sidecar: no
+`md.fixed_parameters`.  So is one from which a node derives the points an
+interface mapping was built from (a uniform `HeatNode`'s `length` under a
+mapping on its `grid_x`): the step would use a new value and the mapping
+would keep the old points' weights.  The bridge applies that list to its sidecar: no
 door into the parameter tree -- `fmi3Set*`, `fmi3SetFMUState`, the
 sidecar's own `set_params` / `set_fmu_state` -- installs a new value for
 one of them; the request is `fmi3Error` naming the parameter and why, and
@@ -201,10 +204,22 @@ same checks with the same messages: `FmuSidecar.set_params` refuses what
 `set` refuses, and `FmuSidecar.set_fmu_state` refuses what `set_state`
 refuses (the bounds only when the sidecar was given `param_specs`).
 
+A restore holds to the bounds the values it would *install*: a parameter
+the snapshot carries at the value it holds now, or held when the FMU was
+instantiated, is not a new value.  A graph runs whatever its constructor
+was given, bounds being metadata to it, so an FMU can be exported with a
+parameter outside its bounds; until 0.4.0's fix both restore paths then
+refused the snapshot the FMU had handed out itself, while
+`GraphManager.load_state` restored the graph's checkpoint.  A `set` is
+still held to the bounds whatever it sets, the starting value included.
+
 ```{warning}
 The consequence is that a snapshot of a *diverged* model — one whose
 state holds `inf` or `NaN` — does not restore.  The error names the
-field.
+field.  A non-finite value the FMU was *instantiated* with is not a
+divergence and restores: a coupling group with `diagnostics=True` seeds
+its spectral `_meta` slots with `NaN` until a solve fills them, and until
+0.4.0's fix a snapshot taken before that was refused by both doors.
 ```
 
 **`FmuSidecar.handle` is not part of this.**  It speaks a pickled

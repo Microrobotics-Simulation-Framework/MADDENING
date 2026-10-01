@@ -121,16 +121,24 @@ not loopback; `/healthz` and `/viz/*` never do.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/graph/state` | Get state of all nodes |
+| GET | `/graph/state` | Get state of all nodes, `_meta` included |
 | GET | `/graph/state/{node_name}` | Get state of one node |
-| PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`) |
+| PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`). A value the field's dtype cannot hold (`1e39` into float32) or a non-finite one is a 400, and nothing is written |
+
+A non-finite number in any reply -- a diverged state, a coupling
+diagnostic not yet filled (`diagnostics=True` seeds its spectral `_meta`
+slots with NaN), a parameter a fit left non-finite -- is written as the
+quoted token `"NaN"`, `"Infinity"` or `"-Infinity"`, as `GET /graph`
+writes one (`maddening.serialization.json_codec.loads` reads them back).
+Until 0.4.0 the reply failed instead: a 500, after a reset or a load had
+already been applied.
 
 ### Parameters
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/graph/params/{node_name}` | The node's parameters, live values (`gm.params`) over constructor ones |
-| PUT | `/graph/params/{node_name}` | Update parameters (`{params: {key: value}}`). A leaf the step reads takes effect on the next step; a structural value the node reads when traced marks the graph for recompilation; an initial condition `initial_state()` reads takes effect at the next `POST /sim/reset`. A value the running node cannot use (declared in `static_data_deps`, or consumed when the node was constructed) is a 400 naming it, and nothing in the request is written: rebuild the node (`DELETE` then `POST /graph/nodes`) to change it.  So is a request the node's constructor refuses with the params a save would carry, one the node a reload builds would compute differently with (a branch the constructor chose from the value), and any non-finite value; integers are bounded as in `POST /graph/nodes` |
+| PUT | `/graph/params/{node_name}` | Update parameters (`{params: {key: value}}`). A leaf the step reads takes effect on the next step; a structural value the node reads when traced marks the graph for recompilation; an initial condition `initial_state()` reads takes effect at the next `POST /sim/reset`. A value the running node cannot use (declared in `static_data_deps`, or consumed when the node was constructed) is a 400 naming it, and nothing in the request is written: rebuild the node (`DELETE` then `POST /graph/nodes`) to change it.  So is a request the node's constructor refuses with the params a save would carry, one the node a reload builds would compute differently with (a branch the constructor chose from the value), one that moves the points an interface mapping was built from (a uniform `HeatNode`'s `length`, from which its `grid_x` is derived), any non-finite value and any value the leaf's dtype cannot hold; integers are bounded as in `POST /graph/nodes` |
 
 ### Checkpoints
 

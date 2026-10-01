@@ -284,7 +284,10 @@ invalidate cleanly even when shape and dtype are unchanged.
   is reduced over (`{"drag": ("spatial_z",)}`); the result keeps one
   leading dimension per *unreduced* mesh axis, sharded along it, and an
   empty tuple stacks the per-shard partial values without reducing.  A
-  key without an entry is still `psum`-med over the full mesh.  Both
+  key without an entry is still `psum`-med over the full mesh.  A mesh
+  axis that splits nothing (one a stencil wrapper's `axis_map` leaves
+  unused) is neither reduced nor stacked over: every device along it
+  holds the same block.  Both
   `ShardedStencilNode` and `ShardedUnstructuredNode` honour it
   (`tests/cloud/multigpu/test_partial_axis_integrals.py`).
 * **Sharded static arrays without halos.**  v0.2.1 rejects a

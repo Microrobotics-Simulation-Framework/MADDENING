@@ -176,6 +176,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **A domain integral is neither summed nor stacked over a mesh axis a `ShardedStencilNode`'s `axis_map` leaves unused** (MADD-ANO-067):
+  releases summed it there, counting every block once per device along it (2x on a `(2, 2)` mesh), and a per-shard integral there now has
+  one leading axis per mesh axis that splits the grid.  Action: re-run sharded totals from such a mesh; drop the extra axis when reading per-shard values
 - **`maddening.sysid.fit` and `fit_multiple_shooting` return the lowest-loss iterate they evaluated, not the last**: Adam's ~`lr`-sized step could end a run above where it started (one fit went from loss `2.7e-8` to `1.9e-4`, unreported). `FitResult.best_iteration` and `best_loss` say which iterate was returned; a run whose loss never rose is bit-identical to before, and `fit_lm` already returned its lowest iterate.
   Action: nothing for a fit that converged; where you relied on the last iterate, read `best_iteration` (it equals `len(losses)` when the last update's result was the lowest).
 - **`HeatNode` refuses more of what it used to run wrongly, and `compile()` warns about an unstable coupled pair**: a rod on `grid_points` is held to `dt*alpha/min(h_L*h_R) <= 1/2` (the Fourier check skipped it; MADD-ANO-002), and a non-positive `length` or `timestep`, a negative `thermal_diffusivity`, a non-finite one of these, or `grid_points` not strictly increasing raise `ValueError` (MADD-ANO-062).
@@ -319,6 +322,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Sharding, from the differential harness**: `ShardedUnstructuredNode` refuses a per-cell input neither in partition layout nor broadcastable
+  (a slab-length one was read by every shard as its slab; MADD-ANO-064); `gather_global` passes an integral listed in `state_fields()` through
+  (MADD-ANO-065); a nested stencil wrapper starts a per-shard integral stacked once (MADD-ANO-066); zero-ghost reverse scans no longer segfault jaxlib 0.11.2
 - **State and IO, from the differential harness** (MADD-ANO-063, 049): a write that moves the points a mapped edge was built from (a uniform `HeatNode`'s `length` under a mapping on its `grid_x`) is refused -- `PUT /graph/params` 400, `gm.params` at the next run, `to_dict` and `save_state`, `POST /checkpoint/load` undone, an FMU parameter fixed -- where it ran on the old mapping weights and saved a config that did not load;
   state replies, `GET /graph/params` and `/ws/state` write a non-finite float as its `json_codec` token (a `diagnostics=True` group's NaN seeds made `POST /sim/reset`, `GET /graph/state` and `POST /checkpoint/load` a 500 after applying); `PUT /graph/params` and `/graph/state` refuse a float32-overflowing value before the cast (a 500 under `-W error`); the FMU bridge and sidecar restore their own snapshot when a parameter started outside its bounds or a state field started non-finite (a diagnostics group's NaN `_meta` seeds).
   Action: read `"NaN"` / `"Infinity"` / `"-Infinity"` in a state reply (`json_codec.loads` decodes them); to change such a geometry parameter, rebuild the node and its mapped edge.
@@ -668,6 +674,9 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-064 to 067 (new, resolved in this release)**: the four sharding defects above (064, 065 and 067 since 0.2.1 or 0.3.0; 066 never released).
+  **MADD-ANO-068 (new, open)**: XLA (jaxlib 0.10.2 to 0.11.2) miscompiles a `ShardedStencilNode` step inside `run_scan` for a node reading a sharded
+  static replicated over a mesh axis in its halo beside a window at its `shard_info` offset; check such a node's `run_scan` against `step()`
 - **MADD-ANO-063 (new, never released)**: a write moving the points a mapped edge was built from ran on the old mapping weights and saved a config that did not load (see `### Fixed`); **MADD-ANO-049** is now resolved (an in-process non-finite parameter is served as a token, not a 500), and **MADD-ANO-022** narrowed: a write is refused, a fit through the mapped edge still uses the constructor's geometry
 - **Severities defined; fourteen relabelled; four entries partially resolved**: `AnomalySeverity` now defines each level, and a silent wrong result is never `minor`, so MADD-ANO-005, 009, 025, 027, 029, 031, 038, 041, 048, 055, 057, 058 and 061 move to `major`, and 052 (a default-exposed route) to `critical`.
   MADD-ANO-032, 036, 047 and 049 are `partially_resolved`, not `resolved`: their routes outside a graph or the REST route are still live (see each `residual_risk`); the release notes' Known anomalies section now names every reachable entry, and a test keeps it so.

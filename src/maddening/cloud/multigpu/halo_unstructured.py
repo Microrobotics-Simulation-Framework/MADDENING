@@ -316,20 +316,24 @@ def exchange_unstructured(
     jax.Array, shape ``(n_local_max + n_ghost_max, ...)``
         The local slab concatenated with the ghost slab (in
         ``layout.ghost_global_ids[<this device>]`` order).  Trailing
-        unused ghost slots are zero-filled.
+        unused ghost slots are zero-filled.  When the layout has no ghost
+        cell at all (``n_ghost_max == 0``: one device, or shards no edge
+        joins) that is ``local`` itself, under either method.
     """
+    if method not in ("all_to_all", "ppermute"):
+        raise ValueError(f"method must be 'all_to_all' or 'ppermute', got {method!r}")
+    if layout.n_ghost_max == 0:
+        # No shard needs any ghost cell (one device, or edge-disjoint
+        # shards): the slab is the local block.  Returned as it is, not
+        # joined to a zero-size ghost tail: on jaxlib 0.11.2 the transpose
+        # of that concatenate inside a ``lax.scan`` -- reverse mode through
+        # ``run_scan`` -- crashed XLA's compiler with a segfault (0.10.2 and
+        # 0.11.0 compiled it).  Both methods built that tail.
+        return local
     if method == "ppermute":
         return _exchange_ppermute(local, layout=layout, mesh_axis=mesh_axis)
-    if method != "all_to_all":
-        raise ValueError(f"method must be 'all_to_all' or 'ppermute', got {method!r}")
     n_devices = layout.n_devices
     n_ghost_max = layout.n_ghost_max
-    if n_ghost_max == 0:
-        # No shard needs any ghost cell (one device, or edge-disjoint
-        # shards): the slab is the local block plus an empty ghost tail.
-        return jnp.concatenate(
-            [local, jnp.zeros((0,) + local.shape[1:], dtype=local.dtype)], axis=0,
-        )
     # Convert tracing-safe numpy arrays to traced jnp arrays.
     send_indices = jnp.asarray(layout.send_indices)   # (D, D, n_ghost_max)
     send_counts = jnp.asarray(layout.send_counts)     # (D, D)

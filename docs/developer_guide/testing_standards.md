@@ -667,6 +667,47 @@ These framework properties are checked only in the slow lane, on purpose:
 To add a row, say what the property is, which tests check it, and why no
 cheaper test can. If a cheaper test can, write it instead.
 
+## Differential tests
+
+A differential test runs two paths that must agree on generated inputs
+and compares them. It finds the defects that hand audits keep finding
+where features combine, and a re-run costs CPU rather than an audit.
+Each harness below says which pairs of paths it compares, over what
+matrix, at what tolerance, and what neither path can show it. A
+disagreement it finds is pinned as
+`@pytest.mark.xfail(strict=True, reason="differential: ...; pending fix")`
+on the exact failing case, so the fix PR has to flip it.
+
+### Coupling and numerics
+
+`tests/property/test_differential_*.py`, over graphs of synthetic nodes
+from `tests/property/coupled_graphs.py`. Every node is `x <- alpha x_pre +
+sum G_j f(u_j) + b + beta dt` (or explicit Euler on the same right-hand
+side). The gains are drawn and rescaled to a drawn spectral radius (up to
+0.999, non-normal or rank one). Nodes can have `tanh` inputs, `int32`,
+`uint32` and `bool` leaves, an unread float field, a clock, and flux
+edges. A graph has a cycle, chords, a driver and a sink. A group of
+linear nodes has its fixed point as a float64 solve. The per-push cases
+fix the structure and configuration and draw the values, which reach the
+compiled step as parameters, so each case compiles once. Each slow-marked
+broad case draws the structure and configuration too, and names its
+per-push sibling.
+
+| Oracle | Paths | Tolerance | Cannot see |
+|---|---|---|---|
+| fori == ift | `solver="fori"` against `"ift"`: every acceleration, norm, mode, predictor, cap, flux edges, `tanh` | `iterations` and `converged` equal when the threshold clears the norm's float32 floor (`residual_noise_floor`) by 4x. With equal passes, states agree to 4 ulps per pass (the documented per-pass difference between the two loop bodies is one ulp) | The one-pass map, norms and criterion arithmetic both solvers share |
+| diagnostics on == off | the same group with `diagnostics` False/True, both solvers | Bitwise: states, `iterations`, `converged`, predictor and IMVJ warm starts, `jax.grad` through `run_scan` | A fault that moves both settings the same way |
+| converged => near the exact fixed point | the returned state against the float64 solve, measured in a NumPy restatement of the group's norm | One coupling mode, the iterate started on it, `none`/`fixed`: distance <= threshold + `floor * amp` + `2 omega floor amp**2`. That is the estimate's own float32 resolution, derived from its formula; at a rate of 0.99 it says float32 cannot certify the distance. `precision_limited` and `ratio_usable=False` groups are excluded, as documented. A usable `spectral_error_bound` >= the distance, bare, on general non-normal spectra under every acceleration | Non-linear groups (no closed form); the definition of the fixed point of the evaluated map |
+| multi-rate == hand-unrolled | the gated multi-rate step against a Python loop that fires each block or leaves it alone, with the group as a uniform-rate sub-graph | Bitwise: a non-firing block's state and `_meta` stay unchanged. States agree to 4 ulps per pass; `iterations` equal | A fault inside the coupled solve both paths call |
+| sub-cycled == uniform-rate | `subcycling=True` (constant interpolation) against a hand-written node that takes `d` sub-steps at the macro timestep | Equal passes, 4 ulps per pass, clocks exact (dyadic timesteps). `quadratic` == `linear` bitwise (MADD-ANO-027). `linear` == `constant` to ulps under Jacobi or with the sub-cycled node first, and within about the tolerance per step otherwise | The shared sub-step update |
+| adaptive at a pinned dt == run_scan | `run_adaptive`/`run_adaptive_scan` with `dt_min = dt_max` against `run_scan` at half the timestep. Replaying `dt_history` through the dt step | 4 ulps per pass; replay bitwise; every node's clock equals the stepper's time (MADD-ANO-061) | The dt-parameterised step itself |
+| vmap == per-member, jit == eager | `run_sweep` against `run_scan` per member; `jax.vmap` of the step against the step; `vmap(grad)` against `grad`; `jax.disable_jit()` against `jit` | 4 ulps per pass on states; the loop's slots bitwise where the states are; spectral keys within 8 eps; `gradient_relative_error_bound` within 25% (its ~8% is documented); gradients within 1e-4 relative | Every fault in the step, which is the same batched and unbatched |
+| int/uint32/bool leaves survive | every non-float leaf after `k` updates against its closed form, in every configuration above and under sub-cycling, waveform sweeps, multi-rate, adaptive stepping and `vmap` | Bitwise, dtype included | A leaf that reads a coupled input (that is the solver oracle's job) |
+
+Each oracle was mutation-tested against a scratch copy of `src/` with at
+least one seeded fault, and each fault was caught. The PR that added the
+harness lists them.
+
 ## Test Organization
 
 ```

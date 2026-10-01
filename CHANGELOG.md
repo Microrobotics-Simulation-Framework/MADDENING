@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Differential tests for coupling and numerics** (`tests/property/test_differential_*.py`): two paths that must agree, over
+  generated graphs of synthetic nodes -- fori/ift, diagnostics on/off, the exact fixed point, multi-rate, sub-cycling, adaptive,
+  `vmap`/`jit`, non-float leaves; each disagreement found is a strict xfail (`testing_standards.md`, "Differential tests")
 - **CycloneDX SBOMs** in `docs/validation/sbom/` for the base install and the `server`, `surrogates` and `usd` extras, from a
   clean install of the wheel (`scripts/generate_sbom.py`), checked offline against `pyproject.toml` and the SOUP package
   (`scripts/check_sbom.py`, in CI).  Regenerated from the release commit before each tag; see `soup_package.md` §6

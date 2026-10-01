@@ -14,7 +14,11 @@ residual.  So:
 
 * ``iterations`` and ``converged`` must be equal whenever the threshold is
   above the floor (:func:`residual_noise_floor`, the derivation
-  ``tests/core/test_coupling_solver_equivalence.py`` makes);
+  ``tests/core/test_coupling_solver_equivalence.py`` makes) -- unless one
+  solver's error estimate sits within its own rounding of the threshold
+  (:func:`~tests.property.coupled_graphs.criterion_is_resolved`: the
+  residual's floor, amplified through the rate estimate), where an ulp
+  decides the pass;
 * where the iteration counts agree, the states agree to
   ``_ULPS_PER_PASS`` units of float32 round-off per pass: the documented
   difference is one ulp on a couple of components per pass (``while_loop``
@@ -103,7 +107,11 @@ def assert_solvers_agree(gdef, group, fori, ift):
         _check_leaves(gdef, s_f, k)
         _check_leaves(gdef, s_i, k)
         same_passes = d_f["iterations"] == d_i["iterations"]
-        if _parity_demanded(gdef, group, s_f):
+        floor = residual_noise_floor(group.get("convergence_norm", "l2"),
+                                     group.get("rtol", 1e-6),
+                                     _n_float(s_f, gdef.group_nodes))
+        resolved = cg.criterion_is_resolved(d_f, floor) and cg.criterion_is_resolved(d_i, floor)
+        if _parity_demanded(gdef, group, s_f) and (same_passes or resolved):
             assert same_passes, (
                 f"step {k}: fori took {d_f['iterations']} passes, ift "
                 f"{d_i['iterations']}, with the threshold above the float floor")
@@ -163,7 +171,7 @@ _SOLVER_CASES = {
 @pytest.mark.parametrize("case", sorted(_SOLVER_CASES))
 # Costly tier: every example is two three-step rollouts of compiled graphs
 # plus their host-side comparison, ~0.2 s on six cores.
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
 def test_the_two_solvers_return_the_same_steps_on_generated_spectra(case, data):
     """fori == ift over drawn spectra of fixed structures (per push).
@@ -182,8 +190,11 @@ def test_the_two_solvers_return_the_same_steps_on_generated_spectra(case, data):
     assert_solvers_agree(gdef, group, fori, ift)
 
 
+# Slow: structure and configuration are drawn, so every example builds and
+# compiles graphs of its own (seconds each on CI).
+# Per push: tests/property/test_differential_coupling_solvers.py::test_the_two_solvers_return_the_same_steps_on_generated_spectra
 @pytest.mark.slow
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
 def test_the_two_solvers_return_the_same_steps_on_generated_graphs(data):
     """fori == ift with the structure and the configuration drawn too.
@@ -254,7 +265,7 @@ _DIAGNOSTICS_CASES = {
 
 @pytest.mark.parametrize("case", sorted(_DIAGNOSTICS_CASES))
 # Costly tier, for the same reason as the solver cases above.
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
 def test_diagnostics_leave_every_returned_value_bit_identical(case, data):
     """States, ``iterations``, ``converged`` and warm starts, bitwise (per push).
@@ -286,7 +297,7 @@ def _gradient(gm, values, steps):
 
 
 @pytest.mark.parametrize("solver", ["ift", "fori"])
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
 def test_diagnostics_leave_gradients_through_run_scan_bit_identical(solver, data):
     """``jax.grad`` through ``run_scan`` is the same bits with or without them.
@@ -308,8 +319,11 @@ def test_diagnostics_leave_gradients_through_run_scan_bit_identical(solver, data
     assert not moved, f"{solver}: diagnostics=True moved the gradient of {moved}"
 
 
+# Slow: structure and configuration are drawn, so every example builds and
+# compiles graphs of its own (seconds each on CI).
+# Per push: tests/property/test_differential_coupling_solvers.py::test_diagnostics_leave_every_returned_value_bit_identical
 @pytest.mark.slow
-@settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data(), solver=st.sampled_from(["ift", "fori"]))
 def test_diagnostics_leave_generated_graphs_bit_identical(data, solver):
     """diagnostics on == off with the structure and configuration drawn.

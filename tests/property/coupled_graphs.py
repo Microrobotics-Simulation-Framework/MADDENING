@@ -68,14 +68,18 @@ TAG_ADD = 1013904223
 class Relay(SimulationNode):
     """``x <- alpha * x_pre + sum_j G_j @ f(u_j) + b + beta * dt``.
 
-    ``f`` is the identity, or ``tanh`` when *nonlinear*.  Each input port
+    ``f`` is the identity, or ``tanh`` when *nonlinear*.  With *ode* the
+    node is instead explicit Euler on ``x' = alpha x + sum_j G_j f(u_j) +
+    b`` -- ``x <- x_pre + dt (...)`` -- a consistent time discretisation,
+    which is what an adaptive stepper's error estimate assumes (the
+    algebraic form is a different map at every ``dt``).  Each input port
     ``u{j}`` takes at most one edge, so an external input can stand in for
     any edge without the additive/replacive question arising (the
     hand-unrolled multi-rate reference relies on that).
     """
 
     def __init__(self, name, timestep, *, n, n_inputs, alpha=0.0, beta=0.0,
-                 nonlinear=False, leaves=(), x0=None):
+                 nonlinear=False, leaves=(), x0=None, ode=False):
         params = {f"G{j}": jnp.zeros((n, n), jnp.float32) for j in range(n_inputs)}
         params["b"] = jnp.zeros(n, jnp.float32)
         super().__init__(name, timestep, **params)
@@ -84,6 +88,7 @@ class Relay(SimulationNode):
         self._alpha = float(alpha)
         self._beta = float(beta)
         self._nl = bool(nonlinear)
+        self._ode = bool(ode)
         self._leaves = tuple(leaves)
         self._x0 = np.zeros(n, F32) if x0 is None else np.asarray(x0, F32)
 
@@ -110,13 +115,17 @@ class Relay(SimulationNode):
 
     def update(self, state, boundary_inputs, dt, *, params=None):
         p = self.params if params is None else {**self.params, **params}
-        x = (jnp.float32(self._alpha) * state["x"] + p["b"]
-             + jnp.float32(self._beta) * jnp.asarray(dt, jnp.float32))
+        dt32 = jnp.asarray(dt, jnp.float32)
+        if self._ode:
+            f = jnp.float32(self._alpha) * state["x"] + p["b"]
+        else:
+            f = jnp.float32(self._alpha) * state["x"] + p["b"] + jnp.float32(self._beta) * dt32
         for j in range(self._k):
             u = boundary_inputs.get(f"u{j}", jnp.zeros(self._n, jnp.float32))
             if self._nl:
                 u = jnp.tanh(u)
-            x = x + p[f"G{j}"] @ u
+            f = f + p[f"G{j}"] @ u
+        x = state["x"] + dt32 * f if self._ode else f
         out = {"x": x.astype(jnp.float32)}
         if "count" in self._leaves:
             out["count"] = state["count"] + jnp.int32(1)
@@ -156,7 +165,7 @@ class SubStepped(SimulationNode):
     """
 
     def __init__(self, inner: Relay, d: int):
-        super().__init__(inner.name, inner.timestep * d, **inner.params)
+        super().__init__(inner.name, inner.delta_t * d, **inner.params)
         self._inner = inner
         self._d = int(d)
 
@@ -193,6 +202,7 @@ class NodeDef:
     nonlinear: bool = False
     leaves: tuple = ()
     flux: bool = False
+    ode: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,6 +241,16 @@ class GraphDef:
             dataclasses.replace(nd, timestep=timesteps.get(nd.name, nd.timestep))
             for nd in self.nodes))
 
+    def as_ode(self, alpha: float = -1.0) -> "GraphDef":
+        """Every node as explicit Euler (``ode=True``) with decay *alpha*."""
+        return dataclasses.replace(self, nodes=tuple(
+            dataclasses.replace(nd, ode=True, alpha=alpha) for nd in self.nodes))
+
+    def without_leaves(self, drop: tuple) -> "GraphDef":
+        return dataclasses.replace(self, nodes=tuple(
+            dataclasses.replace(nd, leaves=tuple(lf for lf in nd.leaves if lf not in drop))
+            for nd in self.nodes))
+
     def with_leaves(self, leaves: tuple, names=None) -> "GraphDef":
         names = set(self.group_nodes if names is None else names)
         return dataclasses.replace(self, nodes=tuple(
@@ -241,7 +261,7 @@ class GraphDef:
 def make_node(nd: NodeDef, n: int, x0=None) -> Relay:
     cls = FluxRelay if nd.flux else Relay
     return cls(nd.name, nd.timestep, n=n, n_inputs=nd.n_inputs, alpha=nd.alpha,
-               beta=nd.beta, nonlinear=nd.nonlinear, leaves=nd.leaves, x0=x0)
+               beta=nd.beta, nonlinear=nd.nonlinear, leaves=nd.leaves, x0=x0, ode=nd.ode)
 
 
 def live_knobs(knobs: dict) -> dict:
@@ -324,13 +344,19 @@ def draw_values(rng: np.random.Generator, gdef: GraphDef, rho: float, *,
                 bias_scale: float = 1.0) -> dict:
     """Gains, biases and initial states, the group rescaled to rate *rho*.
 
-    The internal gains are drawn, assembled into :func:`coupling_matrix`
-    and multiplied by one common factor so its spectral radius is
-    ``|rho|``.  *nonnormal* adds a strongly upper-triangular part to every
-    gain; *rank_one* draws the internal gains so ``M`` has rank one (one
-    coupling mode, eigenvalue ``rho`` exactly, which may be negative), the
-    regime in which the residual sequence is a clean geometric decay and
-    the error estimate has no excuse.
+    By default the internal gains are drawn, assembled into
+    :func:`coupling_matrix` and multiplied by one common factor so its
+    spectral radius -- the Jacobi rate -- is ``|rho|``.  *nonnormal* adds
+    a strongly upper-triangular part to every gain.
+
+    *rank_one* asks for a group with a **single coupling mode**: the
+    internal edges must form a pure cycle, the gain on the edge into the
+    cycle's first node is drawn of rank one, and it is scaled so the cycle
+    product ``P`` (the gain once round the loop) has trace ``rho``.  ``P``
+    then has exactly one non-zero eigenvalue, ``rho`` (negative allowed),
+    and a Gauss-Seidel sweep in the cycle's own order *is* ``x <- P x +
+    c`` on that node -- one mode, so the residual sequence is a clean
+    geometric decay and the error estimate has no excuse.
     """
     n = gdef.n
     values: dict = {}
@@ -344,38 +370,35 @@ def draw_values(rng: np.random.Generator, gdef: GraphDef, rho: float, *,
         values[nd.name] = {"G": Gs, "b": rng.normal(size=n) * bias_scale,
                            "x0": rng.normal(size=n)}
     names = list(gdef.group_nodes)
+    group = set(names)
+    internal = gdef.internal_edges
     if rank_one:
-        # M = u v^T with v^T u = rho: block (i, j) = u_i v_j^T.  Each
-        # internal edge (dst <- src) carries the block u_dst v_src^T; a
-        # pair of nodes joined by two edges splits it between them.
-        dim = n * len(names)
-        u = rng.normal(size=dim)
-        v = rng.normal(size=dim)
+        cycle = [next(e for e in internal if e.dst == nm) for nm in names]
+        assert len(internal) == len(names) and all(
+            sum(1 for e in internal if e.dst == nm) == 1 for nm in names), (
+            "rank_one needs the group's internal edges to be a pure cycle")
+        first = cycle[0]
+        u, v = rng.normal(size=n), rng.normal(size=n)
         if nonnormal:
-            v = v + 3.0 * rng.normal(size=dim)
-        blocks: dict = {}
-        for e in gdef.internal_edges:
-            blocks.setdefault((e.dst, e.src), []).append(e)
-        for (dst, src), edges in blocks.items():
-            i, j = names.index(dst), names.index(src)
-            blk = np.outer(u[i * n:(i + 1) * n], v[j * n:(j + 1) * n])
-            for e in edges:
-                fac = 2.0 if e.field == "q" else 1.0
-                values[dst]["G"][e.port] = blk / (len(edges) * fac)
-        # Pairs with no edge contribute nothing; rescale the realised M.
-        M = coupling_matrix(gdef, {k: {**v_, "G": [np.asarray(g, np.float64) for g in v_["G"]]}
-                                   for k, v_ in values.items()})
-        lam = np.linalg.eigvals(M)
-        top = lam[np.argmax(np.abs(lam))]
-        scale = rho / top.real if abs(top) > 0 else 0.0
+            v = v + 3.0 * rng.normal(size=n)
+        values[first.dst]["G"][first.port] = np.outer(u, v)
+        # P = G_in(first) * G_in(prev) * ... once round the loop.
+        P = np.eye(n)
+        node = first.dst
+        for _ in range(len(names)):
+            e = next(e for e in internal if e.dst == node)
+            fac = 2.0 if e.field == "q" else 1.0
+            P = P @ (fac * np.asarray(values[node]["G"][e.port], np.float64))
+            node = e.src
+        tr = float(np.trace(P))
+        values[first.dst]["G"][first.port] = (
+            values[first.dst]["G"][first.port] * (rho / tr if tr != 0.0 else 0.0))
     else:
         M = coupling_matrix(gdef, {k: {**v_, "G": [np.asarray(g, np.float64) for g in v_["G"]]}
                                    for k, v_ in values.items()})
         r = float(np.max(np.abs(np.linalg.eigvals(M)))) if M.size else 0.0
         scale = abs(rho) / r if r > 0 else 0.0
-    group = set(names)
-    for e in gdef.edges:
-        if e.src in group and e.dst in group:
+        for e in internal:
             values[e.dst]["G"][e.port] = np.asarray(values[e.dst]["G"][e.port]) * scale
     for nd in gdef.nodes:
         if nd.name not in group:
@@ -798,13 +821,35 @@ def report(gm: GraphManager, gdef: GraphDef) -> Optional[dict]:
     group = gm._coupling_groups[0]  # noqa: SLF001
     threshold, scale = convergence_criterion(group)
     it = int(meta["iterations"])
+    amp = float(meta.get("amplification", 0.0))
     return {
         "iterations": it,
         "total_iterations": max(int(meta.get("total_iterations", it)), it),
         "residual": float(meta["residual"]),
+        "amplification": amp,
+        "step_scale": scale,
+        "threshold": threshold,
         "converged": reported_converged(meta["residual"], meta.get("amplification", 0.0),
                                         scale, threshold),
     }
+
+
+def criterion_is_resolved(rep: dict, floor: float) -> bool:
+    """Is this report's verdict further from the threshold than its own rounding?
+
+    The verdict compares ``r max(omega amp, 1)`` with the threshold.  A
+    residual carries up to *floor* of rounding (it is a cancellation), and
+    ``amp = 1 / (1 - r_k / r_{k-1})`` turns that into ``2 floor / r`` on
+    the rate and ``2 omega floor amp**2`` on the estimate (derived in
+    ``test_differential_fixed_point.py``).  Two differently compiled
+    programs that round an ulp apart can stop on different passes only
+    when the estimate is within that of the threshold.
+    """
+    amp = rep["amplification"] if rep["amplification"] >= 1.0 else 1.0
+    omega = rep["step_scale"]
+    est = rep["residual"] * max(omega * amp, 1.0)
+    resolution = floor * max(omega * amp, 1.0) + 2.0 * omega * floor * amp ** 2
+    return abs(est - rep["threshold"]) > resolution
 
 
 def trajectory(gm: GraphManager, gdef: GraphDef, values: dict, steps: int) -> list:
@@ -892,3 +937,87 @@ def steer_leaves_around_known_crashes(gdef: GraphDef, group: dict) -> GraphDef:
                                                  if lf not in NON_FLOAT_LEAVES))
             if nd.name in gdef.group_nodes else nd for nd in gdef.nodes))
     return gdef
+
+
+def gauss_seidel_matrix(gdef: GraphDef, values: dict) -> np.ndarray:
+    """The error map of one Gauss-Seidel sweep, float64, for linear nodes.
+
+    Sweeps the group in ``gdef.group_nodes`` order (the schedule a group
+    with no outside predecessor gets: insertion order), each node reading
+    the already-updated value of every node before it and the previous
+    iterate of every node after it.  Column ``j`` is the sweep applied to
+    the ``j``-th unit error, with every constant zeroed.
+    """
+    names = list(gdef.group_nodes)
+    n = gdef.n
+    dim = n * len(names)
+    J = np.zeros((dim, dim))
+    for col in range(dim):
+        old = np.zeros(dim)
+        old[col] = 1.0
+        new = old.copy()
+        for i, nm in enumerate(names):
+            acc = np.zeros(n)
+            for e in gdef.internal_edges:
+                if e.dst != nm:
+                    continue
+                j = names.index(e.src)
+                fac = 2.0 if e.field == "q" else 1.0
+                G = np.asarray(values[nm]["G"][e.port], F32).astype(np.float64)
+                acc = acc + fac * G @ new[j * n:(j + 1) * n]
+            new[i * n:(i + 1) * n] = acc
+        J[:, col] = new
+    return J
+
+
+def group_distance(gm: GraphManager, gdef: GraphDef, group: dict, got: dict,
+                   exact: dict) -> float:
+    """Distance between *got* and *exact* in the group's own convergence norm.
+
+    A float64 NumPy restatement of the three documented norms (each
+    field's change divided by ``rtol`` times the field's magnitude, the
+    larger of its two ``max |v|``; a field whose magnitude does not exceed
+    ``atol`` leaves the norm; ``"l2"`` the root sum of squares at
+    ``rtol = 1``, ``"mixed"`` the RMS over every active entry,
+    ``"interface"`` the RMS over the internal edges' source values) --
+    written out here rather than called, so a fault in the library's norm
+    is a disagreement and not a shared assumption.  Only ``x`` (and the
+    flux ``q = 2 x``) can differ from the fixed point: every other
+    floating field is independent of the iterate.
+    """
+    nodes = list(gdef.group_nodes)
+    norm = group.get("convergence_norm", "l2")
+    atol = float(group.get("atol", 0.0))
+    rtol = 1.0 if norm == "l2" else float(group.get("rtol", 1e-6))
+
+    def scaled(a, b):
+        a = np.asarray(a, np.float64)
+        b = np.asarray(b, np.float64)
+        ref = max(float(np.max(np.abs(a))), float(np.max(np.abs(b))))
+        if not (ref > atol and ref > 0.0):
+            return np.zeros(0)
+        return np.abs(a - b) / (rtol * ref)
+
+    if norm == "interface":
+        parts = []
+        for e in gdef.internal_edges:
+            fac = 2.0 if e.field == "q" else 1.0
+            parts.append(scaled(fac * np.asarray(got[e.src]["x"], np.float64),
+                                fac * np.asarray(exact[e.src], np.float64)))
+    else:
+        parts = [scaled(got[nm]["x"], exact[nm]) for nm in nodes]
+    flat = np.concatenate(parts) if parts else np.zeros(0)
+    if norm == "l2":
+        return float(np.sqrt(np.sum(flat ** 2)))
+    return float(np.sqrt(np.sum(flat ** 2) / max(flat.size, 1)))
+
+
+def note(message: str) -> None:
+    """``hypothesis.note`` inside a property; nothing in a plain test."""
+    from hypothesis import note as _note  # noqa: PLC0415
+    from hypothesis.errors import InvalidArgument  # noqa: PLC0415
+
+    try:
+        _note(message)
+    except InvalidArgument:
+        pass

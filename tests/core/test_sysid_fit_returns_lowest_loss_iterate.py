@@ -219,6 +219,27 @@ def test_a_run_whose_loss_never_rose_returns_its_last_iterate_bit_for_bit():
     assert _bits(res.params) == _bits(params_next)
 
 
+def test_a_multiple_shooting_run_whose_loss_never_rose_returns_its_last_iterate(graphs):
+    """The same claim for ``fit_multiple_shooting``: small steps on the
+    parameters and smaller ones on the window states, so the joint loss
+    falls at every iterate, and the result is the iterate the last update
+    produced -- which only the extra evaluation can know is the lowest."""
+    gm, obs = graphs["shipped"]
+    kw = dict(obs_fn=lambda h: h["s"]["position"], window=10,
+              params=_with(gm, {"stiffness": 36.0}),
+              mask=_only(gm, "stiffness", "damping"), lr=0.01, lr_states=1e-4,
+              hold_undetermined=False)
+    n = 6
+    res, _ = fit_multiple_shooting(gm, obs, n_iter=n, **kw)
+    assert np.all(np.diff(res.losses) < 0), res.losses
+    assert res.best_iteration == n == len(res.losses)
+    seen, callback = _recorder()
+    fit_multiple_shooting(gm, obs, n_iter=n + 1, callback=callback, **kw)
+    loss_next, params_next = seen[n + 1]
+    assert res.best_loss == loss_next < res.losses[-1]
+    assert _bits(res.params) == _bits(params_next)
+
+
 def test_a_tie_goes_to_the_later_iterate():
     """On a plateau the iterates cross, the last of them is returned.  Ties
     to the *earlier* iterate would hand back the start here, and would

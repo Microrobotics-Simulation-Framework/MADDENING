@@ -126,6 +126,7 @@ property-testing layer. See the full [Verification Guide](verification.md).
 
 **Property-based testing** (hypothesis) — test universal invariants:
 
+<!-- snippet: no-run, reason: pseudo-code: my_node and bounds={...} are placeholders -->
 ```python
 from maddening.testing.strategies import node_states, bounded_dt
 from hypothesis import given
@@ -205,6 +206,7 @@ Depth a test really does need to state is therefore expressed as a
 **tier**: a multiple or fraction of the active profile's `max_examples`,
 resolved once in the root `tests/conftest.py` and imported by name.
 
+<!-- snippet: no-run, reason: external: imports the repository's tests/conftest.py, which only the test suite can -->
 ```python
 from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY, EXAMPLES_STANDARD
 
@@ -317,6 +319,7 @@ around the suite it was already running, so the measurement costs nothing.
 almost always a parameter on the strategy, defaulted so no other caller
 changes:
 
+<!-- snippet: no-run, reason: fragment: lines inside a composite strategy -->
 ```python
 # before: a third of every draw built a graph and threw it away
 recipe = draw(graph_recipes(require_coupling_group=True))

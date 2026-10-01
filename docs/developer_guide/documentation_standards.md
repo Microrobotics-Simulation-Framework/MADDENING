@@ -85,6 +85,7 @@ All academic references go in `docs/bibliography.bib`. This is the single centra
 - CI validates all cited keys exist (`scripts/check_citations.py`)
 
 **In code**: use the `Reference` type in `NodeMeta.references`:
+<!-- snippet: no-run, reason: fragment: a NodeMeta keyword argument -->
 ```python
 references=(
     Reference("Crank1975", "Analytical solutions for heat equation"),

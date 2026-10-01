@@ -70,6 +70,7 @@ stage $i$ holding exactly $t_n + c_i h$ — the Butcher node — and a
 forcing read from it is read at the right time.  This is exact, not an
 interpolation, and it uses only the existing `derivatives_fn` argument:
 
+<!-- snippet: no-run, reason: fragment: node, u_of, rk4_step, dt and n_steps are the reader's -->
 ```python
 def forced(state, _unused):
     t = state["time"]

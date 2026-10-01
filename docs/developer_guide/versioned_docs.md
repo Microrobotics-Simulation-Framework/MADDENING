@@ -90,6 +90,7 @@ Each project ships its own `switcher.json` at
 
 The umbrella `conf.py` wires it into the theme:
 
+<!-- snippet: no-run, reason: external: an excerpt of the umbrella Sphinx conf.py -->
 ```python
 html_theme_options.update({
     "switcher": {

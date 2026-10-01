@@ -34,6 +34,7 @@ v0.2 wires up three things so that doesn't happen:
 
 ## The 30-second tour
 
+<!-- snippet: no-run, reason: cloud: launches a cloud session -->
 ```python
 from maddening.cloud.session import CloudSession
 from maddening.cloud.entrypoint import make_preempt_snapshot_hook
@@ -220,6 +221,7 @@ resume.
 
 For one-off loads of pre-v0.2 checkpoints that don't have a manifest:
 
+<!-- snippet: no-run, reason: network: downloads a checkpoint from url -->
 ```python
 from maddening.cloud.resume import download_and_load_state
 download_and_load_state(

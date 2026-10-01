@@ -121,6 +121,7 @@ host floats and cannot run traced. Pinned by
 
 ## Observing the selection: `selection_diagnostics`
 
+<!-- snippet: continues -->
 ```python
 node.selection_diagnostics()
 # {'active': 8, 'k': 8, 'outer_iterations': 4, 'max_outer': 30,

@@ -1612,6 +1612,15 @@ class SimulationServer:
                 reason = self.gm._unused_node_write_reason(node_name, key, node_value)
                 if reason is not None:
                     raise refused([key], reason, reported=True)
+                # A value the node's own step reads, but from which it also
+                # derived the points an interface mapping was built from (a
+                # uniform HeatNode's grid_x, from length): the mapping would
+                # keep the old points' weights and a save would not load.
+                # The graph's own decision, the one that refuses the same
+                # value written into gm.params alone at the next run.
+                reason = self.gm._mapping_point_write_reason(node_name, {key: node_value})
+                if reason is not None:
+                    raise refused([key], reason)
             # And the graph a save after the write would reload must load,
             # and run what the running graph runs: the constructor asked
             # with every changed key at once and every other key's live

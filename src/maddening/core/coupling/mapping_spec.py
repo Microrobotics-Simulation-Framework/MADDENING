@@ -974,7 +974,22 @@ def _node_field(graph, node_name: str, field_name: str) -> np.ndarray:
             f"point reference names unknown node {node_name!r}; the graph has "
             f"{sorted(names)}"
         )
-    node = graph.get_node(node_name)
+    return _node_point_field(graph.get_node(node_name), node_name, field_name)
+
+
+def _node_point_field(node: Any, node_name: str, field_name: str) -> np.ndarray:
+    """The point set a ``{"node": node_name, "field": field_name}``
+    reference reads from ``node``: its ``static_data[field_name]`` (a
+    ``StaticArray`` unwrapped) or, failing that, an array-valued
+    constructor parameter ``node.params[field_name]``.
+
+    The node-level half of the graph resolver (:func:`make_point_resolver`),
+    so a node outside any graph -- one rebuilt from candidate params, to
+    ask whether a write would move the points a mapping was built from
+    (``GraphManager._mapping_point_write_reason``) -- is read by the same
+    rule.  A field that is absent, or not a numeric point set, is a
+    :class:`PointReferenceError`.
+    """
     static = getattr(node, "static_data", None) or {}
     if not isinstance(static, dict):
         static = {}

@@ -305,7 +305,14 @@ def rods_mapped_by_grid() -> GraphManager:
     """Two uniform rods joined by an RBF mapping whose point sets are
     references to each rod's ``grid_x`` -- the form ``to_dict`` re-resolves
     and hash-checks.  ``grid_x`` is built from ``length`` when a rod is
-    constructed."""
+    constructed.
+
+    The mapping is built from ``grid_x`` *as the rod holds it* (float32): a
+    reference's recorded hash covers the dtype, so points widened to float64
+    first describe another array, and ``to_dict()`` refused this graph
+    before any write -- which is how the pins below used to fail for the
+    wrong reason (``test_the_mapped_rods_save_and_reload_before_any_write``).
+    """
     from maddening.core.coupling.mapping import rbf_mapping
     from maddening.nodes import HeatNode
 
@@ -317,28 +324,45 @@ def rods_mapped_by_grid() -> GraphManager:
     gm.add_node(a)
     gm.add_node(b)
     gm.add_edge("a", "b", "temperature", "heat_source", mapping=rbf_mapping(
-        np.asarray(a.static_data["grid_x"].value, np.float64),
-        np.asarray(b.static_data["grid_x"].value, np.float64),
+        np.asarray(a.static_data["grid_x"].value),
+        np.asarray(b.static_data["grid_x"].value),
         source_ref={"node": "a", "field": "grid_x"},
         target_ref={"node": "b", "field": "grid_x"}))
     gm.compile()
     return gm
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError, reason=(
-    "differential: PUT /graph/params answers 200 to a new length for a uniform rod "
-    "whose grid_x an interface mapping references, then to_dict() refuses to save "
-    "the graph (the reference no longer describes the points the weights were built "
-    "from), while the running graph keeps stepping with those stale weights; "
-    "pending fix"))
+def test_the_mapped_rods_save_and_reload_before_any_write():
+    """The fixture can express the defect: unwritten, the graph saves, its
+    config reloads, and the reload steps bit for bit as the original -- so a
+    refusal or a disagreement below is the write's."""
+    gm = rods_mapped_by_grid()
+    gm.run(WARM_STEPS)
+    config = json.loads(json.dumps(gm.to_dict(), allow_nan=True))
+    with tmp_dir() as tmp:
+        ckpt = gm.save_state(checkpoint_path(tmp))
+        reloaded = reload_from_config(config, REGISTRY)
+        reloaded.load_state(ckpt)
+    assert_trees_identical(rollout(gm, N_STEPS), rollout(reloaded, N_STEPS),
+                           what="mapped rods against their reload")
+
+
 def test_a_rod_length_under_a_mapping_reference_is_refused_or_runs_as_its_reload():
     """Found while widening the generated writes to geometry: ``length`` is a
     live leaf of a uniform rod (its step reads it), so every check the route
-    makes passes; ``grid_x`` is derived from it at construction and never
-    rebuilt, and the mapping's ``MappingSpec`` points at ``grid_x``."""
+    made passed and it answered 200; ``grid_x`` is derived from it at
+    construction and never rebuilt, the mapping's ``MappingSpec`` points at
+    ``grid_x``, and the running graph kept the old grid's weights while the
+    saved config no longer loaded.  Refused now, naming the mapped edge."""
     gm = rods_mapped_by_grid()
     with tmp_dir() as root:
-        check_rest_write(gm, REGISTRY, "a", Write("geometry", {"length": 1.5}), root=root)
+        assert check_rest_write(gm, REGISTRY, "a", Write("geometry", {"length": 1.5}),
+                                root=root) == "refused"
+        resp = _client(gm, root, REGISTRY).put(
+            "/graph/params/a", json={"params": {"length": 1.5}})
+    assert resp.status_code == 400, resp.text
+    assert "a.temperature->b.heat_source" in resp.json()["detail"]
+    assert "grid_x" in resp.json()["detail"]
 
 
 # The two graph features a one-node graph cannot carry, per push: a

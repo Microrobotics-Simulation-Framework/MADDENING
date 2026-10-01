@@ -35,7 +35,7 @@ The per-push sibling, :func:`test_every_mutant_anchor_matches_the_tree_exactly_o
 checks the table against the working tree in a few milliseconds: every
 anchor must occur exactly once in its file, and every guard file and test
 must exist.  Without it, a refactor that moves an anchor would turn a
-mutant into a no-op that only the slow lane, days later, could notice.
+mutant into a no-op that only the next slow-lane run could notice.
 
 Adding a mutant is one entry in :data:`MUTANTS`; see "Guard mutations" in
 ``docs/developer_guide/testing_standards.md``.
@@ -395,9 +395,10 @@ def test_the_mutant_table_is_well_formed():
             problems.append(f"{m.id}: no guard tests")
         for target in targets:
             file, _, name = target.partition("::")
+            func = name.rsplit("::", 1)[-1].split("[", 1)[0]
             if not (REPO_ROOT / file).is_file():
                 problems.append(f"{m.id}: guard file {file} does not exist")
-            elif name and not re.search(rf"^def {re.escape(name)}\(", _tree_text(file), re.M):
+            elif func and not re.search(rf"^\s*(async\s+)?def {re.escape(func)}\(", _tree_text(file), re.M):
                 problems.append(f"{m.id}: guard test {target} does not exist")
         for i, arg in enumerate(m.guards):
             if arg == "--deselect" and (i + 1 == len(m.guards) or m.guards[i + 1].startswith("-")):
@@ -437,8 +438,8 @@ def _run_guards(tree: Path, args: tuple[str, ...], basetemp: Path, *, stop_at_fi
     try:
         proc = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True, timeout=_RUN_TIMEOUT_S)
     except subprocess.TimeoutExpired as exc:
-        pytest.fail(f"the guard run timed out after {_RUN_TIMEOUT_S} s: {' '.join(args)}\n"
-                    f"{(exc.stdout or '')[-2000:] if isinstance(exc.stdout, str) else ''}")
+        out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        pytest.fail(f"the guard run timed out after {_RUN_TIMEOUT_S} s: {' '.join(args)}\n{out[-2000:]}")
     lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
     failures = [ln for ln in lines if ln.startswith(("FAILED ", "ERROR "))]
     tail = lines[-1] if lines else proc.stderr.strip()[-500:]

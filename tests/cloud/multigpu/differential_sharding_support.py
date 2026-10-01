@@ -805,33 +805,25 @@ def _misshapen_candidates(shape: tuple, block: dict, halo: tuple) -> list[tuple]
     return keep
 
 
-#: A mis-shaped per-cell input whose length is a shard's slab (owned plus
-#: ghost rows) is taken by ``ShardedUnstructuredNode`` and read by every
-#: shard as its own slab, where the unsharded node refuses it.  Excluded
-#: from :func:`unstructured_configs` while that is pending a fix, so the
-#: generated property stays green; the exact case is a strict xfail
-#: (``test_a_slab_length_input_the_unsharded_node_refuses_is_refused_sharded``),
-#: and the fix flips both.
-PENDING_UNSTRUCTURED_SLAB_INPUT = True
+#: XLA (jaxlib 0.10.2, 0.11.0 and 0.11.2; not 0.5.3) miscompiles a
+#: ``ShardedStencilNode`` step inside ``lax.scan`` -- ``run_scan`` -- when
+#: a sharded ``StaticArray`` is replicated along a mesh axis of more than
+#: one device and the node reads it in its halo and reads a replicated
+#: array through a window at its ``shard_info`` offset (``kappa="halo"``
+#: with ``table="halo"`` here): on a mesh axis the ``axis_map`` leaves
+#: unused every cell comes back wrong, silently; on a pencil whose static
+#: is split along one axis only the step fails to compile.  ``step`` and
+#: ``run`` are right.  Reproduced without MADDENING; see
+#: ``test_unused_mesh_axis_integrals.py``.  While it is pending, such a
+#: configuration reads the table in the interior instead (still drawn,
+#: one window narrower); the exact cases are strict xfails.
+PENDING_XLA_REPLICATED_STATIC_IN_SCAN = True
 
-#: A per-shard (unreduced) domain integral under a ``ShardedStencilNode``
-#: nested in another has its initial value stacked by both wrappers'
-#: ``initial_state``, so ``run_scan`` refuses the carry and ``step``
-#: changes the state's shape.  Drawn as a vector integral instead while
-#: that is pending a fix; the exact case is a strict xfail
-#: (``test_a_per_shard_integral_under_a_nested_wrapper_runs_as_unsharded``).
-PENDING_NESTED_PER_SHARD_INTEGRAL = True
 
-#: Reverse mode through ``run_scan`` of a ``ShardedUnstructuredNode`` whose
-#: partition has no ghost cell at all (no edge crosses a shard boundary --
-#: every cell on one device, for instance) segfaults XLA's compiler on
-#: jaxlib 0.11.2: ``exchange_unstructured`` returns the local block joined
-#: to a zero-size ghost tail, and the scan's transpose of it crashes the
-#: process.  A segfault cannot be an xfail in-process, so the gradient
-#: surface is skipped on such partitions while that is pending a fix; the
-#: exact case runs in a subprocess, a strict xfail on jaxlib 0.11.2
-#: (``test_a_gradient_through_a_partition_without_ghosts_does_not_crash``).
-PENDING_ZERO_GHOST_REVERSE_SCAN = True
+def _static_replicated_over_devices(mesh_shape, axis_names, axis_map, shard_axis) -> bool:
+    """Is a static split along ``shard_axis`` replicated over a mesh axis of 2+ devices?"""
+    on = {ma for ma, sa in axis_map if sa == shard_axis}
+    return any(int(n) > 1 for ma, n in zip(axis_names, mesh_shape) if ma not in on)
 
 
 @st.composite
@@ -840,19 +832,32 @@ def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool]
                     max_steps: int = 3) -> StencilConfig:
     """A configuration of the stencil family (see the module docstring)."""
     ndim = draw(st.sampled_from([2, 1])) if ndim is None else ndim
+    # "unused_axis": a (2, 2) mesh whose axis_map uses one of its axes, so
+    # the node is replicated along the other (a domain integral is neither
+    # summed nor stacked over it).  Last, so that it stays reachable
+    # without displacing the 4-device meshes from the per-push draws.
     if ndim == 1:
+        kinds = ["line"] + (["unused_axis"] if N_AVAILABLE >= 4 else [])
+        kind = draw(st.sampled_from(kinds))
+    elif pencils is None:
+        kinds = (["pencil", "slab", "unused_axis"] if N_AVAILABLE >= 4 else ["slab"])
+        kind = draw(st.sampled_from(kinds))
+    else:
+        kind = "pencil" if (pencils and N_AVAILABLE >= 4) else "slab"
+    if kind == "unused_axis":
+        mesh_shape, axis_names = (2, 2), ("px", "py")
+        axis_map = ((draw(st.sampled_from(["px", "py"])),
+                     draw(st.sampled_from(list(range(ndim))))),)
+    elif ndim == 1:
         n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
         mesh_shape, axis_names, axis_map = (n_dev,), ("devices",), (("devices", 0),)
+    elif kind == "pencil":
+        mesh_shape = draw(st.sampled_from([(2, 2), (1, 4), (4, 1)]))
+        axis_names, axis_map = ("px", "py"), (("px", 0), ("py", 1))
     else:
-        use_pencil = (draw(st.sampled_from([True, False])) if pencils is None
-                      else pencils) and N_AVAILABLE >= 4
-        if use_pencil:
-            mesh_shape = draw(st.sampled_from([(2, 2), (1, 4), (4, 1)]))
-            axis_names, axis_map = ("px", "py"), (("px", 0), ("py", 1))
-        else:
-            n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
-            mesh_shape, axis_names = (n_dev,), ("devices",)
-            axis_map = (("devices", draw(st.sampled_from([0, 1]))),)
+        n_dev = draw(st.sampled_from(_counts(4, 2, 1)))
+        mesh_shape, axis_names = (n_dev,), ("devices",)
+        axis_map = (("devices", draw(st.sampled_from([0, 1]))),)
     sizes = dict(zip(axis_names, mesh_shape))
     block = {sa: int(sizes[ma]) for ma, sa in axis_map}
     halo = tuple(draw(st.sampled_from([2, 1])) for _ in range(ndim))
@@ -868,21 +873,28 @@ def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool]
         misshapen = draw(st.sampled_from(cands))
     integral = draw(st.sampled_from(["vector", "per_shard", "scalar", None]))
     wrapping = draw(st.sampled_from(["nested", "hybrid", "single"]))
-    if PENDING_NESTED_PER_SHARD_INTEGRAL and wrapping == "nested" and integral == "per_shard":
-        integral = "vector"
+    # Drawn in the order the constructor below used to draw them, so the
+    # derandomized per-push examples move only where a value changes.
+    fill = draw(st.sampled_from(["periodic", "edge", "zero"]))
+    declares = draw(st.sampled_from([True, False]))
+    contract = draw(st.sampled_from(["params", "legacy"]))
+    integral_name = draw(st.sampled_from(["a_total", "z_total"]))
+    integral_listed = draw(st.sampled_from([True, False]))
+    kappa = draw(st.sampled_from(["halo", "interior", None]))
+    kappa_axis = draw(st.sampled_from(list(range(ndim))))
+    table = draw(st.sampled_from(["halo", "interior", None])) if reads else None
+    if (PENDING_XLA_REPLICATED_STATIC_IN_SCAN and kappa == "halo" and table == "halo"
+            and _static_replicated_over_devices(mesh_shape, axis_names, axis_map,
+                                                kappa_axis)):
+        table = "interior"
     return StencilConfig(
         mesh_shape=tuple(mesh_shape), axis_names=tuple(axis_names),
         axis_map=tuple(axis_map), shape=shape, halo=halo,
-        fill=draw(st.sampled_from(["periodic", "edge", "zero"])),
-        declares=draw(st.sampled_from([True, False])),
-        contract=draw(st.sampled_from(["params", "legacy"])),
-        integral=integral,
-        integral_name=draw(st.sampled_from(["a_total", "z_total"])),
-        integral_listed=draw(st.sampled_from([True, False])),
+        fill=fill, declares=declares, contract=contract,
+        integral=integral, integral_name=integral_name,
+        integral_listed=integral_listed,
         reads_shard_info=reads,
-        kappa=draw(st.sampled_from(["halo", "interior", None])),
-        kappa_axis=draw(st.sampled_from(list(range(ndim)))),
-        table=draw(st.sampled_from(["halo", "interior", None])) if reads else None,
+        kappa=kappa, kappa_axis=kappa_axis, table=table,
         source=source, misshapen_shape=misshapen,
         gain=draw(st.sampled_from([True, False])),
         faces=draw(st.sampled_from([True, False])) if reads else False,
@@ -960,8 +972,7 @@ def unstructured_configs(draw, *, surfaces=FORWARD_SURFACES,
         layout = unstructured_layout(cfg)
         n_layout = layout.n_devices * layout.n_local_max
         slab = layout.n_local_max + layout.n_ghost_max
-        pending = {slab} if PENDING_UNSTRUCTURED_SLAB_INPUT else set()
-        cands = sorted({n + 1, slab, layout.n_local_max} - {1, n, n_layout} - pending)
+        cands = sorted({n + 1, slab, layout.n_local_max} - {1, n, n_layout})
         if not cands:
             cands = [n + 1] if n + 1 != n_layout else [n + 2]
         cfg = replace(cfg, misshapen_len=draw(st.sampled_from(cands)))
@@ -1167,8 +1178,11 @@ def _unstructured_case(cfg: UnstructuredConfig) -> Case:
         refusal = ("run", ValueError, r"cannot tell a global-order array")
         known = "balanced non-global partition refuses per-cell inputs"
     elif cfg.source == "misshapen":
-        refusal = ("run", (ValueError, TypeError),
-                   r"boundary input 'source'|broadcast|[Ii]ncompatible shapes")
+        # Refused by the wrapper, before tracing, naming the global shape
+        # (not by the node's own broadcast, which a node need not do).
+        refusal = ("run", ValueError,
+                   rf"boundary input 'source' has shape \({cfg.misshapen_len},\).*"
+                   rf"global shape \({cfg.n_cells},\)")
 
     state_set = {"x"}
 
@@ -1556,8 +1570,32 @@ def written_rate(cfg) -> float:
     return _PARAM[cfg.family][1] * (1.0 + 0.5 * ((cfg.seed % 7) + 1) / 7.0)
 
 
-def _final(gm, case: Case, sharded: bool) -> dict:
-    return case.gather(sharded, gm.get_node_state(case.name))
+def _final(gm, case: Case, sharded: bool, node=None) -> dict:
+    state = gm.get_node_state(case.name)
+    out = case.gather(sharded, state)
+    if sharded and node is not None:
+        check_gather_global(node, state, out)
+    return out
+
+
+def check_gather_global(node, state: dict, gathered: dict) -> None:
+    """``ShardedUnstructuredNode.gather_global`` agrees with the harness's gather.
+
+    The harness gathers by its own table (``layout_rows_of_global``, the
+    grid field only); the wrapper's utility by its own classification.
+    Every field, domain integrals included, must come back identical.
+    Nothing is checked for a composition without that wrapper.
+    """
+    while node is not None and not hasattr(node, "gather_global"):
+        node = getattr(node, "_inner", None) or getattr(node, "physics_node", None)
+    if node is None:
+        return
+    theirs = node.gather_global(state)
+    assert set(theirs) == set(gathered), f"gather_global fields {set(theirs)} vs {set(gathered)}"
+    for k, v in gathered.items():
+        got = np.asarray(theirs[k])
+        assert got.shape == np.shape(v), f"gather_global {k}: shape {got.shape} vs {np.shape(v)}"
+        np.testing.assert_array_equal(got, v, err_msg=f"gather_global {k}")
 
 
 def run_surface(case: Case, surface: str, sharded: bool):
@@ -1612,7 +1650,7 @@ def run_surface(case: Case, surface: str, sharded: bool):
         gm.run_scan(n, ext)
     else:  # pragma: no cover - a typo in a strategy
         raise ValueError(f"unknown surface {surface!r}")
-    return _final(gm, case, sharded)
+    return _final(gm, case, sharded, node)
 
 
 def new_global_state(case: Case, gm, sharded: bool) -> dict:
@@ -1692,9 +1730,6 @@ def _theta_runner(case: Case, sharded: bool):
 
 def _gradient(case: Case, sharded: bool):
     """``(loss, d loss / d theta)`` through ``run_scan`` (see :func:`_theta_runner`)."""
-    if (PENDING_ZERO_GHOST_REVERSE_SCAN and case.layout is not None
-            and int(case.layout.n_ghost_max) == 0):
-        return None
     got = _theta_runner(case, sharded)
     if got is None:
         return None

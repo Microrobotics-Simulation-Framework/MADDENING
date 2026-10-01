@@ -443,24 +443,33 @@ class ShardedUnstructuredNode(SimulationNode):
 
         Strips per-shard padding and rebuilds the global state dict.
         Domain-integral fields (the ones declared via
-        :meth:`SimulationNode.domain_integral_fields`) are already
-        fully replicated after the ``psum`` and are passed through
-        unchanged.  Not on the inner node's signature — this is an
-        unstructured-sharding utility.
+        :meth:`SimulationNode.domain_integral_fields`) are passed through
+        unchanged, as the step returns them: replicated once reduced, the
+        per-shard values stacked along the mesh axis when not.  An
+        integral is recognised first, as the step classifies its outputs,
+        so one that ``state_fields()`` also lists -- the default lists
+        every ``initial_state`` key -- is passed through too.  Read by
+        ``state_fields()`` membership alone, such an integral was
+        reshaped as a per-cell field: a reduced one raised, and per-shard
+        values on a layout of one cell per shard came back reordered into
+        global cell order, silently.  Not on the inner node's signature —
+        this is an unstructured-sharding utility.
         """
         out = {}
         state_set = set(self._inner.state_fields())
+        integrals = set(self._inner.domain_integral_fields())
         for k, arr in sharded_state.items():
             host = jax.device_get(arr)
-            if k in state_set:
+            if k in integrals:
+                out[k] = host
+            elif k in state_set:
                 per_shard = host.reshape(
                     (self._layout.n_devices, self._layout.n_local_max)
                     + host.shape[1:]
                 )
                 out[k] = gather_value(per_shard=per_shard, layout=self._layout)
             else:
-                # Domain-integral (or otherwise replicated) output —
-                # pass through.
+                # Neither an integral nor a state field: pass through.
                 out[k] = host
         return out
 
@@ -499,6 +508,18 @@ class ShardedUnstructuredNode(SimulationNode):
         and cannot be told from it here; convert it with
         :func:`~maddening.cloud.multigpu.halo_unstructured.partition_value`
         before writing it.
+
+        Raises
+        ------
+        ValueError
+            When a state field is not in partition layout; when a
+            boundary input is in global cell order, or has the layout's
+            row count on a partition that does not keep global order (see
+            :meth:`_cell_boundary_inputs`); or when an input the node
+            declares per cell is neither in partition layout nor
+            broadcastable to its declared shape -- it would reach every
+            shard whole and be read as that shard's slab (see
+            :meth:`_refuse_misshapen_inputs`).
         """
         self._check_state_layout(state)
         # Materialise first: it refreshes ``self._sharded_static``, which
@@ -612,6 +633,7 @@ class ShardedUnstructuredNode(SimulationNode):
             for k in state
         }
         cell_bi = self._cell_boundary_inputs(boundary_inputs)
+        self._refuse_misshapen_inputs(boundary_inputs, cell_bi)
         bi_specs = {
             k: (P(self._mesh_axis) if k in cell_bi else P())
             for k in boundary_inputs
@@ -780,6 +802,71 @@ class ShardedUnstructuredNode(SimulationNode):
                     f"to ({n_layout}, ...) first."
                 )
         return frozenset(out)
+
+    def _refuse_misshapen_inputs(
+        self, boundary_inputs: dict, cell_bi: frozenset[str],
+    ) -> None:
+        """Refuse a replicated input the node declares per cell and that cannot be.
+
+        An input that is not in partition layout is replicated: every
+        shard receives the whole array, and ``update_padded`` cannot tell
+        it from its own slab of ``n_local_max + n_ghost_max`` rows.  So on
+        a 4-cell ring over 4 devices (slabs of 3 rows) a ``source`` of 3
+        values was read by every shard as its slab, and every cell took a
+        value from it, where the unsharded node refuses 3 values for 4
+        cells.  ``ShardedStencilNode`` refuses the same thing
+        (MADD-ANO-057); this wrapper did not.
+
+        So an input whose declared ``boundary_input_spec()`` shape is per
+        cell (its leading axis is the layout's global cell count) must be
+        in partition layout -- sharded and ghost-exchanged like the state
+        -- or broadcast to that declared shape, the forms the unsharded
+        ``update`` takes (a scalar, a uniform trailing vector).  Anything
+        else is refused here, before tracing, naming the global shape the
+        node declares.  An input the node does not declare, or declares
+        with a shape that is not per cell, is left to the node, as in
+        ``ShardedStencilNode``.
+        """
+        n_global = int(np.asarray(self._layout.partition_assignment).size)
+        try:
+            specs = dict(self._inner.boundary_input_spec() or {})
+        except Exception:  # noqa: BLE001 - no declaration to check against
+            return
+        for key, value in boundary_inputs.items():
+            if key in cell_bi or key not in specs:
+                continue
+            declared_shape = getattr(specs[key], "shape", None)
+            if declared_shape is None:
+                continue
+            try:
+                declared = tuple(int(n) for n in declared_shape)
+            except (TypeError, ValueError):
+                continue           # not a concrete shape: nothing to hold it to
+            if not declared or declared[0] != n_global:
+                continue           # not a per-cell input
+            given = tuple(int(n) for n in jnp.shape(value))
+            try:
+                fits = np.broadcast_shapes(given, declared) == declared
+            except ValueError:
+                fits = False
+            if fits:
+                continue
+            layout_shape = (self._n_layout_rows,) + declared[1:]
+            raise ValueError(
+                f"ShardedUnstructuredNode {self.name!r}: boundary input {key!r} "
+                f"has shape {given}, but {type(self._inner).__name__} declares "
+                f"it per cell with global shape {declared}, and {given} is "
+                f"neither in partition layout ({layout_shape}: n_devices * "
+                f"n_local_max = {self._layout.n_devices} * "
+                f"{self._layout.n_local_max} rows) nor broadcastable to "
+                f"{declared}, so it is not a value the node declares for this "
+                "input.  Sharded, it would be handed whole to every shard and "
+                f"read as that shard's slab of {self._layout.n_local_max} owned "
+                f"+ {self._layout.n_ghost_max} ghost rows.  Pass the per-cell "
+                "values through partition_value(value=..., layout=...) "
+                f"reshaped to {layout_shape}, or a value that broadcasts to "
+                f"{declared} (a scalar, a uniform trailing vector)."
+            )
 
     def _build_local_update(self):
         inner = self._inner

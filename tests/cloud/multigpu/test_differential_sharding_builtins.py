@@ -390,23 +390,23 @@ def test_grid_fields_on_a_mesh_axis_the_axis_map_leaves_unused_answer_as_unshard
     D.check_config(_UNUSED_AXIS)
 
 
-@pytest.mark.xfail(strict=True, raises=ValueError, reason=(
-    "differential: a domain integral on a mesh with an axis the axis_map leaves "
-    "unused fails at the first step inside lax.psum, naming neither; pending fix"))
-def test_a_domain_integral_on_a_mesh_axis_the_axis_map_leaves_unused_is_summed_or_refused_early():
-    """Sharded = unsharded, or refused at construction: either fix flips this.
+@pytest.mark.parametrize("integral", ["scalar", "vector", "per_shard"])
+@pytest.mark.parametrize("used", ["px", "py"])
+def test_a_domain_integral_on_a_mesh_axis_the_axis_map_leaves_unused_answers_as_unsharded(
+        integral, used):
+    """Neither summed nor stacked over the unused axis: replicated along it.
 
-    The default reduction ``psum``-s over every mesh axis, and the state is
-    replicated over the unused one; JAX's varying-axes check refuses the
-    sum at the first trace with ``jax.lax.psum can only accept
-    axis_name ...``.  (A per-shard integral runs there, stacked over both
-    axes, its partials repeated along the unused one.)
+    The default reduction ``psum``-med over every mesh axis, and the
+    state is replicated over the unused one, so JAX's varying-axes check
+    refused the sum at the first trace with ``jax.lax.psum can only accept
+    axis_name ...``, naming neither the node nor the axis.  Summed there,
+    each block would be counted once per device along the axis.  A
+    per-shard integral ran, stacked over both axes with its partials
+    repeated along the unused one, so its stacked values summed to twice
+    the domain integral.  Both now reduce or stack over the axes the
+    ``axis_map`` uses only, as ``ShardedUnstructuredNode`` treats every
+    mesh axis but its own.
     """
-    cfg = replace(_UNUSED_AXIS, integral="scalar")
-    case = D.build_case(cfg)
-    try:
-        case.make(True)
-    except ValueError as e:
-        assert "py" in str(e)
-        return
-    D.check_config(cfg)
+    D.check_config(replace(_UNUSED_AXIS, integral=integral, axis_map=((used, 0),),
+                           surface="run_scan"),
+                   surfaces=("run_scan", "step", "set_state"))

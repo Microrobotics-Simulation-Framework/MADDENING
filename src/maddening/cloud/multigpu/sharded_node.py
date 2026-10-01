@@ -529,12 +529,20 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
     **A domain integral carried in the state is not a grid field.**  A
     node that declares its integral's initial value, or a graph feeding a
     step's output back, puts the integral in the state; it is placed as
-    the step returns it -- replicated once reduced over every mesh axis,
-    stacked along the unreduced axes of ``domain_integral_axes()``
-    otherwise -- and handed to ``update_padded`` unpadded (a per-shard
-    one as this shard's slice).  Before 0.4.0 it was split and
-    halo-padded like a grid field, which a vector integral could not
-    survive.
+    the step returns it -- replicated once reduced over every mesh axis
+    ``axis_map`` uses, stacked along the unreduced ones of
+    ``domain_integral_axes()`` otherwise -- and handed to
+    ``update_padded`` unpadded (a per-shard one as this shard's slice).
+    Before 0.4.0 it was split and halo-padded like a grid field, which a
+    vector integral could not survive.
+
+    **A mesh axis** ``axis_map`` **leaves unused replicates the node.**
+    Every device along it holds the same block, so a domain integral is
+    neither summed nor stacked over it (that would count each block once
+    per device there); it is replicated along it.  Until 0.4.0 the
+    default reduction summed over it, which JAX refused at the first
+    step with an error about ``psum`` naming neither the node nor the
+    axis.
 
     **An empty** ``axis_map`` **is refused.**  It would shard no spatial
     axis: every device would run the whole node, which is the unsharded
@@ -782,7 +790,7 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 )
 
     def initial_state(self) -> dict:
-        state = self._inner.initial_state()
+        state = self._node_initial_state()
         self._check_divisible_extents(state)
         integrals = set(self._inner.domain_integral_fields())
         out = {}
@@ -793,11 +801,30 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 out[field] = jax.device_put(arr, self._sharding_for_field(arr))
         return out
 
+    def _node_initial_state(self) -> dict:
+        """The initial state of the node this wrapper steps, as that node builds it.
+
+        For a ``ShardedStencilNode`` nested in this one, that is the node
+        *it* wraps: the outer wrapper calls the inner one's
+        ``update_padded``, which forwards straight to its node, so the
+        inner wrapper's placement is not part of the model.  Read from the
+        inner wrapper's ``initial_state()`` instead, a per-shard
+        (unreduced) domain integral arrived already stacked along its
+        unreduced mesh axes and :meth:`_place_integral` stacked it again:
+        ``(2, 2)`` on two devices where a step returns ``(2,)``, so
+        ``step()`` changed the state's shape and ``run_scan`` refused the
+        carry.
+        """
+        if isinstance(self._inner, ShardedStencilNode):
+            return self._inner._node_initial_state()
+        return self._inner.initial_state()
+
     def _integral_spec(self, key: str) -> P:
         """The placement of domain integral ``key``, as the step returns it.
 
-        Replicated (``P()``) once reduced over every mesh axis; stacked
-        along the unreduced axes (one leading dimension each) otherwise.
+        Replicated (``P()``) once reduced over every mesh axis ``axis_map``
+        uses; stacked along the unreduced ones (one leading dimension
+        each) otherwise.  See :meth:`_integral_reduction`.
         """
         _, unreduced = self._integral_reduction(key)
         return P(*unreduced) if unreduced else P()
@@ -885,11 +912,27 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         return dict(getattr(self._inner, "domain_integral_axes", dict)())
 
     def _integral_reduction(self, key: str):
-        """``(reduce_axes, unreduced_axes)`` for a domain-integral key."""
+        """``(reduce_axes, unreduced_axes)`` for a domain-integral key.
+
+        Both are mesh axes ``axis_map`` uses, in mesh order.  A mesh axis
+        ``axis_map`` leaves unused splits nothing: the state, every
+        grid-shaped input and every sharded static are replicated along
+        it (their partition specs never name it), so every device along
+        it holds the same block and computes the same partial.  Summing
+        the partials over it would count the block once per device --
+        JAX refused that ``psum`` at the first step, naming neither the
+        node nor the axis -- and stacking them along it would repeat
+        each partial, so the stacked values no longer summed to the
+        domain integral.  Such an axis is neither reduced nor stacked
+        over, whether ``domain_integral_axes()`` names it or not; the
+        result is replicated along it.  ``ShardedUnstructuredNode``
+        treats every mesh axis but its own the same way.
+        """
         mesh_axes = tuple(self._mesh.axis_names)
+        used = tuple(a for a in mesh_axes if a in self._axis_map)
         axes = self.domain_integral_axes().get(key)
         if axes is None:
-            return mesh_axes, ()
+            return used, ()
         axes = tuple(axes)
         unknown = [a for a in axes if a not in mesh_axes]
         if unknown:
@@ -897,7 +940,8 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
                 f"domain_integral_axes[{key!r}] names mesh axes {unknown} "
                 f"not in mesh.axis_names={mesh_axes}"
             )
-        return axes, tuple(a for a in mesh_axes if a not in axes)
+        return (tuple(a for a in used if a in axes),
+                tuple(a for a in used if a not in axes))
 
     # ------------------------------------------------------------------
     # update path
@@ -1065,7 +1109,8 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
             )
 
             # 5. Classify outputs: declared integrals → psum across the
-            #    full mesh; state fields → strip halos; otherwise raise
+            #    mesh axes axis_map uses (unless domain_integral_axes()
+            #    says otherwise); state fields → strip halos; otherwise raise
             #    (the out_specs build below would also catch it).  An
             #    integral first: a node whose ``state_fields()`` also lists
             #    it (the default lists every ``initial_state`` key) had it

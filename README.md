@@ -71,9 +71,8 @@ import jax.numpy as jnp
 from maddening import GraphManager, SimulationNode
 
 class BounceNode(SimulationNode):
-    @property
-    def requires_halo(self) -> bool:
-        return False  # pointwise (no spatial neighbors)
+    def halo_width(self) -> dict[int, int]:
+        return {}  # pointwise (no spatial neighbors)
 
     def initial_state(self):
         return {"position": jnp.array(5.0), "velocity": jnp.array(0.0)}
@@ -102,6 +101,7 @@ pip install maddening[runpod]
 # Set up ~/.maddening/cloud_credentials.yaml (see examples/cloud/config/)
 ```
 
+<!-- snippet: no-run, reason: cloud: provisions a cloud GPU instance -->
 ```python
 from maddening.cloud.launcher import CloudLauncher
 

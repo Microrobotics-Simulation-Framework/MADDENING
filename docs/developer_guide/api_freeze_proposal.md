@@ -141,7 +141,7 @@ changing one silently changes whether a user's node passes. `experimental`
 fits an opt-in extra whose constants are still being tuned.
 
 *What is not covered:* `@stability` decorates a class or a function, so the
-ten module constants in `mms.__all__` are outside the registry. The
+nine module constants in `mms.__all__` are outside the registry. The
 deprecation policy already says module constants are not covered by the
 signature guard; this is the first place it matters in practice, and a reader
 should take the level on the surrounding functions as speaking for them.
@@ -160,7 +160,7 @@ should take the level on the surrounding functions as speaking for them.
 | `core.simulation.profiler.count_hlo_ops` | `evolving` | **Zero tests name it**; reached only from inside `compile_counts()`. Same shape as `build_mapping`. | As above. |
 | `core.simulation.profiler.compile_counts`, `CompileCounts` | `evolving` | 25 dedicated tests, and the compile-count gate is the one piece of this group with a real contract. But `profiler.py` took 7 commits this cycle and `profile_graph`'s signature grew four parameters. | One quiet cycle. This is the strongest promotion candidate in the release for 0.5.0. |
 | `cloud.resume.download_and_load_state` | `evolving` | 48 tests across two files, a dedicated user guide, a real `__all__` export, and a deprecation shim at the old location — the best-evidenced new surface by some margin. It still fails criterion 2 (it *moved* this cycle) and criterion 4. | One cycle at its new home with the shim still in place. Promote in 0.5.0 if nothing moves. |
-| `sysid.*` (9) | `evolving` | 27 commits on `sysid.py` this cycle — the highest churn in the release — and **no dedicated user-guide page** for the single largest new surface. | Documentation first, then stability. Promoting an undocumented nine-function API would be promising a shape nobody can read. |
+| `sysid.*` (9) | `evolving` | 27 commits on `sysid.py` this cycle — the highest churn in the release. It is documented, but as a section of a shared page ("System identification: `maddening.sysid`" in `docs/user_guide/parameters.md`) rather than a page of its own, for the single largest new surface. | A quiet cycle. The user-guide section exists; promotion waits on the churn, not on documentation. |
 | `nodes.adaptive.base.AdaptiveNode` | `evolving` | The 2026-09-17 round argued for demoting it to `experimental` "for free today and not after 0.4.0 ships". I am **not** taking that recommendation: since then it gained a documented dtype policy, an algorithm guide, a verification benchmark and 12 test files, and `docs/release_notes/v0.4.0.md` states the `evolving` choice deliberately. The premise the demotion rested on has changed. | Nothing — `evolving` is the right level and the release notes already say why. |
 | `cloud.multigpu.halo_unstructured.*` (6) | `evolving` | Five of the six existed before 0.4.0 untagged and were tagged this cycle; `exchange_traffic` is new. Tagging them *was* this release's step. | A cycle at `evolving` with the sharding topology doc stable. |
 | `fmi.tcp_bridge.FmuTcpBridge` | `evolving` | Publicly exported and well tested, but it is an **unauthenticated listening socket** with its own protocol, documented as trusted-clients-only and explicitly out of scope of MADD-ANO-015's fix. Freezing its constructor freezes the shape of that exposure. | A decision on whether it gets the same auth treatment as the ZMQ transports. That decision will change its signature. |

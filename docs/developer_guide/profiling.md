@@ -5,6 +5,7 @@ faster without changing the answer?*
 
 ## `profile_graph`
 
+<!-- snippet: no-run, reason: fragment: gm is the reader's compiled graph -->
 ```python
 from maddening.core.simulation.profiler import profile_graph
 

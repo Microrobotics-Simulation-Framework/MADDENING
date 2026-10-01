@@ -20,7 +20,7 @@ When you discover a bug or anomaly:
 
 1. Create a GitHub Issue using the **anomaly** template (`.github/ISSUE_TEMPLATE/anomaly.md`)
 2. Fill in all mandatory fields: severity, safety relevance, rationale, affected components, affected versions, workaround
-3. Apply the appropriate labels: `anomaly:critical`, `anomaly:major`, or `anomaly:minor`
+3. Apply the appropriate labels: `anomaly:critical`, `anomaly:major`, or `anomaly:minor`, as defined by `AnomalySeverity` in `src/maddening/core/compliance/anomaly.py`.  A silent wrong result is never `anomaly:minor`
 4. If the anomaly could affect numerical correctness in a safety-relevant context, also apply the `safety-relevant` label
 
 ### Phase 2: Formalization (YAML Entry)
@@ -62,6 +62,8 @@ When the anomaly is resolved:
 - **Tier 2** (`anomaly:critical` or `anomaly:major`): YAML entry required before release — no grace period
 - **Tier 3** (`anomaly:minor`): Two-cycle grace period; CI warns after one release cycle, blocks after two
 
+Because a silent wrong result is at least `major`, it is always Tier 2 or Tier 1: it never takes the grace period.  The Tier 3 cycle counting is not automated yet (DOCUMENTATION_ARCHITECTURE.md section 9.7), so nothing in CI enforces the grace period either way.
+
 ## Code Style
 
 - NumPy-style docstrings
@@ -90,6 +92,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest tests/ -v --tb=short
 
 When writing code that uses an optional dependency, wrap the import with a try/except that tells the user which extra to install:
 
+<!-- snippet: no-run, reason: fragment: two import-guard patterns, excerpted from a module and from __getattr__ -->
 ```python
 # Module-level guard (for modules dedicated to one dep)
 try:

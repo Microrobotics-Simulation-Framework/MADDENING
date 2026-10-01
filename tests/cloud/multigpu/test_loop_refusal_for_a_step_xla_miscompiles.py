@@ -323,6 +323,32 @@ def test_the_verdict_follows_a_recompile_both_ways():
     gm.run_scan(1)
 
 
+def test_a_sharded_static_that_appears_after_construction_is_seen():
+    """The declaration half is read from the node's current ``static_data``,
+    not from what the wrapper classified when it was built: a node that
+    exposes its sharded static only later (a provider filling it in) is
+    asked about it on the next loop entry point."""
+    base = D.stencil_node_class(_ROD.contract, _ROD.reads_shard_info, _ROD.declares)
+
+    class Late(base):
+        exposed = False
+
+        @property
+        def static_data(self):
+            return self._static if self.exposed else {
+                k: v for k, v in self._static.items() if k != "kappa"}
+
+    node = Late(_ROD)
+    mesh = create_device_mesh(shape=(2, 2), axis_names=("px", "py"))
+    gm = GraphManager()
+    gm.add_node(ShardedStencilNode(node, mesh, {"px": 0}))
+    gm.compile()
+    gm.run_scan(1)
+    node.exposed = True
+    with pytest.raises(RuntimeError, match=_REFUSED):
+        gm.run_scan(1)
+
+
 def test_a_wrapper_the_probe_did_not_reach_is_refused(monkeypatch):
     """Fail closed: no answer from the wrapper is not a clean answer."""
     monkeypatch.setattr(sharded_node_module, "active_probe", lambda: None)

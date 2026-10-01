@@ -126,11 +126,11 @@ def test_non_float_leaves_count_only_the_steps_a_multirate_block_fires_on():
 
 
 def test_non_float_leaves_count_two_half_steps_per_accepted_adaptive_step():
-    """Explicit-Euler nodes, so the controller settles.  No ``bool`` leaf (the
-    adaptive steppers raise on one) and no ``uint32`` tag (it wraps in the
-    error norm and drives the step to ``dt_min``): strict xfails in
-    ``test_differential_schedules.py``."""
-    gdef = (_all_leaves(cg.TRIANGLE).as_ode(-1.0).without_leaves(("flag", "tag"))
+    """Explicit-Euler nodes, so the controller settles.  Every leaf kind,
+    the ``bool`` flag and the ``uint32`` tag included: the error norm used
+    to raise on the first and wrap on the second (see
+    ``test_differential_schedules.py``); it reads floating leaves only."""
+    gdef = (_all_leaves(cg.TRIANGLE).as_ode(-1.0)
             .with_timesteps({nd.name: 0.25 for nd in cg.TRIANGLE.nodes}))
     gm = cg.build_graph(gdef, dict(acceleration="aitken", tolerance=1e-5, max_iterations=12))
     values = _values(gdef)
@@ -188,8 +188,6 @@ def test_non_float_leaves_survive_generated_configurations(data):
     group = data.draw(cg.group_configs(gdef))
     group = dict(group, solver=data.draw(st.sampled_from(["ift", "fori"])),
                  diagnostics=data.draw(st.booleans()))
-    group = cg.steer_around_known_crashes(gdef, group)
-    gdef = cg.steer_leaves_around_known_crashes(gdef, group)
     schedule = data.draw(st.sampled_from(["uniform", "subcycled", "multirate"]))
     fast = None
     d = 1
@@ -222,25 +220,20 @@ def test_non_float_leaves_survive_generated_configurations(data):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=KeyError, reason=(
-    "differential: predictor + convergence_norm='mixed' + an int/bool leaf in "
-    "the group raises KeyError at trace (the predictor rebuilds the starting "
-    "iterate from float fields only); pending fix"))
 @pytest.mark.parametrize("predictor", ["linear", "quadratic"])
 def test_a_predictor_under_the_mixed_norm_steps_a_group_with_an_integer_leaf(predictor):
-    """The l2 and interface norms step this group; the mixed norm raises.
+    """The mixed norm steps this group, like the l2 and interface norms.
 
     ``_run_coupled_block_impl``'s predictor block extrapolates the floating
-    fields and writes ``new_state[nn] = predicted[nn]``, where
+    fields and wrote ``new_state[nn] = predicted[nn]``, where
     ``predicted`` comes from ``unflatten_coupled_state(..., fields=
     pred_fields)`` and so holds the floating fields *only*: the group's
-    integer and boolean leaves vanish from the iterate the solve starts
-    from.  ``one_pass`` recomputes them from the pre-step state, so the
-    l2 and interface norms (which never read them) do not notice;
-    ``coupling_residual_mixed`` reads ``s_old[nn][field]`` for every field
-    of the new iterate *before* skipping non-floats, and the first
-    residual raises ``KeyError`` naming the leaf.  The predictor's seed is
-    in ``_meta`` from ``compile()``, so this is the first step.
+    integer and boolean leaves vanished from the iterate the solve starts
+    from.  ``coupling_residual_mixed`` read ``s_old[nn][field]`` for every
+    field of the new iterate *before* skipping non-floats, and the first
+    residual raised ``KeyError`` naming the leaf.  The predicted fields
+    are now merged over the node's state, and the norms look a field up
+    in the old iterate only once they know it is floating.
     """
     gdef = cg._cycle(2, 1, outside=False, leaves=("count",))
     gm = cg.build_graph(gdef, dict(predictor=predictor, convergence_norm="mixed", rtol=1e-4))
@@ -267,20 +260,18 @@ def test_two_flux_producers_exchanging_fluxes_step_under_gauss_seidel():
     assert r["converged"]
 
 
-@pytest.mark.xfail(strict=True, raises=KeyError, reason=(
-    "differential: iteration_mode='jacobi' with a flux producer that reads "
-    "another node's flux raises KeyError at trace (the Jacobi pass lacks the "
-    "Gauss-Seidel pass's two-sweep flux seed); pending fix"))
 def test_two_flux_producers_exchanging_fluxes_step_under_jacobi():
     """Jacobi == Gauss-Seidel in what they can step.
 
-    ``one_pass_jacobi`` precomputes every producer's flux from the
+    ``one_pass_jacobi`` precomputed every producer's flux from the
     previous iterate with ``_resolve_boundary(nn, latest_results)`` --
     strict, and with no flux dict -- so a producer whose own input is a
-    flux edge cannot resolve it and the trace raises ``KeyError: 'q'``.
-    ``one_pass_gs`` has the fix (two sweeps, the first tolerating a
-    missing flux); the Jacobi pass never got it.  Two slabs exchanging
-    boundary heat fluxes are this graph.
+    flux edge could not resolve it and the trace raised ``KeyError: 'q'``.
+    ``one_pass_gs`` had the fix (two sweeps, the first tolerating a
+    missing flux); the Jacobi pass now seeds the same way wherever a
+    producer reads a flux.  Two slabs exchanging boundary heat fluxes are
+    this graph.  Neighbouring cases:
+    ``tests/core/test_coupling_jacobi_flux_seed.py``.
     """
     gdef = _mutual_flux_pair()
     gm = cg.build_graph(gdef, dict(tolerance=1e-5, max_iterations=30, iteration_mode="jacobi"))

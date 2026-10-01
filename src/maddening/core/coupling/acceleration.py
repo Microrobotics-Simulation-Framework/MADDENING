@@ -29,8 +29,8 @@ def _is_float_leaf(v) -> bool:
 def float_fields_of(state: dict[str, dict], node_names) -> dict[str, tuple[str, ...]]:
     """``{node: (float fields...)}`` for the given nodes -- the fields a
     coupling norm, a predictor or a fixed-point vector may contain.  A
-    counter, a flag or a PRNG key is recomputed from the pre-step state
-    on every pass and has no place in a floating-point norm."""
+    counter, a flag or a PRNG key is computed by every pass and has no
+    place in a floating-point norm, an extrapolation or a relaxation."""
     return {
         nn: tuple(f for f in sorted(state[nn]) if _is_float_leaf(state[nn][f]))
         for nn in node_names
@@ -332,9 +332,13 @@ def coupling_residual_mixed(
     for nn in node_names:
         for field_name in s_new[nn]:
             new_val = s_new[nn][field_name]
-            old_val = s_old[nn][field_name]
             if not _is_float_leaf(new_val):
-                continue        # counters / flags / keys: not part of the norm
+                # Counters / flags / keys: not part of the norm, and not
+                # looked up in ``s_old`` either -- an iterate rebuilt from
+                # its floating fields (a predictor's start) need not
+                # carry them.
+                continue
+            old_val = s_old[nn][field_name]
             if jnp.asarray(new_val).size == 0:
                 continue
             scaled, active = _scaled_change(new_val, old_val, atol, rtol)
@@ -385,9 +389,9 @@ def coupling_residual_interface(
     count = jnp.array(0, dtype=jnp.int32)
     for edge in interface_edges:
         new_val = s_new[edge.source_node][edge.source_field]
-        old_val = s_old[edge.source_node][edge.source_field]
         if not _is_float_leaf(new_val):
             continue            # an integer interface field cannot carry a norm
+        old_val = s_old[edge.source_node][edge.source_field]
         if edge.transform is not None:
             new_val = edge.transform(new_val)
             old_val = edge.transform(old_val)
@@ -527,8 +531,62 @@ def relaxation_step_scale(acceleration: str, relaxation: float) -> float:
       of the residual.
 
     See ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
+    A loop's first pass is the one exception to "``omega`` is exact";
+    see :func:`first_pass_relaxed_amplification`.
     """
     return float(relaxation) if acceleration == "fixed" else 1.0
+
+
+def first_pass_relaxed_amplification(amplification, acceleration: str,
+                                     relaxation: float, first):
+    """The amplification a loop's *first* pass may use: the relaxed one.
+
+    Every coupling loop starts with one plain, unrelaxed pass (the one
+    ``_run_coupling_inner`` runs before the loop), and the first loop
+    pass reads its rate from that pass's residual: ``r_1 / r_0`` spans an
+    *unrelaxed* step, so it is the map's own rate ``rho`` (read as
+    ``sqrt(rho)``, the seed filling both slots of
+    :func:`error_amplification`).  Every later ratio spans a relaxed
+    step and reads the relaxed rate ``mu = 1 - omega (1 - rho)``, which
+    is what :func:`relaxation_step_scale`'s ``omega`` assumes:
+    ``omega r / (1 - mu) = r / (1 - rho)``, the distance.  On the first
+    pass ``omega r / (1 - sqrt(rho))`` falls short of ``r / (1 - rho)``
+    whenever ``omega < 1 / (1 + sqrt(rho))``.  Measured under
+    ``acceleration="fixed"`` at ``rho = 0.5``, ``omega = 0.3``: a group
+    started two thresholds from its fixed point stopped on that pass
+    with ``ratio_usable=True``, an ``error_estimate`` of 0.72 thresholds
+    and ``converged=True``, 1.41 thresholds away.
+
+    So, on the first pass only, an under-relaxed group translates the
+    rate it read into the relaxed iteration's: a linear map's mode
+    ``lambda`` contracts at ``1 - omega (1 - lambda)`` under the
+    relaxation, whose amplification is ``1 / (omega (1 - rho))`` --
+    *amplification* divided by ``omega``.  The estimate then reads
+    ``r / (1 - sqrt(rho))``, never below the distance on one mode.
+    Over-relaxation (``omega >= 1``) is left alone: there
+    ``omega r / (1 - sqrt(rho))`` already exceeds ``r / (1 - rho)``, and
+    the translated amplification could fall below one, which reads as a
+    rejected ratio.  Every other acceleration's step scale is 1, and its
+    first pass is unchanged too.
+
+    ``first`` is the traced "this is the loop's first pass" predicate.
+    Where nothing is rescaled -- statically, :func:`relaxes_first_pass`
+    -- *amplification* is returned untouched, so the program is the one
+    it always was; callers build ``first`` only where it is read.  A
+    rejected ratio (``0.0``) stays rejected.
+    """
+    if not relaxes_first_pass(acceleration, relaxation):
+        return amplification
+    amp = jnp.asarray(amplification)
+    return jnp.where(first, amp / jnp.asarray(relaxation, amp.dtype), amp)
+
+
+def relaxes_first_pass(acceleration: str, relaxation: float) -> bool:
+    """Whether :func:`first_pass_relaxed_amplification` rescales anything.
+
+    Static: ``acceleration="fixed"`` with ``relaxation < 1``.
+    """
+    return acceleration == "fixed" and float(relaxation) < 1.0
 
 
 def estimated_error(residual, amplification, step_scale=1.0):

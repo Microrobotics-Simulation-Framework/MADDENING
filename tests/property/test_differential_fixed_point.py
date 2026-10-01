@@ -139,12 +139,6 @@ def assert_converged_means_within_threshold(gdef, gm, group, values, head_start,
          f"{dict(d)}")
     if not d["converged"] or d["precision_limited"]:
         return
-    if (omega * (1.0 + abs(lam) ** 0.5) < 1.0 and d["iterations"] == 1):
-        # The strict xfail at the end of this module: an exit on the first
-        # loop pass under this much under-relaxation reads the unrelaxed
-        # pass's rate.  Stepped around here so the property stays about
-        # everything else; the xfail must flip when it is fixed.
-        return
     if not d["ratio_usable"]:
         # Documented: a rejected ratio degrades ``converged`` to the raw
         # residual test, and says so.  That fallback is held below, not
@@ -323,7 +317,6 @@ def test_a_usable_spectral_bound_holds_on_generated_graphs(data):
     gdef = data.draw(cg.graph_defs(allow_nonlinear=False, leaves=()))
     group = data.draw(cg.group_configs(gdef, predictors=("none",), caps=(2, 5, 30, 200),
                                        thresholds=(1e-6, 1e-4, 1e-2)))
-    group = cg.steer_around_known_crashes(gdef, group)
     note(f"{gdef}\n{group}")
     gm = cg.build_graph(gdef, dict(group, diagnostics=True))
     values = data.draw(cg.drawn_values(gdef, rhos=(0.5, 0.9, 0.99, 0.999)))
@@ -378,10 +371,6 @@ def test_the_estimate_is_the_distance_for_fixed_relaxation_past_the_first_pass(s
     assert d["error_estimate"] == pytest.approx(dist, rel=1e-2)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "differential: under acceleration='fixed' with relaxation < 1/(1+sqrt(rho)), "
-    "an exit on the first loop pass scales the unrelaxed pre-loop pass's rate by "
-    "omega, understating the distance ~2x with converged=True; pending fix"))
 @pytest.mark.parametrize("solver", ["ift", "fori"])
 def test_converged_on_the_first_pass_under_under_relaxation_is_within_the_threshold(solver):
     """Converged => within the threshold, in the regime the docs call exact.
@@ -394,14 +383,25 @@ def test_converged_on_the_first_pass_under_under_relaxation_is_within_the_thresh
     the *unrelaxed* pass ``_run_coupling_inner`` ran before the loop --
     so on that pass the rate read is ``rho`` (as ``sqrt(rho)``, the seed
     filling both slots), not ``mu``, and ``omega r / (1 - sqrt(rho))``
-    falls short of ``r / (1 - rho)`` whenever ``omega < 1 / (1 + sqrt(rho))``.
-    Here (``rho = 0.5``, ``omega = 0.3``, two thresholds away): one pass,
-    ``ratio_usable=True``, ``error_estimate`` 0.72 thresholds,
-    ``converged=True`` -- and the state is 1.41 thresholds from the fixed
-    point.  Both solvers seed the same way (``first_r`` on the fori path).
+    fell short of ``r / (1 - rho)`` whenever ``omega < 1 / (1 + sqrt(rho))``.
+    Here (``rho = 0.5``, ``omega = 0.3``, two thresholds away) the group
+    stopped on that pass with ``ratio_usable=True``, ``error_estimate``
+    0.72 thresholds and ``converged=True``, 1.41 thresholds from the
+    fixed point.  The first pass now reads the relaxed rate the ratio
+    implies (``first_pass_relaxed_amplification``), the estimate there is
+    ``r / (1 - sqrt(rho))`` = 2.4 thresholds, and the group goes on to a
+    later pass where the estimate is the distance.  A first-pass exit
+    closer in, and the neighbouring relaxations:
+    ``tests/core/test_coupling_first_pass_relaxed_rate.py``.
     """
     d, dist = _relaxed_pair(solver, 0.3, 2.0e-4)
-    assert d["iterations"] == 1 and d["ratio_usable"]
-    assert not d["converged"] or dist <= 1e-4, (
-        f"converged=True on the first pass at {dist / 1e-4:.2f} thresholds "
-        f"(error_estimate {d['error_estimate'] / 1e-4:.2f})")
+    assert d["ratio_usable"] and d["converged"]
+    assert d["iterations"] > 1, "the first pass's estimate (2.4 thresholds) let it stop"
+    assert dist <= 1e-4, (
+        f"converged=True at {dist / 1e-4:.2f} thresholds "
+        f"(error_estimate {d['error_estimate'] / 1e-4:.2f}, {d['iterations']} passes)")
+    # Past the first pass the estimate is the distance, to its own float32
+    # resolution (``floor * amp + 2 omega floor amp**2``; the module docstring).
+    floor = residual_noise_floor("l2", 1e-6, 2)
+    amp = d["amplification"]
+    assert abs(d["error_estimate"] - dist) <= floor * amp + 2 * 0.3 * floor * amp ** 2

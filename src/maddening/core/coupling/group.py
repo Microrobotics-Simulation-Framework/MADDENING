@@ -149,8 +149,8 @@ class CouplingGroup:
         ``ValueError`` here rather than failing inside the traced
         coupling loop.  Only floating-point fields are accelerated,
         here and under ``"aitken"`` / ``"fixed"``: an integer, boolean
-        or PRNG-key field is recomputed from the pre-step state on every
-        pass, so a named one is dropped from the selection, and
+        or PRNG-key field is computed by every pass and cannot be
+        relaxed, so a named one is dropped from the selection, and
         ``compile()`` refuses a selection that names no floating field.
         (Before 0.4.0, ``solver="fori"`` with ``"aitken"`` or
         ``"fixed"`` relaxed such fields through float32 and kept the

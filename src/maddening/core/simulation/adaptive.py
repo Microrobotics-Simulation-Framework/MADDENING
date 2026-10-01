@@ -54,18 +54,43 @@ class AdaptiveConfig:
     order: int = 1
 
 
+def _is_inexact_leaf(leaf) -> bool:
+    """A floating (or complex) array: something a truncation error lives in."""
+    return bool(jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.inexact))
+
+
 def _tree_error_norm(state_fine, state_coarse, atol, rtol):
     """Compute the mixed absolute/relative error norm.
 
     Uses the formula:
         err_i = |fine_i - coarse_i| / (atol + rtol * max(|fine_i|, |coarse_i|))
-    Returns the RMS norm over all elements.
+    Returns the RMS norm over every element of every floating leaf.
+
+    **Floating leaves only.**  The norm measures the local truncation
+    error step doubling exposes, which lives in the fields an integrator
+    advances.  An integer, unsigned, boolean or PRNG-key leaf (a counter,
+    a tag, a flag) carries no truncation error, and reading one gave a
+    wrong step sequence: a ``bool`` cannot be subtracted at all
+    (``TypeError``); a ``uint32``'s ``fine - coarse`` wraps modulo
+    ``2**32``, so an unread tag read as an error of order one and the
+    controller rejected nearly every step (199,981 rejections in 199,991
+    attempts on a two-node pair); and an ``int32`` counter, which is
+    ``k + 2`` after the two half steps and ``k + 1`` after the full step
+    *by construction*, added a term and an element to the RMS and moved
+    the accepted steps (77 became 65 on the same pair).  Such leaves are
+    skipped -- they add neither a term nor an element -- so a graph steps
+    exactly as it would without them, and an all-floating state is
+    measured exactly as before.  A floating field that is the same in
+    both estimates still counts as an element: that is the RMS convention
+    adaptive ODE solvers use.
     """
     sum_sq = jnp.array(0.0)
     count = jnp.array(0, dtype=jnp.int32)
 
     def _accumulate(fine, coarse):
         nonlocal sum_sq, count
+        if not _is_inexact_leaf(fine):
+            return
         diff = jnp.abs(fine - coarse)
         scale = atol + rtol * jnp.maximum(jnp.abs(fine), jnp.abs(coarse))
         scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)

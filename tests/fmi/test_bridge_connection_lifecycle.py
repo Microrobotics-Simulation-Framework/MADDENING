@@ -646,3 +646,62 @@ def test_no_sequence_of_silent_connects_can_lock_out_an_honest_client(actions):
                     sock.close()
                 except OSError:
                     pass
+
+
+# ------------------------------------------------- idle_timeout (argument)
+#
+# The idle budget was a module constant, so a master that legitimately paused
+# longer than five minutes between calls -- a debugging session, a partner
+# model computing for an hour -- lost its connection, and with it the
+# instance, whatever it needed.  FmuTcpBridge(idle_timeout=...) sets it per
+# bridge; None waits for ever.
+
+
+def _graph_bridge(**kw):
+    from maddening.fmi import build_model_description
+    from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
+
+    gm = _shared_graph()
+    md = build_model_description(gm, model_name="Plant")
+    sidecar = FmuSidecar(SidecarConfig(
+        schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+        initial_state=gm._state, params=gm.params))
+    return tcp_bridge.FmuTcpBridge(sidecar, md, master_dt=gm.timestep, **kw)
+
+
+def test_idle_timeout_drops_a_silent_connection_at_the_value_given(monkeypatch):
+    monkeypatch.setattr(tcp_bridge, "_IDLE_TIMEOUT", 60.0)      # the default is not it
+    with _graph_bridge(idle_timeout=0.5) as bridge:
+        holder = socket.create_connection(_endpoint(bridge), timeout=5)
+        try:
+            holder.settimeout(5)
+            started = time.monotonic()
+            send_message(holder, {"op": "hello"})
+            assert recv_message(holder)["ok"]
+            assert _wait_until(lambda: not bridge._busy.locked(), timeout=10)
+            assert time.monotonic() - started < 10
+            assert _hello(bridge)["ok"]
+        finally:
+            holder.close()
+
+
+def test_idle_timeout_none_keeps_a_silent_connection(monkeypatch):
+    monkeypatch.setattr(tcp_bridge, "_IDLE_TIMEOUT", 0.3)       # would drop it at once
+    with _graph_bridge(idle_timeout=None) as bridge:
+        holder = socket.create_connection(_endpoint(bridge), timeout=5)
+        try:
+            holder.settimeout(5)
+            send_message(holder, {"op": "hello"})
+            assert recv_message(holder)["ok"]
+            time.sleep(1.0)
+            assert bridge._busy.locked()                         # still the instance
+            send_message(holder, {"op": "get", "vr": [1]})
+            assert recv_message(holder)["ok"]
+        finally:
+            holder.close()
+
+
+@pytest.mark.parametrize("bad", [0, -1.0, float("nan"), float("inf"), "300", True])
+def test_idle_timeout_must_be_a_positive_number_or_none(bad):
+    with pytest.raises(ValueError, match="idle_timeout"):
+        _graph_bridge(idle_timeout=bad)

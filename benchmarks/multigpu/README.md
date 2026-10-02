@@ -20,12 +20,12 @@ pod except whether to stop.
 
 | # | claim | goal(s) | compared against | limit |
 |---|---|---|---|---|
-| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (a field under periodic, edge and Dirichlet ends and a D2Q9 lattice, on the 1-D and the 2 × 2 pencil mesh), `forward` | the unsharded node, same pod | rel 1e-5 |
+| 1 | sharded ≡ unsharded, stencil and unstructured wrappers | `stencil` (a field under periodic, edge and Dirichlet ends and a D2Q9 lattice, on every mesh below), `forward` | the unsharded node, same pod | rel 1e-5 |
 | 2 | halo exchange at the shard and global boundaries | `halo` | NumPy, every slot, forward and adjoint | **0** (bit for bit) |
 | 3 | sharded adjoint ≡ unsharded adjoint | `stencil`, `gradient`, `coupled` | the unsharded adjoint | rel 1e-5 (rollouts), 1e-4 (coupled, IFT), 1e-3 (`sharded_cg`) |
-| 4 | nested `HybridNode(ShardedStencilNode(inner))` | `hybrid` (pencil mesh) | `HybridNode(inner)` in the same graph | rel 1e-5 |
+| 4 | nested `HybridNode(ShardedStencilNode(inner))` | `hybrid` (every mesh) | `HybridNode(inner)` in the same graph | rel 1e-5 |
 | 5 | an indivisible grid is refused | `indivisible` | the documented `ValueError`, naming both numbers | exact |
-| 6 | one sharded and one replicated member in one coupling group, with its adjoint | `coupled` (pencil mesh) | the same group with the node unwrapped, **and** a float64 model of the coupled step | rel 1e-5 forward; gradient 1e-4 (IFT) / 1e-5 (`"fori"`), 1e-4 against the model |
+| 6 | one sharded and one replicated member in one coupling group, with its adjoint | `coupled` (every mesh) | the same group with the node unwrapped, **and** a float64 model of the coupled step | rel 1e-5 forward; gradient 1e-4 (IFT) / 1e-5 (`"fori"`), 1e-4 against the model |
 
 The limits live in `LIMITS` in `run_pod.py`, each with its reason; a dry
 run is held to the same ones.  Item 6 has no expected value anywhere else,
@@ -33,6 +33,33 @@ which is why its goal also carries an independent float64 model: a fault
 that moved the sharded and the unsharded group alike (a solver problem on
 the GPU backend, say) passes a sharded-versus-unsharded comparison and
 fails against the model.
+
+### The meshes, and why four devices need more than the pencil
+
+Every goal that runs the stencil wrapper or the halo exchange runs it on
+four meshes (`STENCIL_MESHES`), named for what they shard; over four
+devices, as devices along spatial axis 0 × axis 1:
+
+| mesh | shape | what it adds |
+|---|---|---|
+| `1d` | 4 × 1 | spatial axis 0 split over all four devices; axis 1 whole on each, filled by the wrapper as unsharded |
+| `1d-axis1` | 1 × 4 | the same 1-D mesh sharding spatial axis 1 (`axis_map={MESH_AXIS: 1}`): axis 1 over all four, axis 0 the unsharded one |
+| `2d-flat` | 1 × 4 | a 2-D mesh whose two axes have different sizes: the wrapper's one-device exchange on axis 0, all four on axis 1 |
+| `2d` | 2 × 2 | the pencil: two exchanged axes, so a node reading a halo corner reads one that crossed both |
+
+On a mesh axis of two devices a shard's left and right neighbour are the
+same device, so a halo taken from the wrong neighbour passes every
+comparison.  On four devices the pencil is 2 × 2 and **both** of its axes
+are like that; until schema 6 the wrapper goals ran on `1d` and `2d` only,
+on square grids, and three faults confined to spatial axis 1 passed every
+goal and closed all six items once relabelled as a GPU run (below).  So
+each goal records a spatial axis that none of its cases splits over three
+or more devices as a check *not run* (it is never the case on four devices
+with the meshes above), every grid is non-square (`nx = ny + 4` on four
+devices, 16 × 20 in the dry run), and every grid-shaped input -- the
+source, the lattice's body force, the coupled field's `ambient` -- differs
+on every block of every mesh.  The smallest size runs every mesh; the
+larger sizes run the pencil only.
 
 ### What a broken wrapper does to the goals
 
@@ -44,22 +71,35 @@ four ways -- a static's halos set to NaN, grid-shaped inputs zeroed,
 domain integrals halved, every sharded axis after the first zero-filled at
 the global edges -- passed every goal and closed items 1, 3, 4 and 6 once
 relabelled as a GPU run.  The goals' `Field2D` now reads its mask one cell
-into the halo (face-averaged conductances), takes a grid-shaped `source`
-(read through a 5-point smoothing) and a grid-shaped `ambient`, and
-carries a domain integral, `averages`, in its state; the goals run on the
-2 × 2 pencil mesh, and the `stencil` goal adds `LBMNode` on D2Q9, whose
-streaming reads the halo corners.  In the `coupled` goal the field reaches
-the far field through `averages` and the far field reaches the field as a
-grid-shaped `ambient`, so both paths are inside the group's fixed point
-and its adjoint.
+into the halo (face-averaged conductances, the mask sharded along a
+spatial axis the wrapper shards and sliced along the other by
+`shard_info`), takes a grid-shaped `source` (read through a 5-point
+smoothing) and a grid-shaped `ambient`, and carries a domain integral,
+`averages`, in its state; the goals run on every mesh above, and the
+`stencil` goal adds `LBMNode` on D2Q9, whose streaming reads the halo
+corners.  In the `coupled` goal the field reaches the far field through
+`averages` and the far field reaches the field as `ambient = u ×
+profile`, a non-uniform grid (until schema 6, `u` broadcast to every cell,
+under which a wrapper handing each shard another shard's block of an input
+passed), so both paths are inside the group's fixed point and its adjoint.
 
-`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds the four faults
-as seeds of `sharded_node.py`: slow-marked, it applies each to a scratch
-copy of the library, runs `--goal checklist --dry-run --keep-going`, and
-requires `stencil`, `hybrid` and `coupled` to read `FAIL` (and
-`indivisible` and `halo` `PASS`), items 1, 3, 4 and 6 `FAILED` once
-relabelled as four GPUs, and the unseeded copy to pass everything.  Its
-per-push tests fail when a seed no longer matches the wrapper, and check
+Three more faults passed every goal on four devices until schema 6: each
+halo along spatial axis 1 taken from the wrong neighbour (in
+`halo_exchange`), `shard_info`'s block extent divided by the first mesh
+axis's size, and `shard_info`'s global extent read off spatial axis 0 for
+every axis (which passed on eight devices too, the grids being square).
+They now fail on `1d-axis1` and `2d-flat`, on `2d-flat`, and on every mesh
+that shards axis 1, respectively.
+
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds the seven
+faults as seeds of `sharded_node.py` and `halo.py`: slow-marked, it
+applies each to a scratch copy of the library, runs `--goal checklist
+--dry-run --keep-going`, and requires `stencil`, `hybrid` and `coupled`
+to read `FAIL` (and `halo` too for the `halo_exchange` seed; the other
+checklist goals `PASS`), every item those goals decide `FAILED` once
+relabelled as four GPUs, the failed `stencil` checks to be on the meshes
+the fault can reach, and the unseeded copy to pass everything.  Its
+per-push tests fail when a seed no longer matches the library, and check
 one step of the goals' own node against each seeded wrapper in-process.
 
 ### The transport question
@@ -77,12 +117,12 @@ carries it to the GPUs.
 
 | # | CPU virtual devices (`tests/cloud/multigpu/`) | on the pod |
 |---|---|---|
-| 1 | `test_property_sharded_equals_unsharded.py` (all three wrappers, 1–4 devices, node and graph level), `test_sharded_stencil_node.py`, `test_sharded_unstructured.py`, `test_exchange_ppermute.py`, `test_stencil_static_halo_and_axis_map.py`, `test_sharded_boundary_inputs.py`, `test_stencil_domain_integral_state.py`, `test_lbm_sharded.py` | `stencil` (a 2-D field reading a sharded `StaticArray` in its halo, with a grid-shaped source and a domain integral, 1e5–1e6 cells: periodic ends at every size on the pencil mesh, and at the smallest size `"edge"` ends -- the wrapper's default fill -- and Dirichlet ends held through a boundary input, plus a D2Q9 lattice with a grid-shaped body force, each on the 1-D and the pencil mesh), `forward` (unstructured, both transports) |
-| 2 | `test_halo.py` (slab and pencil fills, halo 1 and 2, the gradient by finite differences), `test_property_exchange_transports.py`, `test_exchange_ppermute.py` | `halo`: every mode × width on a 1-D and a 2×2 mesh, and the unstructured exchange under both transports, forward and adjoint, bit for bit |
+| 1 | `test_property_sharded_equals_unsharded.py` (all three wrappers, 1–4 devices, node and graph level), `test_sharded_stencil_node.py`, `test_sharded_unstructured.py`, `test_exchange_ppermute.py`, `test_stencil_static_halo_and_axis_map.py`, `test_sharded_boundary_inputs.py`, `test_stencil_domain_integral_state.py`, `test_lbm_sharded.py` | `stencil` (a 2-D field reading a sharded `StaticArray` in its halo, with a grid-shaped source and a domain integral, 1e5–1e6 cells: periodic ends at every size on the pencil mesh, and at the smallest size `"edge"` ends -- the wrapper's default fill -- and Dirichlet ends held through a boundary input, plus a D2Q9 lattice with a grid-shaped body force, each on all four meshes), `forward` (unstructured, both transports) |
+| 2 | `test_halo.py` (slab and pencil fills, halo 1 and 2, the gradient by finite differences), `test_property_exchange_transports.py`, `test_exchange_ppermute.py` | `halo`: every mode × width on all four meshes (a 1-D mesh along each spatial axis, the 1 × 4 two-axis mesh, the 2 × 2 pencil), and the unstructured exchange under both transports, forward and adjoint, bit for bit |
 | 3 | `test_property_sharded_equals_unsharded.py::test_a_gradient_through_the_sharded_path_matches_the_unsharded_one`, `test_property_injected_params_gradient.py`, `test_sharded_gradient.py` (finite differences), `test_iterative_solver.py` | `stencil` (d/d initial field and d/d a parameter), `gradient`, `coupled` |
-| 4 | `test_sharded_static_cache.py`: static-cache invalidation, hashing and drift through `HybridNode(ShardedStencilNode(...))` with an empty correction — no forward or adjoint parity with a non-zero correction | `hybrid`: `run_scan` and `jax.grad` of the graph on the pencil mesh with a non-local correction (a shift across shards), a grid-shaped source held through an external input, and the field's domain integral compared |
-| 5 | `test_property_shard_construction.py` (the stencil and pointwise refusals; the unstructured wrapper taking a prime cell count) | `indivisible`: the same refusals on the real mesh, a 2×2 pencil refusal naming axis 1 (recorded as *not run* on a device count with no pencil mesh), and an uneven unstructured split matching the unsharded node |
-| 6 | `test_coupling_group_with_sharded_and_replicated_members.py`: forward on every push, adjoint in the slow lane, default solver and `"fori"`, against the unwrapped group and a float64 model | `coupled`, on the pencil mesh, coupled through the field's domain integral and a grid-shaped input |
+| 4 | `test_sharded_static_cache.py`: static-cache invalidation, hashing and drift through `HybridNode(ShardedStencilNode(...))` with an empty correction — no forward or adjoint parity with a non-zero correction | `hybrid`: `run_scan` and `jax.grad` of the graph on all four meshes at the smallest size (the pencil at the others) with a non-local correction (a shift across shards along both axes), a grid-shaped source held through an external input, and the field's domain integral compared |
+| 5 | `test_property_shard_construction.py` (the stencil and pointwise refusals; the unstructured wrapper taking a prime cell count) | `indivisible`: the same refusals on the real mesh, along spatial axis 0 and along axis 1 of the 1-D mesh, a 2×2 pencil refusal naming axis 1 (recorded as *not run* on a device count with no pencil mesh), and an uneven unstructured split matching the unsharded node |
+| 6 | `test_coupling_group_with_sharded_and_replicated_members.py`: forward on every push, adjoint in the slow lane, default solver and `"fori"`, against the unwrapped group and a float64 model | `coupled`, on all four meshes at the smallest size (the pencil at the others), coupled through the field's domain integral and a non-uniform grid-shaped input |
 
 Before item 6's test, the nearest coverage was
 `test_sharded_wrapper_coupling_hooks.py`, which couples a
@@ -170,7 +210,10 @@ Until the runner records those, the session makes them true by procedure:
   the same pod, in one session: the summary checks that an item's files
   share a commit, not that they share a machine.
 * **Check `device_kinds` by eye** in the summary's run table: every line
-  of the session names the GPU the pod was rented with.
+  of the session names the GPU the pod was rented with.  The same table
+  names each file's commit, every checklist line names the commit its
+  item closed on, and a directory mixing commits prints `MIXED COMMITS`
+  and exits 4 (section 5).
 
 ```sh
 cd ~/sky_workdir
@@ -200,9 +243,11 @@ next: **0** = no check failed, go on; **1** = a check failed (the log
 names it on a `CHECK FAILED` line); **124** = the time box ran out;
 anything else = a crash.  Anything but 0 is the stop condition in
 section 3.  A `CHECK NOT RUN` line is a case this device count cannot
-express (the 2-D pencil cases need an even count of at least 4); it is
-not a failure and does not stop the session, but it keeps the item open.
-On four GPUs there are none.
+express (the 2-D pencil cases need an even count of at least 4; a halo
+from the wrong neighbour shows only on a mesh axis of three or more
+devices, which the 1-D meshes give each spatial axis); it is not a
+failure and does not stop the session, but it keeps the item open.  On
+four GPUs there are none.
 
 ```sh
 R="python benchmarks/multigpu/run_pod.py --out results/multigpu"
@@ -223,8 +268,9 @@ coupled goal is third because item 6 is the one no other measurement
 covers.  `--goal checklist` runs the first five in one process and
 `--goal all` all eight; both stop after the first goal whose checks fail
 (`--keep-going` overrides; do not use it on the pod).  Defaults on GPUs:
-cells `1e5 3e5 1e6` (square 2-D fields for the stencil goals, rows a
-multiple of the device count), 5 warmup + 20 timed repeats, 20 steps per
+cells `1e5 3e5 1e6` (2-D fields of `ny × (ny + 4)` for the stencil goals,
+never square, both a multiple of the device count), 5 warmup + 20 timed
+repeats, 20 steps per
 timed block, 5 differentiated steps, `--n-devices 4`.  The checklist goals
 refuse one device.  Re-run `exchange` with `--fields 5 --out
 results/multigpu-f5` if time allows (the payload of a 5-field state); the
@@ -321,8 +367,10 @@ and commit it with the summary output pasted into the commit body.
 ## 5. Read the result
 
 `python benchmarks/multigpu/run_pod.py --summarise benchmarks/results/multigpu`
-exits 0 when no recorded check failed, 3 when any failed or a file cannot
-decide (below), and 1 when the directory holds no goal JSON.  It does not
+exits 0 when no recorded check failed and every file records one commit,
+3 when any check failed or a file cannot decide (below), 4 when nothing
+failed but the files come from more than one commit (below), and 1 when
+the directory holds no goal JSON.  It does not
 take a check's recorded `passed` on trust: pass/fail is re-derived from
 the check's `value`, `limit` and `sense`, and a record that disagrees --
 a value of 0.5 against a limit of 0.0 recorded as passed, say -- is
@@ -334,7 +382,7 @@ evidence only if it is what `run_pod.py`, as it stands, would have
 written; otherwise its goal reads `INVALID` and it closes nothing.  A
 file must:
 
-* be on the current `schema_version` (5);
+* be on the current `schema_version` (6);
 * record an `n_devices` no larger than the devices its `environment`
   lists (`n_devices_visible`, which must count `devices`), and the same
   `n_devices` in its `config` and in every result entry;
@@ -353,7 +401,15 @@ file must:
 And the files that decide one checklist item must all record the same
 `git_commit` (and must record one).  A directory holding goals from two
 commits keeps the items they share open; re-run those goals on one
-commit.  If the runner itself changed between the session and the
+commit.  That rule is per item, so items decided by different goals can
+each close on a different commit -- the directory a session leaves when it
+re-runs some goals on a fix commit and keeps the earlier passing files.
+So every checklist line names the commit its item's files record (each
+commit with its files, when they disagree), and a directory whose files
+come from more than one commit -- or where some record none -- prints
+`WARNING: MIXED COMMITS`, naming each commit with the items it decides and
+its files, repeats the warning as the last line, and exits 4 (3 if a check
+failed as well).  Read such a checklist as several sessions, not one.  If the runner itself changed between the session and the
 summary (a new check, a new case), the session's files no longer match
 it and read `INVALID`: summarise with the commit the session ran, which
 every file records.  The transport ranking uses the rows of an
@@ -362,8 +418,8 @@ every file records.  The transport ranking uses the rows of an
 It prints:
 
 * **Runs**: one line per JSON file — platform, devices, device kind,
-  `jax / jaxlib`, dry run, checks passed, verdict (`PASS`, `FAIL`,
-  `INVALID`, `INCOMPLETE`).
+  `jax / jaxlib`, dry run, checks passed, commit (12 characters), verdict
+  (`PASS`, `FAIL`, `INVALID`, `INCOMPLETE`).
 * **Checklist**: per item, `CLOSED` (every goal that decides it passed,
   with every check run and every file valid, on real GPUs, not a dry run,
   on ≥ 4 devices, from one commit — `--allow-fewer-devices` does not
@@ -374,10 +430,12 @@ It prints:
   recorded no checks, or is `INCOMPLETE`: a check was recorded as not
   run), `open: passed on CPU / dry run only`, `open: passed on fewer than
   4 devices`, or `open: its files come from N commits` / `open: no git
-  commit recorded in <file>`.  The session succeeded when all six read
-  `CLOSED`.
+  commit recorded in <file>`, then the commit its files record.  The
+  session succeeded when all six read `CLOSED` and the summary exits 0.
 * **Records that cannot decide**: every reason a file is `INVALID`, and
   every item whose files come from more than one commit.
+* **`WARNING: MIXED COMMITS`**, when the directory's files come from more
+  than one commit: each commit, the items it decides and its files.
 * **Failed checks**, each with its value and limit, and **Checks not
   run**, each with why.
 * The per-goal tables (indivisible, halo, coupled, stencil, hybrid), then
@@ -408,7 +466,7 @@ unsharded one" is a statement about the compiled step, not about Python;
 and in `coupled`, the sharded against the unsharded `value_and_grad`
 time, which is where the device-0 gather above shows its cost at scale.
 
-## Schema of the JSON (schema_version 5)
+## Schema of the JSON (schema_version 6)
 
 Common: `goal`, `dry_run`, `allow_fewer_devices`, `n_devices` (the mesh
 size), `environment` (`hostname`, `timestamp_utc`, `python`, `jax`,
@@ -427,17 +485,22 @@ reference_scale, finite}`; a bare `parity_*` number is the largest
 componentwise relative difference; every `compile_s` is an ahead-of-time
 compile without execution.
 
-* `indivisible.json` results (one entry): `stencil`, `pointwise` and,
-  on an even count ≥ 4 devices, `pencil` = `{shape, raised, message}`
-  (otherwise a check not run) (`stencil` also
-  `divisible_shape`, `divisible_raised`: one row fewer is accepted);
+* `indivisible.json` results (one entry): `stencil`, `stencil_axis1`
+  (the 1-D mesh sharding spatial axis 1, one column too many),
+  `pointwise` and, on an even count ≥ 4 devices, `pencil` = `{shape,
+  raised, message}` (otherwise a check not run) (`stencil` and
+  `stencil_axis1` also `divisible_shape`, `divisible_raised`,
+  `divisible_message`: one row, or column, fewer is accepted);
   `unstructured` = `{cells, partition, cells_per_device, steps,
   parity_x}`.
 * `halo.json` results (one entry): `stencil_cases` = `[{mesh,
-  mesh_shape, shape, halo, boundary, forward_max_abs, adjoint_max_abs}]`,
+  mesh_shape, shape, halo, boundary, forward_max_abs, adjoint_max_abs}]`
+  (`mesh` one of `1d`, `1d-axis1`, `2d-flat`, `2d`; `mesh_shape` the
+  devices along spatial axes 0 and 1),
   `unstructured` = `{cells, partition, n_local_max, n_ghost_max,
   methods.<m>.{forward_max_abs, adjoint_max_abs}}`.
-* `coupled.json` results: `mesh` (`1d`/`2d`), `mesh_shape`, `cells`,
+* `coupled.json` results, one per mesh and size: `mesh` (`1d`,
+  `1d-axis1`, `2d-flat` or `2d`), `mesh_shape`, `cells`,
   `shape`, `steps`, `coupled_dof`, `max_iterations`, `tolerance`,
   `parameters`, `model` (`loss`, `grad` and `wall_s` of the float64
   model), `solvers.<ift|fori>` = `{sharded, unsharded}` (`compile_s`,
@@ -447,7 +510,8 @@ compile without execution.
   `parity_loss`, `parity_grad`, `model.<side>.{f, averages, u, loss,
   grad}`.
 * `stencil.json` results, one per case: `node` (`field` or `lbm`), `mesh`
-  (`1d` or `2d`), `mesh_shape`, `cells`, `shape`, `boundary`
+  (`1d`, `1d-axis1`, `2d-flat` or `2d`), `mesh_shape`, `cells`, `shape`,
+  `boundary`
   (`periodic`, `edge` or `dirichlet`), `steps`, `grad_steps`,
   `parameter` (`diffusivity` or `viscosity`), `input_partitioned`,
   `forward.{sharded,unsharded}` (`compile_s`, `rollout` timing with
@@ -455,8 +519,9 @@ compile without execution.
   `velocity`), `gradient.{sharded,unsharded}` (`compile_s`, `grad`
   timing, `loss`, `grad_parameter`), `gradient.parity_loss`,
   `gradient.parity_grad_initial_field`, `gradient.parity_grad_parameter`.
-* `hybrid.json` results: `mesh`, `mesh_shape`, `cells`, `shape`, `steps`,
-  `grad_steps`, `correction_shift_rows`, `{sharded,unsharded}`
+* `hybrid.json` results, one per mesh and size: `mesh`, `mesh_shape`,
+  `cells`, `shape`, `steps`, `grad_steps`, `correction_shift` (rows,
+  columns), `{sharded,unsharded}`
   (`run_scan_first_call_s`, `partitioned`, `compile_s`, `value_and_grad`
   timing, `loss`, `grad`), `correction_rel`, `parity_f`,
   `parity_averages`, `parity_loss`, `parity_grad`.
@@ -481,7 +546,12 @@ compile without execution.
   `grad_sharded`, `grad_unsharded`, `compile_s.{sharded,unsharded}`,
   `grad_parity`, `jvp_parity`).
 
-Schema 4 files ran the stencil goals on a 1-D mesh only, with a node that
+Schema 5 files ran the wrapper goals on the 1-D (axis 0) and the pencil
+mesh only (the graph goals on the pencil only), on square grids, with a
+source of period 1/2 in x and the coupled goal's `ambient` uniform; on
+four devices no case split spatial axis 1 over more than two devices.
+The unsharded side of every case is now run once per grid and shared by
+every mesh's case.  Schema 4 files ran the stencil goals on a 1-D mesh only, with a node that
 read its static in the interior only and took no grid-shaped input or
 domain integral.  Schema 3 files carry no `sense` (the summary reads it
 from the limit's type, which is how schema 3 wrote checks), never record a check as not

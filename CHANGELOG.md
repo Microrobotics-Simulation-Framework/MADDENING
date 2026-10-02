@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Read-only graph inspection** (experimental): `gm.print_graph()` / `format_graph()`, `to_mermaid()` / `to_dot()`, and tables
+  `state_summary()`, `params_table()`, `coupling_report()` (caveats flagged), `memory_estimate()` with `print_*` forms; none writes or
+  compiles anything.  `maddening.show_versions()` / `python -m maddening info` for bug reports; `print()` of `FitResult` / `FIMReport`
 - **Differential tests for coupling and numerics** (`tests/property/test_differential_*.py`): two paths that must agree, over
   generated graphs of synthetic nodes -- fori/ift, diagnostics on/off, the exact fixed point, multi-rate, sub-cycling, adaptive,
   `vmap`/`jit`, non-float leaves; each disagreement found is a strict xfail (`testing_standards.md`, "Differential tests")

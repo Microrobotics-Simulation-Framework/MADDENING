@@ -99,6 +99,29 @@ class PrecisionLimitWarning(UserWarning):
     """
 
 
+class UnderflowRangeWarning(PrecisionLimitWarning):
+    """A coupled group holds a field whose magnitude is in its dtype's
+    subnormal range: below ``finfo(dtype).tiny / finfo(dtype).eps``.
+
+    There a change of one ulp of the field is smaller than the smallest
+    normal number, which XLA's CPU backend flushes to zero (and any backend
+    represents with fewer significant bits), so a node's own arithmetic on
+    the field -- a difference, an increment -- loses resolution, and a field
+    whose magnitude is itself below ``tiny`` reads as exactly zero in the
+    group's convergence norm.  MADDENING's coupling arithmetic (the norm,
+    the accelerators, the report) works in power-of-two frames and keeps
+    its own resolution down to ``tiny``; a node's ``update`` does not.
+
+    ``GraphManager`` checks each coupled group once, on the first step after
+    every ``compile()``, and warns at most once per group, naming the field,
+    its magnitude and the threshold.  An exactly zero field never warns.
+    The remedy is to write the field in units where it is of order one.
+    Float32 thresholds: ``tiny / eps`` is about ``9.9e-32``; bfloat16
+    ``1.5e-36``; float16 ``0.0625`` (its normal range starts at ``6.1e-5``);
+    float64 about ``1e-292``.
+    """
+
+
 class UnitMismatchWarning(UserWarning):
     """Edge declares units that don't match the target node's
     :attr:`BoundaryInputSpec.expected_units`.

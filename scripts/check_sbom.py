@@ -103,6 +103,10 @@ PROP = "maddening:sbom:"
 PROP_INSTALL = PROP + "install"
 PROP_EXCLUDE_NEWER = PROP + "exclude-newer"
 PROP_MARKER = PROP + "marker:"
+#: Per component: one property per line of the package's own
+#: ``Requires-Dist`` metadata, verbatim, and how many lines there were.
+PROP_REQUIRES_DIST = PROP + "requires-dist"
+PROP_REQUIRES_DIST_COUNT = PROP + "requires-dist-count"
 
 #: The PEP 508 marker variables an SBOM must record: enough to evaluate
 #: any marker ``pyproject.toml`` could put on a dependency, and none of
@@ -152,11 +156,17 @@ def canonical_order(sbom: dict) -> dict:
 
     Components by canonical package name then version, the dependency
     graph by ``ref`` with each ``dependsOn`` sorted, and
-    ``metadata.properties`` by name.  Everything else keeps its order:
+    ``metadata.properties`` and each component's ``properties`` by name
+    then value.  Everything else keeps its order:
     JSON object keys are sorted when the file is written.
     """
     out = copy.deepcopy(sbom)
     out["components"] = sorted(out.get("components", []), key=_component_sort_key)
+    for comp in out["components"]:
+        if isinstance(comp, dict) and "properties" in comp:
+            comp["properties"] = sorted(
+                comp["properties"],
+                key=lambda p: (str(p.get("name")), str(p.get("value"))))
     deps = []
     for dep in out.get("dependencies", []):
         dep = dict(dep)

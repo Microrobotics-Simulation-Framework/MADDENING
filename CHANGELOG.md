@@ -14,7 +14,7 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
-- **REST and run_pod claims inventory** (`docs/validation/rest_runpod_claims.yaml`, prefixes `REST`, `RPD`): every documented claim about the HTTP API and the multi-GPU session runner with its conditions, oracle and a test that can fail -- 134 rows, 120 verified, 9 failing (strict xfails), 4 ambiguous, 1 untested; the surrogate and streaming endpoints are out of scope (experimental).
+- **REST and run_pod claims inventory** (`docs/validation/rest_runpod_claims.yaml`, prefixes `REST`, `RPD`): every documented claim about the HTTP API and the multi-GPU session runner with its conditions, oracle and a test that can fail -- 135 rows, 120 verified, 9 failing (strict xfails), 5 ambiguous, 1 untested; the surrogate and streaming endpoints are out of scope (experimental).
   Read the failing and ambiguous rows before relying on those claims; a new REST or `run_pod.py` claim gets a row in the same change (`testing_standards.md`).
 - **Coupling claims inventory** (`docs/validation/coupling_claims.yaml`): every documented coupling claim with its conditions, oracle and a test that can fail -- 130 rows, 114 verified, 6 failing (strict xfails), 10 ambiguous -- checked by `tests/compliance/test_coupling_claims.py`.
   Read the failing and ambiguous rows before relying on those claims; a new coupling claim gets a row in the same change (`testing_standards.md`).

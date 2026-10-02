@@ -181,6 +181,7 @@ claims:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_routable_peer_of_any_spelling_is_challenged_on_a_loopback_bind
     - tests/api/test_bearer_auth.py::test_a_loopback_peer_is_not_challenged_on_a_loopback_bind
     - tests/api/test_bearer_auth.py::test_routable_peer_classification
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_routable_peer_is_challenged_on_a_websocket_handshake_too
   status: verified
 
 - id: REST-006
@@ -852,6 +853,26 @@ claims:
     - tests/api/test_runner_stop_and_stride.py::test_the_largest_stride_is_accepted_and_echoed_as_applied
     - tests/api/test_runner_stop_and_stride.py::test_a_stride_set_before_the_runner_exists_is_the_runners_stride
   status: verified
+
+- id: REST-099
+  area: bounds
+  claim: >-
+    PUT /sim/stride: "steps_per_frame: Physics steps batched per wall-clock
+    frame in the runner ... Applied to the running runner, and kept for the
+    one a later POST /sim/start creates"; "relay_stride: Only capture every
+    Nth step in the relay".  What a call that names only one of them does to
+    the other is unstated.
+  sources:
+    - src/maddening/api/server.py:3556 (sim_set_stride, Parameters)
+  conditions: a call naming steps_per_frame alone after both were set.
+  oracle: the reply and relay.stride.
+  tests:
+    - tests/api/test_routes_answer_what_they_did.py::test_a_stride_call_that_names_one_value_sets_the_other_to_one
+  status: ambiguous
+  proposed_wording: >-
+    Each call sets both values: one left out of the query is set to its
+    default, 1 -- send both to change one and keep the other.
+  notes: The bundled app sends both; a script that sends one resets the other without a word.
 
 - id: REST-039
   area: bounds

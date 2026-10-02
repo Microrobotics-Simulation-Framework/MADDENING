@@ -168,32 +168,38 @@ def test_every_write_is_a_409_while_the_runner_runs(tmp_path):
         _stop(server)
 
 
-def test_a_params_write_reaches_the_graph_between_the_slices_of_a_run(tmp_path, monkeypatch):
-    """Each slice of the run is made to take 30 ms, longer than half of
-    ``_RUN_SLICE_SECONDS``, so the run stays at one step a slice and the
-    write is taken between two of them while the run goes on."""
+def test_a_params_write_reaches_the_graph_between_the_slices_of_a_run(tmp_path):
+    """Until the write is answered each slice of the run takes 30 ms, more
+    than half of ``_RUN_SLICE_SECONDS``, so the run stays at one step a
+    slice and cannot finish first (1000 slices); the write is taken between
+    two of them while the run goes on.  After it the slices are fast."""
     server, client = _served(tmp_path)
     gm = server.gm
     real_run = gm.run
+    answered = threading.Event()
 
-    def slow(n, *args, **kwargs):
-        time.sleep(0.03)
+    def slow_until_answered(n, *args, **kwargs):
+        if not answered.is_set():
+            time.sleep(0.03)
         return real_run(n, *args, **kwargs)
 
-    gm.run = slow
+    gm.run = slow_until_answered
     reply: dict = {}
     run = threading.Thread(target=lambda: reply.setdefault(
-        "run", TestClient(client.app).post("/sim/run", params={"n_steps": 20})))
+        "run", TestClient(client.app).post("/sim/run", params={"n_steps": 1000})))
     run.start()
     try:
         assert _wait_for(lambda: server.relay.step_count >= 2)
         resp = client.put("/graph/params/ball", json={"params": {"gravity": -3.0}})
         still_running = run.is_alive()
+        answered.set()
         assert resp.status_code == 200, resp.text
         assert still_running, "the run ended before the write; the test proves nothing"
     finally:
+        answered.set()
         run.join(60)
     assert reply["run"].status_code == 200
+    assert server.relay.step_count == 1000
     assert client.get("/graph/params/ball").json()["gravity"] == -3.0
 
 

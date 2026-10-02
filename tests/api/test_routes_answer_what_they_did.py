@@ -329,3 +329,16 @@ def test_the_checkpoint_root_defaults_to_a_checkpoints_directory_under_the_worki
     assert resp.status_code == 200, resp.text
     assert (tmp_path / "checkpoints" / "c.npz").is_file()
     assert (tmp_path / "checkpoints" / "c.npz.manifest.json").is_file()
+
+
+def test_a_stride_call_that_names_one_value_sets_the_other_to_one():
+    """``PUT /sim/stride`` sets both values on every call; one left out is
+    set to its default, 1 (REST-099 is ``ambiguous``: no document says
+    what an omitted value means)."""
+    server, client = _ball_server()
+    resp = client.put("/sim/stride", params={"steps_per_frame": 5, "relay_stride": 3})
+    assert resp.json() == {"steps_per_frame": 5, "relay_stride": 3}
+    resp = client.put("/sim/stride", params={"steps_per_frame": 7})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"steps_per_frame": 7, "relay_stride": 1}
+    assert server.relay.stride == 1

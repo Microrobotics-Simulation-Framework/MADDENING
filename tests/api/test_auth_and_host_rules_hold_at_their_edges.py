@@ -138,6 +138,15 @@ def test_a_routable_peer_of_any_spelling_is_challenged_on_a_loopback_bind(peer):
     assert client.get("/graph", headers=_bearer()).status_code == 200
 
 
+def test_a_routable_peer_is_challenged_on_a_websocket_handshake_too():
+    client = TestClient(_server("127.0.0.1").create_app(), client=("203.0.113.5", 40000))
+    with pytest.raises(Exception):
+        with client.websocket_connect("/ws/state"):
+            pass
+    with client.websocket_connect("/ws/state", headers=_bearer()):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # The exempt paths are exact
 # ---------------------------------------------------------------------------

@@ -178,9 +178,17 @@ update `A @ u + c` near its fixed point (at most 0.72 of a unit over
 compilations of the same pass (at most 0.82, the solver-equivalence
 sweep).
 
-`m` is how many evaluations one coupling pass rounds like: the largest
-sub-cycling divider times `SimulationNode.update_evaluations()` in the
-group.  A composite map's error grows with its evaluations: explicit
+`m` is how many evaluations one coupling pass rounds like.  Each node
+counts its sub-cycling divider times `SimulationNode.update_evaluations()`;
+under `iteration_mode="jacobi"` the pass rounds like its worst node,
+because every node reads the stored previous iterate, and under
+`"gauss-seidel"` like its longest chain of same-pass reads -- a node
+reading a member scheduled before it reads that member's output from the
+same pass, already rounded, so the roundings along the chain add up.  On
+a Gauss-Seidel ring of 32 scalar relays stalled at float32 the worst
+node's count let the bound read 0.51x the true distance with
+`spectral_usable=True` (0.30x at 64 relays; MADD-ANO-083); counted along
+the chain it reads 16x over.  A composite map's error grows with its evaluations: explicit
 Euler in `N` sub-steps, each moving its field by less than half an ulp,
 is 5.8 units off the exact map at `N = 20` and 29.4 at `N = 100`, and
 while the floor was a flat four units a stalled relay built on such a

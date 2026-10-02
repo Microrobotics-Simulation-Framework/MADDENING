@@ -333,6 +333,8 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **A `node.params` write after compile reaches the step at the next `compile()`** (MADD-ANO-083, never released: it was dropped); `fit_lm` reports `converged` at the float floor (its proposal is tested accepted or not; `step_tol` is relative, default 16 ulps); `windowed_loss` refuses a negative/NaN `continuity_weight` and a non-bool `mask_unconverged`;
+  a clipped leaf on its bound has its full derivative into the range; a refused mask names the missing empty container.  Action: change a constant mid-run through `gm.params`; pass `step_tol` as a relative change.
 - **The shipped examples run, and print only what they measure** (49 examples; each now runs in CI or is excluded with a reason, see `examples/README.md`): two used the deprecated `RigidBody2DNode`, one raced its own server; the coupled-spring demos had no rest state yet reported "settled" (rest lengths now `+L`/`-L`);
   `vessel_flow_server`'s parameter endpoints reported success without changing the run (they write `gm.params` now); others printed claims their numbers contradicted, deleted the results they announced, or ignored `--gpu`.  Action: none, unless you copied an example -- re-copy it.
 - **Coupling harness findings** (MADD-ANO-070 to 074, new, resolved): a group's integer/boolean fields are those the pass gives at the returned state, on both solvers (`ift` returned first-pass flags and froze edge-carried ones); predictor + mixed norm with such a field, Jacobi with a flux-reading producer, `reset_state`/`set_node_state` after `jax.grad`, under-relaxed `fixed` stopping on its first pass (~2x short) and the adaptive norm on integer leaves all fixed.

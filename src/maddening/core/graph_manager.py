@@ -1101,7 +1101,7 @@ def _declared_evaluations(node):
     return float(value)
 
 
-def _group_evaluations(group, nodes):
+def _group_evaluations(group, nodes, schedule, edges):
     """``(evaluations, declared)``: how many evaluations one coupling pass rounds like.
 
     The float floor of the coupling bound
@@ -1111,25 +1111,70 @@ def _group_evaluations(group, nodes):
     that evaluates each node once.  A pass evaluates node ``n`` ``d_n``
     times (its sub-cycling divider, else once), and each evaluation
     rounds like ``e_n`` (:meth:`SimulationNode.update_evaluations`,
-    undeclared counting as one), so no node is evaluated more than
-    ``max_n d_n * e_n`` times and the pass rounds like at most that many
-    single passes.  That maximum is ``evaluations``; ``declared`` is
-    whether every node declared its ``e_n``.  Measured, float32: a node
-    sub-cycled 100 times per pass (or looping 100 explicit Euler
-    sub-steps inside ``update``) is ~29 units off the exact map, against
-    the 4 the floor allowed before it was counted -- and the bound read
-    0.16x the true distance with ``spectral_usable=True``.
+    undeclared counting as one), so node ``n``'s own update rounds like
+    ``d_n * e_n`` single evaluations.  ``declared`` is whether every
+    node declared its ``e_n``.  Measured, float32: a node sub-cycled 100
+    times per pass (or looping 100 explicit Euler sub-steps inside
+    ``update``) is ~29 units off the exact map, against the 4 the floor
+    allowed before it was counted -- and the bound read 0.16x the true
+    distance with ``spectral_usable=True``.
+
+    **How the nodes' counts combine depends on the iteration mode.**
+    Under ``"jacobi"`` every node reads the previous iterate, which is
+    stored and exact, so a node's output carries its own rounding only
+    and the pass rounds like its worst node: ``max_n d_n e_n``.  Under
+    ``"gauss-seidel"`` a node reads the output of every group member
+    scheduled before it *from the same pass*, already rounded, so its
+    output carries that rounding too: the pass is a composition, and
+    the error at the end of a chain of same-pass reads is the sum of
+    the roundings along it.  ``evaluations`` is then the longest such
+    chain, ``depth(n) = d_n e_n + max(depth(m))`` over the members ``m``
+    scheduled before ``n`` that ``n`` reads (an edge from a member
+    scheduled at or after ``n`` reads the previous iterate and starts no
+    chain).  Measured on a Gauss-Seidel ring of ``N`` scalar relays of
+    loop gain 0.99, every node declaring one evaluation: the exact
+    residual at the float32 stall is 0.6, 1.2 and 2.3x the per-pass
+    floor at ``N`` = 16, 32 and 64, and the bound, which took the worst
+    node's count, read 0.51x (``N = 32``) and 0.30x (``N = 64``) the
+    true distance with ``spectral_usable=True``; counted along the
+    chain the floor is ``N`` times larger and the bound holds.  The
+    longest chain and not the sum over the members: a rounding reaches
+    a node only along a path of reads, and where several paths meet the
+    node's output is a combination of its inputs whose relative gains
+    -- in the norm's units, each field divided by its own magnitude --
+    sum to at most one unless the node cancels, which the floor's own
+    model already excludes (see
+    :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`).
+    For a chain or a ring the two coincide.
+
+    ``schedule`` is the order the step sweeps the group's members in
+    (the compiled schedule; members not in it are swept last, each
+    starting a chain of its own) and ``edges`` every edge of the graph;
+    only those between two members count.
     """
     dividers = _group_dividers(group, nodes) or {}
-    worst = 1.0
     declared = True
+    own: dict[str, float] = {}
     for nn in sorted(group.nodes):
-        own = _declared_evaluations(nodes[nn].node)
-        if own is None:
+        count = _declared_evaluations(nodes[nn].node)
+        if count is None:
             declared = False
-            own = 1.0
-        worst = max(worst, float(dividers.get(nn, 1)) * own)
-    return worst, declared
+            count = 1.0
+        own[nn] = float(dividers.get(nn, 1)) * count
+    if group.iteration_mode == "jacobi":
+        return max([1.0, *own.values()]), declared
+    order = [nn for nn in schedule if nn in group.nodes]
+    order += sorted(nn for nn in group.nodes if nn not in order)
+    position = {nn: i for i, nn in enumerate(order)}
+    same_pass: dict[str, set] = {nn: set() for nn in order}
+    for edge in edges:
+        src, dst = edge.source_node, edge.target_node
+        if src in position and dst in position and position[src] < position[dst]:
+            same_pass[dst].add(src)
+    depth: dict[str, float] = {}
+    for nn in order:
+        depth[nn] = own[nn] + max((depth[m] for m in same_pass[nn]), default=0.0)
+    return max([1.0, *depth.values()]), declared
 
 
 def _group_residual_dtype(state, node_names):
@@ -2557,7 +2602,8 @@ def _run_coupled_block_impl(
     use_quadratic_interp = group.boundary_interpolation == "quadratic"
     # How many evaluations one pass rounds like, for the float floor the
     # diagnostics compare against (see ``_group_evaluations``).
-    pass_evaluations, _declared = _group_evaluations(group, nodes)
+    pass_evaluations, _declared = _group_evaluations(
+        group, nodes, group_node_names, group_internal_list)
 
     def _resolve_boundary_interpolated(nn, s_prev, s_cur, alpha,
                                         flux_s=None, s_prev_prev=None):
@@ -7542,10 +7588,16 @@ class GraphManager:
               (:func:`~maddening.core.coupling.acceleration.reported_converged`),
               so all of them give one verdict; ``"error_estimate"`` is
               the float32 estimate of a float32 group, not the float64
-              product of its factors.  ``False`` means the
-              group hit ``max_iterations`` *and* the state it returned
-              is still outside the threshold; under ``solver="ift"``
-              the gradient through that step is then unreliable.
+              product of its factors.  ``False`` means one of two
+              things: the group hit ``max_iterations`` *and* the state
+              it returned is still outside the threshold, or the state
+              it returned is not finite (below) -- which can come
+              *before* the cap, so ``iterations < max_iterations`` beside
+              ``converged=False`` is not a contradiction: under
+              ``convergence_norm="interface"`` a field no edge reads can
+              be NaN while the fields the norm reads converge, and the
+              loop stops on its criterion.  Under ``solver="ift"`` the
+              gradient through that step is unreliable either way.
               **A non-finite state is the one exception to reading the
               slots literally, by design** (MADD-ANO-019): when any
               floating field of the group is NaN or inf, or beyond the
@@ -7990,7 +8042,8 @@ class GraphManager:
                 # A pass that sub-cycles a node, or whose nodes loop inside
                 # ``update``, rounds like several single ones: the floor is
                 # per evaluation (``_group_evaluations``).
-                evaluations, declared = _group_evaluations(group, self._nodes)
+                evaluations, declared = _group_evaluations(
+                    group, self._nodes, self._schedule, self._edges)
                 floor = float(residual_precision_floor(
                     self._state, sorted(group.nodes), group.convergence_norm,
                     group.atol, group.rtol,

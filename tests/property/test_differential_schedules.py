@@ -22,7 +22,8 @@ each reading the in-pass state of its sources.  That is
 timestep, written by hand, in a group that does not sub-cycle: the same
 map, so the same passes, the same state to round-off, and **exactly** the
 same clocks.  ``"linear"`` interpolation is documented to coincide with
-``"constant"`` bit for bit under Jacobi and whenever every source of the
+``"constant"`` to float32 round-off (not bit for bit: the two modes compile
+to different programs) under Jacobi and whenever every source of the
 sub-cycled node is scheduled after it; ``"quadratic"`` is ``"linear"``
 (MADD-ANO-027, decided); each later waveform sweep adds at least a pass
 (decided).

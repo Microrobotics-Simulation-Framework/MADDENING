@@ -300,6 +300,40 @@ def test_the_guard_decides_the_same_in_any_units(curvature, units):
         np.testing.assert_allclose(held, base, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("curvature", ["gauss_newton", "hessian"])
+@pytest.mark.parametrize("unit", [1.0, 1e-5, 1e6])
+def test_a_determined_direction_no_gradient_spanned_is_not_held_in_any_units(
+        curvature, unit):
+    """A short run whose gradients all pointed along the first parameter
+    leaves the second unspanned, though the data determine it (``M = I``):
+    the curvature test is what keeps it.  It must keep it in any units --
+    read in ``theta``, the second column in units ``1e-5`` is ``1e-5`` the
+    size of the first and the second direction looked flat."""
+    u = np.array([1.0, unit])
+    J = np.eye(2) * u[None, :]
+    tracker = _ExcitationTracker(2, np.float32)
+    for _ in range(3):
+        tracker.observe((J.T @ np.array([1.0, 0.0])).astype(np.float32))
+    theta0 = jnp.asarray(np.array([1.0, 2.0]) / u, jnp.float32)
+    theta = jnp.asarray(np.array([1.5, 2.5]) / u, jnp.float32)
+
+    def flatness(candidates, spanned, scale):
+        if curvature == "gauss_newton":
+            return _gauss_newton_flatness(J, candidates, np.float32, scale=scale)
+        return _hessian_flatness(lambda V: (J.T @ J) @ V, candidates, spanned,
+                                 np.float32, "test", scale)
+
+    objective = _SelectedObjective(
+        loss=lambda th: 1.0, reference=lambda: (0.0, np.zeros(2)), flatness=flatness,
+        transformed=np.zeros(2, dtype=bool), columns=tracker.gradient_scale)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        out, rank, drift, declined = _hold_undetermined_directions(
+            tracker, theta, theta0, objective, "test")
+    assert (rank, drift, declined) == (2, 0.0, False)
+    assert out is theta
+
+
 # ---------------------------------------------------------------------------
 # The scale itself
 # ---------------------------------------------------------------------------

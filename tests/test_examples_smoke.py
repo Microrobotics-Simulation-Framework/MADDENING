@@ -322,8 +322,6 @@ PER_PUSH = [
     Run("advanced.scan_performance", ("--steps", "2000"), expect=("All checks passed",)),
     Run("advanced.profile_lbm_step", ("--n-steps", "20"),
         expect=("Perfetto JSON written to",)),
-    Run("advanced.live_stage_bouncing_ball_demo", ("--steps", "20"), needs=("pxr",),
-        expect=("Wrote bouncing_ball.usda",)),
     Run("advanced.surrogate_demo",
         ("--epochs", "10", "--train-steps", "100", "--compare-steps", "20"),
         needs=("equinox", "optax"), expect=("Done!",)),
@@ -339,8 +337,6 @@ PER_PUSH = [
         expect=("All demos complete",)),
     Run("coupling.flux_coupling_demo", ("--sections", "1,2,3"),
         expect=("All demos completed successfully",)),
-    Run("coupling.vessel_bifurcation", ("--steps", "500"), needs=("pxr",),
-        expect=("Done.",)),
     Run("cloud.streaming.08_subscribe_lbm_velocity", ("--n-frames", "5"),
         needs=("fastapi", "uvicorn", "websockets", "zstandard"),
         expect=("End-to-end reduction",)),
@@ -365,11 +361,18 @@ SLOW = [
      "20 000 coupled heat steps", "--heat-steps 2000"),
     (Run("coupling.flux_coupling_demo", expect=("All demos completed successfully",)),
      "all seven sections, 13 graphs", "--sections 1,2,3"),
-    (Run("coupling.vessel_bifurcation", needs=("pxr",), expect=("Done.",)),
-     "10 000 python-loop steps with USD writes", "--steps 500"),
     (Run("servers.lbm_pipe_interactive", ("--frames", "2"), needs=("pyvista",),
          expect=("Rendered 2 frames",)),
      "3-D LBM plus off-screen VTK rendering", "none: needs pyvista, absent in CI"),
+]
+
+# Need usd-core, which only CI's test-usd job installs; that job runs this
+# test by node id (and no slow tests, so none of these may be slow).
+USD_RUNS = [
+    Run("advanced.live_stage_bouncing_ball_demo", ("--steps", "20"),
+        needs=("pxr",), expect=("Wrote bouncing_ball.usda",)),
+    Run("coupling.vessel_bifurcation", ("--steps", "500"), needs=("pxr",),
+        expect=("Done.",)),
 ]
 
 NOT_RUN = {
@@ -414,7 +417,7 @@ def _module_file(module: str) -> str:
 
 def test_every_example_is_classified_exactly_once() -> None:
     """New examples must be run, or excluded with a reason -- never forgotten."""
-    run = {_module_file(r.module) for r in PER_PUSH} | {
+    run = {_module_file(r.module) for r in PER_PUSH + USD_RUNS} | {
         _module_file(r.module) for r, _, _ in SLOW
     }
     groups = [run, LOOPBACK, set(NOT_RUN)]
@@ -563,6 +566,13 @@ def test_example_runs_headless(run: Run, tmp_path: Path, example_env) -> None:
     proves it does not write into the installed package.
     """
     _run_example(run, tmp_path, example_env)
+
+
+@pytest.mark.parametrize("run", USD_RUNS, ids=[r.id for r in USD_RUNS])
+def test_usd_example_runs_headless(run: Run, tmp_path: Path, example_env) -> None:
+    """The USD examples run end to end and write their stage into ``tmp_path``."""
+    _run_example(run, tmp_path, example_env)
+    assert list(tmp_path.glob("*.usda")), f"{run.id} wrote no .usda file"
 
 
 @pytest.mark.slow

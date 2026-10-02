@@ -234,6 +234,7 @@ def _exact_x0(n, gains, biases):
 # compiles the step again (~50 s on a 3-core slice).  Per push, the count is
 # pinned above without a compile, and both call sites by
 # ``test_the_report_and_the_step_count_the_same_chain``.
+# Per push: tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_report_and_the_step_count_the_same_chain
 @pytest.mark.slow
 def test_both_bounds_hold_on_a_stalled_gauss_seidel_ring_of_32():
     """``spectral_error_bound`` and the gradient bound over a 32-relay ring's stall.

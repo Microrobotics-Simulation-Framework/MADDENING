@@ -60,7 +60,7 @@ import jax.numpy as jnp
 import numpy as np
 
 try:
-    from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, Query, WebSocket
     from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field, field_validator
 except ImportError as _exc:
@@ -1183,6 +1183,81 @@ def warn_if_publicly_bound(host: str, port: int = 8000) -> bool:
         host, port, port, port,
     )
     return True
+
+
+# ------------------------------------------------------------------
+# WebSocket streams: noticing a client that left
+# ------------------------------------------------------------------
+
+async def _receive_until_disconnect(websocket: WebSocket, on_message,
+                                    disconnected: asyncio.Event) -> None:
+    """Hand every JSON object a client sends to *on_message* until the
+    client leaves, then set *disconnected*.
+
+    The streams only learned that a client had gone when a send failed,
+    and they send only when the simulation produced a new snapshot.  A
+    client that left after the simulation stopped was never noticed, and
+    neither was the close uvicorn sends on shutdown, so the handler slept
+    on and SIGINT never completed.  Every way out of here -- the client's
+    disconnect, a broken connection, cancellation -- sets *disconnected*,
+    which ends the stream.  A message that is not a JSON object, or that
+    *on_message* cannot apply, is ignored; it used to end this loop
+    silently, and with it the stream's view of the client.
+    """
+    import json as _json  # noqa: PLC0415
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
+            raw = message.get("text")
+            if raw is None:
+                continue
+            try:
+                msg = _json.loads(raw)
+                if isinstance(msg, dict):
+                    on_message(msg)
+            except Exception:  # noqa: BLE001 - a malformed message is ignored
+                logger.debug("ignored WebSocket message %r", raw[:200], exc_info=True)
+    except Exception:  # noqa: BLE001 - the connection broke: the client is gone
+        return
+    finally:
+        disconnected.set()
+
+
+async def _sleep_unless_disconnected(disconnected: asyncio.Event, seconds: float) -> None:
+    """Sleep *seconds*, or until the client leaves, whichever is first."""
+    try:
+        await asyncio.wait_for(disconnected.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
+
+
+#: Exception class names (anywhere in the MRO) that mean the peer closed
+#: the WebSocket: Starlette's, the ``websockets`` library's, uvicorn's.
+_DISCONNECT_EXCEPTION_NAMES = ("WebSocketDisconnect", "ConnectionClosed", "ClientDisconnected")
+
+
+def _client_left(websocket: WebSocket, exc: BaseException,
+                 disconnected: asyncio.Event) -> bool:
+    """Whether a send that raised *exc* failed only because the client had
+    left -- a normal end of the stream, not an error to log with a
+    traceback.  uvicorn reports a send after the close as a
+    ``RuntimeError`` ("Unexpected ASGI message 'websocket.send', after
+    sending 'websocket.close'"), which every stream logged as an error on
+    each ordinary disconnect."""
+    from starlette.websockets import WebSocketState  # noqa: PLC0415
+
+    if disconnected.is_set():
+        return True
+    if any(cls.__name__.startswith(_DISCONNECT_EXCEPTION_NAMES)
+           for cls in type(exc).__mro__):
+        return True
+    if WebSocketState.DISCONNECTED in (getattr(websocket, "client_state", None),
+                                       getattr(websocket, "application_state", None)):
+        return True
+    return isinstance(exc, RuntimeError) and "websocket.close" in str(exc)
 
 
 def _graph_structure_snapshot(gm) -> dict:
@@ -2825,32 +2900,21 @@ class SimulationServer:
 
             sub_fields = [None]   # mutable: {node: [fields]} or None
             target_fps = [30.0]
-            config_changed = asyncio.Event()
+            disconnected = asyncio.Event()
 
-            async def _receive():
-                import json as _json
-                try:
-                    while True:
-                        raw = await websocket.receive_text()
-                        try:
-                            msg = _json.loads(raw)
-                            if msg.get("type") == "subscribe":
-                                sub_fields[0] = msg.get("fields")
-                            elif msg.get("type") == "config":
-                                if "fps" in msg:
-                                    target_fps[0] = max(1, min(120, msg["fps"]))
-                            config_changed.set()
-                        except (ValueError, KeyError):
-                            pass
-                except (WebSocketDisconnect, Exception):
-                    pass
+            def _on_message(msg: dict) -> None:
+                if msg.get("type") == "subscribe":
+                    sub_fields[0] = msg.get("fields")
+                elif msg.get("type") == "config":
+                    if "fps" in msg:
+                        target_fps[0] = max(1, min(120, msg["fps"]))
 
-            receiver = asyncio.create_task(_receive())
+            receiver = asyncio.create_task(
+                _receive_until_disconnect(websocket, _on_message, disconnected))
 
             last_sim_time = -1.0
             try:
-                while True:
-                    config_changed.clear()
+                while not disconnected.is_set():
                     sim_time, snapshot = self.relay.latest_snapshot()
                     if snapshot is not None and sim_time != last_sim_time:
                         last_sim_time = sim_time
@@ -2872,11 +2936,13 @@ class SimulationServer:
                             "state": _json_reply(state),
                         }
                         await websocket.send_json(payload)
-                    await asyncio.sleep(1.0 / target_fps[0])
-            except WebSocketDisconnect:
+                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                 logger.info("WebSocket client disconnected from /ws/state")
-            except Exception:
-                logger.exception("WebSocket error on /ws/state")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if _client_left(websocket, exc, disconnected):
+                    logger.info("WebSocket client disconnected from /ws/state")
+                else:
+                    logger.exception("WebSocket error on /ws/state")
             finally:
                 receiver.cancel()
 
@@ -2916,58 +2982,50 @@ class SimulationServer:
             current_compression = ["none"]
             current_fields: list[dict | None] = [None]
             schema_dirty = asyncio.Event()
+            disconnected = asyncio.Event()
 
             await websocket.send_json(current_encoder[0].schema())
 
-            async def _receive():
-                import json as _json
-                try:
-                    while True:
-                        raw = await websocket.receive_text()
-                        try:
-                            msg = _json.loads(raw)
-                            if msg.get("type") == "subscribe":
-                                from maddening.api.binary_encoder import (
-                                    BinaryStateEncoder, VALID_COMPRESSIONS,
-                                )
-                                if "fields" in msg:
-                                    current_fields[0] = msg["fields"]
-                                if "compression" in msg:
-                                    comp = msg["compression"]
-                                    if comp in VALID_COMPRESSIONS:
-                                        current_compression[0] = comp
-                                user_state = {
-                                    k: v for k, v in self.gm._state.items()
-                                    if k != "_meta"
-                                }
-                                try:
-                                    current_encoder[0] = BinaryStateEncoder(
-                                        user_state,
-                                        fields=current_fields[0],
-                                        compression=current_compression[0],
-                                    )
-                                except ImportError:
-                                    # zstandard not installed — fall back
-                                    current_compression[0] = "none"
-                                    current_encoder[0] = BinaryStateEncoder(
-                                        user_state,
-                                        fields=current_fields[0],
-                                        compression="none",
-                                    )
-                                schema_dirty.set()
-                            elif msg.get("type") == "config":
-                                if "fps" in msg:
-                                    target_fps[0] = max(1, min(120, msg["fps"]))
-                        except (ValueError, KeyError):
-                            pass
-                except (WebSocketDisconnect, Exception):
-                    pass
+            def _on_message(msg: dict) -> None:
+                if msg.get("type") == "subscribe":
+                    from maddening.api.binary_encoder import (  # noqa: PLC0415
+                        BinaryStateEncoder, VALID_COMPRESSIONS,
+                    )
+                    if "fields" in msg:
+                        current_fields[0] = msg["fields"]
+                    if "compression" in msg:
+                        comp = msg["compression"]
+                        if comp in VALID_COMPRESSIONS:
+                            current_compression[0] = comp
+                    user_state = {
+                        k: v for k, v in self.gm._state.items()
+                        if k != "_meta"
+                    }
+                    try:
+                        current_encoder[0] = BinaryStateEncoder(
+                            user_state,
+                            fields=current_fields[0],
+                            compression=current_compression[0],
+                        )
+                    except ImportError:
+                        # zstandard not installed — fall back
+                        current_compression[0] = "none"
+                        current_encoder[0] = BinaryStateEncoder(
+                            user_state,
+                            fields=current_fields[0],
+                            compression="none",
+                        )
+                    schema_dirty.set()
+                elif msg.get("type") == "config":
+                    if "fps" in msg:
+                        target_fps[0] = max(1, min(120, msg["fps"]))
 
-            receiver = asyncio.create_task(_receive())
+            receiver = asyncio.create_task(
+                _receive_until_disconnect(websocket, _on_message, disconnected))
 
             last_sim_time = -1.0
             try:
-                while True:
+                while not disconnected.is_set():
                     # Re-send schema if subscription changed
                     if schema_dirty.is_set():
                         schema_dirty.clear()
@@ -2978,11 +3036,13 @@ class SimulationServer:
                         last_sim_time = sim_time
                         frame = current_encoder[0].encode(sim_time, snapshot)
                         await websocket.send_bytes(frame)
-                    await asyncio.sleep(1.0 / target_fps[0])
-            except WebSocketDisconnect:
+                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                 logger.info("WebSocket client disconnected from /ws/state/binary")
-            except Exception:
-                logger.exception("WebSocket error on /ws/state/binary")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if _client_left(websocket, exc, disconnected):
+                    logger.info("WebSocket client disconnected from /ws/state/binary")
+                else:
+                    logger.exception("WebSocket error on /ws/state/binary")
             finally:
                 receiver.cancel()
 
@@ -3033,37 +3093,24 @@ class SimulationServer:
             })
 
             config_changed = asyncio.Event()
+            disconnected = asyncio.Event()
 
-            async def _receive_client_messages():
-                """Background task: listen for client config messages."""
-                import json as _json
-                try:
-                    while True:
-                        raw = await websocket.receive_text()
-                        try:
-                            msg = _json.loads(raw)
-                            if msg.get("type") == "config":
-                                if "format" in msg:
-                                    renderer.set_format(
-                                        msg["format"], msg.get("quality"),
-                                    )
-                                if "fps" in msg:
-                                    target_fps[0] = max(1, min(60, msg["fps"]))
-                                config_changed.set()
-                            elif msg.get("type") == "reset":
-                                renderer.reset()
-                        except (ValueError, KeyError):
-                            pass
-                except WebSocketDisconnect:
-                    pass
-                except Exception:
-                    pass
+            def _on_message(msg: dict) -> None:
+                if msg.get("type") == "config":
+                    if "format" in msg:
+                        renderer.set_format(msg["format"], msg.get("quality"))
+                    if "fps" in msg:
+                        target_fps[0] = max(1, min(60, msg["fps"]))
+                    config_changed.set()
+                elif msg.get("type") == "reset":
+                    renderer.reset()
 
-            receiver = asyncio.create_task(_receive_client_messages())
+            receiver = asyncio.create_task(
+                _receive_until_disconnect(websocket, _on_message, disconnected))
 
             last_sim_time = -1.0
             try:
-                while True:
+                while not disconnected.is_set():
                     # Re-send config if client changed settings
                     if config_changed.is_set():
                         config_changed.clear()
@@ -3084,11 +3131,15 @@ class SimulationServer:
                         )
                         await websocket.send_bytes(frame)
 
-                    await asyncio.sleep(1.0 / target_fps[0])
-            except WebSocketDisconnect:
+                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                 logger.info("WebSocket client disconnected from /ws/render")
-            except Exception:
-                logger.exception("WebSocket error on /ws/render")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                # A client that closed its viewer is the ordinary end of a
+                # render stream; it used to log a traceback every time.
+                if _client_left(websocket, exc, disconnected):
+                    logger.info("WebSocket client disconnected from /ws/render")
+                else:
+                    logger.exception("WebSocket error on /ws/render")
             finally:
                 receiver.cancel()
 

@@ -328,9 +328,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **REST, round-4 audit** (MADD-ANO-075 to 079): `POST /graph/nodes`, `PUT /graph/params`, `from_dict` and USD loading check the grid/basis nodes' size estimates before building (one `PUT n_levels=10000000` grew the server to 57.7 GB); `POST /sim/stop`
-  never answers "stopped" while the runner's thread steps (503; state writes 409 while it runs); `PUT /graph/params` refuses values the step cannot trace and keeps a parameter's numeric type;
-  `PUT /sim/stride` is bounded (422) and kept for a later runner; a missing edge's DELETE is a 404; root-equal checkpoint paths are a 400.  Action: send integers for integer params; stop the runner before writing state.
+- **REST, round-4 audit** (MADD-ANO-075 to 080): `POST /graph/nodes`, `PUT /graph/params`, `from_dict` and USD loading check the grid/basis nodes' size estimates before building (one `PUT n_levels=10000000` grew the server to 57.7 GB); `POST /sim/stop`
+  never answers "stopped" while the runner's thread steps (503; state writes 409 while it runs); `PUT /graph/params` refuses values the step cannot trace and keeps a parameter's numeric type; the WebSocket
+  streams end with their client (SIGINT hung); `PUT /sim/stride` is bounded (422); a missing edge's DELETE is a 404; root-equal checkpoint paths are a 400.  Action: send integers for integer params; stop the runner before writing state.
 - **Coupling harness findings** (MADD-ANO-070 to 074, new, resolved): a group's integer/boolean fields are those the pass gives at the returned state, on both solvers (`ift` returned first-pass flags and froze edge-carried ones); predictor + mixed norm with such a field, Jacobi with a flux-reading producer, `reset_state`/`set_node_state` after `jax.grad`, under-relaxed `fixed` stopping on its first pass (~2x short) and the adaptive norm on integer leaves all fixed.
   `boundary_interpolation`'s "bit-identical under Jacobi" is round-off; a near-1 rate's noise-rejected ratio falls back to the raw test (MADD-ANO-005).  Action: re-run `run_adaptive*` results from graphs holding integer leaves.
 - **`hold_undetermined` no longer returns a fit's parameters above the loss it reached** (MADD-ANO-069, never released): a direction is held only if the

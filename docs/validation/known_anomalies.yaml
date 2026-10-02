@@ -6807,3 +6807,51 @@ anomalies:
       - "tests/api/test_runner_stop_and_stride.py::test_a_stride_outside_its_bounds_is_a_422_and_changes_nothing"
       - "tests/api/test_runner_stop_and_stride.py::test_deleting_an_edge_that_does_not_exist_is_a_404"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-080"
+    title: "A state or render WebSocket stream never noticed a client that left after the simulation stopped, so the server could not shut down; an ordinary disconnect was logged as an error"
+    description: >
+      `/ws/state`, `/ws/state/binary` and `/ws/render` learned that a
+      client had gone only when a send failed, and they send only when the
+      simulation has produced a new snapshot.  Their receive task did see
+      the disconnect, and ended without telling the stream.  So a client
+      that left after `POST /sim/stop` was never noticed, and neither was
+      the close uvicorn sends on shutdown: the handler slept on, and SIGINT
+      never completed.  A client that left while the simulation ran made
+      the next send fail with uvicorn's `RuntimeError` ("Unexpected ASGI
+      message 'websocket.send', after sending 'websocket.close'"), which
+      every stream logged with a traceback as "WebSocket error".  Checked
+      at v0.1.0, v0.2.0 and v0.3.1 (`git archive` of each) and on the 0.4.0
+      development tree, on 2026-10-02 (CPU, jaxlib 0.11.0, uvicorn 0.35,
+      websockets 16).  Start the simulation, open each stream, receive two
+      frames, `POST /sim/stop`, close the client, send SIGINT: the server
+      had not exited 10 s later, on all three streams.  Closing the client
+      before the stop instead logged one traceback per stream.  Resolved in
+      0.4.0: every stream ends as soon as its client leaves, the
+      connection breaks or the handler is cancelled, and it waits between
+      frames on that event, so shutdown takes a fraction of a second.  A
+      send that fails because the client left is logged at INFO.  A
+      malformed client message is ignored; it used to end the receive task
+      and, with it, the stream's view of the client.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud and outside the computation: the process would not exit, and
+      the log carried spurious tracebacks.  A second SIGINT makes uvicorn
+      exit, so the server stayed usable.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: send SIGINT twice (uvicorn then exits at once), or
+      close WebSocket clients while the simulation is still running.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A frame being rendered when the client leaves is finished first;
+      `/ws/render` renders in an executor thread.
+    verification:
+      - "tests/api/test_websocket_streams_end_with_their_client.py::test_streams_whose_clients_left_let_the_server_shut_down"
+      - "tests/api/test_websocket_streams_end_with_their_client.py::test_streams_with_their_clients_still_open_let_the_server_shut_down"
+      - "tests/api/test_websocket_streams_end_with_their_client.py::test_what_counts_as_the_client_having_left"
+    github_issue: null

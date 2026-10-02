@@ -105,8 +105,10 @@ class SpringDamperNode(SimulationNode):
             "multiplied by (m - c*dt)/(m - k*dt**2) every step.  Where the "
             "coupling iteration converges (k*dt**2 < m) and c*dt < m, the "
             "pair is stable only for c >= k*dt, far inside the single-node "
-            "limit; past it the pair drifts off with growing speed "
-            "(MADD-ANO-098)",
+            "limit; past it the pair drifts off with growing speed.  With "
+            "heavier damping it is stable up to c*dt + k*dt**2 = 2*m, past "
+            "which its common velocity flips sign and grows (MADD-ANO-098).  "
+            "compile() warns about such a pair; it does not refuse it",
         ),
         validated_regimes=(
             ValidatedRegime("stiffness", 0.01, 1e6, "N/m", "Tested range; very stiff springs need small dt"),
@@ -116,9 +118,11 @@ class SpringDamperNode(SimulationNode):
             "Very stiff springs (k > 1e4) with large dt can cause numerical instability",
             "Zero mass causes division by zero",
             "Two springs anchored on each other in a coupling group gain "
-            "momentum without bound, silently, when stiffness*dt > damping "
-            "(equal pair, stiffness*dt**2 < mass): keep damping >= "
-            "stiffness*dt, or the timestep below damping/stiffness",
+            "momentum without bound when stiffness*dt > damping (equal "
+            "pair, stiffness*dt**2 < mass), and compile() only warns: keep "
+            "damping >= stiffness*dt, or the timestep below "
+            "damping/stiffness, without raising damping*dt + "
+            "stiffness*dt**2 above 2*mass",
         ),
     )
 

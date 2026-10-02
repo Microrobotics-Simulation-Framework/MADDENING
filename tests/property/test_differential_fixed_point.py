@@ -412,6 +412,35 @@ def _long_ring_graph(m, mode):
     return gdef, gm, group
 
 
+def _uniform_ring_values(gdef, rho, scale):
+    """Every link's gain ``rho ** (1/m)``, biases ``scale * (1 - g)``: the worst case.
+
+    Each relay reads its predecessor with a gain just below one, so a
+    rounding at the start of the chain reaches its end almost undamped,
+    and every fixed-point entry is ``scale`` -- no cancellation anywhere,
+    which is the regime the floor's model claims.  This is the ring the
+    finding measured (0.51x at 32 relays); drawn rank-one gains damp the
+    chain and read 1.0-1.7x on the old floor instead.
+    """
+    m = len(gdef.group_nodes)
+    g = np.float32(rho ** (1.0 / m))
+    return {nm: {"G": [np.array([[g]], np.float32)],
+                 "b": np.array([scale * (1.0 - float(g))], np.float32),
+                 "x0": np.zeros(1, np.float32)}
+            for nm in gdef.group_nodes}
+
+
+@st.composite
+def _long_ring_values(draw, m):
+    """The worst-case uniform ring, or drawn rank-one gains, near one either way."""
+    gdef = _long_ring(m)
+    if draw(st.booleans()):
+        return _uniform_ring_values(gdef, draw(st.sampled_from([0.99, 0.995])),
+                                    draw(st.sampled_from([1.0, 0.75, 1e-3, 3e3])))
+    return draw(cg.drawn_values(gdef, rhos=(0.99, 0.995, 0.999), rank_one=True,
+                                bias_scales=(1.0,)))
+
+
 def assert_the_floor_bound_holds_on_a_long_ring(m, mode, values, near):
     gdef, gm, group = _long_ring_graph(m, mode)
     assert_spectral_bound_holds(gdef, gm, group, values, near)
@@ -424,10 +453,8 @@ def assert_the_floor_bound_holds_on_a_long_ring(m, mode, values, near):
 @given(data=st.data())
 def test_a_usable_spectral_bound_holds_on_a_stalled_ring(m, mode, data):
     """Per push, at a length the old floor still covered; slow sibling at 24 and 32."""
-    values = data.draw(cg.drawn_values(_long_ring(m), rhos=(0.99, 0.999), rank_one=True,
-                                       bias_scales=(1.0,)))
     assert_the_floor_bound_holds_on_a_long_ring(
-        m, mode, values, data.draw(st.sampled_from([1e-3, 1e-4])))
+        m, mode, data.draw(_long_ring_values(m)), data.draw(st.sampled_from([1e-3, 1e-4])))
 
 
 # Slow: a 24- or 32-relay group with diagnostics=True compiles the spectral
@@ -442,10 +469,9 @@ def test_a_usable_spectral_bound_holds_on_a_long_gauss_seidel_chain(m, data):
 
     Per-push sibling: :func:`test_a_usable_spectral_bound_holds_on_a_stalled_ring`.
     """
-    values = data.draw(cg.drawn_values(_long_ring(m), rhos=(0.99, 0.995), rank_one=True,
-                                       bias_scales=(1.0,)))
     assert_the_floor_bound_holds_on_a_long_ring(
-        m, "gauss-seidel", values, data.draw(st.sampled_from([1e-3, 3e-4])))
+        m, "gauss-seidel", data.draw(_long_ring_values(m)),
+        data.draw(st.sampled_from([1e-3, 3e-4])))
 
 
 # ---------------------------------------------------------------------------

@@ -334,12 +334,12 @@ def test_the_compiled_fmu_returns_fmi3_error_for_such_an_archive(tmp_path):
         np.savez(buf, **members)
         forged = base64.b64encode(buf.getvalue()) if encoded else buf.getvalue()
         inst.doStep(currentCommunicationPoint=DT, communicationStepSize=DT)
-        here = inst.getFloat64([pos])[0]
+        here = inst.getFloat32([pos])[0]                   # a Float32 output
         bad = inst.deserializeFMUState(forged)
         with pytest.raises(FMICallException) as caught:
             inst.setFMUState(bad)
         assert caught.value.status == 3                    # fmi3Error
-        assert inst.getFloat64([pos])[0] == here           # nothing restored
+        assert inst.getFloat32([pos])[0] == here           # nothing restored
         inst.setFMUState(st)                               # the genuine one still works
         inst.freeFMUState(st)
         inst.freeFMUState(bad)

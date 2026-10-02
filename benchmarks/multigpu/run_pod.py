@@ -13,41 +13,43 @@ unsharded node, NumPy, or the refusal the library promises); the last
 three are the timing goals::
 
     indivisible  checklist 5: a grid the mesh cannot split is refused by
-                 the stencil and pointwise wrappers with both numbers
-                 named (the stencil refusal saying the unstructured
-                 wrapper is not a way out for a stencil node), and the
-                 unstructured wrapper takes an uneven split of a node
-                 written for it and matches the unsharded node.
-                                                    -> indivisible.json
-    halo         checklist 2: ``halo_exchange`` on a 1-D and a 2-D device
-                 mesh for every boundary mode and halo widths 1 and 2, and
-                 ``exchange_unstructured`` under both transports, forward
-                 and adjoint, against a NumPy reference -- bit for bit.
-                                                    -> halo.json
+                 the stencil wrapper (along spatial axis 0 and along axis
+                 1, on the 1-D mesh, and on the pencil) and the pointwise
+                 wrapper with both numbers named (the stencil refusal
+                 saying the unstructured wrapper is not a way out for a
+                 stencil node), and the unstructured wrapper takes an
+                 uneven split of a node written for it and matches the
+                 unsharded node.                    -> indivisible.json
+    halo         checklist 2: ``halo_exchange`` on every mesh of
+                 ``STENCIL_MESHES`` for every boundary mode and halo
+                 widths 1 and 2, and ``exchange_unstructured`` under both
+                 transports, forward and adjoint, against a NumPy
+                 reference -- bit for bit.          -> halo.json
     coupled      checklist 6: one ``ShardedStencilNode`` member and one
-                 replicated member in a single coupling group, on the
-                 pencil mesh, coupled through the field's domain integral
-                 and a grid-shaped input; forward rollout and ``jax.grad``
-                 with respect to trained parameters of both, under the
-                 default solver and ``"fori"``, against the same group
-                 with the sharded member replaced by the node it wraps and
-                 against a float64 model.           -> coupled.json
+                 replicated member in a single coupling group, coupled
+                 through the field's domain integral and a non-uniform
+                 grid-shaped input; forward rollout and ``jax.grad`` with
+                 respect to trained parameters of both, under the default
+                 solver and ``"fori"``, against the same group with the
+                 sharded member replaced by the node it wraps and against
+                 a float64 model.  Every mesh at the smallest size, the
+                 pencil at the others.              -> coupled.json
     stencil      checklist 1 and 3 for ``ShardedStencilNode``: a 2-D field
                  that reads its sharded ``StaticArray`` in the halo, takes
                  a grid-shaped source and carries a domain integral, and a
                  D2Q9 lattice with a grid-shaped body force (its streaming
                  reads the halo corners); forward rollout and the adjoint
                  (initial state and a parameter) against the unsharded
-                 node.  Periodic ends at every size on the pencil mesh;
-                 at the smallest, the field under periodic, ``"edge"``
-                 (the wrapper's default) and Dirichlet ends and the
-                 lattice, each on the 1-D and the pencil mesh.
-                                                    -> stencil.json
+                 node.  At the smallest size, the field under periodic,
+                 ``"edge"`` (the wrapper's default) and Dirichlet ends and
+                 the lattice, each on every mesh; periodic ends on the
+                 pencil at the others.              -> stencil.json
     hybrid       checklist 4: ``HybridNode(ShardedStencilNode(inner))`` in
-                 a graph on the pencil mesh, with a non-local correction
-                 and a grid-shaped source, forward (the field and its
-                 domain integral) and adjoint against
-                 ``HybridNode(inner)``.             -> hybrid.json
+                 a graph, with a non-local correction and a grid-shaped
+                 source, forward (the field and its domain integral) and
+                 adjoint against ``HybridNode(inner)``; every mesh at the
+                 smallest size, the pencil at the others.
+                                                    -> hybrid.json
     exchange     NCCL ranking of the two unstructured halo-exchange
                  transports, ``all_to_all`` vs ``ppermute``, at 1e5-1e6
                  cells -- the measurement that decides whether ``ppermute``
@@ -64,17 +66,30 @@ three are the timing goals::
     checklist    the five checklist goals, in the order above.
     all          all eight, in the order above.
 
+The meshes (``STENCIL_MESHES``, as devices along spatial axes 0 and 1 over
+``D``): ``"1d"`` (D x 1) and ``"1d-axis1"`` (1 x D), a 1-D mesh sharding
+one spatial axis each; ``"2d-flat"`` (1 x D), a 2-D mesh whose two axes
+have different sizes; and ``"2d"`` (2 x D/2), the pencil, which exchanges
+two axes.  On four devices the pencil is 2 x 2, and on a mesh axis of two
+devices a shard's left and right neighbour are one device: the 1-D meshes
+give each spatial axis all four.  Every grid is non-square
+(``field_shape``: ``nx = ny + D``), and every grid-shaped input differs on
+every block of every mesh.
+
 Every goal records ``checks`` (name, measured value, limit, the sense of
 the comparison, passed) and ``passed`` in its JSON, prints a failed check
 as ``CHECK FAILED``, and the runner exits 1 when any check failed.  A case
 the device count cannot express (the 2-D pencil mesh below 4 or on an odd
-count; a neighbour-direction swap on 2) is recorded as a check *not run*
-and printed as ``CHECK NOT RUN``: not a failure, but the goal does not
-read complete; the stencil, hybrid and coupled goals record their
-pencil-mesh cases that way on such a count.  Each of those three must fail
-on a stencil wrapper broken in any of four ways (a static's halos NaN,
+count; a spatial axis no case splits over three or more devices, where a
+halo from the wrong neighbour cannot show) is recorded as a check *not
+run* and printed as ``CHECK NOT RUN``: not a failure, but the goal does
+not read complete; the halo, stencil, hybrid and coupled goals record
+those cases that way on such a count.  Each of the wrapper goals must fail
+on a stencil wrapper broken in any of seven ways (a static's halos NaN,
 grid-shaped inputs zeroed, domain integrals halved, sharded axes after the
-first zero-filled at the global edges):
+first zero-filled at the global edges, halos taken from the wrong
+neighbour along spatial axis 1, ``shard_info``'s extent divided by the
+first mesh axis's size or read off spatial axis 0):
 ``tests/cloud/multigpu/test_run_pod_seeded_faults.py`` seeds each into a
 scratch copy of the library and requires it.  ``--summarise DIR`` reads
 the JSON files back and prints
@@ -90,8 +105,11 @@ the ones this runner derives from its results (``GOAL_CHECKS``), limits
 from ``LIMITS`` included.  A checklist item reads ``CLOSED`` only when
 every goal deciding it passed with every check run and every file valid,
 on real GPUs, not a dry run, on at least ``MIN_DECIDING_DEVICES`` (4)
-devices, and every deciding file records the same git commit.  It does
-not import JAX, so it works on a laptop without a usable jaxlib.
+devices, and every deciding file records the same git commit.  Each item's
+line names the commit its files record, and a directory whose files come
+from more than one commit prints a ``MIXED COMMITS`` warning naming each
+commit's items and files, and exits 4.  It does not import JAX, so it
+works on a laptop without a usable jaxlib.
 
 Every timed callable receives inputs that were placed on the device mesh
 once, with the ``NamedSharding`` the compiled executable expects, outside

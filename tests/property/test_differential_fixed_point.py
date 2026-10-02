@@ -539,7 +539,7 @@ def _chain_names(kinds):
 
 
 @functools.lru_cache(maxsize=None)
-def _chain_graph(kinds, mode="gauss-seidel"):
+def _chain_graph(kinds):
     """The ring ``c00 (head) -> c01 -> ... -> cK -> c00`` for link ``kinds``, compiled once."""
     names = _chain_names(kinds)
     gm = GraphManager()
@@ -551,10 +551,7 @@ def _chain_graph(kinds, mode="gauss-seidel"):
         gm.add_edge(names[k - 1], names[k], "x", "u0")
         if kind == "product":
             gm.add_edge(names[max(k - 2, 0)], names[k], "x", "u1")
-    # Under Jacobi a ring of K + 1 members contracts at ``rho**(1/(K+1))`` a
-    # pass, so reaching the float stall takes about K + 1 times the passes.
-    gm.add_coupling_group(names, max_iterations=3000 * (len(names) if mode == "jacobi" else 1),
-                          tolerance=1e-12, diagnostics=True, iteration_mode=mode)
+    gm.add_coupling_group(names, max_iterations=3000, tolerance=1e-12, diagnostics=True)
     gm.compile()
     assert [nm for nm in gm.schedule] == names, "fixture premise: swept in chain order"
     return gm, names
@@ -644,8 +641,8 @@ def _exact_chain(kinds, consts, start=None):
     return np.asarray(vals, np.float64), np.asarray(slopes, np.float64)
 
 
-def _run_chain(kinds, consts, head, mode="gauss-seidel"):
-    gm, names = _chain_graph(kinds, mode)
+def _run_chain(kinds, consts, head):
+    gm, names = _chain_graph(kinds)
     xs, _slopes = _exact_chain(kinds, consts)
     cg.recover(gm)
     gm.reset_state()
@@ -661,8 +658,8 @@ def _run_chain(kinds, consts, head, mode="gauss-seidel"):
     return gm, names, x, xs, d, params
 
 
-def assert_the_bound_holds_on_an_adversarial_chain(kinds, consts, head, mode="gauss-seidel"):
-    _gm, _names, x, _xs, d, _p = _run_chain(kinds, consts, head, mode)
+def assert_the_bound_holds_on_an_adversarial_chain(kinds, consts, head):
+    _gm, _names, x, _xs, d, _p = _run_chain(kinds, consts, head)
     xs, _slopes = _exact_chain(kinds, consts, start=x[0])
     dist = float(np.sqrt(np.sum(((x - xs) / np.maximum(np.abs(x), np.abs(xs))) ** 2)))
     note(f"kinds={kinds} consts={consts} dist={dist:.4e} {dict(d)}")
@@ -680,23 +677,20 @@ _GAIN_CHAIN = ("square", "product", "square", "quartic", "square", "square",
 _SIGNED_CHAIN = ("affine",) * 6
 
 
-@pytest.mark.parametrize("kinds, mode", [(_GAIN_CHAIN, "gauss-seidel"),
-                                         (_SIGNED_CHAIN, "gauss-seidel"),
-                                         (_SIGNED_CHAIN, "jacobi")],
-                         ids=["gain-above-one", "mixed-sign", "mixed-sign-jacobi"])
+@pytest.mark.parametrize("kinds", [_GAIN_CHAIN, _SIGNED_CHAIN], ids=["gain-above-one", "mixed-sign"])
 # Costly tier: one compile per chain; the examples draw the constants.
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
-def test_a_usable_spectral_bound_holds_on_an_adversarial_chain(kinds, mode, data):
+def test_a_usable_spectral_bound_holds_on_an_adversarial_chain(kinds, data):
     """Per push; slow siblings draw the chain and check the gradient bound.
 
-    Under Jacobi every read is of the stored previous iterate, so no chain
-    composes and the whole count is each member's own, scaled by its
-    reads' gains: what a signed chain whose terms cancel needs.
+    Gauss-Seidel only: under Jacobi these rings contract at ``rho**(1/K)`` a
+    pass and their rounding noise keeps the residual above the floor, so
+    the bound there is the residual's and the floor is never tested.
     """
     assert_the_bound_holds_on_an_adversarial_chain(
         kinds, data.draw(_adversarial_constants(kinds)),
-        data.draw(st.sampled_from([1e-3, 1e-4])), mode)
+        data.draw(st.sampled_from([1e-3, 1e-4])))
 
 
 # Slow: the chain is drawn, so every example compiles a graph of its own.

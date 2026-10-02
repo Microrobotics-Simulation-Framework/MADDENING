@@ -8686,7 +8686,7 @@ anomalies:
       passes on a 16-bit group (pinned for Aitken, IQN-ILS and IQN-IMVJ on
       both 16-bit dtypes).
     severity: "minor"
-    safety_relevance: "none"
+    safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
       Loud -- the step could not be traced -- with a workaround that keeps
       the feature usable (`solver="ift"` from 0.3.0, a float32 group, or
@@ -8720,7 +8720,7 @@ anomalies:
       `boundary_input_spec()` declares, at their defaults (zeros where it
       declares none).
     severity: "minor"
-    safety_relevance: "none"
+    safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
       Loud, with a workaround that keeps the profiler usable (`.get()` with
       a default in `update`, or profiling the graph without per-node

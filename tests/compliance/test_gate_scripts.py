@@ -4178,13 +4178,19 @@ class TestHeatStabilityAsksTheConstructor:
         assert "2 construction(s) refused inside pytest.raises" in out
 
     def test_the_same_refusal_outside_pytest_raises_still_fails(
-            self, heat_stability_gate, tmp_path):
+            self, heat_stability_gate, tmp_path, capsys):
+        # A verified rod too, so that the empty-scope guard cannot be what
+        # fails the run.
         root = _rod(tmp_path,
                     "import pytest\n"
+                    'HeatNode("ok", timestep=1e-3)\n'
                     "with pytest.raises(ValueError):\n"
                     '    HeatNode("r", 0.001, n_cells=4, stencil_order=4)\n'
                     'HeatNode("r", 0.001, n_cells=4, stencil_order=4)\n')
         assert heat_stability_gate.main([str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "FAIL: 1 HeatNode construction(s) the constructor refuses" in out
+        assert "mod.py:6:" in out and "mod.py:5:" not in out
 
     def test_a_rod_inside_pytest_raises_the_constructor_builds_is_verified(
             self, heat_stability_gate, tmp_path, capsys):

@@ -371,7 +371,14 @@ def test_verify_node_runs_the_params_checks_on_a_duck_typed_params_node():
 # ------------------------------------------------------------------
 
 _SIGNATURE_READERS = {"signature", "getfullargspec", "getargspec", "getcallargs"}
-_ALLOWED = {("core/node.py", "_signature_takes_keyword")}
+_ALLOWED = {
+    ("core/node.py", "_signature_takes_keyword"),
+    # Not a params probe: binds a request's params to a node constructor's
+    # signature to apply its defaults, so a class's size estimate sees the
+    # arguments the constructor would run with (``maddening.core._size_estimate``).
+    # It never decides whether a method takes ``params``.
+    ("core/_size_estimate.py", "constructor_arguments"),
+}
 
 
 def _signature_reads():

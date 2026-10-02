@@ -328,7 +328,11 @@ def test_a_routable_peer_is_challenged_even_on_a_believed_loopback_bind():
 
 
 def test_a_loopback_peer_is_not_challenged_on_a_loopback_bind():
-    client = TestClient(_server("127.0.0.1").create_app(), client=("127.0.0.1", 5))
+    # A loopback peer names the server by a loopback name, as a browser on
+    # this machine does; another name is refused (DNS rebinding,
+    # tests/api/test_cross_origin_requests.py).
+    client = TestClient(_server("127.0.0.1").create_app(), client=("127.0.0.1", 5),
+                        base_url="http://127.0.0.1:8000")
     assert client.get("/graph").status_code == 200
 
 

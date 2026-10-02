@@ -1012,6 +1012,8 @@ def test_deleting_rows_from_a_pinned_guide_fails_the_gate(
     monkeypatch.setattr(mapping_gate, "_REPO_ROOT", str(tmp_path))
     monkeypatch.setattr(mapping_gate, "MIN_MAPPINGS",
                         {rel: mapping_gate.MIN_MAPPINGS[rel]})
+    monkeypatch.setattr(mapping_gate, "NODE_GUIDES",
+                        {rel: mapping_gate.NODE_GUIDES[rel]})
 
     target.write_text(text, encoding="utf-8")
     assert mapping_gate.main([str(target.parent)]) == 0

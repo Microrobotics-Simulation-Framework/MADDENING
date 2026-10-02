@@ -443,7 +443,8 @@ jobs:
             tests/cloud/multigpu/test_property_sharded_round_trips.py \
             tests/nodes/test_builtin_node_round_trip.py \
             tests/nodes/test_lbm_wall_mask_round_trip.py \
-            tests/test_examples_smoke.py::test_example_imports_resolve_against_the_library
+            tests/test_examples_smoke.py::test_example_imports_resolve_against_the_library \
+            tests/test_examples_smoke.py::test_usd_example_runs_headless
 
   typecheck:
     # Phase 2 of the typing policy (docs/developer_guide/typing.md): the

@@ -110,7 +110,7 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-045 | solver="fori" with acceleration="iqn-imvj" carried zero secant columns to the next step, so jacobian_reuse did nothing | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-046 | A sub-cycled node whose timestep does not divide the group's macro timestep covered round(macro / node_dt) * node_dt per macro step, and nothing refused it | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-047 | PUT /graph/params accepted a write that flipped a branch the node fixed at construction: the running graph kept the old branch, a saved graph reloaded the new one | `major` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
-| MADD-ANO-048 | PUT /graph/params accepted values the node's own constructor refuses, so a graph saved after the write could not be loaded | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-048 | PUT /graph/params accepted values the node's own constructor refuses, so a graph saved after the write could not be loaded | `major` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-049 | A non-finite value written through PUT /graph/params was stored, then the reply failed with a 500, and every later GET /graph/params for the node failed too | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-050 | Two HeatNode rods coupled end to end are unstable above Fourier number 3/8 (stencil_order=2) or 0.226 (stencil_order=4) once the exchange converges, below the limit each rod's constructor accepts | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
 | MADD-ANO-051 | The HTTP API served every route, POST /cloud/launch included, to any caller with no credential, and the shipped container bound it to 0.0.0.0 | `critical` | `safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
@@ -137,8 +137,16 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-072 | After jax.grad through run_scan, set_node_state wrote into the traced state and the next entry point discarded the write; reset_state raised on a predictor group | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-073 | Under acceleration="fixed" with relaxation below 1/(1+sqrt(rho)), a coupling group stopping on its first loop pass understated its distance about 2x and reported converged | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-074 | The adaptive steppers' error norm read integer and boolean state leaves: a bool raised, a uint32 wrapped and a counter moved the step sequence | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-075 | Opening a USD stage imported the Python module the stage named for a node, so load_graph_from_usd ran a stage author's code | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-076 | The HTTP API checked no Origin, so a web page in the user's browser could drive a loopback-bound server and read its state stream | `critical` | `safety_relevant` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
+| MADD-ANO-077 | Swapping a surrogate in with replace_node, or out with POST /surrogate/deactivate, re-added each edge without its additive flag and units: an additive coupling became an overwriting one, silently | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-078 | build_model_description of a real graph declared no FMU inputs and a default step of 1e-3, whatever the graph's inputs and timestep | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
+| MADD-ANO-079 | compile() restarted a multi-rate graph's sub-step counter, so a recompile in the middle of a run re-phased the sub-steps each slower node fired on | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-080 | The FMU bridge split a variable's name at its first dot to find the node, so every input of a node whose name holds a '.' was filed under a node the graph does not have | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-081 | After a sharded static was rewritten in place, compile() traced the new step against the wrapper's cached copy of the old buffer | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-082 | The FMU bridge installed an importer's FMU-state archive without the value checks set applies: a parameter outside its declared bounds and non-finite state were accepted | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 
-*74 anomalies registered.  21 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 14 `open` plus 7 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*82 anomalies registered.  23 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 14 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence
@@ -168,9 +176,10 @@ installs it into a new, isolated virtual environment, and runs
 the tool is not in the SBOM.  MADDENING is the root component, with its
 version, purl and licence.  Every other installed distribution is a
 component with its name, version, `pkg:pypi` purl and the licence its
-metadata declares.  The dependency graph is included, and the root's edges
-are exactly the direct dependencies `pyproject.toml` declares for that
-install.
+metadata declares, and its own `Requires-Dist` metadata, verbatim
+(`maddening:sbom:requires-dist` properties, with a count).  The dependency
+graph is included, and the root's edges are exactly the direct dependencies
+`pyproject.toml` declares for that install.
 
 | File | Install | What it covers |
 |---|---|---|
@@ -224,11 +233,29 @@ the directory holds any other SBOM.  It fails if a direct dependency
 SBOM, or is at a version outside its declared range.  It fails if a SOUP
 item §1 lists is missing, or is at a version outside the `pyproject.toml`
 range.  It also fails if a component has no purl, or a purl that disagrees
-with it, or no licence; if a component is reached by no path from the root
-in the dependency graph, so that no install brings it in; if the recorded
-Python is one `requires-python` refuses; and if the file was edited after
-generation: the `serialNumber` is derived from the content.  Each failure
-names the discrepancy.
+with it, or no licence or a blank one; if a component is reached by no path
+from the root in the dependency graph, so that no install brings it in; if
+the recorded Python is one `requires-python` refuses; and if a file does not
+record its resolution cutoff.  It follows the install's requirements from
+the declared direct dependencies through each component's recorded
+`Requires-Dist`, with markers evaluated in the recorded environment, and
+fails if a requirement the install turns on names a package the SBOM lacks
+or a version the requirement refuses, if the graph and the requirements
+disagree, or if a component is required by nothing the install turns on.
+It fails if the four files disagree about the cutoff, the index, the
+resolver, the platform or any marker variable: they are one resolution, and
+are regenerated together.  And it fails if a file was changed after
+generation without being re-sealed: the `serialNumber` is derived from the
+content.  Each failure names the discrepancy.
+
+These checks prove that the files are consistent with `pyproject.toml`, with
+§1 and with themselves.  They do not prove that the content is what a
+resolver produced: the sealing function is public, so an edit can be
+re-sealed, and one that breaks none of the rules above (a package moved to
+another version that its range and its dependants all admit) passes.  Only
+regeneration proves the content.  `python scripts/generate_sbom.py
+--exclude-newer <the recorded cutoff> --output-dir <dir>` resolves each
+install again, and its output must be byte-identical to the committed file.
 
 **Determinism.**  Components and the dependency graph are sorted, keys are
 written sorted, `metadata.timestamp` is the resolution cutoff (or

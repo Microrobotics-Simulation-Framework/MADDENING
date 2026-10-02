@@ -57,7 +57,28 @@ import time.  Levels:
 | `maddening.core.coupling.mapping_spec.point_array_digest` | evolving |
 | `maddening.core.edge.EdgeSpec` | stable |
 | `maddening.core.graph_manager.GraphManager` | stable |
+| `maddening.core.graph_manager.GraphManager.coupling_report` | experimental |
+| `maddening.core.graph_manager.GraphManager.format_graph` | experimental |
+| `maddening.core.graph_manager.GraphManager.memory_estimate` | experimental |
+| `maddening.core.graph_manager.GraphManager.params_table` | experimental |
+| `maddening.core.graph_manager.GraphManager.print_coupling_report` | experimental |
+| `maddening.core.graph_manager.GraphManager.print_graph` | experimental |
+| `maddening.core.graph_manager.GraphManager.print_memory_estimate` | experimental |
+| `maddening.core.graph_manager.GraphManager.print_params_table` | experimental |
+| `maddening.core.graph_manager.GraphManager.print_state_summary` | experimental |
+| `maddening.core.graph_manager.GraphManager.state_summary` | experimental |
+| `maddening.core.graph_manager.GraphManager.to_dot` | experimental |
+| `maddening.core.graph_manager.GraphManager.to_mermaid` | experimental |
 | `maddening.core.graph_manager.ShardingIssue` | evolving |
+| `maddening.core.inspection.InspectionTable` | experimental |
+| `maddening.core.inspection.coupling_report` | experimental |
+| `maddening.core.inspection.format_graph` | experimental |
+| `maddening.core.inspection.memory_estimate` | experimental |
+| `maddening.core.inspection.params_table` | experimental |
+| `maddening.core.inspection.print_graph` | experimental |
+| `maddening.core.inspection.state_summary` | experimental |
+| `maddening.core.inspection.to_dot` | experimental |
+| `maddening.core.inspection.to_mermaid` | experimental |
 | `maddening.core.node.BoundaryFluxSpec` | evolving |
 | `maddening.core.node.BoundaryInputSpec` | evolving |
 | `maddening.core.node.SimulationNode` | stable |
@@ -92,6 +113,8 @@ import time.  Levels:
 | `maddening.fmi.sidecar.FmuSidecar` | evolving |
 | `maddening.fmi.sidecar.SidecarConfig` | evolving |
 | `maddening.fmi.tcp_bridge.FmuTcpBridge` | evolving |
+| `maddening.info.collect_versions` | experimental |
+| `maddening.info.show_versions` | experimental |
 | `maddening.nodes.adaptive.base.AdaptiveNode` | evolving |
 | `maddening.nodes.adaptive.base.AdaptiveNode.blindness_ratio` | deprecated |
 | `maddening.nodes.adaptive.base.AdaptiveNode.is_trapped_at` | deprecated |
@@ -182,4 +205,4 @@ import time.  Levels:
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
 
-*162 API surfaces registered.*
+*185 API surfaces registered.*

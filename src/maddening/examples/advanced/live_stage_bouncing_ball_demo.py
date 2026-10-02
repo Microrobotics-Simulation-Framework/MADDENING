@@ -85,26 +85,22 @@ def run(out_path: Optional[Path] = None, n_steps: int = 100) -> Path:
     xform.ClearXformOpOrder()
     xform.AddTranslateOp()
 
-    stage.register_prim(
-        node_name="ball", prim_path="/World/Ball",
-        updater=make_translate_updater(field="position"),
-    )
-
-    # Convert ball's 1-D position into a 3-D translate (x = 0, y = pos, z = 0).
-    # Wrap the updater to do this conversion since BallNode emits scalar y.
+    # BallNode emits a scalar height, and make_translate_updater wants a
+    # 3-vector, so wrap it: (x = 0, y = height, z = 0).
     base_updater = make_translate_updater(field="position")
+
     def adapt_1d_to_3d(stage, prim_path, node_state, time_code=None):
         pos = node_state.get("position")
         if pos is None:
             return
         import numpy as np  # noqa: PLC0415
-        # BallNode position is a scalar (the y-coordinate above the ground).
         adapted = np.array([0.0, float(pos), 0.0])
         base_updater(stage, prim_path,
                      {"position": adapted}, time_code=time_code)
 
-    # Replace the registered updater with the 1D-aware adapter.
-    stage._dynamic_prims[-1].updater = adapt_1d_to_3d
+    stage.register_prim(
+        node_name="ball", prim_path="/World/Ball", updater=adapt_1d_to_3d,
+    )
 
     # Run the simulation, writing time-sampled positions.  step() does
     # the bookkeeping for us — the returned dict is the user-facing

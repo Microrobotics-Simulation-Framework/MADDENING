@@ -22,9 +22,9 @@ apt ``libgirepository1.0-dev`` headers; the apt ``python3-gi`` package is
 kept only for the GIR typelibs it pulls in.
 
 Usage:
-    python 07_webrtc_streaming_test.py
-    python 07_webrtc_streaming_test.py --gpu RTX4090
-    python 07_webrtc_streaming_test.py --keep
+    python -m maddening.examples.cloud.streaming.07_webrtc_streaming_test
+    python -m maddening.examples.cloud.streaming.07_webrtc_streaming_test --gpu RTX4090
+    python -m maddening.examples.cloud.streaming.07_webrtc_streaming_test --keep
 """
 
 import argparse
@@ -369,8 +369,11 @@ def main():
     # --- Upload and run server script ---
     print("\nStarting WebRTC server (with performance profiling)...")
     job.ssh_run(f"echo {shlex.quote(SERVER_SCRIPT)} > /tmp/webrtc_server.py", check=True)
+    # The token goes over ssh's stdin, not in the command string, where it
+    # would sit in /proc/<pid>/cmdline (see 04_server_test.py).
     job.ssh_run_background(
-        f"MADDENING_API_TOKEN={shlex.quote(API_TOKEN)} {PYTHON} /tmp/webrtc_server.py"
+        f"{PYTHON} /tmp/webrtc_server.py",
+        env={"MADDENING_API_TOKEN": API_TOKEN},
     )
 
     # --- Wait for perf results (server profiles before starting uvicorn) ---
@@ -442,8 +445,8 @@ def main():
     else:
         print("  WARNING: FastAPI server not responding")
 
-    # --- Verify server-rendered WS works alongside WebRTC ---
-    print("\nVerifying /ws/render endpoint (server-side rendering)...")
+    # --- Check the FastAPI server answers alongside WebRTC ---
+    print("\nChecking the FastAPI server alongside WebRTC (GET /graph)...")
     try:
         req = urllib.request.Request(
             f"{base_url}/graph", method="GET",

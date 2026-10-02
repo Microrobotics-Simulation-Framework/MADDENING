@@ -1,5 +1,24 @@
 # Cloud Examples
 
+Most scripts here **provision billable VMs**.  The ones marked *local* below
+have a mode that needs no cloud account; start there.
+
+## Without a cloud account
+
+```bash
+# The server script 04 installs on the VM, run on this machine on a free
+# loopback port, with the same endpoint checks:
+python -m maddening.examples.cloud.server.04_server_test --local
+# The same for the JSON and binary WebSocket checks:
+python -m maddening.examples.cloud.server.05_websocket_test --local
+# The multi-job rendezvous (coordinator + two workers) on loopback:
+python -m maddening.examples.cloud.multijob.08_two_vm_test --local
+# Field subscription and compression over the binary WebSocket (local only):
+python -m maddening.examples.cloud.streaming.08_subscribe_lbm_velocity
+```
+
+None of these import the cloud launcher.
+
 ## Directory Structure
 
 ```
@@ -8,41 +27,52 @@ cloud/
 │   ├── cloud_credentials.example.yaml   # API key template → ~/.maddening/
 │   └── job_config.example.yaml          # Job config template (safe to commit)
 ├── launch/                          # VM provisioning + lifecycle
-│   ├── 01_validate.py                   # Dry-run config validation
-│   ├── 02_runpod_launch.py              # Real launch, status, teardown
-│   └── 03_reconnect_test.py             # CloudJob.from_cluster_name() test
-├── server/                          # Simulation server on cloud GPU
-│   ├── 04_server_test.py                # REST API (ball+spring on RTX 4090)
-│   └── 05_websocket_test.py             # JSON + binary WS streaming
+│   ├── 01_validate.py                   # Config + credential validation, cost guards
+│   ├── 02_runpod_launch.py              # Real launch, status, teardown (RunPod)
+│   ├── 03_lambda_launch.py              # The same on Lambda Labs
+│   ├── 03_reconnect_test.py             # CloudJob.from_cluster_name() test
+│   ├── 04_aws_launch.py                 # The same on AWS
+│   └── 05_gcp_launch.py                 # The same on GCP
+├── server/                          # Simulation server on a cloud GPU
+│   ├── 04_server_test.py                # REST API checks           (--local)
+│   └── 05_websocket_test.py             # JSON + binary WS streaming (--local)
+├── multijob/
+│   └── 08_two_vm_test.py                # Two-VM rendezvous         (--local)
+├── multigpu/
+│   └── 09_real_gpu_benchmark.py         # Single- vs multi-GPU timings, 2x RTX 4090
 └── streaming/                       # WebRTC / Selkies streaming
-    ├── 06_selkies_test.py               # GStreamer pipeline on cloud GPU
-    └── 07_webrtc_streaming_test.py      # Full WebRTC pipeline + profiling
+    ├── 06_selkies_test.py               # GStreamer pipeline on a cloud GPU
+    ├── 07_webrtc_streaming_test.py      # Full WebRTC pipeline + profiling
+    └── 08_subscribe_lbm_velocity.py     # Binary-WS field subscription (local only)
 ```
 
 ## Setup
 
 ```bash
-pip install maddening[runpod]
+pip install "maddening[runpod]"      # or [lambda], [aws], [gcp]
 mkdir -p ~/.maddening
-cp config/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
-# Edit with your RunPod API key
+# The templates ship with MADDENING; this prints the directory holding them:
+python -c "import maddening.examples.cloud.config as c; print(c.__path__[0])"
+cp <that directory>/cloud_credentials.example.yaml ~/.maddening/cloud_credentials.yaml
+cp <that directory>/job_config.example.yaml job.yaml
+# Edit the credentials with your API key, and job.yaml to taste
 ```
 
 ## Running
 
-Start with validation (no cloud spend):
+Start with validation:
 ```bash
-python launch/01_validate.py --job config/job_config.example.yaml
+python -m maddening.examples.cloud.launch.01_validate --job job.yaml
 ```
 
-Then try a real launch:
+Then try a real launch (or `--dry-run` first):
 ```bash
-python launch/02_runpod_launch.py
+python -m maddening.examples.cloud.launch.02_runpod_launch --job job.yaml
 ```
 
 Full server test (provisions VM, installs deps, starts server, tests API):
 ```bash
-python server/04_server_test.py --gpu RTX4090
+python -m maddening.examples.cloud.server.04_server_test --gpu RTX4090
 ```
 
 ## Security: the server these examples start needs a token

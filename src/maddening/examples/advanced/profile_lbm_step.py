@@ -1,29 +1,35 @@
 #!/usr/bin/env python3
-"""v0.2 #9 demo: profile a simulation step and save a Perfetto JSON.
+"""Profile a simulation step and save a Perfetto JSON.
 
-Runs the v0.2 profiler against a small Heat+Coupling graph (a real
-graph rather than a toy single-node smoke), saves the result as
-``profile.json``, and prints how to open it.
+Runs :func:`~maddening.core.simulation.profiler.profile_graph` on a
+small graph of two heat rods joined by a one-way edge, saves the
+result as ``profile.json`` in the current directory, and prints the
+report and how to open the file.  (The file name is historical: the
+graph it builds is not a Lattice-Boltzmann one.)
 
 The profile contains:
-  * a top-level event for the run (n_steps × mean step time)
-  * one event per node (in-isolation update timing)
-  * a coupling-overhead event for the residual time
-  * bottleneck + recommendation summary in ``otherData``
+  * a top-level ``run xN`` event spanning the timed steps, whose
+    ``args`` carry the mean step time, the throughput and the
+    bottleneck verdict;
+  * one ``<node>.update`` event per node -- each node's update timed in
+    isolation and laid out in series, so the bars are a reconstruction,
+    not a recording;
+  * a ``coupling_overhead`` event only when the graph has coupling
+    groups and the measured overhead is positive (this graph has none,
+    so its trace has none);
+  * the recommendations and the JIT compile time in ``otherData``.
 
-Drag-and-drop the saved JSON into https://ui.perfetto.dev to see
-the flame-graph view.  The Perfetto UI is the same one TensorBoard's
-"Trace Viewer" plugin uses, so you don't need TensorBoard for this
-file format.
+Drag-and-drop the saved JSON into https://ui.perfetto.dev to see the
+timeline.
 
 Usage:
-    python profile_lbm_step.py
-    python profile_lbm_step.py --n-steps 200 --out my_profile.json
-    python profile_lbm_step.py --jax-trace      # also capture the
-                                                # XLA-level trace dir
+    python -m maddening.examples.advanced.profile_lbm_step
+    python -m maddening.examples.advanced.profile_lbm_step --n-steps 200 --out my_profile.json
+    python -m maddening.examples.advanced.profile_lbm_step --jax-trace
+        # also capture an XLA-level jax.profiler trace directory
 
-For real LBM you can swap _build_graph for your own graph; the
-profiler is graph-shape-agnostic.
+To profile your own graph, swap ``_build_graph`` for it; the profiler
+does not depend on the graph's shape.
 """
 
 from __future__ import annotations

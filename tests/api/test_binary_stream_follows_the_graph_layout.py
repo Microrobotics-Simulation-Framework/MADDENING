@@ -108,6 +108,30 @@ def test_a_client_connected_through_a_replacement_gets_the_new_schema_first(n_ce
         _assert_frame_is_the_state(message["bytes"], schema, truth)
 
 
+def test_a_snapshot_of_another_layout_gets_its_schema_first_whatever_published_it():
+    """The invariant without the graph's events: a snapshot published with a
+    node the schema lacks -- as when a frame races the compile that bumps
+    the layout -- is preceded by a schema that has it.  (A node the schema
+    lacks is no size mismatch, so ``encode`` alone would drop it.)"""
+    import json
+
+    gm, server, client = _server()
+    with client.websocket_connect("/ws/state/binary") as ws:
+        schema = ws.receive_json()
+        assert client.post("/sim/step").status_code == 200
+        ws.receive_bytes()
+        state = {n: dict(f) for n, f in gm._state.items() if n != "_meta"}
+        state["c_new"] = {"x": np.arange(3, dtype=np.float32)}
+        server.relay.restore(state, step_count=2, elapsed=0.02)
+        message = ws.receive()
+        while "text" in message:
+            schema = json.loads(message["text"])
+            message = ws.receive()
+    _assert_frame_is_the_state(message["bytes"], schema,
+                               {n: {f: np.asarray(v).tolist() for f, v in d.items()}
+                                for n, d in state.items()})
+
+
 @pytest.mark.parametrize("edit", ["add", "remove", "compile"])
 def test_the_cached_encoder_is_dropped_by_a_structural_change(edit):
     gm, server, client = _server()

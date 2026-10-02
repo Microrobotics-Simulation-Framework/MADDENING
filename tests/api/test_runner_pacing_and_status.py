@@ -61,7 +61,9 @@ def _real_time_runner(**kwargs):
 # ---------------------------------------------------------------------------
 
 def test_a_resumed_runner_keeps_real_time_instead_of_catching_up_the_pause():
-    gm, runner = _real_time_runner()
+    # A catch-up limit longer than the pause: the resume itself must move
+    # the schedule.
+    gm, runner = _real_time_runner(max_catch_up=10.0)
     runner.start()
     try:
         assert _wait_for(lambda: runner.sim_time > 0.2)
@@ -82,9 +84,11 @@ def test_a_stall_longer_than_the_catch_up_limit_is_not_burst_through():
     gm, runner = _real_time_runner(max_catch_up=0.1)
     real_step = gm.step
     stalled = threading.Event()
+    at_stall = []
 
     def step(*args, **kwargs):
         if runner.sim_time > 0.2 and not stalled.is_set():
+            at_stall.append(runner.sim_time)
             stalled.set()
             time.sleep(1.0)              # a long compile, a wait for the lock
         return real_step(*args, **kwargs)
@@ -93,13 +97,13 @@ def test_a_stall_longer_than_the_catch_up_limit_is_not_burst_through():
     runner.start()
     try:
         assert stalled.wait(10)
-        time.sleep(1.05)                 # the stall is over
-        after_stall = runner.sim_time
-        time.sleep(0.4)
-        advanced = runner.sim_time - after_stall
+        time.sleep(1.4)                  # the stall, then 0.4 s of running
+        advanced = runner.sim_time - at_stall[0]
     finally:
         assert runner.stop(timeout=5.0)
-    assert advanced < 0.8, f"{advanced:.2f} s simulated in 0.4 s after a 1 s stall"
+    # Real time after the stall is ~0.4 s (the stalled step's own 0.01 s
+    # aside); bursting through it was ~1.4 s.
+    assert advanced < 0.9, f"{advanced:.2f} s simulated over a 1 s stall and 0.4 s after"
 
 
 def test_a_runner_behind_by_less_than_the_limit_still_catches_up():

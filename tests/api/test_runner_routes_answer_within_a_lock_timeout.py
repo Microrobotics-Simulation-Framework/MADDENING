@@ -102,7 +102,15 @@ def test_an_activation_that_cannot_have_the_graph_says_it_stopped_the_runner(ser
     assert "stays stopped" in resp.json()["detail"]
 
 
-def test_each_request_behind_a_long_holder_answers_within_about_one_timeout(served):
+#: The queue test's lock timeout: long enough that a request's own cost
+#: (a TestClient request on a two-core CI runner takes up to ~0.2 s) is
+#: small beside it, so "about one timeout" and "about two" stay apart.
+QUEUE_TIMEOUT = 1.0
+
+
+def test_each_request_behind_a_long_holder_answers_within_about_one_timeout(served,
+                                                                            monkeypatch):
+    monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", QUEUE_TIMEOUT)
     server, client = served
     app = client.app
     log: dict = {}
@@ -135,6 +143,6 @@ def test_each_request_behind_a_long_holder_answers_within_about_one_timeout(serv
     # behind a start waiting for the graph, a request that then waited a
     # whole timeout of its own answered after nearly two.
     for label, (waited, status) in log.items():
-        assert waited < 1.6 * TIMEOUT, (label, waited, status, log)
-    assert log["stride"][1] == 200 and log["stride"][0] < TIMEOUT / 2, log
+        assert waited < 1.5 * QUEUE_TIMEOUT, (label, waited, status, log)
+    assert log["stride"][1] == 200 and log["stride"][0] < QUEUE_TIMEOUT / 2, log
     assert server._steps_per_frame == 2

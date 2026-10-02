@@ -1282,6 +1282,9 @@ class SimulationServer:
         # ``PUT /sim/stride``'s value, kept for the runner a later
         # ``POST /sim/start`` creates (it used to be echoed and dropped).
         self._steps_per_frame = 1
+        # A stop was asked for and timed out: the runner is kept until its
+        # thread is seen to have exited (``POST /sim/stop`` again).
+        self._runner_stop_pending = False
         self._relay_attached = False
         # Eagerly attach relay when a pre-built graph is provided
         if graph_manager is not None:
@@ -1385,18 +1388,9 @@ class SimulationServer:
         return self.runner
 
     def _runner_stopping(self) -> bool:
-        """Whether a runner thread is still alive after it was told to stop.
-
-        Drops the handle once that thread has exited, so a stop that timed
-        out resolves itself the next time anything asks.
-        """
+        """Whether a runner thread is still alive after it was told to stop."""
         runner = self.runner
-        if runner is None or self._runner_started:
-            return False
-        if runner.is_alive:
-            return True
-        self.runner = None
-        return False
+        return runner is not None and not self._runner_started and runner.is_alive
 
     def _runner_alive(self) -> bool:
         """Whether a runner thread is stepping the graph (running, paused,
@@ -1449,8 +1443,10 @@ class SimulationServer:
         if self._runner_started or runner.is_alive:
             self._runner_started = False
             if not runner.stop(timeout=_RUNNER_STOP_TIMEOUT):
+                self._runner_stop_pending = True
                 return False
         self.runner = None
+        self._runner_stop_pending = False
         return True
 
     def _stop_runner_or_refuse(self, action: str) -> None:
@@ -2265,6 +2261,7 @@ class SimulationServer:
                 self._ensure_relay_attached()
                 runner.start()
                 self._runner_started = True
+                self._runner_stop_pending = False
             except RuntimeError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "started"}
@@ -2292,8 +2289,8 @@ class SimulationServer:
             503 and the runner is kept as stopping: retry, and the route
             waits for it again.
             """
-            if not self._runner_stopping() and (
-                    self.runner is None or not self._runner_started):
+            if self.runner is None or not (
+                    self._runner_started or self._runner_stop_pending):
                 raise HTTPException(status_code=409, detail="Runner is not started.")
             self._stop_runner_or_refuse("report the runner stopped")
             return {"status": "stopped"}

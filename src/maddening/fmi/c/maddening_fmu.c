@@ -118,9 +118,16 @@ static void inst_log(Instance *in, fmi3Status status, const char *category,
 #  define SEND_FLAGS 0
 #endif
 
+/* A signal that interrupts send() before anything is written is not a
+ * failure (EINTR): retry it.  Every other failure is final, and the
+ * caller drops the connection (bridge_xfer), because part of a frame may
+ * already be on the wire and the next frame would be read as its rest. */
 static int send_all(sock_t s, const char *buf, size_t n) {
     while (n > 0) {
         ssize_t k = send(s, buf, n, SEND_FLAGS);
+#ifdef EINTR
+        if (k < 0 && errno == EINTR) continue;
+#endif
         if (k <= 0) return -1;
         buf += k; n -= (size_t)k;
     }
@@ -203,7 +210,10 @@ static fmi3Status bridge_xfer(Instance *in, const char *req, size_t n, int binar
     }
     put_be32(head, (unsigned long)n | (binary ? FRAME_BINARY : 0ul));
     if (send_all(in->sock, (const char *)head, 4) || send_all(in->sock, req, n)) {
-        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: send failed");
+        /* Part of the frame may be on the wire: the bridge would read the
+         * next request as the rest of this one.  The stream is out of
+         * step, so it is closed like a failed receive. */
+        conn_drop(in, "maddening_fmu: send failed");
         return fmi3Error;
     }
     if (recv_all(in->sock, (char *)head, 4)) {
@@ -291,7 +301,9 @@ static int hdr_count(const Instance *in, size_t *count) {
 }
 
 /* The raw doubles of a binary get reply: the header's count must match
- * the raw length exactly and cover the caller's array. */
+ * the raw length exactly and equal the caller's array size (FMI's
+ * nValues is the number of values the value references hold, so a reply
+ * of any other length answers a different question). */
 static fmi3Status parse_binary_values(Instance *in, double *out, size_t n) {
     size_t have;
     FUZZ_COUNT(parse_binary_values);
@@ -311,11 +323,20 @@ static fmi3Status parse_binary_values(Instance *in, double *out, size_t n) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: too few values in reply");
         return fmi3Error;
     }
+    if (have > n) {
+        /* nValues smaller than what the value references hold: answering
+         * fmi3OK with the first nValues dropped the rest in silence */
+        inst_log(in, fmi3Error, "logStatusError",
+                 "maddening_fmu: more values in reply than nValues (nValues must be the "
+                 "number of values the value references hold)");
+        return fmi3Error;
+    }
     if (n > 0) { f64_from_le(out, (const unsigned char *)in->raw, n); FUZZ_COUNT(parse_binary_ok); }
     return fmi3OK;
 }
 
-/* Parse "values":[n0,n1,...] from in->resp into out[0..n). */
+/* Parse "values":[n0,n1,...] from in->resp into out[0..n): exactly n
+ * values, as in the binary path. */
 static fmi3Status parse_values(Instance *in, double *out, size_t n) {
     FUZZ_COUNT(parse_values);
     if (n == 0) return fmi3OK;
@@ -362,6 +383,14 @@ static fmi3Status parse_values(Instance *in, double *out, size_t n) {
             }
             ++p;
         }
+    }
+    while (*p == ' ') ++p;
+    if (*p != ']') {
+        inst_log(in, fmi3Error, "logStatusError",
+                 *p == ',' ? "maddening_fmu: more values in reply than nValues (nValues must be "
+                             "the number of values the value references hold)"
+                           : "maddening_fmu: malformed values list in reply");
+        return fmi3Error;
     }
     FUZZ_COUNT(parse_values_ok);
     return fmi3OK;
@@ -468,6 +497,22 @@ static int hello_negotiated_binary(const Instance *in) {
     if (v < 2 || strstr(in->resp, "\"binary\":true") == NULL) return 0;
     FUZZ_COUNT(hello_binary);
     return 1;
+}
+
+/* Does the hello reply's "token" equal the importer's instantiationToken,
+ * exactly?  FMI requires the importer to pass the modelDescription's token;
+ * a NULL or empty one is a mismatch (it used to skip the check), and the
+ * comparison is of the whole string, so neither may be a prefix of the
+ * other. */
+static int token_matches(const Instance *in, fmi3String token) {
+    if (token == NULL || *token == '\0' || in->resp == NULL || in->resp_binary) return 0;
+    const char *p = strstr(in->resp, "\"token\":\"");
+    if (p == NULL) return 0;
+    p += 9;
+    const char *q = strchr(p, '"');
+    if (q == NULL) return 0;
+    size_t n = strlen(token);
+    return (size_t)(q - p) == n && strncmp(p, token, n) == 0;
 }
 
 static int read_endpoint(fmi3String resource_path, char *host, size_t hostcap, int *port) {
@@ -580,14 +625,10 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
         sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
     }
     in->binary = hello_negotiated_binary(in);
-    if (instantiationToken && *instantiationToken) {
-        char needle[300];
-        snprintf(needle, sizeof needle, "\"token\":\"%s\"", instantiationToken);
-        if (in->resp == NULL || strstr(in->resp, needle) == NULL) {
-            inst_log(in, fmi3Error, "logStatusError",
-                     "maddening_fmu: instantiation token does not match the sidecar's graph");
-            sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
-        }
+    if (!token_matches(in, instantiationToken)) {
+        inst_log(in, fmi3Error, "logStatusError",
+                 "maddening_fmu: instantiation token does not match the sidecar's graph");
+        sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
     }
     return (fmi3Instance)in;
 }
@@ -615,12 +656,24 @@ FMI3_Export void fmi3FreeInstance(fmi3Instance instance) {
     free(in->req); free(in->resp); free(in);
 }
 
+/* The start time is the instance's time from here on, so the bridge is
+ * told it ("initialize"): it used to stay in in->time, and the "time"
+ * variable read 0.0 until the first step.  The bridge then requires the
+ * first doStep at this time. */
 FMI3_Export fmi3Status fmi3EnterInitializationMode(
     fmi3Instance instance, fmi3Boolean toleranceDefined, fmi3Float64 tolerance,
     fmi3Float64 startTime, fmi3Boolean stopTimeDefined, fmi3Float64 stopTime) {
     (void)toleranceDefined; (void)tolerance; (void)stopTimeDefined; (void)stopTime;
     Instance *in = (Instance *)instance;
     if (!in) return fmi3Error;
+    if (!isfinite(startTime)) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: start time must be finite");
+        return fmi3Error;
+    }
+    char req[64];
+    snprintf(req, sizeof req, "{\"op\":\"initialize\",\"t\":%.17g}", startTime);
+    fmi3Status st = bridge_call(in, req);
+    if (st != fmi3OK) return st;
     in->time = startTime;
     return fmi3OK;
 }
@@ -1000,6 +1053,13 @@ FMI3_Export fmi3Status fmi3DoStep(
     *eventHandlingNeeded = fmi3False; *terminateSimulation = fmi3False; *earlyReturn = fmi3False;
     Instance *in = (Instance *)instance;
     if (!in) { *lastSuccessfulTime = 0.0; return fmi3Error; }
+    if (!isfinite(currentCommunicationPoint) || !isfinite(communicationStepSize)) {
+        /* %.17g would write "nan" / "inf", which is not JSON */
+        inst_log(in, fmi3Error, "logStatusError",
+                 "maddening_fmu: communication point and step size must be finite");
+        *lastSuccessfulTime = in->time;
+        return fmi3Error;
+    }
     if (req_reserve(in, 128)) { *lastSuccessfulTime = in->time; return fmi3Fatal; }
     sprintf(in->req, "{\"op\":\"step\",\"t\":%.17g,\"dt\":%.17g}",
             currentCommunicationPoint, communicationStepSize);

@@ -344,7 +344,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **REST round-6 audit fixes** (MADD-ANO-120 to 123; 096 completed): a surrogate job re-checks its memory budget on the graph it sweeps; `POST /sim/profile` restores the live state and keeps the streams out; a reset, a state write, a node edit and a surrogate swap publish to the streams (the relay adds `run_adaptive`'s `dt`); a JAX trace stops itself at 10 000 steps or 600 s;
+- **REST round-6 audit fixes** (MADD-ANO-121 to 124; 096 completed): a surrogate job re-checks its memory budget on the graph it sweeps; `POST /sim/profile` restores the live state and keeps the streams out; a reset, a state write, a node edit and a surrogate swap publish to the streams (the relay adds `run_adaptive`'s `dt`); a JAX trace stops itself at 10 000 steps or 600 s;
   `/sim/run` reports `steps_run` when a step raises; runner routes answer within one lock timeout and say when they left the runner stopped; checkpoint saves are atomic; past the stream cap a client gets 1013, not 403; `run_pod.py` records only a real commit and `--summarise` survives older files.
   Action: none; read `GET /sim/profile/jax/status` if a long trace ends early.
 - **FMU export: schema-valid starts, a locale-proof wrapper, the FMI state machine** (MADD-ANO-119, never released): Boolean/integer `start`/`min`/`max` in their type's form and discrete; the C wrapper writes and reads numbers in the C locale; an archive cannot install mapping weights;

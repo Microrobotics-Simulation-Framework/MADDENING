@@ -8833,7 +8833,7 @@ anomalies:
       A checkpoint without this server's manifest (written by another tool,
       or a server before 0.4.0) restarts the streams' clock at zero, as the
       reply says.  (A reset, a state write and a node edit did not publish
-      either; that is MADD-ANO-122, also resolved in 0.4.0.)
+      either; that is MADD-ANO-123, also resolved in 0.4.0.)
     verification:
       - "tests/api/test_streams_after_a_checkpoint_load.py::test_ws_state_serves_the_loaded_state_at_the_checkpoints_time"
       - "tests/api/test_streams_after_a_checkpoint_load.py::test_ws_state_binary_serves_the_loaded_state_at_the_checkpoints_time"
@@ -9394,7 +9394,7 @@ anomalies:
       - "tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_the_sidecars_own_restore_door_refuses_the_same_weights"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-120"
+  - anomaly_id: "MADD-ANO-121"
     title: "POST /surrogate/train's memory budget was checked on the graph at the request, and the job swept the graph as it was later: a node added in between bypassed it"
     description: >
       0.4.0 estimates a training job's memory before its worker starts and
@@ -9441,7 +9441,7 @@ anomalies:
       - "tests/api/test_surrogate_jobs_are_bounded.py::test_a_node_added_between_the_request_and_the_sweep_is_counted"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-121"
+  - anomaly_id: "MADD-ANO-122"
     title: "POST /sim/profile reset the live simulation and left it at the profiler's last step, and the streams counted the profiler's steps"
     description: >
       The route handed the live graph to `profile_graph`, which resets it
@@ -9485,7 +9485,7 @@ anomalies:
       - "tests/api/test_profile_leaves_the_live_simulation.py::test_a_coupling_groups_state_and_warm_start_survive_a_profile"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-122"
+  - anomaly_id: "MADD-ANO-123"
     title: "A reset, a state write or a node removed over REST was not shown by the streams: they served the state from before it until the next step"
     description: >
       `StateRelay` publishes on the steps it observes, and only `POST
@@ -9535,7 +9535,7 @@ anomalies:
       - "tests/api/test_routes_publish_to_the_streams.py::test_a_surrogate_swap_is_published_at_step_zero_both_ways"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-123"
+  - anomaly_id: "MADD-ANO-124"
     title: "A JAX trace started over REST had no bound: left running, it grew the server's memory by kilobytes per step until stopped"
     description: >
       `POST /sim/profile/jax/start` starts a `jax.profiler` trace that

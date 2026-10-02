@@ -411,6 +411,10 @@ def windowed_loss(
                  why=_CONTINUITY_WEIGHT_WHY)
     if start_step is not None:
         _check_count("start_step", start_step)
+    # As every run method does first: a ``node.params`` write or a changed
+    # static since the last compile makes the graph recompile, so this loss
+    # traces the same model ``gm.step`` runs.
+    gm._check_static_data_dirty()  # noqa: SLF001
     if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
         gm.compile()
     # The windows scan the graph step: a sharded node XLA miscompiles

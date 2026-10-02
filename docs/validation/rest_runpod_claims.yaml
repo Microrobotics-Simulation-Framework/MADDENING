@@ -6,7 +6,8 @@
 # is known, and a pytest node id that fails if it stops being true.  An
 # audit attacks this list; a new claim in a docstring, the REST guide, the
 # runbook or the release notes gets a row here in the same change
-# (docs/developer_guide/testing_standards.md, "The claims inventories").
+# (docs/developer_guide/testing_standards.md, "The coupling claims
+# inventory", which names this file).
 # The inventory guard checks every row: its fields, that each cited test is
 # collected and runs on every push (or is slow-marked and names a per-push
 # witness), that a `failing` row cites a strict xfail and that a `verified`
@@ -2099,7 +2100,7 @@ claims:
   oracle: exit 1, the failed goal's JSON with passed false, no later goal run.
   tests:
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_a_multi_goal_run_stops_at_the_first_failing_goal
-    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_every_record_carries_the_keys_the_runbook_lists
+    - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_every_record_carries_the_keys_the_runbook_lists
   status: verified
 
 - id: RPD-009
@@ -2563,7 +2564,7 @@ claims:
   conditions: the constants and the runbook text; a check built at the exact limit.
   oracle: equality of LIMITS with the table; check() at and past a limit.
   tests:
-    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_the_limits_are_the_runbooks
+    - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_the_limits_are_the_runbooks
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_check_helpers_fail_closed
   status: verified
 
@@ -2580,8 +2581,8 @@ claims:
   conditions: the committed real dry-run record of every goal.
   oracle: key sets; SCHEMA_VERSION in the runbook's heading and rule.
   tests:
-    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_the_runbook_names_the_runners_schema_version
-    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_every_record_carries_the_keys_the_runbook_lists
+    - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_the_runbook_names_the_runners_schema_version
+    - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_every_record_carries_the_keys_the_runbook_lists
   status: verified
 
 - id: RPD-031

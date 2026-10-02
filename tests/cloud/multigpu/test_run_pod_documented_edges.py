@@ -13,9 +13,10 @@ goal for real.
   means "no goal JSON");
 * the commit a file records: a repository with no commit records none,
   and a recorded commit that is not a SHA counts as none (strict xfails);
-* the runbook and the runner agree: ``LIMITS``, the schema version, the
-  checklist's goals, the keys every record carries, the seeded faults
-  the runbook names;
+* the checklist's goals and the seeded faults the runbook names (the
+  tests that read the runbook itself are in
+  ``tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py``,
+  which a docs-only change runs);
 * the CLI: what is required, the device count, the default sizes of a dry
   run, the order of ``--goal all``, the exit status of a goal whose every
   check was not run, the dry run's backend and its ``nvidia-smi`` skip;
@@ -40,7 +41,6 @@ import maddening
 
 _REPO = Path(maddening.__file__).resolve().parents[2]
 _RUNNER = _REPO / "benchmarks" / "multigpu" / "run_pod.py"
-_RUNBOOK = _REPO / "benchmarks" / "multigpu" / "README.md"
 _RECORD = Path(__file__).resolve().parent / "run_pod_record"
 
 
@@ -54,11 +54,6 @@ def _load(path: Path, name: str):
 @pytest.fixture(scope="module")
 def rp():
     return _load(_RUNNER, "run_pod_documented_edges")
-
-
-@pytest.fixture(scope="module")
-def runbook() -> str:
-    return _RUNBOOK.read_text(encoding="utf-8")
 
 
 def _copy_record(tmp_path: Path) -> Path:
@@ -172,26 +167,6 @@ def test_a_recorded_commit_that_is_not_a_sha_counts_as_none(rp):
 # The runbook and the runner agree
 # ---------------------------------------------------------------------------
 
-def test_the_limits_are_the_runbooks(rp, runbook):
-    """The runbook's checklist table states each limit; ``LIMITS`` holds
-    them, and the README says so ("The limits live in LIMITS")."""
-    assert rp.LIMITS == {"exact": 0.0, "forward": 1e-5, "gradient": 1e-5,
-                         "coupled_gradient_ift": 1e-4, "coupled_gradient_fori": 1e-5,
-                         "krylov": 1e-3, "model_gradient": 1e-4}
-    for fragment in ("rel 1e-5 |", "**0** (bit for bit)", "1e-4 (coupled, IFT)",
-                     "1e-3 (`sharded_cg`)", "1e-4 (IFT) / 1e-5 (`\"fori\"`), 1e-4 against "
-                     "the model"):
-        assert fragment in runbook, fragment
-
-
-def test_the_runbook_names_the_runners_schema_version(rp, runbook):
-    version = rp.SCHEMA_VERSION
-    assert f"## Schema of the JSON (schema_version {version})" in runbook
-    assert f"be on the current `schema_version` ({version})" in runbook
-    for path in sorted(_RECORD.glob("*.json")):
-        assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == version
-
-
 def test_the_checklist_items_are_decided_by_the_runbooks_goals(rp):
     assert {i: tuple(goals) for i, (_claim, goals) in rp.CHECKLIST.items()} == {
         1: ("stencil", "forward"), 2: ("halo",), 3: ("stencil", "gradient", "coupled"),
@@ -200,25 +175,6 @@ def test_the_checklist_items_are_decided_by_the_runbooks_goals(rp):
     assert rp.CHECKLIST_GOALS == ("indivisible", "halo", "coupled", "stencil", "hybrid")
     assert rp.ALL_GOALS == rp.CHECKLIST_GOALS + ("exchange", "forward", "gradient")
     assert rp.MIN_DECIDING_DEVICES == 4
-
-
-def test_every_record_carries_the_keys_the_runbook_lists(rp, runbook):
-    common = ("schema_version", "goal", "dry_run", "allow_fewer_devices", "n_devices",
-              "environment", "config", "wall_s", "results", "checks", "passed")
-    environment = ("hostname", "timestamp_utc", "python", "jax", "jaxlib", "platform",
-                   "devices", "device_kinds", "n_devices_visible", "nvidia_smi", "xla_flags",
-                   "jax_platforms", "git_commit")
-    schema = runbook[runbook.index("## Schema of the JSON"):]
-    for key in common[1:] + environment:
-        assert f"`{key}`" in schema, key
-    files = sorted(_RECORD.glob("*.json"))
-    assert {p.stem for p in files} == set(rp.ALL_GOALS)
-    for path in files:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-        assert set(common) <= set(doc), (path.name, set(common) - set(doc))
-        assert set(environment) <= set(doc["environment"]), path.name
-        for c in doc["checks"]:
-            assert {"name", "value", "limit", "sense", "passed"} <= set(c), (path.name, c)
 
 
 def test_every_seeded_fault_the_runbook_names_is_a_seed():

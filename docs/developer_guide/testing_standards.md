@@ -743,6 +743,12 @@ convergence mask. Each row records:
 An audit attacks the list rather than hunting open-ended, and a fix PR
 re-classifies the rows it touches.
 
+`docs/validation/rest_runpod_claims.yaml` holds, in the same schema, the
+claims about the HTTP API (`REST-NNN`: authentication, the `Host` and
+`Origin` rules, request bounds, the graph lock, every route but the
+experimental surrogate and streaming ones) and about
+`benchmarks/multigpu/run_pod.py` and its runbook (`RPD-NNN`).
+
 To add a claim, add a row in the same change as the sentence. Give it the
 next free `CPL-NNN` and cite a test that can fail at the edge of the
 claim's conditions, not in their comfortable middle. If the tree does not

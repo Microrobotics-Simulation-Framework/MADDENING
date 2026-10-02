@@ -33,7 +33,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from hypothesis import given, note, settings
+from hypothesis import example, given, note, settings
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
@@ -144,6 +144,16 @@ def _check_fit_lm(kinds, truth_at, start_at):
 
 
 @given(**_PROBLEM)
+# Found by the broad draw below: a logit stiffness started near the bottom of
+# (0.5, 2) is thrown to the top edge, where the sigmoid is flat, and its
+# value moves by under ``step_tol`` for any step in ``u`` -- it stopped there,
+# "converged", at 1.999997 with the truth at 1.25.  Pinned per push.
+@example(kinds=("logit", "clip", "clip"), truth_at=(0.5, 0.5, 0.75),
+         start_at=(0.0625, 0.5, 0.5))
+# Found here: a logit damping driven past the sigmoid's edge sat on the
+# clamp (derivative 0) at 1.999998 of (0.5, 2), "converged".
+@example(kinds=("clip", "logit", "clip"), truth_at=(0.5, 0.5, 0.5),
+         start_at=(0.5, 0.0001, 0.5))
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 def test_fit_lm_converged_means_the_truth(kinds, truth_at, start_at):
     _check_fit_lm(kinds, truth_at, start_at)

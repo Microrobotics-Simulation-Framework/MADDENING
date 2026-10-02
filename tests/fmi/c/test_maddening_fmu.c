@@ -960,6 +960,13 @@ static void test_instantiate(const char *good_token) {
         Instance *in = (Instance *)inst;
         CHECK(strcmp(in->instance_name, "i") == 0 && in->logging_on == fmi3True);
         CHECK(in->binary == 0);
+        /* Nagle is off: every call is a small request awaiting its reply,
+         * sent as two writes, and with Nagle the second waited for the
+         * peer's delayed ACK (>= 40 ms per FMI call on Linux) */
+        {
+            int nodelay = 0; socklen_t len = sizeof nodelay;
+            CHECK(getsockopt(in->sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, &len) == 0 && nodelay != 0);
+        }
         CHECK(fmi3EnterInitializationMode(inst, fmi3False, 0, 0.5, fmi3False, 0) == fmi3OK && in->time == 0.5);
         CHECK(fmi3ExitInitializationMode(inst) == fmi3OK);
         /* the listener has hung up after two exchanges, so FreeInstance's

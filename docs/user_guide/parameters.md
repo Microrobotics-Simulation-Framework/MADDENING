@@ -193,6 +193,28 @@ dropped with a `RuntimeWarning`.  `gm.reset_params()` is the explicit
 way back to the constructor snapshot.  A checkpoint loaded before the
 first compile compiles the graph so its params are not lost.
 
+A recompile takes each node constant from **whichever of `node.params`
+and `gm.params` was written since the previous compile**.  Writing
+`gm.params` takes effect on the next step with no recompile, and is the
+way to change a constant mid-run; writing `node.params` after the graph
+was compiled takes effect at the next `compile()` (or the next run of a
+graph marked dirty), as a structural value always has.  If both were
+written since the last compile, to different values, `gm.params`' value
+-- the one the step was already running -- is kept and `compile()`
+warns (`RuntimeWarning`), naming the leaf and both values; both written
+to the same value, as `PUT /graph/params` does, is no conflict.  Before
+this rule a recompile kept every live leaf, so a `node.params` write
+after the first compile was dropped without a word: a `HeartPumpNode`
+set to 144 bpm and recompiled went on at 72.
+
+<!-- snippet: continues -->
+```python
+gm.get_node("ball").params["elasticity"] = 0.6    # on the node, after compile
+assert float(gm.params["nodes"]["ball"]["elasticity"]) == float(jnp.float32(0.7))
+gm.compile()                                       # the next compile takes it
+assert float(gm.params["nodes"]["ball"]["elasticity"]) == float(jnp.float32(0.6))
+```
+
 The graph's *state* survives the same recompile, and so does the
 internal bookkeeping that goes with it: a multi-rate graph keeps its
 sub-step phase and a coupling group keeps its predictor history and IQN
@@ -215,7 +237,7 @@ Each leaf carries a `ParamSpec` (`maddening.core.params`):
 |-------|---------|
 | `trainable` | may an optimiser move it (default `True`; `initial_*` entries default to `False`) |
 | `bounds` | physical range, `(lo, hi)` with `None` for open |
-| `transform` | `None` (clip to bounds), `"log"` (`p = lo + exp(u)`, strictly above `lo`, or above 0 when `lo` is `None` -- `check` refuses anything else), `"logit"` (`lo < p < hi`) |
+| `transform` | `None` (clip to bounds; a leaf exactly on a bound has derivative 1, the one-sided one into its range, where `jnp.clip` alone gives 0.5), `"log"` (`p = lo + exp(u)`, strictly above `lo`, or above 0 when `lo` is `None` -- `check` refuses anything else), `"logit"` (`lo < p < hi`) |
 
 Nodes declare specs for their own constants in `param_specs()`
 (`SpringDamperNode`: stiffness and mass are `log`-positive, damping is
@@ -422,7 +444,15 @@ sensitivities `fim` computes, so with a handful of parameters it
 converges in a few iterations where Adam needs hundreds; give it a
 residual function rather than a scalar loss, and `noise_std` (a scalar or
 a per-leaf σ, also accepted by `fim`) to weight the residual so the
-Cramér–Rao bound comes out in the parameters' own units.
+Cramér–Rao bound comes out in the parameters' own units.  Its
+`converged` is `True` when the loss reached `tol`, or when the step an
+iteration proposed moved every trainable parameter by no more than
+`step_tol` of its own magnitude -- whether or not that step lowered the
+loss, since at the float floor a fit's proposal rounds to nothing and
+cannot.  The default `step_tol` is `2**4` ulps of each parameter's dtype,
+so a float32 fit that reaches its optimum reports it.  (`fit` and
+`fit_multiple_shooting` have only the `tol` test, so with the default
+`tol=0.0` their `converged` is always `False`; read `best_loss`.)
 
 For noisy data, `fit_multiple_shooting` replaces teacher forcing with
 free per-window initial states and a continuity penalty

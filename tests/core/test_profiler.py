@@ -534,3 +534,34 @@ def test_a_gm_params_write_survives_profiling_and_the_next_compile():
     assert float(gm.params["nodes"]["a"]["stiffness"]) == 3.0 * old
     gm.compile()
     assert float(gm.params["nodes"]["a"]["stiffness"]) == 3.0 * old
+
+
+class _IndexingRelay(SimulationNode):
+    """Indexes its declared input, as every node fed by the graph may."""
+
+    def __init__(self, name, bias):
+        super().__init__(name, 1.0, bias=jnp.asarray(bias, jnp.float32))
+
+    def initial_state(self):
+        return {"x": jnp.zeros(2, jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(2,), dtype=jnp.float32,
+                                       default=jnp.zeros(2, jnp.float32))}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"x": jnp.float32(0.5) * boundary_inputs["u"] + self.params["bias"]}
+
+
+def test_per_node_timing_feeds_each_node_its_declared_inputs():
+    """``profile_graph`` timed each node with no inputs at all: ``KeyError: 'u'``."""
+    gm = GraphManager()
+    gm.add_node(_IndexingRelay("a", [1.0, 2.0]))
+    gm.add_node(_IndexingRelay("b", [0.0, 1.0]))
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_coupling_group(["a", "b"], max_iterations=10, tolerance=1e-6)
+    gm.compile()
+    rep = profile_graph(gm, n_steps=2, n_warmup=1, counts=False)
+    assert set(rep.node_times_ms) == {"a", "b"} and all(
+        t > 0 for t in rep.node_times_ms.values()), rep.node_times_ms

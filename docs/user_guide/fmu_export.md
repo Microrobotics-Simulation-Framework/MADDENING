@@ -357,7 +357,7 @@ cannot use an FMU-state archive to install a constant the graph declares
 invalid.  An archive cannot change interface-mapping weights either
 (`params["mappings"]`): they are not FMI variables, so no `set` reaches
 them, and an archive that replaced them made the FMU compute a coupling its
-description does not describe (MADD-ANO-113).  A Boolean takes true / false
+description does not describe (MADD-ANO-119).  A Boolean takes true / false
 or exactly 0 / 1 on both doors.  An
 archive must carry its time, and exactly the model's state fields,
 parameters and pending inputs: an archive missing an input used to restore

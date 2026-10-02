@@ -711,7 +711,14 @@ def _graph_sections(gm: "GraphManager") -> tuple[list[str], list[_Section]]:
     if nodes:
         rate = "multi-rate" if status.ever_compiled and gm._is_multirate else (
             "uniform rate" if status.ever_compiled else "rate dividers: not compiled")
-        header.append(f"base timestep: {_cell(float(gm.timestep))} ({rate})")
+        base = _effective_base_timestep(gm)
+        header.append(f"base timestep: {_cell(base)} ({rate})")
+        reported = float(gm.timestep)
+        if not math.isclose(base, reported, rel_tol=1e-9):
+            header.append(
+                f"note: gm.timestep reads {_cell(reported)}, the GCD of the node timesteps; "
+                f"a sub-cycling coupling group advances at its largest member timestep, so "
+                f"one step of this graph is {_cell(base)}")
     mesh = getattr(gm, "_multigpu_mesh", None)
     if mesh is not None:
         device_map = getattr(gm, "_multigpu_device_map", None) or {}
@@ -726,6 +733,8 @@ def _graph_sections(gm: "GraphManager") -> tuple[list[str], list[_Section]]:
         timing = f"timestep {_cell(float(spec.timestep))}"
         if name in dividers:
             timing += f", rate divider {dividers[name]}"
+        elif status.ever_compiled:
+            timing += ", rate divider: not compiled (added since the last compile)"
         else:
             timing += ", rate divider: not compiled"
         details.append(timing)
@@ -733,7 +742,7 @@ def _graph_sections(gm: "GraphManager") -> tuple[list[str], list[_Section]]:
         if group is not None:
             sub = _subcycle_dividers(gm, group).get(name)
             text = f"coupling group {_group_key(group)}"
-            if sub:
+            if sub and sub > 1:
                 text += f", sub-cycled x{sub} per coupling pass"
             details.append(text)
         fields = _fields(gm._state.get(name, {}))
@@ -808,6 +817,24 @@ def _graph_sections(gm: "GraphManager") -> tuple[list[str], list[_Section]]:
     return header, sections
 
 
+def _effective_base_timestep(gm: "GraphManager") -> float:
+    """The step the compiled graph advances by, derived as ``compile()``
+    derives it: a sub-cycling group's members step at the group's largest
+    timestep, and the base is the GCD of what remains."""
+    from maddening.core.graph_manager import _multi_gcd  # noqa: PLC0415
+    effective = {name: float(spec.timestep) for name, spec in gm._nodes.items()}
+    for group in gm._coupling_groups:
+        if not group.subcycling:
+            continue
+        members = [n for n in group.nodes if n in gm._nodes]
+        if members:
+            macro = max(float(gm._nodes[n].timestep) for n in members)
+            for n in members:
+                effective[n] = macro
+    values = sorted(set(effective.values()))
+    return values[0] if len(values) == 1 else float(_multi_gcd(values))
+
+
 def _firing(divider: int) -> str:
     return "every base step" if divider <= 1 else f"every {divider} base steps"
 
@@ -816,7 +843,7 @@ def _firing(divider: int) -> str:
 def format_graph(gm: "GraphManager", *, width: int = DEFAULT_WIDTH) -> str:
     """The text :meth:`GraphManager.print_graph` prints.  See there."""
     header, sections = _graph_sections(gm)
-    lines = list(header)
+    lines = [wrapped for line in header for wrapped in _wrap(line, width, "", "  ")]
     for section in sections:
         lines.append("")
         lines.append(section.title)
@@ -1200,9 +1227,6 @@ def coupling_report(gm: "GraphManager") -> InspectionTable:
         # Read-only on a graph that holds no tracers: its one write,
         # ``_recover_from_escaped_tracers``, returns at once (checked above).
         diags = dict(gm.coupling_diagnostics())
-        if not diags:
-            notes.append("no coupling group has reported yet: nothing has stepped since "
-                         "compile() or reset_state()")
     committed = getattr(gm, "_committed_coupling_groups", {}) or {}
     rows = []
     for group in groups:

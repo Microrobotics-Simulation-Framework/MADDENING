@@ -344,6 +344,53 @@ def test_every_test_package_is_described_in_the_organization_table():
     assert gen._check_test_directories_are_described(gen.test_packages()) == []
 
 
+# -- a package no CI lane collects is not shown as evidence (audit_040_p4_4, L1)
+#
+# framework_verification.md listed tests/viz/ beside the packages CI runs,
+# and every lane passes --ignore=tests/viz.  The never-run paths are
+# check_anomalies.PATHS_CI_NEVER_RUNS, which test_gate_scripts.py derives
+# from .github/workflows and holds equal.
+
+
+def test_every_package_no_ci_lane_collects_is_marked_on_the_committed_page():
+    page = (REPO_ROOT / "docs" / "validation" / "framework_verification.md").read_text()
+    never = gen._anomaly_gate.PATHS_CI_NEVER_RUNS
+    assert never, "PATHS_CI_NEVER_RUNS is empty; this test then pins nothing"
+    rows = {line.split("|")[1].strip(): line for line in page.splitlines()
+            if line.startswith("| `tests/")}
+    for path in never:
+        name = path.split("/")[1]
+        assert "**not run by CI**" in rows[f"`tests/{name}/`"], rows[f"`tests/{name}/`"]
+    marked = {key for key, line in rows.items() if "not run by CI" in line}
+    assert marked == {f"`tests/{p.split('/')[1]}/`" for p in never}
+    (row,) = [line for line in page.splitlines() if line.startswith("| Test packages |")]
+    for path in never:
+        assert f"no lane collects `{path}/`" in row, row
+
+
+def test_the_never_run_map_reads_whole_packages_and_sub_paths(monkeypatch):
+    monkeypatch.setattr(gen._anomaly_gate, "PATHS_CI_NEVER_RUNS",
+                        ("tests/viz", "tests/cloud/multigpu"))
+    unrun = gen.never_run(["cloud", "core", "viz", "vizier"])
+    assert unrun == {"cloud": ["tests/cloud/multigpu"], "viz": ["tests/viz"]}
+    table = gen.render_test_organization(["cloud", "core", "viz"])
+    lines = {line.split("|")[1].strip(): line for line in table.splitlines()
+             if line.startswith("| `tests/")}
+    assert "--ignore=tests/viz" in lines["`tests/viz/`"]
+    assert "**not run by CI**: `tests/cloud/multigpu/`" in lines["`tests/cloud/`"]
+    assert "not run" not in lines["`tests/core/`"]
+    row = gen._test_packages_row(["cloud", "core", "viz"])
+    assert "collect 2 of them, and no lane collects `tests/viz/`" in row
+    assert "no lane collects `tests/cloud/multigpu/`" in row
+
+
+def test_no_never_run_paths_leaves_the_table_unmarked(monkeypatch):
+    monkeypatch.setattr(gen._anomaly_gate, "PATHS_CI_NEVER_RUNS", ())
+    assert gen.never_run(["viz"]) == {}
+    assert gen._test_packages_row(["core", "viz"]) == "2 — listed below"
+    assert "not run" not in gen.render_test_organization(["core", "viz"])
+
+
 def test_the_version_is_identified_the_same_way_everywhere():
     """pyproject is authoritative; the registry and CITATION.cff follow it."""
     assert gen._check_versions(

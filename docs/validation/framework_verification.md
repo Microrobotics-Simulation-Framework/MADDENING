@@ -38,7 +38,7 @@ stand in for the tested one.
 | JAX | evidence generated at `0.10.2`, `0.11.2`, the 2 versions CI installs; `jax>=0.10,<0.13` is the *declared* range and no other point in it has been exercised |
 | Other base dependencies | `lineax>=0.0.7`, `numpy>=1.24`, `pyyaml>=6.0` — installed from these ranges, not pinned, so the resolved version differs between runs and **is not recorded** |
 | Backend | CPU (GPU tests are not run in CI — MADD-ANO-001) |
-| Test packages | 13 — listed below |
+| Test packages | 13 — listed below; the CI test lanes collect 12 of them, and no lane collects `tests/viz/` |
 <!-- END GENERATED: test-suite -->
 
 ## Test Organization
@@ -58,7 +58,7 @@ stand in for the tested one.
 | `tests/surrogates/` | Neural {term}`surrogate <Surrogate>` training, architectures, dataset generation |
 | `tests/usd/` | USD stage serialization and round-trips, geometry sources, interface mappings |
 | `tests/verification/` | Registered verification benchmarks (analytical comparisons, convergence studies) |
-| `tests/viz/` | Visualization backends, ZMQ transport, serialization |
+| `tests/viz/` | Visualization backends, ZMQ transport, serialization — **not run by CI**: every test command in `.github/workflows` passes `--ignore=tests/viz`, so nothing in it is verification evidence |
 <!-- END GENERATED: test-organization -->
 
 ## Registered Verification Benchmarks

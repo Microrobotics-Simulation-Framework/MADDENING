@@ -61,20 +61,38 @@ PYPROJECT = {
 }
 SOUP_ITEMS = ["jax>=0.10,<0.13", "numpy>=1.24", "pyyaml>=6.0"]
 CORE = {"jax": "0.11.2", "jaxlib": "0.11.2", "numpy": "2.5.3", "PyYAML": "6.0.3"}
+#: Each fixture package's own ``Requires-Dist``; a package not listed
+#: requires nothing.  The dependency graph is drawn from it.
+REQUIRES = {"jax": ["jaxlib"]}
 
 
 def _ref(name: str, version: str) -> str:
     return f"{name}=={version}"
 
 
+def _requires_props(reqs: list[str]) -> list[dict]:
+    """A component's ``Requires-Dist`` as ``generate_sbom.py`` records it."""
+    return ([{"name": check_sbom.PROP_REQUIRES_DIST, "value": r} for r in reqs]
+            + [{"name": check_sbom.PROP_REQUIRES_DIST_COUNT, "value": str(len(reqs))}])
+
+
 def make_sbom(install: str = "core", components: dict[str, str] | None = None,
               *, env: dict[str, str] | None = None, version: str = VERSION,
-              pyproject: dict = PYPROJECT) -> dict:
-    """A small SBOM shaped like ``generate_sbom.py``'s output, sealed."""
+              pyproject: dict = PYPROJECT,
+              requires: dict[str, list[str]] | None = None,
+              cutoff: str = "2026-09-25T00:00:00Z") -> dict:
+    """A small SBOM shaped like ``generate_sbom.py``'s output, sealed.
+
+    ``requires`` is each package's ``Requires-Dist`` (default
+    :data:`REQUIRES`); every requirement naming a package that is present
+    is an edge, whatever its marker, as cyclonedx-py draws them.
+    """
     components = dict(CORE if components is None else components)
+    requires = REQUIRES if requires is None else requires
     comps = [{"bom-ref": _ref(n, v), "name": n, "version": v, "type": "library",
               "purl": f"pkg:pypi/{n.lower()}@{v}",
-              "licenses": [{"license": {"id": "MIT"}}]}
+              "licenses": [{"license": {"id": "MIT"}}],
+              "properties": _requires_props(requires.get(n, []))}
              for n, v in components.items()]
     by_key = {check_sbom.canonicalize_name(n): _ref(n, v) for n, v in components.items()}
     edges = []
@@ -90,13 +108,19 @@ def make_sbom(install: str = "core", components: dict[str, str] | None = None,
             edges.append(by_key[key])
     root_ref = f"maddening=={version}"
     deps = [{"ref": root_ref, "dependsOn": edges}]
-    if "jax" in components and "jaxlib" in components:
-        deps.append({"ref": by_key["jax"], "dependsOn": [by_key["jaxlib"]]})
     for n, v in components.items():
-        if n != "jax":
-            deps.append({"ref": _ref(n, v)})
+        named = []
+        for r in requires.get(n, []):
+            try:
+                key = check_sbom.canonicalize_name(check_sbom.Requirement(r).name)
+            except check_sbom.InvalidRequirement:
+                continue                 # a planted defect; no edge for it
+            if key in by_key:
+                named.append(by_key[key])
+        deps.append({"ref": _ref(n, v), **({"dependsOn": sorted(set(named))}
+                                           if named else {})})
     props = [{"name": check_sbom.PROP_INSTALL, "value": install},
-             {"name": check_sbom.PROP_EXCLUDE_NEWER, "value": "2026-09-25T00:00:00Z"}]
+             {"name": check_sbom.PROP_EXCLUDE_NEWER, "value": cutoff}]
     props += [{"name": check_sbom.PROP_MARKER + k, "value": v}
               for k, v in (ENV if env is None else env).items()]
     sbom = {
@@ -222,10 +246,12 @@ def _depended_on_by(sbom: dict, parent: str, child: str) -> None:
 
 
 def test_a_soup_item_pyproject_does_not_declare_is_named_even_when_installed():
-    # Installed transitively (jax pulls it in), so the one rule that fires
+    # Installed transitively (jax requires it), so the one rule that fires
     # is the SOUP rule under test and not the orphan rule.
-    sbom = mutate(make_sbom(components={**CORE, "scipy": "1.18.1"}),
-                  lambda s: _depended_on_by(s, "jax", "scipy"))
+    sbom = make_sbom(components={**CORE, "scipy": "1.18.1"},
+                     requires={"jax": ["jaxlib", "scipy>=1.13"]})
+    assert "scipy==1.18.1" in next(
+        d for d in sbom["dependencies"] if d["ref"] == "jax==0.11.2")["dependsOn"]
     errors = errors_of(sbom, soup=SOUP_ITEMS + ["scipy>=1.0"])
     assert errors == [f"SBOM: SOUP item scipy is listed in soup_package.md, but "
                       f"pyproject.toml declares no base dependency of that name"]
@@ -327,10 +353,17 @@ def test_an_orphan_component_no_install_brings_in_is_named():
         s["components"].append({
             "bom-ref": "requests==2.0.0", "name": "requests", "version": "2.0.0",
             "purl": "pkg:pypi/requests@2.0.0", "type": "library",
-            "licenses": [{"license": {"id": "Apache-2.0"}}]})
+            "licenses": [{"license": {"id": "Apache-2.0"}}],
+            "properties": _requires_props([])})
         s["dependencies"].append({"ref": "requests==2.0.0"})
     errors = errors_of(mutate(make_sbom(), orphan))
-    assert errors == ["SBOM: component requests ('requests==2.0.0') is reached by "
+    # Both rules see it: the graph reaches it from nowhere, and nothing's
+    # recorded Requires-Dist turns it on.
+    assert errors == ["SBOM: component requests is required by nothing "
+                      "`pip install maddening` turns on (following the declared "
+                      "direct dependencies and each component's recorded "
+                      "Requires-Dist), so it is not part of this install",
+                      "SBOM: component requests ('requests==2.0.0') is reached by "
                       "no path from the root component in the dependency graph: "
                       "nothing `pip install maddening` resolves depends on it, so "
                       "it is not part of this install"]
@@ -453,6 +486,218 @@ def test_a_prerelease_inside_the_range_is_admitted():
     assert errors_of(sbom) == []
 
 
+# -- what audit_040_p4_4 (M4) re-sealed past the check ------------------------
+#
+# Each edit below was re-sealed and passed: G1 a transitive dependency
+# dropped with its edges, G2 one at a version its dependants refuse, G3
+# the cutoff removed, G4 a blank licence, G5 one file resolved apart.
+
+
+def _drop(s: dict, name: str) -> None:
+    """Remove a component and every edge to it, leaving nothing dangling."""
+    ref = component(s, name)["bom-ref"]
+    s["components"] = [c for c in s["components"] if c["bom-ref"] != ref]
+    s["dependencies"] = [d for d in s["dependencies"] if d["ref"] != ref]
+    for d in s["dependencies"]:
+        if "dependsOn" in d:
+            d["dependsOn"] = [r for r in d["dependsOn"] if r != ref]
+
+
+def _set_version(s: dict, name: str, version: str) -> None:
+    """Move a component to another version, its refs and edges with it."""
+    comp = component(s, name)
+    old, new = comp["bom-ref"], _ref(name, version)
+    comp.update({"bom-ref": new, "version": version,
+                 "purl": f"pkg:pypi/{name.lower()}@{version}"})
+    for d in s["dependencies"]:
+        if d["ref"] == old:
+            d["ref"] = new
+        if "dependsOn" in d:
+            d["dependsOn"] = [new if r == old else r for r in d["dependsOn"]]
+
+
+def test_g1_a_transitive_dependency_dropped_with_its_edges_is_named():
+    sbom = mutate(make_sbom(), lambda s: _drop(s, "jaxlib"))
+    errors = errors_of(sbom)
+    assert _has(errors, "component jax requires jaxlib", "holds no jaxlib")
+    assert not _has(errors, "names no component")     # nothing left dangling
+
+
+def test_g2_a_version_its_dependant_refuses_is_named():
+    reqs = {"jax": ["jaxlib>=0.11"]}
+    assert errors_of(make_sbom(requires=reqs)) == []
+    sbom = mutate(make_sbom(requires=reqs), lambda s: _set_version(s, "jaxlib", "0.0.1"))
+    assert _has(errors_of(sbom), "component jax requires jaxlib>=0.11",
+                "jaxlib 0.0.1", "refuses")
+
+
+def test_g3_an_sbom_without_its_cutoff_is_refused():
+    def drop(s):
+        s["metadata"]["properties"] = [p for p in s["metadata"]["properties"]
+                                       if p["name"] != check_sbom.PROP_EXCLUDE_NEWER]
+    assert _has(errors_of(mutate(make_sbom(), drop)),
+                "does not record its resolution cutoff")
+
+
+@pytest.mark.parametrize("cutoff", ["2026-09-25", "yesterday", ""])
+def test_a_cutoff_not_written_as_the_generator_writes_it_is_refused(cutoff):
+    assert _has(errors_of(make_sbom(cutoff=cutoff)), "not a UTC timestamp")
+
+
+@pytest.mark.parametrize("licences", [
+    [{"license": {"name": ""}}],
+    [{"license": {"name": "   "}}],
+    [{"license": {"id": ""}}],
+    [{"expression": ""}],
+    [{"license": {"name": None}}],
+], ids=["empty-name", "blank-name", "empty-id", "empty-expression", "null-name"])
+def test_g4_a_blank_licence_is_no_licence(licences):
+    sbom = mutate(make_sbom(), lambda s: component(s, "numpy").update(licenses=licences))
+    assert _has(errors_of(sbom), "component numpy carries no licence")
+
+
+def test_a_blank_root_licence_is_named():
+    pyproject = copy.deepcopy(PYPROJECT)
+    sbom = mutate(make_sbom(), lambda s: s["metadata"]["component"].update(
+        licenses=[{"license": {"id": " "}}]))
+    assert _has(errors_of(sbom, pyproject=pyproject), "root component licence")
+
+
+def test_an_edge_no_requirement_names_is_named():
+    sbom = mutate(make_sbom(), lambda s: _depended_on_by(s, "numpy", "PyYAML"))
+    assert _has(errors_of(sbom), "'numpy==2.5.3' depends on 'PyYAML==6.0.3'",
+                "Requires-Dist names no pyyaml")
+
+
+def test_a_requirement_with_no_edge_is_named():
+    reqs = {"jax": ["jaxlib", "numpy>=1.24"]}
+    assert errors_of(make_sbom(requires=reqs)) == []
+
+    def cut(s):
+        jax = next(d for d in s["dependencies"] if d["ref"] == "jax==0.11.2")
+        jax["dependsOn"].remove("numpy==2.5.3")
+    assert _has(errors_of(mutate(make_sbom(requires=reqs), cut)),
+                "'jax==0.11.2' has no edge to 'numpy==2.5.3'", "requires numpy>=1.24")
+
+
+def test_an_edge_for_a_requirement_whose_marker_is_off_is_allowed():
+    """cyclonedx-py links an installed package an unselected extra names:
+    scipy's ``typing-extensions; extra == "test"`` is an edge in the real
+    core SBOM."""
+    reqs = {"jax": ["jaxlib"], "numpy": ['PyYAML; extra == "test"']}
+    sbom = make_sbom(requires=reqs)
+    assert "PyYAML==6.0.3" in next(
+        d for d in sbom["dependencies"] if d["ref"] == "numpy==2.5.3")["dependsOn"]
+    assert errors_of(sbom) == []
+
+
+def test_a_requirement_whose_marker_is_off_is_not_required():
+    reqs = {"jax": ["jaxlib", "winlib>=1; sys_platform == 'win32'",
+                    'testlib; extra == "test"']}
+    assert errors_of(make_sbom(requires=reqs)) == []
+    win = {**ENV, "sys_platform": "win32"}
+    assert _has(errors_of(make_sbom(requires=reqs, env=win)),
+                "component jax requires winlib>=1", "holds no winlib")
+
+
+def test_an_extra_a_dependant_asks_for_turns_its_requirements_on():
+    """``pyzmq[fancy]`` turns on pyzmq's ``extra == "fancy"`` lines, and a
+    plain ``pyzmq`` does not."""
+    pyproject = copy.deepcopy(PYPROJECT)
+    pyproject["project"]["optional-dependencies"]["net"] = ["pyzmq[fancy]>=25.0"]
+    reqs = {"jax": ["jaxlib"], "pyzmq": ['rich>=12; extra == "fancy"']}
+    comps = {**CORE, "pyzmq": "27.2.0", "rich": "15.0.0"}
+    ok = make_sbom("net", comps, requires=reqs, pyproject=pyproject)
+    assert errors_of(ok, "net", pyproject=pyproject) == []
+    no_rich = make_sbom("net", {**CORE, "pyzmq": "27.2.0"}, requires=reqs,
+                        pyproject=pyproject)
+    assert _has(errors_of(no_rich, "net", pyproject=pyproject),
+                "component pyzmq requires rich>=12", "holds no rich")
+    # The same SBOM under a plain ``pyzmq`` requirement: rich is installed
+    # by nothing the install turns on.
+    plain = make_sbom("net", comps, requires=reqs)
+    assert _has(errors_of(plain, "net"), "component rich is required by nothing")
+
+
+def test_an_extra_propagates_through_a_chain():
+    """root -> pyzmq[fancy] -> rich[color] -> colorlib: two hops of extras."""
+    pyproject = copy.deepcopy(PYPROJECT)
+    pyproject["project"]["optional-dependencies"]["net"] = ["pyzmq[fancy]>=25.0"]
+    reqs = {"jax": ["jaxlib"], "pyzmq": ['rich[color]; extra == "fancy"'],
+            "rich": ['colorlib; extra == "color"']}
+    comps = {**CORE, "pyzmq": "27.2.0", "rich": "15.0.0"}
+    sbom = make_sbom("net", comps, requires=reqs, pyproject=pyproject)
+    assert _has(errors_of(sbom, "net", pyproject=pyproject),
+                "component rich requires colorlib", "holds no colorlib")
+    full = make_sbom("net", {**comps, "colorlib": "1.0"}, requires=reqs,
+                     pyproject=pyproject)
+    assert errors_of(full, "net", pyproject=pyproject) == []
+
+
+def test_a_component_reached_only_through_an_edge_whose_marker_is_off_is_named():
+    reqs = {"jax": ["jaxlib"], "numpy": ['extra-pkg; extra == "test"']}
+    sbom = make_sbom(components={**CORE, "extra-pkg": "1.0"}, requires=reqs)
+    errors = errors_of(sbom)
+    assert _has(errors, "component extra-pkg is required by nothing")
+    assert not _has(errors, "reached by no path")   # the graph does reach it
+
+
+def test_a_component_that_does_not_record_its_requires_dist_is_refused():
+    sbom = mutate(make_sbom(), lambda s: component(s, "numpy").pop("properties"))
+    assert _has(errors_of(sbom), "component numpy does not record its Requires-Dist")
+
+
+def test_a_requires_dist_count_that_disagrees_is_refused():
+    def lie(s):
+        props = component(s, "jax")["properties"]
+        props[:] = [p for p in props if p["name"] != check_sbom.PROP_REQUIRES_DIST]
+    assert _has(errors_of(mutate(make_sbom(), lie)), "component jax records ['1']",
+                "carries 0")
+
+
+def test_a_marker_reading_an_unrecorded_variable_is_refused():
+    reqs = {"jax": ["jaxlib", "oldlib; platform_release < '5'"]}
+    assert _has(errors_of(make_sbom(requires=reqs)), "component jax requires",
+                "a variable this SBOM does not record")
+
+
+def test_an_unparseable_recorded_requirement_is_refused():
+    reqs = {"jax": ["jaxlib", "not a requirement!!"]}
+    assert _has(errors_of(make_sbom(requires=reqs)), "is not a requirement")
+
+
+def _committed(install: str) -> dict:
+    version = check_sbom.load_pyproject()["project"]["version"]
+    return json.loads((check_sbom.SBOM_DIR / check_sbom.sbom_filename(
+        version, install)).read_text(encoding="utf-8"))
+
+
+def _committed_errors(sbom: dict, install: str = "core") -> list[str]:
+    text = check_sbom.SOUP_PACKAGE.read_text(encoding="utf-8")
+    return check_sbom.check_sbom(sbom, pyproject=check_sbom.load_pyproject(),
+                                 install=install,
+                                 soup_requirements=check_sbom.soup_items(text))
+
+
+def test_the_audits_g1_and_g2_fail_on_the_committed_core_sbom():
+    """Replayed on the file CI checks: scipy dropped with its edges, and
+    ml-dtypes rewritten to 0.0.1 under jax's ``>=0.5.0``."""
+    core = _committed("core")
+    assert _committed_errors(core) == []
+    g1 = _committed_errors(mutate(core, lambda s: _drop(s, "scipy")))
+    assert _has(g1, "component jax requires scipy", "holds no scipy")
+    assert _has(g1, "component jaxlib requires scipy", "holds no scipy")
+    g2 = _committed_errors(mutate(core, lambda s: _set_version(s, "ml_dtypes", "0.0.1")))
+    assert _has(g2, "component jax requires ml_dtypes>=0.5.0", "ml_dtypes 0.0.1")
+
+
+def test_every_committed_component_records_its_requires_dist():
+    for path in sorted(check_sbom.SBOM_DIR.glob("*.cdx.json")):
+        for comp in json.loads(path.read_text())["components"]:
+            reqs, problem = check_sbom.recorded_requirements(comp)
+            assert problem is None, (path.name, comp["name"], problem)
+
+
 # ---------------------------------------------------------------------------
 # The directory and the SOUP document
 # ---------------------------------------------------------------------------
@@ -499,6 +744,38 @@ def test_a_consistent_directory_passes(tmp_path):
     errors, sboms = check_sbom.check_directory(tmp_path, pyproject=pyproject,
                                                soup_text=_soup_text())
     assert errors == [] and len(sboms) == 4
+
+
+@pytest.mark.parametrize("prop, value", [
+    (check_sbom.PROP_EXCLUDE_NEWER, "2026-03-01T00:00:00Z"),
+    (check_sbom.PROP_MARKER + "python_full_version", "3.12.9"),
+    (check_sbom.PROP_MARKER + "platform_machine", "aarch64"),
+    (check_sbom.PROP + "index", "https://example.invalid/simple"),
+], ids=["cutoff", "python", "machine", "index"])
+def test_g5_one_sbom_resolved_apart_from_the_others_is_named(tmp_path, prop, value):
+    pyproject = _pyproject_with_extras()
+    _write_dir(tmp_path, pyproject)
+    path = tmp_path / check_sbom.sbom_filename(VERSION, "server")
+
+    def apart(s):
+        props = [p for p in s["metadata"]["properties"] if p["name"] != prop]
+        s["metadata"]["properties"] = props + [{"name": prop, "value": value}]
+    path.write_text(check_sbom.dumps(mutate(json.loads(path.read_text()), apart)))
+    errors, _ = check_sbom.check_directory(tmp_path, pyproject=pyproject,
+                                           soup_text=_soup_text())
+    assert _has(errors, f"the SBOMs disagree about {prop}",
+                f"{value!r} in maddening-{VERSION}-server.cdx.json",
+                "regenerate them all in one run")
+
+
+def test_a_property_only_some_files_record_is_a_disagreement():
+    """The file without it cannot be shown to share the resolution; one
+    no file records is no disagreement (the per-file rules own those)."""
+    errors = check_sbom._shared_resolution_errors(
+        {"a": {check_sbom.PROP + "index": "x"}, "b": {}}, "sbom")
+    assert len(errors) == 1
+    assert "disagree about maddening:sbom:index (None in b; 'x' in a)" in errors[0]
+    assert check_sbom._shared_resolution_errors({"a": {}, "b": {}}, "sbom") == []
 
 
 def test_a_missing_sbom_for_a_covered_install_is_named(tmp_path):
@@ -666,10 +943,12 @@ def _raw(components: dict[str, str], root_edges: list[str], licences=True) -> di
     }
 
 
-def _probe(components: dict[str, str], license_fields=None) -> dict:
+def _probe(components: dict[str, str], license_fields=None, requires=None) -> dict:
+    requires = REQUIRES if requires is None else requires
     return {"marker": dict(ENV), "platform": "linux-x86_64", "libc": "glibc 2.39",
             "distributions": [[n, v] for n, v in components.items()] + [["maddening", VERSION]],
-            "license_fields": license_fields or {}}
+            "license_fields": license_fields or {},
+            "requires_dist": {n: list(requires.get(n, [])) for n in components}}
 
 
 def _finalise(raw, probe, install="core"):
@@ -729,6 +1008,33 @@ def test_finalise_carries_a_short_licence_field_cyclonedx_dropped():
         {"license": {"acknowledgement": "declared", "name": "LicenseRef-TOST-1.0"}}]
     assert "licenses" not in component(sbom, "numpy")        # licence text, not a name
     assert component(sbom, "jax")["licenses"][0]["license"]["id"] == "MIT"  # kept
+
+
+def test_finalise_records_each_components_requires_dist():
+    reqs = {"jax": ["jaxlib<=0.11.2,>=0.11.2", 'nvlib; extra == "cuda"'],
+            "numpy": []}
+    sbom = _finalise(_raw(CORE, []), _probe(CORE, requires=reqs))
+    assert check_sbom.recorded_requirements(component(sbom, "jax")) == (
+        sorted(reqs["jax"]), None)
+    assert check_sbom.recorded_requirements(component(sbom, "numpy")) == ([], None)
+    assert errors_of(sbom) == []
+
+
+def test_finalise_keeps_the_component_properties_cyclonedx_wrote():
+    raw = _raw(CORE, [])
+    component(raw, "jax")["properties"] = [
+        {"name": "cdx:python:package:required-extra", "value": "cuda12"}]
+    sbom = _finalise(raw, _probe(CORE))
+    names = [p["name"] for p in component(sbom, "jax")["properties"]]
+    assert "cdx:python:package:required-extra" in names
+    assert check_sbom.PROP_REQUIRES_DIST_COUNT in names
+
+
+def test_finalise_refuses_a_probe_without_a_components_requires_dist():
+    probe = _probe(CORE)
+    del probe["requires_dist"]["numpy"]
+    with pytest.raises(ValueError, match="no Requires-Dist for numpy"):
+        _finalise(_raw(CORE, []), probe)
 
 
 def test_finalise_is_independent_of_the_order_cyclonedx_wrote():

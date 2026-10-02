@@ -1,0 +1,278 @@
+"""The bearer-token, ``Origin`` and ``Host`` rules hold at the edges of
+what the REST guide says about them.
+
+The rows these pin are in ``docs/validation/rest_runpod_claims.yaml``
+(``REST-0xx``, area ``auth`` and ``host-origin``).  The neighbouring
+suites check the comfortable middle: an anonymous ``GET`` on a public
+bind, a foreign ``Origin`` on a loopback bind, a rebound ``Host`` on a
+handful of routes.  These go to the edges:
+
+* every spelling of a loopback bind, and of a bind that is not one, and
+  routable peers that are not plain IPv4 (an IPv4-mapped IPv6 address, a
+  scoped link-local one);
+* the exempt paths are exact: a trailing slash, ``HEAD`` or ``OPTIONS``
+  is not exempt;
+* the ``Origin`` rule still applies where the token is demanded and
+  presented, over HTTP and over a WebSocket handshake;
+* the ``Host`` rule covers every route, ``/healthz`` and ``/viz/*``
+  included, and ignores an ``allowed_hosts`` entry's port;
+* an unauthenticated caller is refused before its body is read, so an
+  oversized body is a 401, not a 413;
+* ``/healthz`` answers while another request holds the graph;
+* the generated token's file is the owner's alone even when the file
+  already existed (a strict xfail: it is not).
+
+Nothing here can reach a cloud provider: ``HOME`` is an empty directory,
+cloud credentials are unset and every launcher raises
+(:func:`tests.property.differential.no_cloud_launch`), and
+``/cloud/launch`` is left out of every enumeration.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import time
+import warnings
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+import pytest
+from fastapi.testclient import TestClient
+from starlette.routing import Route
+
+from maddening.api import server as server_module
+from maddening.api.auth import TOKEN_FILE_ENV, UNAUTHENTICATED_PATHS, APIAuth
+from maddening.api.server import SimulationServer, _rebinding_refusal
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.spring import SpringDamperNode
+from tests.property.differential import no_cloud_launch
+
+TOKEN = "claims-test-token-not-a-credential"
+REGISTRY = {"SpringDamperNode": SpringDamperNode}
+FOREIGN = "https://evil.example"
+LOOPBACK_PEER = ("127.0.0.1", 51234)
+#: Routes a test here never sends a request to, whatever it enumerates.
+NEVER_REACHED = {"/cloud/launch"}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _offline():
+    with no_cloud_launch():
+        yield
+
+
+def _graph() -> GraphManager:
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode(name="spring", timestep=0.01))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+    return gm
+
+
+def _server(bind_host: str, **kwargs) -> SimulationServer:
+    return SimulationServer(REGISTRY, graph_manager=_graph(), bind_host=bind_host,
+                            api_token=TOKEN, **kwargs)
+
+
+def _bearer() -> dict:
+    return {"Authorization": f"Bearer {TOKEN}"}
+
+
+def _routes(app) -> list[tuple[str, str, str]]:
+    """``(method, concrete path, template)`` of every HTTP route but the
+    ones never reached, with path parameters filled in."""
+    out = []
+    for route in app.routes:
+        if not isinstance(route, Route) or route.path in NEVER_REACHED:
+            continue
+        path = route.path
+        for name in getattr(route, "param_convertors", {}) or {}:
+            path = path.replace("{" + name + "}", "spring")
+        for method in sorted(route.methods or set()):
+            if method not in {"HEAD", "OPTIONS"}:
+                out.append((method, path, route.path))
+    return out
+
+
+def _structure(server: SimulationServer) -> tuple:
+    gm = server.gm
+    return (list(gm._nodes), list(gm._edges),
+            {k: dict(v) for k, v in gm._state.items() if k != "_meta"},
+            dict(gm._nodes["spring"].node.params))
+
+
+# ---------------------------------------------------------------------------
+# Which binds demand the token, and which peers the backstop challenges
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bind", ["127.0.0.1", "127.0.0.2", "localhost", "LOCALHOST",
+                                  "::1", "[::1]", "::ffff:127.0.0.1"])
+def test_every_loopback_spelling_of_the_bind_serves_without_a_token(bind):
+    server = _server(bind)
+    assert server.auth.enforced is False
+    client = TestClient(server.create_app())
+    assert client.get("/graph").status_code == 200
+    assert client.get("/openapi.json").status_code == 200
+
+
+@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "", " ", "10.0.0.4", "203.0.113.5",
+                                  "example.org", "localhost.example.org"])
+def test_every_other_bind_demands_the_token_and_hides_the_docs(bind):
+    """An unknown or empty address fails closed (``is_loopback``)."""
+    server = _server(bind)
+    assert server.auth.enforced is True
+    client = TestClient(server.create_app())
+    assert client.get("/graph").status_code == 401
+    assert client.get("/graph", headers=_bearer()).status_code == 200
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        assert client.get(path, headers=_bearer()).status_code == 404, path
+
+
+@pytest.mark.parametrize("peer", ["::ffff:203.0.113.5", "fe80::1%eth0", "10.0.0.4",
+                                  "2001:db8::7"])
+def test_a_routable_peer_of_any_spelling_is_challenged_on_a_loopback_bind(peer):
+    client = TestClient(_server("127.0.0.1").create_app(), client=(peer, 40000))
+    assert client.get("/graph").status_code == 401
+    assert client.get("/graph", headers=_bearer()).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The exempt paths are exact
+# ---------------------------------------------------------------------------
+
+def test_only_the_exact_exempt_paths_answer_without_the_token():
+    client = TestClient(_server("0.0.0.0").create_app())
+    for path in sorted(UNAUTHENTICATED_PATHS):
+        assert client.get(path).status_code == 200, path
+        assert client.get(path + "/").status_code == 401, path + "/"
+    for method in ("HEAD", "OPTIONS"):
+        assert client.request(method, "/graph").status_code == 401, method
+
+
+# ---------------------------------------------------------------------------
+# The Origin rule where the token is demanded
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bind", ["127.0.0.1", "0.0.0.0"])
+def test_every_state_changing_route_refuses_a_foreign_origin(bind):
+    """On either bind, and with the token presented where it is demanded:
+    the Origin rule is the server's own, not a loopback special case."""
+    server = _server(bind)
+    client = TestClient(server.create_app(), raise_server_exceptions=False)
+    before = _structure(server)
+    checked = 0
+    for method, path, template in _routes(client.app):
+        if method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            continue
+        resp = client.request(method, path, headers={**_bearer(), "Origin": FOREIGN,
+                                                     "Content-Type": "text/plain"})
+        assert resp.status_code == 403, (method, template, resp.status_code, resp.text)
+        checked += 1
+    assert checked >= 20, f"only {checked} state-changing routes found"
+    assert _structure(server) == before
+
+
+def test_a_state_stream_refuses_a_foreign_origin_that_holds_the_token():
+    client = TestClient(_server("0.0.0.0").create_app())
+    with pytest.raises(Exception):
+        with client.websocket_connect("/ws/state", headers={**_bearer(), "Origin": FOREIGN}):
+            pass
+    # The same handshake from no Origin at all (a script) is served.
+    with client.websocket_connect("/ws/state", headers=_bearer()):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# The Host rule covers every route
+# ---------------------------------------------------------------------------
+
+def test_a_foreign_host_is_refused_on_every_route_the_exempt_ones_included():
+    server = _server("127.0.0.1")
+    client = TestClient(server.create_app(), base_url="http://attacker.example:8000",
+                        client=LOOPBACK_PEER, raise_server_exceptions=False)
+    before = _structure(server)
+    templates = set()
+    for method, path, template in _routes(client.app):
+        resp = client.request(method, path)
+        assert resp.status_code == 403, (method, template, resp.status_code, resp.text)
+        templates.add(template)
+    assert UNAUTHENTICATED_PATHS <= templates
+    assert _structure(server) == before
+
+
+def test_a_request_with_no_host_header_is_not_refused_for_its_host():
+    auth = APIAuth(bind_host="127.0.0.1", token=TOKEN, environ={})
+    assert _rebinding_refusal(auth, "127.0.0.1", None, frozenset()) is None
+    assert _rebinding_refusal(auth, "127.0.0.1", "attacker.example", frozenset()) is not None
+
+
+def test_an_allowed_host_is_matched_whatever_port_either_side_names():
+    server = _server("127.0.0.1", allowed_hosts=["sim.lab.example:9999"])
+    client = TestClient(server.create_app(), base_url="http://sim.lab.example:1234",
+                        client=LOOPBACK_PEER)
+    assert client.get("/graph").status_code == 200
+    assert client.get("/graph", headers={"Host": "sim.lab.example"}).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Order: who is refused before what
+# ---------------------------------------------------------------------------
+
+def test_an_anonymous_oversized_body_is_refused_for_its_credential_first(monkeypatch):
+    monkeypatch.setattr(server_module, "MAX_REQUEST_BODY_BYTES", 1000)
+    client = TestClient(_server("0.0.0.0").create_app(), raise_server_exceptions=False)
+    body = b"x" * 5000
+    headers = {"Content-Type": "application/json"}
+    assert client.put("/graph/state/spring", content=body, headers=headers).status_code == 401
+    assert client.put("/graph/state/spring", content=body,
+                      headers={**headers, **_bearer()}).status_code == 413
+
+
+def test_healthz_answers_while_another_request_holds_the_graph():
+    server = _server("127.0.0.1")
+    client = TestClient(server.create_app())
+    assert server._graph_lock.acquire()
+    try:
+        t0 = time.monotonic()
+        resp = client.get("/healthz")
+        elapsed = time.monotonic() - t0
+    finally:
+        server._graph_lock.release()
+    assert resp.status_code == 200 and resp.json()["status"] == "ok"
+    assert elapsed < 2.0, f"/healthz waited {elapsed:.2f} s for the graph"
+
+
+# ---------------------------------------------------------------------------
+# The token file
+# ---------------------------------------------------------------------------
+
+def test_a_new_token_file_is_written_with_mode_0600(tmp_path, monkeypatch):
+    path = tmp_path / "token"
+    monkeypatch.setenv(TOKEN_FILE_ENV, str(path))
+    auth = APIAuth(bind_host="0.0.0.0", environ={})
+    assert auth.announce(8000) is True
+    assert path.read_text() == auth.token + "\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="REST-016: a token file that already exists keeps its mode; "
+                          "pending fix")
+def test_a_token_file_that_already_existed_is_left_readable_by_its_owner_only(
+        tmp_path, monkeypatch):
+    """The README: "point MADDENING_API_TOKEN_FILE at a path on a mounted
+    volume and the generated token is written there with mode 0600".  A
+    path on a volume is often a file that is already there (a placeholder,
+    the last run's token): ``os.open(..., O_CREAT, 0o600)`` applies the
+    mode only to a file it creates, so the new token lands in a
+    world-readable file."""
+    path = tmp_path / "token"
+    path.write_text("the last run's token\n")
+    path.chmod(0o644)
+    monkeypatch.setenv(TOKEN_FILE_ENV, str(path))
+    auth = APIAuth(bind_host="0.0.0.0", environ={})
+    assert auth.announce(8000) is True
+    assert path.read_text() == auth.token + "\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600, oct(stat.S_IMODE(path.stat().st_mode))

@@ -733,14 +733,9 @@ def _graph_sections(gm: "GraphManager") -> tuple[list[str], list[_Section]]:
     if nodes:
         rate = "multi-rate" if status.ever_compiled and gm._is_multirate else (
             "uniform rate" if status.ever_compiled else "rate dividers: not compiled")
-        base = _effective_base_timestep(gm)
-        header.append(f"base timestep: {_cell(base)} ({rate})")
-        reported = float(gm.timestep)
-        if not math.isclose(base, reported, rel_tol=1e-9):
-            header.append(
-                f"note: gm.timestep reads {_cell(reported)}, the GCD of the node timesteps; "
-                f"a sub-cycling coupling group advances at its largest member timestep, so "
-                f"one step of this graph is {_cell(base)}")
+        # ``gm.timestep`` is the step compile() schedules (a sub-cycling
+        # group at its largest member timestep), the one rule for both.
+        header.append(f"base timestep: {_cell(float(gm.timestep))} ({rate})")
     mesh = getattr(gm, "_multigpu_mesh", None)
     if mesh is not None:
         device_map = getattr(gm, "_multigpu_device_map", None) or {}
@@ -837,24 +832,6 @@ def _graph_sections(gm: "GraphManager") -> tuple[list[str], list[_Section]]:
         _Section(order_title, tuple(order_items), empty=order_empty),
     ]
     return header, sections
-
-
-def _effective_base_timestep(gm: "GraphManager") -> float:
-    """The step the compiled graph advances by, derived as ``compile()``
-    derives it: a sub-cycling group's members step at the group's largest
-    timestep, and the base is the GCD of what remains."""
-    from maddening.core.graph_manager import _multi_gcd  # noqa: PLC0415
-    effective = {name: float(spec.timestep) for name, spec in gm._nodes.items()}
-    for group in gm._coupling_groups:
-        if not group.subcycling:
-            continue
-        members = [n for n in group.nodes if n in gm._nodes]
-        if members:
-            macro = max(float(gm._nodes[n].timestep) for n in members)
-            for n in members:
-                effective[n] = macro
-    values = sorted(set(effective.values()))
-    return values[0] if len(values) == 1 else float(_multi_gcd(values))
 
 
 def _firing(divider: int) -> str:

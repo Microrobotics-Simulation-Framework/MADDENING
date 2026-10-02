@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import functools
 import math
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -485,7 +486,12 @@ def _two_springs(stiffness_a, stiffness_b, solver):
     gm.add_edge("b", "a", "position", "anchor_position")
     gm.add_coupling_group(["a", "b"], max_iterations=6, tolerance=1e-8, solver=solver,
                           predictor="quadratic", acceleration="iqn-imvj", jacobian_reuse=2)
-    gm.compile()
+    with warnings.catch_warnings():
+        # Past MADD-ANO-098's limit ('b' has c < k*dt), so compile() warns.
+        # The test is about the secant history, not the springs' stability.
+        warnings.filterwarnings("ignore", message=".*MADD-ANO-098",
+                                category=UserWarning)
+        gm.compile()
     for _ in range(5):
         gm.step()
     meta = gm._state["_meta"]  # noqa: SLF001

@@ -85,9 +85,12 @@ def test_graph_text_reports_sub_cycling_and_the_true_base_step():
     text = graph("subcycled").format_graph()
     assert "sub-cycled x2 per coupling pass" in text
     assert "sub-cycling: coarse x1, fine x2 evaluations per pass" in text
-    # one step of a sub-cycling group is its largest member timestep
+    # one step of a sub-cycling group is its largest member timestep, and
+    # gm.timestep says so too (it used to read the GCD, 0.01, and the text
+    # carried a note about the difference; MADD-ANO-096)
     assert "base timestep: 0.02" in text
-    assert "gm.timestep reads 0.01" in text
+    assert graph("subcycled").timestep == 0.02
+    assert "note:" not in text
 
 
 def test_graph_text_on_an_uncompiled_graph_reports_what_compile_would_decide_as_unknown():

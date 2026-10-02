@@ -190,9 +190,7 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
         _clot_pos[0] = None
         _clot_mask[0] = _base_mask
         runner.reset_time()
-        relay._step_count = 0
-        relay._sim_time = 0.0
-        relay._snapshot = None
+        relay.reset()
         return {"status": "reset"}
 
     # --- Parameter tuning ---

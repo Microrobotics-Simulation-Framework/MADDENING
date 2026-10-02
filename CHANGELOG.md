@@ -188,6 +188,7 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`compile()` warns about two `SpringDamperNode`s anchored on each other in a coupling group whose converged step grows** (MADD-ANO-098, still open; a `UserWarning` naming both nodes and the growth factor `g`, never a refusal, judged from the live `gm.params`). Action: use a smaller timestep, or keep `k*dt <= c <= (2*m - k*dt**2)/dt`.
 - **`LBMPipeNode` refuses a `propeller_radius` above 1** (MADD-ANO-058): the disc reached past the pipe wall and pushed on wall cells (64 of 140 disc cells at 1.5 on a 12x12 cross-section; mean `u_x` 1.9% off), with no error.
   Action: pass a radius in `(0, 1]` (1 is the whole cross-section); a config saved with a larger one no longer reloads.
 - **`run_scan` and the other loop entry points refuse a `ShardedStencilNode` step XLA miscompiles inside a loop** (MADD-ANO-068, now `partially_resolved`): a node reading a sharded static in its halo beside a `shard_info`-offset window into another array, the static copied along a mesh axis of 2+ devices,
@@ -339,6 +340,11 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The FMU bridge and C wrapper refuse what they used to coerce or drop** (MADD-ANO-100 to 103, never released): a `master_dt` other than `md.graph_timestep`, a Boolean other than 0/1, an `fmi3Get`/`Set` of another type than the variable's, a repeated value reference, a numeric set of a Clock,
+  an archive missing an input; step size and communication point share one tolerance; a step takes at most `max_steps_per_request` (100000) graph steps and stops at `stop()`; `SetFMUState` checks the whole frame; the wrapper waits at most `MADDENING_FMU_TIMEOUT` (600 s).
+  Action: pass `master_dt=gm.timestep`; read and write each FMU variable with the function of its type (`getFloat32` for a Float32).
+- **`gm.timestep` is the step a graph takes** (MADD-ANO-096/097, since 0.1.0): a sub-cycling group counts at its largest member timestep, so the runner's and relays' clocks, USD `baseDt` and the FMU default step (all now from it) no longer run slow; `SpringDamperNode` states its coupled-pair limit `c >= k*dt` (MADD-ANO-098, open);
+  MADD-ANO-099 registers the partial `external_inputs` v0.1.0-v0.3.1 did not zero-fill.  Action: on a sub-cycled graph, recompute any step count taken as `duration / gm.timestep`; keep `damping >= stiffness*dt` on coupled spring pairs.
 - **`run_pod.py`'s wrapper goals see a fault confined to one spatial axis on four devices** (schema 6): each axis is split over all four on a
   1-D mesh of its own, beside a 1 x 4 two-axis mesh and the 2 x 2 pencil, on non-square grids whose inputs differ block to block (three seeded
   faults closed all six items).  `--summarise` names each item's commit, and exits 4 with `MIXED COMMITS` across commits.  Action: re-run dry runs.

@@ -367,6 +367,10 @@ def test_single_pass_group_honours_strict_convergence():
         jax.block_until_ready(gm.step())
 
 
+# ``_coupled_springs`` is past MADD-ANO-098's limit (c < k*dt: the pair's
+# centre of mass grows by 1.015 a step), so compile() warns.  The test is
+# about the one-iteration variant's report.
+@pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
 def test_one_iteration_profile_variant_reports_diagnostics():
     """The profiler's coupling-overhead measurement needs the report.
 

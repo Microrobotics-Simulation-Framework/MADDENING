@@ -224,8 +224,12 @@ class ModelDescription:
     default_stop_time : float
         Default experiment stop time.
     default_step_size : float
-        Default fixed timestep.  Derived from the graph's master
-        timestep.
+        Default fixed timestep, the ``DefaultExperiment`` ``stepSize``: the
+        communication step an importer takes.  Derived from the graph's
+        step unless ``build_model_description(default_step_size=...)``
+        chose another; :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge`
+        refuses to serve a description whose step is not a whole number
+        of graph steps.
     default_tolerance : float
         Default tolerance for adaptive solvers.
     fixed_parameters : dict[str, str]
@@ -245,6 +249,17 @@ class ModelDescription:
         inputs, and a node whose input was left out took its own "input
         missing" branch instead (a ball with no table falls through the
         floor).
+    graph_timestep : float or None
+        The simulated time one step of the described graph advances
+        (``GraphManager.timestep``), which is what one sidecar step -- the
+        bridge's ``master_dt`` -- covers.  ``build_model_description``
+        records it whatever ``default_step_size`` was chosen; ``None`` for
+        a description built by hand, which then has only
+        ``default_step_size`` to say what its step is.  Not part of the
+        XML.  :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge` refuses a
+        ``master_dt`` that differs from it: a bridge stepping a 0.01 s
+        graph with ``master_dt=0.005`` ran two graph steps per 0.01 s
+        ``doStep`` and labelled a state at 0.10 s with the time 0.05 s.
     """
     model_name: str
     instantiation_token: str
@@ -268,6 +283,10 @@ class ModelDescription:
     # bridge (not written to the XML).
     held_inputs: dict[str, tuple[str, str, tuple[int, ...], str]] = field(
         default_factory=dict)
+    # One graph step in seconds (``GraphManager.timestep``), whatever
+    # ``default_step_size`` advertises; the bridge's ``master_dt`` must be
+    # it.  ``None`` for a hand-built description (not written to the XML).
+    graph_timestep: Optional[float] = None
 
     def clocks(self) -> list[FMIVariable]:
         """The ``<Clock>`` variables (empty for a single-clock FMU)."""
@@ -473,19 +492,50 @@ class _ExtView:
     expected_units: str = ""
 
 
-def _master_timestep(graph_manager: Any) -> float:
-    """The graph's base (fastest) timestep: ``_base_dt`` when compile()
-    set it, else the smallest node timestep; 1e-3 for an empty graph."""
-    base = getattr(graph_manager, "_base_dt", None)
-    if base:
-        return float(base)
+def _node_timesteps(graph_manager: Any) -> dict[str, float]:
+    """Each node's timestep as the graph's step schedules it.
+
+    A ``GraphManager``'s scheduled timesteps
+    (``maddening.core.graph_manager._scheduled_timesteps``): every member of
+    a sub-cycling coupling group at the group's largest member timestep,
+    because the group solves once per macro step and an importer sees its
+    members change only then.  A duck-typed graph without coupling groups
+    gives its nodes' own timesteps.
+    """
+    from maddening.core.graph_manager import _scheduled_timesteps  # noqa: PLC0415
+
     nodes = getattr(graph_manager, "_nodes", {}) or {}
-    dts = [
-        float(getattr(spec, "timestep", getattr(getattr(spec, "node", spec), "delta_t", 0.0)))
-        for spec in nodes.values()
-    ]
-    dts = [dt for dt in dts if dt > 0]
-    return min(dts) if dts else 1.0e-3
+    own = {
+        name: float(getattr(spec, "timestep",
+                            getattr(getattr(spec, "node", spec), "delta_t", 0.0)))
+        for name, spec in nodes.items()
+    }
+    groups = getattr(graph_manager, "_coupling_groups", None) or ()
+    if not groups:
+        return own
+    return {name: float(dt) for name, dt in _scheduled_timesteps(nodes, groups).items()}
+
+
+def _master_timestep(graph_manager: Any) -> float:
+    """One step of the graph: the simulated time one sidecar step advances.
+
+    ``GraphManager.timestep`` -- the GCD of the scheduled node timesteps,
+    which is the fastest node's timestep on a uniform-rate graph and on a
+    multi-rate one whose timesteps divide each other (MADD-ANO-078), and
+    shorter or longer than that on the others: 0.001 for nodes at 0.002
+    and 0.003, 0.02 for a sub-cycling group of 0.01 and 0.02.  A duck-typed
+    graph without that property gives the GCD of its node timesteps; an
+    empty graph 1e-3.  (This used to read a ``_base_dt`` attribute nothing
+    set and fall back to the smallest node timestep, MADD-ANO-097.)
+    """
+    from maddening.core.graph_manager import _step_duration  # noqa: PLC0415
+
+    try:
+        return float(graph_manager.timestep)
+    except (AttributeError, RuntimeError):
+        pass
+    dts = {name: dt for name, dt in _node_timesteps(graph_manager).items() if dt > 0}
+    return float(_step_duration(dts)) if dts else 1.0e-3
 
 
 def _deterministic_token(parts: Iterable[str]) -> str:
@@ -556,8 +606,15 @@ def build_model_description(
         the FMU's public surface minimal — only ``STABLE``-tagged
         sources/sinks contribute.
     default_step_size : float, optional
-        Default fixed step size for the FMU's experiment block.
-        Defaults to the graph's master timestep when available.
+        Default fixed step size for the FMU's experiment block.  Defaults
+        to one step of the graph, ``graph_manager.timestep``: the fastest
+        node's timestep on a uniform-rate graph, and on a multi-rate graph
+        the GCD of the timesteps as scheduled (a sub-cycling coupling
+        group at its largest member timestep), which is what one sidecar
+        step advances.  Another value is advertised as the FMU's
+        communication step; a bridge serves it only if it is a whole
+        number of graph steps.  The graph step itself is recorded as
+        :attr:`ModelDescription.graph_timestep` either way.
     include_parameters : bool, default True
         Expose every leaf of ``graph_manager.params["nodes"]`` that the
         compiled step reads as a ``causality="parameter"``,
@@ -581,9 +638,13 @@ def build_model_description(
         exported output and external input with the clock of its node
         (``clocks=`` attribute, ``variability="discrete"``): an importer
         then knows that a node on a 10x coarser rate only changes every
-        10th master step.  Clocks are named ``clock_<k>`` in order of
-        increasing interval; the fastest one equals the default step
-        size.  Off by default (single-clock, every output continuous),
+        10th master step.  A member of a sub-cycling coupling group is on
+        its group's largest member timestep, the only rate at which its
+        values change between steps.  Clocks are named ``clock_<k>`` in
+        order of increasing interval; every interval is a whole number of
+        default steps, and the fastest equals it unless the timesteps do
+        not divide each other (nodes at 0.002 and 0.003 run on a 0.001
+        step).  Off by default (single-clock, every output continuous),
         so existing FMUs are unchanged.
     model_identifier : str, optional
         Emit a ``<CoSimulation modelIdentifier=...>`` element naming the
@@ -726,13 +787,16 @@ def build_model_description(
     clock_vr_of_dt: dict[float, int] = {}
     node_clock: dict[str, int] = {}
     if multi_clock:
+        scheduled = _node_timesteps(graph_manager)
         dts: dict[float, list[str]] = {}
         for node_name, node_spec in nodes.items():
             node = getattr(node_spec, "node", node_spec)
             cls_name = f"{type(node).__module__}.{type(node).__name__}"
             if not _ensure_stable_only_or_opt_in(cls_name, include_evolving):
                 continue
-            dt = float(getattr(node_spec, "timestep", getattr(node, "delta_t", 0.0)))
+            # The scheduled timestep, not the node's own: a sub-cycled
+            # member's outputs change once per macro step of its group.
+            dt = scheduled[node_name]
             dts.setdefault(dt, []).append(node_name)
         for k, dt in enumerate(sorted(dts)):
             variables.append(FMIVariable(
@@ -907,8 +971,12 @@ def build_model_description(
         seen[var.name] = var
 
     # ----- Defaults -----
+    # One graph step, recorded separately from the advertised step: a
+    # caller may advertise a coarser communication step, and the bridge
+    # still has to know what one sidecar step covers.
+    graph_timestep = _master_timestep(graph_manager)
     if default_step_size is None:
-        default_step_size = _master_timestep(graph_manager)
+        default_step_size = graph_timestep
 
     # Deterministic instantiationToken — depends on the schema, so
     # the FMU loader refuses mismatched schemas at instantiation.
@@ -926,6 +994,7 @@ def build_model_description(
         co_simulation_model_identifier=model_identifier,
         fixed_parameters=fixed_parameters,
         held_inputs=held_inputs,
+        graph_timestep=graph_timestep,
     )
 
 

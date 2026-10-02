@@ -97,6 +97,7 @@ from dataclasses import replace as dataclass_replace
 from typing import Any, Optional
 
 import numpy as np
+from hypothesis import assume
 from hypothesis import strategies as st
 
 from maddening.core.coupling.group import _FIELD_DEFAULTS, _INERT_RULES
@@ -1045,7 +1046,7 @@ def graph_recipes(
     )
     edges = draw(_edges(nodes, allow_mappings=allow_mappings,
                         require_mapping=require_mapping))
-    return GraphRecipe(
+    recipe = GraphRecipe(
         nodes=nodes,
         edges=edges,
         coupling_groups=(
@@ -1061,3 +1062,54 @@ def graph_recipes(
             draw(st.sampled_from([0.5, 1.5, 3.0])) if train_mapping_weights else 1.0
         ),
     )
+    assume(not anchored_springs_warn(recipe))
+    return recipe
+
+
+def anchored_springs_warn(recipe: GraphRecipe) -> bool:
+    """Whether compiling *recipe* would draw MADD-ANO-098's warning.
+
+    Two ``SpringDamperNode``\\ s anchored on each other in a coupling group
+    are unstable for most of the constants drawn here (``c < k*dt``), and
+    ``compile()`` warns about such a pair, which fails the graph over the
+    recipe under ``filterwarnings = ["error"]``.  Asked before and after
+    ``param_overrides``, because a property that saves and reloads the
+    calibrated graph compiles the overridden values again.
+
+    Asked of the library's own hook on an uncompiled copy of the graph, not
+    restated here, for the same reason :func:`without_inert_knobs` reads
+    ``_INERT_RULES``.  Rare, so :func:`graph_recipes` rejects rather than
+    maps: in 3000 draws each of ``graph_recipes()`` and
+    ``graph_recipes(require_coupling_group=True)`` no recipe warned, and
+    three of the former had the pattern at all (2026-10-02).
+    """
+    springs = {n.name for n in recipe.nodes if n.type_name == "SpringDamperNode"}
+    groups = [g for g in recipe.coupling_groups if len(springs & set(g.nodes)) >= 2]
+    if not groups:
+        return False
+    gm = GraphManager()
+    for node in recipe.nodes:
+        gm.add_node(node.build())
+    for edge in recipe.edges:
+        # A mapped edge needs array endpoints, so it never reaches a
+        # spring's scalar anchor; its mapping is not needed to ask.
+        gm.add_edge(source=edge.source, target=edge.target,
+                    source_field=edge.source_field, target_field=edge.target_field,
+                    transform=edge.transform, additive=edge.additive,
+                    source_units=edge.units, target_units=edge.units)
+    for ext in recipe.external_inputs:
+        gm.add_external_input(ext.target_node, ext.target_field, shape=ext.shape)
+    for group in groups:
+        gm.add_coupling_group(list(group.nodes), **group.kwargs)
+    for overridden in (False, True):
+        if overridden:
+            constants = {n.name: n.params for n in recipe.nodes}
+            for name, key, factor in recipe.param_overrides:
+                if name in springs:
+                    live = gm.params["nodes"].setdefault(name, {})
+                    live[key] = float(np.float32(constants[name][key] * factor))
+        for group in gm._coupling_groups:  # noqa: SLF001
+            if any("MADD-ANO-098" in issue
+                   for issue in gm._coupling_group_advisories(group)):  # noqa: SLF001
+                return True
+    return False

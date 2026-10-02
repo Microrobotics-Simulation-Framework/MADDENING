@@ -55,12 +55,14 @@ class USDWriter:
 
         # Create root prim as MaddeningSimulationGraph
         root_prim = stage.DefinePrim(root_path, "MaddeningSimulationGraph")
-        root_prim.GetAttribute("maddening:baseDt").Set(
-            float(gm._base_dt if hasattr(gm, "_base_dt") else 0.01)
-        )
-        root_prim.GetAttribute("maddening:isMultirate").Set(
-            bool(gm._is_multirate)
-        )
+        # One step of the graph (``gm.timestep``) and whether its nodes
+        # fire at more than one rate, by the rule the serialiser uses.
+        # baseDt used to read a ``_base_dt`` nothing set, so every stage
+        # said 0.01 whatever the graph stepped by.
+        from maddening.usd.serialization import _graph_timing  # noqa: PLC0415
+        base_dt, is_multirate = _graph_timing(gm)
+        root_prim.GetAttribute("maddening:baseDt").Set(base_dt)
+        root_prim.GetAttribute("maddening:isMultirate").Set(is_multirate)
 
         # Create nodes container
         self._nodes_path = root_path + "/nodes"

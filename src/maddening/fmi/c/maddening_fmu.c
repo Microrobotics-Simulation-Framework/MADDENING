@@ -22,8 +22,33 @@
  * the token.  Bare tokens are still accepted.  Non-finite values are
  * never *sent*: do_set refuses them before the request is built.
  *
+ * Every get and set request names the FMI type of the function that made
+ * it ("type":"Float32", ...), and the bridge refuses a variable of another
+ * type: FMI 3.0 has a variable accessed only through the fmi3Get/Set
+ * function of its own type, and this wrapper carries every width as a
+ * double.  A getter also refuses a reply value its C type cannot hold (a
+ * fraction, NaN or an out-of-range number for an integer, anything but
+ * 0/1 for a Boolean), so no conversion here is undefined behaviour or a
+ * silent truncation; an Int64/UInt64 setter refuses a value a double
+ * cannot carry exactly.
+ *
  * The endpoint is read from "<resourcePath>/endpoint.txt" ("host:port"),
  * or from the MADDENING_FMU_ENDPOINT environment variable.
+ *
+ * Deadlines.  MADDENING_FMU_TIMEOUT (seconds, decimal; default 600) bounds
+ * how long the wrapper waits on the sidecar: every receive and send on the
+ * connection times out after that much silence, and a timeout closes the
+ * connection, so the call and every later one return fmi3Error.  Connecting
+ * (on Linux, where SO_SNDTIMEO bounds connect) and the hello exchange get
+ * the smaller of that and 30 s: the bridge answers a hello at once, so an
+ * endpoint that accepts and never answers fails fmi3InstantiateCoSimulation
+ * in 30 s instead of blocking it for ever.  Ten minutes covers a first
+ * doStep that compiles a large graph and a step of many graph steps (the
+ * bridge caps one request at 100000 by default); raise it for a longer
+ * step, or set 0 to wait for ever (the behaviour before 0.4.0).  A value
+ * that is not a number from 0 to 1e6 fails instantiation.  The deadline is
+ * on silence, not on a whole reply: a sidecar that keeps sending is never
+ * cut off.
  *
  * Only libc and the FMI 3.0 headers are needed to build:
  *   cc -shared -fPIC -O2 -I<fmi3 headers> maddening_fmu.c -o maddening_fmu.so
@@ -37,6 +62,7 @@
 #endif
 
 #include <errno.h>
+#include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,6 +80,7 @@
 #  include <netinet/in.h>
 #  include <netinet/tcp.h>
 #  include <sys/socket.h>
+#  include <sys/time.h>
 #  include <unistd.h>
    typedef int sock_t;
 #  define SOCK_INVALID (-1)
@@ -69,6 +96,9 @@
 #define FRAME_MAX (64ul * 1024ul * 1024ul)   /* the bridge's frame limit, both
                                                 directions and both frame kinds */
 #define HDR_MAX 4096                         /* a binary reply's JSON header */
+#define REPLY_TIMEOUT_DEFAULT_S 600.0        /* MADDENING_FMU_TIMEOUT unset */
+#define REPLY_TIMEOUT_MAX_S 1.0e6            /* and its largest accepted value */
+#define HANDSHAKE_TIMEOUT_S 30.0             /* connect + hello, at most */
 
 /* Path counters for the fuzz harness (tests/fmi/c/fuzz_maddening_fmu.c),
  * which defines MADDENING_FUZZ_COUNTERS before including this file so it
@@ -100,6 +130,7 @@ typedef struct {
     char hdr[HDR_MAX];     /* its JSON header, NUL-terminated */
     const char *raw;       /* its raw part (points into resp) */
     size_t raw_len;
+    double timeout_s;      /* MADDENING_FMU_TIMEOUT; 0 = no deadline */
 } Instance;
 
 /* ------------------------------------------------------------------ util */
@@ -135,12 +166,67 @@ static int send_all(sock_t s, const char *buf, size_t n) {
     return 0;
 }
 
+/* EINTR is retried, as in send_all.  EOF clears errno, so a caller can
+ * tell a socket timeout (EAGAIN / EWOULDBLOCK, from SO_RCVTIMEO) from a
+ * peer that hung up. */
 static int recv_all(sock_t s, char *buf, size_t n) {
     while (n > 0) {
         ssize_t k = recv(s, buf, n, 0);
-        if (k <= 0) return -1;
+#ifdef EINTR
+        if (k < 0 && errno == EINTR) continue;
+#endif
+        if (k == 0) {
+            errno = 0;
+#ifdef _WIN32
+            WSASetLastError(0);
+#endif
+            return -1;
+        }
+        if (k < 0) return -1;
         buf += k; n -= (size_t)k;
     }
+    return 0;
+}
+
+/* Did the last failed recv / send time out (SO_RCVTIMEO / SO_SNDTIMEO)? */
+static int timed_out(void) {
+#ifdef _WIN32
+    return WSAGetLastError() == WSAETIMEDOUT;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
+/* Receive and send deadlines on `s`, in seconds; 0 removes them. */
+static int set_socket_timeout(sock_t s, double seconds) {
+#ifdef _WIN32
+    DWORD ms = (DWORD)(seconds * 1000.0 + 0.5);
+    if (seconds > 0 && ms == 0) ms = 1;
+    if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof ms)) return -1;
+    if (setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char *)&ms, sizeof ms)) return -1;
+#else
+    struct timeval tv;
+    tv.tv_sec = (time_t)seconds;
+    tv.tv_usec = (long)((seconds - (double)tv.tv_sec) * 1e6);
+    if (seconds > 0 && tv.tv_sec == 0 && tv.tv_usec == 0) tv.tv_usec = 1;
+    if (setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv)) return -1;
+    if (setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv)) return -1;
+#endif
+    return 0;
+}
+
+/* MADDENING_FMU_TIMEOUT in seconds (REPLY_TIMEOUT_DEFAULT_S when unset or
+ * empty); -1 when it is not a plain number from 0 to REPLY_TIMEOUT_MAX_S. */
+static int read_timeout(double *out) {
+    const char *spec = getenv("MADDENING_FMU_TIMEOUT");
+    if (!spec || !*spec) { *out = REPLY_TIMEOUT_DEFAULT_S; return 0; }
+    char *end;
+    errno = 0;
+    double v = strtod(spec, &end);
+    while (*end == ' ') ++end;
+    if (end == spec || *end != '\0' || errno == ERANGE || !(v >= 0.0) || v > REPLY_TIMEOUT_MAX_S)
+        return -1;
+    *out = v;
     return 0;
 }
 
@@ -197,6 +283,9 @@ static void conn_drop(Instance *in, const char *why) {
  * longer than FRAME_MAX (either kind) or cut short by the peer drops the
  * connection: the instance is dead from then on (every call fmi3Error),
  * never out of step. */
+#define TIMEOUT_MESSAGE "maddening_fmu: the sidecar did not answer within the deadline " \
+    "(MADDENING_FMU_TIMEOUT); the connection is closed"
+
 static fmi3Status bridge_xfer(Instance *in, const char *req, size_t n, int binary) {
     unsigned char head[4];
     in->resp_binary = 0; in->raw = NULL; in->raw_len = 0; in->hdr[0] = '\0';
@@ -214,11 +303,11 @@ static fmi3Status bridge_xfer(Instance *in, const char *req, size_t n, int binar
         /* Part of the frame may be on the wire: the bridge would read the
          * next request as the rest of this one.  The stream is out of
          * step, so it is closed like a failed receive. */
-        conn_drop(in, "maddening_fmu: send failed");
+        conn_drop(in, timed_out() ? TIMEOUT_MESSAGE : "maddening_fmu: send failed");
         return fmi3Error;
     }
     if (recv_all(in->sock, (char *)head, 4)) {
-        conn_drop(in, "maddening_fmu: recv failed");
+        conn_drop(in, timed_out() ? TIMEOUT_MESSAGE : "maddening_fmu: recv failed");
         return fmi3Error;
     }
     unsigned long word = get_be32(head);
@@ -241,7 +330,7 @@ static fmi3Status bridge_xfer(Instance *in, const char *req, size_t n, int binar
     in->resp[0] = '\0';
     if (m > 0 && recv_all(in->sock, in->resp, m)) {
         in->resp[0] = '\0';
-        conn_drop(in, "maddening_fmu: recv body failed");
+        conn_drop(in, timed_out() ? TIMEOUT_MESSAGE : "maddening_fmu: recv body failed");
         return fmi3Error;
     }
     in->resp[m] = '\0';
@@ -407,12 +496,20 @@ static int req_reserve(Instance *in, size_t need) {
     return 0;
 }
 
+/* ,"type":"<FMI type>" for a request, or nothing when type is NULL.  The
+ * type is a literal from the DEFINE_GET / DEFINE_SET table below (no JSON
+ * escaping needed); the bridge checks it against each variable's type. */
+static int put_type(char *w, const char *type) {
+    return type ? sprintf(w, ",\"type\":\"%s\"", type) : 0;
+}
+
 /* Build a set request from any numeric width: a binary frame
- * ({"op":"set","vr":[..],"n":N,"dtype":"f64"} + N raw little-endian
- * doubles) after a protocol-2 hello, else the JSON
- * {"op":"set","vr":[..],"values":[..]} with %.17g text. */
-static fmi3Status do_set(Instance *in, const fmi3ValueReference vr[], size_t nvr,
-                         const double values[], size_t nvalues) {
+ * ({"op":"set","type":T,"vr":[..],"n":N,"dtype":"f64"} + N raw
+ * little-endian doubles) after a protocol-2 hello, else the JSON
+ * {"op":"set","type":T,"vr":[..],"values":[..]} with %.17g text.  T is
+ * the FMI type of the setter that was called. */
+static fmi3Status do_set(Instance *in, const char *type, const fmi3ValueReference vr[],
+                         size_t nvr, const double values[], size_t nvalues) {
     static const char *const too_big = "maddening_fmu: set exceeds the frame limit";
     /* Cheap bounds before any buffer grows: 8 bytes per value and at
      * least 2 header bytes per value reference can never fit the frame. */
@@ -429,10 +526,12 @@ static fmi3Status do_set(Instance *in, const fmi3ValueReference vr[], size_t nvr
     if (in->binary) {
         /* header first, so the exact frame length is known before the
          * raw part is laid out: [u32 hl][header][8 * nvalues] <= FRAME_MAX */
-        if (req_reserve(in, 4 + 96 + 24 * nvr)) return fmi3Fatal;
+        if (req_reserve(in, 4 + 128 + 24 * nvr)) return fmi3Fatal;
         char *h = in->req + 4;
         char *w = h;
-        w += sprintf(w, "{\"op\":\"set\",\"vr\":[");
+        w += sprintf(w, "{\"op\":\"set\"");
+        w += put_type(w, type);
+        w += sprintf(w, ",\"vr\":[");
         for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
         w += sprintf(w, "],\"n\":%lu,\"dtype\":\"f64\"}", (unsigned long)nvalues);
         size_t hl = (size_t)(w - h);
@@ -446,9 +545,11 @@ static fmi3Status do_set(Instance *in, const fmi3ValueReference vr[], size_t nvr
         f64_to_le((unsigned char *)in->req + 4 + hl, values, nvalues);
         return bridge_xfer(in, in->req, total, 1);
     }
-    if (req_reserve(in, 64 + 24 * nvr + 32 * nvalues)) return fmi3Fatal;
+    if (req_reserve(in, 96 + 24 * nvr + 32 * nvalues)) return fmi3Fatal;
     char *w = in->req;
-    w += sprintf(w, "{\"op\":\"set\",\"vr\":[");
+    w += sprintf(w, "{\"op\":\"set\"");
+    w += put_type(w, type);
+    w += sprintf(w, ",\"vr\":[");
     for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
     w += sprintf(w, "],\"values\":[");
     for (size_t i = 0; i < nvalues; ++i) w += sprintf(w, "%s%.17g", i ? "," : "", values[i]);
@@ -460,8 +561,8 @@ static fmi3Status do_set(Instance *in, const fmi3ValueReference vr[], size_t nvr
     return bridge_call(in, in->req);
 }
 
-static fmi3Status do_get(Instance *in, const fmi3ValueReference vr[], size_t nvr,
-                         double *out, size_t nvalues) {
+static fmi3Status do_get(Instance *in, const char *type, const fmi3ValueReference vr[],
+                         size_t nvr, double *out, size_t nvalues) {
     /* The same frame check do_set has.  Without it a get of a few million
      * value references built a request frame over FRAME_MAX, which the
      * bridge refuses to read: the connection is dropped and the instance
@@ -471,9 +572,11 @@ static fmi3Status do_get(Instance *in, const fmi3ValueReference vr[], size_t nvr
         inst_log(in, fmi3Error, "logStatusError", too_big);
         return fmi3Error;
     }
-    if (req_reserve(in, 64 + 24 * nvr)) return fmi3Fatal;
+    if (req_reserve(in, 96 + 24 * nvr)) return fmi3Fatal;
     char *w = in->req;
-    w += sprintf(w, "{\"op\":\"get\",\"vr\":[");
+    w += sprintf(w, "{\"op\":\"get\"");
+    w += put_type(w, type);
+    w += sprintf(w, ",\"vr\":[");
     for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
     w += sprintf(w, "]}");
     if ((size_t)(w - in->req) > FRAME_MAX) {
@@ -549,7 +652,10 @@ static int read_endpoint(fmi3String resource_path, char *host, size_t hostcap, i
     return *port > 0 ? 0 : -1;
 }
 
-static sock_t connect_endpoint(const char *host, int port) {
+/* `timeout` (seconds, 0 = none) is set on each socket before connect:
+ * on Linux SO_SNDTIMEO bounds connect() itself, and on every platform it
+ * bounds the hello exchange that follows. */
+static sock_t connect_endpoint(const char *host, int port, double timeout) {
 #ifdef _WIN32
     WSADATA wsa; WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
@@ -573,7 +679,8 @@ static sock_t connect_endpoint(const char *host, int port) {
          * took at least that long.  Measured: 245 calls of an 80-step FMPy
          * run took 10.1 s, about 41 ms each. */
         { int one = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one); }
-        if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) break;
+        if (set_socket_timeout(s, timeout) == 0
+            && connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) break;
         sock_close(s); s = SOCK_INVALID;
     }
     freeaddrinfo(res);
@@ -624,7 +731,16 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
                  "maddening_fmu: no endpoint (resources/endpoint.txt or MADDENING_FMU_ENDPOINT)");
         free(in); return NULL;
     }
-    in->sock = connect_endpoint(host, port);
+    if (read_timeout(&in->timeout_s)) {
+        inst_log(in, fmi3Error, "logStatusError",
+                 "maddening_fmu: MADDENING_FMU_TIMEOUT must be a number of seconds from 0 "
+                 "(no deadline) to 1e6");
+        free(in); return NULL;
+    }
+    /* the hello is answered at once by a live bridge: a short deadline */
+    double handshake = in->timeout_s > 0 && in->timeout_s < HANDSHAKE_TIMEOUT_S
+                       ? in->timeout_s : (in->timeout_s > 0 ? HANDSHAKE_TIMEOUT_S : 0.0);
+    in->sock = connect_endpoint(host, port, handshake);
     if (in->sock == SOCK_INVALID) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: cannot connect to sidecar");
         free(in); return NULL;
@@ -636,6 +752,11 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
     if (!token_matches(in, instantiationToken)) {
         inst_log(in, fmi3Error, "logStatusError",
                  "maddening_fmu: instantiation token does not match the sidecar's graph");
+        sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
+    }
+    /* from here every call may be a long step: the full deadline */
+    if (set_socket_timeout(in->sock, in->timeout_s)) {
+        inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: cannot set the socket deadline");
         sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
     }
     return (fmi3Instance)in;
@@ -707,9 +828,57 @@ FMI3_Export fmi3Status fmi3Reset(fmi3Instance instance) {
     return bridge_call(in, "{\"op\":\"reset\"}");
 }
 
-/* ---- getters: every numeric width goes through double ---- */
+/* ---- getters and setters: every numeric width goes through double ----
+ *
+ * The request names the FMI type of the function called, and the bridge
+ * refuses a variable of another type.  A getter then checks each value
+ * before converting it: a double that its C type cannot hold -- NaN, a
+ * fraction or an out-of-range number for an integer type, anything but 0
+ * or 1 for a Boolean, a finite number beyond FLT_MAX for a Float32 -- is
+ * fmi3Error with values[] untouched, because the conversion would be
+ * undefined behaviour or a silent change of value (fmi3GetInt32 on a
+ * Float32 output used to return 0 for 0.5, with fmi3OK).  The range checks
+ * short-circuit before the cast, and every bound is a power of two, exact
+ * in a double. */
 
-#define DEFINE_GET(NAME, CTYPE)                                                        \
+#define FITS_ANY(v)  1
+#define FITS_F32(v)  (!isfinite(v) || ((v) >= -FLT_MAX && (v) <= FLT_MAX))
+#define FITS_INT(v, LO, HI, CTYPE) ((v) >= (LO) && (v) < (HI) && (double)(CTYPE)(v) == (v))
+#define FITS_I8(v)   FITS_INT(v, -128.0, 128.0, fmi3Int8)
+#define FITS_U8(v)   FITS_INT(v, 0.0, 256.0, fmi3UInt8)
+#define FITS_I16(v)  FITS_INT(v, -32768.0, 32768.0, fmi3Int16)
+#define FITS_U16(v)  FITS_INT(v, 0.0, 65536.0, fmi3UInt16)
+#define FITS_I32(v)  FITS_INT(v, -2147483648.0, 2147483648.0, fmi3Int32)
+#define FITS_U32(v)  FITS_INT(v, 0.0, 4294967296.0, fmi3UInt32)
+#define FITS_I64(v)  FITS_INT(v, -9223372036854775808.0, 9223372036854775808.0, fmi3Int64)
+#define FITS_U64(v)  FITS_INT(v, 0.0, 18446744073709551616.0, fmi3UInt64)
+#define FITS_BOOL(v) ((v) == 0.0 || (v) == 1.0)
+
+/* An Int64 / UInt64 value the double on the wire cannot carry exactly
+ * (|v| > 2^53, most of them) is refused rather than rounded; every other
+ * width converts to double exactly. */
+#define EXACT_ANY(v) 1
+#define EXACT_I64(v) ((double)(v) < 9223372036854775808.0 && (fmi3Int64)(double)(v) == (v))
+#define EXACT_U64(v) ((double)(v) < 18446744073709551616.0 && (fmi3UInt64)(double)(v) == (v))
+
+static fmi3Status refuse_reply_value(Instance *in, const char *fn, const char *type, double v) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "maddening_fmu: %s: the sidecar sent %.17g, which is not a value "
+             "of type %s; nothing was written to values[]", fn, v, type);
+    inst_log(in, fmi3Error, "logStatusError", msg);
+    return fmi3Error;
+}
+
+static fmi3Status refuse_inexact_value(Instance *in, const char *fn, size_t i) {
+    char msg[256];
+    snprintf(msg, sizeof msg, "maddening_fmu: %s: values[%lu] cannot be carried exactly as the "
+             "float64 the sidecar protocol uses (its magnitude is above 2^53); nothing was sent",
+             fn, (unsigned long)i);
+    inst_log(in, fmi3Error, "logStatusError", msg);
+    return fmi3Error;
+}
+
+#define DEFINE_GET(NAME, CTYPE, TYPE, FITS)                                            \
 FMI3_Export fmi3Status NAME(fmi3Instance instance, const fmi3ValueReference vr[],       \
                             size_t nvr, CTYPE values[], size_t nValues) {              \
     Instance *in = (Instance *)instance;                                               \
@@ -717,49 +886,54 @@ FMI3_Export fmi3Status NAME(fmi3Instance instance, const fmi3ValueReference vr[]
     if (nValues == 0) return fmi3OK;                                                   \
     double *tmp = (double *)malloc(nValues * sizeof(double));                          \
     if (!tmp) return fmi3Fatal;                                                        \
-    fmi3Status st = do_get(in, vr, nvr, tmp, nValues);                                 \
+    fmi3Status st = do_get(in, TYPE, vr, nvr, tmp, nValues);                           \
+    for (size_t i = 0; st == fmi3OK && i < nValues; ++i)                               \
+        if (!(FITS(tmp[i])))                                                           \
+            st = refuse_reply_value(in, #NAME, TYPE, tmp[i]);                          \
     if (st == fmi3OK) for (size_t i = 0; i < nValues; ++i) values[i] = (CTYPE)tmp[i];  \
     free(tmp);                                                                         \
     return st;                                                                         \
 }
 
-#define DEFINE_SET(NAME, CTYPE)                                                        \
+#define DEFINE_SET(NAME, CTYPE, TYPE, EXACT)                                           \
 FMI3_Export fmi3Status NAME(fmi3Instance instance, const fmi3ValueReference vr[],       \
                             size_t nvr, const CTYPE values[], size_t nValues) {        \
     Instance *in = (Instance *)instance;                                               \
     if (!in) return fmi3Error;                                                         \
     if (nValues == 0) return fmi3OK;                                                   \
+    for (size_t i = 0; i < nValues; ++i)                                               \
+        if (!(EXACT(values[i]))) return refuse_inexact_value(in, #NAME, i);           \
     double *tmp = (double *)malloc(nValues * sizeof(double));                          \
     if (!tmp) return fmi3Fatal;                                                        \
     for (size_t i = 0; i < nValues; ++i) tmp[i] = (double)values[i];                   \
-    fmi3Status st = do_set(in, vr, nvr, tmp, nValues);                                 \
+    fmi3Status st = do_set(in, TYPE, vr, nvr, tmp, nValues);                           \
     free(tmp);                                                                         \
     return st;                                                                         \
 }
 
-DEFINE_GET(fmi3GetFloat32, fmi3Float32)
-DEFINE_GET(fmi3GetFloat64, fmi3Float64)
-DEFINE_GET(fmi3GetInt8,    fmi3Int8)
-DEFINE_GET(fmi3GetUInt8,   fmi3UInt8)
-DEFINE_GET(fmi3GetInt16,   fmi3Int16)
-DEFINE_GET(fmi3GetUInt16,  fmi3UInt16)
-DEFINE_GET(fmi3GetInt32,   fmi3Int32)
-DEFINE_GET(fmi3GetUInt32,  fmi3UInt32)
-DEFINE_GET(fmi3GetInt64,   fmi3Int64)
-DEFINE_GET(fmi3GetUInt64,  fmi3UInt64)
-DEFINE_GET(fmi3GetBoolean, fmi3Boolean)
+DEFINE_GET(fmi3GetFloat32, fmi3Float32, "Float32", FITS_F32)
+DEFINE_GET(fmi3GetFloat64, fmi3Float64, "Float64", FITS_ANY)
+DEFINE_GET(fmi3GetInt8,    fmi3Int8,    "Int8",    FITS_I8)
+DEFINE_GET(fmi3GetUInt8,   fmi3UInt8,   "UInt8",   FITS_U8)
+DEFINE_GET(fmi3GetInt16,   fmi3Int16,   "Int16",   FITS_I16)
+DEFINE_GET(fmi3GetUInt16,  fmi3UInt16,  "UInt16",  FITS_U16)
+DEFINE_GET(fmi3GetInt32,   fmi3Int32,   "Int32",   FITS_I32)
+DEFINE_GET(fmi3GetUInt32,  fmi3UInt32,  "UInt32",  FITS_U32)
+DEFINE_GET(fmi3GetInt64,   fmi3Int64,   "Int64",   FITS_I64)
+DEFINE_GET(fmi3GetUInt64,  fmi3UInt64,  "UInt64",  FITS_U64)
+DEFINE_GET(fmi3GetBoolean, fmi3Boolean, "Boolean", FITS_BOOL)
 
-DEFINE_SET(fmi3SetFloat32, fmi3Float32)
-DEFINE_SET(fmi3SetFloat64, fmi3Float64)
-DEFINE_SET(fmi3SetInt8,    fmi3Int8)
-DEFINE_SET(fmi3SetUInt8,   fmi3UInt8)
-DEFINE_SET(fmi3SetInt16,   fmi3Int16)
-DEFINE_SET(fmi3SetUInt16,  fmi3UInt16)
-DEFINE_SET(fmi3SetInt32,   fmi3Int32)
-DEFINE_SET(fmi3SetUInt32,  fmi3UInt32)
-DEFINE_SET(fmi3SetInt64,   fmi3Int64)
-DEFINE_SET(fmi3SetUInt64,  fmi3UInt64)
-DEFINE_SET(fmi3SetBoolean, fmi3Boolean)
+DEFINE_SET(fmi3SetFloat32, fmi3Float32, "Float32", EXACT_ANY)
+DEFINE_SET(fmi3SetFloat64, fmi3Float64, "Float64", EXACT_ANY)
+DEFINE_SET(fmi3SetInt8,    fmi3Int8,    "Int8",    EXACT_ANY)
+DEFINE_SET(fmi3SetUInt8,   fmi3UInt8,   "UInt8",   EXACT_ANY)
+DEFINE_SET(fmi3SetInt16,   fmi3Int16,   "Int16",   EXACT_ANY)
+DEFINE_SET(fmi3SetUInt16,  fmi3UInt16,  "UInt16",  EXACT_ANY)
+DEFINE_SET(fmi3SetInt32,   fmi3Int32,   "Int32",   EXACT_ANY)
+DEFINE_SET(fmi3SetUInt32,  fmi3UInt32,  "UInt32",  EXACT_ANY)
+DEFINE_SET(fmi3SetInt64,   fmi3Int64,   "Int64",   EXACT_I64)
+DEFINE_SET(fmi3SetUInt64,  fmi3UInt64,  "UInt64",  EXACT_U64)
+DEFINE_SET(fmi3SetBoolean, fmi3Boolean, "Boolean", EXACT_ANY)
 
 FMI3_Export fmi3Status fmi3GetString(fmi3Instance instance, const fmi3ValueReference vr[],
                                      size_t nvr, fmi3String values[], size_t nValues) {
@@ -855,21 +1029,33 @@ FMI3_Export fmi3Status fmi3SetFMUState(fmi3Instance instance, fmi3FMUState FMUSt
     Instance *in = (Instance *)instance;
     FmuState *st = (FmuState *)FMUState;
     if (!in || !st) return fmi3Error;
+    static const char *const too_big = "maddening_fmu: FMU state exceeds the frame limit";
     if (in->binary) {
         /* length-delimited raw bytes: nothing the importer supplies can
-         * break the framing, the bridge validates the archive itself */
-        if (st->n > FRAME_MAX) {
-            inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: FMU state exceeds the frame limit");
-            return fmi3Error;
-        }
+         * break the framing, the bridge validates the archive itself.
+         * The frame is [u32 hl][header][blob], and the bridge drops a
+         * connection whose frame exceeds FRAME_MAX, so the check is on the
+         * whole frame, as in do_set: a blob of exactly FRAME_MAX bytes used
+         * to pass a check on the blob alone and kill the instance. */
         char hdr[64];
         int hl = snprintf(hdr, sizeof hdr, "{\"op\":\"set_state\",\"n\":%lu}", (unsigned long)st->n);
         if (hl <= 0 || (size_t)hl >= sizeof hdr) return fmi3Error;
+        if (st->n > FRAME_MAX - 4 - (size_t)hl) {
+            inst_log(in, fmi3Error, "logStatusError", too_big);
+            return fmi3Error;
+        }
         if (req_reserve(in, 4 + (size_t)hl + st->n)) return fmi3Fatal;
         put_be32((unsigned char *)in->req, (unsigned long)hl);
         memcpy(in->req + 4, hdr, (size_t)hl);
         memcpy(in->req + 4 + hl, st->blob, st->n);
         return bridge_xfer(in, in->req, 4 + (size_t)hl + st->n, 1);
+    }
+    /* The same whole-frame limit on the JSON path, checked before the blob
+     * is scanned or the request buffer grows. */
+    static const char json_frame[] = "{\"op\":\"set_state\",\"state\":\"\"}";
+    if (st->n > FRAME_MAX - (sizeof json_frame - 1)) {
+        inst_log(in, fmi3Error, "logStatusError", too_big);
+        return fmi3Error;
     }
     /* The blob is embedded verbatim in a JSON string: only the base64
      * alphabet the bridge produces is allowed, so importer-supplied bytes

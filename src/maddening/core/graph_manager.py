@@ -1186,6 +1186,44 @@ def _group_dividers(group, nodes):
     return {nn: max(round(macro / nodes[nn].timestep), 1) for nn in names}
 
 
+def _scheduled_timesteps(nodes, coupling_groups) -> dict[str, float]:
+    """Each node's timestep as ``compile()`` schedules it.
+
+    A node's own timestep, except that every member of a ``subcycling=True``
+    coupling group is scheduled at the group's largest member timestep: the
+    group solves once per macro step and sub-steps its faster members inside
+    that solve (:func:`_group_dividers`), so from outside the group every
+    member advances by the macro timestep at a time.  ``compile()`` derives
+    the rate dividers from these and :attr:`GraphManager.timestep` the step,
+    so the two cannot disagree.
+    """
+    scheduled = {name: spec.timestep for name, spec in nodes.items()}
+    for group in coupling_groups:
+        if not group.subcycling:
+            continue
+        members = [n for n in group.nodes if n in nodes]
+        if not members:
+            continue
+        macro = max(nodes[n].timestep for n in members)
+        for n in members:
+            scheduled[n] = macro
+    return scheduled
+
+
+def _step_duration(scheduled) -> float:
+    """The simulated time one compiled step advances: the GCD of *scheduled*.
+
+    *scheduled* is :func:`_scheduled_timesteps`'s mapping.  ``RuntimeError``
+    when it is empty (a graph with no nodes takes no step).
+    """
+    timesteps = sorted(set(scheduled.values()))
+    if not timesteps:
+        raise RuntimeError("No nodes registered.")
+    if len(timesteps) == 1:
+        return timesteps[0]
+    return _multi_gcd(timesteps)
+
+
 def _group_waveform_sweeps(group, nodes) -> int:
     """How many waveform sweeps one step of *group* runs.
 
@@ -6650,13 +6688,17 @@ class GraphManager:
                         "(no edges or external inputs)"
                     )
 
-        # Multi-rate timestep informational message
-        timesteps = {spec.timestep for spec in self._nodes.values()}
-        if len(timesteps) > 1:
-            base_dt = _multi_gcd(sorted(timesteps))
+        # Multi-rate timestep informational message, from the timesteps
+        # ``compile()`` schedules: a sub-cycling group whose members differ
+        # is one macro rate, not a multi-rate graph.  (The nodes' own
+        # timesteps used to be read here, which called such a graph
+        # multi-rate and gave the step and dividers no compile uses.)
+        scheduled = _scheduled_timesteps(self._nodes, self._coupling_groups)
+        if len(set(scheduled.values())) > 1:
+            base_dt = _step_duration(scheduled)
             dividers = {
-                name: round(spec.timestep / base_dt)
-                for name, spec in self._nodes.items()
+                name: round(scheduled[name] / base_dt)
+                for name in self._nodes
             }
             issues.append(
                 f"INFO: multi-rate scheduling enabled. "
@@ -6920,23 +6962,16 @@ class GraphManager:
         # For nodes in subcycling coupling groups, use the group's
         # macro timestep (max of member timesteps) for rate divider
         # computation, since the coupling block handles sub-stepping.
-        effective_timesteps = {
-            name: spec.timestep for name, spec in self._nodes.items()
-        }
-        for g in self._coupling_groups:
-            if g.subcycling:
-                group_max_dt = max(
-                    self._nodes[n].timestep for n in g.nodes
-                    if n in self._nodes
-                )
-                for n in g.nodes:
-                    if n in effective_timesteps:
-                        effective_timesteps[n] = group_max_dt
+        # ``self.timestep`` reads the same two helpers, so the step it
+        # reports is the one these dividers count in.
+        effective_timesteps = _scheduled_timesteps(
+            self._nodes, self._coupling_groups,
+        )
 
         timesteps = sorted(set(effective_timesteps.values()))
         if len(timesteps) > 1:
             is_multirate = True
-            base_dt = _multi_gcd(timesteps)
+            base_dt = _step_duration(effective_timesteps)
             rate_dividers = {
                 name: round(effective_timesteps[name] / base_dt)
                 for name in self._nodes
@@ -10387,18 +10422,36 @@ class GraphManager:
 
     @property
     def timestep(self) -> float:
-        """Return the base timestep (GCD of all node timesteps).
+        """The simulated time one :meth:`step` advances the graph by.
 
-        For uniform-rate graphs this is the common timestep.  For
-        multi-rate graphs this is the smallest step at which the
-        compiled function advances.
+        The GCD of the node timesteps *as* :meth:`compile` *schedules
+        them*: every member of a ``subcycling=True`` coupling group is
+        scheduled at the group's largest member timestep, because the group
+        solves once per macro step and sub-steps its faster members inside
+        that solve.  For a uniform-rate graph this is the common timestep.
+        For a multi-rate graph it is the smallest step at which the
+        compiled function advances, and node ``n`` fires every
+        ``rate_dividers[n]`` steps of it.  ``n_steps * timestep`` is the
+        simulated time ``n_steps`` calls of :meth:`step` cover, which is
+        what :class:`~maddening.viz.runner.RealtimeRunner`, the state
+        relays, the FMU's default step and the USD ``baseDt`` report.
+
+        Computed from the graph as it stands, so on a graph modified since
+        its last compile it is the step the next compile will take.
+
+        Until 0.4.0 this was the GCD of the nodes' own timesteps, which on
+        a graph with a sub-cycling group is shorter than a step: two nodes
+        at 0.01 and 0.02 in one such group read 0.01 while every step
+        advanced 0.02 (MADD-ANO-096).
+
+        Raises
+        ------
+        RuntimeError
+            If the graph has no nodes.
         """
-        timesteps = sorted({spec.timestep for spec in self._nodes.values()})
-        if not timesteps:
-            raise RuntimeError("No nodes registered.")
-        if len(timesteps) == 1:
-            return timesteps[0]
-        return _multi_gcd(timesteps)
+        return _step_duration(
+            _scheduled_timesteps(self._nodes, self._coupling_groups)
+        )
 
     @property
     def is_multirate(self) -> bool:
@@ -10409,13 +10462,16 @@ class GraphManager:
     def rate_dividers(self) -> dict[str, int]:
         """Per-node rate divider (node_dt / base_dt, rounded).
 
-        Only meaningful after :meth:`compile`.
+        ``base_dt`` is :attr:`timestep`, and ``node_dt`` the node's
+        scheduled timestep: a member of a sub-cycling coupling group is
+        scheduled at the group's largest member timestep.  Only meaningful
+        after :meth:`compile`.
         """
         return dict(self._rate_dividers)
 
     @property
     def base_timestep(self) -> float:
-        """Alias for :attr:`timestep`."""
+        """Alias for :attr:`timestep`: the simulated time one step advances."""
         return self.timestep
 
     @property

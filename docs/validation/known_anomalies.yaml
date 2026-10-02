@@ -6897,9 +6897,14 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      None known.  The default step is the fastest node's timestep; the
-      slower nodes of a multi-rate graph are declared on their own clocks
-      only when `multi_clock=True` is passed.
+      None known.  The default step is the graph's step, `gm.timestep`.
+      That is the fastest node's timestep on a uniform-rate graph and on a
+      multi-rate one whose timesteps divide each other, which is what this
+      fix verified.  The fastest node's timestep is not the step when the
+      timesteps do not divide or a group sub-cycles, which MADD-ANO-097
+      records and fixed in the same release.  The slower nodes of a
+      multi-rate graph are declared on their own clocks only when
+      `multi_clock=True` is passed.
     verification:
       - "tests/fmi/test_multi_clock.py::test_external_inputs_of_a_real_graph_are_fmu_inputs"
       - "tests/fmi/test_multi_clock.py::test_default_step_size_is_the_fastest_node_timestep"
@@ -7202,7 +7207,8 @@ anomalies:
     description: >
       `GraphManager.step` completes a partial `external_inputs` with zeros
       and refuses a name the graph does not declare (since 2428f5e, during
-      the 0.4.0 development line).  The FMU paths did neither.  The bridge
+      the 0.4.0 development line; MADD-ANO-099 records the graph's defect
+      at the tags).  The FMU paths did neither.  The bridge
       built its inputs from the model description's input variables only,
       so an input that `build_model_description(selected_inputs=...)` left
       out never reached the compiled step.  `FmuSidecar.step` called the
@@ -7920,3 +7926,509 @@ anomalies:
       - "tests/core/test_strict_convergence_threshold.py::test_the_adaptive_strict_check_raises_at_twice_the_threshold"
     github_issue: null
 
+
+  - anomaly_id: "MADD-ANO-096"
+    title: "GraphManager.timestep was the GCD of the nodes' own timesteps, shorter than a step on a graph with a sub-cycling coupling group, so the live runner's clock and pacing and the REST and ZMQ relays' frame times ran slow"
+    description: >
+      A `subcycling=True` coupling group solves once per macro step, its
+      largest member timestep, and sub-steps its faster members inside that
+      solve, so `compile()` schedules every member at the macro timestep.
+      `GraphManager.timestep` (and its alias `base_timestep`) returned the
+      GCD of the nodes' own timesteps, which on such a graph is shorter
+      than a step.  Its docstring says "the smallest step at which the
+      compiled function advances".  Two nodes at 0.01 and 0.02 in one group
+      read 0.01, while every `step()` advanced both of their clocks by 0.02.
+      Everything that clocks a run with it was wrong by the same factor.
+      `RealtimeRunner` added `timestep` per step to `sim_time` and paced to
+      the wall clock by it, so after 0.5 s at `time_scale=100` it reported
+      50.5 s while the graph's own clocks read 101 s: the run went twice as
+      fast as asked and was labelled half as far along.  `StateRelay`, which
+      stamps the REST server's WebSocket frames, `NetworkRelay` (the ZMQ
+      `t`) and `GraphInfo.timestep` all carried the same value.  So did
+      `validate()`'s multi-rate line, which called such a pair multi-rate at
+      a base step of 0.01.  A graph is affected when the GCD of its
+      scheduled timesteps differs from the GCD of its own: a group of 0.005
+      and 0.02 beside a node at 0.03 read 0.005 for a step of 0.01, while a
+      group of 0.01 and 0.02 beside a node at 0.01 read the right 0.01.
+      Reproduced identically at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0).
+      The relays also read the step once, at attach time, and multiplied it
+      by the step count.  The runner read it once per run.  A graph edited
+      between runs, for example a node of another timestep added over the
+      REST API, is recompiled by its next step and steps by the new amount.
+      At v0.1.0 and v0.3.1 a relay attached to a 0.01 graph that then took 5
+      steps, gained a 0.001 node and took 10 more read 0.15 s for 0.06 s.
+      Found by the 0.4.0 inspection work (#184), whose `format_graph`
+      reported the true step and noted the difference.
+      Resolved in 0.4.0: `compile()` and `timestep` read one helper, which
+      schedules each sub-cycling group's members at its largest member
+      timestep and takes the GCD of the result, so the step reported is the
+      one the rate dividers count in.  The runner and both relays add
+      `gm.timestep` after each step, the relay gains `reset()` (which the
+      server's `/sim/reset` calls), and `validate()` reads the same
+      schedule.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, never `minor` under the 0.4.0 severity
+      definition.  The simulated time the library reported for a state, in
+      the runner, in every streamed frame and in `gm.timestep` itself, was
+      half (or another fraction of) the time the state had reached, and a
+      caller converting steps to time with `n * gm.timestep` got the same
+      error.  The states were right.  Not `critical`: it needs a
+      sub-cycling group whose members' timesteps differ, and a node's own
+      clock, or the group's largest timestep, shows the true value.
+      `context_dependent` because whether a time label or wall-clock
+      pacing feeds a decision is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.timestep"
+      - "maddening.core.graph_manager.GraphManager.base_timestep"
+      - "maddening.core.graph_manager.GraphManager.validate"
+      - "maddening.viz.runner.RealtimeRunner"
+      - "maddening.viz.relay.StateRelay"
+      - "maddening.viz.network.NetworkRelay"
+      - "maddening.viz.renderer.GraphInfo"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, on a graph with a sub-cycling coupling group: take the
+      step as the GCD of the node timesteps with each such group's members
+      replaced by the group's largest member timestep, and scale `sim_time`
+      and every frame's time by its ratio to `gm.timestep`.  Alternatively,
+      give a node its own clock and read that.  Attach a relay again after
+      changing the graph's timesteps.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `run_adaptive` notifies observers once per accepted step, and the
+      relays add `gm.timestep` for each, not the accepted `dt`.  So a relay
+      attached during an adaptive run counts steps of the fixed step.  This
+      is unchanged and is not a sub-cycling effect; read `t_history` from
+      the adaptive run's result instead.  A graph edited from another
+      thread in the middle of a runner frame is clocked by the step read
+      after each step, which is the step the next compile takes.
+    verification:
+      - "tests/core/test_graph_timestep_is_the_step_advance.py::test_every_node_advanced_n_steps_of_gm_timestep"
+      - "tests/core/test_graph_timestep_is_the_step_advance.py::test_the_rate_dividers_count_in_gm_timestep"
+      - "tests/core/test_graph_timestep_is_the_step_advance.py::test_validate_reports_the_schedule_compile_builds"
+      - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_the_runner_and_the_relay_clock_the_real_step_advance"
+      - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_the_clocks_keep_time_when_the_graph_is_edited_between_runs"
+      - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_the_network_relay_stamps_each_message_with_the_real_advance"
+      - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_a_server_reset_restarts_the_frames_clock"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-097"
+    title: "USD baseDt and the FMU default step read a _base_dt attribute that nothing set: USDWriter wrote 0.01 for every graph, and save_graph_to_usd gave the smallest node timestep rather than the graph's step"
+    description: >
+      `usd.writer.USDWriter`, `usd.serialization.save_graph_to_usd` and
+      `fmi.model_description._master_timestep` all read
+      `GraphManager._base_dt`, which no version of `GraphManager` ever set.
+      `USDWriter` fell back to 0.01, so every stage it wrote said
+      `maddening:baseDt = 0.01`: a graph stepping at 0.001 was described as
+      stepping at 0.01.  The writer's own example writes the time code as
+      the step index, so `baseDt` is what converts a frame back to seconds.
+      `save_graph_to_usd` fell back to the smallest node timestep.  That is
+      the step only when the timesteps divide each other and nothing
+      sub-cycles: nodes at 0.002 and 0.003 (a step of 0.001) wrote 0.002,
+      and a sub-cycling group of 0.01 and 0.02 (a step of 0.02) wrote 0.01.
+      Both reproduced at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git
+      archive` of each tag, CPU, jaxlib 0.11.0).  Both writers also wrote
+      `maddening:isMultirate` from the last compile, so a graph saved before
+      its first compile was described as uniform-rate.
+      On the FMU side, v0.3.0 and v0.3.1 declared a 0.001 step whatever the
+      graph (MADD-ANO-078).  That entry's fix, during 0.4.0's development,
+      made the default the smallest node timestep, which carried the same
+      gap into the 0.4.0 development builds.  The `multi_clock` export
+      added in the same cycle put a sub-cycled member on a clock of its own
+      timestep, faster than any step the FMU takes.  Found by the 0.4.0
+      inspection work (#184).
+      Resolved in 0.4.0: the three read `gm.timestep` (MADD-ANO-096's
+      step), and `isMultirate` and the FMU clocks read the same scheduled
+      timesteps.  The default step of a uniform-rate graph, the case
+      MADD-ANO-078's fix verified, is unchanged.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A saved value that describes the simulated system was wrong with no
+      warning.  `baseDt` gives the step of the time samples in a stage, and
+      the FMU's `DefaultExperiment` gives the step an importer follows.  On
+      MADD-ANO-078's grading, a wrong value in the description an importer
+      acts on is `major`, not the `minor` of a misstatement beside computed
+      values that stay right.  Not `critical`: the node timesteps in the
+      same files are right, `load_graph_from_usd` rebuilds the graph from
+      them and never reads `baseDt`, and the FMU's step is an explicit
+      argument wherever it matters.  `context_dependent` because the effect
+      depends on what the consumer does with the value.
+    affected_components:
+      - "maddening.usd.writer.USDWriter"
+      - "maddening.usd.serialization.save_graph_to_usd"
+      - "maddening.fmi.model_description.build_model_description"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: after writing a stage, set the root prim's
+      `maddening:baseDt` to the graph's step yourself (MADD-ANO-096's
+      workaround gives it for a sub-cycled graph), and compile before
+      saving.  Pass `default_step_size=` explicitly to
+      `build_model_description`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  A graph with no nodes takes no step and keeps the
+      schema's 0.01.
+    verification:
+      - "tests/usd/test_usd_base_dt_is_the_graph_step.py::test_save_graph_to_usd_writes_the_graph_step"
+      - "tests/usd/test_usd_base_dt_is_the_graph_step.py::test_the_frame_writer_writes_the_graph_step"
+      - "tests/fmi/test_default_step_is_one_graph_step.py::test_the_default_step_is_one_graph_step"
+      - "tests/fmi/test_default_step_is_one_graph_step.py::test_a_sub_cycled_member_is_on_its_groups_clock"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-098"
+    title: "Two SpringDamperNodes anchored on each other in a converged coupling group gain momentum without bound when stiffness*dt > damping, far inside the single node's stability limit"
+    description: >
+      `SpringDamperNode` integrates by semi-implicit Euler.  Two of them
+      anchored on each other (each one's `position` is the other's
+      `anchor_position`, with rest lengths +L and -L, so that they form one
+      spring) and converged in a coupling group are each explicit in their
+      own position and implicit in the partner's.  The spring forces then do
+      not cancel and the pair's momentum is not conserved.  For an equal
+      pair (the same k, c and m) the velocity sum decouples exactly, and is
+      multiplied by g = (m - c*dt)/(m - k*dt**2) per step.  Where the
+      coupling iteration converges (k*dt**2 < m) and c*dt < m, that grows
+      exactly when k*dt > c.  The relative motion is stable for any k when
+      c*dt < 2*m.  So the spring itself settles while the pair drifts off
+      with a speed that grows every step.  The single node's own bound,
+      k*dt**2 + 2*c*dt < 4*m, does not see it.  With k = 1000, c = 2,
+      m = 0.5 and dt = 0.01, the single node sits at 0.14 against 2, and
+      the pair's centre-of-mass velocity grows by 1.2 per step.  Measured
+      identically at v0.1.0 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0) and on the 0.4.0 tree, where the growth matches g to
+      float32 precision either side of c = k*dt.  From rest, the rounding
+      alone seeds the drift: started 2 m from its rest separation, the pair
+      had moved some 20 m after 1 s, with every value finite and no
+      warning.  The shipped coupled-spring examples used a pair past the
+      limit until the 0.4.0 examples work (#183) raised their damping.
+      Above c*dt = m the factor is negative.  The pair is then stable up
+      to c*dt + k*dt**2 = 2*m, and past that its common velocity flips
+      sign and grows every step, though c > k*dt: with k = 6000, c = 150,
+      m = 1 and dt = 0.01 each node sits at 3.6 against its bound of 4 and
+      g = -1.25, measured on the 0.4.0 tree (CPU, jaxlib 0.11.0).  Every
+      equal pair past the single-node bound with k*dt**2 < m is past that
+      upper figure too.  Nothing refuses either bound.  0.4.0 states both
+      in the node's `NodeMeta` (limitations and a hazard hint) and derives
+      them in its algorithm guide, and `compile()` warns.  It emits a
+      UserWarning naming both nodes, their constants, the growth factor
+      and this entry when a coupling group (`max_iterations` of 2 or more)
+      holds two `SpringDamperNode`s of one timestep, each anchored on the
+      other through an edge with no transform (or the built-in
+      `identity`) that is neither additive nor mapped and is the anchor's
+      only writer, and the converged step grows: its spectral radius,
+      from the live `gm.params` values, exceeds 1 by more than one part in
+      a million.  For an equal pair that is g; an unequal pair, which a
+      calibration of one node leaves behind, gets the spectral radius.
+      The numerics are unchanged, so this entry stays open.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result: a configuration that each node's own bound
+      accepts, and that converges at every step, drifts away without limit
+      while the spring between the two looks right.  Graded `major`.  Not
+      `critical`: it needs two springs anchored on each other in a
+      coupling group with stiffness*dt above damping, the drift is in plain
+      view in the positions, and the stated condition avoids it.  The
+      warning `compile()` now gives does not refuse the graph, and it sees
+      only the pattern it recognises.  `context_dependent` because what
+      the drifting positions feed is the program's choice.
+    affected_components:
+      - "maddening.nodes.spring.SpringDamperNode"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Keep damping >= stiffness*dt on two springs anchored on each other in
+      a coupling group: choose dt <= damping/stiffness, or raise the
+      damping, but not so far that damping*dt + stiffness*dt**2 exceeds
+      2*mass.  Keep stiffness*dt**2 < mass so that the coupling iteration
+      converges.  For an unequal pair, check the spectral radius of the
+      converged step; `compile()` does, and warns past 1.  It does not
+      judge an edge through any other transform (a lambda that passes the
+      value through included), a wrapped node or a subclass that overrides
+      `update`, two timesteps in a sub-cycled group, stiffness*dt**2 >=
+      mass (the iteration does not converge there, and
+      `coupling_diagnostics()` says so), or a value supplied after
+      compile, so check those yourself.  Exchanging the positions without
+      a coupling group (lagged by the schedule) is a different scheme with
+      its own limit; it also diverges at the constants above, and is not
+      warned about.
+    resolution_status: "open"
+    verification:
+      - "tests/nodes/test_spring_stability_limits.py::test_the_coupled_pairs_centre_of_mass_grows_by_the_stated_factor"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_reproducer_drifts_off_with_finite_values_and_warns_only_at_compile"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_relative_motion_is_stable_where_the_pair_is_not"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_heavily_damped_side_flips_sign_and_grows"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_single_node_bound_is_exact"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_node_metadata_states_both_bounds"
+      # The warning (not a fix: the entry stays open).
+      - "tests/nodes/test_spring_stability_limits.py::test_compile_warns_about_the_reproducer"
+      - "tests/nodes/test_spring_stability_limits.py::test_no_warning_on_the_defaults_which_sit_on_the_limit"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_step_matrix_is_the_nodes_converged_step"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-099"
+    title: "GraphManager.step did not zero-fill the inputs a partial external_inputs left out, and dropped an undeclared node or field name in silence: the node took its own \"input missing\" branch"
+    description: >
+      `step(external_inputs=None)` fed zeros to every declared external
+      input, as documented.  A dict naming only some of them did not
+      complete the rest: an omitted input never reached the node, which
+      fell back to whatever its `update()` does when the input is absent.
+      A name the graph does not declare, such as a misspelt node or field,
+      was dropped without a word, so the input it was meant to set
+      took the same fallback.  On a node with two declared inputs whose
+      fallbacks are 100 and 200, `step()` gave 0.  `step({})` gave 300.
+      `step({"s": {"f": 1.0}})` gave 201 where zero-filling gives 1.
+      `step({"s": {"force": 1.0}})` and `step({"spring": {"f": 1.0}})`
+      both gave 300.  The same held for `run` and `run_scan`, at v0.1.0,
+      v0.2.0, v0.2.1, v0.3.0 and v0.3.1 alike (`git archive` of each tag,
+      CPU, jaxlib 0.11.0).  `BallNode` without its `table_position`, for
+      instance, falls through the floor rather than bouncing at zero
+      (MADD-ANO-084 measured that on the FMU paths).
+      Fixed during 0.4.0 development (2428f5e, 2026-09-19) and recorded in
+      the CHANGELOG, but not registered until the 0.4.0 record audit.
+      Resolved in 0.4.0: `_resolve_external_inputs` stands in front of every
+      entry point (`step`, `run`, `run_scan`, `run_scan_with_history`,
+      `run_sweep`, `run_adaptive`, `run_adaptive_scan`).  It completes a
+      partial dict with zeros and refuses an undeclared `node.field` with a
+      `ValueError` naming the declared ones.  MADD-ANO-084 is the FMU paths'
+      counterpart, which arose when this fix reached the graph alone.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`.  An external input the caller
+      left out, or misspelt, was neither the value meant nor the zero that
+      `None` gives, but the node's own fallback, and nothing said so.  Not
+      `critical`: it needs a partial or misspelt dict and a node whose
+      fallback differs from zero, and passing every declared input in full
+      avoids it.  `context_dependent` because the size of the difference is
+      whatever the node's fallback makes it.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.core.graph_manager.GraphManager.run"
+      - "maddening.core.graph_manager.GraphManager.run_scan"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass every declared external input on every call,
+      zeros included, and check the node and field names against
+      `gm._external_inputs` before stepping.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known for the graph.  A stand-alone `FmuSidecar` built without
+      `input_resolver` hands its inputs to the compiled step as given (see
+      MADD-ANO-084).
+    verification:
+      - "tests/core/test_graph_manager.py::TestExternalInputsAreCompletedAndValidated::test_an_omitted_input_is_zero_filled_like_the_none_case"
+      - "tests/core/test_graph_manager.py::TestExternalInputsAreCompletedAndValidated::test_an_unknown_name_is_refused_and_the_declared_ones_named"
+      - "tests/core/test_graph_manager.py::TestExternalInputsAreCompletedAndValidated::test_every_run_method_validates_the_same_way"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-100"
+    title: "The FMU bridge took any master_dt: a doStep ran h / master_dt graph steps and reported t + h, so a 0.01 s graph served with master_dt=0.005 labelled a state at 0.10 s with the time 0.05 s"
+    description: >
+      `FmuTcpBridge` stored the `master_dt` its caller passed and never
+      compared it with the graph it served, which it is not given, or with
+      the model description, which it is.  A `step` of `h` ran
+      `round(h / master_dt)` graph steps and reported `t + h`.  On the
+      0.4.0 development tree on 2026-10-02 (CPU, jaxlib 0.11.0), a
+      uniform-rate `SpringDamperNode` graph at 0.01 s served with
+      `master_dt=0.005` answered five `doStep`s of 0.01 s with t = 0.05 s
+      and a position of 1.420895, which is the graph at 0.10 s; at 0.05 s it
+      is 1.477806.  The same held in reverse for a multi-rate graph whose
+      advertised default step was its smallest node timestep, not its step
+      (MADD-ANO-097): nodes at 0.02 and 0.03 s step by 0.01 s, and a bridge
+      given the advertised 0.02 s as `master_dt` ran one graph step per
+      0.02 s `doStep`, so after 0.12 s of reported time the state was the
+      graph's at 0.06 s.  The user guide's own example passed an undefined
+      `gm_base_dt`.  No release carried it: v0.1.0 to v0.3.1 have no
+      `src/maddening/fmi/tcp_bridge.py`.  Found by the round-5 FMU audit.
+      Resolved in 0.4.0: `build_model_description` records the graph's step
+      as `ModelDescription.graph_timestep` (`GraphManager.timestep`, which
+      MADD-ANO-096 made the step a graph takes), whatever
+      `default_step_size` advertises.  The bridge refuses a `master_dt` more
+      than a relative 1e-9 from it, and a description whose
+      `default_step_size` is not a whole number of graph steps, or more of
+      them than one request may take.  A description built by hand, without
+      `graph_timestep`, is held to its `default_step_size`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`.  Every value the FMU returned
+      was the graph's state at a time other than the one it reported, every
+      call `fmi3OK`, and an importer coupling it to other models would
+      exchange values at the wrong times.  Not `critical`: it needs a
+      `master_dt` other than the graph's step, and the step was then
+      undocumented rather than the default.  Registered although no release
+      carried it, because it is major.  `context_dependent` because the
+      size of the error is whatever the model does over the mislabelled
+      interval.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.model_description.ModelDescription"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: pass `master_dt=gm.timestep`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The bridge holds no graph, so it checks `master_dt` against the step
+      the description records, not against the compiled step the sidecar
+      runs.  A sidecar built over a different graph from its description
+      is not detected; build both from the same `GraphManager`.
+    verification:
+      - "tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_a_master_dt_other_than_the_graph_step_is_refused"
+      - "tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_at_the_graph_step_the_fmu_is_the_graph_at_the_time_it_reports"
+      - "tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_an_advertised_step_of_several_graph_steps_runs_that_many"
+      - "tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_an_advertised_step_the_bridge_would_refuse_is_refused_up_front"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-101"
+    title: "A number for a Boolean FMU variable was stored by its truthiness: set gate.open = 0.5, 2.0 or -3.0 read back as true, and an FMU-state archive holding 0.25 in a Boolean field restored as true"
+    description: >
+      The one value check on every write path into the FMU's state and
+      parameters (`set` and `set_state` on the TCP bridge,
+      `FmuSidecar.set_params` and `FmuSidecar.set_fmu_state`) refused a
+      boolean for a number but let any integer or float through to a
+      Boolean target, and cast it with `astype(bool)`.  On the 0.4.0
+      development tree on 2026-10-02 (CPU, jaxlib 0.11.0), a graph with a
+      Boolean external input answered `set` of 0.5, 2.0 and -3.0 with `ok`
+      and read each back as 1, and an archive whose Boolean state field
+      held the float 0.25 restored with the field `True`.  Every value on
+      the FMU wire is a float64, so this is the path every Boolean
+      variable takes.  No release carried it: the check was added during
+      0.4.0's development (v0.3.1's `set_fmu_state` checked nothing, and its
+      sidecar had no `set_params`), and the TCP bridge is new in 0.4.0.
+      Found by the round-5 FMU audit.  Resolved in 0.4.0: a Boolean target
+      takes a boolean or exactly 0 or 1, through the same check on all four
+      paths; anything else is refused naming the variable, and nothing is
+      written.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the value stored was not the
+      value given, and the reply said `ok`.  Not `critical`: it needs a
+      Boolean variable and a value other than 0 or 1, which a conforming
+      importer's `fmi3SetBoolean` never sends.  Registered although no
+      release carried it, because it is major.  `context_dependent` because
+      what a flag set the wrong way does depends on the model.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.checked_value"
+      - "maddening.fmi.sidecar.FmuSidecar.set_params"
+      - "maddening.fmi.sidecar.FmuSidecar.set_fmu_state"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: send only 0 or 1 to a Boolean variable.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_a_set_of_a_boolean_input_to_a_non_0_1_number_is_refused"
+      - "tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_an_archive_with_a_fraction_in_a_boolean_member_does_not_restore"
+      - "tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_the_sidecars_own_restore_door_refuses_it_too"
+      - "tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_set_params_holds_a_boolean_parameter_to_the_same_rule"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-102"
+    title: "The FMU's C wrapper carried every width as a double and the bridge could not tell the calls apart: fmi3SetBoolean wrote 1.0 into a Float32 parameter and fmi3GetInt32 truncated a Float32 output, both fmi3OK"
+    description: >
+      FMI 3.0 has a variable accessed only through the `fmi3Get` /
+      `fmi3Set` function of its own type ("Getting and Setting Variable
+      Values").  The C wrapper converted every width to a double and sent
+      the bare number, and cast every reply back with `(CTYPE)value`.  On
+      the 0.4.0 development tree on 2026-10-02 (CPU, jaxlib 0.11.0, the
+      compiled wrapper driven through `ctypes` against a live bridge):
+      `fmi3SetBoolean(true)` on the Float32 parameter
+      `ball.params.elasticity` answered `fmi3OK` and stored 1.0, the
+      coercion `FmuSidecar.set_params` refuses in process; and
+      `fmi3GetInt32` on the Float32 output `spring.position`, at 0.5,
+      answered `fmi3OK` with 0.  A NaN or out-of-range reply cast to an
+      integer type is undefined behaviour in C.  No release carried it: the
+      C wrapper is new in 0.4.0.  Found by the round-5 FMU audit.
+      Resolved in 0.4.0: every get and set request names the FMI type of the
+      function that made it, and the bridge refuses a variable of another
+      type with nothing read or written.  A getter also refuses a reply
+      value its C type cannot hold (a fraction, NaN or an out-of-range
+      number for an integer type, anything but 0 or 1 for a Boolean, a
+      finite number beyond `FLT_MAX` for a Float32), and the Int64 and
+      UInt64 setters refuse a value a double cannot carry exactly.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: an importer that used the
+      wrong getter read a truncated value with `fmi3OK`, and one that used
+      the wrong setter wrote a value the library refuses on every other
+      path.  Not `critical`: it needs an importer calling a function of
+      another type than the variable's, which FMI forbids and FMPy's
+      `simulate_fmu` does not do.  Registered although no release carried
+      it, because it is major.
+    affected_components:
+      - "maddening.fmi.package.C_SOURCE"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: access each variable through the function of its declared
+      type.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A client of the bridge's JSON protocol that names no `type` is not
+      type-checked; the C wrapper always names one.  The wire carries every
+      value as a float64, so a value above 2^53 in magnitude cannot pass
+      through it exactly: an Int64 or UInt64 set of one is refused, and a
+      get of one returns the nearest double.  No node in the package holds
+      a 64-bit integer that large.
+    verification:
+      - "tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_set_of_another_type_is_refused_and_writes_nothing"
+      - "tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_get_of_another_type_is_refused"
+      - "tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_a_boolean_setter_cannot_write_a_float32_parameter"
+      - "tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_each_variable_is_read_only_through_the_getter_of_its_type"
+      - "tests/fmi/test_c_unit.py::test_c_unit_tests"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-103"
+    title: "An FMU-state archive missing its pending-input members restored with those inputs silently at zero"
+    description: >
+      The bridge's `set_state` refused an archive whose state fields or
+      parameters were not exactly the model's, and one without `_time`.
+      The pending inputs (`i/<node>/<field>`) were optional: the restore
+      started from zero inputs and filled in whichever members were there.
+      The bridge's own `get_state` always writes every input, so an archive
+      missing one is partial, the case the key-set rule exists to refuse.
+      On the 0.4.0 development tree on 2026-10-02 (CPU, jaxlib 0.11.0), an
+      archive taken with `spring.anchor_position` at 0.4 and stripped of
+      that member restored with `ok`, and the input read 0.0.  No release
+      carried it: the TCP bridge is new in 0.4.0.  Found by the round-5 FMU
+      audit.  Resolved in 0.4.0: the inputs are held to the same key-set
+      rule as the fields and parameters, from the archive's directory and
+      again on decode, with the same message; a model with no inputs
+      expects none, and a clock, which holds no value, has no member.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the restored FMU was not the
+      snapshot, the reply said `ok`, and the next step ran with a zero
+      input.  Not `critical`: it needs an archive that was edited or
+      truncated, never one the bridge wrote.  Registered although no
+      release carried it, because it is major.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: restore only archives the bridge wrote.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing"
+      - "tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_with_an_extra_input_member_is_refused"
+    github_issue: null

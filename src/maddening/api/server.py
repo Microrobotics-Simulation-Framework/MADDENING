@@ -1650,10 +1650,10 @@ class SimulationServer:
     def _reset_state(self) -> None:
         """Reset all nodes to their initial state (normalised, no retrace)."""
         self.gm.reset_state()
-        # Reset relay counters
-        with self.relay._lock:
-            self.relay._step_count = 0
-            self.relay._snapshot = None
+        # Reset relay counters, its clock included: the relay sums each
+        # step's advance, so leaving that sum would restart the frames'
+        # sim_time from where the run before the reset stopped.
+        self.relay.reset()
         # Invalidate binary encoder (state shape may have changed)
         self._binary_encoder = None
 

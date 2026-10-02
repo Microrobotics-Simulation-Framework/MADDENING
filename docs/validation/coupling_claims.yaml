@@ -269,7 +269,7 @@ claims:
     - tests/core/test_coupling_non_finite_state.py::test_a_tiny_field_beside_a_normal_one_relaxes_like_its_control
   status: verified
   notes: >-
-    Failing until 0.4.0's round-4 fix (MADD-ANO-108): at 2**-110 Aitken took
+    Failing until 0.4.0's round-4 fix (MADD-ANO-115): at 2**-110 Aitken took
     42 passes where the unscaled run took 45, and "fixed" and IQN-IMVJ
     returned a different state, because the accelerators subtracted the
     iterates before any rescaling and a subnormal difference flushed.  The
@@ -1350,7 +1350,7 @@ claims:
     - tests/core/test_coupling_sixteen_bit_groups.py::test_fori_and_ift_take_the_same_passes_on_an_accelerated_sixteen_bit_group
   status: verified
   notes: >-
-    Ambiguous until 0.4.0's round-4 fix (MADD-ANO-109): under the
+    Ambiguous until 0.4.0's round-4 fix (MADD-ANO-116): under the
     deprecated solver="fori", "aitken", "iqn-ils" and "iqn-imvj" raised a
     fori_loop carry TypeError on a 16-bit group (since 0.1.0).  The
     accelerators' returns are now cast to their carries' dtypes, and the
@@ -2204,7 +2204,7 @@ claims:
     - tests/verification/hypothesis/test_hypothesis_adaptive.py::TestOneRuleOnBothBackends::test_the_numpy_and_jax_rules_choose_the_same_next_dt
   status: verified
   notes: >-
-    Ambiguous until 0.4.0's round-4 fix (MADD-ANO-111): run_adaptive
+    Ambiguous until 0.4.0's round-4 fix (MADD-ANO-118): run_adaptive
     accepted a failed attempt up to dt_min / min_factor whenever its shrink
     reached dt_min, where run_adaptive_scan retried at dt_min.  Both now
     take their decision and next step from adaptive.step_decision, so they
@@ -2291,7 +2291,7 @@ claims:
     - tests/property/test_differential_ift_derivatives.py::test_the_ift_derivatives_agree_with_dense_and_fori_at_every_scale
   status: verified
   notes: >-
-    Failing until 0.4.0's round-4 fix (MADD-ANO-106, since 0.3.0): atol was
+    Failing until 0.4.0's round-4 fix (MADD-ANO-113, since 0.3.0): atol was
     1e-8 + rtol * max|b|, so a cotangent below about 1e-8 met the GMRES
     test at x = 0 and the gradient came back exactly zero, reported
     successful.  The solve now runs on b rescaled by an exact power of two

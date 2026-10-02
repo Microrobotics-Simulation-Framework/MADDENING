@@ -1172,7 +1172,7 @@ the matrix-free backends stop on a tolerance relative to `max|b|` only, on
 `b` rescaled by an exact power of two.  Until 0.4.0 the criterion also
 carried an absolute `1e-8`, which a small `b` met before a single step: the
 derivative of a group in small units, or of a loss near its minimum, came
-back exactly zero and "successful" (MADD-ANO-106).  An ill-conditioned
+back exactly zero and "successful" (MADD-ANO-113).  An ill-conditioned
 solve now fails at every scale alike, with the error below.
 
 ## `linear_solver="dense"` is not an escape hatch on a grid

@@ -120,7 +120,7 @@ def _scaled_values(values, s):
 
 
 # Aitken, "fixed" and IQN-IMVJ failed this until the accelerators formed their
-# steps in power-of-two frames (MADD-ANO-108).
+# steps in power-of-two frames (MADD-ANO-115).
 @pytest.mark.parametrize("acceleration", ["none", "aitken", "fixed", "iqn-ils", "iqn-imvj"])
 def test_a_group_at_2_to_the_minus_110_takes_the_unscaled_passes(acceleration):
     """CPL-010: "a group at any power-of-two scale reproduce[s] the unscaled run bit for bit".
@@ -387,7 +387,7 @@ class _Lin16(SimulationNode):
 
 
 # The fori rows raised a carry TypeError until the accelerators' returns were
-# cast to their carries' dtypes (MADD-ANO-109).
+# cast to their carries' dtypes (MADD-ANO-116).
 @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16], ids=["bfloat16", "float16"])
 @pytest.mark.parametrize("acceleration,solver", [
     *[(acc, "ift") for acc in ACCELERATIONS],
@@ -633,7 +633,7 @@ def test_the_report_flags_an_unsettled_spectral_bound_only_where_one_was_compute
 
 
 # run_adaptive kept a rejected attempt when the shrunk step would fall to
-# dt_min until both steppers took one rule (adaptive.step_decision; MADD-ANO-111).
+# dt_min until both steppers took one rule (adaptive.step_decision; MADD-ANO-118).
 def test_both_adaptive_steppers_accept_the_same_steps_at_dt_min():
     """CPL-134: "Like run_adaptive but fully JIT-compiled" -- the same accepted steps at ``dt_min``."""
     def graph():
@@ -697,7 +697,7 @@ def test_the_ift_gradient_of_an_affine_group_is_the_same_under_every_acceleratio
 # ---------------------------------------------------------------------------
 
 
-# 1e-12 read exactly 0.0 until the solve dropped its absolute 1e-8 (MADD-ANO-106).
+# 1e-12 read exactly 0.0 until the solve dropped its absolute 1e-8 (MADD-ANO-113).
 @pytest.mark.parametrize("scale", [1.0, 1e-12])
 def test_the_ift_gradient_is_scale_equivariant_in_the_cotangent(scale):
     """CPL-143: ``d(s * L)/dtheta = s * dL/dtheta``: the adjoint is relative to its right-hand side.

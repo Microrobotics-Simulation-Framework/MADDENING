@@ -1677,7 +1677,7 @@ def _fixed_point_while(
     # the relaxed iterate stopped moving while the norm still measured the
     # residual, the stalled ratio read 1 and was rejected, and the raw
     # residual test reported ``converged=True`` up to 7x the threshold
-    # away; MADD-ANO-108).  Not formed without an accelerator, so the
+    # away; MADD-ANO-115).  Not formed without an accelerator, so the
     # plain loop's program is the one it was.
     frame = _pow2_normaliser(x0_acc) if acceleration != "none" else None
 
@@ -2028,7 +2028,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
     carried an absolute ``1e-8``, below which the zero initial guess
     passed lineax's test before a single step: the tangent or adjoint of
     a group in small units, or of a loss near its minimum, came back
-    exactly zero and "successful" (MADD-ANO-106).  Memory is
+    exactly zero and "successful" (MADD-ANO-113).  Memory is
     O(N) for the matrix-free backends; no Jacobian is ever
     materialised except under ``"dense"``.
 
@@ -5922,10 +5922,17 @@ class GraphManager:
             return True
         return not all(_leaf_values_equal(a, b) for a, b in zip(consts_a, consts_b))
 
-    def _constructor_write_reason(self, owner: str, key: str, value: Any) -> Optional[str]:
+    def _constructor_write_reason(self, owner: str, key: str, value: Any,
+                                  others: Optional[dict[str, Any]] = None) -> Optional[str]:
         """Why the node's own constructor refuses its params with
-        ``params[key] = value``, or ``None`` when it takes them or that
+        ``params[key] = value`` -- and the other changes of the same write,
+        *others*, applied with it -- or ``None`` when it takes them or that
         cannot be told.
+
+        *others* matters for a value that is valid only together with
+        another: ``HeatNode`` ``stencil_order: 4`` at a Fourier number of
+        0.4 is unstable, and with ``thermal_diffusivity: 0.2`` in the same
+        request it is not; asked alone, the request was refused.
 
         A graph is saved (:meth:`to_dict`) as each node's class and params,
         and loaded by calling the class with them (:meth:`from_dict`), so a
@@ -5955,7 +5962,7 @@ class GraphManager:
             except Exception:  # noqa: BLE001 - not rebuilt from its params
                 continue
             try:
-                build({**(shared or {}), key: value})
+                build({**(shared or {}), **(others or {}), key: value})
             except Exception as exc:  # noqa: BLE001 - the constructor refuses it
                 return (
                     f"{cls.__name__}'s constructor refuses it ({type(exc).__name__}: "

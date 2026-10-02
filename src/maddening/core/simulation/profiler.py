@@ -578,6 +578,19 @@ def _meta_group_keys(gm) -> list[tuple[str, str, str, str, float, float, int]]:
     return out
 
 
+def _group_sweeps(gm) -> dict[str, int]:
+    """``{group_key: waveform sweeps}``: how many fixed-point solves a step runs per group.
+
+    One unless the group sub-cycles with ``waveform_iterations > 1``
+    (``maddening.core.graph_manager._group_waveform_sweeps``) -- and so
+    the passes the one-iteration variant runs, one per sweep.
+    """
+    from maddening.core.graph_manager import _group_waveform_sweeps  # noqa: PLC0415
+
+    return {"+".join(sorted(g.nodes)): int(_group_waveform_sweeps(g, gm._nodes))
+            for g in gm._coupling_groups}
+
+
 def _group_rate_dividers(gm) -> dict[str, int]:
     """``{group_key: rate divider}``: every how many base steps a group solves.
 
@@ -807,8 +820,12 @@ def profile_graph(
         staggered pass, before any ``while_loop``, accelerator or IFT
         solve is reached, so the capped step is straight-line code on
         fixed shapes and costs the same whatever state it starts from.
-        Its measured iteration count is exactly one from every
-        trajectory position, which
+        It runs exactly one pass per waveform sweep from every trajectory
+        position -- ``iterations`` reads one, and ``total_iterations``
+        the group's number of sweeps (one unless it sub-cycles with
+        ``waveform_iterations > 1``) -- so ``coupling_per_iteration_ms``
+        divides the overhead by the real step's ``total_iterations`` less
+        those sweeps, the passes the overhead paid for, which
         ``test_one_iteration_variant_runs_one_pass_from_any_position``
         pins.  Pinning both windows to the same start was measured on
         the compute-bound ``expensive-pair`` fixture (two 1e5-cell heat
@@ -952,6 +969,10 @@ def profile_graph(
                 gm.step(external_inputs)
             jax.block_until_ready(jax.tree.leaves(gm._state))
         iters = {k[0]: [] for k in group_keys}
+        # Every pass the step ran (``total_iterations``: summed over the
+        # waveform sweeps; the slot exists only for a group running more
+        # than one, and a one-sweep group's total is ``iterations``).
+        totals = {k[0]: [] for k in group_keys}
         conv = {k[0]: [] for k in group_keys}
         # On a multi-rate graph a group solves only on the base steps its
         # rate divider fires on, and its ``_meta`` slots hold that solve
@@ -968,13 +989,22 @@ def profile_graph(
                     continue    # the group did not solve on this base step
                 if iter_key in meta:
                     iters[key].append(int(meta[iter_key]))
+                    totals[key].append(int(meta.get(
+                        f"coupling_{key}_total_iterations", meta[iter_key])))
                     conv[key].append(_meta_converged(meta, res_key, amp_key, thr, scale))
+        sweeps = _group_sweeps(gm)
         for key, _ik, _rk, _ak, _thr, _scale, cap in group_keys:
             if iters[key]:
                 a = np.asarray(iters[key])
                 report.coupling_iter_stats[key] = {
                     "mean": float(a.mean()), "min": int(a.min()), "max": int(a.max()),
                     "cap": cap,
+                    # Every pass the step ran, summed over its waveform
+                    # sweeps, and how many sweeps that is: the passes the
+                    # one-iteration variant runs (one per sweep), which
+                    # ``coupling_per_iteration_ms`` subtracts.
+                    "total_mean": float(np.mean(totals[key])),
+                    "sweeps": int(sweeps.get(key, 1)),
                     # ``iterations`` counts the passes that produced the
                     # returned state, the first staggered one included,
                     # and equals ``max_iterations`` exactly when the
@@ -1047,8 +1077,15 @@ def profile_graph(
             / np.sqrt(max(n_steps, 1))
         )
         report.coupling_overhead_method = "measured"
+        # The passes the overhead paid for: every pass the real step ran
+        # (``total_iterations``) less the ones the variant still runs --
+        # one per waveform sweep.  Divided by ``iterations - 1`` -- the
+        # largest sweep's count -- it overstated the cost of a pass by
+        # nearly ``waveform_iterations`` times: 87 passes of overhead on a
+        # three-sweep group divided by 29.
         extra = sum(
-            max(st["mean"] - 1.0, 0.0) for st in report.coupling_iter_stats.values()
+            max(st.get("total_mean", st["mean"]) - st.get("sweeps", 1), 0.0)
+            for st in report.coupling_iter_stats.values()
         )
         report.coupling_per_iteration_ms = (
             report.coupling_overhead_ms / extra if extra > 0 else 0.0

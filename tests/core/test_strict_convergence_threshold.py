@@ -147,8 +147,12 @@ def test_strict_convergence_accepts_an_estimate_exactly_at_the_threshold():
 # The adaptive steppers' strict check: the same boundary through the sink
 # ---------------------------------------------------------------------------
 
-#: One accepted attempt of the whole interval: ``dt_min = dt_max = t_end``.
-_ADAPTIVE = dict(dt_initial=0.1, dt_min=0.1, dt_max=0.1)
+#: One accepted attempt of the whole interval: ``dt_min = dt_max = t_end``,
+#: and an error tolerance the step-doubling estimate meets (the relay ignores
+#: ``dt``, so the full step and the half steps differ only by how far each
+#: solve got), so the attempt is accepted on its error, not forced at
+#: ``dt_min``.
+_ADAPTIVE = dict(dt_initial=0.1, dt_min=0.1, dt_max=0.1, atol=1e3, rtol=1.0)
 
 
 def _adaptive(entry, gm):
@@ -157,49 +161,55 @@ def _adaptive(entry, gm):
     return gm.run_adaptive_scan(0.1, max_steps=1, **_ADAPTIVE)
 
 
-@functools.lru_cache(maxsize=None)
-def _first_half_at_the_cap():
-    """The first kept half step's estimate, read off the folded report.
+def _adaptive_report(entry, tolerance):
+    gm = _graph(tolerance, strict=False)
+    _adaptive(entry, gm)
+    return gm.coupling_diagnostics()[KEY]
 
-    The relay ignores ``dt``, so the first half step is the same solve as
-    ``step()``'s from the same start; it runs to the cap, and the report of
-    the accepted attempt carries its (failing) verdict.
-    """
-    gm = _graph(1e-12, strict=False)
-    _adaptive("run_adaptive", gm)
-    d = gm.coupling_diagnostics()[KEY]
-    assert d["iterations"] == CAP and not d["converged"], dict(d)
-    return float(d["residual"]), float(d["error_estimate"])
+
+# The relay ignores ``dt``, so an attempt's first half step is the solve
+# ``step()`` runs from the same start (``_at_the_cap``): it reaches the cap
+# at every threshold below.  The second half step starts from its result,
+# nearer the fixed point, and converges at all of them.  The accepted
+# attempt's report folds the two (``_fold_kept_half_step_reports``), so it
+# carries the first half's verdict wherever that half alone fails.
 
 
 @pytest.mark.parametrize("entry", ["run_adaptive", "run_adaptive_scan"])
 def test_the_adaptive_strict_check_raises_at_twice_the_threshold(entry):
-    """The kept first half step at 2x the threshold raises under both steppers."""
-    _res, est = _first_half_at_the_cap()
+    """The kept first half step at 2x the threshold: reported unconverged, and refused."""
+    _res, est = _at_the_cap()
     tol = est / 2.0
+    d = _adaptive_report(entry, tol)
+    assert d["iterations"] == CAP and not d["converged"], dict(d)
+    assert d["error_estimate"] / tol == 2.0, dict(d)
     with pytest.raises(Exception, match="without converging"):
         _adaptive(entry, _graph(tol, strict=True))
 
 
 @pytest.mark.parametrize("entry", ["run_adaptive", "run_adaptive_scan"])
 def test_the_adaptive_strict_check_tests_the_error_estimate(entry):
-    """Residual inside, estimate outside the threshold: the adaptive check raises too."""
-    res, est = _first_half_at_the_cap()
+    """Residual inside, estimate outside the threshold: reported unconverged, and refused."""
+    res, est = _at_the_cap()
     tol = 1.5 * res
-    assert res <= tol < est
+    d = _adaptive_report(entry, tol)
+    assert d["iterations"] == CAP, dict(d)
+    assert d["residual"] <= tol < d["error_estimate"] and not d["converged"], dict(d)
     with pytest.raises(Exception, match="without converging"):
         _adaptive(entry, _graph(tol, strict=True))
 
 
-def test_the_adaptive_report_agrees_with_its_strict_check_at_the_threshold():
+@pytest.mark.parametrize("entry", ["run_adaptive", "run_adaptive_scan"])
+def test_the_adaptive_report_agrees_with_its_strict_check_at_the_threshold(entry):
     """At ``tolerance`` = the first half's estimate both halves converge: no raise.
 
-    The second half starts from the first's result, nearer the fixed
-    point, so it meets any threshold the first met.
+    ``converged=True`` in the report, and the strict check lets the
+    attempt through: one verdict.  The first half still used its whole
+    budget, which ``iterations`` (the larger half's count) shows.
     """
-    _res, est = _first_half_at_the_cap()
+    _res, est = _at_the_cap()
+    d = _adaptive_report(entry, est)
+    assert d["converged"] and d["iterations"] == CAP, dict(d)
     gm = _graph(est, strict=True)
-    _adaptive("run_adaptive", gm)
-    d = gm.coupling_diagnostics()[KEY]
-    assert d["converged"], dict(d)
-    assert np.isfinite(d["residual"])
+    _adaptive(entry, gm)
+    assert gm.coupling_diagnostics()[KEY]["converged"]

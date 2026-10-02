@@ -1,0 +1,2664 @@
+# Coupling claims inventory.
+#
+# Every documented statement about coupling that a user could rely on, with
+# the exact domain it was stated for, how its truth is known, and a pytest
+# node id that fails if it stops being true.  An audit attacks this list;
+# a new claim in a docstring, a guide or the release notes gets a row here
+# in the same change (docs/developer_guide/testing_standards.md, "The
+# coupling claims inventory").  tests/compliance/test_coupling_claims.py
+# checks every row: its fields, that each cited test is collected and runs
+# on every push (or is slow-marked and names a per-push witness), that a
+# `failing` row cites a strict xfail and that a `verified` row cites none.
+#
+# Scope: "coupling" is what the coupling audits cover --
+#   * coupling groups and their solvers (ift, fori), schedules (Gauss-Seidel,
+#     Jacobi), accelerations, predictors and warm starts;
+#   * sub-cycling, multi-rate groups, waveform sweeps and the adaptive
+#     steppers on coupled graphs;
+#   * coupling_diagnostics(), coupling_report() / print_coupling_report()
+#     and strict_convergence;
+#   * the precision floor and every reported bound and *_usable flag;
+#   * IFT gradients;
+#   * profile_graph's coupling statistics and sysid.windowed_loss's
+#     convergence mask.
+# Out of scope, with their own audit areas: interface mappings
+# (coupling/mapping.py, mapping_spec.py, interface_mapping.py) and the
+# edge-construction conveniences in coupling/helpers.py.
+#
+# Row fields:
+#   id          CPL-NNN, unique.
+#   area        a grouping label, free text.
+#   claim       the documented wording (quoted where it is quoted).
+#   sources     file:line or file#section; the first is where it is stated.
+#   conditions  the domain the documentation states, or "unstated" parts.
+#   oracle      how the truth is known.
+#   tests       pytest node ids (without parameters, or with them).
+#   status      verified | failing | untested | ambiguous
+#   proposed_wording  required for ambiguous: the precise statement the
+#                     tests support.
+#   finding     required for failing: what breaks, the reproducer and a
+#               file:line guess.  Every failing row cites a strict xfail.
+#   reason      required for untested: why no test can fail.
+#   notes       optional.
+#
+# Line numbers are those of the tree the row was last verified on
+# (release/0.4.0 at 7b2f7d9 for the first edition); the section name beside
+# each makes it findable when they move.
+
+schema_version: 1
+
+claims:
+
+# ---------------------------------------------------------------------------
+# Configuration: CouplingGroup and its registration
+# ---------------------------------------------------------------------------
+
+- id: CPL-001
+  area: configuration
+  claim: >-
+    A Literal-typed CouplingGroup field holding a value outside its permitted
+    set raises ValueError at construction, naming the accepted options
+    ("Without this check a typo like acceleration="aitkin" silently sets the
+    field to that string").
+  sources:
+    - src/maddening/core/coupling/group.py:371 (CouplingGroup.__post_init__)
+  conditions: every Literal field (solver, acceleration, convergence_norm, iteration_mode, boundary_interpolation, predictor, linear_solver); the empty string included.
+  oracle: exception type and message.
+  tests:
+    - tests/core/test_coupling_group_validation.py::test_typo_raises
+    - tests/core/test_coupling_group_validation.py::test_typo_error_includes_valid_options
+    - tests/core/test_coupling_group_validation.py::test_empty_string_rejected
+    - tests/core/test_coupling_group_validation.py::test_acceleration_valid
+  status: verified
+
+- id: CPL-002
+  area: configuration
+  claim: >-
+    accelerated_fields: "A non-mapping, a value given as a bare field name
+    instead of a one-element tuple, an empty mapping and a mapping naming
+    only foreign nodes all raise ValueError here rather than failing inside
+    the traced coupling loop."
+  sources:
+    - src/maddening/core/coupling/group.py:141 (CouplingGroup, accelerated_fields)
+  conditions: construction time, any acceleration.
+  oracle: exception type.
+  tests:
+    - tests/core/test_coupling_group_validation.py::test_accelerated_fields_rejects_a_non_mapping
+    - tests/core/test_coupling_group_validation.py::test_accelerated_fields_rejects_a_bare_string_value
+    - tests/core/test_coupling_fixture_invariants.py::test_accelerated_fields_must_select_at_least_one_field_in_the_group
+    - tests/core/test_coupling_group_validation.py::test_a_bogus_accelerated_field_is_named_under_every_acceleration
+  status: verified
+
+- id: CPL-003
+  area: configuration
+  claim: >-
+    "Only floating-point fields are accelerated, here and under "aitken" /
+    "fixed": an integer, boolean or PRNG-key field is computed by every pass
+    and cannot be relaxed, so a named one is dropped from the selection, and
+    compile() refuses a selection that names no floating field."
+  sources:
+    - src/maddening/core/coupling/group.py:150 (CouplingGroup, accelerated_fields)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-059)
+  conditions: every acceleration, both solvers; integer, unsigned, boolean and typed-key leaves.
+  oracle: closed-form values of the non-floating leaves; compile-time refusal.
+  tests:
+    - tests/core/test_coupling_non_float_leaves.py::test_an_integer_field_named_in_accelerated_fields_is_left_out
+    - tests/core/test_coupling_non_float_leaves.py::test_accelerated_fields_naming_no_floating_field_is_refused_at_compile
+    - tests/property/test_differential_leaves.py::test_non_float_leaves_keep_their_closed_form_under_every_accelerator
+  status: verified
+
+- id: CPL-004
+  area: configuration
+  claim: >-
+    "A knob the rest of the configuration never reads warns at construction
+    rather than turning silently; the rules are in _INERT_RULES."  Only a
+    deliberate setting (away from the field's default) warns, and the
+    to_dict / coupling_group_kwargs round trip is quiet.
+  sources:
+    - src/maddening/core/coupling/group.py:19 (module docstring)
+    - src/maddening/core/coupling/group.py:458 (CouplingGroup._warn_about_inert_settings)
+    - src/maddening/core/coupling/group.py:696 (_INERT_RULES)
+  conditions: >-
+    rtol under l2; tolerance under mixed/interface; relaxation outside
+    "fixed"; jacobian_reuse outside "iqn-imvj"; accelerated_fields outside
+    the IQN pair; waveform_iterations / boundary_interpolation without
+    subcycling; linear_solver / strict_convergence under "fori"; the
+    acceleration family and linear_solver at max_iterations=1.
+  oracle: the warnings emitted against a table of read sites written independently in the test.
+  tests:
+    - tests/property/test_coupling_group_inert_knobs.py::test_warns_exactly_for_the_settings_the_configuration_does_not_read
+    - tests/property/test_coupling_group_inert_knobs.py::test_a_group_of_pure_defaults_never_warns
+    - tests/property/test_coupling_group_inert_knobs.py::test_the_validator_and_this_module_agree_on_when_a_field_is_read
+    - tests/core/test_coupling_group_validation.py::test_round_trip_through_to_dict_does_not_warn_twice
+    - tests/core/test_coupling_group_validation.py::test_rtol_set_under_l2_warns
+    - tests/core/test_coupling_group_validation.py::test_atol_set_under_l2_is_silent_because_the_l2_norm_reads_it
+  status: verified
+
+- id: CPL-005
+  area: configuration
+  claim: >-
+    An inert-knob warning (and the fori deprecation warning) is attributed to
+    "the first frame whose module is outside the maddening package and
+    outside the standard library", whether the group was written as
+    CouplingGroup(...), add_coupling_group(...) or auto_couple().
+  sources:
+    - src/maddening/core/coupling/group.py:840 (_caller_stacklevel)
+  conditions: CPython frame introspection.
+  oracle: warning filename and line.
+  tests:
+    - tests/core/test_coupling_group_validation.py::test_inert_knob_warning_points_at_the_direct_construction
+    - tests/core/test_coupling_group_validation.py::test_inert_knob_warning_points_at_the_add_coupling_group_call
+    - tests/core/test_coupling_group_validation.py::test_inert_knob_warning_points_at_the_auto_couple_call
+    - tests/core/test_coupling_group_validation.py::test_fori_deprecation_warning_points_at_the_users_call_too
+  status: verified
+
+- id: CPL-006
+  area: configuration
+  claim: >-
+    "max_iterations 1 is a different branch, not merely the smallest cap: the
+    group takes one staggered pass and returns before the accelerator is
+    built and before the IFT solver is entered.  So acceleration,
+    relaxation, jacobian_reuse, accelerated_fields and linear_solver are all
+    inert there and warn (UserWarning), and solver="ift" differentiates
+    straight through that single pass rather than through a fixed point --
+    the same derivative "fori" would give."
+  sources:
+    - src/maddening/core/coupling/group.py:57 (CouplingGroup, max_iterations)
+    - src/maddening/core/graph_manager.py:3074 (_run_coupled_block_impl, single pass)
+  conditions: max_iterations=1, both solvers, any acceleration.
+  oracle: warnings; one evaluation counted; ift gradient equal to the fori gradient of the same pass.
+  tests:
+    - tests/core/test_coupling_group_validation.py::test_the_acceleration_family_warns_at_a_cap_of_one
+    - tests/core/test_coupling_group_validation.py::test_a_cap_of_one_reports_its_dead_knobs_in_a_single_message
+    - tests/core/test_coupling_convergence_reporting.py::test_a_cap_of_one_costs_one_pass
+    - tests/core/test_coupling_convergence_reporting.py::test_single_pass_group_reports_the_residual_it_measured
+    - tests/core/test_coupling_claims_graphs.py::test_a_single_pass_group_differentiates_like_fori
+  status: verified
+
+- id: CPL-007
+  area: configuration
+  claim: >-
+    At max_iterations=1 "strict_convergence is still honoured, and still
+    reports that the pass did not converge."
+  sources:
+    - src/maddening/core/coupling/group.py:66 (CouplingGroup, max_iterations)
+  conditions: unstated -- read literally, the pass is always reported unconverged.
+  oracle: the single pass's residual against the threshold (raw test, no ratio).
+  tests:
+    - tests/core/test_coupling_convergence_reporting.py::test_single_pass_group_honours_strict_convergence
+    - tests/core/test_coupling_convergence_reporting.py::test_single_pass_group_still_reports_convergence_when_it_converges
+    - tests/core/test_coupling_group_validation.py::test_strict_convergence_survives_a_cap_of_one
+  status: ambiguous
+  proposed_wording: >-
+    At max_iterations=1 the single pass's own residual is the verdict (the
+    raw residual test: there is no ratio, so ratio_usable is False):
+    converged is True when that residual meets the threshold, and
+    strict_convergence raises when it does not.
+  notes: The code measures the verdict; only the docstring reads as "always unconverged".
+
+- id: CPL-008
+  area: configuration
+  claim: >-
+    tolerance: "Since 0.4.0 the L2 norm divides each field's change by that
+    field's own magnitude, so this is a relative tolerance; for fields of
+    order one it is the absolute threshold it used to be."
+  sources:
+    - src/maddening/core/coupling/group.py:69 (CouplingGroup, tolerance)
+    - src/maddening/core/coupling/acceleration.py:237 (coupling_residual_l2)
+  conditions: convergence_norm="l2"; "order one" unstated.
+  oracle: closed-form norm value.
+  tests:
+    - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_known_value
+    - tests/core/test_coupling_claims_helpers.py::test_the_l2_tolerance_is_absolute_only_at_unit_magnitude
+  status: ambiguous
+  proposed_wording: >-
+    The L2 norm divides each field's change by the field's largest magnitude
+    (the larger of its two iterates' max|v|), so tolerance is relative: it
+    equals the pre-0.4.0 absolute threshold exactly when every field's
+    largest magnitude is 1, and is an absolute threshold of
+    tolerance * max|v| per field otherwise.
+
+- id: CPL-009
+  area: configuration
+  claim: >-
+    convergence_norm: "All three scale each field's change by the field's own
+    magnitude, so a group's verdict does not depend on the units its
+    quantities are written in."
+  sources:
+    - src/maddening/core/coupling/group.py:80 (CouplingGroup, convergence_norm)
+    - docs/developer_guide/coupling_algorithm_guide.md#reading-coupling_diagnostics
+  conditions: >-
+    the verdict (converged); atol=0 (a declared dead band is units by
+    definition); every quantity rescaled by the same factor and the map
+    equivariant under it (no absolute forcing); magnitudes inside the normal
+    float range.  Power-of-two factors give bit-identical runs; decimal
+    factors change the inputs' rounding and so can move the pass count, not
+    the verdict.
+  oracle: the same group at another scale (bit-identity for powers of two).
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_the_verdict_does_not_depend_on_the_units_a_field_is_written_in
+    - tests/property/test_differential_coupling_units.py::test_a_coupled_group_takes_the_same_passes_at_every_scale
+    - tests/property/test_coupling_convergence_at_every_field_scale.py::test_a_small_field_is_not_dropped_merely_for_being_small
+  status: verified
+
+- id: CPL-010
+  area: configuration
+  claim: >-
+    "Aitken and IQN do not depend on units ... Each now works on the vectors
+    rescaled by one exact power of two, which leaves every configuration at
+    ordinary scales bit-identical (125 dumped) and makes a group at any
+    power-of-two scale reproduce the unscaled run bit for bit -- which the
+    new units oracle in the coupling differential harness now checks for
+    every acceleration, norm and solver."
+  sources:
+    - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
+    - src/maddening/core/coupling/acceleration.py:1639 (_pow2_normaliser)
+    - src/maddening/core/coupling/acceleration.py:1702 (aitken_relaxation)
+  conditions: >-
+    "any power-of-two scale", every acceleration, norm and solver; the
+    harness checks 2**-53 to 2**66 only.  Below about 2**-115 the node
+    arithmetic of the fixture itself underflows (products of O(1e-3) gains
+    and O(1e-35) states), so a scale must keep the map's own operands
+    normal.
+  oracle: bit-identity of passes, verdict, residual and state / s against the unscaled run.
+  tests:
+    - tests/property/test_differential_coupling_units.py::test_a_coupled_group_takes_the_same_passes_at_every_scale
+    - tests/core/test_coupling_accelerators_are_units_invariant.py::test_aitken_omega_is_the_same_at_every_scale
+    - tests/core/test_coupling_claims_graphs.py::test_a_group_at_2_to_the_minus_110_takes_the_unscaled_passes
+  status: failing
+  finding: >-
+    At 2**-110 (states ~1e-33, a field's one-ulp change ~1e-40, subnormal)
+    the "aitken" and "fixed" steps are not scale-free: Aitken on a
+    Gauss-Seidel triangle takes 42 passes where the unscaled run takes 45,
+    and "fixed" (relaxation 0.8) returns a different state and residual on
+    the same pass count, while "none" and the IQN pair reproduce the
+    unscaled run bit for bit.  The accelerators subtract the iterates
+    (residual = x_raw - x_old in aitken_relaxation, x_raw - x_old in
+    fixed_relaxation) before any rescaling, and a subnormal difference is
+    flushed to zero on XLA's CPU backend.  Guess:
+    src/maddening/core/coupling/acceleration.py:1700 and :1933.  Reproducer:
+    the cited test.
+
+- id: CPL-011
+  area: configuration
+  claim: >-
+    atol is a dead band: "a field whose magnitude does not exceed atol counts
+    as being at zero, leaves the norm entirely and is no longer held to any
+    criterion"; the default 0.0 "excludes only a field with no scale at
+    all", and a group every one of whose moving fields is excluded "reports
+    residual=0.0, converged=True after one pass however far it is from its
+    fixed point".
+  sources:
+    - src/maddening/core/coupling/group.py:89 (CouplingGroup, atol)
+    - src/maddening/core/coupling/acceleration.py:65 (_scaled_change)
+  conditions: all three norms.
+  oracle: closed-form norm values; distance to the fixed point of the kept field.
+  tests:
+    - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_ignores_a_field_inside_the_dead_band
+    - tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
+    - tests/core/test_coupling_error_bound.py::test_a_field_that_is_legitimately_zero_does_not_block_the_group
+    - tests/core/test_coupling_non_finite_state.py::test_the_dead_band_still_drops_a_field_that_is_exactly_zero
+    - tests/core/test_coupling_spectral_bound_certificate.py::test_a_loop_the_dead_band_hides_from_the_residual_is_seen_by_the_bound
+  status: verified
+
+- id: CPL-012
+  area: configuration
+  claim: >-
+    diagnostics: "Under solver="ift" the iteration count, the final residual
+    and the amplification are stored in _meta (and reported by
+    coupling_diagnostics()) whatever this says; True adds the spectral keys
+    ... and the IFT gradient-error bound ...  Under solver="fori" True is
+    what stores the iteration count, residual and amplification at all; the
+    spectral and gradient keys stay NaN there."
+  sources:
+    - src/maddening/core/coupling/group.py:110 (CouplingGroup, diagnostics)
+    - src/maddening/core/graph_manager.py:8247 (coupling_diagnostics, reported for every group)
+  conditions: both solvers.
+  oracle: presence and NaN-ness of the report keys.
+  tests:
+    - tests/core/test_coupling_convergence.py::TestDiagnostics::test_diagnostics_always_reported_under_default_solver
+    - tests/core/test_coupling_convergence.py::TestDiagnostics::test_diagnostics_off_by_default_on_fori
+    - tests/core/test_coupling_error_bound.py::test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed
+  status: verified
+
+- id: CPL-013
+  area: configuration
+  claim: >-
+    The diagnostics cost "8 Jacobian-vector products for the spectrum and
+    11 + k + 4 n_c more for the bound per group per step (k <= 8, n_c the
+    group's floating constants)"; arnoldi_spectral_radius's n_steps "is the
+    number of Jacobian-vector products the call costs, with or without
+    v_extra".
+  sources:
+    - src/maddening/core/coupling/group.py:116 (CouplingGroup, diagnostics)
+    - src/maddening/core/coupling/acceleration.py:861 (arnoldi_spectral_radius)
+    - src/maddening/core/graph_manager.py:691 (_gradient_error_bound_at)
+  conditions: solver="ift", diagnostics=True.
+  oracle: Jacobian-vector products counted by evaluating the analysis eagerly with vmap unrolled.
+  tests:
+    - tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_jacobian_vector_products
+    - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_k_plus_four_n_c_products
+  status: verified
+
+- id: CPL-014
+  area: configuration
+  claim: >-
+    jacobian_reuse: "For "iqn-imvj": number of V/W columns retained from the
+    previous timestep.  0 means no reuse (same as IQN-ILS)."
+  sources:
+    - src/maddening/core/coupling/group.py:195 (CouplingGroup, jacobian_reuse)
+  conditions: acceleration="iqn-imvj", both solvers.
+  oracle: bit-identity with acceleration="iqn-ils" over several steps.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_imvj_without_reuse_is_iqn_ils
+    - tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve
+  status: verified
+
+- id: CPL-015
+  area: configuration
+  claim: >-
+    relaxation / acceleration="fixed": constant relaxation
+    x + relaxation * (F(x) - x); "1.0 is no relaxation".
+  sources:
+    - src/maddening/core/coupling/group.py:131 (CouplingGroup, relaxation)
+    - src/maddening/core/coupling/acceleration.py:1910 (fixed_relaxation)
+  conditions: acceleration="fixed".
+  oracle: closed form; bit-identity with "none" at relaxation=1.
+  tests:
+    - tests/core/test_coupling_convergence.py::TestFixedRelaxation::test_fixed_relaxation_unit
+    - tests/core/test_coupling_convergence.py::TestFixedRelaxation::test_fixed_relaxation_omega_one_noop
+    - tests/core/test_coupling_convergence.py::TestFixedRelaxation::test_fixed_relaxation_default_noop
+  status: verified
+
+- id: CPL-016
+  area: configuration
+  claim: >-
+    iteration_mode: ""gauss-seidel" updates nodes sequentially (each sees
+    current-iteration values from earlier nodes).  "jacobi" updates all
+    nodes from the frozen previous-iteration state."
+  sources:
+    - src/maddening/core/coupling/group.py:137 (CouplingGroup, iteration_mode)
+  conditions: both solvers; the sweep order is the compiled schedule.
+  oracle: one pass against the float64 Gauss-Seidel and Jacobi sweep of a linear group.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_one_pass_reads_the_iterate_its_mode_documents
+    - tests/core/test_coupling_convergence.py::TestJacobiIteration::test_jacobi_produces_different_results
+  status: verified
+
+- id: CPL-017
+  area: configuration
+  claim: >-
+    subcycling: "Fast nodes take multiple sub-steps per coupling iteration: a
+    whole number, macro_dt / node_dt, macro_dt the largest timestep in the
+    group.  Every member's timestep must therefore divide macro_dt (to a
+    relative 1e-9); compile() refuses one that does not."
+  sources:
+    - src/maddening/core/coupling/group.py:161 (CouplingGroup, subcycling)
+    - src/maddening/core/graph_manager.py:985 (_subcycling_ratio_errors)
+  conditions: subcycling=True with differing member timesteps.
+  oracle: refusal; the hand-written sub-stepped reference node.
+  tests:
+    - tests/core/test_subcycling_ratio_refusal.py::test_a_member_whose_timestep_does_not_divide_is_refused
+    - tests/core/test_subcycling_ratio_refusal.py::test_the_tolerance_admits_float_noise_and_nothing_coarser
+    - tests/core/test_subcycling_ratio_refusal.py::test_a_member_that_divides_is_accepted_and_keeps_the_graphs_clock
+    - tests/property/test_differential_schedules.py::test_a_subcycled_group_steps_like_its_uniform_rate_reference
+    - tests/core/test_coupling_subcycling.py::TestSubcyclingValidation::test_mixed_timestep_without_subcycling_raises
+  status: verified
+
+- id: CPL-018
+  area: configuration
+  claim: >-
+    boundary_interpolation: "constant" and "linear" compute the same input
+    "when every source of the sub-cycled node is scheduled after it, under
+    iteration_mode="jacobi" ... and at exact stationarity -- but they
+    compile to different programs, so they agree to float32 round-off, not
+    to the bit ... Otherwise they differ by about the tolerance per step";
+    ""quadratic" ... is exactly "linear"."
+  sources:
+    - src/maddening/core/coupling/group.py:170 (CouplingGroup, boundary_interpolation)
+    - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
+    - docs/validation/known_anomalies.yaml (MADD-ANO-027)
+  conditions: subcycling=True with a member that sub-steps.
+  oracle: bit-identity (quadratic vs linear); float32 round-off bound (linear vs constant where documented).
+  tests:
+    - tests/property/test_differential_schedules.py::test_linear_interpolation_is_constant_where_documented_and_quadratic_is_linear
+    - tests/core/test_coupling_waveform_report.py::test_the_interpolation_modes_coincide_when_the_source_is_scheduled_after
+    - tests/core/test_phases_5_7_8.py::TestQuadraticInterpolation::test_quadratic_interpolation_is_linear_interpolation_today
+  status: verified
+
+- id: CPL-019
+  area: configuration
+  claim: >-
+    waveform_iterations and boundary_interpolation are read only on a group
+    that actually sub-cycles: set on a group whose members share one
+    timestep they are ignored and compile() warns ("subcycling=True was
+    demoted because every node in the group has the same timestep").
+  sources:
+    - src/maddening/core/coupling/group.py:590 (inert_uniform_timestep_message)
+  conditions: subcycling=True, uniform timesteps.
+  oracle: warning at compile.
+  tests:
+    - tests/core/test_coupling_subcycling.py::TestSubcyclingValidation::test_the_knobs_a_demoted_subcycling_group_never_reads_warn
+    - tests/core/test_coupling_subcycling.py::TestSubcyclingValidation::test_a_genuinely_subcycled_group_is_not_warned_about
+  status: verified
+
+- id: CPL-020
+  area: configuration
+  claim: >-
+    predictor: ""linear" uses linear extrapolation from the last two
+    converged states, "quadratic" uses quadratic extrapolation from the last
+    three converged states.  Reduces iteration count for smoothly varying
+    problems"; only floating fields are extrapolated and the converged
+    answer does not move.
+  sources:
+    - src/maddening/core/coupling/group.py:223 (CouplingGroup, predictor)
+    - src/maddening/core/graph_manager.py:3886 (_run_coupled_block_impl, predictor)
+  conditions: any acceleration; a multi-rate group learns only from applied solves (CPL-073).
+  oracle: iteration counts with and without; converged state against the predictor-free run; closed-form leaves.
+  tests:
+    - tests/core/test_coupling_predictor.py::TestPredictorReducesIterations::test_linear_predictor_reduces_iterations
+    - tests/core/test_coupling_predictor.py::TestPredictorReducesIterations::test_predictor_converges_to_same_result
+    - tests/core/test_coupling_non_float_leaves.py::test_predictor_leaves_integer_fields_alone
+    - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_a_predictor_starts_from_an_iterate_that_keeps_the_non_floating_fields
+  status: verified
+
+- id: CPL-021
+  area: configuration
+  claim: >-
+    to_dict writes every field ("Driven by dataclasses.fields rather than a
+    hand-written list of keys"), nodes as a sorted list, accelerated_fields
+    as a dict of lists; coupling_group_kwargs is the inverse and refuses a
+    string node list.
+  sources:
+    - src/maddening/core/coupling/group.py:340 (CouplingGroup.to_dict)
+    - src/maddening/core/coupling/group.py:793 (coupling_group_kwargs)
+  conditions: config and USD round trips.
+  oracle: the reloaded group equals the original, field by field; the reloaded graph reaches the same state.
+  tests:
+    - tests/core/test_coupling_group_serialisation.py::test_to_dict_writes_every_field_of_the_dataclass
+    - tests/core/test_coupling_group_serialisation.py::test_every_field_round_trips_through_a_config
+    - tests/core/test_coupling_group_serialisation.py::test_a_string_node_list_is_not_five_one_letter_nodes
+    - tests/core/test_coupling_group_serialisation.py::test_a_reloaded_group_reaches_the_same_state
+    - tests/property/test_round_trips.py::test_a_config_round_trip_preserves_every_coupling_group_field
+  status: verified
+
+- id: CPL-022
+  area: configuration
+  claim: >-
+    add_coupling_group refuses a group overlapping an existing one
+    (ValueError) and an unknown node name (KeyError); two groups whose keys
+    (sorted names joined with "+") or _meta slot names would collide are
+    refused at registration.
+  sources:
+    - src/maddening/core/graph_manager.py:6100 (GraphManager.add_coupling_group)
+    - src/maddening/core/graph_manager.py:925 (_refuse_colliding_group_keys)
+  conditions: add_coupling_group, auto_couple, config load.
+  oracle: exception types.
+  tests:
+    - tests/core/test_coupling.py::TestCouplingGroupManagement::test_overlapping_groups_rejected
+    - tests/core/test_coupling.py::TestCouplingGroupManagement::test_add_coupling_group_nonexistent_node
+    - tests/core/test_coupling_group_validation.py::test_two_groups_that_would_share_a_diagnostics_key_are_refused
+    - tests/core/test_coupling_group_validation.py::test_a_group_whose_key_spells_another_groups_slot_is_refused
+    - tests/core/test_coupling_group_validation.py::test_a_group_whose_key_spells_another_groups_waveform_sum_slot_is_refused
+  status: verified
+
+- id: CPL-023
+  area: configuration
+  claim: >-
+    auto_couple "creates a coupling group for each SCC with more than one
+    node.  Existing coupling groups are cleared first"; every group is built
+    before any is registered, so a refused kwarg leaves the old groups, and
+    the graph is marked dirty even when nothing is found.
+  sources:
+    - src/maddening/core/graph_manager.py:6187 (GraphManager.auto_couple)
+  conditions: any graph.
+  oracle: the groups registered after the call.
+  tests:
+    - tests/core/test_coupling.py::TestAutoCouple::test_auto_couple_finds_cycle
+    - tests/core/test_coupling.py::TestAutoCouple::test_auto_couple_multiple_cycles
+    - tests/core/test_coupling.py::TestAutoCouple::test_auto_couple_clears_previous_groups
+    - tests/core/test_coupling.py::TestAutoCouple::test_auto_couple_dirties_the_graph_even_when_it_finds_nothing
+    - tests/core/test_graph_mutation_atomicity.py::test_auto_couple_keeps_the_groups_it_cannot_replace
+  status: verified
+
+- id: CPL-024
+  area: configuration
+  claim: >-
+    "All edges between nodes in the group use current-iteration values rather
+    than staggered (previous-timestep) values."
+  sources:
+    - src/maddening/core/graph_manager.py:6110 (GraphManager.add_coupling_group)
+    - src/maddening/core/coupling/group.py:8 (module docstring)
+  conditions: any group.
+  oracle: the coupled step differs from the staggered one and reaches the float64 fixed point.
+  tests:
+    - tests/core/test_coupling.py::TestGaussSeidel::test_iteration_actually_runs
+    - tests/property/test_differential_fixed_point.py::test_converged_means_within_the_threshold_of_the_exact_fixed_point
+  status: verified
+
+- id: CPL-025
+  area: configuration
+  claim: >-
+    "Only back-edges are staggered": "A feedback loop is logged at INFO level
+    ... Back-edges are staggered to the previous timestep, so intentional
+    coupling loops also run correctly", and validate() says only of a cycle
+    that its "Back-edges will use previous-timestep values (staggering)".
+    An edge that is not on any cycle -- from a coupling group to a node
+    downstream of it -- is therefore read in the same step.
+  sources:
+    - docs/user_guide/quickstart.md:119 (Advisories on multi-node graphs)
+    - src/maddening/core/graph_manager.py:6449 (GraphManager.validate, cycle detected)
+    - src/maddening/core/schedule.py:55 (topological_sort)
+  conditions: 'unstated: the order the nodes were added in.'
+  oracle: the downstream node's state against the same graph built with the downstream node added last.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_a_node_downstream_of_a_group_reads_it_in_the_same_step
+  status: failing
+  finding: >-
+    A node downstream of a coupling group (not on any cycle) that was added
+    to the graph before the group's members reads the group's output from
+    the previous step, silently: compile() and validate() say nothing, and
+    the same graph built in another order gives a different trajectory
+    (sink.x 0.409 against 0.821 after one step on a two-relay group with a
+    driver and a sink).  Kahn's sort leaves every descendant of a cycle
+    unreached and topological_sort appends them in insertion order, so the
+    sink lands before the group and identify_back_edges classifies its
+    acyclic input as a back edge.  Guess: src/maddening/core/schedule.py:55
+    (the unreached nodes should be ordered by the condensation of their
+    strongly connected components, not by insertion order).
+
+# ---------------------------------------------------------------------------
+# Solvers: ift and fori
+# ---------------------------------------------------------------------------
+
+- id: CPL-030
+  area: solvers
+  claim: >-
+    solver="ift": "a jax.lax.while_loop that exits as soon as the group's
+    convergence norm meets its threshold, and differentiates via the implicit
+    function theorem at the fixed point -- a custom_jvp rule, so jax.jvp /
+    jacfwd and jax.grad / jacrev both work through the step.  Every
+    acceleration, iteration_mode, convergence_norm and diagnostics setting
+    is supported."
+  sources:
+    - src/maddening/core/coupling/group.py:230 (CouplingGroup, solver)
+    - src/maddening/core/graph_manager.py:1745 (_ift_solve_impl)
+  conditions: any configuration.
+  oracle: forward and reverse derivatives against fori and against each other (adjoint identity).
+  tests:
+    - tests/core/test_coupling_ift_forward_mode.py::test_jvp_through_jitted_step_matches_fori
+    - tests/core/test_coupling_ift_forward_mode.py::test_jacfwd_and_jacrev_agree_and_match_fori
+    - tests/core/test_coupling_ift_forward_mode.py::test_forward_reverse_adjoint_identity
+    - tests/core/test_coupling_while_default.py::test_forward_and_reverse_ad_through_previously_excluded_configs
+    - tests/core/test_coupling_while_default.py::test_exits_early_and_reports_convergence
+  status: verified
+
+- id: CPL-031
+  area: solvers
+  claim: >-
+    solver="fori" "is the legacy path ... Deprecated: emits
+    DeprecationWarning and will be removed in the next minor release.
+    Forward-mode AD does not work through it."
+  sources:
+    - src/maddening/core/coupling/group.py:241 (CouplingGroup, solver)
+  conditions: solver="fori".
+  oracle: the warning; jax.jvp through a fori-coupled step.
+  tests:
+    - tests/core/test_coupling_while_default.py::test_default_is_ift_and_fori_is_deprecated
+    - tests/core/test_coupling_claims_graphs.py::test_forward_mode_through_a_fori_group_is_refused
+  status: failing
+  finding: >-
+    Forward mode does work through solver="fori": jax.jvp of a fori-coupled
+    step returns a finite tangent (24.31 on a linear pair) that matches the
+    ift tangent.  The sentence is left from the custom_vjp era and
+    understates the legacy path.  Guess: src/maddening/core/coupling/group.py:245
+    (a docs fix: drop the sentence or say forward mode works by unrolling).
+
+- id: CPL-032
+  area: solvers
+  claim: >-
+    "The two return the same state: both stop on the iterate whose residual
+    met the criterion rather than on the update it went on to produce, so
+    migrating a graph off "fori" does not change the forward answer.  The
+    gradients differ by design ... and they agree to round-off once the
+    criterion is tight enough for the two to be the same point."
+  sources:
+    - src/maddening/core/coupling/group.py:248 (CouplingGroup, solver)
+    - src/maddening/core/graph_manager.py:1422 (_fixed_point_while)
+  conditions: 'threshold above the norm''s float32 floor (below it the two loops may stop on different passes: CPL-063).'
+  oracle: state equality to float32 round-off; gradients against each other at a tight tolerance.
+  tests:
+    - tests/core/test_coupling_solver_equivalence.py::test_the_two_solvers_return_the_same_state_on_a_converged_exit
+    - tests/core/test_coupling_solver_equivalence.py::test_the_state_returned_is_the_one_measured_not_its_successor
+    - tests/core/test_coupling_solver_equivalence.py::test_both_gradients_agree_once_the_forward_has_converged
+    - tests/property/test_differential_coupling_solvers.py::test_the_two_solvers_return_the_same_steps_on_generated_spectra
+  status: verified
+
+- id: CPL-033
+  area: solvers
+  claim: >-
+    strict_convergence: "raise a runtime error (via equinox.error_if,
+    jit-safe) when the group exits at max_iterations and the state it
+    returns is still outside its threshold ... The test is on that state's
+    own residual, so a group that arrives on its last pass runs rather than
+    raising.  Default False: the condition is only reported."
+  sources:
+    - src/maddening/core/coupling/group.py:257 (CouplingGroup, strict_convergence)
+  conditions: solver="ift".
+  oracle: raises at 2x the threshold, not at the threshold; residual inside with the estimate outside raises.
+  tests:
+    - tests/core/test_strict_convergence_threshold.py::test_strict_convergence_raises_at_twice_the_threshold
+    - tests/core/test_strict_convergence_threshold.py::test_strict_convergence_accepts_an_estimate_exactly_at_the_threshold
+    - tests/core/test_strict_convergence_threshold.py::test_strict_convergence_tests_the_error_estimate_not_the_raw_residual
+    - tests/core/test_coupling_convergence_reporting.py::test_a_group_that_reached_its_fixed_point_reports_it_converged
+    - tests/core/test_coupling_while_default.py::test_unconverged_is_reported_not_raised_by_default
+  status: verified
+
+- id: CPL-034
+  area: solvers
+  claim: >-
+    strict_convergence on a multi-rate graph: "only a step that applies the
+    group's solve is checked", including under vmap over states at different
+    phases.
+  sources:
+    - src/maddening/core/coupling/group.py:267 (CouplingGroup, strict_convergence)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-044)
+  conditions: multi-rate graph, group rate divider above one.
+  oracle: no raise about discarded solves; a raise about an applied one.
+  tests:
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_strict_convergence_does_not_raise_about_a_discarded_solve
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_strict_convergence_still_raises_about_an_applied_solve
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_a_batched_step_keeps_each_elements_firing_rule
+  status: verified
+
+- id: CPL-035
+  area: solvers
+  claim: >-
+    "With waveform_iterations > 1 on a sub-cycling group every sweep is
+    checked, so a step raises when an earlier sweep stops at max_iterations
+    unconverged even if the last sweep -- and so the returned state and its
+    gradient -- converges; coupling_diagnostics()["converged"] is the last
+    sweep's verdict."
+  sources:
+    - src/maddening/core/coupling/group.py:271 (CouplingGroup, strict_convergence)
+    - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
+  conditions: solver="ift", subcycling with waveform_iterations > 1.
+  oracle: the report says converged=True with iterations at the cap, and the strict group raises on the same step.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
+  status: verified
+
+- id: CPL-036
+  area: solvers
+  claim: >-
+    linear_solver="dense": "the path materialises the full N x N Jacobian and
+    the identity basis used to build it, so its peak working set is
+    2 * N**2 * itemsize"; the guide adds that XLA's compiled-module memory
+    analysis "agrees with 2 * N**2 * 4 to within a few tens of kilobytes at
+    every size from 64 DOF to 3.6e5".
+  sources:
+    - src/maddening/core/coupling/group.py:286 (CouplingGroup, linear_solver)
+    - docs/developer_guide/coupling_algorithm_guide.md#linear_solverdense-is-not-an-escape-hatch-on-a-grid
+    - src/maddening/core/graph_manager.py:1803 (_dense_peak)
+  conditions: 'unstated: which differentiation mode.'
+  oracle: XLA's compiled memory analysis of the dense solve (temp bytes) at N = 256 and 512, jaxlib on the box.
+  tests:
+    - tests/core/test_coupling_claims_helpers.py::test_the_dense_adjoint_peaks_at_two_jacobians_in_reverse_mode
+  status: ambiguous
+  proposed_wording: >-
+    In reverse mode (jax.grad: the transposed solve) the dense path peaks at
+    2 * N**2 * itemsize.  In forward mode (jax.jvp / jacfwd, the FMI FORWARD
+    derivative) a dense coupling Jacobian costs 3 * N**2 * itemsize: the
+    identity basis, the Jacobian-vector products and I - J are live at once.
+  notes: >-
+    Measured on jaxlib 0.11.0, CPU: forward 3.00 N**2 floats for a dense or
+    non-linear map, 2.00 for a diagonal one; reverse 2.00.  The forward
+    reading is not pinned by a strict xfail: XLA's buffer assignment can
+    differ between the jaxlib versions CI runs, and a strict xfail that
+    passes on one lane fails it.  Reproducer: compile
+    jax.jit(lambda b: _ift_linear_solve(mv, b, "dense")) for a dense
+    non-linear matvec at N = 512 and read memory_analysis().temp_size_in_bytes.
+
+- id: CPL-037
+  area: solvers
+  claim: >-
+    "The MADDENING_IFT_DENSE_SOLVE=1 env var forces "dense" regardless of
+    this setting and overrides for triage", and "dense" agrees with "gmres".
+  sources:
+    - src/maddening/core/coupling/group.py:300 (CouplingGroup, linear_solver)
+    - src/maddening/core/graph_manager.py:1947 (_ift_linear_solve)
+  conditions: solver="ift".
+  oracle: the backend actually called; the gradient against gmres.
+  tests:
+    - tests/core/test_coupling_ift_forward_mode.py::test_jvp_linear_solver_backends
+    - tests/core/test_coupling_claims_helpers.py::test_the_dense_env_var_overrides_the_configured_solver
+  status: verified
+
+- id: CPL-038
+  area: solvers
+  claim: >-
+    GMRES runs with "restart = min(N, 50)" and max_steps >= 4 * restart; a
+    failed Krylov solve at N <= _DENSE_ADJOINT_FALLBACK_MAX_DOF (50) is
+    re-solved densely, and above it raises a MADDENING error that names the
+    remedies and prices the dense path at the caller's N.
+  sources:
+    - src/maddening/core/graph_manager.py:1854 (_ift_linear_solve)
+    - src/maddening/core/graph_manager.py:1800 (_DENSE_ADJOINT_FALLBACK_MAX_DOF)
+    - docs/developer_guide/coupling_algorithm_guide.md#linear_solverdense-is-not-an-escape-hatch-on-a-grid
+  conditions: linear_solver="gmres".
+  oracle: the GMRES construction arguments; the analytic gradient of stiff groups; the raised message.
+  tests:
+    - tests/core/test_coupling_ift_lineax.py::test_gmres_call_uses_explicit_restart_at_least_minN50
+    - tests/core/test_coupling_ift_lineax.py::test_default_adjoint_solve_returns_the_analytic_gradient_when_stiff
+    - tests/core/test_coupling_ift_lineax.py::test_stiff_adjoint_agrees_across_linear_solvers
+    - tests/core/test_coupling_ift_lineax.py::test_unaffordable_dense_fallback_names_the_remedies_that_work
+  status: verified
+
+- id: CPL-039
+  area: solvers
+  claim: >-
+    BiCGStab is not exposed because "lineax 0.0.7 ships lineax.BiCGStab, but
+    it returns NaN when driving a FunctionLinearOperator".
+  sources:
+    - src/maddening/core/coupling/group.py:307 (CouplingGroup, linear_solver)
+  conditions: the lineax version installed.
+  oracle: the BiCGStab result on 0.5 * I.
+  tests:
+    - tests/core/test_coupling_ift_lineax.py::test_bicgstab_known_breakdown_with_function_operator
+  status: verified
+
+# ---------------------------------------------------------------------------
+# Convergence norms and the stopping criterion
+# ---------------------------------------------------------------------------
+
+- id: CPL-040
+  area: norms
+  claim: >-
+    coupling_residual_l2 is the "L2 norm of the relative state change between
+    iterations.  Each field's change is divided by the field's own magnitude
+    before the norm is taken"; coupling_residual_mixed is the RMS of
+    |new_i - old_i| / (rtol * ref_field) over every float field above the
+    dead band, ref_field = max|v| over the field, "converged when the result
+    is <= 1.0".
+  sources:
+    - src/maddening/core/coupling/acceleration.py:237 (coupling_residual_l2)
+    - src/maddening/core/coupling/acceleration.py:289 (coupling_residual_mixed)
+    - src/maddening/core/coupling/acceleration.py:41 (_field_reference)
+  conditions: float fields; integer, boolean and key leaves are skipped.
+  oracle: closed form.
+  tests:
+    - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_known_value
+    - tests/core/test_coupling_convergence.py::TestResidualNorms::test_mixed_norm_known_value
+    - tests/core/test_coupling_convergence.py::TestResidualNorms::test_mixed_with_arrays
+    - tests/core/test_coupling_norms_skip_non_floating_fields.py::test_an_old_iterate_without_its_non_floating_fields_measures_the_same
+  status: verified
+
+- id: CPL-041
+  area: norms
+  claim: >-
+    coupling_residual_interface: "Computes the difference in interface values
+    (edge source fields) between two successive iterations.  Only the fields
+    that appear on intra-group edges are compared", scaled as the mixed norm,
+    with the edge's transform applied to both iterates.
+  sources:
+    - src/maddening/core/coupling/acceleration.py:358 (coupling_residual_interface)
+  conditions: 'convergence_norm="interface"; state edges (a flux edge is refused at compile: CPL-075).'
+  oracle: closed form over the transformed edge values.
+  tests:
+    - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
+    - tests/core/test_phases_5_7_8.py::TestInterfaceResidual::test_interface_residual_detects_difference
+  status: verified
+
+- id: CPL-042
+  area: norms
+  claim: >-
+    The 0.4.0 mixed scale "replaces the elementwise atol + rtol * |v_i|
+    scale ... for fields well above atol / rtol the two formulas agree to
+    within 1 + atol/(rtol*|v|)."
+  sources:
+    - src/maddening/core/coupling/acceleration.py:300 (coupling_residual_mixed)
+  conditions: 'unstated: a scalar field, or every entry of an array field.'
+  oracle: the old elementwise formula evaluated beside the new one.
+  tests:
+    - tests/core/test_coupling_claims_helpers.py::test_the_old_and_new_mixed_scales_agree_only_at_the_fields_largest_entry
+  status: ambiguous
+  proposed_wording: >-
+    For a scalar field (or an entry at its field's largest magnitude) well
+    above atol / rtol the two scales agree to within 1 + atol / (rtol |v|).
+    An entry smaller than its field's largest is measured against the
+    field's scale, so the new norm can be smaller than the old elementwise
+    one by up to max|v| / |v_i|.
+
+- id: CPL-043
+  area: norms
+  claim: >-
+    "A field the criterion cannot be evaluated on fails it; it does not leave
+    it": a non-finite reference, or a scale whose reciprocal is not a normal
+    number of the field's dtype, makes every entry inf and the field active,
+    so every norm is inf and converged is False -- "a float32 field within a
+    factor of four of overflow can never read as converged".
+  sources:
+    - src/maddening/core/coupling/acceleration.py:88 (_scaled_change)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-019)
+  conditions: >-
+    the non-finite rule under every norm; the overflow rule is "only
+    reachable under the L2 norm's rtol=1.0" -- the mixed and interface
+    scales rtol * max|v| stay normal far above it.
+  oracle: closed form; a constant field (an exact fixed point) near overflow.
+  tests:
+    - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_is_active_and_contributes_inf
+    - tests/core/test_coupling_non_finite_state.py::test_a_reference_beyond_the_dtype_range_contributes_inf
+    - tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf
+    - tests/core/test_coupling_claims_helpers.py::test_only_the_l2_norm_fails_a_field_near_overflow
+  status: verified
+
+- id: CPL-044
+  area: norms
+  claim: >-
+    The underflow ends: a field above the dead band whose scale rtol * ref is
+    subnormal is measured on the pair rescaled by 1 / finfo.tiny, "the same
+    quotient"; and wherever a one-ulp change is below the normal range the
+    pair is rescaled before it is subtracted, so "the norm then says the
+    same thing about a group at 1e-35 as about the same group scaled by any
+    power of two into the normal range -- to the bit".
+  sources:
+    - src/maddening/core/coupling/acceleration.py:120 (_scaled_change)
+    - src/maddening/core/coupling/acceleration.py:138 (_scaled_change)
+  conditions: 'all three norms, both solvers; acceleration="none" (the accelerators: CPL-010).'
+  oracle: the same group scaled by 2**-shift against its normal-range control, bit for bit.
+  tests:
+    - tests/core/test_coupling_non_finite_state.py::test_a_field_whose_scale_underflows_is_still_measured
+    - tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow
+    - tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_change_underflow
+  status: verified
+
+- id: CPL-045
+  area: norms
+  claim: >-
+    "A field whose magnitude is itself subnormal is below what the dtype
+    resolves: a flush-to-zero backend (XLA's CPU backend is one) reads it as
+    zero and it leaves the norm as a field at zero does."
+  sources:
+    - src/maddening/core/coupling/acceleration.py:156 (_scaled_change)
+  conditions: CPU backend (flush to zero), float32.
+  oracle: the norm of a field at 1e-40 changing by 100%.
+  tests:
+    - tests/core/test_coupling_claims_helpers.py::test_a_subnormal_field_reads_as_zero_and_leaves_the_norm
+  status: verified
+
+- id: CPL-046
+  area: norms
+  claim: >-
+    "Every other field is measured by the expressions the norms always
+    evaluated, selected by a where, so its value -- and the compiled loop it
+    sits in -- is bit-identical to what it was before either guard existed."
+  sources:
+    - src/maddening/core/coupling/acceleration.py:159 (_scaled_change)
+  conditions: finite, in-range fields.
+  oracle: the guarded helper against the bare formula.
+  tests:
+    - tests/core/test_coupling_non_finite_state.py::test_a_finite_field_is_bit_identical_through_the_guard
+  status: verified
+
+- id: CPL-047
+  area: criterion
+  claim: >-
+    error_amplification estimates 1 / (1 - rho) with rho = max(r_k / r_{k-1},
+    sqrt(r_k / r_{k-2})), and "Returns 0.0 -- an impossible amplification,
+    since a valid one is always >= 1 -- when the estimate must be rejected: a
+    non-decreasing residual (rho >= 1 ...), a zero or non-finite predecessor,
+    or a non-finite current residual"; prev2 defaults to prev.
+  sources:
+    - src/maddening/core/coupling/acceleration.py:411 (error_amplification)
+    - src/maddening/core/graph_manager.py:7767 (coupling_diagnostics, amplification)
+  conditions: any residual triple.
+  oracle: closed form at every rejection edge.
+  tests:
+    - tests/core/test_coupling_claims_helpers.py::test_error_amplification_follows_its_formula_at_every_edge
+    - tests/core/test_coupling_error_bound.py::test_the_bound_recovers_the_contraction_rate_of_a_known_fixed_point
+    - tests/core/test_coupling_error_bound.py::test_an_alternating_sequence_is_not_flattered_by_its_good_half
+    - tests/core/test_coupling_error_bound.py::test_a_growing_residual_is_rejected_rather_than_extrapolated
+  status: verified
+
+- id: CPL-048
+  area: criterion
+  claim: >-
+    estimated_error is "residual * step_scale * amplification, floored at
+    residual ... Still never smaller than residual, so a group that meets
+    this criterion also meets the raw residual test it replaces"; the
+    criterion is "never looser than the raw one it replaces".
+  sources:
+    - src/maddening/core/coupling/acceleration.py:599 (estimated_error)
+    - src/maddening/core/graph_manager.py:1336 (_fixed_point_while)
+  conditions: any amplification, rejected (0.0) included; any step scale.
+  oracle: closed form; the criterion against the raw residual test over generated groups.
+  tests:
+    - tests/core/test_coupling_claims_helpers.py::test_estimated_error_is_never_below_the_residual
+    - tests/property/test_coupling_error_bound.py::test_the_new_criterion_is_never_looser_than_the_residual_test
+  status: verified
+
+- id: CPL-049
+  area: criterion
+  claim: >-
+    relaxation_step_scale is omega under acceleration="fixed" and 1.0
+    otherwise, which "puts the series back on the step the iteration takes":
+    over-relaxation no longer understates (est/true "0.992 to 4.53 over an
+    88-point (gain, omega) grid, exactly 1.0 wherever the relaxed iteration
+    does not overshoot").
+  sources:
+    - src/maddening/core/coupling/acceleration.py:504 (relaxation_step_scale)
+    - docs/release_notes/v0.4.0.md#the-error-estimate-and-the-flag-that-does-not-certify-it
+  conditions: 'acceleration="fixed", past the first loop pass (the first pass: CPL-050).'
+  oracle: distance to the exact float64 fixed point.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor
+    - tests/property/test_differential_fixed_point.py::test_the_estimate_is_the_distance_for_fixed_relaxation_past_the_first_pass
+  status: verified
+
+- id: CPL-050
+  area: criterion
+  claim: >-
+    "On the first pass only, an under-relaxed group translates the rate it
+    read into the relaxed iteration's ... amplification divided by omega";
+    over-relaxation and every other acceleration are unchanged, and a
+    rejected ratio stays rejected.
+  sources:
+    - src/maddening/core/coupling/acceleration.py:547 (first_pass_relaxed_amplification)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-073)
+  conditions: acceleration="fixed", relaxation < 1, the first loop pass.
+  oracle: distance to the exact fixed point; both solvers' pass and verdict.
+  tests:
+    - tests/core/test_coupling_first_pass_relaxed_rate.py::test_converged_is_within_the_threshold_under_under_relaxation
+    - tests/core/test_coupling_first_pass_relaxed_rate.py::test_both_solvers_stop_on_the_same_pass_and_report_the_same_verdict
+    - tests/core/test_coupling_first_pass_relaxed_rate.py::test_under_relaxation_divides_the_first_pass_only_and_keeps_a_rejection
+    - tests/property/test_differential_fixed_point.py::test_converged_on_the_first_pass_under_under_relaxation_is_within_the_threshold
+  status: verified
+
+- id: CPL-051
+  area: criterion
+  claim: >-
+    "converged : the error estimate met the group's threshold (tolerance for
+    the L2 norm, 1.0 for the mixed / interface norms), compared in the
+    residual's dtype with the threshold rounded to it -- the comparison the
+    loop, strict_convergence and the sysid mask make in-graph
+    (reported_converged), so all of them give one verdict"; the profiler's
+    converged_fraction reads the same rule.
+  sources:
+    - src/maddening/core/graph_manager.py:7850 (coupling_diagnostics, converged)
+    - src/maddening/core/coupling/acceleration.py:623 (convergence_criterion)
+    - src/maddening/core/coupling/acceleration.py:685 (reported_converged)
+  conditions: one solve per step (one waveform sweep; the multi-sweep case is CPL-052).
+  oracle: the in-graph verdict computed by JAX beside each host reader.
+  tests:
+    - tests/core/test_coupling_converged_one_precision.py::test_every_reader_gives_the_loops_verdict
+    - tests/core/test_coupling_converged_one_precision.py::test_strict_convergence_agrees_with_the_report
+    - tests/core/test_coupling_converged_one_precision.py::test_the_sysid_mask_agrees_with_the_report
+    - tests/core/test_coupling_converged_one_precision.py::test_the_host_verdict_is_the_in_graph_verdict_on_float32_slots
+    - tests/core/test_profiler.py::test_the_profiler_reads_converged_as_the_report_does_on_every_step
+  status: verified
+
+- id: CPL-052
+  area: criterion
+  claim: >-
+    "so all of them give one verdict" (coupling_diagnostics, converged)
+    against "strict_convergence=True under solver="ift" checks every sweep
+    ... converged and strict_convergence therefore disagree on such a step;
+    which of them is right is to be decided in 0.5.0" (coupling guide).
+  sources:
+    - src/maddening/core/graph_manager.py:7856 (coupling_diagnostics, converged)
+    - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
+  conditions: waveform_iterations > 1 on a sub-cycling group, solver="ift".
+  oracle: the report and the strict check on the same step.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
+  status: ambiguous
+  proposed_wording: >-
+    The report, strict_convergence, the profiler and the sysid mask give one
+    verdict on every solve.  With waveform_iterations > 1, converged is the
+    last sweep's verdict while strict_convergence (solver="ift") raises when
+    any sweep stopped at max_iterations unconverged, so on such a step the
+    report says converged=True and the strict group raises.
+
+- id: CPL-053
+  area: criterion
+  claim: >-
+    "False means one of two things: the group hit max_iterations and the
+    state it returned is still outside the threshold, or the state it
+    returned is not finite ... which can come before the cap."
+  sources:
+    - src/maddening/core/graph_manager.py:7859 (coupling_diagnostics, converged)
+  conditions: any configuration.
+  oracle: converged=False implies iterations == max_iterations or a non-finite returned state, over every acceleration and both modes.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_unconverged_means_at_the_cap_or_not_finite
+    - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
+  status: verified
+
+- id: CPL-054
+  area: criterion
+  claim: >-
+    "True on a stalled float32 iterate.  When (1 - rho) * |x - x*| falls
+    below half an ulp a pass changes nothing, the residual is exactly 0.0,
+    and converged -- and strict_convergence -- report success although the
+    state can be far from its fixed point: 38 348 ulps ... The criterion is
+    deliberately not changed for this."
+  sources:
+    - src/maddening/core/graph_manager.py:7887 (coupling_diagnostics, converged)
+    - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
+  conditions: float32, a rate near 1.
+  oracle: exact float64 fixed point.
+  tests:
+    - tests/core/test_coupling_precision_floor.py::test_a_stalled_float32_iterate_is_not_reported_at_its_fixed_point
+  status: verified
+
+- id: CPL-055
+  area: criterion
+  claim: >-
+    ratio_usable is "whether the contraction ratio was usable this step, and
+    nothing more": True means "rho < 1, the predecessor residual was
+    non-zero, and every residual in the ratio was finite"; "False on a
+    non-monotone (non-normal) sequence, on a zero or non-finite predecessor,
+    and at max_iterations=1"; "False does not mean the sequence stopped
+    contracting" -- a rate near 1 reads rho >= 1 from noise and the raw
+    residual test decides.
+  sources:
+    - src/maddening/core/graph_manager.py:7791 (coupling_diagnostics, ratio_usable)
+    - docs/developer_guide/coupling_algorithm_guide.md#what-ratio_usable-checks-and-what-it-does-not
+    - docs/validation/known_anomalies.yaml (MADD-ANO-005)
+  conditions: any configuration.
+  oracle: closed-form residual sequences; exact fixed points of single-mode groups.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_the_first_pass_has_no_ratio_and_reports_that_it_has_none
+    - tests/core/test_coupling_error_bound.py::test_a_growing_residual_is_rejected_rather_than_extrapolated
+    - tests/property/test_differential_fixed_point.py::test_a_rate_float32_cannot_tell_from_one_falls_back_to_the_raw_residual_test
+  status: verified
+
+- id: CPL-056
+  area: criterion
+  claim: >-
+    error_estimate "is an estimate, not a bound: it can understate, and by
+    large factors" -- 122x on modes (0.999, 0.2) at tolerance=1e-4 with
+    ratio_usable=True and converged=True; 2.04x under aitken at its 2.0 clip,
+    4.5x under iqn-*.
+  sources:
+    - src/maddening/core/graph_manager.py:7778 (coupling_diagnostics, error_estimate)
+    - src/maddening/core/graph_manager.py:1340 (_fixed_point_while)
+    - docs/developer_guide/coupling_algorithm_guide.md#what-ratio_usable-checks-and-what-it-does-not
+  conditions: the measured fixtures.
+  oracle: exact float64 fixed point.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_a_hidden_slow_mode_is_the_recorded_size_and_is_not_flagged
+    - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_holds_under_an_accelerator_where_the_estimate_does_not
+  status: verified
+
+- id: CPL-057
+  area: criterion
+  claim: >-
+    converged=True "is a statement about the state this step returned: both
+    solvers stop on the iterate whose residual met the criterion rather than
+    on the update it went on to produce, so recomputing ||F(x) - x|| on the
+    state you were handed reproduces "residual"."
+  sources:
+    - src/maddening/core/graph_manager.py:8168 (coupling_diagnostics)
+    - src/maddening/core/graph_manager.py:1422 (_fixed_point_while)
+  conditions: 'a finite state (a non-finite one records inf by design: CPL-084).'
+  oracle: the residual recomputed from the returned state.
+  tests:
+    - tests/core/test_coupling_convergence_reporting.py::test_neither_solver_claims_a_state_it_did_not_measure
+    - tests/core/test_coupling_convergence_reporting.py::test_converged_survives_recomputation_on_a_contractive_group
+    - tests/core/test_coupling_convergence_reporting.py::test_converged_is_proof_the_returned_state_is_within_tolerance
+  status: verified
+
+# ---------------------------------------------------------------------------
+# The fixed-point loop and the accelerators
+# ---------------------------------------------------------------------------
+
+- id: CPL-060
+  area: loop
+  claim: >-
+    "iterations : coupling passes used to produce the state this step
+    returned, counting the first staggered pass.  Equal to max_iterations
+    exactly when the group exhausted its budget, whichever solver ran, so
+    iterations >= max_iterations is a usable cap check."
+  sources:
+    - src/maddening/core/graph_manager.py:7733 (coupling_diagnostics, iterations)
+    - src/maddening/core/graph_manager.py:1717 (_fixed_point_while, n_passes)
+  conditions: both solvers, any float dtype (the count is int32).
+  oracle: a group that cannot meet its tolerance; one that converges a pass short.
+  tests:
+    - tests/core/test_coupling_convergence_reporting.py::test_a_group_that_ran_out_of_passes_reports_the_cap_it_ran_out_of
+    - tests/core/test_coupling_convergence_reporting.py::test_a_group_that_reached_its_fixed_point_reports_it_converged
+    - tests/core/test_coupling_sixteen_bit_groups.py::test_the_cap_check_holds_at_the_cap_in_any_float_dtype
+  status: verified
+
+- id: CPL-061
+  area: loop
+  claim: >-
+    "Aitken must meet the threshold twice": it "stops only when two
+    consecutive passes are at or below threshold", the first member of the
+    streak being the pass before the loop, so "the guard costs at most one
+    extra pass"; IQN is deliberately not on the list and stops on its first
+    sub-threshold pass.
+  sources:
+    - src/maddening/core/graph_manager.py:1452 (_fixed_point_while)
+    - src/maddening/core/graph_manager.py:1311 (_TWO_PASS_EXIT)
+    - docs/developer_guide/coupling_algorithm_guide.md#the-finding-that-matters-most
+  conditions: acceleration="aitken" (the guard); every other acceleration (no guard); both solvers, every cap.
+  oracle: pass counts on constructed residual sequences.
+  tests:
+    - tests/core/test_coupling_convergence_reporting.py::test_aitken_needs_two_consecutive_passes_to_stop
+    - tests/core/test_coupling_convergence_reporting.py::test_other_accelerations_stop_on_the_first_sub_threshold_pass
+    - tests/core/test_coupling_convergence_reporting.py::test_the_aitken_guard_is_answerable_at_every_cap
+    - tests/core/test_coupling_convergence_reporting.py::test_aitken_at_the_cap_does_not_report_a_lone_dip_as_convergence
+  status: verified
+
+- id: CPL-062
+  area: loop
+  claim: >-
+    "Budget one pass over the unaccelerated exit, not a floor of four."
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#the-finding-that-matters-most
+  conditions: 'unstated: "the unaccelerated exit" compares Aitken with acceleration="none", whose iterates differ.'
+  oracle: the same group under "none" and "aitken".
+  tests:
+    - tests/core/test_coupling_convergence_reporting.py::test_the_aitken_guard_is_answerable_at_every_cap
+  status: ambiguous
+  proposed_wording: >-
+    The two-pass guard adds at most one pass to Aitken's own exit (the pass
+    before the loop is the streak's first member), so Aitken can stop in two
+    or three passes; it is not a bound on Aitken against
+    acceleration="none", which follows different iterates and can stop
+    sooner or later.
+
+- id: CPL-063
+  area: loop
+  claim: >-
+    "ift" and "fori" "run the same passes, stop on the same pass and derive
+    every value here by the same rule -- the three spectral keys and the two
+    gradient-bound keys excepted ... The returned state agrees to float32
+    round-off -- bit-identical on most graphs, and 7.3e-07 relative in the
+    worst of 480 configurations"; "residual" agrees "to about eps_float32 /
+    rtol under the mixed norm and eps_float32 * sqrt(n) under the L2 norm";
+    below that floor the verdicts can disagree.
+  sources:
+    - src/maddening/core/graph_manager.py:8203 (coupling_diagnostics)
+    - src/maddening/core/graph_manager.py:8215 (coupling_diagnostics)
+  conditions: threshold above the norm's float32 floor for the parity of passes and verdicts.
+  oracle: the two solvers side by side.
+  tests:
+    - tests/core/test_coupling_convergence_reporting.py::test_both_coupling_solvers_report_the_same_residual_and_converged_flag
+    - tests/core/test_coupling_solver_equivalence.py::test_both_solvers_report_the_same_verdict_about_the_same_state
+    - tests/core/test_coupling_solver_equivalence.py::test_the_multirate_solvers_agree_across_the_configuration_class
+    - tests/core/test_coupling_solver_equivalence.py::test_the_residual_at_the_fixed_point_is_reported_to_its_own_resolution
+    - tests/core/test_coupling_error_bound.py::test_both_solvers_report_the_same_bound
+  status: verified
+
+- id: CPL-064
+  area: loop
+  claim: >-
+    aitken_relaxation: the all-zero previous residual is the "no previous
+    residual yet" sentinel and "that pass keeps omega unchanged"; the factor
+    is "re-derived each pass and clipped to [0.01, 2.0]", and falls back to
+    the current omega "when the denominator is degenerate or overflowed".
+  sources:
+    - src/maddening/core/coupling/acceleration.py:1662 (aitken_relaxation)
+    - src/maddening/core/coupling/acceleration.py:523 (relaxation_step_scale)
+  conditions: any residual pair.
+  oracle: closed form at the clip bounds and the degenerate cases.
+  tests:
+    - tests/core/test_coupling_convergence.py::TestAitkenAcceleration::test_aitken_without_a_previous_residual_keeps_the_seeded_omega
+    - tests/core/test_coupling_claims_helpers.py::test_aitken_omega_is_clipped_and_falls_back_as_documented
+  status: verified
+
+- id: CPL-065
+  area: loop
+  claim: >-
+    IQN-ILS appends a secant column only when have_prev is True, falls back
+    to Aitken "when no secant columns are available yet or the quasi-Newton
+    step is invalid (NaN, or a blow-up)", the blow-up guard being relative
+    (1e6 residuals) and scale-free; W holds differences of raw operator
+    outputs (Degroote 2009).
+  sources:
+    - src/maddening/core/coupling/acceleration.py:1742 (iqn_ils_update)
+    - docs/release_notes/v0.4.0.md#the-iqn-family-corrected
+  conditions: both IQN accelerations.
+  oracle: column counts; the step at every scale; convergence in 2 passes on the rho=0.98 scene.
+  tests:
+    - tests/core/test_coupling_acceleration.py::TestIQNILSUnit::test_iqn_ils_first_column_added_once_prev_is_real
+    - tests/core/test_coupling_acceleration.py::TestIQNILSUnit::test_iqn_ils_first_iteration_uses_fallback
+    - tests/core/test_coupling_accelerators_are_units_invariant.py::test_an_iqn_blow_up_is_rejected_at_every_scale
+    - tests/core/test_coupling_accelerators_are_units_invariant.py::test_an_iqn_step_is_the_same_at_every_scale
+    - tests/core/test_coupling_ift_iqn_imvj.py::test_convergence_rate_iqn_imvj_beats_aitken_on_stiff_scene
+  status: verified
+
+- id: CPL-066
+  area: loop
+  claim: >-
+    "IQN allocates max_iterations - 1 secant columns, so the cap sets the
+    size of its least-squares problem" (max_cols = max_iterations - 1).
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#what-iqn-costs
+    - src/maddening/core/graph_manager.py:3177 (_iqn_warm_start)
+  conditions: both IQN accelerations, max_iterations >= 2.
+  oracle: the shape of the IQN-IMVJ secant slots.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_the_secant_history_is_max_iterations_minus_one_columns
+  status: verified
+
+- id: CPL-067
+  area: loop
+  claim: >-
+    The IQN gradient stays finite with jacobian_reuse > 0: lstsq "replaced by
+    jnp.linalg.pinv, which is rank-deficiency-safe through a custom_jvp and
+    gives the same solution".
+  sources:
+    - docs/release_notes/v0.4.0.md#the-iqn-family-corrected
+    - src/maddening/core/coupling/acceleration.py:1848 (iqn_ils_update)
+  conditions: masked secant matrices with zero columns, unrolled (fori) gradient.
+  oracle: finiteness; finite differences.
+  tests:
+    - tests/core/test_coupling_acceleration.py::TestIQNILSUnit::test_iqn_ils_gradient_finite_with_empty_active_columns
+    - tests/core/test_imvj_gradient_matches_finite_differences.py::test_the_gradient_through_a_multiphysics_imvj_group_matches_finite_differences
+  status: verified
+
+- id: CPL-068
+  area: loop
+  claim: >-
+    IQN-IMVJ warm start: "the previous timestep's columns from _meta, masked
+    to the first jacobian_reuse"; "later steps need fewer passes"; under
+    "fori" the carried columns are the latching pass's, as under "ift".
+  sources:
+    - src/maddening/core/graph_manager.py:3169 (_iqn_warm_start)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-045)
+  conditions: acceleration="iqn-imvj", jacobian_reuse > 0.
+  oracle: pass counts across steps; the stored columns; fori against ift.
+  tests:
+    - tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve
+    - tests/core/test_coupling_imvj_solver_agreement.py::test_fori_carries_the_latching_passs_columns
+    - tests/core/test_coupling_imvj_solver_agreement.py::test_the_solvers_take_the_same_passes_every_step
+    - tests/core/test_coupling_while_default.py::test_imvj_warm_start_persists_secant_matrices
+  status: verified
+
+- id: CPL-069
+  area: loop
+  claim: >-
+    accelerated_fields=None "auto-detects from coupling edges (interface
+    fields only)": the fields the group's internal edges read, a flux edge
+    standing for its producer's whole (floating) state.
+  sources:
+    - src/maddening/core/coupling/group.py:143 (CouplingGroup, accelerated_fields)
+    - src/maddening/core/graph_manager.py:222 (_interface_state_fields)
+  conditions: the IQN accelerations.
+  oracle: the flattened vector's length; the same result as the explicit selection.
+  tests:
+    - tests/core/test_phases_5_7_8.py::TestIQNAutoDetect::test_iqn_auto_detects_interface_fields
+    - tests/core/test_phases_5_7_8.py::TestIQNAutoDetect::test_iqn_auto_detect_matches_manual
+    - tests/core/test_coupling_non_float_leaves.py::test_a_flux_edge_from_a_node_with_an_integer_field_accelerates_its_floats
+  status: verified
+
+- id: CPL-070
+  area: loop
+  claim: >-
+    The group's non-floating fields are "the ones the pass computes at that
+    state", on both solvers, and an edge-carried one is evaluated at the
+    iterate on every ift pass.
+  sources:
+    - src/maddening/core/graph_manager.py:3028 (_run_coupling_inner)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-070)
+  conditions: integer, boolean and key leaves; every acceleration.
+  oracle: closed form; fori against ift.
+  tests:
+    - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_an_iterate_dependent_flag_is_the_one_the_returned_state_computes
+    - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_a_flag_read_across_an_internal_edge_iterates_with_the_solve
+    - tests/property/test_differential_coupling_solvers.py::test_a_flag_reading_a_coupled_input_agrees_between_the_solvers
+    - tests/core/test_coupling_non_float_leaves.py::test_wide_integer_leaves_survive_a_coupled_step
+  status: verified
+
+- id: CPL-071
+  area: loop
+  claim: >-
+    "Under jax_enable_x64 a float32 group steps and scans with every
+    acceleration and both solvers: the accelerator carries were seeded at
+    canonical precision"; the carries are "seeded in the interface vector's
+    dtype, widened to at least float32".
+  sources:
+    - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
+    - src/maddening/core/graph_manager.py:3140 (_run_coupling_inner, acc_dtype)
+  conditions: x64 on, float32 group.
+  oracle: step and run_scan succeed and keep float32; the state equals the run without x64.
+  tests:
+    - tests/core/test_coupling_accelerators_under_x64.py::test_a_float32_group_steps_and_scans_under_x64
+    - tests/core/test_coupling_accelerators_under_x64.py::test_the_accelerated_state_agrees_with_the_same_group_without_x64
+  status: verified
+
+- id: CPL-072
+  area: loop
+  claim: >-
+    16-bit groups: "A bfloat16 or float16 group's pass count is carried as
+    int32, so the cap check holds above 256 (2048) passes, and
+    diagnostics=True runs its spectral and gradient analysis in float32";
+    "Every acceleration ... setting is supported" under solver="ift".
+  sources:
+    - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
+    - src/maddening/core/graph_manager.py:560 (_analysis_dtype)
+    - src/maddening/core/coupling/group.py:236 (CouplingGroup, solver)
+  conditions: unstated for solver="fori" with an accelerator.
+  oracle: step and run_scan succeed and keep the group's dtype.
+  tests:
+    - tests/core/test_coupling_sixteen_bit_groups.py::test_diagnostics_run_on_a_sixteen_bit_group
+    - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
+    - tests/core/test_coupling_claims_graphs.py::test_a_sixteen_bit_group_steps_under_every_accelerator
+  status: ambiguous
+  proposed_wording: >-
+    Under solver="ift" a bfloat16 or float16 group steps and scans under
+    every acceleration.  Under the deprecated solver="fori", "aitken",
+    "iqn-ils" and "iqn-imvj" raise a fori_loop carry TypeError on a 16-bit
+    group (their carries are widened to float32 and the loop hands back the
+    group's dtype); "none" and "fixed" step.
+  notes: >-
+    The fori failure is loud (TypeError at the first step) and on a
+    deprecated path; the strict xfail parameters of the cited test pin it.
+
+- id: CPL-073
+  area: loop
+  claim: >-
+    "a group whose contraction factor exceeds one reports itself unconverged
+    for every fixed-point acceleration, and IQN converges the same group";
+    under-relaxation does not rescue a positive eigenvalue above one.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#invariants
+    - docs/developer_guide/coupling_algorithm_guide.md#where-the-measurement-contradicted-the-theory
+  conditions: stiff-pair-1.2.
+  oracle: the report at the cap; IQN's converged fixed point.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_divergent_group_reports_unconverged_rather_than_truncating
+    - tests/core/test_coupling_fixture_invariants.py::test_quasi_newton_converges_where_the_fixed_point_iteration_diverges
+  status: verified
+
+- id: CPL-074
+  area: loop
+  claim: >-
+    "IQN on a single-degree-of-freedom interface, where its least-squares is
+    rank-deficient, agrees with plain iteration rather than returning a
+    silently wrong answer."
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#invariants
+  conditions: one accelerated scalar.
+  oracle: plain iteration over a driven trajectory, scaled by its amplitude.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_iqn_on_a_single_dof_interface_agrees_with_plain_iteration
+  status: verified
+
+- id: CPL-075
+  area: loop
+  claim: >-
+    compile() refuses a group-internal flux edge where the loop reads the
+    state: under convergence_norm="interface", and into a sub-cycled member
+    under boundary_interpolation="linear" / "quadratic"; the refusal names
+    the settings that work.
+  sources:
+    - src/maddening/core/graph_manager.py:1024 (_flux_edge_coupling_errors)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-060)
+  conditions: flux edges between two members.
+  oracle: the refusal; the named settings step the same group.
+  tests:
+    - tests/core/test_coupling_flux_edge_readers.py::test_the_interface_norm_on_a_flux_edge_is_refused_by_name
+    - tests/core/test_coupling_flux_edge_readers.py::test_the_norms_the_refusal_names_step_the_same_group
+    - tests/core/test_coupling_flux_edge_readers.py::test_a_sub_cycled_consumer_of_a_flux_edge_needs_constant_interpolation
+  status: verified
+
+- id: CPL-076
+  area: loop
+  claim: >-
+    Flux seeding: Gauss-Seidel seeds producers' fluxes from the previous
+    iterate in two sweeps, and "the Jacobi pass now takes the Gauss-Seidel
+    pass's two-sweep seed wherever a producer reads a flux, and keeps its
+    single sweep, and its program, everywhere else".
+  sources:
+    - src/maddening/core/graph_manager.py:2606 (_run_coupled_block_impl, jacobi_flux_sweeps)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-071)
+  conditions: flux edges inside a group.
+  oracle: the Gauss-Seidel fixed point; per-pass flux evaluation counts.
+  tests:
+    - tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point
+    - tests/core/test_coupling_jacobi_flux_seed.py::test_a_jacobi_pass_seeds_in_two_sweeps_only_where_a_producer_reads_a_flux
+    - tests/property/test_differential_leaves.py::test_two_flux_producers_exchanging_fluxes_step_under_gauss_seidel
+  status: verified
+
+- id: CPL-077
+  area: loop
+  claim: >-
+    "Gauss-Seidel on a ring is measurably order-dependent" -- the sweep
+    follows the order the members were added in.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#start-here
+    - docs/developer_guide/coupling_algorithm_guide.md#invariants
+  conditions: a closed cycle with no outside predecessor.
+  oracle: the schedule; the under-converged iterate for two build orders.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_ring_schedule_follows_node_insertion_order
+    - tests/core/test_coupling_fixture_invariants.py::test_gauss_seidel_on_a_ring_is_order_dependent
+  status: verified
+
+- id: CPL-078
+  area: loop
+  claim: >-
+    "Jacobi is bit-identical under rotation and reversal" (of the order the
+    ring was built in): "jacobi if the answer must not depend on how the
+    graph was built".
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#start-here
+  conditions: 'unstated: acceleration, norm, and which outputs (states, report).'
+  oracle: bit-identity of the states and the report across build orders.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_jacobi_on_a_ring_is_order_independent
+    - tests/core/test_coupling_claims_graphs.py::test_jacobi_states_do_not_depend_on_the_build_order_under_a_constant_iterator
+  status: ambiguous
+  proposed_wording: >-
+    Under iteration_mode="jacobi" with acceleration "none" or "fixed" the
+    returned states do not depend on the order the members were added in,
+    to the bit unless a residual lands within an ulp of the threshold (the
+    norm sums the members in the schedule's order).  Under "aitken" and the
+    IQN pair the states agree to float32 round-off, not to the bit (the
+    accelerator's dot products are taken in the schedule's order), and the
+    spectral keys and gradient_relative_error_bound are not order-invariant
+    (the gradient bound moved by 15% between build orders of a three-node
+    group).
+  notes: >-
+    The existing test checks a relative spread below 1e-6, not bit-identity.
+    Measured on jaxlib 0.11.0: none/fixed states bit-identical; aitken and
+    iqn-* states and residuals differ in the last bits; rho_spectral,
+    spectral_error_bound and gradient_relative_error_bound move.
+
+- id: CPL-079
+  area: loop
+  claim: >-
+    "groups in one graph keep independent schedules, iteration counts and
+    convergence flags", and the graph steps deterministically.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#start-here
+    - docs/developer_guide/coupling_algorithm_guide.md#invariants
+  conditions: two groups of different modes.
+  oracle: the counterfactual with one group's mode flipped.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_gives_each_group_its_own_schedule
+    - tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_groups_keep_independent_iteration_counts
+    - tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_steps_deterministically
+    - tests/core/test_coupling_convergence.py::TestDiagnostics::test_diagnostics_multiple_groups
+  status: verified
+
+# ---------------------------------------------------------------------------
+# coupling_diagnostics(): the report
+# ---------------------------------------------------------------------------
+
+- id: CPL-080
+  area: report
+  claim: >-
+    "Each group reports fourteen fields: nine for every group, and five --
+    three spectral, two about the gradient -- that carry a value only under
+    solver="ift" with diagnostics=True"; the 0.4.0 names are the only keys.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#reading-coupling_diagnostics
+    - src/maddening/core/graph_manager.py:8247 (coupling_diagnostics)
+  conditions: any group that has stepped.
+  oracle: the key set.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_the_diagnostics_report_the_0_4_0_field_names
+  status: verified
+
+- id: CPL-081
+  area: report
+  claim: >-
+    The development-era names bound_valid and gradient_error_bound "still
+    read through 0.4.x and emit a DeprecationWarning naming their
+    replacement ... They are not in keys(), so dict(diag) and anything that
+    records the report carry only the new names."
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#the-old-names
+    - src/maddening/core/graph_manager.py:2158 (_CouplingDiagnostics)
+  conditions: reads only.
+  oracle: the warning and the value; the key set.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_the_pre_0_4_0_field_name_still_reads_and_warns
+    - tests/core/test_coupling_error_bound.py::test_the_deprecated_names_are_wired_to_their_own_replacements
+    - tests/core/test_coupling_error_bound.py::test_an_unknown_key_is_a_keyerror_and_does_not_warn
+  status: verified
+
+- id: CPL-082
+  area: report
+  claim: >-
+    "A group that has not taken a step yet -- before the first step(), and
+    again after reset_state() -- has no entry, so the dict is empty until
+    something has run."
+  sources:
+    - src/maddening/core/graph_manager.py:8251 (coupling_diagnostics)
+  conditions: both solvers.
+  oracle: the report's keys.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_no_report_before_a_step_or_after_a_reset
+    - tests/core/test_coupling_error_bound.py::test_reset_state_restores_the_meta_compile_seeds
+  status: verified
+
+- id: CPL-083
+  area: report
+  claim: >-
+    The derived keys follow their slots: "amplification ... nan when the
+    estimate was rejected"; error_estimate "residual * omega *
+    amplification ... Falls back to residual when the estimate was
+    rejected"; gradient_error_estimate is "numerically the same number as
+    error_estimate ... inf when ratio_usable is False"; precision_limited is
+    "False for a non-finite residual and for a group whose norm reads no
+    field".
+  sources:
+    - src/maddening/core/graph_manager.py:7767 (coupling_diagnostics, amplification)
+    - src/maddening/core/graph_manager.py:7778 (coupling_diagnostics, error_estimate)
+    - src/maddening/core/graph_manager.py:7837 (coupling_diagnostics, gradient_error_estimate)
+    - src/maddening/core/graph_manager.py:8151 (coupling_diagnostics, precision_limited)
+  conditions: both solvers, every acceleration, a dead band that removes every field.
+  oracle: the report recomputed from its _meta slots with the documented rule.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_the_report_derives_every_value_from_its_slots
+    - tests/core/test_coupling_claims_graphs.py::test_a_group_whose_norm_reads_nothing_is_not_precision_limited
+  status: verified
+
+- id: CPL-084
+  area: report
+  claim: >-
+    residual is "inf on a non-finite state, whatever the norm evaluates to
+    there -- NaN included"; the verdict on a non-finite state "is taken over
+    every floating field of it", so a NaN in a field the interface norm does
+    not read still reads converged=False and raises under
+    strict_convergence.
+  sources:
+    - src/maddening/core/graph_manager.py:7758 (coupling_diagnostics, residual)
+    - src/maddening/core/graph_manager.py:1281 (_non_finite_reads_as_diverged)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-019)
+  conditions: every norm, both solvers, max_iterations=1 included.
+  oracle: the report on a diverged state.
+  tests:
+    - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_state_never_reads_as_converged
+    - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
+    - tests/core/test_coupling_non_finite_state.py::test_strict_convergence_raises_on_a_non_finite_field_no_edge_reads
+    - tests/core/test_coupling_non_finite_state.py::test_a_single_pass_reads_a_non_finite_field_no_edge_reads
+    - tests/core/test_coupling_non_finite_state.py::test_strict_convergence_names_the_non_finite_state
+  status: verified
+
+- id: CPL-085
+  area: report
+  claim: >-
+    "On a multi-rate graph a coupling group solves only on the base steps its
+    rate divider fires on, and between those its entry is the most recent
+    applied solve's."
+  sources:
+    - src/maddening/core/graph_manager.py:7723 (coupling_diagnostics)
+  conditions: multi-rate graph.
+  oracle: the report on every base step against the firing step's.
+  tests:
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_the_report_between_firings_is_the_last_applied_solve
+  status: verified
+
+- id: CPL-086
+  area: report
+  claim: >-
+    The report is "judged under the group the slots were written under: the
+    one the compiled step was built from.  A replacement registered since
+    has not stepped ... compile() restarts the slots of a replaced group";
+    until the next compile "the report is the last step's, judged under the
+    groups that step ran" (coupling_report note).
+  sources:
+    - src/maddening/core/graph_manager.py:8265 (coupling_diagnostics)
+    - src/maddening/core/inspection.py:1261 (coupling_report, stale note)
+  conditions: an edit after the last step and before the next compile.
+  oracle: the report before and after the edit.
+  tests:
+    - tests/core/test_coupling_report_follows_the_group_that_ran.py::test_a_replacement_group_does_not_rejudge_the_last_step
+    - tests/core/test_coupling_report_follows_the_group_that_ran.py::test_recompiling_a_replaced_group_restarts_its_report
+    - tests/core/test_inspection_views.py::test_coupling_report_judges_a_replaced_group_under_the_one_that_ran
+    - tests/core/test_coupling_claims_graphs.py::test_an_edge_added_after_the_step_does_not_rejudge_its_floor
+  status: failing
+  finding: >-
+    Only the group is taken from the committed snapshot.  The float floor
+    behind spectral_error_bound, precision_limited and spectral_usable is
+    re-derived from the graph's current nodes, schedule and edges
+    (coupling_diagnostics calls _group_evaluations(group, self._nodes,
+    self._schedule, self._edges)), so an edge added between two members
+    after a step, before any recompile, changes the last step's floor and
+    bound: on a Gauss-Seidel chain of relays a chord that lengthens the
+    longest same-pass chain raises spectral_error_bound of a step that
+    never ran with that edge.  Guess: src/maddening/core/graph_manager.py:8339.
+
+- id: CPL-087
+  area: report
+  claim: >-
+    rho_spectral is "the spectral radius of dF/dx at the returned state, from
+    eight Arnoldi steps ...  Exact (non-zero eigenvalues, to float32) for a
+    group whose Jacobian has rank at most eight ... and an estimate from
+    below otherwise, which spectral_usable reports.  Only under
+    solver="ift" with diagnostics=True; NaN for "fori", for
+    diagnostics=False, at max_iterations=1 (no fixed point was solved) and
+    on a non-finite state."
+  sources:
+    - src/maddening/core/graph_manager.py:7904 (coupling_diagnostics, rho_spectral)
+    - src/maddening/core/coupling/acceleration.py:786 (arnoldi_spectral_radius)
+  conditions: as stated.
+  oracle: eigenvalues of the matrix; NaN where documented.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_arnoldi_recovers_the_spectral_radius_of_a_resolved_spectrum
+    - tests/core/test_coupling_error_bound.py::test_arnoldi_leaves_a_residual_where_the_space_is_too_small
+    - tests/core/test_coupling_error_bound.py::test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed
+    - tests/core/test_coupling_error_bound.py::test_on_a_nonlinear_map_the_spectrum_is_taken_at_the_returned_iterate
+    - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
+  status: verified
+
+- id: CPL-088
+  area: report
+  claim: >-
+    spectral_error_bound: "For a linear F the error of any iterate is
+    (A - I)^{-1} of its residual, whatever the step sequence, relaxation or
+    accelerator did -- so this is a bound on ||x - x*||" where
+    spectral_usable is True.
+  sources:
+    - src/maddening/core/graph_manager.py:7960 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/coupling/acceleration.py:1193 (spectral_error_bound)
+    - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
+  conditions: >-
+    F linear; solver="ift", diagnostics=True; at most eight independent
+    interface scalars (spectral_usable); the group's own norm at the
+    returned state; every acceleration and schedule; long Gauss-Seidel
+    chains, sub-cycled and multi-rate groups; float16 to float32.
+  oracle: exact float64 fixed point of the evaluated map.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
+    - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_holds_under_an_accelerator_where_the_estimate_does_not
+    - tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_is_never_below_the_true_distance
+    - tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_stalled_ring
+    - tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_long_gauss_seidel_chain
+    - tests/property/test_coupling_error_bound.py::test_the_spectral_bound_holds_on_random_normal_contractions
+    - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
+    - tests/core/test_coupling_claims_graphs.py::test_a_usable_bound_holds_on_a_stalled_subcycled_or_multirate_group
+  status: verified
+
+- id: CPL-089
+  area: report
+  claim: >-
+    spectral_error_bound is "(residual + floor) * max(amplification,
+    1 / (1 - rho_safe))" with rho_safe = rho + 2 * arnoldi_residual; "inf
+    when rho_safe >= 1 or the compressed I - H is singular ... NaN when rho
+    is NaN ... Never smaller than residual + floor where it is finite."
+  sources:
+    - src/maddening/core/coupling/acceleration.py:1134 (spectral_error_bound)
+  conditions: any inputs.
+  oracle: closed form.
+  tests:
+    - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_rejects_what_it_cannot_bound
+    - tests/core/test_coupling_precision_floor.py::test_the_floor_is_added_to_the_residual_before_it_is_amplified
+  status: verified
+
+- id: CPL-090
+  area: report
+  claim: >-
+    The Krylov space "is continued from the residual itself whenever it
+    breaks down, so the residual the resolvent is applied to provably lies
+    in the invariant space", and "a dead-banded field keeps a positive weight
+    in the spectrum (its own magnitude's)", its residual share folded into
+    the factor.
+  sources:
+    - src/maddening/core/graph_manager.py:7945 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/graph_manager.py:451 (_spectral_rate_at)
+  conditions: a repeated eigenvalue; a dead-banded field on the loop.
+  oracle: exact fixed point; the matrix's spectrum.
+  tests:
+    - tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space
+    - tests/core/test_coupling_spectral_bound_certificate.py::test_arnoldi_continues_from_the_residual_at_a_breakdown
+    - tests/core/test_coupling_spectral_bound_certificate.py::test_a_residual_the_space_never_absorbs_reads_as_unresolved
+    - tests/core/test_coupling_spectral_bound_certificate.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum
+  status: verified
+
+- id: CPL-091
+  area: report
+  claim: >-
+    "It is reported, not applied: converged and the iteration counts are
+    exactly what they were" -- diagnostics=True leaves the forward bitwise
+    unchanged: states, iterations, converged, the warm starts and gradients
+    through run_scan.
+  sources:
+    - src/maddening/core/graph_manager.py:7991 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/graph_manager.py:725 (_gradient_error_bound_at)
+  conditions: both solvers, every acceleration; every jaxlib CI runs (0.10.2, 0.11.2).
+  oracle: bit-identity with diagnostics=False.
+  tests:
+    - tests/core/test_coupling_diagnostics_leave_the_state_alone.py::test_diagnostics_leave_the_returned_state_bit_identical
+    - tests/core/test_coupling_diagnostics_leave_the_state_alone.py::test_diagnostics_leave_an_accelerated_group_bit_identical
+    - tests/property/test_differential_coupling_solvers.py::test_diagnostics_leave_every_returned_value_bit_identical
+    - tests/property/test_differential_coupling_solvers.py::test_diagnostics_leave_gradients_through_run_scan_bit_identical
+  status: verified
+
+- id: CPL-092
+  area: report
+  claim: >-
+    spectral_usable: "the bound above is finite and the Arnoldi space had
+    settled: the Arnoldi residual h_{k+1,k} is at most 5% of
+    1 - rho_spectral.  False where nothing was computed, where the bound is
+    inf, for a group with more independent interface scalars than the eight
+    Krylov steps resolve ... where the residual never entered the Krylov
+    space ... and where the residual is at its float floor
+    (precision_limited) while a node in the group has not declared
+    update_evaluations()."
+  sources:
+    - src/maddening/core/graph_manager.py:7994 (coupling_diagnostics, spectral_usable)
+    - src/maddening/core/coupling/acceleration.py:1249 (spectral_rate_settled)
+  conditions: as stated.
+  oracle: the flag against each condition.
+  tests:
+    - tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
+    - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_resolved_spectrum_is_usable
+    - tests/core/test_coupling_spectral_bound_certificate.py::test_a_residual_the_space_never_absorbs_reads_as_unresolved
+    - tests/core/test_coupling_precision_floor.py::test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor
+  status: verified
+
+- id: CPL-093
+  area: report
+  claim: >-
+    gradient_relative_error_bound is "a bound on the relative error of the
+    IFT gradient that comes from the forward stopping at the returned
+    iterate ... Read it as |g_k - g*| <= bound * |g_k| for the gradient with
+    respect to one scalar constant"; measured never below the true error at
+    caps 3-8 on concave, convex and affine maps, 7-11x on a spring pair, 83x
+    on a hidden slow mode.
+  sources:
+    - src/maddening/core/graph_manager.py:8023 (coupling_diagnostics, gradient_relative_error_bound)
+    - docs/developer_guide/coupling_algorithm_guide.md#gradient_relative_error_bound-the-gradient-not-the-solve
+  conditions: >-
+    solver="ift", diagnostics=True; gradient_bound_usable; leading-order in
+    the distance; one probe per floating constant (a field-valued constant
+    along one random direction).
+  oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
+  tests:
+    - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep
+    - tests/core/test_coupling_gradient_error_bound.py::test_a_parameter_that_sits_at_zero_is_still_probed_at_one_cap
+    - tests/core/test_coupling_gradient_error_bound.py::test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap
+    - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient
+    - tests/core/test_coupling_precision_floor.py::test_a_stalled_nonlinear_iterate_does_not_read_its_gradient_as_exact
+    - tests/core/test_coupling_gradient_bound_through_a_vmapped_step.py::test_the_gradient_bound_holds_for_each_member_of_a_vmapped_batch
+  status: verified
+
+- id: CPL-094
+  area: report
+  claim: >-
+    "This is a statement about the gradient, not about the solve.  On a map
+    that is affine in its state with additive parameters the IFT gradient is
+    the fixed point's from any iterate, so this truthfully reads 0.0 while
+    the state is far off."
+  sources:
+    - src/maddening/core/graph_manager.py:8122 (coupling_diagnostics, gradient_relative_error_bound)
+  conditions: affine in the state, additive parameters.
+  oracle: the float64 fixed point's gradient.
+  tests:
+    - tests/core/test_coupling_gradient_error_bound.py::test_on_an_affine_map_the_bound_reads_zero_against_the_exact_gradient
+  status: verified
+
+- id: CPL-095
+  area: report
+  claim: >-
+    The gradient bound "carries a Newton-Kantorovich check ... the bound is
+    multiplied by 1 / sqrt(1 - 2h) ... and is inf -- unusable -- at
+    h >= 1/2 ... h is exactly zero on an affine map"; gradient_bound_usable
+    is "finite and spectral_usable is True"; NaN "for "fori", for
+    diagnostics=False, at max_iterations=1 ... where the fixed point responds
+    to no constant and where the returned state is not finite".
+  sources:
+    - src/maddening/core/graph_manager.py:8057 (coupling_diagnostics, gradient_relative_error_bound)
+    - src/maddening/core/graph_manager.py:8141 (coupling_diagnostics, gradient_bound_usable)
+    - src/maddening/core/coupling/acceleration.py:1376 (ift_gradient_error_bound)
+  conditions: as stated.
+  oracle: the flag and value against each condition; the helper's conventions.
+  tests:
+    - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes
+    - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_reads_nan_and_unusable_where_nothing_was_computed
+    - tests/core/test_coupling_report_flags_read_their_conditions.py::test_gradient_bound_usable_requires_a_settled_spectrum
+    - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_range_larger_than_the_basis_reports_no_gradient_bound
+    - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_helper_never_reports_a_number_where_none_was_computed
+  status: verified
+
+- id: CPL-096
+  area: report
+  claim: >-
+    "under vmap the forward state, iterations, residual and amplification are
+    bit-identical, and the spectral keys agree to a few ulps"; the gradient
+    bound "can differ from the unbatched value in its leading digit
+    (2.01e-06 against 1.84e-06 on one step, both above the true 9.5e-07)".
+  sources:
+    - src/maddening/core/graph_manager.py:8104 (coupling_diagnostics, its own rounding)
+  conditions: jax.vmap over states.
+  oracle: the unbatched step per member; the true gradient error.
+  tests:
+    - tests/core/test_coupling_gradient_bound_under_vmap.py::test_the_forward_and_its_report_are_identical_under_vmap
+    - tests/core/test_coupling_gradient_bound_under_vmap.py::test_both_bounds_hold_and_agree_to_their_own_resolution
+    - tests/property/test_differential_transforms.py::test_a_vmapped_coupled_step_is_the_step_per_member
+  status: verified
+
+- id: CPL-097
+  area: report
+  claim: >-
+    precision_limited: "the residual is at or below its own float resolution
+    (the floor spectral_error_bound adds) ... at least half of each bound key
+    is the floor ... Reported for every group, whatever the solver ... It
+    clears spectral_usable only in a group with a node that has not declared
+    its evaluation count."
+  sources:
+    - src/maddening/core/graph_manager.py:8151 (coupling_diagnostics, precision_limited)
+  conditions: any group.
+  oracle: the stored residual against the floor recomputed from the state.
+  tests:
+    - tests/core/test_coupling_precision_floor.py::test_precision_limited_is_the_residual_at_or_below_the_floor
+    - tests/core/test_coupling_precision_floor.py::test_a_residual_above_the_floor_is_not_precision_limited
+    - tests/core/test_coupling_precision_floor.py::test_a_sub_stepped_node_is_floored_per_evaluation
+  status: verified
+
+# ---------------------------------------------------------------------------
+# The precision floor
+# ---------------------------------------------------------------------------
+
+- id: CPL-100
+  area: precision floor
+  claim: >-
+    The floor is "PRECISION_FLOOR_ULPS = 4 units of eps * max|field| in every
+    entry the norm reads, per evaluation, in the norm's units -- 4 m eps
+    sqrt(n) under "l2" over its n entries, 4 m eps / rtol under "mixed" and
+    "interface" ... each field at its own dtype's eps"; 0.0 when the norm
+    reads no active field; traceable.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
+    - src/maddening/core/coupling/acceleration.py:1033 (residual_precision_floor)
+  conditions: every norm; mixed dtypes.
+  oracle: closed form.
+  tests:
+    - tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve
+    - tests/core/test_coupling_precision_floor.py::test_a_float16_field_beside_a_float32_one_is_floored_at_float16
+    - tests/core/test_coupling_claims_helpers.py::test_the_floor_traces_under_jit_and_reads_nothing_inside_the_dead_band
+  status: verified
+
+- id: CPL-101
+  area: precision floor
+  claim: >-
+    "Four is 2.6x the sum of the two measured sources of one evaluation's
+    rounding: the evaluation error of a dense update A @ u + c near its fixed
+    point (at most 0.72 of a unit over 3 000 random contractions) and the
+    disagreement between two compilations of the same pass (at most 0.82)."
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
+    - src/maddening/core/coupling/acceleration.py:960 (PRECISION_FLOOR_ULPS)
+  conditions: float32, n <= 6.
+  oracle: float64 evaluation of the same updates.
+  tests:
+    - tests/core/test_coupling_precision_floor.py::test_the_floor_has_headroom_over_a_dense_updates_evaluation_error
+  status: verified
+
+- id: CPL-102
+  area: precision floor
+  claim: >-
+    "m is how many evaluations one coupling pass rounds like.  Each node
+    counts its sub-cycling divider times SimulationNode.update_evaluations();
+    under iteration_mode="jacobi" the pass rounds like its worst node ...
+    and under "gauss-seidel" like its longest chain of same-pass reads"; an
+    edge from a member scheduled at or after the reader starts no chain; an
+    undeclared node counts as one.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
+    - src/maddening/core/graph_manager.py:1168 (_group_evaluations)
+  conditions: any group.
+  oracle: the count against hand-derived chains; the step and the report count the same.
+  tests:
+    - tests/core/test_coupling_gauss_seidel_chain_floor.py::test_a_gauss_seidel_ring_rounds_like_its_length
+    - tests/core/test_coupling_gauss_seidel_chain_floor.py::test_a_jacobi_ring_rounds_like_one_node
+    - tests/core/test_coupling_gauss_seidel_chain_floor.py::test_a_read_of_a_member_scheduled_later_starts_no_chain
+    - tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_count_is_the_longest_chain_not_the_sum
+    - tests/core/test_coupling_gauss_seidel_chain_floor.py::test_a_sub_cycled_member_counts_its_divider_along_the_chain
+    - tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_report_and_the_step_count_the_same_chain
+  status: verified
+
+- id: CPL-103
+  area: precision floor
+  claim: >-
+    update_evaluations() returns "None (not declared) or a finite number
+    >= 1"; anything else is refused at compile; a HybridNode forwards its
+    physics node's count.
+  sources:
+    - src/maddening/core/graph_manager.py:1152 (_declared_evaluations)
+  conditions: any node in a group.
+  oracle: the refusal; the count.
+  tests:
+    - tests/core/test_coupling_precision_floor.py::test_an_invalid_evaluation_count_is_refused_at_compile
+    - tests/core/test_coupling_precision_floor.py::test_a_hybrid_node_keeps_its_physics_nodes_evaluation_count
+  status: verified
+
+- id: CPL-104
+  area: precision floor
+  claim: >-
+    The floor "covers explicit Euler per declared sub-step": "explicit Euler
+    in N sub-steps ... is 5.8 units off the exact map at N = 20 and 29.4 at
+    N = 100", within 4 units per declared evaluation; a node that does not
+    declare "is counted as one evaluation, and ... a group containing it
+    reports spectral_usable=False ... wherever its residual is at the
+    floor".
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
+    - src/maddening/core/coupling/acceleration.py:992 (PRECISION_FLOOR_ULPS)
+  conditions: float32.
+  oracle: float64 evaluation of the composite map.
+  tests:
+    - tests/core/test_coupling_precision_floor.py::test_the_floor_covers_explicit_euler_per_declared_sub_step
+    - tests/core/test_coupling_precision_floor.py::test_a_sub_stepped_node_is_floored_per_evaluation
+    - tests/core/test_coupling_precision_floor.py::test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor
+  status: verified
+
+- id: CPL-105
+  area: precision floor
+  claim: >-
+    On a stalled float32 iterate "spectral_error_bound adds the residual's
+    float resolution before amplifying it (it read 0.0 there; it now reads
+    9.4e-2, which covers the 4.2e-3), and precision_limited is True"; the
+    gradient bound's distance carries the same floor.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
+  conditions: a relay contracting at 0.99999, float32.
+  oracle: exact float64 fixed point; the fixed point's gradient.
+  tests:
+    - tests/core/test_coupling_precision_floor.py::test_a_stalled_float32_iterate_is_not_reported_at_its_fixed_point
+    - tests/core/test_coupling_precision_floor.py::test_a_stalled_linear_iterate_does_not_read_its_gradient_as_exact
+    - tests/core/test_coupling_gauss_seidel_chain_floor.py::test_both_bounds_hold_on_a_stalled_gauss_seidel_ring_of_32
+  status: verified
+
+# ---------------------------------------------------------------------------
+# coupling_report() / print_coupling_report()
+# ---------------------------------------------------------------------------
+
+- id: CPL-110
+  area: inspection
+  claim: >-
+    coupling_report is "coupling_diagnostics as one row per coupling group,
+    with its caveats flagged": flags for hitting max_iterations,
+    converged=False, ratio_usable=False, precision_limited=True and
+    "spectral_usable=False where a spectral bound was computed", and "why a
+    group has no report" (fori without diagnostics, no step since compile()
+    / reset_state(), added since the last compile).
+  sources:
+    - src/maddening/core/graph_manager.py:10339 (GraphManager.coupling_report)
+    - docs/user_guide/inspection.md#coupling-convergence
+  conditions: compiled graph.
+  oracle: the rows against coupling_diagnostics and each flag's condition.
+  tests:
+    - tests/core/test_inspection_views.py::test_coupling_report_matches_coupling_diagnostics
+    - tests/core/test_inspection_views.py::test_coupling_report_flags_the_cap_the_fallback_and_non_convergence
+    - tests/core/test_inspection_views.py::test_coupling_report_flags_precision_limited
+    - tests/core/test_inspection_views.py::test_coupling_report_explains_a_missing_report
+    - tests/core/test_coupling_claims_graphs.py::test_the_report_flags_an_unsettled_spectral_bound_only_where_one_was_computed
+  status: verified
+
+- id: CPL-111
+  area: inspection
+  claim: >-
+    coupling_report is "Read-only: coupling_diagnostics is read only on a
+    graph holding no tracers, where it writes nothing (on one that does, it
+    would put the graph back first, so this reports "state holds tracers"
+    instead)"; a graph with no groups, or not compiled, "gives a table that
+    says so"; print_coupling_report prints it.
+  sources:
+    - src/maddening/core/graph_manager.py:10361 (GraphManager.coupling_report)
+    - src/maddening/core/graph_manager.py:10378 (GraphManager.print_coupling_report)
+  conditions: any graph state.
+  oracle: the graph before and after; the rendered text.
+  tests:
+    - tests/core/test_inspection_read_only.py::test_inspection_method_changes_nothing_and_compiles_nothing
+    - tests/core/test_inspection_read_only.py::test_guard_catches_a_coupling_report_that_ignores_the_tracers
+    - tests/core/test_inspection_views.py::test_coupling_report_says_why_there_is_nothing_to_report
+    - tests/core/test_inspection_views.py::test_coupling_report_on_an_uncompiled_graph
+    - tests/core/test_inspection_views.py::test_coupling_report_text_prints_flags_visibly
+  status: verified
+
+# ---------------------------------------------------------------------------
+# Sub-cycling, multi-rate groups and waveform sweeps
+# ---------------------------------------------------------------------------
+
+- id: CPL-120
+  area: multi-rate
+  claim: >-
+    "every member of a subcycling=True coupling group is scheduled at the
+    group's largest member timestep"; gm.timestep is the step the graph
+    takes, "a sub-cycling group counts at its largest member timestep".
+  sources:
+    - src/maddening/core/graph_manager.py:1100 (_scheduled_timesteps)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-096)
+  conditions: sub-cycling groups, multi-rate graphs.
+  oracle: every node's own clock after n steps.
+  tests:
+    - tests/core/test_graph_timestep_is_the_step_advance.py::test_every_node_advanced_n_steps_of_gm_timestep
+    - tests/core/test_graph_timestep_is_the_step_advance.py::test_the_rate_dividers_count_in_gm_timestep
+  status: verified
+
+- id: CPL-121
+  area: multi-rate
+  claim: >-
+    A multi-rate group's "solve now runs under a lax.cond on the firing
+    predicate: a base step that does not fire neither solves nor touches the
+    group's node states or slots, so both are always the last applied
+    solve's"; the predictor and the IMVJ warm start learn only from applied
+    solves.
+  sources:
+    - docs/release_notes/v0.4.0.md#the-coupling-runtime-audited-on-the-frozen-tree
+    - src/maddening/core/graph_manager.py:2499 (_run_coupled_block_impl, fires)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-044)
+  conditions: rate divider above one.
+  oracle: the hand-unrolled schedule; trace-time evaluation counts.
+  tests:
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_a_group_does_not_solve_on_a_step_it_does_not_fire_on
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_the_linear_predictor_learns_only_from_applied_solves
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_the_imvj_warm_start_is_carried_only_from_applied_solves
+    - tests/property/test_differential_schedules.py::test_a_multirate_graph_steps_like_its_hand_unrolled_schedule
+  status: verified
+
+- id: CPL-122
+  area: waveform
+  claim: >-
+    "iterations is the largest sweep's count and total_iterations the sum.
+    The cap check iterations >= max_iterations is exact: true when, and only
+    when, some sweep exhausted its budget"; total_iterations is "at most
+    waveform_iterations * max_iterations" and counts "the passes that
+    produced the state, not the one extra evaluation a sweep stopped at the
+    cap spends measuring its residual".
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
+    - src/maddening/core/graph_manager.py:7748 (coupling_diagnostics, total_iterations)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-026)
+  conditions: subcycling with waveform_iterations > 1, both solvers.
+  oracle: per-sweep counts on the sub-cycled spring pair; every sweep at its cap.
+  tests:
+    - tests/core/test_coupling_waveform_report.py::test_iterations_is_the_largest_sweep_and_total_iterations_the_sum
+    - tests/core/test_coupling_waveform_report.py::test_the_cap_check_sees_a_first_sweep_that_exhausted_its_budget
+    - tests/core/test_coupling_waveform_report.py::test_the_cap_check_stays_quiet_when_no_sweep_hits_the_cap
+    - tests/core/test_coupling_waveform_report.py::test_both_solvers_report_the_same_counts_and_verdict
+    - tests/core/test_coupling_claims_graphs.py::test_every_sweep_at_its_cap_counts_exactly_n_times_the_cap
+  status: verified
+
+- id: CPL-123
+  area: waveform
+  claim: >-
+    "Every sweep starts with one pass, so after a converged first sweep each
+    later sweep still applies at least one more pass and moves the state by
+    about one residual: within the tolerance, and identical to N = 1 only at
+    exact stationarity ... When the first sweep stops at the cap, the later
+    sweeps act as extra passes toward the same fixed point."
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
+    - src/maddening/core/coupling/group.py:206 (CouplingGroup, waveform_iterations)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-027)
+  conditions: subcycling with waveform_iterations > 1.
+  oracle: the N = 1 state; the residual of the first sweep.
+  tests:
+    - tests/core/test_coupling_waveform_report.py::test_each_later_sweep_moves_a_converged_state_by_about_one_residual
+    - tests/core/test_coupling_waveform_report.py::test_a_capped_first_sweep_is_continued_by_the_later_ones
+    - tests/property/test_differential_schedules.py::test_each_later_waveform_sweep_adds_at_least_one_pass
+  status: verified
+
+# ---------------------------------------------------------------------------
+# Adaptive steppers on coupled graphs
+# ---------------------------------------------------------------------------
+
+- id: CPL-130
+  area: adaptive
+  claim: >-
+    run_adaptive / run_adaptive_scan are "Incompatible with multi-rate
+    graphs ... Nodes of different timesteps are accepted inside a coupling
+    group with subcycling=True, whose members keep their ratio to the
+    group's macro timestep: each of a fast node's round(macro /
+    node_timestep) sub-steps is dt * node_timestep / macro, so at an integer
+    ratio every member covers dt"; one adaptive step at dt = macro is the
+    compiled step to float32 rounding.
+  sources:
+    - src/maddening/core/graph_manager.py:9212 (GraphManager.run_adaptive)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-043)
+  conditions: a sub-cycling group; a multi-rate graph is refused.
+  oracle: every member's own clock; the compiled step.
+  tests:
+    - tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_advances_every_member_by_the_step
+    - tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_scan_advances_every_member_by_the_step
+    - tests/core/test_adaptive_subcycled_group_dt.py::test_the_adaptive_step_at_the_macro_timestep_is_the_compiled_step
+    - tests/core/test_adaptive_subcycled_group_dt.py::test_the_multirate_refusal_says_what_it_enforces
+  status: verified
+
+- id: CPL-131
+  area: adaptive
+  claim: >-
+    "strict_convergence is checked here, on the host, and only for the solves
+    the stepper keeps: the error estimate's full step and a rejected attempt
+    are discarded"; run_adaptive_scan checks "accepted & ~done" in-graph; a
+    kept solve that does not converge "still raises, with the same message".
+  sources:
+    - src/maddening/core/graph_manager.py:9305 (GraphManager.run_adaptive)
+    - src/maddening/core/graph_manager.py:4103 (_build_adaptive_scan)
+  conditions: both adaptive steppers.
+  oracle: raises about kept unconverged solves only.
+  tests:
+    - tests/core/test_adaptive_strict_convergence_checks_kept_solves.py::test_run_adaptive_completes_when_every_kept_solve_converges
+    - tests/core/test_adaptive_strict_convergence_checks_kept_solves.py::test_run_adaptive_scan_completes_when_every_kept_solve_converges
+    - tests/core/test_adaptive_strict_convergence_checks_kept_solves.py::test_run_adaptive_still_raises_about_a_kept_solve_that_did_not_converge
+    - tests/core/test_adaptive_strict_convergence_checks_kept_solves.py::test_run_adaptive_scan_still_raises_about_a_kept_solve_that_did_not_converge
+    - tests/core/test_strict_convergence_threshold.py::test_the_adaptive_strict_check_raises_at_twice_the_threshold
+  status: verified
+
+- id: CPL-132
+  area: adaptive
+  claim: >-
+    "After run_adaptive or run_adaptive_scan the report describes the last
+    accepted attempt's two kept half steps ... iterations is the larger
+    half's count ... total_iterations the sum where the group owns that slot
+    ... and every per-solve key ... comes from one half: the first when it
+    alone did not converge, else the second ... converged is therefore False
+    exactly when a kept solve did not converge, the verdict
+    strict_convergence acts on."
+  sources:
+    - src/maddening/core/graph_manager.py:8185 (coupling_diagnostics)
+    - src/maddening/core/graph_manager.py:2402 (_fold_kept_half_step_reports)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-095)
+  conditions: both adaptive steppers.
+  oracle: the halves' own reports; the strict check on the same run.
+  tests:
+    - tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_a_kept_unconverged_first_half_is_reported_unconverged
+    - tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_the_report_and_strict_convergence_give_one_verdict
+    - tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_a_waveform_group_reports_the_sum_of_both_halves_passes
+    - tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_the_fold_leaves_the_state_alone
+  status: verified
+
+- id: CPL-133
+  area: adaptive
+  claim: >-
+    The step-doubling error norm reads floating leaves only: "An integer,
+    unsigned, boolean or PRNG-key leaf ... adds neither a term nor an
+    element ... so a graph steps exactly as it would without them".
+  sources:
+    - src/maddening/core/simulation/adaptive.py:62 (_tree_error_norm)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-074)
+  conditions: both adaptive steppers.
+  oracle: the accepted steps with and without the leaves.
+  tests:
+    - tests/core/test_adaptive_error_norm_reads_floating_leaves_only.py::test_a_non_floating_leaf_adds_neither_a_term_nor_an_element
+    - tests/property/test_differential_schedules.py::test_a_non_float_leaf_nothing_reads_does_not_change_the_adaptive_steps
+  status: verified
+
+- id: CPL-134
+  area: adaptive
+  claim: >-
+    At dt_min run_adaptive accepts the attempt it just made and "The clock,
+    the histories and the callback now advance by the step the state
+    covered"; "run_adaptive_scan was not affected"; run_adaptive_scan is
+    "Like run_adaptive but fully JIT-compiled and differentiable".
+  sources:
+    - src/maddening/core/graph_manager.py:9376 (GraphManager.run_adaptive)
+    - src/maddening/core/graph_manager.py:9424 (GraphManager.run_adaptive_scan)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-061)
+  conditions: 'unstated: whether the two steppers accept the same attempts at the dt_min boundary.'
+  oracle: the two steppers' accepted steps on the same graph.
+  tests:
+    - tests/core/test_adaptive_dt_min_accept_keeps_the_clock.py::test_the_clock_advances_by_the_attempt_a_dt_min_accept_keeps
+    - tests/core/test_coupling_claims_graphs.py::test_both_adaptive_steppers_accept_the_same_steps_at_dt_min
+  status: ambiguous
+  proposed_wording: >-
+    run_adaptive accepts an attempt whose error is above tolerance when the
+    shrunk step would fall to dt_min, and keeps the attempt's own size
+    (up to dt_min / min_factor); run_adaptive_scan accepts only an attempt
+    made at dt_min, so it rejects that attempt, retries at dt_min and keeps
+    the retry.  The two step sequences differ at the dt_min boundary.
+  notes: The second test is a strict xfail of the reading "the two accept the same steps".
+
+# ---------------------------------------------------------------------------
+# IFT gradients
+# ---------------------------------------------------------------------------
+
+- id: CPL-140
+  area: ift gradients
+  claim: >-
+    "x_star differentiates via the implicit function theorem:
+    dx*/d(consts) = (I - dF/dx)^{-1} dF/d(consts) evaluated at the fixed
+    point"; the adjoint is the sensitivity of the fixed point, not of the
+    truncated iterate, and differs from a finite difference of the forward
+    by about the residual times cond(I - dF/dx).
+  sources:
+    - src/maddening/core/graph_manager.py:1738 (_ift_solve_impl)
+    - src/maddening/core/graph_manager.py:1763 (_ift_solve_impl)
+  conditions: solver="ift", a converged forward.
+  oracle: the analytic gradient of linear groups; finite differences of the converged fixed point.
+  tests:
+    - tests/core/test_coupling_solver_equivalence.py::test_the_ift_adjoint_is_the_sensitivity_of_the_fixed_point
+    - tests/core/test_coupling_solver_equivalence.py::test_the_ift_adjoint_disagrees_with_its_forward_by_about_the_residual
+    - tests/core/test_coupling_ift_lineax.py::test_default_adjoint_solve_returns_the_analytic_gradient_when_stiff
+    - tests/core/test_imvj_gradient_matches_finite_differences.py::test_the_gradient_through_a_multiphysics_imvj_group_matches_finite_differences
+  status: verified
+
+- id: CPL-141
+  area: ift gradients
+  claim: >-
+    "acceleration / relaxation / n_reuse are static and control only the
+    forward iterator; the derivative is identical for all of them because
+    the IFT rule depends on F at x*, not on the path taken to reach x*."
+  sources:
+    - src/maddening/core/graph_manager.py:1779 (_ift_solve_impl)
+  conditions: 'unstated: each acceleration returns its own iterate, so "identical" holds only at the same x*.'
+  oracle: gradients across accelerations on an affine group (where the rule's inputs do not depend on the iterate).
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_the_ift_gradient_of_an_affine_group_is_the_same_under_every_acceleration
+    - tests/core/test_coupling_ift_aitken.py::test_backward_parity_ift_aitken_through_jit
+    - tests/core/test_coupling_ift_iqn_imvj.py::test_backward_parity_ift_iqn_imvj_through_jit
+  status: ambiguous
+  proposed_wording: >-
+    The derivative rule is the same for every acceleration -- it is linearised
+    at the iterate the forward returns, whatever path reached it -- so the
+    gradients agree to the extent the returned iterates do: exactly on a map
+    affine in its state with additive constants, and to about the solve's
+    tolerance times the map's curvature otherwise.
+
+- id: CPL-142
+  area: ift gradients
+  claim: >-
+    "x0, accel_init and first_res receive a zero derivative (the fixed point
+    is invariant under the initial guess, the acceleration state and the
+    stopping bookkeeping in the converged limit)."
+  sources:
+    - src/maddening/core/graph_manager.py:1740 (_ift_solve_impl)
+    - src/maddening/core/graph_manager.py:2048 (_ift_solve_jvp)
+  conditions: solver="ift".
+  oracle: the jvp of _ift_solve with tangents on x0 and first_res only.
+  tests:
+    - tests/core/test_coupling_claims_helpers.py::test_the_ift_solve_gives_the_initial_guess_a_zero_derivative
+  status: verified
+
+- id: CPL-143
+  area: ift gradients
+  claim: >-
+    The adjoint's Krylov criterion: "atol is scaled to the largest rhs entry
+    -- the usual "relative to ||b||" Krylov criterion -- and rtol is no
+    tighter than ~100 ulp of the dtype", so exact zeros in a cotangent no
+    longer read as a breakdown.
+  sources:
+    - src/maddening/core/graph_manager.py:1863 (_ift_linear_solve)
+    - docs/release_notes/v0.4.0.md#the-iqn-family-corrected
+  conditions: 'unstated: the absolute term atol = 1e-8 + rtol * max|b| dominates when every rhs entry is below ~1e-3.'
+  oracle: the gradient of s * sum(x*) divided by s, against the analytic 1 / (1 - g) at s = 1e-12.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_the_ift_gradient_is_scale_equivariant_in_the_cotangent
+    - tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises
+  status: failing
+  finding: >-
+    The adjoint is not scale-free: atol is 1e-8 + rtol * max|b|, absolute
+    below max|b| ~ 1e-3, so a cotangent whose entries are all below about
+    1e-8 satisfies the GMRES tolerance at x = 0 and the solve returns zero
+    with lineax reporting success (no dense fallback, no error).  The
+    gradient of 1e-12 * sum(x*) through a linear pair is exactly 0.0 where
+    the analytic value is 2.17e-12 -- a silent, plausible zero gradient for
+    any loss written in small units.  Guess:
+    src/maddening/core/graph_manager.py:1972 (atol in _krylov).
+
+- id: CPL-144
+  area: ift gradients
+  claim: >-
+    "The IFT derivative rule is a jax.custom_jvp ... one definition serves
+    jax.jvp / jacfwd -- the FMI FORWARD directional derivative ... -- as well
+    as jax.grad / jacrev and jax.hessian."
+  sources:
+    - docs/release_notes/v0.4.0.md#coupling-and-solvers
+    - src/maddening/core/graph_manager.py:1745 (_ift_solve_impl)
+  conditions: solver="ift".
+  oracle: forward against reverse; the FMI derivative kinds; the Hessian against fori.
+  tests:
+    - tests/core/test_coupling_ift_forward_mode.py::TestFMIDirectionalDerivative::test_forward_kind_through_ift_step
+    - tests/core/test_coupling_ift_forward_mode.py::test_hessian_through_ift_step
+    - tests/core/test_coupling_claims_graphs.py::test_jax_hessian_runs_through_an_ift_step
+    - tests/core/test_coupling_ift_forward_mode.py::test_forward_reverse_adjoint_identity
+  status: verified
+
+- id: CPL-145
+  area: ift gradients
+  claim: >-
+    Non-float leaves through the adjoint: "images are now 16-bit limbs
+    (float_image / from_float_image), keys travel as their uint32 data", and
+    differentiating through lax.scan over a coupled step with an integer or
+    boolean leaf in the group works.
+  sources:
+    - docs/release_notes/v0.4.0.md#non-float-leaves-through-the-adjoint
+    - src/maddening/core/coupling/acceleration.py:1514 (float_image)
+  conditions: solver="ift", reverse and forward mode through run_scan.
+  oracle: bit-exact leaves; finite gradients equal to the leafless graph's.
+  tests:
+    - tests/core/test_cross_feature_edge_cases.py::test_int_leaf_in_coupling_group_reverse_and_forward_mode_through_scan
+    - tests/core/test_coupling_non_float_leaves.py::test_typed_prng_key_inside_and_outside_group
+    - tests/core/test_coupling_non_float_leaves.py::test_gradient_still_flows_with_wide_integer_leaves_in_the_group
+    - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_the_ift_gradient_is_the_fixed_points_with_the_leaves_present
+  status: verified
+
+- id: CPL-146
+  area: ift gradients
+  claim: >-
+    "jax.grad on the default solver path neither raises nor lies": a stiff
+    group's spurious GMRES breakdown is gone, and the default coupling group
+    is differentiable on a base install with no extra.
+  sources:
+    - docs/user_guide/installation.md#installation
+    - src/maddening/core/graph_manager.py:1900 (_ift_linear_solve)
+  conditions: default settings.
+  oracle: generated spectra and cotangents; an install with every extra unimportable.
+  tests:
+    - tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises
+    - tests/core/test_solver_ift_lineax_is_core.py::test_default_coupling_group_differentiable_with_no_extra_installed
+  status: verified
+
+# ---------------------------------------------------------------------------
+# profile_graph's coupling statistics
+# ---------------------------------------------------------------------------
+
+- id: CPL-150
+  area: profiler
+  claim: >-
+    coupling_iter_stats per group: mean / min / max iterations, the cap,
+    total_mean, sweeps, at_cap_fraction (iterations >= max_iterations, "with
+    waveform_iterations > 1: when some sweep did") and converged_fraction by
+    "the report's own rules"; on a multi-rate graph a group "is sampled only
+    on those [steps it fires on]: its "n" counts solves".
+  sources:
+    - src/maddening/core/simulation/profiler.py:1013 (profile_graph, coupling_iter_stats)
+    - src/maddening/core/simulation/profiler.py:607 (_meta_converged)
+    - docs/release_notes/v0.4.0.md#waveform_iterations-the-report-counts-every-sweep-and-the-sweeps-are-restarts
+  conditions: any graph with groups; measure_coupling on or off.
+  oracle: the report on each sampled step.
+  tests:
+    - tests/core/test_profiler.py::test_measured_coupling_overhead_and_iteration_stats
+    - tests/core/test_profiler.py::test_a_group_one_pass_short_of_its_cap_is_not_at_the_cap
+    - tests/core/test_profiler.py::test_an_over_relaxed_groups_converged_fraction_is_the_reports
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_the_profiler_counts_each_applied_solve_once
+    - tests/core/test_coupling_claims_graphs.py::test_the_profilers_cap_check_sees_a_capped_first_sweep
+  status: verified
+
+- id: CPL-151
+  area: profiler
+  claim: >-
+    "Passing a value [n_stat_steps] pins both [the sample count and the
+    window's position]: the state is reset and re-warmed first, so the
+    statistics come from the same window whatever n_steps is."
+  sources:
+    - src/maddening/core/simulation/profiler.py:869 (profile_graph, n_stat_steps)
+  conditions: n_stat_steps given.
+  oracle: the statistics at two n_steps.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_coupling_statistics_do_not_depend_on_the_timed_step_count
+  status: verified
+
+- id: CPL-152
+  area: profiler
+  claim: >-
+    measure_coupling: the one-iteration variant "runs exactly one pass per
+    waveform sweep from every trajectory position", "coupling_per_iteration_ms
+    divides the overhead by the real step's total_iterations less those
+    sweeps", the graph (groups, state, compiled step, params snapshot) is
+    restored, nothing warns, a pending node.params write survives, and
+    coupling_overhead_ms "is reported signed".
+  sources:
+    - src/maddening/core/simulation/profiler.py:816 (profile_graph, measure_coupling)
+    - src/maddening/core/simulation/profiler.py:635 (_one_iteration_variant)
+  conditions: measure_coupling=True.
+  oracle: the variant's report; the graph before and after; the warnings.
+  tests:
+    - tests/core/test_profiler.py::test_one_iteration_variant_runs_one_pass_from_any_position
+    - tests/core/test_profiler.py::test_the_one_iteration_variant_runs_one_pass_per_waveform_sweep
+    - tests/core/test_profiler.py::test_coupling_per_iteration_ms_divides_by_the_passes_the_overhead_paid_for
+    - tests/core/test_profiler.py::test_graph_restored_after_one_iteration_measurement
+    - tests/core/test_profiler_one_iteration_variant_warnings.py::test_measuring_coupling_overhead_warns_about_nothing
+    - tests/core/test_profiler.py::test_a_pending_node_params_write_survives_profiling
+    - tests/core/test_profiler.py::test_measured_overhead_is_signed_not_clamped
+  status: verified
+
+# ---------------------------------------------------------------------------
+# sysid.windowed_loss's convergence mask
+# ---------------------------------------------------------------------------
+
+- id: CPL-160
+  area: sysid
+  claim: >-
+    mask_unconverged: "Drop a window from the loss and from its gradient when
+    any coupling group exited at max_iterations unconverged during it ... it
+    contributes exactly zero to both, including a window whose state
+    diverged to inf or NaN, and under multiple shooting its continuity
+    penalty goes with it.  The verdict is taken in a gradient-free forward
+    pass."
+  sources:
+    - src/maddening/sysid.py:348 (windowed_loss, mask_unconverged)
+  conditions: any group that records a verdict.
+  oracle: the masked loss and gradient against the sum over the other windows.
+  tests:
+    - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_a_diverged_window_leaves_a_finite_gradient_of_the_other_windows
+    - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_a_masked_window_contributes_nothing_whatever_its_samples_hold
+    - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_multiple_shooting_drops_a_diverged_window_and_its_continuity_term
+    - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_the_verdict_reads_every_coupling_group
+    - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_the_mask_drops_the_window_the_report_calls_unconverged
+  status: verified
+
+- id: CPL-161
+  area: sysid
+  claim: >-
+    The mask "Reads each group's residual and amplification slots in _meta,
+    which solver="ift" always writes and solver="fori" writes only with
+    diagnostics=True: a group with no such slots would never be masked, so
+    it is refused (ValueError)"; mask_unconverged must be a bool; on a
+    multi-rate graph a group's slots hold its most recent applied solve.
+  sources:
+    - src/maddening/sysid.py:357 (windowed_loss, mask_unconverged)
+    - src/maddening/sysid.py:265 (_refuse_unmaskable_groups)
+  conditions: as stated.
+  oracle: refusals; the multi-rate window whose applied solve converged.
+  tests:
+    - tests/core/test_sysid_mask_refuses_unrecorded_group.py::test_a_fori_group_without_diagnostics_is_refused
+    - tests/core/test_sysid_mask_refuses_unrecorded_group.py::test_every_group_that_records_a_verdict_is_masked
+    - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_refuses_a_mask_unconverged_that_is_not_a_bool
+    - tests/core/test_multirate_group_meta_follows_firing.py::test_the_sysid_mask_keeps_a_window_whose_applied_solve_converged
+  status: verified
+
+- id: CPL-162
+  area: sysid
+  claim: >-
+    "Values are unchanged wherever every window converges (where picks its
+    first operand exactly), and a masked window contributes exactly
+    nothing."
+  sources:
+    - src/maddening/sysid.py:508 (windowed_loss)
+  conditions: every window converges.
+  oracle: the loss and gradient with mask_unconverged True against False, bit for bit.
+  tests:
+    - tests/core/test_coupling_claims_graphs.py::test_the_mask_changes_nothing_where_every_window_converges
+  status: verified
+
+# ---------------------------------------------------------------------------
+# The coupling guide's measured claims (recorded sweep files)
+# ---------------------------------------------------------------------------
+
+- id: CPL-170
+  area: coupling guide
+  claim: >-
+    "the recorded files still describe the code: one row of every fixture of
+    every file (gs/none/l2) is re-measured over the window the file records
+    and compared with it -- iterations per step within 5%, converged fraction
+    within 5 points, predicted_rho exactly."
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#invariants
+  conditions: CPU; five fixtures per push, the rest in the slow lane.
+  oracle: the recorded JSON rows.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_every_recorded_fixture_still_measures_its_baseline_row
+    - tests/core/test_coupling_fixture_invariants.py::test_the_live_row_check_can_fail
+    - tests/core/test_coupling_fixture_invariants.py::test_every_row_the_guide_quotes_is_what_the_fixture_measures
+  status: verified
+
+- id: CPL-171
+  area: coupling guide
+  claim: >-
+    "every configuration of a fixture reaches the same fixed point" -- the
+    rows that do not are listed in _KNOWN_DISAGREEMENTS with their defect,
+    and the test fails if a listed row starts agreeing.
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#invariants
+    - docs/developer_guide/coupling_algorithm_guide.md#do-all-these-configurations-agree
+  conditions: the six L2 configurations per push; all 24 slow.
+  oracle: the configurations against each other.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_every_l2_configuration_reaches_the_same_fixed_point
+    - tests/core/test_coupling_fixture_invariants.py::test_every_configuration_reaches_the_same_fixed_point
+  status: verified
+
+- id: CPL-172
+  area: coupling guide
+  claim: >-
+    "Gauss-Seidel needs 1.7-2.1x fewer iterations than Jacobi on every shape
+    where both converge on every step"; "not one Gauss-Seidel row beats its
+    unrelaxed counterpart ... Every row where relaxation wins is a Jacobi
+    row"; the interface norm "removes -18% to 28% of the iterations"; "all
+    four Jacobi cheap-only rows fall short".
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#start-here
+    - docs/developer_guide/coupling_algorithm_guide.md#where-the-measurement-contradicted-the-theory
+    - docs/developer_guide/coupling_algorithm_guide.md#four-combinations-that-theory-says-should-win
+  conditions: the recorded sweep (CPU, 2026-09-25).
+  oracle: the recorded rows.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_gauss_seidel_needs_between_1_7_and_2_1_times_fewer_iterations
+    - tests/core/test_coupling_fixture_invariants.py::test_fixed_relaxation_never_helps_gauss_seidel_and_helps_jacobi_on_two_fixtures
+    - tests/core/test_coupling_fixture_invariants.py::test_interface_norm_iteration_change_is_the_quoted_range
+    - tests/core/test_coupling_fixture_invariants.py::test_jacobi_loses_convergence_when_iqn_is_restricted_to_the_cheap_nodes
+  status: verified
+
+- id: CPL-173
+  area: coupling guide
+  claim: >-
+    "the heat fixtures contract at the rate they predict (2 Fo and (2 Fo)^2,
+    measured from the report's own amplification), and a slab pair at or
+    above its coupled time-step limit, Fo = 3/8, is refused."
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#invariants
+  conditions: the heat fixtures.
+  oracle: the report's amplification; the builder's refusal.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_the_heat_fixtures_contract_at_the_rate_they_predict
+    - tests/core/test_coupling_fixture_invariants.py::test_a_slab_pair_past_its_coupled_stability_limit_is_refused
+  status: verified
+
+- id: CPL-174
+  area: coupling guide
+  claim: >-
+    "do not pair the auto-detected accelerated_fields with
+    convergence_norm="interface" ... naming every field in
+    accelerated_fields closes all ten at the same iteration count, and
+    tightening atol/rtol ... does not".
+  sources:
+    - docs/developer_guide/coupling_algorithm_guide.md#four-combinations-that-theory-says-should-win
+    - docs/validation/known_anomalies.yaml (MADD-ANO-005)
+  conditions: iqn-* rows under the interface norm.
+  oracle: the plain-iteration fixed point.
+  tests:
+    - tests/core/test_coupling_fixture_invariants.py::test_tightening_rtol_does_not_move_the_resistant_stiff_pair_row
+    - tests/property/test_coupling_acceleration_agreement.py::test_accelerating_every_field_lands_on_the_same_answer_as_plain_iteration
+  status: verified
+
+# ---------------------------------------------------------------------------
+# Metamorphic invariances (the contract tests/property/test_coupling_invariances.py states)
+# ---------------------------------------------------------------------------
+
+- id: CPL-180
+  area: invariance
+  claim: >-
+    A group is keyed by "its sorted node names joined with "+"" and nothing
+    else about a node's name reaches the solve: renaming every node (a
+    random permutation of names, including ones where the sorted order
+    differs from the schedule) gives bit-identical states, verdicts and
+    reports, up to the name keys.
+  sources:
+    - docs/developer_guide/testing_standards.md#the-coupling-claims-inventory
+    - src/maddening/core/graph_manager.py:928 (_refuse_colliding_group_keys)
+  conditions: both solvers, both schedules, every acceleration and norm, diagnostics on.
+  oracle: bit-identity against the run under the original names.
+  tests:
+    - tests/property/test_coupling_invariances.py::test_renaming_every_node_changes_nothing_but_the_keys
+    - tests/property/test_coupling_invariances.py::test_renaming_is_invariant_on_generated_graphs
+  status: verified
+
+- id: CPL-181
+  area: invariance
+  claim: >-
+    The order of add_edge calls, and of add_node calls for nodes the
+    schedule does not order by insertion, does not reach the result: the
+    same graph built in another order gives bit-identical states, verdicts
+    and reports.
+  sources:
+    - docs/developer_guide/testing_standards.md#the-coupling-claims-inventory
+    - docs/developer_guide/coupling_algorithm_guide.md#start-here
+  conditions: >-
+    both solvers, both schedules, every acceleration, the l2 and mixed norms;
+    the group's members keep their relative order (a Gauss-Seidel sweep
+    follows it by design: CPL-077) and a downstream node is added after the
+    group (CPL-025).
+  oracle: bit-identity against the original build order.
+  tests:
+    - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
+    - tests/property/test_coupling_invariances.py::test_the_build_order_is_invariant_on_generated_graphs
+  status: verified
+
+- id: CPL-182
+  area: invariance
+  claim: >-
+    The interface norm does not depend on the order the group's edges were
+    added in (the same invariance as CPL-181, under convergence_norm=
+    "interface").
+  sources:
+    - docs/developer_guide/testing_standards.md#the-coupling-claims-inventory
+    - src/maddening/core/coupling/acceleration.py:391 (coupling_residual_interface)
+  conditions: convergence_norm="interface", any acceleration and solver.
+  oracle: the residual against the same graph with its edges added in reverse.
+  tests:
+    - tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
+  status: failing
+  finding: >-
+    The interface norm sums its terms over the group's internal edges in the
+    order they were added (group_internal_list follows all_edges), so
+    reversing the add_edge calls moves the reported residual in its last
+    bits (228.80760 against 228.80762 on a three-node group under
+    acceleration="fixed") -- enough to move a verdict, and with it the pass
+    and the state, wherever the estimate sits within an ulp of the
+    threshold.  The l2 and mixed norms sum over nodes in the schedule's
+    order and are unaffected.  Guess:
+    src/maddening/core/graph_manager.py:2552 (sort group_internal_list by
+    edge key) or src/maddening/core/coupling/acceleration.py:391.
+
+- id: CPL-183
+  area: invariance
+  claim: >-
+    An identity relay inserted on an internal edge does not move the
+    fixed point: the coupled system is the same system with one more copy
+    of a field, so the other nodes' states change only by rounding (within
+    the derived bound stated in the test) and the verdicts not at all away
+    from the threshold.
+  sources:
+    - docs/developer_guide/testing_standards.md#the-coupling-claims-inventory
+    - src/maddening/core/coupling/group.py:8 (module docstring)
+  conditions: >-
+    Gauss-Seidel with the relay added straight after its source and a
+    constant iterator ("none", "fixed"): the other nodes' iterates are
+    bit-identical pass for pass.  Otherwise (Jacobi, Aitken, IQN): both run
+    to float32 stationarity and each lands within amp * floor of the exact
+    float64 fixed point; a convergent group converges with and without the
+    relay, a divergent one with neither.  The verdict statement is drawn
+    for Aitken under Gauss-Seidel only: under Jacobi its single factor,
+    re-derived from residuals that count the relayed field twice, can
+    stagnate (capped at 400 passes at rate 0.9 where the relay-free group
+    stopped at 278 through the raw-residual fallback) -- the documented
+    failure of Aitken's single-mode assumption on a Jacobi spectrum, not
+    rounding.
+  oracle: bit-identity; the exact float64 fixed point and the operator norm of (I - M)^-1.
+  tests:
+    - tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_no_bit_under_a_gauss_seidel_constant_iterator
+    - tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_the_fixed_point_only_by_rounding
+    - tests/property/test_coupling_invariances.py::test_an_identity_relay_keeps_the_verdict
+  status: verified

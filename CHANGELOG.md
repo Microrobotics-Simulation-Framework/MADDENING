@@ -342,9 +342,12 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **FMU export: schema-valid starts, a locale-proof wrapper, the FMI state machine** (MADD-ANO-106, never released): Boolean/integer `start`/`min`/`max` in their type's form and discrete; the C wrapper writes and reads numbers in the C locale; an archive cannot install mapping weights;
+- **FMU export: schema-valid starts, a locale-proof wrapper, the FMI state machine** (MADD-ANO-113, never released): Boolean/integer `start`/`min`/`max` in their type's form and discrete; the C wrapper writes and reads numbers in the C locale; an archive cannot install mapping weights;
   the token covers starts and bounds; terminate refuses step/set/initialize until reset; `fmi3GetClock`/`SetClock` are `fmi3Error`; `FmuTcpBridge(idle_timeout=None)` waits for ever; a node named `x.params.y` has settable parameters.
   Action: rebuild FMUs (their tokens change) and re-package them with their bridge's description.
+- **The REST server uses its graph one request at a time, and bounds what a request can take** (MADD-ANO-106 to 112; 086 and 092 completed): concurrent `/sim/step`s no longer lose steps, `/surrogate/train` leaves the live simulation alone (one job, memory estimated first), streams follow a checkpoint load and a replaced node, `/sim/run` stops on shutdown (503),
+  a dead runner is reported, structural edits beside the runner are 409, bodies over 32 MiB are 413, the whole graph holds at most 1e8 state elements; `run_pod.py --keep-going` records a goal that raises, and `--summarise` exits 4 when no file records a commit.
+  Action: expect 409 for writes during a `/sim/run` or beside the runner, and read `/checkpoint/load`'s `sim_time`; a 503 from `/sim/run` names the steps it took.
 - **Fitters keep each parameter where `constrain` is not a clip or a clamp** (MADD-ANO-104, never released: a coordinate past one stayed there and `fit_lm` said converged); `fit_lm`'s floor is relative to the residual; `windowed_loss(start_step=)` (experimental) says where a multi-rate record began;
   `node.params` writes are counted, so every entry point recompiles for one and `load_state` supersedes them (MADD-ANO-105, since 0.1.0: `gm.step` and a new `run_scan` length ran different models).  Action: after writing `node.params` on a 0.3.x graph, `compile()` before running it.
 - **The FMU bridge and C wrapper refuse what they used to coerce or drop** (MADD-ANO-100 to 103, never released): a `master_dt` other than `md.graph_timestep`, a Boolean other than 0/1, an `fmi3Get`/`Set` of another type than the variable's, a repeated value reference, a numeric set of a Clock,

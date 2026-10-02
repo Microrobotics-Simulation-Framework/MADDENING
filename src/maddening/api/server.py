@@ -48,14 +48,20 @@ the best-supported way to reach this API from another machine.
 from __future__ import annotations
 
 import asyncio
+import atexit
+import collections
+import contextlib
 import ipaddress
+import json
 import logging
 import math
 import os
+import signal
 import threading
 import time
 import uuid
 import warnings
+import weakref
 from pathlib import Path
 from typing import Annotated, Any, Iterable, Optional
 from urllib.parse import urlsplit
@@ -68,6 +74,7 @@ try:
     from fastapi import FastAPI, HTTPException, Query, WebSocket
     from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field, field_validator
+    from starlette.exceptions import HTTPException as StarletteHTTPException
 except ImportError as _exc:
     raise ImportError(
         "The MADDENING API server requires 'fastapi' and 'pydantic'. "
@@ -95,6 +102,9 @@ from maddening.core._size_estimate import (
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.graph_manager import (
+    EVENT_COMPILED,
+    EVENT_NODE_ADDED,
+    EVENT_NODE_REMOVED,
     GraphManager,
     _declared_boundary_zeros,
     _hook_outputs,
@@ -260,6 +270,79 @@ MAX_SURROGATE_BATCH_SIZE = 65_536
 MAX_SURROGATE_LAYERS = 16
 MAX_SURROGATE_LAYER_WIDTH = 8192
 
+#: Upper bound on ``width ** 2 * depth`` of a ``POST /surrogate/train``
+#: network, *width* its widest hidden layer and *depth* its number of
+#: hidden layers: the hidden weights, which the two bounds above only
+#: bound one at a time (8192 x 16 is a billion weights, 4 GB of them
+#: before the optimiser copies them).  2**24 float32 weights are 64 MiB;
+#: training holds about twelve copies (the weights, their gradient, Adam's
+#: two moments and each step's new values), so about 0.75 GiB at the
+#: bound, within :data:`MAX_SURROGATE_TRAIN_BYTES`.  It admits 4096 x 1,
+#: 2048 x 4 and 1024 x 16, and the shipped UI's 64 x 2 by a wide margin.
+MAX_SURROGATE_HIDDEN_WEIGHTS = 2 ** 24
+
+#: Upper bound on the memory one ``POST /surrogate/train`` job may take,
+#: estimated before its worker starts (:func:`_surrogate_training_bytes`):
+#: the data sweep over the whole graph (16 initial conditions, up to 200
+#: steps each, every node's history), the dataset made from it and the
+#: copies training takes of it, and the network with its optimiser.  The
+#: same bound as building one node, :data:`MAX_NODE_BUILD_BYTES`: one
+#: request may name about that much, and no more.  One in-cap request
+#: used to take 2.2 GB (a 25 000-cell rod) to 5.9 GB and an out-of-memory
+#: error (an 8192 x 16 network).
+MAX_SURROGATE_TRAIN_BYTES = MAX_NODE_BUILD_BYTES
+
+#: How many finished ``POST /surrogate/train`` jobs (and their trained
+#: networks) are kept for ``GET /surrogate/status`` and ``POST
+#: /surrogate/activate``; the oldest finished job is dropped past it.  One
+#: job runs at a time.  Every job used to be kept for the life of the
+#: process, and any number ran at once.
+MAX_SURROGATE_JOBS_KEPT = 8
+
+#: Upper bound on the scalars of the whole graph's state, summed over
+#: every node, after a ``POST /graph/nodes``: each node is held to
+#: :data:`MAX_NODE_STATE_ELEMENTS`, and nothing bounded how many such
+#: nodes a caller could add.  Five nodes at the per-node cap, 400 MB of
+#: float32 state; a step holds the old and new state and a few temporaries
+#: of it, about 1.6 GB at the bound -- the order of
+#: :data:`MAX_NODE_BUILD_BYTES` again.  Checked before the node is built
+#: for a class that can say what it would build, and on the built state
+#: for any other.
+MAX_GRAPH_STATE_ELEMENTS = 5 * MAX_NODE_STATE_ELEMENTS
+
+#: Upper bound on a request body, enforced by a pure-ASGI middleware
+#: before anything is parsed: a ``Content-Length`` above it is a 413
+#: without reading the body, and a body sent without one is counted as it
+#: arrives and refused the moment it passes it.  The largest body any
+#: bounded field admits is :data:`MAX_NODE_PARAM_ELEMENTS` numbers in
+#: ``POST /graph/nodes`` / ``PUT /graph/params``, at most 26 bytes each in
+#: JSON (``-1.2345678901234567e-308, ``), about 26 MB; this is the next
+#: power of two.  Parsing JSON takes 25-40 times the body, so about
+#: 1.3 GB at the bound, again the order of :data:`MAX_NODE_BUILD_BYTES`.
+#: Bodies were unbounded, and parsed whole before any cap was checked.
+MAX_REQUEST_BODY_BYTES = 32 * 1024 ** 2
+
+#: Upper bound on the WebSocket streams (``/ws/state``,
+#: ``/ws/state/binary``, ``/ws/render``) open at once; past it a handshake
+#: is closed with 1013 ("try again later").  Each stream encodes or renders
+#: the state on its own, so the streams' share of the server grew with
+#: every client.
+MAX_STREAM_CONNECTIONS = 16
+
+#: How long a request waits for the graph lock (see
+#: :class:`SimulationServer`) before answering 503: another request, the
+#: runner's step or a surrogate data sweep is using the graph.  A step
+#: holds the lock for one step and ``POST /sim/run`` for a slice of about
+#: :data:`_RUN_SLICE_SECONDS`, so this is reached only behind something
+#: long -- a first compile, a large checkpoint -- and keeps a queue of
+#: waiting requests from holding the server's worker threads.
+_GRAPH_LOCK_TIMEOUT = 30.0
+
+#: ``POST /sim/run`` steps in slices of about this many seconds, taking
+#: the graph lock for each and checking between them whether the server
+#: is shutting down; reads are served between slices.
+_RUN_SLICE_SECONDS = 0.05
+
 
 def _oversized_param(value: Any, path: str = "") -> Optional[str]:
     """Why *value* is too big to accept as a node parameter, else ``None``.
@@ -371,6 +454,21 @@ class TrainSurrogateRequest(BaseModel):
         Annotated[int, Field(ge=1, le=MAX_SURROGATE_LAYER_WIDTH)]
     ] = Field([64, 64], min_length=1, max_length=MAX_SURROGATE_LAYERS)
     batch_size: int = Field(64, ge=1, le=MAX_SURROGATE_BATCH_SIZE)
+
+    # The width and depth bounds hold one number each; the hidden weights
+    # grow with width squared times depth, so that is bounded too.
+    @field_validator("hidden_sizes")
+    @classmethod
+    def _hidden_weights_within_bounds(cls, value: list[int]) -> list[int]:
+        weights = max(value) ** 2 * len(value)
+        if weights > MAX_SURROGATE_HIDDEN_WEIGHTS:
+            raise ValueError(
+                f"hidden_sizes: width**2 * depth is {weights} (widest layer "
+                f"{max(value)}, {len(value)} layers); at most "
+                f"{MAX_SURROGATE_HIDDEN_WEIGHTS} hidden weights are accepted "
+                "(this server is unauthenticated -- train a network this size "
+                "in-process)")
+        return value
 
 
 # ------------------------------------------------------------------
@@ -534,6 +632,10 @@ def _dry_run_node(node, state: Any = None) -> None:
 _GRAPH_CONFIGURATION_ERRORS = (
     RuntimeError, ValueError, TypeError, KeyError, AttributeError, IndexError,
     ArithmeticError,
+    # ``compile()`` reports every edge it cannot validate at once, as an
+    # ExceptionGroup of ValueErrors: an edge between fields whose shapes do
+    # not match, which ``POST /graph/edges`` accepts.  It was a 500.
+    ExceptionGroup,
 )
 
 
@@ -541,8 +643,360 @@ def _cannot_step_detail(exc: BaseException) -> str:
     """The 400 body for a step that raised *exc*."""
     if isinstance(exc, RuntimeError):
         return str(exc)
+    if isinstance(exc, ExceptionGroup):
+        reasons = "; ".join(f"{type(e).__name__}: {e}" for e in exc.exceptions)
+        return (f"the graph cannot step with its current configuration "
+                f"({exc.message}: {reasons}); nothing was stepped")
     return (f"the graph cannot step with its current configuration "
             f"({type(exc).__name__}: {exc}); nothing was stepped")
+
+
+def _overflowing_float(value: Any, path: str = "") -> Optional[str]:
+    """The path of the first finite float inside *value* that the default
+    floating dtype overflows to an infinity (``1e39`` under float32), else
+    ``None``.
+
+    For a structural parameter -- a value ``node.params`` stores as Python
+    data (RigidBodyNode's ``constraints``), which the node turns into an
+    array of the default dtype when it is traced.  A leaf of the params
+    pytree is checked against its own dtype (:func:`_unrepresentable`);
+    a structural value was not checked at all, so ``{"z": 1e39}`` was
+    answered 200 and every later step produced infinities.
+    """
+    limit = float(np.finfo(jax.dtypes.canonicalize_dtype(jnp.float64)).max)
+    stack: list[tuple[Any, str]] = [(value, path)]
+    while stack:
+        item, where = stack.pop()
+        if isinstance(item, dict):
+            stack.extend((v, f"{where}.{k}" if where else str(k)) for k, v in item.items())
+        elif isinstance(item, (list, tuple)):
+            stack.extend((v, f"{where}[{i}]") for i, v in enumerate(item))
+        elif isinstance(item, float) and math.isfinite(item) and abs(item) > limit:
+            return where or "value"
+    return None
+
+
+def _json_value_count(value: Any) -> int:
+    """How many numbers a JSON *value* holds (nested lists flattened, a
+    scalar is one), counted without converting it to an array."""
+    total = 0
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (list, tuple)):
+            stack.extend(item)
+        else:
+            total += 1
+    return total
+
+
+class _GraphLock:
+    """The re-entrant lock around every use of a server's graph: granted
+    first come, first served, and able to say whether the calling thread
+    holds it.
+
+    ``acquire`` / ``release`` as ``threading.RLock`` (the interface
+    :class:`~maddening.viz.runner.RealtimeRunner` takes), plus
+    :meth:`acquire_unless`, which the runner uses to wait for its turn
+    while watching its stop event.  :meth:`held` is what lets a route
+    refuse to wait for the runner's thread while it holds the lock that
+    thread needs for its next step.
+
+    First come, first served, because a ``threading.RLock`` is not: a
+    runner behind its schedule releases the lock after a step and takes it
+    straight back, and a request waiting for it could wait for many steps
+    -- 36 s for twenty parameter writes on a two-core CI runner.  Here a
+    thread that asks while others are waiting queues behind them, so a
+    request waits for at most the step in flight.
+    """
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition(threading.Lock())
+        self._owner: Optional[int] = None
+        self._depth = 0
+        self._queue: collections.deque = collections.deque()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1,
+                cancelled: Optional[Any] = None) -> bool:
+        """Take the lock, after every thread that asked for it earlier.
+
+        Parameters
+        ----------
+        blocking : bool
+            ``False`` takes it only if it is free and nobody is waiting.
+        timeout : float
+            Seconds to wait; negative (the default) or ``None`` waits for
+            as long as it takes.
+        cancelled : callable, optional
+            Asked between waits of at most 50 ms; when it returns true the
+            wait is given up.  The thread keeps its place in the queue
+            while it waits.
+
+        Returns
+        -------
+        bool
+            Whether the lock is now held.
+        """
+        me = threading.get_ident()
+        with self._cond:
+            if self._owner == me:
+                self._depth += 1
+                return True
+            if self._owner is None and not self._queue:
+                self._owner, self._depth = me, 1
+                return True
+            if not blocking:
+                return False
+            deadline = (None if timeout is None or timeout < 0
+                        else time.monotonic() + timeout)
+            ticket = object()
+            self._queue.append(ticket)
+            try:
+                while self._owner is not None or self._queue[0] is not ticket:
+                    if cancelled is not None and cancelled():
+                        return False
+                    wait = 0.05 if cancelled is not None else None
+                    if deadline is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                        wait = remaining if wait is None else min(wait, remaining)
+                    self._cond.wait(wait)
+                self._queue.popleft()
+                self._owner, self._depth = me, 1
+                return True
+            finally:
+                if self._owner != me and ticket in self._queue:
+                    # Gave up: the next in line may be at the head now.
+                    self._queue.remove(ticket)
+                    self._cond.notify_all()
+
+    def acquire_unless(self, event: threading.Event) -> bool:
+        """Wait for the lock unless *event* is set first; ``False`` (not
+        held) when it is."""
+        return self.acquire(cancelled=event.is_set)
+
+    def release(self) -> None:
+        with self._cond:
+            if self._owner != threading.get_ident():
+                raise RuntimeError("release of a graph lock this thread does not hold")
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+                self._cond.notify_all()
+
+    def held(self) -> bool:
+        """Whether the calling thread holds the lock."""
+        return self._owner == threading.get_ident()
+
+    def __enter__(self) -> "_GraphLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        self.release()
+
+
+def _surrogate_training_bytes(gm: GraphManager, node_name: str,
+                              req: "TrainSurrogateRequest") -> int:
+    """The memory a ``POST /surrogate/train`` job for *req* would take,
+    estimated from the graph's shapes before anything is built.
+
+    The job runs a sweep of :data:`_SURROGATE_CONDITIONS` initial
+    conditions over the whole graph for ``S = min(200, n_data_steps)``
+    steps, keeping every node's history; pairs the target node's states
+    with the next ones into a dataset; and trains a network on it.  So:
+
+    * **the sweep's history**: ``C * S * E_graph`` values;
+    * **the dataset** (states, next states and boundary inputs of the
+      target node): ``D = C * (S - 1) * (2 * E_node + E_inputs)`` values,
+      held three times at the peak -- the dataset, the training/validation
+      split and each epoch's shuffle (measured: a 25 000-cell rod at the
+      defaults took 2.18 GiB, this says 2.08 GiB);
+    * **the network**: ``P`` weights, the input and output layers sized by
+      the node's state (``in * w + (d - 1) * w**2 + w * out``), about
+      twelve copies of them while training (the weights, the gradient,
+      Adam's two moments and each step's new values: measured 0.47 GiB
+      above the fixed cost for a 2048 x 4 network), and a batch's
+      activations, forward and backward;
+
+    in the graph's widest float dtype.
+    """
+    def size(leaf: Any) -> int:
+        n = 1
+        for dim in getattr(leaf, "shape", ()):
+            n *= int(dim)
+        return n
+
+    itemsize = 4
+    e_graph = 0
+    for name, fields in gm._state.items():
+        if name == "_meta":
+            continue
+        for leaf in jax.tree_util.tree_leaves(fields):
+            e_graph += size(leaf)
+            dtype = getattr(leaf, "dtype", None)
+            if dtype is not None and np.issubdtype(np.dtype(dtype), np.floating):
+                itemsize = max(itemsize, np.dtype(dtype).itemsize)
+    e_node = sum(size(leaf) for leaf in jax.tree_util.tree_leaves(gm._state[node_name]))
+    e_inputs = 0
+    for edge in gm._edges:
+        if edge.target_node != node_name:
+            continue
+        source = gm._state.get(edge.source_node, {})
+        e_inputs += size(source[edge.source_field]) if edge.source_field in source else 1
+    for ext in gm._external_inputs:
+        if ext.target_node == node_name:
+            e_inputs += max(1, math.prod(int(d) for d in (ext.shape or ())))
+    conditions = _SURROGATE_CONDITIONS
+    steps = min(_SURROGATE_STEPS_PER_CONDITION, req.n_data_steps)
+    history = conditions * steps * e_graph
+    dataset = conditions * max(steps - 1, 1) * (2 * e_node + e_inputs)
+    width, depth = max(req.hidden_sizes), len(req.hidden_sizes)
+    n_in, n_out = e_node + e_inputs + 1, e_node
+    weights = n_in * width + (depth - 1) * width ** 2 + width * n_out + depth * width + n_out
+    activations = 3 * req.batch_size * (n_in + depth * width + n_out)
+    return itemsize * (history + 3 * dataset + 12 * weights + activations)
+
+
+#: The sweep ``POST /surrogate/train`` generates its data with: this many
+#: initial conditions, of at most this many steps each.
+_SURROGATE_CONDITIONS = 16
+_SURROGATE_STEPS_PER_CONDITION = 200
+
+
+class _TrainingCancelled(Exception):
+    """Raised from a training job's progress callback when the server is
+    shutting down: the job ends at the epoch it is in."""
+
+
+#: Servers whose surrogate jobs are cancelled and joined at interpreter
+#: exit (see :meth:`SimulationServer._cancel_training_jobs`).
+_LIVE_SERVERS: "weakref.WeakSet[SimulationServer]" = weakref.WeakSet()
+
+
+@atexit.register
+def _cancel_training_jobs_at_exit() -> None:
+    """A training job's thread is a daemon, and one still inside XLA when
+    the interpreter tore down its runtime aborted the process ("terminate
+    called after throwing an instance of ...", a core dump).  At exit each
+    job is told to stop and its thread is joined, so it is out of XLA
+    first."""
+    for server in list(_LIVE_SERVERS):
+        server._cancel_training_jobs(timeout=30.0)
+
+
+def _body_too_large_detail(limit: int) -> str:
+    return (f"Request body is larger than {format_bytes(limit)}, the most this "
+            "server accepts (MAX_REQUEST_BODY_BYTES): nothing was parsed or "
+            "changed.  Send fewer values; a graph this size is built "
+            "in-process.")
+
+
+class _BodyTooLarge(StarletteHTTPException):
+    """A request body passed :data:`MAX_REQUEST_BODY_BYTES` while it was
+    being read.  An HTTP exception, so that FastAPI's body reader -- which
+    turns any other exception into "There was an error parsing the body"
+    (400) -- passes it on as the 413 it is."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(status_code=413, detail=_body_too_large_detail(limit))
+
+
+class _RequestBodyLimitMiddleware:
+    """Refuse a request body over :data:`MAX_REQUEST_BODY_BYTES` with 413,
+    before anything parses it.
+
+    Pure ASGI, below only the authentication middlewares (which read no
+    body): a ``Content-Length`` over the limit is refused without reading a
+    byte of the body, and a body sent without one
+    (chunked) is counted as the application reads it -- the read that
+    takes it past the limit raises, and the 413 is sent in place of
+    whatever the application would have answered.  Nothing bounded a body
+    before: every element cap ran on the parsed request, and parsing a
+    76 MB body of numbers took 2-3 GB.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    @staticmethod
+    async def _refuse(send, limit: int) -> None:
+        body = json.dumps({"detail": _body_too_large_detail(limit)}).encode()
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode()),
+                                (b"connection", b"close")]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = MAX_REQUEST_BODY_BYTES
+        for key, value in scope.get("headers") or ():
+            if key.lower() == b"content-length":
+                try:
+                    declared = int(value)
+                except ValueError:
+                    declared = None
+                if declared is not None and declared > limit:
+                    logger.warning("Refused %s %s: Content-Length %s over %s",
+                                   scope.get("method"), scope.get("path"), declared, limit)
+                    await self._refuse(send, limit)
+                    return
+        received = 0
+        started = False
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body") or b"")
+                if received > limit:
+                    raise _BodyTooLarge(limit)
+            return message
+
+        async def tracking_send(message):
+            nonlocal started
+            if message.get("type") == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except _BodyTooLarge:
+            if started:
+                raise
+            logger.warning("Refused %s %s: body over %s bytes",
+                           scope.get("method"), scope.get("path"), limit)
+            await self._refuse(send, limit)
+
+
+def _state_layout(state: dict) -> tuple:
+    """``((node, field, shape), ...)`` of a user state, sorted: what a
+    binary stream's schema depends on."""
+    return tuple(
+        (node, field, tuple(int(d) for d in getattr(value, "shape", ())))
+        for node, fields in sorted(state.items()) if node != "_meta"
+        for field, value in sorted(fields.items())
+    )
+
+
+def _encode_state_frame(sim_time: float, state: dict, fields: Optional[dict]) -> str:
+    """One ``/ws/state`` frame, as the text Starlette's ``send_json`` would
+    send: *state* filtered to *fields* (``{node: [field, ...]}``, ``None``
+    for all of it), every non-finite float as its quoted token.  Run in a
+    worker thread, never on the event loop: for a large state it takes
+    tenths of a second, and every other request waited for it."""
+    if fields is not None:
+        state = {
+            node: {f: values[f] for f in fields.get(node, []) if f in values}
+            for node, values in state.items()
+            if node in fields
+        }
+    return json.dumps({"sim_time": sim_time, "state": _json_reply(state)},
+                      separators=(",", ":"), ensure_ascii=False)
 
 
 # ------------------------------------------------------------------
@@ -595,6 +1049,19 @@ def _allocation_refusal(estimate: AllocationEstimate) -> Optional[str]:
                 "the API (this server is unauthenticated -- build a graph this "
                 "size in-process)")
     return None
+
+
+def _graph_budget_refusal(name: str, held: int, adding: int) -> Optional[str]:
+    """Why adding node *name* with *adding* state elements to a graph that
+    holds *held* is refused for :data:`MAX_GRAPH_STATE_ELEMENTS`, or
+    ``None``."""
+    if held + adding <= MAX_GRAPH_STATE_ELEMENTS:
+        return None
+    return (f"node '{name}' would bring the graph to {format_count(held + adding)} "
+            f"state elements (it holds {held}, the node {format_count(adding)}); "
+            f"at most {MAX_GRAPH_STATE_ELEMENTS} are accepted over the API in the "
+            "whole graph (this server is unauthenticated -- build a graph this "
+            "size in-process)")
 
 
 def _allocation_write_reason(gm: GraphManager, owner: str,
@@ -1026,7 +1493,10 @@ def origin_is_same_site(
     for allowed in allowed_origins:
         if normalised == allowed.strip().rstrip("/").lower():
             return True
-    parts = urlsplit(candidate)
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:          # an unbalanced "[" in the authority
+        return False
     if not parts.scheme or not parts.netloc:
         return False
     try:
@@ -1035,8 +1505,11 @@ def origin_is_same_site(
         return False
     if not hostname or parts.username is not None or parts.password is not None:
         return False
-    authority = hostname if port is None else f"{hostname}:{port}"
-    return authority == (host or "").strip().lower()
+    # Compared as (host, port), both sides read the same way: ``urlsplit``
+    # gives an IPv6 literal without its brackets, and the ``Host`` header
+    # carries them, so a page served from ``http://[::1]:8000`` used to be
+    # refused as cross-origin by its own server.
+    return (hostname, port) == _host_and_port(host)
 
 
 #: The 403 body.  Says what happened and what an embedder does about it.
@@ -1048,6 +1521,34 @@ _CROSS_ORIGIN_DETAIL = (
     "developer's browser. If you are embedding the UI on another origin, "
     "pass allowed_origins to SimulationServer."
 )
+
+
+def _host_and_port(host_header: Optional[str]) -> Optional[tuple[str, Optional[int]]]:
+    """``(host, port)`` of a ``Host`` header as :func:`urllib.parse.urlsplit`
+    reads an origin's authority -- lowercased, an IPv6 literal without its
+    brackets, the port an ``int`` or ``None`` -- or ``None`` when it is not
+    a valid ``host[:port]``.  Nothing else is normalised (a trailing dot is
+    kept), so a comparison of the two is the authority comparison it always
+    was, with the brackets read alike."""
+    value = (host_header or "").strip().lower()
+    if not value:
+        return None
+    if value.startswith("["):
+        end = value.find("]")
+        if end <= 1:
+            return None
+        name, rest = value[1:end], value[end + 1:]
+        if not rest:
+            return name, None
+        if not (rest.startswith(":") and rest[1:].isdigit()):
+            return None
+        return name, int(rest[1:])
+    if value.count(":") > 1:           # a bare IPv6 address is not a valid Host
+        return None
+    name, colon, port = value.partition(":")
+    if not name or (colon and not port.isdigit()):
+        return None
+    return name, (int(port) if colon else None)
 
 
 def _host_name(host_header: str) -> Optional[str]:
@@ -1439,6 +1940,23 @@ class SimulationServer:
     ValueError
         If ``MADDENING_API_TOKEN`` or *api_token* is set but blank, or an
         *allowed_hosts* entry is not a host name.
+
+    Notes
+    -----
+    **Concurrency.**  FastAPI runs the routes on a thread pool, so
+    requests arrive concurrently, and ``GraphManager.step`` reads the
+    state, runs the compiled step (which releases the GIL) and stores the
+    result: two steps in flight read the same state, and one result
+    overwrote the other -- 200 concurrent ``POST /sim/step`` once took
+    about 100 steps, every one answered 200.  One re-entrant lock now
+    serialises every use of the graph: each route that reads or writes its
+    state, params or structure takes it, the background runner takes it
+    for each step, a surrogate job for its data sweep, and ``POST
+    /sim/run`` for each slice of its run (writes are refused while a run
+    is in progress, reads are served between slices).  It is never held
+    while waiting for the runner's thread: a route that stops the runner
+    does so first, without the lock, and then takes it; and the runner
+    waits for it in short slices that watch its stop flag.
     """
 
     def __init__(
@@ -1492,6 +2010,30 @@ class SimulationServer:
         # Last JAX trace directory (set by /sim/profile/jax/stop) so
         # CloudSession teardown can pick it up.
         self._last_jax_trace_dir: Optional[str] = None
+        # Every use of the graph is serialised by this lock (see Notes);
+        # the runner's bookkeeping by the second, which is always taken
+        # first when both are needed, and never while waiting for it.
+        self._graph_lock = _GraphLock()
+        self._runner_lock = threading.RLock()
+        # A ``POST /sim/run`` is stepping the graph slice by slice.
+        self._sync_run_active = False
+        # Set when the server shuts down (the lifespan hook, a chained
+        # SIGINT / SIGTERM, or request_shutdown()): an in-flight
+        # ``POST /sim/run`` stops at its next slice, a training job at its
+        # next epoch.
+        self._shutdown = threading.Event()
+        # Bumped whenever the graph's layout may have changed (a node
+        # added or removed, a compile): the binary stream re-sends its
+        # schema, and the cached encoder is dropped.
+        self._layout_generation = 0
+        self.gm.add_observer(self._on_graph_event)
+        # The encoded ``/ws/state`` frame of the latest snapshot, shared by
+        # every client that subscribes to the whole state.
+        self._json_frame_cache: tuple[Optional[int], Optional[str]] = (None, None)
+        self._stream_connections = 0
+        self._surrogate_lock = threading.Lock()
+        self._surrogate_threads: dict[str, threading.Thread] = {}
+        _LIVE_SERVERS.add(self)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1551,13 +2093,15 @@ class SimulationServer:
             return True, selected
         logger.warning(
             "Refused WebSocket %s from %s: %s bearer token",
-            websocket.url.path, peer or "?",
+            websocket.scope.get("path", "?"), peer or "?",
             "invalid" if presented else "missing",
         )
         await websocket.close(code=1008, reason="Invalid or missing bearer token")
         return False, None
 
     def _ensure_relay_attached(self) -> None:
+        """Attach the relay to the graph once (it reads the graph's
+        timestep): call it holding the graph lock."""
         if self._relay_attached:
             return
         try:
@@ -1566,11 +2110,18 @@ class SimulationServer:
         except RuntimeError:
             pass
 
+    def _ensure_relay_attached_locked(self) -> None:
+        """:meth:`_ensure_relay_attached` under the graph lock, for a stream
+        (run in a worker thread, never on the event loop)."""
+        with self._graph_lock:
+            self._ensure_relay_attached()
+
     def _ensure_runner(self) -> RealtimeRunner:
         if self.runner is None:
             self._ensure_relay_attached()
             self.runner = RealtimeRunner(self.gm, self.relay,
-                                         steps_per_frame=self._steps_per_frame)
+                                         steps_per_frame=self._steps_per_frame,
+                                         lock=self._graph_lock)
         return self.runner
 
     def _runner_stopping(self) -> bool:
@@ -1583,13 +2134,33 @@ class SimulationServer:
         or still finishing after a stop)."""
         return self.runner is not None and self.runner.is_alive
 
+    def _runner_running(self) -> bool:
+        """Whether the runner is started and its thread is alive.  A
+        runner whose thread died (a step raised) is not running, whatever
+        ``_runner_started`` remembers: the routes used to report it
+        started, paused and resumed long after it had gone."""
+        return self._runner_started and self._runner_alive()
+
+    def _reap_dead_runner(self) -> Optional[str]:
+        """Forget a started runner whose thread has died; returns why it
+        died (``None`` when it did not, or no reason was recorded).  Call
+        it holding the runner lock."""
+        runner = self.runner
+        if runner is None or runner.is_alive or not self._runner_started:
+            return None
+        self.runner = None
+        self._runner_started = False
+        self._runner_stop_pending = False
+        return runner.error or "its thread exited"
+
     def _refuse_while_runner_alive(self, action: str) -> None:
-        """Refuse a write of the graph's state while a runner thread can
-        overwrite it: a 409 while the runner runs, a 503 while it is still
-        stopping.  The runner stores each step's state over whatever is
-        there, so a state written beside it used to be answered 200 and
-        then lost -- a reset after a stop that had not finished came back
-        with positions in the hundreds of thousands."""
+        """Refuse a write of the graph while something else steps it: a
+        409 while the runner runs or a ``POST /sim/run`` is in progress, a
+        503 while the runner is still stopping.  The runner stores each
+        step's state over whatever is there, so a state written beside it
+        used to be answered 200 and then lost -- a reset after a stop that
+        had not finished came back with positions in the hundreds of
+        thousands."""
         if self._runner_stopping():
             raise HTTPException(
                 status_code=503,
@@ -1603,6 +2174,41 @@ class SimulationServer:
                 detail=(f"Cannot {action} while the runner is started; "
                         "POST /sim/stop first."),
             )
+        if self._sync_run_active:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Cannot {action} while a POST /sim/run is in progress; "
+                        "wait for it to return."),
+            )
+
+    @contextlib.contextmanager
+    def _graph_access(self, action: str, *, write: bool = False):
+        """Hold the graph lock for *action*: a 503 after
+        :data:`_GRAPH_LOCK_TIMEOUT` seconds without it.
+
+        With *write*, refused (:meth:`_refuse_while_runner_alive`) while
+        the runner or a ``POST /sim/run`` steps the graph -- asked before
+        waiting for the lock, whose holder may be the runner's thread in a
+        step, and again once it is held, so that nothing can start
+        stepping between the question and the write.
+        """
+        if write:
+            self._refuse_while_runner_alive(action)
+        if not self._graph_lock.acquire(timeout=_GRAPH_LOCK_TIMEOUT):
+            raise HTTPException(
+                status_code=503,
+                detail=(f"Cannot {action}: the graph has been in use for "
+                        f"{_GRAPH_LOCK_TIMEOUT:g} s (a long step or compile, a "
+                        "large checkpoint, a surrogate data sweep). Nothing was "
+                        "changed; retry shortly."),
+                headers={"Retry-After": "1"},
+            )
+        try:
+            if write:
+                self._refuse_while_runner_alive(action)
+            yield
+        finally:
+            self._graph_lock.release()
 
     def _state_json(self) -> dict:
         """The whole state, ``_meta`` included, as a reply body
@@ -1622,7 +2228,16 @@ class SimulationServer:
         state it steps.  This used to give up after two seconds and drop
         the handle while the thread kept stepping -- ``POST /sim/stop``
         answered "stopped", and a reset after it was overwritten.
+
+        Never called holding the graph lock: the thread needs it for the
+        step it may be waiting to take, so the wait would last the whole
+        timeout and end in a 503 every time.  That is a programming error,
+        and raises.
         """
+        if self._graph_lock.held():
+            raise RuntimeError(
+                "SimulationServer._stop_runner called holding the graph lock: "
+                "the runner's thread needs it to finish its step")
         runner = self.runner
         if runner is None:
             return True
@@ -1657,15 +2272,151 @@ class SimulationServer:
         # Invalidate binary encoder (state shape may have changed)
         self._binary_encoder = None
 
+    def _user_state(self) -> dict:
+        """The state without ``_meta``, shallow-copied: call it holding the
+        graph lock."""
+        return {k: dict(v) for k, v in self.gm._state.items() if k != "_meta"}
+
+    def _on_graph_event(self, event: str, data: Any) -> None:
+        """Graph observer: drop the cached binary encoder, and tell the
+        binary streams to re-send their schema, when a node is added or
+        removed or the graph is compiled and the state's layout is no
+        longer the one they encode.  The encoder used to be dropped only by
+        a reset, so a node replaced over REST kept a schema the graph no
+        longer had."""
+        if event not in (EVENT_NODE_ADDED, EVENT_NODE_REMOVED, EVENT_COMPILED):
+            return
+        self._binary_encoder = None
+        self._layout_generation += 1
+
     def _get_binary_encoder(self):
-        """Lazily build a BinaryStateEncoder from the current state."""
+        """Lazily build a BinaryStateEncoder from the current state: call it
+        holding the graph lock."""
         if self._binary_encoder is None:
             from maddening.api.binary_encoder import BinaryStateEncoder
-            user_state = {
-                k: v for k, v in self.gm._state.items() if k != "_meta"
-            }
-            self._binary_encoder = BinaryStateEncoder(user_state)
+            self._binary_encoder = BinaryStateEncoder(self._user_state())
         return self._binary_encoder
+
+    def _binary_encoder_locked(self):
+        """:meth:`_get_binary_encoder`, the layout generation it was built
+        at and the state layout it encodes, under the graph lock (a stream
+        runs it in a worker thread)."""
+        with self._graph_lock:
+            return (self._get_binary_encoder(), self._layout_generation,
+                    _state_layout(self._user_state()))
+
+    def _user_state_locked(self) -> dict:
+        with self._graph_lock:
+            return self._user_state()
+
+    def _admit_stream(self) -> bool:
+        """Count a new stream connection; ``False`` (not counted) past
+        :data:`MAX_STREAM_CONNECTIONS`."""
+        with self._surrogate_lock:
+            if self._stream_connections >= MAX_STREAM_CONNECTIONS:
+                return False
+            self._stream_connections += 1
+            return True
+
+    def _release_stream(self) -> None:
+        with self._surrogate_lock:
+            self._stream_connections -= 1
+
+    async def _refuse_stream(self, websocket: WebSocket, path: str) -> None:
+        logger.warning("Refused WebSocket %s: %d streams are open, the most this "
+                       "server serves (MAX_STREAM_CONNECTIONS)", path,
+                       MAX_STREAM_CONNECTIONS)
+        await websocket.close(
+            code=1013,
+            reason=f"{MAX_STREAM_CONNECTIONS} streams are open already; try again later.",
+        )
+
+    async def _shared_state_frame(self, seq: int, sim_time: float, snapshot: dict,
+                                  fields: Optional[dict]) -> str:
+        """The ``/ws/state`` frame for one relay snapshot, encoded in a
+        worker thread; a client of the whole state reuses the frame another
+        client already encoded for the same snapshot."""
+        if fields is None:
+            cached_seq, cached = self._json_frame_cache
+            if cached_seq == seq and cached is not None:
+                return cached
+        loop = asyncio.get_running_loop()
+        text = await loop.run_in_executor(None, _encode_state_frame, sim_time,
+                                          snapshot, fields)
+        if fields is None:
+            self._json_frame_cache = (seq, text)
+        return text
+
+    @stability(StabilityLevel.EVOLVING)
+    def request_shutdown(self) -> None:
+        """Tell the work that runs for a while to stop soon.
+
+        An in-flight ``POST /sim/run`` stops at its next slice (a fraction
+        of a second) and answers 503 with how many of its steps it ran;
+        a surrogate training job stops at its next epoch.  Called by the
+        app's lifespan shutdown and, when the app is served from the main
+        thread, by a SIGINT / SIGTERM, ahead of the server's own handler.
+        uvicorn waits for in-flight requests to finish before it runs the
+        lifespan shutdown, which is why the signal is chained: a server
+        embedded in another thread, or stopped by setting
+        ``uvicorn.Server.should_exit``, calls this itself first.
+        """
+        self._shutdown.set()
+
+    def _chain_shutdown_signals(self):
+        """Have SIGINT and SIGTERM call :meth:`request_shutdown` before the
+        handler already installed for them (uvicorn's), which they still
+        call.  Only from the main thread, and only over a Python handler:
+        a default or ignored signal is left alone.  Returns the function
+        that puts the previous handlers back."""
+        installed: list = []
+        if threading.current_thread() is not threading.main_thread():
+            return lambda: None
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                previous = signal.getsignal(sig)
+            except (ValueError, OSError):
+                continue
+            if not callable(previous):
+                continue
+
+            def handler(signum, frame, _previous=previous):
+                self.request_shutdown()
+                _previous(signum, frame)
+
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                continue
+            installed.append((sig, handler, previous))
+
+        def restore() -> None:
+            for sig, handler, previous in installed:
+                try:
+                    if signal.getsignal(sig) is handler:
+                        signal.signal(sig, previous)
+                except (ValueError, OSError):
+                    pass
+
+        return restore
+
+    def _cancel_training_jobs(self, timeout: float = 30.0) -> None:
+        """Tell every running training job to stop and wait up to *timeout*
+        seconds in all for their threads."""
+        self._shutdown.set()
+        deadline = time.monotonic() + timeout
+        for thread in list(self._surrogate_threads.values()):
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+    def _stop_for_shutdown(self) -> None:
+        """The lifespan shutdown's work, in a worker thread: stop the
+        runner and the training jobs."""
+        with self._runner_lock:
+            try:
+                self._stop_runner()
+            except Exception:  # noqa: BLE001 - shutting down regardless
+                logger.exception("stopping the runner at shutdown")
+        self._cancel_training_jobs(timeout=_RUNNER_STOP_TIMEOUT)
 
     # ------------------------------------------------------------------
     # App factory
@@ -1689,6 +2440,24 @@ class SimulationServer:
         # than none: when the token is enforced these are switched off,
         # and the way to read them is an SSH tunnel to a loopback bind.
         interactive_docs = not self.auth.enforced
+
+        @contextlib.asynccontextmanager
+        async def lifespan(_app):
+            # Startup: a SIGINT / SIGTERM tells the long-running work to stop
+            # before uvicorn's handler sees it.  uvicorn waits for every
+            # in-flight request before it runs the shutdown half below, so
+            # a stop event set only there was never seen by the
+            # ``POST /sim/run`` that SIGINT was waiting for.
+            self._shutdown.clear()
+            restore_signals = self._chain_shutdown_signals()
+            try:
+                yield
+            finally:
+                restore_signals()
+                self.request_shutdown()
+                await asyncio.get_running_loop().run_in_executor(
+                    None, self._stop_for_shutdown)
+
         app = FastAPI(
             title="MADDENING Simulation Server",
             description="HTTP/WebSocket API for the MADDENING simulation graph.",
@@ -1698,6 +2467,7 @@ class SimulationServer:
             docs_url="/docs" if interactive_docs else None,
             redoc_url="/redoc" if interactive_docs else None,
             openapi_url="/openapi.json" if interactive_docs else None,
+            lifespan=lifespan,
         )
 
         # -- authentication ---------------------------------------------------
@@ -1709,6 +2479,16 @@ class SimulationServer:
         # Two of them, because one cannot cover both: ``@app.middleware("http")``
         # is a BaseHTTPMiddleware and never runs for a WebSocket scope, so
         # the WebSocket half is a pure-ASGI middleware of its own.
+        #
+        # The body limit is added first, so it is the innermost: the
+        # authentication refuses an unauthenticated caller (401) before
+        # anything is read, and the limit's 413 is raised straight into
+        # FastAPI's body reader.  Outside a BaseHTTPMiddleware it would be
+        # raised through that middleware's task group, which wraps it in an
+        # ExceptionGroup that FastAPI answers as "There was an error
+        # parsing the body" (400).  No middleware or route reads a body
+        # before it either way.
+        app.add_middleware(_RequestBodyLimitMiddleware)
         app.add_middleware(
             _WebSocketAuthMiddleware,
             auth=self.auth,
@@ -1719,12 +2499,16 @@ class SimulationServer:
         @app.middleware("http")
         async def _require_bearer_token(request, call_next):
             peer = request.client.host if request.client else None
+            # The scope's path, not the request's URL: the URL is built from
+            # the Host header, and a malformed one (``[::1]x``) raised
+            # inside this middleware -- a 500 where the refusal is a 403.
+            path = request.scope.get("path", "")
             if (self.auth.required_for_peer(peer)
-                    and request.url.path not in UNAUTHENTICATED_PATHS):
+                    and path not in UNAUTHENTICATED_PATHS):
                 if not self.auth.verify(bearer_from_headers(request.headers)):
                     logger.warning(
                         "Refused %s %s from %s: %s bearer token",
-                        request.method, request.url.path, peer or "?",
+                        request.method, path, peer or "?",
                         "invalid" if request.headers.get("authorization")
                         else "missing",
                     )
@@ -1740,7 +2524,7 @@ class SimulationServer:
             if rebinding is not None:
                 logger.warning(
                     "Refused %s %s for host %r: not a name of this "
-                    "loopback-bound server", request.method, request.url.path,
+                    "loopback-bound server", request.method, path,
                     request.headers.get("host"),
                 )
                 return JSONResponse(status_code=403, content={"detail": rebinding})
@@ -1752,7 +2536,7 @@ class SimulationServer:
                     )):
                 logger.warning(
                     "Refused %s %s from origin %r: not this server's origin",
-                    request.method, request.url.path,
+                    request.method, path,
                     request.headers.get("origin"),
                 )
                 return JSONResponse(
@@ -1762,12 +2546,14 @@ class SimulationServer:
             return await call_next(request)
 
         @app.get("/healthz", tags=["meta"], response_model=None)
-        def healthz() -> dict[str, str]:
+        async def healthz() -> dict[str, str]:
             """Liveness probe.  Served without a token, on purpose.
 
             A container health check has no credential, and this answer
             says nothing about the graph -- only that the process is up
-            and which version it is.
+            and which version it is.  Answered on the event loop, not the
+            worker threads, so it answers while every worker is waiting
+            for the graph.
             """
             return {"status": "ok", "version": _maddening_version}
 
@@ -1812,12 +2598,21 @@ class SimulationServer:
         def get_graph() -> dict[str, Any]:
             # Display, not persistence: a mapping without point references
             # is shown as far as it describes itself rather than refused.
-            data = self.gm.to_dict(strict_mappings=False)
-            data["active_surrogates"] = list(self._active_surrogates)
+            with self._graph_access("read the graph"):
+                data = self.gm.to_dict(strict_mappings=False)
+                data["active_surrogates"] = list(self._active_surrogates)
             return data
 
         @app.post("/graph/nodes", tags=["graph"], status_code=201, response_model=None)
         def add_node(req: AddNodeRequest) -> dict[str, Any]:
+            """Add a node.  Refused (409) while the runner runs or a
+            ``POST /sim/run`` is in progress.  Its size is bounded per node
+            (:data:`MAX_NODE_STATE_ELEMENTS`, :data:`MAX_NODE_BUILD_BYTES`)
+            and over the whole graph (:data:`MAX_GRAPH_STATE_ELEMENTS`),
+            before it is built where its class can say what it would
+            build; nodes are built one at a time (under the graph lock), so
+            concurrent requests do not each hold a node's worth of memory
+            at once."""
             if req.type not in self.registry:
                 raise HTTPException(
                     status_code=400,
@@ -1833,6 +2628,15 @@ class SimulationServer:
                 raise HTTPException(
                     status_code=400,
                     detail=f"params.{bad}: value must be finite",
+                )
+            # A finite number the node's float dtype cannot hold (1e39 in
+            # float32) becomes an infinity once the node traces it.
+            bad = _overflowing_float(req.params)
+            if bad is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"params.{bad}: value does not fit its type "
+                            f"{np.dtype(jax.dtypes.canonicalize_dtype(jnp.float64))}"),
                 )
             node_cls = self.registry[req.type]
             # Before the constructor, for a class that can say what it would
@@ -1850,181 +2654,231 @@ class SimulationServer:
                         detail=(f"node '{req.name}' {refusal}; this is told from "
                                 "its params, before anything of that size is built"),
                     )
-            try:
-                node = node_cls(name=req.name, timestep=req.timestep, **req.params)
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-            # AddNodeRequest bounds each integer the caller sends, which is
-            # what keeps a single dimension from naming hundreds of MB.
-            # Dimensions that multiply survive that bound, so the state the
-            # node actually built is measured too -- before the node joins
-            # the graph, so an oversized one is transient rather than
-            # resident for the life of the process.
-            try:
-                initial_state = node.initial_state()
-            except Exception as exc:  # noqa: BLE001 - a constant it cannot use
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"node '{req.name}' cannot build its initial state: {exc}",
-                )
-            n_elements = _state_elements(initial_state)
-            if n_elements > MAX_NODE_STATE_ELEMENTS:
-                del initial_state, node
-                raise HTTPException(
-                    status_code=400,
-                    detail=(f"node '{req.name}' would hold {n_elements} state "
-                            f"elements; at most {MAX_NODE_STATE_ELEMENTS} are "
-                            f"accepted over the API (this server is "
-                            f"unauthenticated -- build a graph this size "
-                            f"in-process)"),
-                )
-            # Nodes do not validate their constants; a bad one only fails
-            # inside the trace and would wedge every later /sim/step.
-            # Trace one update on the node's own initial state (abstractly,
-            # no compute) before it enters the graph.
-            try:
-                _dry_run_node(node, initial_state)
-            except Exception as exc:  # noqa: BLE001 - any trace failure is a 400
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"node '{req.name}' cannot run with these params: {exc}",
-                )
-            if req.name in self.gm._nodes:
-                raise HTTPException(status_code=409, detail=f"Node '{req.name}' already exists in the graph.")
-            try:
-                self.gm.add_node(node)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-            return {"status": "ok", "node": node.to_dict()}
+            with self._graph_access("add a node", write=True):
+                # The graph-wide budget: each node was held to the per-node
+                # cap, and nothing bounded how many of them a caller added.
+                held = sum(_state_elements(fields) for name, fields in self.gm._state.items()
+                           if name != "_meta")
+                if estimate is not None:
+                    refusal = _graph_budget_refusal(req.name, held, estimate.state_elements)
+                    if refusal is not None:
+                        raise HTTPException(status_code=400, detail=refusal)
+                try:
+                    node = node_cls(name=req.name, timestep=req.timestep, **req.params)
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+                # AddNodeRequest bounds each integer the caller sends, which
+                # is what keeps a single dimension from naming hundreds of
+                # MB.  Dimensions that multiply survive that bound, so the
+                # state the node actually built is measured too -- before
+                # the node joins the graph, so an oversized one is transient
+                # rather than resident for the life of the process.
+                try:
+                    initial_state = node.initial_state()
+                except Exception as exc:  # noqa: BLE001 - a constant it cannot use
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"node '{req.name}' cannot build its initial state: {exc}",
+                    )
+                n_elements = _state_elements(initial_state)
+                if n_elements > MAX_NODE_STATE_ELEMENTS:
+                    del initial_state, node
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"node '{req.name}' would hold {n_elements} state "
+                                f"elements; at most {MAX_NODE_STATE_ELEMENTS} are "
+                                f"accepted over the API (this server is "
+                                f"unauthenticated -- build a graph this size "
+                                f"in-process)"),
+                    )
+                refusal = _graph_budget_refusal(req.name, held, n_elements)
+                if refusal is not None:
+                    del initial_state, node
+                    raise HTTPException(status_code=400, detail=refusal)
+                # Nodes do not validate their constants; a bad one only
+                # fails inside the trace and would wedge every later
+                # /sim/step.  Trace one update on the node's own initial
+                # state (abstractly, no compute) before it enters the graph.
+                try:
+                    _dry_run_node(node, initial_state)
+                except Exception as exc:  # noqa: BLE001 - any trace failure is a 400
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"node '{req.name}' cannot run with these params: {exc}",
+                    )
+                if req.name in self.gm._nodes:
+                    raise HTTPException(status_code=409, detail=f"Node '{req.name}' already exists in the graph.")
+                try:
+                    self.gm.add_node(node)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+                return {"status": "ok", "node": node.to_dict()}
 
         @app.delete("/graph/nodes/{name}", tags=["graph"], response_model=None)
         def remove_node(name: str) -> dict[str, str]:
-            try:
-                self.gm.remove_node(name)
-            except KeyError as exc:
-                raise HTTPException(status_code=404, detail=str(exc))
+            """Remove a node.  Refused (409) while the runner runs or a
+            ``POST /sim/run`` is in progress."""
+            with self._graph_access("remove a node", write=True):
+                try:
+                    self.gm.remove_node(name)
+                except KeyError as exc:
+                    raise HTTPException(status_code=404, detail=str(exc))
             return {"status": "ok"}
 
         @app.post("/graph/edges", tags=["graph"], status_code=201, response_model=None)
         def add_edge(req: AddEdgeRequest) -> dict[str, str]:
-            for n in (req.source_node, req.target_node):
-                if n not in self.gm._nodes:
-                    raise HTTPException(status_code=404, detail=f"No node '{n}'.")
-            src = self.gm._nodes[req.source_node].node
-            fields = set(self.gm.get_node_state(req.source_node))
-            try:
-                fields |= set(src.boundary_flux_spec())
-            except Exception:  # noqa: BLE001 - optional descriptor
-                pass
-            if req.source_field not in fields:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"'{req.source_node}' has no field or flux '{req.source_field}'. "
-                           f"Available: {sorted(fields)}",
-                )
-            try:
-                self.gm.add_edge(
-                    source=req.source_node, target=req.target_node,
-                    source_field=req.source_field, target_field=req.target_field,
-                )
-            except (ValueError, KeyError) as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
+            """Add an edge.  Refused (409) while the runner runs or a
+            ``POST /sim/run`` is in progress: an edge the graph cannot
+            validate (shapes that do not match) used to be taken beside a
+            running runner, whose next step raised and whose thread died
+            while the routes went on reporting it started."""
+            with self._graph_access("add an edge", write=True):
+                for n in (req.source_node, req.target_node):
+                    if n not in self.gm._nodes:
+                        raise HTTPException(status_code=404, detail=f"No node '{n}'.")
+                src = self.gm._nodes[req.source_node].node
+                fields = set(self.gm.get_node_state(req.source_node))
+                try:
+                    fields |= set(src.boundary_flux_spec())
+                except Exception:  # noqa: BLE001 - optional descriptor
+                    pass
+                if req.source_field not in fields:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"'{req.source_node}' has no field or flux '{req.source_field}'. "
+                               f"Available: {sorted(fields)}",
+                    )
+                try:
+                    self.gm.add_edge(
+                        source=req.source_node, target=req.target_node,
+                        source_field=req.source_field, target_field=req.target_field,
+                    )
+                except (ValueError, KeyError) as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "ok"}
 
         @app.delete("/graph/edges", tags=["graph"], response_model=None)
         def remove_edge(req: RemoveEdgeRequest) -> dict[str, str]:
             """Remove every edge with these endpoints and fields; a 404 when
-            the graph has none (it used to answer 200 and change nothing)."""
-            if not any(
-                e.source_node == req.source_node and e.target_node == req.target_node
-                and e.source_field == req.source_field
-                and e.target_field == req.target_field
-                for e in self.gm._edges
-            ):
-                raise HTTPException(
-                    status_code=404,
-                    detail=(f"No edge {req.source_node}.{req.source_field} -> "
-                            f"{req.target_node}.{req.target_field}."),
+            the graph has none (it used to answer 200 and change nothing).
+            Refused (409) while the runner runs or a ``POST /sim/run`` is in
+            progress."""
+            with self._graph_access("remove an edge", write=True):
+                if not any(
+                    e.source_node == req.source_node and e.target_node == req.target_node
+                    and e.source_field == req.source_field
+                    and e.target_field == req.target_field
+                    for e in self.gm._edges
+                ):
+                    raise HTTPException(
+                        status_code=404,
+                        detail=(f"No edge {req.source_node}.{req.source_field} -> "
+                                f"{req.target_node}.{req.target_field}."),
+                    )
+                self.gm.remove_edge(
+                    source=req.source_node, target=req.target_node,
+                    source_field=req.source_field, target_field=req.target_field,
                 )
-            self.gm.remove_edge(
-                source=req.source_node, target=req.target_node,
-                source_field=req.source_field, target_field=req.target_field,
-            )
             return {"status": "ok"}
 
         @app.post("/graph/compile", tags=["graph"], response_model=None)
         def compile_graph() -> dict[str, Any]:
-            try:
-                self.gm.compile()
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-            return {"status": "ok", "schedule": self.gm.schedule}
+            """Compile the graph; a graph it cannot compile is a 400 naming
+            why (an edge it cannot validate was a 500)."""
+            with self._graph_access("compile the graph"):
+                try:
+                    self.gm.compile()
+                except _GRAPH_CONFIGURATION_ERRORS as exc:
+                    detail = _cannot_step_detail(exc)
+                    if not isinstance(exc, RuntimeError):
+                        detail = detail.replace("cannot step", "cannot compile").replace(
+                            "nothing was stepped", "nothing was compiled")
+                    raise HTTPException(status_code=400, detail=detail)
+                return {"status": "ok", "schedule": self.gm.schedule}
 
         @app.post("/graph/validate", tags=["graph"], response_model=None)
         def validate_graph() -> dict[str, Any]:
-            issues = self.gm.validate()
+            with self._graph_access("validate the graph"):
+                issues = self.gm.validate()
             return {"issues": issues}
 
         # -- state endpoints -------------------------------------------------
 
         @app.get("/graph/state", tags=["state"], response_model=None)
         def get_state() -> dict[str, Any]:
-            return self._state_json()
+            with self._graph_access("read the state"):
+                return self._state_json()
 
         @app.get("/graph/state/{node_name}", tags=["state"], response_model=None)
         def get_node_state(node_name: str) -> dict[str, Any]:
-            try:
-                return self._node_state_json(node_name)
-            except KeyError as exc:
-                raise HTTPException(status_code=404, detail=str(exc))
+            with self._graph_access("read the state"):
+                try:
+                    return self._node_state_json(node_name)
+                except KeyError as exc:
+                    raise HTTPException(status_code=404, detail=str(exc))
 
         @app.put("/graph/state/{node_name}", tags=["state"], response_model=None)
         def set_node_state(node_name: str, req: SetNodeStateRequest) -> dict[str, str]:
             """Replace a node's state.  Every field is required, coerced to
             the live leaf's dtype, and must match its shape and be finite;
-            a 400 names the field and writes nothing."""
-            if node_name not in self.gm._nodes:
-                raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
-            self._refuse_while_runner_alive("write a node's state")
-            live = self.gm.get_node_state(node_name)
-            if set(req.state) != set(live):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"state fields must be exactly {sorted(live)}; got {sorted(req.state)}",
-                )
-            staged = {}
-            for field, value in req.state.items():
-                want = jnp.asarray(live[field])
-                # As for PUT /graph/params: refused before the cast warns.
-                problem = _unrepresentable(value, want.dtype)
-                if problem is not None:
-                    raise HTTPException(status_code=400, detail=f"{field}: {problem}")
-                try:
-                    arr = jnp.asarray(value, dtype=want.dtype)
-                except (TypeError, ValueError) as exc:
-                    raise HTTPException(status_code=400, detail=f"{field}: {exc}")
-                if arr.shape != want.shape:
+            a 400 names the field and writes nothing.  Each field's value
+            count is checked against the live field before anything is
+            converted to an array."""
+            with self._graph_access("write a node's state", write=True):
+                if node_name not in self.gm._nodes:
+                    raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
+                live = self.gm.get_node_state(node_name)
+                if set(req.state) != set(live):
                     raise HTTPException(
                         status_code=400,
-                        detail=f"{field}: expected shape {want.shape}, got {arr.shape}",
+                        detail=f"state fields must be exactly {sorted(live)}; got {sorted(req.state)}",
                     )
-                if jnp.issubdtype(arr.dtype, jnp.inexact) and not bool(jnp.all(jnp.isfinite(arr))):
-                    raise HTTPException(status_code=400, detail=f"{field}: value must be finite")
-                staged[field] = arr
-            self.gm.set_node_state(node_name, staged)
+                # Counted on the JSON before any of it becomes an array: the
+                # shape check used to run after the conversion, and a body of
+                # 16 million numbers for a scalar field took 2 GB to refuse.
+                for field, value in req.state.items():
+                    want_size = int(np.prod(np.shape(live[field])))
+                    got_size = _json_value_count(value)
+                    if got_size != want_size:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(f"{field}: expected {want_size} value(s) (shape "
+                                    f"{tuple(np.shape(live[field]))}), got {got_size}"),
+                        )
+                staged = {}
+                for field, value in req.state.items():
+                    want = jnp.asarray(live[field])
+                    # As for PUT /graph/params: refused before the cast warns.
+                    problem = _unrepresentable(value, want.dtype)
+                    if problem is not None:
+                        raise HTTPException(status_code=400, detail=f"{field}: {problem}")
+                    try:
+                        arr = jnp.asarray(value, dtype=want.dtype)
+                    except (TypeError, ValueError) as exc:
+                        raise HTTPException(status_code=400, detail=f"{field}: {exc}")
+                    if arr.shape != want.shape:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{field}: expected shape {want.shape}, got {arr.shape}",
+                        )
+                    if jnp.issubdtype(arr.dtype, jnp.inexact) and not bool(jnp.all(jnp.isfinite(arr))):
+                        raise HTTPException(status_code=400, detail=f"{field}: value must be finite")
+                    staged[field] = arr
+                self.gm.set_node_state(node_name, staged)
             return {"status": "ok"}
 
         # -- parameter endpoints ---------------------------------------------
 
         @app.get("/graph/params/{node_name}", tags=["params"], response_model=None)
         def get_node_params(node_name: str) -> dict[str, Any]:
-            if node_name not in self.gm._nodes:
-                raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
-            node = self.gm._nodes[node_name].node
-            # The live pytree wins over the constructor value: it is what
-            # the step uses after a fit or a checkpoint restore.
-            live = self.gm.params.get("nodes", {}).get(node_name) or {}
-            return _json_reply({**_jax_to_python(node.params), **_jax_to_python(live)})
+            with self._graph_access("read a node's params"):
+                if node_name not in self.gm._nodes:
+                    raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
+                node = self.gm._nodes[node_name].node
+                # The live pytree wins over the constructor value: it is what
+                # the step uses after a fit or a checkpoint restore.
+                live = self.gm.params.get("nodes", {}).get(node_name) or {}
+                return _json_reply({**_jax_to_python(node.params), **_jax_to_python(live)})
 
         @app.put("/graph/params/{node_name}", tags=["params"], response_model=None)
         def set_node_params(node_name: str, req: SetNodeParamsRequest) -> dict[str, Any]:
@@ -2073,7 +2927,16 @@ class SimulationServer:
             refused before any node or state is built with it -- told from
             the class's own size estimate where it has one, and wherever
             the node's ``initial_state()`` can be evaluated abstractly.
+
+            Taken while the runner runs (the UI's sliders), between two of
+            its steps: the graph lock makes the whole write one change as
+            far as any step is concerned.
             """
+            with self._graph_access("write a node's params"):
+                return set_node_params_locked(node_name, req)
+
+        def set_node_params_locked(node_name: str, req: SetNodeParamsRequest) -> dict[str, Any]:
+            """``PUT /graph/params/{node_name}``, holding the graph lock."""
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
             # Before anything else, and for every key, as POST /graph/nodes
@@ -2148,6 +3011,19 @@ class SimulationServer:
                     oversized = _oversized_param(coerced, key)
                     if oversized is not None:
                         raise HTTPException(status_code=422, detail=oversized)
+                    # A finite number inside a structural value that the
+                    # node's float dtype overflows (RigidBodyNode
+                    # ``constraints: {"z": 1e39}``) was taken, and every
+                    # step after it produced infinities: refused here as a
+                    # live leaf's is by _unrepresentable below.
+                    overflow = _overflowing_float(coerced, key)
+                    if overflow is not None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(f"{overflow}: value does not fit its type "
+                                    f"{np.dtype(jax.dtypes.canonicalize_dtype(jnp.float64))}, "
+                                    f"got {value!r}"),
+                        )
                     structural[key] = coerced
                     continue
                 # Before the cast, which overflows 1e39 into float32's inf
@@ -2244,12 +3120,20 @@ class SimulationServer:
             # one that refuses the same leaf written into gm.params alone.
             for key, node_value in changes.items():
                 # A structural value is checked against the node's own
-                # constructor: the saved graph is rebuilt through it.  (Every
-                # key, together and with a save's params, is checked below.)
-                shape_reason = (
-                    self.gm._constructor_write_reason(node_name, key, node_value)
-                    if key not in staged else None
-                ) or self.gm._state_shape_write_reason(node_name, key, node_value)
+                # constructor: the saved graph is rebuilt through it.  With
+                # the request's other changes applied: a value valid only
+                # together with another one (HeatNode ``stencil_order: 4``
+                # with a smaller ``thermal_diffusivity``) was refused when
+                # asked alone.  (Every key, together and with a save's
+                # params, is checked below.)
+                if key not in staged:
+                    others = {k: v for k, v in changes.items()
+                              if k != key and k in node.params}
+                    reason = self.gm._constructor_write_reason(
+                        node_name, key, node_value, others=others)
+                    if reason is not None:
+                        raise refused([key, *others], reason)
+                shape_reason = self.gm._state_shape_write_reason(node_name, key, node_value)
                 if shape_reason is not None:
                     raise refused([key], shape_reason)
                 reason = self.gm._unused_node_write_reason(node_name, key, node_value)
@@ -2355,59 +3239,127 @@ class SimulationServer:
                 raise outside
             return target
 
-        @app.post("/checkpoint/save", tags=["checkpoint"], response_model=None)
-        def checkpoint_save(path: str = "checkpoint.npz") -> dict[str, str]:
-            target = _checkpoint_path(path)
+        def _manifest_path(target: Path) -> Optional[Path]:
+            """The manifest beside checkpoint *target*
+            (:func:`~maddening.core.simulation.checkpoint.write_manifest`'s
+            name for it), or ``None`` when it would resolve outside the
+            checkpoint root (a symlink)."""
+            manifest = target.with_name(target.name + ".manifest.json")
             try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                saved = self.gm.save_state(str(target))
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=400, detail=f"could not save checkpoint: {exc}")
-            return {"status": "ok", "path": str(saved or target)}
+                resolved = manifest.resolve()
+            except (OSError, RuntimeError, ValueError):
+                return None
+            root = self.checkpoint_root
+            return manifest if root in resolved.parents else None
+
+        def _checkpoint_clock(target: Path) -> Optional[tuple[float, int]]:
+            """``(sim_time, step_count)`` this server recorded when it saved
+            *target*, or ``None``: no manifest, one that does not hash to
+            the file (it was replaced since), or one written by something
+            else."""
+            from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
+                verify_manifest,
+            )
+            manifest_path = _manifest_path(target)
+            try:
+                if manifest_path is None or not manifest_path.is_file() \
+                        or manifest_path.stat().st_size > 1 << 20:
+                    return None
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                verify_manifest(target, manifest)
+                clock = manifest["extra"]["server_clock"]
+                sim_time, steps = float(clock["sim_time"]), int(clock["step_count"])
+            except Exception:  # noqa: BLE001 - no clock to restore
+                return None
+            if not math.isfinite(sim_time) or sim_time < 0 or steps < 0:
+                return None
+            return sim_time, steps
+
+        @app.post("/checkpoint/save", tags=["checkpoint"], response_model=None)
+        def checkpoint_save(path: str = "checkpoint.npz") -> dict[str, Any]:
+            """Save the graph's state and params to *path* under the
+            checkpoint root, and beside it a manifest
+            (``<path>.manifest.json``: its SHA-256 and the streams' clock,
+            ``sim_time`` and step count), which ``POST /checkpoint/load``
+            restores the clock from."""
+            target = _checkpoint_path(path)
+            manifest = _manifest_path(target)
+            with self._graph_access("save a checkpoint"):
+                self._ensure_relay_attached()
+                clock = {"sim_time": self.relay.elapsed,
+                         "step_count": self.relay.step_count}
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    saved = Path(self.gm.save_state(str(target)) or target)
+                    if manifest is not None and saved == target:
+                        from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
+                            write_manifest,
+                        )
+                        write_manifest(saved, extra={"server_clock": clock})
+                except Exception as exc:  # noqa: BLE001
+                    raise HTTPException(status_code=400, detail=f"could not save checkpoint: {exc}")
+            return {"status": "ok", "path": str(saved), "sim_time": clock["sim_time"]}
 
         @app.post("/checkpoint/load", tags=["checkpoint"], response_model=None)
         def checkpoint_load(path: str = "checkpoint.npz") -> dict[str, Any]:
-            # A load replaces the state a running runner is stepping, and the
-            # runner's next store would overwrite it: stop it first.
-            self._refuse_while_runner_alive("load a checkpoint")
-            target = _checkpoint_path(path, loading=True)
-            try:
-                found = target.is_file()
-            except OSError:
-                found = False
-            if not found:
-                raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
-            from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
-                _restore_state_and_params,
-                _state_and_params_snapshot,
-            )
-            try:
-                # load_state compiles a dirty graph before it reads anything;
-                # done first here so the undo below starts after it.
-                if self.gm._dirty or self.gm._compiled_step is None:
-                    self.gm.compile()
-                undo = _state_and_params_snapshot(self.gm)
-                self.gm.load_state(str(target))
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-            except Exception:  # noqa: BLE001 - do not leak file/parse internals
-                raise HTTPException(status_code=400, detail=f"could not load checkpoint {path!r}")
-            # A checkpoint of a graph whose node was built with another value
-            # of a parameter it consumes at construction carries that value
-            # in gm.params.  The graph refuses such a leaf at the next step,
-            # and this API has no reset_params: every later /sim/step would
-            # be a 500 while GET /graph/params served the checkpoint's value.
-            # Refused here instead, with the load undone.
-            try:
-                self.gm._refuse_baked_param_writes(self.gm.params, live=False)
-            except ValueError as exc:
-                _restore_state_and_params(self.gm, undo)
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"checkpoint {path!r} does not fit this graph, nothing "
-                           f"was loaded: {exc}",
+            """Load a checkpoint saved under the checkpoint root.  Refused
+            (409) while the runner runs or a ``POST /sim/run`` is in
+            progress: its next store would overwrite the load.
+
+            The streams (``/ws/state``, ``/ws/state/binary``, ``/ws/render``)
+            serve the loaded state at once, and their ``sim_time`` is the
+            checkpoint's: the one this server recorded in the manifest when
+            it saved it, or zero -- counted from the load -- for a file
+            without one (``sim_time_from_checkpoint`` says which).  They
+            used to serve the state from before the load until the next
+            step, and to go on counting from the step before it.
+            """
+            with self._graph_access("load a checkpoint", write=True):
+                target = _checkpoint_path(path, loading=True)
+                try:
+                    found = target.is_file()
+                except OSError:
+                    found = False
+                if not found:
+                    raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
+                from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
+                    _restore_state_and_params,
+                    _state_and_params_snapshot,
                 )
-            return {"status": "ok", "state": self._state_json()}
+                try:
+                    # load_state compiles a dirty graph before it reads
+                    # anything; done first here so the undo below starts
+                    # after it.
+                    if self.gm._dirty or self.gm._compiled_step is None:
+                        self.gm.compile()
+                    undo = _state_and_params_snapshot(self.gm)
+                    self.gm.load_state(str(target))
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+                except Exception:  # noqa: BLE001 - do not leak file/parse internals
+                    raise HTTPException(status_code=400, detail=f"could not load checkpoint {path!r}")
+                # A checkpoint of a graph whose node was built with another
+                # value of a parameter it consumes at construction carries
+                # that value in gm.params.  The graph refuses such a leaf at
+                # the next step, and this API has no reset_params: every
+                # later /sim/step would be a 500 while GET /graph/params
+                # served the checkpoint's value.  Refused here instead, with
+                # the load undone.
+                try:
+                    self.gm._refuse_baked_param_writes(self.gm.params, live=False)
+                except ValueError as exc:
+                    _restore_state_and_params(self.gm, undo)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"checkpoint {path!r} does not fit this graph, nothing "
+                               f"was loaded: {exc}",
+                    )
+                clock = _checkpoint_clock(target)
+                sim_time, steps = clock if clock is not None else (0.0, 0)
+                self._ensure_relay_attached()
+                self.relay.restore(self._user_state(), step_count=steps, elapsed=sim_time)
+                return {"status": "ok", "state": self._state_json(),
+                        "sim_time": sim_time, "sim_time_from_checkpoint": clock is not None}
 
         # -- simulation control endpoints -----------------------------------
 
@@ -2415,13 +3367,16 @@ class SimulationServer:
         def sim_step() -> dict[str, Any]:
             """Advance the graph one step.  A graph that cannot step is a
             400 naming why (nothing is stepped); a 409 while the runner is
-            started, whose next step would overwrite this one's."""
-            self._refuse_while_runner_alive("step the graph")
-            try:
-                self.gm.step()
-            except _GRAPH_CONFIGURATION_ERRORS as exc:
-                raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
-            return self._state_json()
+            started, whose next step would overwrite this one's, or while a
+            ``POST /sim/run`` is in progress.  Concurrent requests are
+            stepped one after another: N of them take N steps."""
+            with self._graph_access("step the graph", write=True):
+                self._ensure_relay_attached()
+                try:
+                    self.gm.step()
+                except _GRAPH_CONFIGURATION_ERRORS as exc:
+                    raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
+                return self._state_json()
 
         @app.post("/sim/run", tags=["sim"], response_model=None)
         def sim_run(
@@ -2430,52 +3385,121 @@ class SimulationServer:
                 description="Steps to run synchronously.  Zero is a no-op "
                             "that returns the current state.  The upper "
                             "bound exists because the request holds a "
-                            "worker for its whole duration and cannot be "
-                            "cancelled; for a longer run use POST "
-                            "/sim/start.",
+                            "worker for its whole duration; for a longer "
+                            "run use POST /sim/start.",
             ),
-        ) -> dict[str, Any]:
-            self._refuse_while_runner_alive("run the graph")
+        ) -> Any:
+            """Run *n_steps* steps and return the state.
+
+            The run steps in slices of about :data:`_RUN_SLICE_SECONDS`,
+            each holding the graph lock: reads are served between slices,
+            and writes -- another step or run, a state, a reset, a load, a
+            structural edit -- are refused (409) until it returns.  When
+            the server is told to shut down (SIGINT, SIGTERM, the lifespan
+            shutdown, :meth:`SimulationServer.request_shutdown`) the run
+            stops at its next slice and answers **503** with
+            ``{"status": "interrupted", "steps_run": k, "n_steps": n}``:
+            the graph is left after the *k* steps it took.  A shutdown used
+            to wait for the whole run, up to an hour.
+            """
+            with self._graph_access("run the graph", write=True):
+                self._ensure_relay_attached()
+                self._sync_run_active = True
+            done, chunk = 0, 1
+            interrupted = False
             try:
-                self.gm.run(n_steps)
-            except _GRAPH_CONFIGURATION_ERRORS as exc:
-                raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
-            return self._state_json()
+                while done < n_steps:
+                    if self._shutdown.is_set():
+                        interrupted = True
+                        break
+                    k = min(chunk, n_steps - done)
+                    t0 = time.perf_counter()
+                    with self._graph_access("run the graph"):
+                        try:
+                            self.gm.run(k)
+                        except _GRAPH_CONFIGURATION_ERRORS as exc:
+                            raise HTTPException(status_code=400,
+                                                detail=_cannot_step_detail(exc))
+                    done += k
+                    if time.perf_counter() - t0 < _RUN_SLICE_SECONDS / 2:
+                        chunk = min(2 * chunk, MAX_RUN_STEPS)
+                with self._graph_lock:
+                    if n_steps == 0:
+                        try:
+                            self.gm.run(0)      # compiles a graph edited since
+                        except _GRAPH_CONFIGURATION_ERRORS as exc:
+                            raise HTTPException(status_code=400,
+                                                detail=_cannot_step_detail(exc))
+                    state = None if interrupted else self._state_json()
+            finally:
+                self._sync_run_active = False
+            if interrupted:
+                return JSONResponse(status_code=503, content={
+                    "status": "interrupted",
+                    "detail": (f"The server is shutting down: this run took {done} of "
+                               f"its {n_steps} steps, and the graph is left after "
+                               "them."),
+                    "steps_run": done,
+                    "n_steps": n_steps,
+                })
+            return state
 
         @app.post("/sim/start", tags=["sim"], response_model=None)
         def sim_start() -> dict[str, str]:
-            if self._runner_stopping():
-                raise HTTPException(
-                    status_code=503,
-                    detail=("The previous run's thread is still finishing a step "
-                            "after POST /sim/stop; two runners would step one "
-                            "graph. Retry shortly."),
-                    headers={"Retry-After": "1"},
-                )
-            runner = self._ensure_runner()
-            if self._runner_started:
-                raise HTTPException(status_code=409, detail="Runner is already started.")
-            try:
-                self._ensure_relay_attached()
-                runner.start()
-                self._runner_started = True
-                self._runner_stop_pending = False
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
+            with self._runner_lock:
+                if self._runner_stopping():
+                    raise HTTPException(
+                        status_code=503,
+                        detail=("The previous run's thread is still finishing a step "
+                                "after POST /sim/stop; two runners would step one "
+                                "graph. Retry shortly."),
+                        headers={"Retry-After": "1"},
+                    )
+                # A runner whose thread died is not started: it is replaced.
+                self._reap_dead_runner()
+                if self._runner_started:
+                    raise HTTPException(status_code=409, detail="Runner is already started.")
+                with self._graph_access("start the runner", write=True):
+                    runner = self._ensure_runner()
+                    try:
+                        runner.start()
+                        self._runner_started = True
+                        self._runner_stop_pending = False
+                    except _GRAPH_CONFIGURATION_ERRORS as exc:
+                        raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
             return {"status": "started"}
+
+        def _not_running_detail() -> Optional[str]:
+            """The 409 for pause / resume when no runner is running, with
+            why a started one stopped; ``None`` when it runs."""
+            if self.runner is None or not self._runner_started:
+                return "Runner is not started."
+            if self.runner.is_alive:
+                return None
+            why = self._reap_dead_runner()
+            return (f"Runner is not running: its thread stopped ({why}). "
+                    "POST /sim/start starts a new one.")
 
         @app.post("/sim/pause", tags=["sim"], response_model=None)
         def sim_pause() -> dict[str, str]:
-            if self.runner is None or not self._runner_started:
-                raise HTTPException(status_code=409, detail="Runner is not started.")
-            self.runner.pause()
+            with self._runner_lock:
+                detail = _not_running_detail()
+                runner = self.runner
+                if detail is not None or runner is None:
+                    raise HTTPException(status_code=409,
+                                        detail=detail or "Runner is not started.")
+                runner.pause()
             return {"status": "paused"}
 
         @app.post("/sim/resume", tags=["sim"], response_model=None)
         def sim_resume() -> dict[str, str]:
-            if self.runner is None or not self._runner_started:
-                raise HTTPException(status_code=409, detail="Runner is not started.")
-            self.runner.resume()
+            with self._runner_lock:
+                detail = _not_running_detail()
+                runner = self.runner
+                if detail is not None or runner is None:
+                    raise HTTPException(status_code=409,
+                                        detail=detail or "Runner is not started.")
+                runner.resume()
             return {"status": "resumed"}
 
         @app.post("/sim/stop", tags=["sim"], response_model=None)
@@ -2485,24 +3509,34 @@ class SimulationServer:
             "stopped" means no runner thread is stepping the graph.  When
             the thread is still in a step after the wait, the answer is a
             503 and the runner is kept as stopping: retry, and the route
-            waits for it again.
+            waits for it again.  A runner whose thread had already died
+            is reported stopped, with ``error`` saying why it died.
             """
-            if self.runner is None or not (
-                    self._runner_started or self._runner_stop_pending):
-                raise HTTPException(status_code=409, detail="Runner is not started.")
-            self._stop_runner_or_refuse("report the runner stopped")
-            return {"status": "stopped"}
+            with self._runner_lock:
+                if self.runner is None or not (
+                        self._runner_started or self._runner_stop_pending):
+                    raise HTTPException(status_code=409, detail="Runner is not started.")
+                runner = self.runner
+                died = self._runner_started and not runner.is_alive and runner.error
+                self._stop_runner_or_refuse("report the runner stopped")
+            return {"status": "stopped", "error": died} if died else {"status": "stopped"}
 
         @app.post("/sim/reset", tags=["sim"], response_model=None)
         def sim_reset() -> dict[str, Any]:
             """Stop the runner and reset all nodes to initial state.  A 503,
             with nothing reset, when the runner's thread will not stop in
-            time (it would overwrite the reset)."""
-            was_running = self._runner_started
-            self._stop_runner_or_refuse("reset the graph")
-            self._reset_state()
-            self.gm._dirty = True
-            return {"status": "ok", "was_running": was_running, "state": self._state_json()}
+            time (it would overwrite the reset); a 409 while a
+            ``POST /sim/run`` is in progress.  ``was_running`` says whether
+            a runner was running -- one whose thread had died was not."""
+            with self._runner_lock:
+                was_running = self._runner_running()
+                self._stop_runner_or_refuse("reset the graph")
+                with self._graph_access("reset the graph", write=True):
+                    self._ensure_relay_attached()
+                    self._reset_state()
+                    self.gm._dirty = True
+                    return {"status": "ok", "was_running": was_running,
+                            "state": self._state_json()}
 
         @app.put("/sim/stride", tags=["sim"], response_model=None)
         def sim_set_stride(
@@ -2540,33 +3574,68 @@ class SimulationServer:
             dict
                 The values in force, as the runner and the relay hold them.
             """
-            self._steps_per_frame = steps_per_frame
-            if self.runner is not None:
-                self.runner.steps_per_frame = steps_per_frame
-            self.relay.stride = relay_stride
-            return {
-                "steps_per_frame": self._steps_per_frame,
-                "relay_stride": self.relay.stride,
-            }
+            with self._runner_lock:
+                self._steps_per_frame = steps_per_frame
+                if self.runner is not None:
+                    self.runner.steps_per_frame = steps_per_frame
+                self.relay.stride = relay_stride
+                return {
+                    "steps_per_frame": self._steps_per_frame,
+                    "relay_stride": self.relay.stride,
+                }
 
         # -- surrogate endpoints --------------------------------------------
 
         @app.post("/surrogate/train", tags=["surrogate"], response_model=None)
-        def surrogate_train(req: TrainSurrogateRequest) -> dict[str, str]:
-            """Start training a surrogate in a background thread."""
+        def surrogate_train(req: TrainSurrogateRequest) -> dict[str, Any]:
+            """Start training a surrogate of one node in a background thread.
+
+            **One job runs at a time**: a 409 while another one does.  The
+            last :data:`MAX_SURROGATE_JOBS_KEPT` finished jobs are kept, the
+            oldest finished one dropped past it.  **The memory the job would
+            take is estimated before it starts**
+            (:func:`_surrogate_training_bytes`: the data sweep over the
+            whole graph, the dataset and its training copies, the network
+            and its optimiser) and refused with 400 over
+            :data:`MAX_SURROGATE_TRAIN_BYTES`; the reply carries the
+            estimate as ``estimated_bytes``.
+
+            The data come from a batched sweep from varied initial
+            conditions (``GraphManager.run_sweep``), which **leaves the live
+            graph's state untouched** -- the job used to reset the live
+            simulation twice without saying so -- and holds the graph lock
+            while it runs (training does not).  A runner may keep running.
+            When the server shuts down, the job stops at its next epoch and
+            reads ``cancelled``.
+            """
             try:
+                from maddening.surrogates.architectures.mlp import MLPDirect
                 from maddening.surrogates.dataset import DatasetGenerator
                 from maddening.surrogates.training.trainer import SurrogateTrainer
-                from maddening.surrogates.architectures.mlp import MLPDirect
             except ImportError:
                 raise HTTPException(
                     status_code=400,
                     detail="Surrogate training requires equinox+optax. "
                            "pip install maddening[surrogates]",
                 )
-
-            if req.node_name not in self.gm._nodes:
-                raise HTTPException(status_code=404, detail=f"No node '{req.node_name}'.")
+            if self._shutdown.is_set():
+                raise HTTPException(status_code=503,
+                                    detail="The server is shutting down; no job was started.")
+            with self._graph_access("start a surrogate job"):
+                if req.node_name not in self.gm._nodes:
+                    raise HTTPException(status_code=404, detail=f"No node '{req.node_name}'.")
+                need = _surrogate_training_bytes(self.gm, req.node_name, req)
+            if need > MAX_SURROGATE_TRAIN_BYTES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"this job would take about {format_bytes(need)} (the data "
+                            f"sweep over the whole graph, its dataset and the network); "
+                            f"at most {format_bytes(MAX_SURROGATE_TRAIN_BYTES)} is accepted "
+                            "over the API (this server is unauthenticated -- train a "
+                            "surrogate this size in-process).  Fewer n_data_steps, a "
+                            "narrower network or a smaller graph take less; nothing "
+                            "was started."),
+                )
 
             job_id = str(uuid.uuid4())[:8]
             job = {
@@ -2580,61 +3649,50 @@ class SimulationServer:
                 "result": None,
                 "error": None,
             }
-            self._surrogate_jobs[job_id] = job
 
             def _train_worker():
                 try:
-                    # Stop runner if going, generate data from varied ICs
-                    if not self._stop_runner():
-                        raise RuntimeError(
-                            "the runner's thread did not stop in time; nothing "
-                            "was reset or trained -- retry once it has stopped")
-                    self._reset_state()
-                    self.gm._dirty = True
-
-                    # Generate diverse training data using sweep with
-                    # varied initial conditions for the target node
-                    target_node = self.gm._nodes[req.node_name].node
-                    target_init = target_node.initial_state()
-
-                    n_conditions = 16
-                    steps_per_condition = min(200, req.n_data_steps)
-                    key = jax.random.PRNGKey(42)
-
-                    # Build batched initial states -- broadcast non-target
-                    # nodes, vary target node's scalar fields
-                    batched = {}
-                    for name, spec in self.gm._nodes.items():
-                        node_init = spec.node.initial_state()
-                        batched[name] = {
-                            k: jnp.broadcast_to(
-                                v, (n_conditions,) + v.shape
-                            )
-                            for k, v in node_init.items()
-                        }
-
-                    # Vary target node's scalar fields
-                    for field_name, val in target_init.items():
-                        if val.shape == ():
-                            key, subkey = jax.random.split(key)
-                            center = float(val)
-                            scale = max(abs(center), 1.0) * 2.0
-                            varied = center + jax.random.uniform(
-                                subkey, (n_conditions,),
-                                minval=-scale, maxval=scale,
-                            )
-                            # Ensure non-negative for position-like fields
-                            if "position" in field_name.lower():
-                                varied = jnp.maximum(varied, 0.1)
-                            batched[req.node_name][field_name] = varied
-
-                    ds = DatasetGenerator.from_sweep(
-                        self.gm, req.node_name,
-                        n_steps=steps_per_condition,
-                        initial_states_batch=batched,
-                    )
-                    # Reset state after data generation
-                    self._reset_state()
+                    # The data, under the graph lock: generated from batched
+                    # initial conditions by ``run_sweep``, which writes
+                    # nothing back to the graph.
+                    with self._graph_lock:
+                        if self._shutdown.is_set():
+                            raise _TrainingCancelled()
+                        if req.node_name not in self.gm._nodes:
+                            raise RuntimeError(
+                                f"node '{req.node_name}' was removed before the job started")
+                        target_init = self.gm._nodes[req.node_name].node.initial_state()
+                        n_conditions = _SURROGATE_CONDITIONS
+                        steps_per_condition = min(_SURROGATE_STEPS_PER_CONDITION,
+                                                  req.n_data_steps)
+                        key = jax.random.PRNGKey(42)
+                        # Batched initial states: every node's broadcast, the
+                        # target node's scalar fields varied.
+                        batched = {}
+                        for name, spec in self.gm._nodes.items():
+                            node_init = spec.node.initial_state()
+                            batched[name] = {
+                                k: jnp.broadcast_to(v, (n_conditions,) + v.shape)
+                                for k, v in node_init.items()
+                            }
+                        for field_name, val in target_init.items():
+                            if val.shape == ():
+                                key, subkey = jax.random.split(key)
+                                center = float(val)
+                                scale = max(abs(center), 1.0) * 2.0
+                                varied = center + jax.random.uniform(
+                                    subkey, (n_conditions,),
+                                    minval=-scale, maxval=scale,
+                                )
+                                # Ensure non-negative for position-like fields
+                                if "position" in field_name.lower():
+                                    varied = jnp.maximum(varied, 0.1)
+                                batched[req.node_name][field_name] = varied
+                        ds = DatasetGenerator.from_sweep(
+                            self.gm, req.node_name,
+                            n_steps=steps_per_condition,
+                            initial_states_batch=batched,
+                        )
 
                     arch = MLPDirect(hidden_sizes=tuple(req.hidden_sizes))
                     trainer = SurrogateTrainer(arch, ds)
@@ -2643,6 +3701,8 @@ class SimulationServer:
                         job["epoch"] = epoch
                         job["train_loss"] = float(metrics["train_loss"])
                         job["val_loss"] = float(metrics["val_loss"])
+                        if self._shutdown.is_set():
+                            raise _TrainingCancelled()
 
                     result = trainer.train(
                         n_epochs=req.n_epochs,
@@ -2652,20 +3712,42 @@ class SimulationServer:
                     )
                     job["result"] = result
                     job["status"] = "done"
+                except _TrainingCancelled:
+                    job["status"] = "cancelled"
+                    job["error"] = "the server shut down before the job finished"
                 except Exception as exc:
                     job["status"] = "error"
                     job["error"] = str(exc)
                     logger.exception("Surrogate training failed")
+                finally:
+                    with self._surrogate_lock:
+                        self._surrogate_threads.pop(job_id, None)
 
-            thread = threading.Thread(target=_train_worker, daemon=True)
-            thread.start()
-            return {"job_id": job_id, "status": "started"}
+            with self._surrogate_lock:
+                running = [j["id"] for j in self._surrogate_jobs.values()
+                           if j["status"] == "running"]
+                if running:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(f"Surrogate job '{running[0]}' is still running; one job "
+                                f"runs at a time (GET /surrogate/status/{running[0]})."),
+                    )
+                finished = [k for k, j in self._surrogate_jobs.items()
+                            if j["status"] != "running"]
+                for old in finished[:max(0, len(finished) - (MAX_SURROGATE_JOBS_KEPT - 1))]:
+                    del self._surrogate_jobs[old]
+                self._surrogate_jobs[job_id] = job
+                thread = threading.Thread(target=_train_worker, daemon=True,
+                                          name=f"maddening-surrogate-{job_id}")
+                self._surrogate_threads[job_id] = thread
+                thread.start()
+            return {"job_id": job_id, "status": "started", "estimated_bytes": need}
 
         @app.get("/surrogate/status/{job_id}", tags=["surrogate"], response_model=None)
         def surrogate_status(job_id: str) -> dict[str, Any]:
-            if job_id not in self._surrogate_jobs:
+            job = self._surrogate_jobs.get(job_id)
+            if job is None:
                 raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
-            job = self._surrogate_jobs[job_id]
             return {
                 "job_id": job["id"],
                 "node_name": job["node_name"],
@@ -2679,52 +3761,56 @@ class SimulationServer:
 
         @app.post("/surrogate/activate/{job_id}", tags=["surrogate"], response_model=None)
         def surrogate_activate(job_id: str) -> dict[str, str]:
-            """Replace the physics node with the trained surrogate."""
-            if job_id not in self._surrogate_jobs:
+            """Replace the physics node with the trained surrogate (the
+            runner is stopped first; a 409 while a ``POST /sim/run`` is in
+            progress)."""
+            job = self._surrogate_jobs.get(job_id)
+            if job is None:
                 raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
-            job = self._surrogate_jobs[job_id]
             if job["status"] != "done":
                 raise HTTPException(status_code=400, detail="Training not complete.")
 
             node_name = job["node_name"]
             result = job["result"]
 
-            # Save original node info for deactivation
-            if node_name not in self._original_nodes:
-                orig_node = self.gm._nodes[node_name].node
-                orig_edges = [e for e in self.gm._edges
-                              if e.source_node == node_name or e.target_node == node_name]
-                orig_ext = [ei for ei in self.gm._external_inputs
-                            if ei.target_node == node_name]
-                self._original_nodes[node_name] = (orig_node, orig_edges, orig_ext)
+            with self._runner_lock:
+                self._stop_runner_or_refuse("activate a surrogate")
+                with self._graph_access("activate a surrogate", write=True):
+                    if node_name not in self.gm._nodes:
+                        raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
+                    # Save original node info for deactivation
+                    if node_name not in self._original_nodes:
+                        orig_node = self.gm._nodes[node_name].node
+                        orig_edges = [e for e in self.gm._edges
+                                      if e.source_node == node_name or e.target_node == node_name]
+                        orig_ext = [ei for ei in self.gm._external_inputs
+                                    if ei.target_node == node_name]
+                        self._original_nodes[node_name] = (orig_node, orig_edges, orig_ext)
 
-            # Use the ORIGINAL node's initial state for surrogate initial values
-            orig_node = self._original_nodes[node_name][0]
-            initial_values = {}
-            for field_name, shape in result.state_spec.items():
-                if shape == ():
-                    initial_values[field_name] = 0.0
-                else:
-                    initial_values[field_name] = jnp.zeros(shape)
-            orig_init = orig_node.initial_state()
-            for k, v in orig_init.items():
-                if k in initial_values:
-                    initial_values[k] = v
+                    # Use the ORIGINAL node's initial state for surrogate initial values
+                    orig_node = self._original_nodes[node_name][0]
+                    initial_values = {}
+                    for field_name, shape in result.state_spec.items():
+                        if shape == ():
+                            initial_values[field_name] = 0.0
+                        else:
+                            initial_values[field_name] = jnp.zeros(shape)
+                    orig_init = orig_node.initial_state()
+                    for k, v in orig_init.items():
+                        if k in initial_values:
+                            initial_values[k] = v
 
-            was_running = self._runner_started
-            self._stop_runner_or_refuse("activate a surrogate")
+                    surrogate = result.to_node(
+                        name=node_name,
+                        timestep=orig_node.delta_t,
+                        initial_values=initial_values,
+                    )
 
-            surrogate = result.to_node(
-                name=node_name,
-                timestep=orig_node.delta_t,
-                initial_values=initial_values,
-            )
-
-            from maddening.surrogates.replace import replace_node
-            replace_node(self.gm, node_name, surrogate)
-            self.gm.compile()
-            self._active_surrogates.add(node_name)
-            self._reset_state()
+                    from maddening.surrogates.replace import replace_node
+                    replace_node(self.gm, node_name, surrogate)
+                    self.gm.compile()
+                    self._active_surrogates.add(node_name)
+                    self._reset_state()
 
             return {"status": "activated", "node": node_name}
 
@@ -2737,9 +3823,13 @@ class SimulationServer:
                     detail=f"No original node saved for '{node_name}'.",
                 )
 
-            was_running = self._runner_started
-            self._stop_runner_or_refuse("deactivate a surrogate")
+            with self._runner_lock:
+                self._stop_runner_or_refuse("deactivate a surrogate")
+                with self._graph_access("deactivate a surrogate", write=True):
+                    return deactivate_locked(node_name)
 
+        def deactivate_locked(node_name: str) -> dict[str, str]:
+            """``POST /surrogate/deactivate``, holding the graph lock."""
             orig_node, orig_edges, orig_ext = self._original_nodes[node_name]
 
             # The revert rebuilds a subgraph, so it is all-or-nothing: on
@@ -2849,18 +3939,11 @@ class SimulationServer:
             )
             n_steps = max(1, min(1000, int(n_steps)))
             n_warmup = max(0, min(50, int(n_warmup)))
-            try:
-                if self._runner_started:
-                    raise HTTPException(
-                        status_code=409,
-                        detail="Cannot profile while the runner is started. "
-                               "POST /sim/stop first.",
-                    )
-                report = profile_graph(self.gm, n_steps=n_steps, n_warmup=n_warmup)
-            except HTTPException:
-                raise
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
+            with self._graph_access("profile the graph", write=True):
+                try:
+                    report = profile_graph(self.gm, n_steps=n_steps, n_warmup=n_warmup)
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
             return profile_report_to_perfetto(report)
 
         @app.post("/sim/profile/jax/start", tags=["sim"], response_model=None)
@@ -3009,63 +4092,63 @@ class SimulationServer:
               to reset to full state.
             * ``{"type": "config", "fps": 15}`` — change poll rate.
 
+            Each frame is encoded in a worker thread, never on the event
+            loop, and a frame of the whole state is encoded once and sent
+            to every client of it.  At most :data:`MAX_STREAM_CONNECTIONS`
+            streams are open at once (1013 past it).
+
             Authentication is the same rule as every HTTP route; see
             :meth:`SimulationServer._authorise_ws`.
             """
             authorised, subprotocol = await self._authorise_ws(websocket)
             if not authorised:
                 return
-            await websocket.accept(subprotocol=subprotocol)
-            logger.info("WebSocket client connected to /ws/state")
-            self._ensure_relay_attached()
-
-            sub_fields = [None]   # mutable: {node: [fields]} or None
-            target_fps = [30.0]
-            disconnected = asyncio.Event()
-
-            def _on_message(msg: dict) -> None:
-                if msg.get("type") == "subscribe":
-                    sub_fields[0] = msg.get("fields")
-                elif msg.get("type") == "config":
-                    if "fps" in msg:
-                        target_fps[0] = max(1, min(120, msg["fps"]))
-
-            receiver = asyncio.create_task(
-                _receive_until_disconnect(websocket, _on_message, disconnected))
-
-            last_sim_time = -1.0
+            if not self._admit_stream():
+                await self._refuse_stream(websocket, "/ws/state")
+                return
             try:
-                while not disconnected.is_set():
-                    sim_time, snapshot = self.relay.latest_snapshot()
-                    if snapshot is not None and sim_time != last_sim_time:
-                        last_sim_time = sim_time
-                        state = snapshot
-                        # Apply field subscription filter
+                await websocket.accept(subprotocol=subprotocol)
+                logger.info("WebSocket client connected to /ws/state")
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._ensure_relay_attached_locked)
+
+                sub_fields: list[Optional[dict]] = [None]   # {node: [fields]} or None
+                target_fps = [30.0]
+                disconnected = asyncio.Event()
+
+                def _on_message(msg: dict) -> None:
+                    if msg.get("type") == "subscribe":
+                        fields = msg.get("fields")
+                        if fields is None or isinstance(fields, dict):
+                            sub_fields[0] = fields
+                    elif msg.get("type") == "config":
+                        if "fps" in msg:
+                            target_fps[0] = max(1, min(120, msg["fps"]))
+
+                receiver = asyncio.create_task(
+                    _receive_until_disconnect(websocket, _on_message, disconnected))
+
+                last = (None, None)   # (relay sequence, subscription) last sent
+                try:
+                    while not disconnected.is_set():
+                        seq, sim_time, snapshot = self.relay.latest_frame()
                         filt = sub_fields[0]
-                        if filt is not None:
-                            state = {
-                                node: {
-                                    f: fields[f]
-                                    for f in filt.get(node, [])
-                                    if f in fields
-                                }
-                                for node, fields in state.items()
-                                if node in filt
-                            }
-                        payload = {
-                            "sim_time": sim_time,
-                            "state": _json_reply(state),
-                        }
-                        await websocket.send_json(payload)
-                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
-                logger.info("WebSocket client disconnected from /ws/state")
-            except Exception as exc:  # noqa: BLE001 - classified below
-                if _client_left(websocket, exc, disconnected):
+                        if snapshot is not None and (seq, id(filt)) != last:
+                            last = (seq, id(filt))
+                            text = await self._shared_state_frame(seq, sim_time,
+                                                                  snapshot, filt)
+                            await websocket.send_text(text)
+                        await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                     logger.info("WebSocket client disconnected from /ws/state")
-                else:
-                    logger.exception("WebSocket error on /ws/state")
+                except Exception as exc:  # noqa: BLE001 - classified below
+                    if _client_left(websocket, exc, disconnected):
+                        logger.info("WebSocket client disconnected from /ws/state")
+                    else:
+                        logger.exception("WebSocket error on /ws/state")
+                finally:
+                    receiver.cancel()
             finally:
-                receiver.cancel()
+                self._release_stream()
 
         @app.websocket("/ws/state/binary")
         async def ws_state_binary(websocket: WebSocket) -> None:
@@ -3087,85 +4170,120 @@ class SimulationServer:
               current mode.
             * ``{"type": "config", "fps": 30}`` — change poll rate.
 
+            Every frame is laid out by the last schema sent.  When the
+            graph's layout changes -- a node added, removed or replaced, a
+            compile -- the server sends a new schema before the next frame;
+            the cached encoder used to outlive a replaced node, and frames
+            in the old layout were resized to fit, dropping values or
+            padding phantom zeros in a frame of the advertised length.
+
             Authentication is the same rule as every HTTP route; see
             :meth:`SimulationServer._authorise_ws`.
             """
             authorised, subprotocol = await self._authorise_ws(websocket)
             if not authorised:
                 return
-            await websocket.accept(subprotocol=subprotocol)
-            logger.info("WebSocket client connected to /ws/state/binary")
-            self._ensure_relay_attached()
+            if not self._admit_stream():
+                await self._refuse_stream(websocket, "/ws/state/binary")
+                return
+            try:
+                await websocket.accept(subprotocol=subprotocol)
+                logger.info("WebSocket client connected to /ws/state/binary")
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._ensure_relay_attached_locked)
 
-            # Mutable state shared with receiver task
-            target_fps = [60.0]
-            current_encoder = [self._get_binary_encoder()]
-            current_compression = ["none"]
-            current_fields: list[dict | None] = [None]
-            schema_dirty = asyncio.Event()
-            disconnected = asyncio.Event()
+                from maddening.api.binary_encoder import (  # noqa: PLC0415
+                    BinaryStateEncoder, VALID_COMPRESSIONS,
+                )
 
-            await websocket.send_json(current_encoder[0].schema())
+                # Mutable state shared with receiver task
+                target_fps = [60.0]
+                encoder, generation, layout = await loop.run_in_executor(
+                    None, self._binary_encoder_locked)
+                current_compression = ["none"]
+                current_fields: list[dict | None] = [None]
+                schema_dirty = asyncio.Event()
+                disconnected = asyncio.Event()
 
-            def _on_message(msg: dict) -> None:
-                if msg.get("type") == "subscribe":
-                    from maddening.api.binary_encoder import (  # noqa: PLC0415
-                        BinaryStateEncoder, VALID_COMPRESSIONS,
-                    )
-                    if "fields" in msg:
-                        current_fields[0] = msg["fields"]
-                    if "compression" in msg:
-                        comp = msg["compression"]
-                        if comp in VALID_COMPRESSIONS:
-                            current_compression[0] = comp
-                    user_state = {
-                        k: v for k, v in self.gm._state.items()
-                        if k != "_meta"
-                    }
+                def build(state: dict):
                     try:
-                        current_encoder[0] = BinaryStateEncoder(
-                            user_state,
-                            fields=current_fields[0],
-                            compression=current_compression[0],
-                        )
+                        return BinaryStateEncoder(state, fields=current_fields[0],
+                                                  compression=current_compression[0])
                     except ImportError:
                         # zstandard not installed — fall back
                         current_compression[0] = "none"
-                        current_encoder[0] = BinaryStateEncoder(
-                            user_state,
-                            fields=current_fields[0],
-                            compression="none",
-                        )
-                    schema_dirty.set()
-                elif msg.get("type") == "config":
-                    if "fps" in msg:
-                        target_fps[0] = max(1, min(120, msg["fps"]))
+                        return BinaryStateEncoder(state, fields=current_fields[0],
+                                                  compression="none")
 
-            receiver = asyncio.create_task(
-                _receive_until_disconnect(websocket, _on_message, disconnected))
+                await websocket.send_json(encoder.schema())
 
-            last_sim_time = -1.0
-            try:
-                while not disconnected.is_set():
-                    # Re-send schema if subscription changed
-                    if schema_dirty.is_set():
-                        schema_dirty.clear()
-                        await websocket.send_json(current_encoder[0].schema())
+                def _on_message(msg: dict) -> None:
+                    if msg.get("type") == "subscribe":
+                        if "fields" in msg and (msg["fields"] is None
+                                                or isinstance(msg["fields"], dict)):
+                            current_fields[0] = msg["fields"]
+                        if "compression" in msg:
+                            comp = msg["compression"]
+                            if comp in VALID_COMPRESSIONS:
+                                current_compression[0] = comp
+                        schema_dirty.set()
+                    elif msg.get("type") == "config":
+                        if "fps" in msg:
+                            target_fps[0] = max(1, min(120, msg["fps"]))
 
-                    sim_time, snapshot = self.relay.latest_snapshot()
-                    if snapshot is not None and sim_time != last_sim_time:
-                        last_sim_time = sim_time
-                        frame = current_encoder[0].encode(sim_time, snapshot)
-                        await websocket.send_bytes(frame)
-                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
-                logger.info("WebSocket client disconnected from /ws/state/binary")
-            except Exception as exc:  # noqa: BLE001 - classified below
-                if _client_left(websocket, exc, disconnected):
+                receiver = asyncio.create_task(
+                    _receive_until_disconnect(websocket, _on_message, disconnected))
+
+                last_seq = None
+                try:
+                    while not disconnected.is_set():
+                        seq, sim_time, snapshot = self.relay.latest_frame()
+                        # A new schema when the client changed its
+                        # subscription or the graph's layout changed: built
+                        # from the snapshot about to be encoded, or from the
+                        # graph when there is none yet.
+                        if schema_dirty.is_set() or generation != self._layout_generation:
+                            resubscribed = schema_dirty.is_set()
+                            schema_dirty.clear()
+                            generation = self._layout_generation
+                            source = snapshot if snapshot is not None else \
+                                await loop.run_in_executor(None, self._user_state_locked)
+                            # A compile that left the layout as it was (the
+                            # recompile after a reset or a parameter write)
+                            # sends no schema; a subscription always does.
+                            if resubscribed or _state_layout(source) != layout:
+                                encoder, layout = build(source), _state_layout(source)
+                                await websocket.send_json(encoder.schema())
+                        if snapshot is not None and seq != last_seq:
+                            last_seq = seq
+                            # A snapshot of another layout than the schema's
+                            # (a node added, removed or resized since): its
+                            # own schema first.
+                            if _state_layout(snapshot) != layout:
+                                encoder, layout = build(snapshot), _state_layout(snapshot)
+                                await websocket.send_json(encoder.schema())
+                            try:
+                                frame = await loop.run_in_executor(
+                                    None, encoder.encode, sim_time, snapshot)
+                            except (ValueError, KeyError):
+                                # The snapshot is laid out otherwise than the
+                                # schema the client holds: send its own.
+                                encoder, layout = build(snapshot), _state_layout(snapshot)
+                                await websocket.send_json(encoder.schema())
+                                frame = await loop.run_in_executor(
+                                    None, encoder.encode, sim_time, snapshot)
+                            await websocket.send_bytes(frame)
+                        await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                     logger.info("WebSocket client disconnected from /ws/state/binary")
-                else:
-                    logger.exception("WebSocket error on /ws/state/binary")
+                except Exception as exc:  # noqa: BLE001 - classified below
+                    if _client_left(websocket, exc, disconnected):
+                        logger.info("WebSocket client disconnected from /ws/state/binary")
+                    else:
+                        logger.exception("WebSocket error on /ws/state/binary")
+                finally:
+                    receiver.cancel()
             finally:
-                receiver.cancel()
+                self._release_stream()
 
         @app.websocket("/ws/render")
         async def ws_render(websocket: WebSocket) -> None:
@@ -3196,72 +4314,77 @@ class SimulationServer:
                     reason="No frame renderer configured on this server.",
                 )
                 return
-
-            await websocket.accept(subprotocol=subprotocol)
-            logger.info("WebSocket client connected to /ws/render")
-            self._ensure_relay_attached()
-
-            renderer = self._frame_renderer
-            target_fps = [30.0]  # mutable so the receiver task can update it
-
-            # Send initial config
-            await websocket.send_json({
-                "type": "config",
-                "width": renderer.width,
-                "height": renderer.height,
-                "format": renderer.fmt,
-                "content_type": renderer.content_type,
-            })
-
-            config_changed = asyncio.Event()
-            disconnected = asyncio.Event()
-
-            def _on_message(msg: dict) -> None:
-                if msg.get("type") == "config":
-                    if "format" in msg:
-                        renderer.set_format(msg["format"], msg.get("quality"))
-                    if "fps" in msg:
-                        target_fps[0] = max(1, min(60, msg["fps"]))
-                    config_changed.set()
-                elif msg.get("type") == "reset":
-                    renderer.reset()
-
-            receiver = asyncio.create_task(
-                _receive_until_disconnect(websocket, _on_message, disconnected))
-
-            last_sim_time = -1.0
+            if not self._admit_stream():
+                await self._refuse_stream(websocket, "/ws/render")
+                return
             try:
-                while not disconnected.is_set():
-                    # Re-send config if client changed settings
-                    if config_changed.is_set():
-                        config_changed.clear()
-                        await websocket.send_json({
-                            "type": "config",
-                            "width": renderer.width,
-                            "height": renderer.height,
-                            "format": renderer.fmt,
-                            "content_type": renderer.content_type,
-                        })
+                await websocket.accept(subprotocol=subprotocol)
+                logger.info("WebSocket client connected to /ws/render")
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._ensure_relay_attached_locked)
 
-                    sim_time, snapshot = self.relay.latest_snapshot()
-                    if snapshot is not None and sim_time != last_sim_time:
-                        last_sim_time = sim_time
-                        loop = asyncio.get_event_loop()
-                        frame = await loop.run_in_executor(
-                            None, renderer.render, sim_time, snapshot,
-                        )
-                        await websocket.send_bytes(frame)
+                renderer = self._frame_renderer
+                target_fps = [30.0]  # mutable so the receiver task can update it
 
-                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
-                logger.info("WebSocket client disconnected from /ws/render")
-            except Exception as exc:  # noqa: BLE001 - classified below
-                # A client that closed its viewer is the ordinary end of a
-                # render stream; it used to log a traceback every time.
-                if _client_left(websocket, exc, disconnected):
+                # Send initial config
+                await websocket.send_json({
+                    "type": "config",
+                    "width": renderer.width,
+                    "height": renderer.height,
+                    "format": renderer.fmt,
+                    "content_type": renderer.content_type,
+                })
+
+                config_changed = asyncio.Event()
+                disconnected = asyncio.Event()
+
+                def _on_message(msg: dict) -> None:
+                    if msg.get("type") == "config":
+                        if "format" in msg:
+                            renderer.set_format(msg["format"], msg.get("quality"))
+                        if "fps" in msg:
+                            target_fps[0] = max(1, min(60, msg["fps"]))
+                        config_changed.set()
+                    elif msg.get("type") == "reset":
+                        renderer.reset()
+
+                receiver = asyncio.create_task(
+                    _receive_until_disconnect(websocket, _on_message, disconnected))
+
+                last_seq = None
+                try:
+                    while not disconnected.is_set():
+                        # Re-send config if client changed settings
+                        if config_changed.is_set():
+                            config_changed.clear()
+                            await websocket.send_json({
+                                "type": "config",
+                                "width": renderer.width,
+                                "height": renderer.height,
+                                "format": renderer.fmt,
+                                "content_type": renderer.content_type,
+                            })
+
+                        seq, sim_time, snapshot = self.relay.latest_frame()
+                        if snapshot is not None and seq != last_seq:
+                            last_seq = seq
+                            frame = await loop.run_in_executor(
+                                None, renderer.render, sim_time, snapshot,
+                            )
+                            await websocket.send_bytes(frame)
+
+                        await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                     logger.info("WebSocket client disconnected from /ws/render")
-                else:
-                    logger.exception("WebSocket error on /ws/render")
+                except Exception as exc:  # noqa: BLE001 - classified below
+                    # A client that closed its viewer is the ordinary end of a
+                    # render stream; it used to log a traceback every time.
+                    if _client_left(websocket, exc, disconnected):
+                        logger.info("WebSocket client disconnected from /ws/render")
+                    else:
+                        logger.exception("WebSocket error on /ws/render")
+                finally:
+                    receiver.cancel()
             finally:
-                receiver.cancel()
+                self._release_stream()
 
         return app

@@ -173,10 +173,17 @@ def test_a_stop_that_times_out_is_a_503_and_keeps_the_runner(blocked_runner):
     assert server.runner is None
 
 
+def _live_position(gm) -> float:
+    """The ball's position, read off the graph.  Not through ``GET
+    /graph/state``: a read takes the graph lock, which the stuck step
+    holds, so it waits for that step like every other use of the graph."""
+    return float(gm._state["ball"]["position"])
+
+
 def test_while_the_runner_is_still_stopping_state_writes_are_503s(blocked_runner):
     gm, server, client, release = blocked_runner
     assert client.post("/sim/stop").status_code == 503
-    position = client.get("/graph/state").json()["ball"]["position"]
+    position = _live_position(gm)
     for method, url, kwargs in [
         ("POST", "/sim/reset", {}),
         ("POST", "/sim/start", {}),
@@ -187,7 +194,7 @@ def test_while_the_runner_is_still_stopping_state_writes_are_503s(blocked_runner
     ]:
         resp = client.request(method, url, **kwargs)
         assert resp.status_code == 503, (url, resp.text)
-    assert client.get("/graph/state").json()["ball"]["position"] == position
+    assert _live_position(gm) == position
     release.set()
     assert _wait_for(lambda: not server.runner._thread.is_alive())
     reset = client.post("/sim/reset")
@@ -197,11 +204,11 @@ def test_while_the_runner_is_still_stopping_state_writes_are_503s(blocked_runner
 
 def test_a_reset_whose_stop_times_out_resets_nothing(blocked_runner):
     gm, server, client, release = blocked_runner
-    before = client.get("/graph/state").json()
+    before = _live_position(gm)
     resp = client.post("/sim/reset")
     assert resp.status_code == 503, resp.text
     assert "Nothing was changed" in resp.json()["detail"]
-    assert client.get("/graph/state").json() == before
+    assert _live_position(gm) == before
 
 
 def test_while_the_runner_runs_state_writes_are_409s_and_params_still_go_through():

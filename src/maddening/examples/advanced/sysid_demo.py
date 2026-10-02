@@ -17,7 +17,9 @@ true parameters and its position recorded with measurement noise.  Then:
 3. **Freeze the mass and recover the rest.**  ``ParamSpec(trainable=
    False)`` on ``m``, a ``mask=`` that selects ``k`` and ``c``, and
    :func:`~maddening.sysid.fit_lm` (Levenberg-Marquardt) from a perturbed
-   start, with ``params_table()`` before and after.
+   start, with ``params_table()`` before and after.  Its ``step_tol`` is
+   set to ``1e-5``, far below the parameters' statistical uncertainty, and
+   ``converged`` reports that this stopping test was met.
 4. **How well?**  ``fim`` at the fitted values with ``noise_std`` gives
    each parameter's Cramér-Rao bound in its own units; the fit lands
    within a few standard deviations of the truth.
@@ -60,6 +62,16 @@ from maddening.sysid import fim, fit, fit_lm
 TRUE = {"stiffness": 30.0, "damping": 2.0, "mass": 1.0}
 START = {"stiffness": 45.0, "damping": 3.0}      # the perturbed guess
 NOISE_STD = 0.01                                  # measurement noise [m]
+# fit_lm's stopping test: converged once a proposed step moves every fitted
+# parameter by at most this fraction of itself.  1e-5 is a choice about the
+# answer -- hundreds of times below the Cramer-Rao sigma this data gives
+# (0.2-1%) -- where the default (16 float32 ulps, 1.9e-6) asks for the
+# parameters' own float resolution.  On this data the default is met at
+# some record lengths and not at others (measured: met at 200 and 300
+# samples, not at 50, 100 or 500, where the damping retries are exhausted
+# first), so ``converged`` would depend on --samples.  At 1e-5 it is met at
+# every one of them.
+STEP_TOL = 1e-5
 DT = 0.01
 
 
@@ -97,6 +109,11 @@ def main(argv=None) -> int:
     parser.add_argument("--n-iter", type=int, default=300,
                         help="Adam iterations in part 2 (default 300)")
     args = parser.parse_args(argv)
+    if args.samples < 100 or args.n_iter < 150:
+        # A shorter record (under one second of the oscillation) or a smaller
+        # Adam budget does not pin k/m and c/m to the tolerances part 2
+        # asserts: measured at 50 samples and 100 iterations, c/m = 1.75.
+        parser.error("--samples must be at least 100 and --n-iter at least 150")
     n = args.samples
 
     gm = GraphManager()
@@ -154,9 +171,11 @@ def main(argv=None) -> int:
                mask=select(start, "stiffness", "damping", "mass"),
                n_iter=args.n_iter, lr=0.1)
     print(adam)
-    print(f"  ('not converged' because tol=0: Adam runs its whole budget.  It "
+    print(f"  ('not converged' because tol=0, the default: fit's only stopping "
+          f"test is the loss reaching tol, so Adam runs its whole budget.  It "
           f"returns its lowest-loss iterate, number {adam.best_iteration}, not "
           f"necessarily its last.)")
+    assert adam.converged is False and adam.n_iter == args.n_iter
     k, c, m = (leaf(adam.params, key) for key in ("stiffness", "damping", "mass"))
     held = (k * c * m) ** (1 / 3)
     held_start = (START["stiffness"] * START["damping"] * 1.0) ** (1 / 3)
@@ -197,17 +216,22 @@ def main(argv=None) -> int:
         raise AssertionError("a mask widened onto a frozen leaf was accepted")
 
     lm = fit_lm(gm, residual, params=start, mask=select(start, "stiffness", "damping"),
-                noise_std=NOISE_STD)
+                noise_std=NOISE_STD, step_tol=STEP_TOL)
     print()
     print(lm)
     # The loss is 0.5 * sum((r / sigma)^2): pure noise at sigma gives about
     # n / 2, so a fit at the noise floor lands there and goes no lower.
     floor = 2.0 * lm.best_loss / n
-    print(f"  best loss {lm.best_loss:.1f} = {floor:.2f} x n/2: at the noise floor.  "
-          f"LM stops when no damped step lowers the loss any further, so "
-          f"'converged' (loss <= tol, or a step below step_tol) stays False; "
-          f"its last iterate is its lowest (best iterate {lm.best_iteration}).")
+    print(f"  best loss {lm.best_loss:.1f} = {floor:.2f} x n/2: at the noise floor.")
+    print(f"  'converged' is True: an iteration proposed a step that moved both k "
+          f"and c by at most step_tol={STEP_TOL:g} of their values.  That is fit_lm's "
+          f"stopping test, and it counts the proposal whether or not it lowered "
+          f"the loss -- at the floor a step that small cannot strictly lower a "
+          f"loss that is rounding noise.  Like every fit_lm run, its last iterate "
+          f"is its lowest (iterate {lm.best_iteration} of {len(lm.losses)} "
+          f"evaluated).")
     assert 0.7 < floor < 1.3, floor
+    assert lm.converged is True and lm.n_iter < 50          # stopped on the test
     assert lm.best_iteration in (len(lm.losses), len(lm.losses) - 1)
     assert lm.excited_rank == 2 and lm.hold_declined is False
     assert leaf(lm.params, "mass") == TRUE["mass"]            # frozen: untouched

@@ -163,6 +163,15 @@ class BinaryStateEncoder:
         ``[8 B sim_time][variable-length compressed payload]`` and the
         receiver must look at the schema's ``compression`` field to
         decide whether to decompress.
+
+        Raises
+        ------
+        ValueError
+            If a field of *state* holds another number of values than the
+            schema gives it (the state's layout changed since the encoder
+            was built).
+        KeyError
+            If *state* lacks a node or field the schema names.
         """
         # Build the uncompressed payload (everything after byte 8).
         payload = bytearray(self._total_floats * 4)
@@ -173,6 +182,15 @@ class BinaryStateEncoder:
                 flat = np.asarray(val.flatten(), dtype=np.float32)
             else:
                 flat = np.array([float(val)], dtype=np.float32)
+            if flat.size != n:
+                # Slice assignment into a bytearray resizes it, so a field
+                # of another size used to shift every field after it, or
+                # pad the frame with zeros the schema called values.
+                raise ValueError(
+                    f"{node}.{field} has {flat.size} value(s), the schema "
+                    f"{n}: the state's layout changed since this encoder was "
+                    "built; build a new one and send its schema"
+                )
             payload[offset : offset + n * 4] = flat.tobytes()
             offset += n * 4
         payload_b = bytes(payload)

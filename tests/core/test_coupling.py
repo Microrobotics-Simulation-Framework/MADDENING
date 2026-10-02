@@ -323,6 +323,9 @@ class TestGaussSeidel:
             "Coupled and staggered solutions should differ"
         )
 
+    # Undamped and stiff: past MADD-ANO-098's limit (c < k*dt), so
+    # compile() warns.  The test is about the capped iteration completing.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_max_iterations_reached(self):
         """With very few iterations the solver still completes."""
         gm = _make_bidirectional_springs(dt=0.01, k=1000.0, c=0.0,

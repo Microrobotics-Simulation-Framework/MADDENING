@@ -24,9 +24,20 @@
 enum { FAULT_NONE = 0, FAULT_EINTR_ONCE, FAULT_HALF_THEN_RESET, FAULT_HALF_THEN_EINTR };
 static int g_fault_fd = -1, g_fault_mode = FAULT_NONE, g_fault_calls = 0;
 static ssize_t fault_send(int s, const void *buf, size_t n, int flags);
+/* recv() likewise, for a signal that interrupts a receive (EINTR once, on
+ * the socket in g_recv_fault_fd). */
+static int g_recv_fault_fd = -1, g_recv_eintr = 0;
+static ssize_t fault_recv(int s, void *buf, size_t n, int flags);
 #define send fault_send
+#define recv fault_recv
 #include "../../../src/maddening/fmi/c/maddening_fmu.c"
 #undef send
+#undef recv
+
+static ssize_t fault_recv(int s, void *buf, size_t n, int flags) {
+    if (s == g_recv_fault_fd && g_recv_eintr > 0) { --g_recv_eintr; errno = EINTR; return -1; }
+    return recv(s, buf, n, flags);
+}
 
 static ssize_t fault_send(int s, const void *buf, size_t n, int flags) {
     if (s != g_fault_fd || g_fault_mode == FAULT_NONE) return send(s, buf, n, flags);
@@ -356,6 +367,21 @@ static void test_bridge_call_paths(void) {
     CHECK(gone->sock == SOCK_INVALID);
     if (gone->sock != SOCK_INVALID) sock_close(sv[0]);
     free_instance(gone);
+}
+
+/* ------------------------------------------------------- recv: EINTR */
+
+static void test_a_signal_during_a_receive_is_retried(void) {
+    /* A signal that interrupts recv() before anything arrives is not a
+     * failure: the receive is retried and the reply read whole (recv_all
+     * used to treat it as a dead peer and drop the connection). */
+    WITH_SERVER("{\"ok\":true,\"t\":1}", 0, {
+        g_recv_fault_fd = in->sock; g_recv_eintr = 2;
+        CHECK(bridge_call(in, "{\"op\":\"hello\"}") == fmi3OK);
+        CHECK(g_recv_eintr == 0 && in->sock != SOCK_INVALID);
+        CHECK(strcmp(in->resp, "{\"ok\":true,\"t\":1}") == 0);
+        g_recv_fault_fd = -1;
+    });
 }
 
 /* ------------------------------------------------------- send failures */
@@ -1356,6 +1382,7 @@ int main(int argc, char **argv) {
     test_read_endpoint();
     test_bridge_call_paths();
     test_send_failures();
+    test_a_signal_during_a_receive_is_retried();
     test_get_set_step();
     test_binary_get_set();
     test_binary_fmu_state();

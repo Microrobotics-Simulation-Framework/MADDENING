@@ -184,7 +184,13 @@ def _two_springs(**group):
         gm.add_edge("a", "b", "position", "anchor_position")
         gm.add_edge("b", "a", "position", "anchor_position")
         gm.add_coupling_group(["a", "b"], max_iterations=6, tolerance=1e-8, **group)
-        gm.compile()
+        with warnings.catch_warnings():
+            # Just past MADD-ANO-098's limit ('b' has c < k*dt; the converged
+            # step grows by 1.00014 a step), so compile() warns.  The fixture
+            # is for the ``_meta`` slots, not the springs' stability.
+            warnings.filterwarnings("ignore", message=".*MADD-ANO-098",
+                                    category=UserWarning)
+            gm.compile()
         return gm
     return build
 

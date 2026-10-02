@@ -77,7 +77,7 @@ def test_state_blob_is_arrays_only_and_validated():
         (lambda a: a.__setitem__("_token", np.array("other")), "token"),
         (lambda a: a.__setitem__("s/spring/position", np.zeros(3, np.float32)), "shape"),
         (lambda a: a.pop("s/ball/velocity"), "missing"),
-        (lambda a: a.__setitem__("i/spring/nope", np.zeros(())), "unknown input"),
+        (lambda a: a.__setitem__("i/spring/nope", np.zeros(())), "extra ['i/spring/nope']"),
     ):
         bad = dict(arrays)
         mutate(bad)
@@ -254,7 +254,8 @@ def test_set_state_refuses_a_zip_bomb_before_decompressing_on_both_paths(no_np_l
     assert not r["ok"] and "'s/ball/position' is 67108864 bytes" in r["error"], r
     # a member the model does not have at all, however small
     r = bridge.handle({"op": "set_state", "state": _zip_bomb("i/spring/nope.npy", 1 << 20)})
-    assert not r["ok"] and "unknown input 'i/spring/nope.npy'" in r["error"], r
+    assert not r["ok"] and "inputs differ from the model" in r["error"], r
+    assert "extra ['i/spring/nope']" in r["error"], r
     r = bridge.handle({"op": "set_state", "state": _zip_bomb("evil.npy", 0)})
     assert not r["ok"] and "unknown member 'evil.npy'" in r["error"], r
     # binary path: the raw npz bytes go through the very same check

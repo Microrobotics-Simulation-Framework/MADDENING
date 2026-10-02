@@ -46,6 +46,8 @@ There is no spatial order — the node integrates an ODE and has no grid. The te
 | Continuous right-hand side | `maddening.nodes.spring.SpringDamperNode.derivatives` | For `maddening.core.simulation.integrators.integrate_node`; not the scheme `update()` uses |
 | Backward-Euler residual | `maddening.nodes.spring.SpringDamperNode.implicit_residual` | $x^{n+1} - x^n - \Delta t f(x^{n+1})$ |
 | Reaction force delivered over a flux edge | `maddening.nodes.spring.SpringDamperNode.compute_boundary_fluxes` | `spring_force`, same constants as `update` |
+| Coupled-pair limit (warning) | `maddening.nodes.spring._anchored_pair_advisories` | `compile()` warns when two nodes anchored on each other in a coupling group have a converged step that grows, MADD-ANO-098 |
+| Converged step of an anchored pair | `maddening.nodes.spring._anchored_pair_step_matrix` | The map on $(x_a - x_b, v_a, v_b)$ the warning takes the spectral radius of |
 
 ## Assumptions and Simplifications
 
@@ -69,7 +71,7 @@ There is no spatial order — the node integrates an ODE and has no grid. The te
 2. **No stability check**: a single node is stable only for $k\,\Delta t^2 + 2c\,\Delta t < 4m$ (see [Stability Conditions](#stability-conditions)), and nothing enforces it at runtime
 3. **A calibrated constant reaches `derivatives()` and `implicit_residual()` only when it is passed.** Both take the injected `params` by the same `{**self.params, **params}` rule as `update()` (MADD-ANO-018, resolved in 0.4.0), so hand the node's `gm.params` entry to `integrate_node(..., params=)` or `implicit_euler_step(..., params=)`; called without it, they integrate the constructor constants
 4. No nonlinear spring behaviour, and no contact
-5. **Two nodes anchored on each other in a converged coupling group are unstable for $k\,\Delta t > c$**, far inside the single-node limit, and nothing warns (MADD-ANO-098). See [Stability Conditions](#stability-conditions).
+5. **Two nodes anchored on each other in a converged coupling group are unstable for $k\,\Delta t > c$**, far inside the single-node limit, and for $c\,\Delta t + k\,\Delta t^2 > 2m$. `compile()` warns about such a pair and does not refuse it (MADD-ANO-098). See [Stability Conditions](#stability-conditions).
 
 ## Stability Conditions
 
@@ -94,6 +96,16 @@ c \ge k\,\Delta t ,
 $$
 
 and the factor is exactly 1 at equality. The relative motion $x_a - x_b$ is stable whenever $c\,\Delta t < 2m$, so the instability is the pair drifting off together, with a speed that grows every step. The single-node bound does not see it. With $k = 1000$, $c = 2$, $m = 0.5$ and $\Delta t = 0.01$, the single node has $k\Delta t^2 + 2c\Delta t = 0.14$ against $4m = 2$, while the pair's centre-of-mass velocity grows by a factor of 1.2 per step. Without a coupling group the pair exchanges positions lagged by the schedule. That is a different scheme with its own limit, which this bound does not describe; it also diverges at those constants.
+
+Above $c\Delta t = m$ the factor is negative, and it passes $-1$ at $c\Delta t + k\Delta t^2 = 2m$. So where the iteration converges, an equal pair is stable exactly for
+
+$$
+k\,\Delta t \le c \le \frac{2m - k\,\Delta t^2}{\Delta t} .
+$$
+
+Past the upper figure the pair's common velocity flips sign and grows every step, though $c > k\Delta t$: at $k = 6000$, $c = 150$, $m = 1$ and $\Delta t = 0.01$ each node has $3.6$ against $4m = 4$ and $g = -1.25$. Every equal pair past the single-node bound is past the upper figure too. For an unequal pair the factor has no closed form; the converged step is the linear map on $(x_a - x_b, v_a, v_b)$ that solves the two coupled velocity updates, and its spectral radius is the growth per step. The common translation of the pair, an eigenvalue of exactly 1, is left out of that map.
+
+**The compile-time warning.** `GraphManager.compile()` warns, with a `UserWarning` naming both nodes, their constants, the growth factor and MADD-ANO-098, when it finds two `SpringDamperNode`s in one coupling group anchored on each other and the spectral radius of their converged step, from the live `gm.params` values, exceeds 1 by more than one part in a million. It recognises the pattern conservatively: each `position` reaches the other's `anchor_position` through an edge with no transform (or the built-in `identity`) that is neither additive nor mapped and is the anchor's only writer; both nodes have one timestep; the group's `max_iterations` is at least 2. It does not judge $k\Delta t^2 \ge m$ (the iteration does not converge, so the converged step is not the one that runs), a wrapped node or a subclass that overrides `update`, or a value supplied after compile. It warns and never refuses. The full list is in the docstring of `maddening.nodes.spring._anchored_pair_advisories`.
 
 ## State Variables
 
@@ -136,7 +148,7 @@ and the factor is exactly 1 at equality. The relative motion $x_a - x_b$ is stab
 - Benchmark: `MADD-VER-009` — observed temporal order of accuracy by the Method of Manufactured Solutions. A manufactured displacement is injected through `anchor_position`, which enters the force linearly, so the anchor that makes the trajectory exact is available in closed form. Over a 100/200/400/800 step ladder at fixed final time, in float64, the observed order over the finest pair is **1.029** against the declared 1.0.
 - Test file: `tests/verification/test_mms_order_ode_nodes.py`
 - The same file mutation-tests the study: a mis-scaled timestep, a timestep that drifts with the resolution (a monotone ladder at order 1/2) and a source frozen at $t=0$ are each required to fail the ladder and name this node.
-- Stability: `tests/nodes/test_spring_stability_limits.py` checks both bounds above against the node itself. The single node's step matrix has spectral radius below 1 just inside $k\Delta t^2 + 2c\Delta t = 4m$ and above 1 just outside it. The coupled pair's measured centre-of-mass growth per step equals $(m - c\Delta t)/(m - k\Delta t^2)$ to float32 precision, either side of $c = k\Delta t$ and at it.
+- Stability: `tests/nodes/test_spring_stability_limits.py` checks both bounds above against the node itself. The single node's step matrix has spectral radius below 1 just inside $k\Delta t^2 + 2c\Delta t = 4m$ and above 1 just outside it. The coupled pair's measured centre-of-mass growth per step equals $(m - c\Delta t)/(m - k\Delta t^2)$ to float32 precision, either side of $c = k\Delta t$ and at it, and on the heavily damped side. The converged-step matrix the warning judges reproduces 40 steps of the node, for equal and unequal pairs, and the same file checks the warning against the pattern.
 
 ## Changelog
 
@@ -145,3 +157,4 @@ and the factor is exactly 1 at equality. The relative motion $x_a - x_b$ is stab
 | 1.0.0 | 2025-03-01 | Initial implementation |
 | 1.0.0 | 2026-09-20 | Declared order of accuracy added and measured (MADD-VER-009) |
 | 1.0.0 | 2026-10-02 | Exact single-node stability bound and the coupled-pair limit $c \ge k\Delta t$ stated (MADD-ANO-098); numerics unchanged |
+| 1.0.0 | 2026-10-02 | The coupled pair's upper limit $c\Delta t + k\Delta t^2 \le 2m$ stated, and `compile()` warns about an anchored pair whose converged step grows (MADD-ANO-098); numerics unchanged |

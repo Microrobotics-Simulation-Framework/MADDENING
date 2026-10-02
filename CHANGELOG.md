@@ -333,6 +333,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling round-3 audit fixes** (MADD-ANO-083/084, new, resolved): a Gauss-Seidel pass's float floor counts its longest chain of same-pass reads (a stalled 32-relay ring's spectral and gradient bounds read 0.5x the truth, flags set); after `run_adaptive*` the report covers both kept half steps;
+  Aitken and IQN are units-invariant (exact power-of-two rescaling); `strict_convergence`'s threshold is pinned; 16-bit groups count passes in int32 and run `diagnostics=True`; x64 float32 groups step with every accelerator; the profiler's per-pass cost divides by `total_iterations` less one per sweep.
+  Action: none for states (bit-identical); re-read `spectral_error_bound`/`precision_limited` of Gauss-Seidel groups and post-adaptive reports.
 - **The shipped examples run, and print only what they measure** (49 examples; each now runs in CI or is excluded with a reason, see `examples/README.md`): two used the deprecated `RigidBody2DNode`, one raced its own server; the coupled-spring demos had no rest state yet reported "settled" (rest lengths now `+L`/`-L`);
   `vessel_flow_server`'s parameter endpoints reported success without changing the run (they write `gm.params` now); others printed claims their numbers contradicted, deleted the results they announced, or ignored `--gpu`.  Action: none, unless you copied an example -- re-copy it.
 - **Coupling harness findings** (MADD-ANO-070 to 074, new, resolved): a group's integer/boolean fields are those the pass gives at the returned state, on both solvers (`ift` returned first-pass flags and froze edge-carried ones); predictor + mixed norm with such a field, Jacobi with a flux-reading producer, `reset_state`/`set_node_state` after `jax.grad`, under-relaxed `fixed` stopping on its first pass (~2x short) and the adaptive norm on integer leaves all fixed.

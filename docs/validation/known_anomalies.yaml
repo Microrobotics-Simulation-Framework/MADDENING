@@ -491,9 +491,14 @@ anomalies:
       bound 0.07-0.96x its true distance at N=15-200 with
       spectral_usable=True, whether the node looped inside update() or
       the framework sub-cycled it.  The floor is now per evaluation,
-      times the evaluations a pass rounds like: the largest sub-cycling
+      times the evaluations a pass rounds like: each node's sub-cycling
       divider times SimulationNode.update_evaluations(), a count a node
-      declares for its own loops (4N covers the measured figures).
+      declares for its own loops (4N covers the measured figures), taken
+      as the worst node's under Jacobi and, under Gauss-Seidel, summed
+      along the pass's longest chain of same-pass reads -- a later
+      confirmation audit found the worst node's count let a stalled
+      32-relay Gauss-Seidel ring read 0.51x its true distance with the
+      flag set (MADD-ANO-083).
       Nothing outside update() can see an undeclared loop, so where the
       residual is at the floor -- where that count is the whole bound --
       a group with an undeclared node reports spectral_usable=False and
@@ -734,6 +739,8 @@ anomalies:
       - "tests/core/test_coupling_precision_floor.py::test_the_floor_covers_explicit_euler_per_declared_sub_step"
       - "tests/core/test_coupling_precision_floor.py::test_a_float16_field_beside_a_float32_one_is_floored_at_float16"
       - "tests/core/test_coupling_non_finite_state.py::test_the_spectrum_is_measured_at_the_top_of_the_range"
+      - "tests/property/test_differential_coupling_units.py::test_a_coupled_group_takes_the_same_passes_at_every_scale"
+      - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_both_bounds_hold_on_a_stalled_gauss_seidel_ring_of_32"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-006"
@@ -1884,9 +1891,23 @@ anomalies:
       `acceleration="aitken"`, `solver="fori"` with `acceleration="none"`,
       and the default solver with `acceleration="aitken"` all run under
       `step()`, and all three raise the scan `TypeError` above under
-      `run_scan`.  The path adds no failure of its own, and the fix
-      described below -- a seed state that follows the canonical float
-      dtype -- makes those seeds match as well.
+      `run_scan`.  That measurement was taken on nodes whose float64
+      parameters promote the state to float64 on the first step, which
+      hid the seeds' own failure, and its conclusion that the path "adds
+      no failure of its own" was wrong.  On a group whose state stays
+      float32 under x64 (float32 parameters, as a node that pins its
+      dtype has), `step()` itself raised a `fori_loop` carry `TypeError`
+      under `solver="fori"` with `"aitken"`, `"iqn-ils"` or `"iqn-imvj"`,
+      and `solver="ift"` with IQN narrowed a float64 secant step into the
+      float32 iterate through a scatter JAX warns will become an error
+      (`FutureWarning`): the accelerator carries, and `compile()`'s
+      IQN-IMVJ warm start, were seeded at canonical precision.  Fixed in
+      0.4.0 (round-3 confirmation audit): they are seeded in the
+      interface vector's dtype, widened to at least float32, so such a
+      group steps and scans under x64 with every acceleration and both
+      solvers (`tests/core/test_coupling_accelerators_under_x64.py`); a
+      float64 group's carries are float64 as before, and nothing moves
+      with x64 off.
 
       Relationship to MADD-ANO-013, which is adjacent and not the same entry.
       MADD-ANO-013 records nodes that *downcast* a float64 quantity to
@@ -1980,6 +2001,7 @@ anomalies:
       - "tests/core/test_x64_graph_scan_limitation.py"
       - "tests/core/test_x64_graph_scan_limitation.py::TestTheSolverPathsUnderX64::test_implicit_euler_step_refuses_a_float32_state_whatever_the_params"
       - "tests/core/test_x64_graph_scan_limitation.py::TestTheSolverPathsUnderX64::test_update_and_integrate_node_disagree_in_dtype_but_not_in_value"
+      - "tests/core/test_coupling_accelerators_under_x64.py::test_a_float32_group_steps_and_scans_under_x64"
     github_issue: null
   - anomaly_id: "MADD-ANO-018"
     title: "A calibrated params value reaches update() and cannot reach derivatives(), implicit_residual() or integrate_node()"
@@ -7081,4 +7103,156 @@ anomalies:
       - "tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_set_a_parameter_outside_its_declared_bounds"
       - "tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_install_a_non_finite_state_field"
       - "tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_narrow_a_value_the_live_dtype_cannot_hold"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-083"
+    title: "Under Gauss-Seidel the coupling bound's float floor counted the worst node's evaluations, not the chain a pass composes: a stalled 32-relay ring read its spectral bound at 0.51x the true distance with spectral_usable=True"
+    description: >
+      `spectral_error_bound` adds the residual's float resolution before
+      amplifying it: `PRECISION_FLOOR_ULPS` units of `eps * max|field|`
+      per entry per evaluation the one-pass map rounds like
+      (`_group_evaluations`), which took the largest sub-cycling divider
+      times `SimulationNode.update_evaluations()` over the group's nodes,
+      on the argument that no node is evaluated more often than that.
+      Under `iteration_mode="gauss-seidel"` that is not what bounds the
+      rounding: a node reads the output of every member scheduled before
+      it from the same pass, already rounded, so the pass is a composition
+      and the error at the end of a chain of same-pass reads carries every
+      rounding upstream of it.  Measured (jaxlib 0.11.0, CPU, float32) on a
+      Gauss-Seidel ring of N scalar relays with loop gain 0.99, every node
+      declaring one evaluation, started 0.1% short of its fixed point at
+      `tolerance=1e-12` so only the bitwise stall stops it: the exact
+      residual at the stall is 0.60, 1.18 and 2.33 per-pass floors at
+      N = 16, 32 and 64, and `spectral_error_bound` read 1.44x, 0.51x and
+      0.30x the true distance to the exact fixed point with
+      `spectral_usable=True` and `rho_spectral` = 0.99 to float32 -- the
+      case the docs call a bound (a linear map, a rank-one Jacobian the
+      eight Krylov steps resolve exactly, every node declaring its count).
+      `gradient_relative_error_bound`, whose distance is the same floored
+      bound, read 0.50x the true relative error of the IFT gradient with
+      respect to a gain at N = 32, `gradient_bound_usable=True`.  Found by
+      the round-3 confirmation audit of the merged 0.4.0 tree.  Resolved
+      in 0.4.0: under Gauss-Seidel the count is the longest chain of
+      same-pass reads, `depth(n) = d_n e_n + max(depth(m))` over the
+      members scheduled before `n` that `n` reads; under Jacobi, where
+      every read is of the stored previous iterate, it is still the worst
+      node's.  After the fix the same ring reads 23x and 16x over the
+      true distance at N = 16 and 32, and the gradient bound 36x and 17x
+      over its true error.  Only report keys move -- `spectral_error_bound`,
+      `gradient_relative_error_bound` and `precision_limited` on a
+      Gauss-Seidel group with a chain of two or more members -- while
+      states, iteration counts and `converged` are bit-identical (125
+      configurations dumped before and after).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound that reads below the quantity it bounds with its usability
+      flag set is a silent wrong result, which is never `minor` under the
+      0.4.0 severity definition: a caller trusting `spectral_usable` would
+      accept a stalled iterate up to 3x farther from its fixed point than
+      the report said, and an IFT gradient twice as wrong.  Registered
+      although no release carried it, because it is major.  Not
+      `critical`: it needs a long Gauss-Seidel chain (the ratio falls
+      below one between 16 and 32 relays) stalled at its float floor, and
+      `converged` and the iteration counts, which are what most callers
+      read, were never affected.  `context_dependent` because whether a
+      distance or gradient bound gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: read the bound of a Gauss-Seidel group whose report says
+      `precision_limited=True` as valid only after multiplying it by the
+      number of members in its longest chain of same-pass reads, or run
+      the group under `iteration_mode="jacobi"`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The floor remains a model of the map's rounding, not a proof of it.
+      The longest-chain count assumes that where several same-pass reads
+      meet, the node's output combines them with relative gains (each
+      field divided by its own magnitude) summing to at most one; a node
+      that cancels -- a small output computed as the difference of two
+      large inputs -- can exceed it, as it can exceed the per-evaluation
+      constant, and nothing outside the node can see that.  The count is
+      one number for the whole pass, so the floor is conservative for the
+      members near the start of a chain: 16x over the true distance on
+      the 32-relay ring.
+    verification:
+      - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_both_bounds_hold_on_a_stalled_gauss_seidel_ring_of_32"
+      - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_a_gauss_seidel_ring_rounds_like_its_length"
+      - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_count_is_the_longest_chain_not_the_sum"
+      - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_report_and_the_step_count_the_same_chain"
+      - "tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_long_gauss_seidel_chain"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-084"
+    title: "After run_adaptive or run_adaptive_scan the coupling report described only the second kept half step: a first half step stopped at max_iterations was hidden, and converged read True where strict_convergence refused the step"
+    description: >
+      An accepted adaptive attempt keeps two solves per coupling group,
+      its two half steps.  The `_meta` report slots `coupling_diagnostics()`
+      reads were whatever the second half step wrote, so the report of the
+      accepted step described only that solve.  On every tagged release
+      the report carried `iterations` and `residual`, and both were the
+      second half's: on a pair of relays (gain 0.5 each way, a cap of
+      four passes, `tolerance=1e-3`) whose first half step exhausts its
+      budget and whose second converges in three, `run_adaptive` reported
+      `iterations=3` where `step()` from the same start reports 4 --
+      measured identically on v0.1.0, v0.2.0 and v0.3.1 (`git archive` of
+      each tag, CPU, jaxlib 0.11.0) -- so the documented cap check
+      `iterations >= max_iterations` missed a kept solve that ran out of
+      passes.  In 0.4.0's development the report gained `converged`, and
+      it read `True` about that same accepted step, while
+      `strict_convergence=True` -- which in 0.4.0 checks both kept half
+      steps, on MADD-ANO-044's principle that strict checks the solves a
+      step keeps -- raised on it: the report, the strict check and
+      the docs, which promise one verdict, gave two.  Found by the
+      round-3 confirmation audit of the merged 0.4.0 tree.  Resolved in
+      0.4.0: the steppers fold the two kept half steps into the report
+      (`_fold_kept_half_step_reports`).  `iterations` is the larger half's
+      count; `total_iterations` the sum where the group owns that slot
+      (`waveform_iterations > 1`); and the per-solve slots -- residual,
+      amplification, the spectral triple, the gradient bound -- are taken
+      together from the first half when it alone did not converge, else
+      from the second, so `converged` is `False` exactly when a kept solve
+      did not converge.  Only report slots move; the state is the second
+      half step's, bit for bit.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong report, never `minor` under the 0.4.0 severity
+      definition: a caller checking convergence after an adaptive run --
+      by the cap check on any release, by `converged` in 0.4.0's
+      development -- was told a kept solve converged when it had not, and
+      under `solver="ift"` the gradient through that step is then
+      unreliable.  Not `critical`: the state itself is what the stepper
+      computed, `strict_convergence=True` (in 0.4.0's development) raised
+      on the step, and the second half step's verdict, which the report
+      did carry, is about the state returned.  `context_dependent` because
+      whether a coupling verdict gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: do not read the coupling report after an adaptive run
+      as a statement about the whole accepted step; to check every kept
+      solve, step the graph at the accepted dt history with `step()` and
+      read the report after each step, or raise `max_iterations` until the
+      report of a fixed step of the largest accepted dt is well short of
+      the cap.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A group running one waveform sweep owns no slot for a sum, so after
+      an adaptive run its `total_iterations` reads the larger half's count
+      rather than both halves' passes; `iterations`, the cap check and
+      `converged` are exact.  The report still describes only the
+      accepted attempt's two kept solves, not the error estimate's full
+      step or rejected attempts, which the stepper discards.
+    verification:
+      - "tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_a_kept_unconverged_first_half_is_reported_unconverged"
+      - "tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_the_report_and_strict_convergence_give_one_verdict"
+      - "tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_a_waveform_group_reports_the_sum_of_both_halves_passes"
+      - "tests/core/test_strict_convergence_threshold.py::test_the_adaptive_strict_check_raises_at_twice_the_threshold"
     github_issue: null

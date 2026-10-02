@@ -1162,8 +1162,10 @@ def _group_evaluations(group, nodes, schedule, edges):
     residual at the float32 stall is 0.6, 1.2 and 2.3x the per-pass
     floor at ``N`` = 16, 32 and 64, and the bound, which took the worst
     node's count, read 0.51x (``N = 32``) and 0.30x (``N = 64``) the
-    true distance with ``spectral_usable=True``; counted along the
-    chain the floor is ``N`` times larger and the bound holds.  The
+    true distance with ``spectral_usable=True`` (MADD-ANO-083); counted
+    along the chain the floor is ``N`` times larger and the bound reads
+    23x and 16x over at ``N`` = 16 and 32 (the gradient bound 36x and
+    17x over its true error; jaxlib 0.11.0, CPU).  The
     longest chain and not the sum over the members: a rounding reaches
     a node only along a path of reads, and where several paths meet the
     node's output is a combination of its inputs whose relative gains
@@ -7884,7 +7886,11 @@ class GraphManager:
               node can see: a relay whose node takes 15-200 explicit
               Euler sub-steps inside ``update`` read 0.07-0.96x its true
               distance with this flag set.  A group whose nodes all
-              declare keeps the flag at float32 convergence.
+              declare keeps the flag at float32 convergence -- its floor
+              counting the declared evaluations along a Gauss-Seidel
+              pass's longest chain of same-pass reads, without which a
+              stalled 32-relay ring read 0.51x its true distance with the
+              flag set (MADD-ANO-083).
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -8050,6 +8056,24 @@ class GraphManager:
             do not treat ``converged=True`` as certifying a distance,
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
+
+            **After** :meth:`run_adaptive` **or** :meth:`run_adaptive_scan`
+            the report describes the last accepted attempt's two kept
+            half steps, the two solves ``strict_convergence`` checks:
+            ``"iterations"`` is the larger half's count (so the cap check
+            reads "a kept solve exhausted its budget"),
+            ``"total_iterations"`` the sum where the group owns that slot
+            (``waveform_iterations > 1``; a one-sweep group has none and
+            reports ``"iterations"``), and every per-solve key --
+            ``"residual"``, ``"amplification"`` and what is derived from
+            them, the spectral keys, the gradient bound -- comes from one
+            half: the first when it alone did not converge, else the
+            second, which produced the returned state.  ``"converged"`` is
+            therefore ``False`` exactly when a kept solve did not
+            converge, the verdict ``strict_convergence`` acts on.  (It
+            used to be the second half's report alone, which said
+            ``converged=True`` beside a first half stopped at the cap:
+            MADD-ANO-084.)
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value

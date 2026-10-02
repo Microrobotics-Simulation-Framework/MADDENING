@@ -44,6 +44,11 @@ if TYPE_CHECKING:
     # import stays inside the method so importing this module does
     # not pay for it.
     from pathlib import Path
+    from typing import TextIO
+
+    # The inspection methods return it; the module is imported lazily
+    # inside them (see "Read-only inspection" at the end of the class).
+    from maddening.core.inspection import InspectionTable
 
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
@@ -9741,3 +9746,276 @@ class GraphManager:
         if self._is_multirate:
             parts.append("multi-rate")
         return f"GraphManager({', '.join(parts)}, {compiled})"
+
+    # ------------------------------------------------------------------
+    # Read-only inspection (logic in ``maddening.core.inspection``)
+    # ------------------------------------------------------------------
+    #
+    # Every method below reads the graph and changes nothing: not the
+    # state, ``_meta``, ``params``, node parameters, the dirty / compiled
+    # flags, the schedule or any cache.  None compiles or traces the step,
+    # and none puts a graph holding escaped tracers back (that is a
+    # write); each reports such a graph as it stands instead.
+    # ``tests/core/test_inspection_read_only.py`` pins this for every
+    # method on every kind of graph.
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def format_graph(self, *, width: int = 100) -> str:
+        """The graph's structure as plain text: what :meth:`print_graph` prints.
+
+        Sections, in order:
+
+        * a header: node, edge, coupling-group and external-input counts,
+          the compile status, the base timestep and whether the graph is
+          multi-rate, and the multi-GPU mesh if one is enabled;
+        * **Nodes** -- each node's type (a wrapper shows what it wraps:
+          ``ShardedPointwiseNode(MyNode)``), timestep and rate divider,
+          its coupling group and sub-cycling factor, its state fields as
+          ``dtype[shape]`` (a sharded axis reads ``16@devices``), and for
+          a sharded node the wrapper, mesh axes and what is split;
+        * **Edges** -- ``source.field -> target.input`` with whether the
+          source is a state field or a boundary flux, the transform's
+          name, the mapping, ``additive``, units, and whether the edge is
+          iterated inside a coupling group or is a back edge;
+        * **Coupling groups** -- members, solver, acceleration, iteration
+          mode, norm with the tolerance it reads, ``max_iterations``,
+          diagnostics, strict convergence, any other non-default setting
+          and the sub-cycling factors;
+        * **External inputs** -- ``node.field`` with dtype and shape;
+        * **Execution order** -- the compiled schedule, a coupling group
+          as one block, and how often each block fires.
+
+        Long names wrap onto their own line at ``width`` characters and
+        are never split.  Deterministic: no terminal size, colour or
+        object address enters it.
+
+        Read-only.  On a graph that has never been compiled the rate
+        dividers and the execution order read "not compiled" (they are
+        not computed here); on one modified since its last compile they
+        are the last compile's, marked stale.  On a graph holding JAX
+        tracers (after ``jax.grad`` of a loss that calls ``run_scan``)
+        the state fields' shapes and dtypes are read from the tracers.
+
+        Parameters
+        ----------
+        width : int
+            Wrap width of the plain-text layout.
+
+        Returns
+        -------
+        str
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        return inspection.format_graph(self, width=width)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def print_graph(self, *, file: Optional[TextIO] = None, width: int = 100,
+                    rich: bool = False) -> None:
+        """Print :meth:`format_graph` to ``file`` (default ``sys.stdout``).
+
+        ``rich=True`` renders the same sections as trees with the
+        optional ``rich`` package (``pip install maddening[terminal]``)
+        and raises ``ImportError`` when it is missing.  Plain text is the
+        default and is never replaced by ``rich`` on its own.  Read-only,
+        as :meth:`format_graph`.
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        inspection.print_graph(self, file=file, width=width, rich=rich)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def to_mermaid(self, *, direction: str = "LR") -> str:
+        """The graph as a Mermaid flowchart (plain text).
+
+        Nodes are labelled with their name and type, coupling groups are
+        subgraphs, edges are labelled ``field→input`` (plus the transform,
+        mapping and ``additive`` where set; a flux edge is dotted), and
+        each external input is a parallelogram feeding its node.  Every
+        name is escaped, so quotes, ``#``, angle brackets and newlines in
+        a node name cannot break the chart or inject HTML.  Node ids are
+        ``n0, n1, ...`` in insertion order.
+
+        Paste the text into anything that renders Mermaid (GitHub
+        Markdown, the Mermaid live editor, MyST with sphinxcontrib-mermaid).
+        No dependency is needed.  Read-only; on an uncompiled graph the
+        structure is shown as registered.
+
+        Parameters
+        ----------
+        direction : {"LR", "RL", "TB", "BT"}
+            Flowchart direction.
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        return inspection.to_mermaid(self, direction=direction)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def to_dot(self, *, rankdir: str = "LR") -> str:
+        """The graph in Graphviz DOT (plain text).
+
+        The same content as :meth:`to_mermaid`: coupling groups as
+        ``cluster_`` subgraphs, edges labelled ``field→input``, external
+        inputs as parallelograms, every label escaped.  Render it with
+        ``dot -Tsvg`` or any DOT reader; nothing here needs Graphviz.
+        Read-only.
+
+        Parameters
+        ----------
+        rankdir : {"LR", "RL", "TB", "BT"}
+            Graphviz ``rankdir``.
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        return inspection.to_dot(self, rankdir=rankdir)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def state_summary(self, *, include_meta: bool = False) -> InspectionTable:
+        """Per-field statistics of the state the graph holds now.
+
+        One row per state field, sorted by node then field, with keys
+        ``node``, ``field``, ``shape``, ``dtype``, ``min``, ``max``,
+        ``mean`` (over the finite entries), ``nan``, ``inf`` (counts),
+        ``bytes`` and ``flags`` (a field holding NaN or inf is flagged).
+        ``print(gm.state_summary())`` prints it as a table;
+        :meth:`print_state_summary` does the same.
+
+        Computed on the host from a copy of each array (``np.asarray``):
+        nothing on the graph is written, and no JAX computation runs.
+
+        * Never compiled: the state ``add_node`` initialised, noted.
+        * Holding JAX tracers (after ``jax.grad`` of a loss that calls
+          ``run_scan``): shapes, dtypes and bytes are the tracers';
+          the value columns are ``None`` and a note says so -- call a
+          stepping method, or ``get_node_state``, which puts the graph
+          back to its pre-transform state, then inspect again.  This
+          method does not put it back.
+
+        Parameters
+        ----------
+        include_meta : bool
+            Also summarise the internal ``_meta`` entries (the multi-rate
+            step counter, coupling diagnostics and warm starts).
+
+        Returns
+        -------
+        InspectionTable
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        return inspection.state_summary(self, include_meta=include_meta)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def print_state_summary(self, *, file: Optional[TextIO] = None,
+                            include_meta: bool = False, width: int = 100,
+                            rich: bool = False) -> None:
+        """Print :meth:`state_summary` (see :meth:`InspectionTable.print`)."""
+        self.state_summary(include_meta=include_meta).print(file, width=width, rich=rich)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def params_table(self) -> InspectionTable:
+        """One row per leaf of the graph's parameters, with its ParamSpec.
+
+        Keys: ``section`` (``"nodes"`` or ``"mappings"``), ``owner`` (the
+        node, or the mapped edge's key), ``param``, ``value`` (the value
+        of a one-element leaf; ``None`` for an array, whose ``shape``
+        says what it is), ``shape``, ``dtype``, ``trainable``,
+        ``bounds`` (``(lo, hi)``, ``None`` for unbounded), ``transform``,
+        ``units``, ``out_of_bounds`` (:meth:`ParamSpec.check`'s rule,
+        applied on the host) and ``flags``.  Rows are sorted by section,
+        owner and parameter.
+
+        The values are the graph's effective parameters: :attr:`params`,
+        with the specs of :meth:`param_specs` (each node's own with the
+        :meth:`set_param_spec` overrides applied).  Read-only --
+        :attr:`params` is read as it stands; unlike :meth:`check_params`
+        this does not coerce a Python-scalar leaf in place.  On a graph
+        never compiled, :attr:`params` is still empty, so the table shows
+        the values ``compile()`` would take (each node's
+        ``params_pytree()``, built fresh and not stored) and says so.
+        A traced leaf is flagged and has no value.
+
+        Returns
+        -------
+        InspectionTable
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        return inspection.params_table(self)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def print_params_table(self, *, file: Optional[TextIO] = None, width: int = 100,
+                           rich: bool = False) -> None:
+        """Print :meth:`params_table` (see :meth:`InspectionTable.print`)."""
+        self.params_table().print(file, width=width, rich=rich)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def coupling_report(self) -> InspectionTable:
+        """:meth:`coupling_diagnostics` as one row per coupling group, with its caveats flagged.
+
+        Keys: ``group``, ``solver``, ``max_iterations`` and the report's
+        ``iterations``, ``total_iterations``, ``converged``,
+        ``residual``, ``error_estimate``, ``amplification``,
+        ``ratio_usable``, ``precision_limited``, ``rho_spectral``,
+        ``spectral_error_bound`` and ``spectral_usable`` (``None`` where
+        there is no report), and ``flags``, which names the documented
+        caveats wherever they apply:
+
+        * the group hit ``max_iterations``;
+        * ``converged=False``;
+        * ``ratio_usable=False`` -- the criterion fell back to the raw
+          residual test, and ``converged`` reports that test;
+        * ``precision_limited=True`` -- the residual is rounding, and
+          ``converged`` can be ``True`` on a stalled iterate;
+        * ``spectral_usable=False`` where a spectral bound was computed;
+        * why a group has no report (``solver="fori"`` without
+          ``diagnostics``, no step since ``compile()`` /
+          ``reset_state()``, added since the last compile).
+
+        A graph with no coupling groups, or not compiled, gives a table
+        that says so.  Read-only: :meth:`coupling_diagnostics` is read
+        only on a graph holding no tracers, where it writes nothing (on
+        one that does, it would put the graph back first, so this
+        reports "state holds tracers" instead).  It evaluates the
+        residual's float floor with eager ``jax.numpy`` operations,
+        which JAX compiles once per shape on first use; the step is not
+        traced.
+
+        Returns
+        -------
+        InspectionTable
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        return inspection.coupling_report(self)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def print_coupling_report(self, *, file: Optional[TextIO] = None, width: int = 100,
+                              rich: bool = False) -> None:
+        """Print :meth:`coupling_report` (see :meth:`InspectionTable.print`)."""
+        self.coupling_report().print(file, width=width, rich=rich)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def memory_estimate(self) -> InspectionTable:
+        """State memory per node, and in total, from shapes and dtypes.
+
+        One row per node and one for ``_meta`` when the graph has it,
+        with keys ``node``, ``fields``, ``bytes`` (global, logical size),
+        ``per_device_bytes`` (what one device holds: a sharded field's
+        shard, an unsharded or replicated field in full), ``devices``
+        and ``sharding`` (e.g. ``"devices@0"``, ``"replicated x4"``).
+        :attr:`InspectionTable.summary` carries ``state_bytes``,
+        ``meta_bytes``, ``total_bytes`` and ``total_per_device_bytes``.
+
+        **State memory only**: XLA workspace, compiled programs, the
+        copies a step makes, scan histories, ``params`` and external
+        inputs are not counted, so this is a floor on what a run needs.
+        Read-only; it reads shapes, dtypes and shardings and never the
+        values, so it works on an uncompiled graph (no ``_meta`` yet) and
+        on one holding JAX tracers alike.
+
+        Returns
+        -------
+        InspectionTable
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        return inspection.memory_estimate(self)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
+    def print_memory_estimate(self, *, file: Optional[TextIO] = None, width: int = 100,
+                              rich: bool = False) -> None:
+        """Print :meth:`memory_estimate` (see :meth:`InspectionTable.print`)."""
+        self.memory_estimate().print(file, width=width, rich=rich)

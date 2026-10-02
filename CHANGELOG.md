@@ -17,6 +17,9 @@ guidance; the itemized changes follow.
 - **One-command local runs for the remote-simulation examples**: `python -m maddening.examples.servers.remote_viz_client --local` starts the
   simulation server on a free loopback port, streams to the viewer and stops the server on exit (Ctrl-C and errors included); the HTTP example
   servers take `--port 0`, and `cloud/server/04`, `05` and `cloud/multijob/08` gain a `--local` mode that needs no cloud account.
+- **Read-only graph inspection** (experimental): `gm.print_graph()` / `format_graph()`, `to_mermaid()` / `to_dot()`, and tables
+  `state_summary()`, `params_table()`, `coupling_report()` (caveats flagged), `memory_estimate()` with `print_*` forms; none writes or
+  compiles anything.  `maddening.show_versions()` / `python -m maddening info` for bug reports; `print()` of `FitResult` / `FIMReport`
 - **Differential tests for coupling and numerics** (`tests/property/test_differential_*.py`): two paths that must agree, over
   generated graphs of synthetic nodes -- fori/ift, diagnostics on/off, the exact fixed point, multi-rate, sub-cycling, adaptive,
   `vmap`/`jit`, non-float leaves; each disagreement found is a strict xfail (`testing_standards.md`, "Differential tests")

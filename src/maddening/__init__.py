@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from maddening.core.node import SimulationNode
     from maddening.core.simulation.adaptive import AdaptiveConfig
     from maddening.core.simulation.history_logger import HistoryLogger
+    from maddening.info import show_versions
     from maddening.surrogates.architecture import SurrogateArchitecture
     from maddening.surrogates.node import SurrogateNode
 
@@ -53,6 +54,7 @@ def __getattr__(name: str) -> Any:
         "SurrogateArchitecture": "maddening.surrogates.architecture",
         "CloudSession": "maddening.cloud.session",
         "CloudConfig": "maddening.cloud.session",
+        "show_versions": "maddening.info",
     }
     if name in _lazy:
         import importlib
@@ -72,4 +74,5 @@ __all__ = [
     "SurrogateArchitecture",
     "CloudSession",
     "CloudConfig",
+    "show_versions",
 ]

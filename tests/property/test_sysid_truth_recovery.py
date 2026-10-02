@@ -34,6 +34,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from hypothesis import example, given, note, settings
+from hypothesis.errors import InvalidArgument
 from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
@@ -60,12 +61,25 @@ _SPECS = {
 KEYS = ("stiffness", "damping", "rest_length")
 
 
-def _graph(kinds):
+_ONE = (1.0, 1.0, 1.0)
+
+
+def _spec(kind, unit=1.0):
+    """The coordinate's spec with its parameter measured in a unit ``unit``
+    times smaller: bounds scale with it; a ``log`` leaf's floor 0 does not."""
+    spec, _ = _SPECS[kind]
+    if spec.transform == "log":
+        return spec
+    lo, hi = spec.bounds
+    return ParamSpec(bounds=(lo * unit, hi * unit), transform=spec.transform)
+
+
+def _graph(kinds, units=_ONE):
     gm = GraphManager()
     gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0, damping=2.0, mass=1.0,
                                  rest_length=1.0, initial_position=0.2))
-    for key, kind in zip(KEYS, kinds):
-        gm.set_param_spec("s", key, _SPECS[kind][0])
+    for key, kind, unit in zip(KEYS, kinds, units):
+        gm.set_param_spec("s", key, _spec(kind, unit))
     gm.set_param_spec("s", "mass", ParamSpec(trainable=False))
     gm.compile()
     return gm
@@ -76,27 +90,29 @@ def _value(kind, fraction):
     return lo + fraction * (hi - lo)
 
 
-def _blocks(p):
+def _blocks(p, units=_ONE):
     """One strictly monotone, nonlinear block of residuals per coordinate,
     with a finite, nowhere-vanishing derivative over every range drawn (an
     ``exp(-c t)`` block underflowed to an exactly flat plateau that a fit
     then rightly called stationary, which is not what this oracle is
     about).  The concave blocks make a Gauss-Newton step from above
     overshoot below the truth -- past a lower bound of 0 for a clipped
-    coordinate -- and the convex one overshoots from below."""
+    coordinate -- and the convex one overshoots from below.  ``units``
+    measure each parameter in another unit: the model reads ``p / unit``."""
     q = p["nodes"]["s"]
+    k, c, rest = (q[key] / unit for key, unit in zip(KEYS, units))
     t = jnp.asarray(T, jnp.float32)
     return jnp.concatenate([
-        jnp.log1p(q["damping"] * t),
-        jnp.sqrt(q["stiffness"] + 0.1) * t,
-        q["rest_length"] * t + 0.2 * q["rest_length"] ** 2 * t,
+        jnp.log1p(c * t),
+        jnp.sqrt(k + 0.1) * t,
+        rest * t + 0.2 * rest ** 2 * t,
     ])
 
 
-def _start(gm, kinds, fractions):
+def _start(gm, kinds, fractions, units=_ONE):
     p = jax.tree.map(lambda x: x, gm.params)
-    for key, kind, fraction in zip(KEYS, kinds, fractions):
-        p["nodes"]["s"][key] = jnp.asarray(_value(kind, fraction), jnp.float32)
+    for key, kind, fraction, unit in zip(KEYS, kinds, fractions, units):
+        p["nodes"]["s"][key] = jnp.asarray(_value(kind, fraction) * unit, jnp.float32)
     return p
 
 
@@ -107,13 +123,13 @@ def _mask(gm):
     return mask
 
 
-def _recovered(res, truth, kinds) -> tuple[bool, list]:
+def _recovered(res, truth, kinds, units=_ONE) -> tuple[bool, list]:
     errors = []
     ok = True
-    for key, kind in zip(KEYS, kinds):
+    for key, kind, unit in zip(KEYS, kinds, units):
         lo, hi = _SPECS[kind][1]
-        got = float(res.params["nodes"]["s"][key])
-        want = float(truth["nodes"]["s"][key])
+        got = float(res.params["nodes"]["s"][key]) / unit
+        want = float(truth["nodes"]["s"][key]) / unit
         # 1e-3 of the coordinate's range: a fit at its float32 floor is far
         # inside this, and a fit stuck on a bound is far outside it.
         tolerance = 1e-3 * (hi - lo)
@@ -129,17 +145,31 @@ _PROBLEM = dict(
 )
 
 
-def _check_fit_lm(kinds, truth_at, start_at):
-    gm = _graph(kinds)
-    truth = _start(gm, kinds, truth_at)
-    data = _blocks(truth)
+def _fit(kinds, truth_at, start_at, units=_ONE):
+    gm = _graph(kinds, units)
+    truth = _start(gm, kinds, truth_at, units)
+    data = _blocks(truth, units)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)       # a declined hold says so
-        res = fit_lm(gm, lambda p: _blocks(p) - data, params=_start(gm, kinds, start_at),
-                     mask=_mask(gm), n_iter=60)
-    ok, errors = _recovered(res, truth, kinds)
-    note(f"kinds={kinds} converged={res.converged} n_iter={res.n_iter} "
-         f"best_loss={res.best_loss} (key, got, truth)={errors}")
+        res = fit_lm(gm, lambda p: _blocks(p, units) - data,
+                     params=_start(gm, kinds, start_at, units), mask=_mask(gm), n_iter=60)
+    ok, errors = _recovered(res, truth, kinds, units)
+    _note(f"units={units} kinds={kinds} converged={res.converged} n_iter={res.n_iter} "
+          f"best_loss={res.best_loss} (key, got, truth)={errors}")
+    return res, ok, errors
+
+
+def _note(message):
+    """``hypothesis.note`` inside a property, nothing in a plain test (whose
+    assertion messages carry the same numbers)."""
+    try:
+        note(message)
+    except InvalidArgument:
+        pass
+
+
+def _check_fit_lm(kinds, truth_at, start_at):
+    res, ok, errors = _fit(kinds, truth_at, start_at)
     assert ok or not res.converged, errors
 
 
@@ -157,6 +187,50 @@ def _check_fit_lm(kinds, truth_at, start_at):
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 def test_fit_lm_converged_means_the_truth(kinds, truth_at, start_at):
     _check_fit_lm(kinds, truth_at, start_at)
+
+
+def _check_units(kinds, truth_at, start_at, which, unit):
+    """Parameter-unit invariance: measure one parameter in a unit 1e4 times
+    larger or smaller (its bounds, start and truth scale with it) and the
+    fit must give the same answer, in about as many iterations -- and each
+    run must still recover the truth or say ``converged=False``.  A
+    Marquardt floor of ``eps`` times the *mean* of ``diag(JᵀJ)`` failed
+    exactly this: the coordinate whose column the rescaling shrank had its
+    step crushed and stopped short, "converged".  (Residual-scale
+    invariance: ``tests/core/test_sysid_bounded_coordinates_and_residual_scale.py``.)"""
+    units = tuple(unit if i == which else 1.0 for i in range(3))
+    base, base_ok, base_errors = _fit(kinds, truth_at, start_at)
+    scaled, scaled_ok, scaled_errors = _fit(kinds, truth_at, start_at, units)
+    assert base_ok or not base.converged, base_errors
+    assert scaled_ok or not scaled.converged, scaled_errors
+    if base.converged and scaled.converged:
+        slack = max(3, (base.n_iter + scaled.n_iter) // 4)
+        assert abs(base.n_iter - scaled.n_iter) <= slack, (base.n_iter, scaled.n_iter)
+
+
+#: Per push, each transform's coordinate rescaled both ways (two fits a case,
+#: each compiled, so a fixed table rather than a draw; the draw is slow below).
+_UNIT_CASES = [
+    (("clip", "log", "logit"), (0.5, 0.3, 0.6), (0.9, 0.7, 0.2), 0, 1e4),
+    (("clip", "log", "logit"), (0.5, 0.3, 0.6), (0.9, 0.7, 0.2), 0, 1e-4),
+    (("log", "clip", "logit"), (0.2, 0.01, 0.5), (0.8, 0.9, 0.9), 1, 1e4),
+    (("log", "clip", "logit"), (0.2, 0.01, 0.5), (0.8, 0.9, 0.9), 1, 1e-4),
+    (("logit", "log", "clip"), (0.5, 0.5, 0.75), (0.1, 0.9, 0.2), 2, 1e4),
+    (("logit", "log", "clip"), (0.5, 0.5, 0.75), (0.1, 0.9, 0.2), 2, 1e-4),
+]
+
+
+@pytest.mark.parametrize("kinds, truth_at, start_at, which, unit", _UNIT_CASES)
+def test_fit_lm_answers_the_same_in_any_units(kinds, truth_at, start_at, which, unit):
+    _check_units(kinds, truth_at, start_at, which, unit)
+
+
+# Per push: tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units
+@pytest.mark.slow  # two fits compiled per example: over 5 s on CI
+@given(**_PROBLEM, which=st.integers(0, 2), unit=st.sampled_from([1e-4, 1e4]))
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+def test_fit_lm_answers_the_same_in_any_units_broadly(kinds, truth_at, start_at, which, unit):
+    _check_units(kinds, truth_at, start_at, which, unit)
 
 
 # Per push: tests/property/test_sysid_truth_recovery.py::test_fit_lm_converged_means_the_truth

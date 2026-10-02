@@ -159,3 +159,62 @@ def test_a_step_tol_with_no_reading_is_refused(bad):
     gm = _spring()
     with pytest.raises(ValueError, match="step_tol"):
         fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1, step_tol=bad)
+
+
+# ---------------------------------------------------------------------------
+# The floor rule's guards (audit_040_p4_6/fmu-sysid/repro_q3_floor_rule_guard_unpinned.py)
+# ---------------------------------------------------------------------------
+
+
+@jax.custom_jvp
+def _wrong_sign(x):
+    return x
+
+
+@_wrong_sign.defjvp
+def _wrong_sign_jvp(primals, tangents):
+    (x,), (dx,) = primals, tangents
+    return x, -dx                  # the derivative a buggy custom rule reports
+
+
+def _damping_record(n=80):
+    return _spring(damping=0.5).run_scan_with_history(n)[1]["s"]["position"]
+
+
+def test_a_run_that_never_lowered_the_loss_is_not_converged_by_the_floor_rule():
+    """Every candidate of a wrong-signed Jacobian climbs, down to one far
+    inside ``step_tol``.  The floor rule reads "every candidate rejected"
+    as the rounding floor only after the run has lowered the loss once;
+    without that guard this run was ``converged=True`` at its start."""
+    obs = _damping_record()
+
+    def residual(p):
+        q = {**p, "nodes": {"s": {**p["nodes"]["s"],
+                                  "damping": _wrong_sign(p["nodes"]["s"]["damping"])}}}
+        return _spring().run_scan_with_history(80, params=q)[1]["s"]["position"] - obs
+
+    gm = _spring(damping=2.0)
+    res = fit_lm(gm, residual, mask=_only(gm, "damping"), n_iter=20)
+    assert not res.converged
+    assert res.n_iter == 1 and float(res.params["nodes"]["s"]["damping"]) == 2.0
+
+
+def test_the_floor_rule_never_fires_while_a_bound_coordinate_could_descend(monkeypatch):
+    """The other guard: no floor-rule verdict while a coordinate on its bound
+    could lower the loss by moving into the range.  A weakly determined
+    damping ends its fit on the floor rule (control); told every iterate has
+    such a coordinate, the same run must not converge."""
+    from maddening import sysid
+
+    obs = _damping_record(100)
+
+    def residual(p):
+        return _spring().run_scan_with_history(100, params=p)[1]["s"]["position"] - obs
+
+    gm = _spring(damping=2.0)
+    control = fit_lm(gm, residual, mask=_only(gm, "damping"), n_iter=50)
+    assert control.converged
+    monkeypatch.setattr(sysid._CoordinateBounds, "inward_descent",  # noqa: SLF001
+                        lambda self, *args, **kwargs: True)
+    res = fit_lm(gm, residual, mask=_only(gm, "damping"), n_iter=50)
+    assert not res.converged

@@ -344,6 +344,8 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`fit_lm` no longer depends on the parameters' units, and a shrunken step cannot read as converged** (MADD-ANO-121, never released): the Marquardt floor is per column, and `converged` also needs the undamped Gauss-Newton step to be stationary;
+  **every reader of `gm.params` sees a pending `node.params` write** (MADD-ANO-122, never released): one sync point, the `gm.params` getter, serves readers and runners alike, and the later write wins.  Action: none.
 - **A node reading a cycle runs after it in the same step, whatever order it was added in** (MADD-ANO-120, since 0.1.0: added before a coupling group's members, it read their previous-step output); the interface norm sums its edges in the group's sweep order, not insertion order; `solver="fori"` docs: forward mode works.
   Eight coupling claims now state their true conditions (`docs/validation/coupling_claims.yaml`).  Action: rerun a 0.3.x graph whose `gm.schedule` lists a node ahead of a cycle it reads; its results change.
 - **FMU export: schema-valid starts, a locale-proof wrapper, the FMI state machine** (MADD-ANO-119, never released): Boolean/integer `start`/`min`/`max` in their type's form and discrete; the C wrapper writes and reads numbers in the C locale; an archive cannot install mapping weights;

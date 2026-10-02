@@ -257,3 +257,36 @@ def test_a_fitter_starts_from_the_written_value(fitter):
         res, _ = sysid.fit_multiple_shooting(gm, obs, obs_fn=lambda s: s["c"]["x"],
                                              window=1, mask=mask, n_iter=0)
     assert float(res.params["nodes"]["c"]["gain"]) == 4.0
+
+
+def test_the_fmu_export_reads_a_pending_node_write():
+    """The documented export wiring -- a model description and a sidecar
+    built from ``gm.params`` and ``gm._compiled_step`` -- after a node write
+    with nothing run: it used to export, and step, the value from before."""
+    from maddening.fmi import build_model_description
+    from maddening.fmi.package import MODEL_IDENTIFIER
+    from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
+
+    gm = _spring()
+    gm.get_node("s").params["stiffness"] = 45.0
+    md = build_model_description(gm, model_name="S", model_identifier=MODEL_IDENTIFIER)
+    start = next(v.start for v in md.variables if v.name == "s.params.stiffness")
+    assert float(start) == 45.0
+    sidecar = FmuSidecar(SidecarConfig(
+        schema_token=md.instantiation_token, step_fn=gm._compiled_step,  # noqa: SLF001
+        initial_state=gm._state, params=gm.params, param_specs=gm.param_specs(),  # noqa: SLF001
+        fixed_params=md.fixed_parameters, input_resolver=gm._resolve_external_inputs))  # noqa: SLF001
+    assert float(sidecar.params["nodes"]["s"]["stiffness"]) == 45.0
+
+
+def test_assigning_gm_params_is_later_than_a_node_write_before_it():
+    """``gm.params = tree`` is a write of every leaf, later than any
+    ``node.params`` write before it -- the profiler restores the caller's
+    tree this way after its own recompiles.  The tree was taken before the
+    node write, so it holds the old value, and that value must stay."""
+    gm = _spring()
+    saved = jax.tree.map(lambda x: x, gm.params)
+    gm.get_node("s").params["stiffness"] = 50.0
+    gm.params = saved
+    assert _k(gm) == 30.0
+    assert _k_stepped(gm) == pytest.approx(30.0, rel=1e-3)

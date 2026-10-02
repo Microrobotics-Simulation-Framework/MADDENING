@@ -71,8 +71,11 @@ CHECKPOINT_SLOTS = ("first.npz", "nested/second.npz", "third")
 """Checkpoint names inside the configured root (the last one has no suffix,
 which ``numpy.savez`` appends and ``load_state`` retries with)."""
 
-ESCAPING_PATHS = ("../escaped.npz", "/tmp/escaped.npz", "a/../../escaped.npz")
-"""Paths that resolve outside ``checkpoint_root`` and must be refused."""
+ESCAPING_PATHS = ("../escaped.npz", "/tmp/escaped.npz", "a/../../escaped.npz",
+                  "", ".", "nested/..")
+"""Paths that resolve outside ``checkpoint_root`` and must be refused --
+the last three to the root itself, which ``numpy.savez`` turned into
+``<root>.npz`` in its parent."""
 
 
 class SimulationServerMachine(RuleBasedStateMachine):
@@ -226,6 +229,20 @@ class SimulationServerMachine(RuleBasedStateMachine):
                                source_field=src_field, target_field=tgt_field)
         # remove_edge drops every copy of a repeated edge, not just one.
         self.edges = [e for e in self.edges if e != edge]
+
+    @precondition(lambda self: bool(self.types))
+    @rule(data=st.data())
+    def remove_missing_edge(self, data):
+        """Removing an edge the graph does not have is a 404 that changes
+        nothing (it used to answer 200)."""
+        tgt = data.draw(st.sampled_from(sorted(self.types)))
+        before = self._snapshot()
+        resp = self._send("DELETE", "/graph/edges", json={
+            "source_node": "ghost", "target_node": tgt,
+            "source_field": "x", "target_field": "y",
+        })
+        assert resp.status_code == 404, resp.text[:500]
+        self._reject(resp, before)
 
     @precondition(lambda self: bool(self._boundary_targets()))
     @rule(kind=st.sampled_from(("unknown_source", "unknown_target", "unknown_field")),

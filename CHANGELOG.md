@@ -333,8 +333,11 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **A `node.params` write after compile reaches the step at the next `compile()`** (MADD-ANO-086, never released: it was dropped); `fit_lm` reports `converged` at the float floor (its proposal is tested accepted or not; `step_tol` is relative, default 16 ulps); `windowed_loss` refuses a negative/NaN `continuity_weight` and a non-bool `mask_unconverged`;
+- **A `node.params` write after compile reaches the step at the next `compile()`** (MADD-ANO-093, never released: it was dropped); `fit_lm` reports `converged` at the float floor (its proposal is tested accepted or not; `step_tol` is relative, default 16 ulps); `windowed_loss` refuses a negative/NaN `continuity_weight` and a non-bool `mask_unconverged`;
   a clipped leaf on its bound has its full derivative into the range; a refused mask names the missing empty container.  Action: change a constant mid-run through `gm.params`; pass `step_tol` as a relative change.
+- **REST, round-4 audit** (MADD-ANO-086 to 092): `POST /graph/nodes`, `PUT /graph/params`, `from_dict` and USD loading check the grid/basis nodes' size estimates before building (one `PUT n_levels=10000000` grew the server to 57.7 GB); `POST /sim/stop`
+  never answers "stopped" while the runner's thread steps (503; state writes 409 while it runs); `PUT /graph/params` refuses values the step cannot trace and keeps a parameter's numeric type; the WebSocket
+  streams end with their client (SIGINT hung); `PUT /sim/stride` is bounded (422); a missing edge's DELETE is a 404; root-equal checkpoint paths are a 400.  Action: send integers for integer params; stop the runner before writing state.
 - **FMU export, round-4 audit** (MADD-ANO-083 to 085, never released): a new instance starts at the description's start values (it inherited the last one's state, parameters and time); inputs `selected_inputs` leaves out are held at zero (`held_inputs`); `SidecarConfig.input_resolver` steps as `GraphManager.step`; advertised min/max hold without `param_specs`.
   `dt`/`t`/values must be numbers; `doStep` must start at the FMU's time, which `fmi3EnterInitializationMode` sets; the wrapper refuses a reply longer than `nValues` and an empty token, drops a half-sent frame and sets `TCP_NODELAY` (every call took >=40 ms).
   Action: pass `input_resolver=gm._resolve_external_inputs`; build the sidecar and the description from the same parameters; open one connection per instance.
@@ -668,6 +671,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **A loopback-bound API answers only to loopback host names** (CRITICAL, MADD-ANO-076, now resolved): a DNS-rebinding page's `Host` and
+  `Origin` agree, so it passed the Origin check and could drive every route, `/cloud/launch` included; any other `Host` is now a 403.
+  Action: pass `SimulationServer(allowed_hosts=)` to serve a loopback-bound server under a proxy's name or an `/etc/hosts` alias
 - **Cloud launches reach ready again, and cross-origin browser requests are
   refused** (CRITICAL, MADD-ANO-076, since 0.1.0; partially resolved, a DNS-rebinding page still passes): set `MADDENING_TRANSPORT_TOKEN` so the ZeroMQ CURVE key is not the
   cleartext API bearer token; pass `allowed_origins=` to embed the UI elsewhere

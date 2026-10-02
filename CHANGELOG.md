@@ -344,7 +344,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **REST round-6 audit fixes** (MADD-ANO-121 to 124; 096 completed): a surrogate job re-checks its memory budget on the graph it sweeps; `POST /sim/profile` restores the live state and keeps the streams out; a reset, a state write, a node edit and a surrogate swap publish to the streams (the relay adds `run_adaptive`'s `dt`); a JAX trace stops itself at 10 000 steps or 600 s;
+- **REST round-6 audit fixes** (MADD-ANO-123 to 126; 096 completed): a surrogate job re-checks its memory budget on the graph it sweeps; `POST /sim/profile` restores the live state and keeps the streams out; a reset, a state write, a node edit and a surrogate swap publish to the streams (the relay adds `run_adaptive`'s `dt`); a JAX trace stops itself at 10 000 steps or 600 s;
   `/sim/run` reports `steps_run` when a step raises; runner routes answer within one lock timeout and say when they left the runner stopped; checkpoint saves are atomic; past the stream cap a client gets 1013, not 403; `run_pod.py` records only a real commit and `--summarise` survives older files.
   Action: none; read `GET /sim/profile/jax/status` if a long trace ends early.
 - **A node reading a cycle runs after it in the same step, whatever order it was added in** (MADD-ANO-120, since 0.1.0: added before a coupling group's members, it read their previous-step output); the interface norm sums its edges in the group's sweep order, not insertion order; `solver="fori"` docs: forward mode works.

@@ -176,7 +176,7 @@ def http_post(base_url: str, path: str) -> dict:
         return json.loads(resp.read())
 
 
-def test_endpoints(base_url: str) -> None:
+def check_endpoints(base_url: str) -> None:
     """The endpoint checks, shared by the cloud and the --local runs."""
     print("  GET /graph...")
     graph = http_get(base_url, "/graph")
@@ -294,7 +294,7 @@ def run_local() -> int:
         print("  Server is UP!")
         print()
         print("Testing API endpoints...")
-        test_endpoints(base_url)
+        check_endpoints(base_url)
     finally:
         code = _stop_process(proc)
         print(f"  Local server (pid {proc.pid}) stopped, exit code {code}")
@@ -465,7 +465,7 @@ def main():
     # --- Phase 7: Test endpoints ---
     print()
     print("Phase 7: Testing API endpoints...")
-    test_endpoints(base_url)
+    check_endpoints(base_url)
 
     # --- Teardown ---
     if args.keep:

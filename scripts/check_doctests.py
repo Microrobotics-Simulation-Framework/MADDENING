@@ -49,7 +49,7 @@ are named ``*_test.py``, so pytest collects their functions as live tests
 that would launch cloud VMs.  Excluding them leaves no hole:
 ``tests/test_examples_smoke.py`` owns that directory, statically for the
 cloud scripts -- which it says the suite must never execute, for the same
-reason -- and by running the cheap headless ones in its ``slow`` lane.
+reason -- and by running the headless and loopback ones.
 
 Usage:
     python scripts/check_doctests.py [--min N] [-- PYTEST_ARG ...]

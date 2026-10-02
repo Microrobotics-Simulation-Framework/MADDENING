@@ -366,6 +366,8 @@ class TestShardedUnstructuredNode:
 # ---------------------------------------------------------------------------
 
 
+# Per push: tests/cloud/multigpu/test_sharded_unstructured.py::TestShardedUnstructuredNode::test_psum_domain_integral
+# (the same psum on a smaller ring).
 @pytest.mark.slow
 class TestIntermediateSizeSmoke:
 
@@ -415,6 +417,9 @@ class TestStabilityTagging:
 
 class TestPoissonOnGraph:
 
+    # Per push: tests/cloud/multigpu/test_iterative_solver.py::TestShardedCorrectness::test_cg_sharded_matches_unsharded
+    # and tests/cloud/multigpu/test_sharded_unstructured.py::TestExchangeUnstructured::test_4_shard_ring_exchange,
+    # the two halves of this composition.
     @pytest.mark.slow  # compiling the sharded CG solve: 7-12 s on CI
     def test_sharded_cg_solves_graph_laplacian(self):
         """1-D ring graph Laplacian solved via sharded_cg.
@@ -537,6 +542,8 @@ class TestPoissonOnGraph:
         )
 
 
+# Per push: tests/cloud/multigpu/test_exchange_ppermute.py::test_wrapper_matches_unsharded_under_both_transports
+# (a 32-cell ring, sharded against unsharded, both transports).
 @pytest.mark.slow
 def test_ten_thousand_cell_ring_matches_unsharded():
     """v0.4.0 plan: real-mesh-size forward check (lower end of the 1e4-1e6

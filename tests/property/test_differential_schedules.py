@@ -577,8 +577,8 @@ def assert_adaptive_replays_and_keeps_its_clock(gdef, gm, values, *, atol, dt_mi
     assert not moved, f"replaying dt_history moved {moved}"
 
 
-# Per push: the seed-0 cases of this test; seed 1 is slow-marked (a
-# compile per run_adaptive call).
+# Per push: tests/property/test_differential_schedules.py::test_adaptive_runs_replay_their_accepted_steps_and_keep_their_clocks
+# (its seed-0 cases); seed 1 is slow-marked, a compile per run_adaptive call.
 @pytest.mark.parametrize("seed", [0, pytest.param(1, marks=pytest.mark.slow)])
 @pytest.mark.parametrize("atol,dt_min", [(1e-2, 1e-3), (1e-7, 0.1)])
 def test_adaptive_runs_replay_their_accepted_steps_and_keep_their_clocks(atol, dt_min, seed):

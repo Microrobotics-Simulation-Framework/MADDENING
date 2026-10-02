@@ -389,6 +389,7 @@ def adjoint(request):
 # tests/cloud/multigpu/test_coupling_group_adjoint_through_a_sharded_member.py::test_reverse_mode_ad_through_a_coupling_group_with_a_sharded_member.
 # The eight-step, both-solver, sharded-against-unsharded comparison runs in
 # slow-tests.yml.
+# Per push: tests/cloud/multigpu/test_coupling_group_adjoint_through_a_sharded_member.py::test_reverse_mode_ad_through_a_coupling_group_with_a_sharded_member
 @pytest.mark.slow
 def test_the_adjoint_matches_the_group_with_the_unsharded_inner_node(adjoint):
     solver, out = adjoint
@@ -400,6 +401,8 @@ def test_the_adjoint_matches_the_group_with_the_unsharded_inner_node(adjoint):
                   STATE_RTOL, f"{solver}: field under the gradient trace")
 
 
+# Per push: tests/cloud/multigpu/test_coupling_group_adjoint_through_a_sharded_member.py::test_reverse_mode_ad_through_a_coupling_group_with_a_sharded_member
+# (one step of this group, sharded over two devices, against the same float64 model).
 @pytest.mark.slow
 def test_the_adjoint_is_the_derivative_of_the_implicitly_coupled_step(adjoint):
     """Both gradients against central differences of the float64 model."""

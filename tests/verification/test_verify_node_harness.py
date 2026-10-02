@@ -175,6 +175,8 @@ def test_unknown_check_name_rejected():
         verify_node(EnergyGain(name="n", timestep=0.01), checks=["nope"])
 
 
+# Per push: tests/verification/test_builtin_nodes_verified.py::test_builtin_node_passes_battery[table]
+# and [health_check]: the full battery, params checks included, on two built-in nodes.
 @pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_builtin_node_passes_full_battery():
     assert_node_verified(
@@ -193,6 +195,7 @@ def test_params_path_divergence_caught():
     assert res["params_gradient_finite"].passed
 
 
+# Per push: tests/verification/test_verify_node_harness.py::test_params_gradient_finite_fails_on_a_gradient_only_nan_in_a_param
 @pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_params_gradient_only_nan_caught():
     res = verify_node(ParamsGradientNaN(name="n", timestep=0.01),
@@ -204,6 +207,20 @@ def test_params_gradient_only_nan_caught():
     assert "wrt param 'k'" in res["params_gradient_finite"].detail
 
 
+def test_params_gradient_finite_fails_on_a_gradient_only_nan_in_a_param():
+    """The battery above, cut to the checks the fault concerns (per push).
+
+    Without it nothing on a push sees ``params_gradient_finite`` fail: the
+    other per-push uses of the check assert that it passes, so a check that
+    could no longer fail would go unnoticed until the slow lane."""
+    res = verify_node(ParamsGradientNaN(name="n", timestep=0.01), bounds={"x": (0.0, 1.0)},
+                      checks=["params_consistent", "params_gradient_finite"], **KW)
+    assert res["params_consistent"].passed
+    assert res["params_gradient_finite"].failed
+    assert "wrt param 'k'" in res["params_gradient_finite"].detail
+
+
+# Per push: tests/verification/test_verify_node_harness.py::test_params_effective_fails_on_a_leaf_read_from_self_params
 @pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_params_dead_leaf_caught_by_effective_check():
     res = verify_node(ParamsDeadLeaf(name="n", timestep=0.01),
@@ -211,6 +228,16 @@ def test_params_dead_leaf_caught_by_effective_check():
     assert res["params_consistent"].passed        # both paths agree ...
     assert res["params_gradient_finite"].passed   # ... and zero is finite
     assert res["params_effective"].failed         # but 'rate' is dead
+    assert "['rate']" in res["params_effective"].detail
+    assert "'k'" not in res["params_effective"].detail
+
+
+def test_params_effective_fails_on_a_leaf_read_from_self_params():
+    """The battery above, cut to the checks the fault concerns (per push)."""
+    res = verify_node(ParamsDeadLeaf(name="n", timestep=0.01), bounds={"x": (0.0, 1.0)},
+                      checks=["params_consistent", "params_effective"], **KW)
+    assert res["params_consistent"].passed
+    assert res["params_effective"].failed
     assert "['rate']" in res["params_effective"].detail
     assert "'k'" not in res["params_effective"].detail
 
@@ -253,11 +280,24 @@ def test_params_checks_skip_for_nodes_without_params():
                          checks=["params_consistent"], **KW)
 
 
+# Per push: tests/verification/test_verify_node_harness.py::test_the_params_checks_pass_on_a_clean_node_and_skip_its_structural_entries
 @pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_params_checks_pass_for_clean_node_and_ignore_structural_entries():
     node = ParamsClean(name="n", timestep=0.01)
     assert set(node.params_pytree()) == {"k", "rest"}   # not label / n
     res = verify_node(node, bounds={"x": (0.0, 1.0)}, **KW)
+    assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
+    assert res["params_consistent"].n_examples > 0
+    assert res["params_gradient_finite"].n_examples > 0
+
+
+def test_the_params_checks_pass_on_a_clean_node_and_skip_its_structural_entries():
+    """The battery above, cut to the three params checks (per push)."""
+    node = ParamsClean(name="n", timestep=0.01)
+    assert set(node.params_pytree()) == {"k", "rest"}
+    res = verify_node(node, bounds={"x": (0.0, 1.0)},
+                      checks=["params_consistent", "params_gradient_finite", "params_effective"],
+                      **KW)
     assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
     assert res["params_consistent"].n_examples > 0
     assert res["params_gradient_finite"].n_examples > 0
@@ -371,6 +411,7 @@ class DerivativesNotApplicable(_Decay):
 _DECAY_BOUNDS = {"x": (0.25, 1.0)}
 
 
+# Per push: tests/verification/test_verify_node_harness.py::test_params_effective_blames_derivatives_not_update_for_ignored_params
 @pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_derivatives_that_ignore_the_injected_params_are_caught():
     res = verify_node(DerivativesIgnoreInjectedParams(name="n", timestep=0.01),
@@ -382,6 +423,17 @@ def test_derivatives_that_ignore_the_injected_params_are_caught():
     assert "update()" not in detail.split("derivatives()")[0]  # update is not blamed
 
 
+def test_params_effective_blames_derivatives_not_update_for_ignored_params():
+    """The battery above, cut to the checks the fault concerns (per push)."""
+    res = verify_node(DerivativesIgnoreInjectedParams(name="n", timestep=0.01),
+                      bounds=_DECAY_BOUNDS, checks=["params_consistent", "params_effective"], **KW)
+    assert res["params_consistent"].passed
+    assert res["params_effective"].failed
+    detail = res["params_effective"].detail
+    assert "derivatives() reads ['k'] from self.params" in detail
+    assert "update()" not in detail.split("derivatives()")[0]
+
+
 def test_a_legacy_derivatives_signature_is_caught():
     res = verify_node(DerivativesLegacySignature(name="n", timestep=0.01),
                       bounds=_DECAY_BOUNDS, checks=["params_effective"], **KW)
@@ -389,9 +441,18 @@ def test_a_legacy_derivatives_signature_is_caught():
     assert "update() takes params but derivatives() does not" in res["params_effective"].detail
 
 
+# Per push: tests/verification/test_verify_node_harness.py::test_params_effective_passes_a_clean_derivatives_override_and_names_its_paths
 @pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_a_clean_derivatives_override_passes_and_the_detail_names_the_paths():
     res = verify_node(_Decay(name="n", timestep=0.01), bounds=_DECAY_BOUNDS, **KW)
+    assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
+    assert res["params_effective"].detail == "paths checked: update, derivatives"
+
+
+def test_params_effective_passes_a_clean_derivatives_override_and_names_its_paths():
+    """The battery above, cut to the params checks (per push)."""
+    res = verify_node(_Decay(name="n", timestep=0.01), bounds=_DECAY_BOUNDS,
+                      checks=["params_consistent", "params_effective"], **KW)
     assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
     assert res["params_effective"].detail == "paths checked: update, derivatives"
 
@@ -472,6 +533,7 @@ class DerivativesReadOneLeafFromSelf(_Decay):
         return {"x": -(p["k"] * s["x"] + self.params["c"])}
 
 
+# Per push: tests/verification/test_verify_node_harness.py::test_the_projected_effective_probe_passes_a_conserving_node
 @pytest.mark.slow  # a 100-200-example verify_node battery, eager: 5-24 s on CI
 def test_a_conserving_node_passes_the_effective_check():
     """The plain sum of the outputs is blind to a conserved exchange; the
@@ -487,6 +549,21 @@ def test_a_conserving_node_passes_the_effective_check():
     assert all(r.passed for r in res.values()), [str(r) for r in res.values()]
     assert res["params_effective"].detail == "paths checked: update, derivatives"
     assert_node_verified(node, bounds={"a": (0.1, 0.9), "b": (0.1, 0.9)}, **KW)
+
+
+def test_the_projected_effective_probe_passes_a_conserving_node():
+    """The battery above, cut to ``params_effective`` (per push); the
+    fixture still has a plain-sum gradient of exactly zero."""
+    node = TwoCompartmentExchange(name="n", timestep=0.01)
+    s0 = node.initial_state()
+    plain = jax.grad(lambda p: sum(jnp.sum(v) for v in node.update(s0, {}, 0.01, params=p).values()))(
+        {"k": jnp.asarray(2.0)}
+    )
+    assert float(plain["k"]) == 0.0
+    res = verify_node(node, bounds={"a": (0.1, 0.9), "b": (0.1, 0.9)},
+                      checks=["params_effective"], **KW)["params_effective"]
+    assert res.passed, res.detail
+    assert res.detail == "paths checked: update, derivatives"
 
 
 def test_a_derivatives_that_reads_one_leaf_from_self_is_still_caught_by_the_projected_probe():

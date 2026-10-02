@@ -122,6 +122,7 @@ def _reload_usd(gm: GraphManager) -> GraphManager:
 # Config
 # ---------------------------------------------------------------------------
 
+# Per push: tests/property/test_differential_serialisation.py::test_a_generated_graph_of_every_node_kind_reloads_bit_for_bit
 @pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes())
 def test_a_config_round_trip_preserves_trajectory_params_and_specs(recipe):
@@ -140,6 +141,7 @@ def test_a_config_round_trip_preserves_trajectory_params_and_specs(recipe):
                             what="trajectory")
 
 
+# Per push: tests/core/test_mapping_edges.py::test_serialisation_of_mapped_edges_round_trips_without_weights
 @pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(require_mapping=True, max_nodes=3))
 def test_a_config_round_trip_preserves_a_mapped_edge_and_its_weights(recipe):
@@ -306,6 +308,8 @@ def _assert_groups_identical(expected: GraphManager, actual: GraphManager,
             )
 
 
+# Per push: tests/core/test_coupling_group_serialisation.py::test_every_field_round_trips_through_a_config and
+# tests/core/test_coupling_group_serialisation.py::test_a_reloaded_group_reaches_the_same_state
 @pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(require_coupling_group=True))
 def test_a_config_round_trip_preserves_every_coupling_group_field(recipe):
@@ -367,7 +371,7 @@ def test_the_generator_draws_every_option_of_every_coupling_group_enum():
 # Checkpoints
 # ---------------------------------------------------------------------------
 
-# Per push, on a fixed graph:
+# Per push: on a fixed graph,
 # tests/core/test_checkpoint_resumes_the_same_rollout.py::test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout
 @pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(), split=st.integers(min_value=1, max_value=N_STEPS - 1))
@@ -398,7 +402,7 @@ def test_a_checkpoint_restores_state_and_params_and_continues_the_same_rollout(
                                 what="continued trajectory")
 
 
-# Per push, on two heat rods:
+# Per push: on two heat rods,
 # tests/core/test_mapping_spec_serialisation.py::test_checkpoint_weights_win_over_the_rebuilt_spec
 @pytest.mark.slow  # graphs built and compiled per example: 10-95 s on CI
 @given(recipe=graph_recipes(train_mapping_weights=True, max_nodes=3))

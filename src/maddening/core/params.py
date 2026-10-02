@@ -263,6 +263,91 @@ class ParamSpec:
             return jnp.log(t) - jnp.log1p(-t)
         return p
 
+    def _log_floor(self, fi) -> float:
+        """The smallest ``exp(u)`` a ``log`` leaf takes: ``2 * eps * |lo|``
+        is 2-4 ulps of ``lo`` (>= 1 ulp is what makes ``lo + m > lo``
+        exact); ``tiny`` keeps the ``lo == 0`` floor at the smallest
+        normal."""
+        return max(float(fi.tiny), 2.0 * float(fi.eps) * abs(self._lo()))
+
+    def _logit_interior(self, fi) -> tuple[float, float]:
+        """The representable interior a ``logit`` leaf is clamped to.
+
+        Clipping the *result* (not the sigmoid) keeps rounding in
+        ``lo + (hi - lo) * t`` off a bound: with ``m >= 4 ulp`` of every
+        quantity involved, ``p - lo`` and ``hi - lo`` round to distinct
+        floats and the inverse ``log(t) - log1p(-t)`` stays finite.  An
+        interval only a few ulps wide (``(1e6, 1e6 + 0.1)`` in float32) has
+        no interior to clamp to; the margin is capped so the clip never
+        inverts, and ``check`` reports such a value.
+        """
+        lo_b, hi_b = self.bounds
+        assert lo_b is not None and hi_b is not None
+        lo, hi = float(lo_b), float(hi_b)
+        m = 4.0 * float(fi.eps) * max(abs(lo), abs(hi), hi - lo)
+        m = min(m, 0.25 * (hi - lo))
+        # ``lo + m`` / ``hi - m`` can round back onto the bound for an
+        # interval a few ulps wide; the next representable float inside is
+        # the true limit, so take the wider of the two.
+        _t = np.dtype(fi.dtype).type
+        inner_lo = max(lo + m, float(np.nextafter(_t(lo), _t(np.inf))))
+        inner_hi = min(hi - m, float(np.nextafter(_t(hi), _t(-np.inf))))
+        if inner_lo > inner_hi:                    # no interior float at all
+            inner_lo = inner_hi = 0.5 * (lo + hi)
+        return inner_lo, inner_hi
+
+    def _optimiser_interval(self, dtype) -> tuple[float, float]:
+        """The optimiser coordinates ``u`` over which :meth:`to_constrained`
+        is the transform itself, not a clamp.
+
+        Outside it ``to_constrained`` returns a clamped value whose
+        derivative is 0, so an optimiser that steps there has no gradient
+        back: the bounds of a ``transform=None`` leaf, and for ``log`` /
+        ``logit`` the coordinates where ``exp`` leaves its floor or
+        overflows, or the sigmoid lands on the representable interior's
+        edge.  Each end is moved inward until the value it maps to is
+        strictly inside the clamp, at ``dtype``'s rounding, so a coordinate
+        projected onto it keeps a non-zero derivative.  ``(-inf, inf)`` for
+        an unbounded identity leaf, and for a ``logit`` interval with no
+        interior float to clamp to.
+        """
+        lo_b, hi_b = self.bounds
+        if self.transform is None:
+            return (-math.inf if lo_b is None else float(lo_b),
+                    math.inf if hi_b is None else float(hi_b))
+        fi = np.finfo(dtype)
+        if self.transform == "log":
+            floor, ceiling = self._log_floor(fi), float(fi.max)
+            u_lo, u_hi = math.log(floor), math.log(ceiling)
+            lo = self._lo()
+
+            def inside(u):
+                e = float(jnp.exp(jnp.asarray(u, dtype)))
+                return floor < e < ceiling
+        else:
+            inner_lo, inner_hi = self._logit_interior(fi)
+            if not inner_lo < inner_hi:
+                return -math.inf, math.inf
+            lo, hi = float(lo_b), float(hi_b)  # type: ignore[arg-type]
+            t_lo, t_hi = (inner_lo - lo) / (hi - lo), (inner_hi - lo) / (hi - lo)
+            u_lo = math.log(t_lo) - math.log1p(-t_lo)
+            u_hi = math.log(t_hi) - math.log1p(-t_hi)
+
+            def inside(u):
+                v = float(lo + (hi - lo) * jax.nn.sigmoid(jnp.asarray(u, dtype)))
+                return inner_lo < v < inner_hi
+
+        def inward(u, direction):
+            step = 1e-6 * max(1.0, abs(u))
+            for _ in range(64):
+                if inside(u):
+                    return u
+                u += direction * step
+                step *= 2.0
+            return u
+
+        return inward(u_lo, 1.0), inward(u_hi, -1.0)
+
     def to_constrained(self, u):
         u = jnp.asarray(u)
         # ``exp`` under/overflows and ``sigmoid`` saturates to exactly 0
@@ -278,35 +363,13 @@ class ParamSpec:
         floating = jnp.issubdtype(u.dtype, jnp.floating)
         fi = jnp.finfo(u.dtype if floating else jnp.float32)
         if self.transform == "log":
-            lo = self._lo()
-            # ``2 * eps * |lo|`` is 2-4 ulps of ``lo`` (>= 1 ulp is what
-            # makes ``lo + m > lo`` exact); ``tiny`` keeps the lo == 0
-            # floor at the smallest normal, as before.
-            m = max(float(fi.tiny), 2.0 * float(fi.eps) * abs(lo))
-            return lo + jnp.clip(jnp.exp(u), m, fi.max)
+            return self._lo() + jnp.clip(jnp.exp(u), self._log_floor(fi), fi.max)
         if self.transform == "logit":
             # `__post_init__` refuses transform='logit' without both bounds.
             lo_b, hi_b = self.bounds
             assert lo_b is not None and hi_b is not None
             lo, hi = float(lo_b), float(hi_b)
-            # Clip the *result* (not the sigmoid) so rounding in
-            # ``lo + (hi - lo) * t`` cannot land on a bound either: with
-            # ``m >= 4 ulp`` of every quantity involved, ``p - lo`` and
-            # ``hi - lo`` round to distinct floats and the inverse
-            # ``log(t) - log1p(-t)`` stays finite.
-            # An interval only a few ulps wide (``(1e6, 1e6 + 0.1)`` in
-            # float32) has no interior to clamp to; cap the margin so the
-            # clip never inverts, and let ``check`` report such a value.
-            m = 4.0 * float(fi.eps) * max(abs(lo), abs(hi), hi - lo)
-            m = min(m, 0.25 * (hi - lo))
-            # ``lo + m`` / ``hi - m`` can round back onto the bound for an
-            # interval a few ulps wide; the next representable float
-            # inside is the true limit, so take the wider of the two.
-            _t = np.dtype(fi.dtype).type
-            inner_lo = max(lo + m, float(np.nextafter(_t(lo), _t(np.inf))))
-            inner_hi = min(hi - m, float(np.nextafter(_t(hi), _t(-np.inf))))
-            if inner_lo > inner_hi:                    # no interior float at all
-                inner_lo = inner_hi = 0.5 * (lo + hi)
+            inner_lo, inner_hi = self._logit_interior(fi)
             p = lo + (hi - lo) * jax.nn.sigmoid(u)
             return jnp.clip(p, inner_lo, inner_hi)
         lo, hi = self.bounds

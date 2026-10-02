@@ -192,7 +192,7 @@ def test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on
     obs = _record(damping=TRUE_C)
     gm = _spring(damping=0.5)
     monkeypatch.setattr(sysid._CoordinateBounds, "inward_descent",  # noqa: SLF001
-                        lambda self, theta, g: True)
+                        lambda self, *args, **kwargs: True)
     res = fit_lm(gm, _residual_against(obs), mask=_only(gm, "damping"), n_iter=12)
     assert not res.converged
 
@@ -214,16 +214,37 @@ def test_the_inward_descent_predicate():
 
 
 def test_an_unbounded_fit_is_not_projected():
-    """No bounded identity coordinate: the projection is the identity and
+    """An identity leaf with no bounds: the projection is the identity and
     the predicate never fires (the same arithmetic as before)."""
     gm = _spring()
-    stiffness_only = np.asarray([[jax.tree_util.keystr(p) for p, _ in
-                                  jax.tree_util.tree_flatten_with_path(gm.params)[0]]
-                                 .index("['nodes']['s']['stiffness']")])
-    bounds = sysid._CoordinateBounds(gm, gm.params, stiffness_only, jnp.float32)  # noqa: SLF001
+    assert gm.param_specs()["nodes"]["s"]["rest_length"].bounds == (None, None)
+    rest_length_only = np.asarray([[jax.tree_util.keystr(p) for p, _ in
+                                    jax.tree_util.tree_flatten_with_path(gm.params)[0]]
+                                   .index("['nodes']['s']['rest_length']")])
+    bounds = sysid._CoordinateBounds(gm, gm.params, rest_length_only, jnp.float32)  # noqa: SLF001
     assert not bounds.active
     theta = jnp.asarray([-50.0])
     assert bounds.project(theta) is theta
+
+
+def test_a_log_and_a_logit_coordinate_are_kept_where_constrain_is_not_clamped():
+    """Past the point where ``constrain`` clamps a ``log`` / ``logit`` leaf
+    its derivative is 0 too, so those coordinates are projected onto the
+    range where it is the transform itself; at its ends the value maps
+    strictly inside the clamp, with a non-zero derivative."""
+    for spec in (ParamSpec(bounds=(0.5, 2.0), transform="logit"),
+                 ParamSpec(bounds=(0.0, None), transform="log")):
+        u_lo, u_hi = spec._optimiser_interval(np.float32)  # noqa: SLF001
+        for u in (u_lo, u_hi):
+            assert np.isfinite(u)
+            slope = float(jax.grad(spec.to_constrained)(jnp.float32(u)))
+            assert slope > 0.0, (spec, u, slope)
+        # Beyond the ends the clamp is active and the slope is gone: the
+        # dead zone the projection keeps the optimiser out of (past the
+        # ``log`` leaf's upper end ``exp`` overflows and the slope is not
+        # even finite).
+        beyond = u_lo - 50.0 if spec.transform == "log" else u_hi + 50.0
+        assert float(jax.grad(spec.to_constrained)(jnp.float32(beyond))) == 0.0, spec
 
 
 # ---------------------------------------------------------------------------

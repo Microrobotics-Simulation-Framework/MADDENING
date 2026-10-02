@@ -1194,23 +1194,38 @@ class _CoordinateBounds:
     0.  So every fitter projects its coordinate back onto the bounds after
     each update; a coordinate on its bound has the one-sided derivative
     into the range, and a step that would leave the range again moves it by
-    nothing.  ``log`` / ``logit`` coordinates are unbounded and never move
-    here; inside the bounds the projection is the identity, bit for bit.
+    nothing.  A ``log`` / ``logit`` coordinate is bounded the same way to the
+    range where ``constrain`` is its transform and not its clamp
+    (:meth:`ParamSpec._optimiser_interval`), since past that its derivative
+    is 0 too.  Inside the bounds the projection is the identity, bit for bit.
     """
 
     def __init__(self, gm, start: dict, idx, dtype) -> None:
         specs = _resolve_specs(start, gm.param_specs())
-        los, his = [], []
+        los, his, p_los, p_his = [], [], [], []
         for leaf, spec in zip(jax.tree.leaves(start), specs):
             n = _leaf_size(leaf)
-            lo = hi = None
-            if spec.trainable and spec.transform is None:
-                lo, hi = spec.bounds
-            los.append(np.full(n, -np.inf if lo is None else float(lo)))
-            his.append(np.full(n, np.inf if hi is None else float(hi)))
+            lo, hi = -np.inf, np.inf
+            p_lo, p_hi = -np.inf, np.inf
+            if spec.trainable and _is_differentiable(leaf):
+                p_lo, p_hi = _physical_edges(spec, jnp.result_type(leaf))
+                # A ``log`` / ``logit`` coordinate is unbounded in principle,
+                # but past the point where ``constrain`` clamps it (``exp``
+                # at its floor or overflowing, the sigmoid at the edge of
+                # the representable interior) its derivative is 0 as well:
+                # a logit-bounded damping driven past it sat at 1.999998 of
+                # (0.5, 2) with ``converged=True``.  Same projection.
+                lo, hi = spec._optimiser_interval(jnp.result_type(leaf))  # noqa: SLF001
+            los.append(np.full(n, lo))
+            his.append(np.full(n, hi))
+            p_los.append(np.full(n, p_lo))
+            p_his.append(np.full(n, p_hi))
         lo_all = np.concatenate(los) if los else np.zeros(0)
         hi_all = np.concatenate(his) if his else np.zeros(0)
         lo_np, hi_np = lo_all[idx], hi_all[idx]
+        #: The physical values the edges of each coordinate's range map to.
+        self.p_lo = (np.concatenate(p_los) if p_los else np.zeros(0))[idx]
+        self.p_hi = (np.concatenate(p_his) if p_his else np.zeros(0))[idx]
         #: Whether any coordinate is bounded at all; when not, every method
         #: here is the identity and costs nothing.
         self.active = bool(np.isfinite(lo_np).any() or np.isfinite(hi_np).any())
@@ -1222,16 +1237,44 @@ class _CoordinateBounds:
     def project(self, theta):
         return jnp.clip(theta, self.lo, self.hi) if self.active else theta
 
-    def inward_descent(self, theta, g) -> bool:
+    def inward_descent(self, theta, g, physical=None, rel_tol=0.0) -> bool:
         """Whether a coordinate on its bound could lower the loss by moving
         into the range: ``g`` (the gradient, with the one-sided derivative on
         the bound) pointing inward.  Such a point is not a constrained
-        stationary point, whatever the size of the step proposed there."""
+        stationary point, whatever the size of the step proposed there.
+
+        "On its bound" is also read physically, when ``physical`` (the
+        coordinates' physical values) is given: within ``rel_tol`` of the
+        value an edge maps to.  A ``logit`` coordinate near the edge of its
+        range moves its value by almost nothing for a large step in ``u``
+        (the sigmoid is flat there), so a fit pushed there proposed steps
+        that changed the value by under ``step_tol`` and stopped,
+        "converged", at 1.999997 of ``(0.5, 2)`` with the truth at 1.25.
+        """
         if not self.active:
             return False
         th, gg = np.asarray(theta), np.asarray(g)
         lo, hi = np.asarray(self.lo), np.asarray(self.hi)
-        return bool((((th <= lo) & (gg < 0)) | ((th >= hi) & (gg > 0))).any())
+        on_lo, on_hi = th <= lo, th >= hi
+        if physical is not None:
+            p = np.asarray(physical, dtype=np.float64)
+            margin = np.asarray(rel_tol) * np.abs(p)
+            on_lo = on_lo | (p - self.p_lo <= margin)
+            on_hi = on_hi | (self.p_hi - p <= margin)
+        return bool(((on_lo & (gg < 0)) | (on_hi & (gg > 0))).any())
+
+
+def _physical_edges(spec, dtype) -> tuple[float, float]:
+    """The physical values a trainable leaf's coordinate range ends at: its
+    bounds under ``transform=None``, the floor ``constrain`` keeps a ``log``
+    leaf above, the representable interior of a ``logit`` leaf."""
+    if spec.transform is None:
+        lo, hi = spec.bounds
+        return (-np.inf if lo is None else float(lo), np.inf if hi is None else float(hi))
+    fi = np.finfo(dtype)
+    if spec.transform == "log":
+        return spec._lo() + spec._log_floor(fi), np.inf  # noqa: SLF001
+    return spec._logit_interior(fi)  # noqa: SLF001
 
 
 def _inverse_noise_std(noise_std, residual):
@@ -3822,6 +3865,40 @@ def fit(
     )
 
 
+@jax.jit
+def _marquardt_step(th, r, J, lam, lo, hi):
+    """One Levenberg-Marquardt candidate from ``th``, projected onto
+    ``[lo, hi]`` (:class:`_CoordinateBounds`).
+
+    Module-level, so its compiled form is shared by every :func:`fit_lm`
+    call of the same shapes rather than compiled again per call.
+    """
+    A = J.T @ J
+    g = J.T @ r
+    # A coordinate on its bound whose gradient points out of the range is
+    # held (its row and column replaced by the identity, its gradient by 0):
+    # that is the constraint active, and solving for it as if free would
+    # couple a step it cannot take into the others.
+    hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+    free = jnp.where(hold, 0.0, 1.0).astype(A.dtype)
+    A = A * free[:, None] * free[None, :]
+    g = g * free
+    n = A.shape[0]
+    # The floor that keeps the solve regular is *relative*, ``eps`` times
+    # the mean of ``diag(A)``: an absolute ``1e-12 * I`` was not negligible
+    # once the residual was small in its own units (a residual scaled by
+    # 1e-7 made it 1e-12 / 1e-14 of the curvature it was added to), and the
+    # fit stopped being Gauss-Newton -- it did not converge in 50 iterations
+    # at 1e-7 and barely moved at 1e-8.  Relative, the step is the same for
+    # every scaling of the residual.
+    scale = jnp.trace(A) / n
+    floor = jnp.where(scale > 0, jnp.finfo(A.dtype).eps * scale, 1.0)
+    A_damped = (A + lam * jnp.diag(jnp.diag(A))
+                + floor * jnp.eye(n, dtype=A.dtype) + jnp.diag(1.0 - free))
+    delta = jnp.linalg.solve(A_damped, g)
+    return jnp.clip(th - delta, lo, hi)
+
+
 @stability(StabilityLevel.EVOLVING)
 def fit_lm(
     gm,
@@ -4039,34 +4116,7 @@ def fit_lm(
     residual_only = jax.jit(_residual)
 
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
-    lm_floor = float(np.finfo(np.dtype(theta0.dtype)).eps)
-
-    @jax.jit
-    def _lm_step(th, r, J, lam, lo, hi):
-        A = J.T @ J
-        g = J.T @ r
-        # A coordinate on its bound whose gradient points out of the range
-        # is held (its row and column replaced by the identity, its
-        # gradient by 0): that is the constraint active, and solving for it
-        # as if free would couple a step it cannot take into the others.
-        hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
-        free = jnp.where(hold, 0.0, 1.0).astype(A.dtype)
-        A = A * free[:, None] * free[None, :]
-        g = g * free
-        n = A.shape[0]
-        # The floor that keeps the solve regular is *relative*, ``eps``
-        # times the mean of ``diag(A)``: an absolute ``1e-12 * I`` was not
-        # negligible once the residual was small in its own units (a
-        # residual scaled by 1e-7 made it 1e-12 / 1e-14 of the curvature it
-        # was added to), and the fit stopped being Gauss-Newton -- it did
-        # not converge in 50 iterations at 1e-7 and barely moved at 1e-8.
-        # Relative, the step is the same for every scaling of the residual.
-        scale = jnp.trace(A) / n
-        floor = jnp.where(scale > 0, lm_floor * scale, 1.0)
-        A_damped = (A + lam * jnp.diag(jnp.diag(A))
-                    + floor * jnp.eye(n, dtype=A.dtype) + jnp.diag(1.0 - free))
-        delta = jnp.linalg.solve(A_damped, g)
-        return jnp.clip(th - delta, lo, hi)
+    _lm_step = _marquardt_step
 
     # The step test, on the physical trainable entries (see ``step_tol``):
     # per entry, a relative tolerance -- ``step_tol``, or ``2**4`` ulps of
@@ -4143,7 +4193,7 @@ def fit_lm(
         # proposal cannot converge the run even if it moves nothing (the
         # coupled solve can point such a coordinate outward); the retries,
         # damped towards the gradient, move it inward.
-        stuck_inward = bounds.inward_descent(theta, J.T @ r)
+        stuck_inward = bounds.inward_descent(theta, J.T @ r, _physical(theta), rel_tol)
         for attempt in range(12):
             cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype), bounds.lo, bounds.hi)
             r_new = residual_only(cand)

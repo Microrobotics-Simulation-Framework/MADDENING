@@ -587,8 +587,9 @@ def _adversarial_constants(draw, kinds):
     Multiplicative links keep ``a = 1`` around a head value just above one
     (the values stay within ``e**0.25`` of 1 whatever the exponent);
     affine links get a signed gain of magnitude 0.5-3 and a bias that puts
-    the next value at a drawn signed target of magnitude 0.02-0.3, so
-    ``a u`` and the bias cancel: ``|a u|`` is up to 150 times ``|x|``.  The head's gain makes the loop contract at ``rho``.
+    the next value at a drawn signed target of magnitude 0.02-0.3 (0.9-1.1
+    where a multiplicative link follows), so ``a u`` and the bias cancel:
+    ``|a u|`` is up to 150 times ``|x|``.  The head's gain makes the loop contract at ``rho``.
     """
     rho = draw(st.sampled_from([0.9, 0.99]))
     seed = draw(st.integers(0, 2 ** 32 - 1))
@@ -604,7 +605,11 @@ def _adversarial_constants(draw, kinds):
     for k, kind in enumerate(kinds, start=1):
         if kind == "affine":
             a = float(rng.choice([-1.0, 1.0]) * rng.uniform(0.5, 3.0))
-            nxt = float(rng.choice([-1.0, 1.0]) * rng.uniform(0.02, 0.3))
+            # Small targets only where no multiplicative link follows: a
+            # square of 0.1 five times over is 1e-32.
+            small = all(kd == "affine" for kd in kinds[k:])
+            nxt = float(rng.choice([-1.0, 1.0])
+                        * (rng.uniform(0.02, 0.3) if small else rng.uniform(0.9, 1.1)))
             consts[k] = (a, nxt - a * target[k - 1])
             target.append(nxt)
         else:
@@ -622,15 +627,16 @@ def _adversarial_constants(draw, kinds):
     return consts
 
 
-def _exact_chain(kinds, consts):
+def _exact_chain(kinds, consts, start=None):
     """The fixed point of the float32-constant map: Newton on ``g s_K(n0) + c - n0``.
 
-    Started at the designed head value: the map is a polynomial with other
-    roots (a signed affine link between squares puts one 0.4 away), and the
-    one the loop contracts to is the one at rate ``rho``.
+    Started at the designed head value, or at *start* (the head value the
+    loop returned): the map is a polynomial with other roots (a signed
+    affine link between squares puts one 0.4 away), and the one to measure
+    against is the one the loop approached.
     """
     g, c = consts[0]
-    n0 = consts["n0"]
+    n0 = consts["n0"] if start is None else float(start)
     for _ in range(200):
         vals, slopes = _chain_values(kinds, n0, consts)
         n0 -= (g * vals[-1] + c - n0) / (g * slopes[-1] - 1.0)
@@ -656,7 +662,8 @@ def _run_chain(kinds, consts, head, mode="gauss-seidel"):
 
 
 def assert_the_bound_holds_on_an_adversarial_chain(kinds, consts, head, mode="gauss-seidel"):
-    _gm, _names, x, xs, d, _p = _run_chain(kinds, consts, head, mode)
+    _gm, _names, x, _xs, d, _p = _run_chain(kinds, consts, head, mode)
+    xs, _slopes = _exact_chain(kinds, consts, start=x[0])
     dist = float(np.sqrt(np.sum(((x - xs) / np.maximum(np.abs(x), np.abs(xs))) ** 2)))
     note(f"kinds={kinds} consts={consts} dist={dist:.4e} {dict(d)}")
     if d["spectral_usable"]:
@@ -718,22 +725,20 @@ def test_a_usable_gradient_bound_holds_on_an_adversarial_chain(kinds, data):
     gm, names, x, xs, d, params = _run_chain(kinds, consts, data.draw(st.sampled_from([1e-3, 1e-4])))
     if not d["gradient_bound_usable"]:
         return
-    xs_state = {nm: gm.get_node_state(nm)["x"] for nm in names}
-    _gm2, _n2 = _chain_graph(kinds)
+    # The compiled step itself, a pure function of the state and the
+    # parameters, from the state the loop returned.
+    step, state = gm._compiled_step, gm._state
+    ext = gm._resolve_external_inputs(None)
 
     def f(c):
         p = jax.tree.map(lambda v: v, params)
         p["nodes"][names[0]]["b"] = c
-        cg.recover(_gm2)
-        _gm2.reset_state()
-        for nm in names:
-            _gm2.set_node_state(nm, {"x": xs_state[nm]})
-        out = _gm2.run_scan(1, params=p)
+        out = step(state, ext, p)
         return jnp.stack([out[nm]["x"][0] for nm in names])
 
     tk = np.asarray(jax.jacfwd(f)(params["nodes"][names[0]]["b"]), np.float64)
     g = consts[0][0]
-    _vals, slopes = _exact_chain(kinds, consts)
+    _vals, slopes = _exact_chain(kinds, consts, start=x[0])
     dn0 = 1.0 / (1.0 - g * slopes[-1])
     tstar = slopes * dn0
     w = 1.0 / np.abs(x)

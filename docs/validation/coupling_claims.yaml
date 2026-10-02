@@ -194,9 +194,9 @@ claims:
     - tests/core/test_coupling_error_bound.py::test_the_first_pass_has_no_ratio_and_reports_that_it_has_none
   status: verified
   notes: >-
-    Ambiguous in the first edition: the docstring said the single pass
+    Ambiguous until 0.4.0's claims fix: the docstring said the single pass
     "still reports that the pass did not converge", which read as always
-    unconverged.  Reworded in fix/p4-13.
+    unconverged.  Reworded.
 
 - id: CPL-008
   area: configuration
@@ -216,8 +216,8 @@ claims:
     - tests/core/test_coupling_claims_helpers.py::test_the_l2_tolerance_is_absolute_only_at_unit_magnitude
   status: verified
   notes: >-
-    Ambiguous in the first edition ("for fields of order one it is the
-    absolute threshold it used to be").  Reworded in fix/p4-13.
+    Ambiguous until 0.4.0's claims fix ("for fields of order one it is the
+    absolute threshold it used to be").  Reworded.
 
 - id: CPL-009
   area: configuration
@@ -565,11 +565,11 @@ claims:
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
   status: verified
   notes: >-
-    Failing in the first edition: a node downstream of a coupling group
-    added before the group's members read the group's previous-step output
-    (sink.x 0.409 against 0.821 after one step), silently.  Fixed in
-    fix/p4-13 (schedule.py, _order_by_components); registered as a shipped
-    defect.
+    Failing until 0.4.0's claims fix (MADD-ANO-119, since 0.1.0): a node
+    downstream of a coupling group added before the group's members read
+    the group's previous-step output (sink.x 0.409 against 0.821 after one
+    step), silently.  The unreached nodes are now ordered by strongly
+    connected component (schedule.py, _order_by_components).
 
 # ---------------------------------------------------------------------------
 # Solvers: ift and fori
@@ -613,8 +613,8 @@ claims:
     - tests/core/test_coupling_claims_graphs.py::test_forward_mode_through_a_fori_group_works
   status: verified
   notes: >-
-    Failing in the first edition: the docstring said "Forward-mode AD does
-    not work through it", and it always had.  Docstring fixed in fix/p4-13.
+    Failing until 0.4.0's claims fix: the docstring said "Forward-mode AD
+    does not work through it", and it always had.  Docstring fixed.
 
 - id: CPL-032
   area: solvers
@@ -709,9 +709,9 @@ claims:
     - tests/core/test_coupling_claims_helpers.py::test_the_dense_tangent_solve_peaks_at_three_jacobians_in_forward_mode
   status: verified
   notes: >-
-    Ambiguous in the first edition: the documentation gave 2 N**2 without
+    Ambiguous until 0.4.0's claims fix: the documentation gave 2 N**2 without
     naming the mode; forward mode measured 3.00 N**2 floats (jaxlib 0.11.0,
-    CPU).  Reworded in fix/p4-13, the failure message included.
+    CPU).  Reworded, the failure message included.
 
 - id: CPL-037
   area: solvers
@@ -819,7 +819,7 @@ claims:
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_old_and_new_mixed_scales_agree_only_at_the_fields_largest_entry
   status: verified
-  notes: Ambiguous in the first edition (stated for every field).  Reworded in fix/p4-13.
+  notes: Ambiguous until 0.4.0's claims fix (stated for every field).  Reworded.
 
 - id: CPL-043
   area: norms
@@ -1006,8 +1006,8 @@ claims:
     - tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
   status: verified
   notes: >-
-    Ambiguous in the first edition: "all of them give one verdict" against
-    the waveform documentation.  Reworded in fix/p4-13; which of the two
+    Ambiguous until 0.4.0's claims fix: "all of them give one verdict" against
+    the waveform documentation.  Reworded; which of the two
     verdicts is right is still to be decided in 0.5.0, as documented.
 
 - id: CPL-053
@@ -1160,8 +1160,8 @@ claims:
     - tests/core/test_coupling_convergence_reporting.py::test_the_aitken_guard_is_answerable_at_every_cap
   status: verified
   notes: >-
-    Ambiguous in the first edition ("Budget one pass over the unaccelerated
-    exit, not a floor of four").  Reworded in fix/p4-13.
+    Ambiguous until 0.4.0's claims fix ("Budget one pass over the unaccelerated
+    exit, not a floor of four").  Reworded.
 
 - id: CPL-063
   area: loop
@@ -1458,8 +1458,8 @@ claims:
     - tests/core/test_coupling_claims_graphs.py::test_the_gradient_bound_holds_in_every_build_order
   status: verified
   notes: >-
-    Ambiguous in the first edition ("Jacobi is bit-identical under rotation
-    and reversal", conditions unstated).  Reworded in fix/p4-13.  The
+    Ambiguous until 0.4.0's claims fix ("Jacobi is bit-identical under rotation
+    and reversal", conditions unstated).  Reworded.  The
     gradient bound's dependence on the build order (83.5 to 99.5 over the
     six orders of one group) was judged a documented approximation -- one
     fixed-seed random probe per field-valued constant, drawn in the order
@@ -2255,8 +2255,8 @@ claims:
     - tests/core/test_coupling_ift_iqn_imvj.py::test_backward_parity_ift_iqn_imvj_through_jit
   status: verified
   notes: >-
-    Ambiguous in the first edition ("the derivative is identical for all of
-    them").  Reworded in fix/p4-13.
+    Ambiguous until 0.4.0's claims fix ("the derivative is identical for all of
+    them").  Reworded.
 
 - id: CPL-142
   area: ift gradients
@@ -2626,9 +2626,9 @@ claims:
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
   status: verified
   notes: >-
-    Failing in the first edition: the norm summed in insertion order, and a
+    Failing until 0.4.0's claims fix: the norm summed in insertion order, and a
     reversed build moved the residual in its last bits (228.80760 against
-    228.80762).  Fixed in fix/p4-13, by the group's sweep order rather
+    228.80762).  Fixed by the group's sweep order rather
     than the edges' names, which would have made the renaming invariance
     (CPL-180) fail under this norm instead.
 

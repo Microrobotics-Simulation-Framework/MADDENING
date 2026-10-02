@@ -1,10 +1,16 @@
 #!/usr/bin/env python
 """
-RigidBody2DNode demo using the MADDENING GraphManager.
+Planar rigid-body demo using the MADDENING GraphManager.
 
-Simulates a 2D rigid body (projectile) launched at an angle with an
+Simulates a rigid body (projectile) launched at an angle with an
 applied torque, producing simultaneous translational (parabolic
 trajectory) and rotational motion.
+
+The body is a :class:`~maddening.nodes.rigid_body.RigidBodyNode` (6-DOF)
+held in the x-y plane by DOF constraints -- ``z`` locked at 0 and no
+rotation about ``x`` or ``y`` -- which is how 0.4.0 expresses what the
+deprecated ``RigidBody2DNode`` used to.  Its orientation is a
+quaternion; the in-plane rotation angle is read back from it.
 
 The results are verified against analytical solutions for:
 - Position:  x(t) = x0 + vx0*t,  y(t) = y0 + vy0*t + 0.5*g*t^2
@@ -20,9 +26,21 @@ Usage
 import math
 
 import jax.numpy as jnp
+import numpy as np
 
 from maddening.core.graph_manager import GraphManager
-from maddening.nodes.rigid_body_2d import RigidBody2DNode
+from maddening.nodes.rigid_body import RigidBodyNode
+
+
+def planar_angle(orientation) -> np.ndarray:
+    """Unwrapped rotation angle about z from a history of quaternions.
+
+    ``orientation`` is ``(..., 4)`` in ``(w, x, y, z)`` order.  With the
+    ``rx``/``ry`` constraints the rotation is purely about z, so the
+    quaternion is ``(cos(theta/2), 0, 0, sin(theta/2))``.
+    """
+    q = np.asarray(orientation, dtype=np.float64)
+    return np.unwrap(2.0 * np.arctan2(q[..., 3], q[..., 0]))
 
 
 def main() -> None:
@@ -42,7 +60,7 @@ def main() -> None:
 
     gx, gy = 0.0, -9.81
 
-    print("RigidBody2D Demo: Projectile with Rotation")
+    print("Planar Rigid-Body Demo: Projectile with Rotation")
     print("=" * 60)
     print(f"  Mass:           {mass} kg")
     print(f"  Inertia:        {inertia} kg*m^2")
@@ -56,26 +74,25 @@ def main() -> None:
     # ---- Build graph ----------------------------------------------------
     gm = GraphManager()
 
-    body = RigidBody2DNode(
+    body = RigidBodyNode(
         name="body",
         timestep=dt,
         mass=mass,
-        inertia=inertia,
-        gravity=(gx, gy),
-        initial_x=0.0,
-        initial_y=0.0,
-        initial_vx=vx0,
-        initial_vy=vy0,
-        initial_angle=0.0,
-        initial_omega=0.0,
+        # Only the z entry matters in the plane; the other two are inert
+        # because rotation about x and y is locked.
+        inertia=(inertia, inertia, inertia),
+        gravity=(gx, gy, 0.0),
+        constraints={"z": 0.0, "rx": 0.0, "ry": 0.0},
+        initial_position=(0.0, 0.0, 0.0),
+        initial_velocity=(vx0, vy0, 0.0),
     )
     gm.add_node(body)
 
-    # Declare external torque input
+    # Declare external torque input (a 3-vector; only z acts in the plane)
     gm.add_external_input(
         target_node="body",
         target_field="torque",
-        shape=(),
+        shape=(3,),
         dtype=jnp.float32,
     )
 
@@ -83,17 +100,15 @@ def main() -> None:
     print(f"Schedule: {gm.schedule}")
 
     # ---- Run simulation -------------------------------------------------
-    xs = []
-    ys = []
-    angles = []
+    # The torque is constant, so the whole run fits in one lax.scan.
+    ext = {"body": {"torque": jnp.array([0.0, 0.0, torque_value],
+                                        dtype=jnp.float32)}}
+    final_state, history = gm.run_scan_with_history(n_steps, external_inputs=ext)
 
-    ext = {"body": {"torque": jnp.array(torque_value, dtype=jnp.float32)}}
-
-    for i in range(n_steps):
-        state = gm.step(external_inputs=ext)
-        xs.append(float(state["body"]["x"][0]))
-        ys.append(float(state["body"]["x"][1]))
-        angles.append(float(state["body"]["angle"]))
+    positions = np.asarray(history["body"]["position"])
+    xs = positions[:, 0]
+    ys = positions[:, 1]
+    angles = planar_angle(history["body"]["orientation"])
 
     # ---- Analytical solution --------------------------------------------
     # Semi-implicit Euler for constant acceleration converges to the
@@ -115,13 +130,14 @@ def main() -> None:
     angle_exact = 0.5 * alpha * t_end**2
     omega_exact = alpha * t_end
 
-    final_state = gm.get_node_state("body")
-    x_sim = float(final_state["x"][0])
-    y_sim = float(final_state["x"][1])
-    vx_sim = float(final_state["v"][0])
-    vy_sim = float(final_state["v"][1])
-    angle_sim = float(final_state["angle"])
-    omega_sim = float(final_state["omega"])
+    body_final = final_state["body"]
+    x_sim = float(body_final["position"][0])
+    y_sim = float(body_final["position"][1])
+    vx_sim = float(body_final["velocity"][0])
+    vy_sim = float(body_final["velocity"][1])
+    angle_sim = float(angles[-1])
+    omega_sim = float(body_final["angular_velocity"][2])
+    z_sim = float(body_final["position"][2])
 
     print()
     print("--- Final State Comparison ---")
@@ -136,8 +152,8 @@ def main() -> None:
     print()
 
     # ---- Trajectory summary ---------------------------------------------
-    max_height = max(ys)
-    range_x = xs[-1]
+    max_height = float(np.max(ys))
+    range_x = float(xs[-1])
     total_rotation_deg = math.degrees(angle_sim)
 
     print(f"  Max height:     {max_height:.4f} m")
@@ -183,6 +199,10 @@ def main() -> None:
         f"omega error too large: {abs(omega_sim - omega_exact):.4e}"
     )
     print(f"Check: omega error {abs(omega_sim - omega_exact):.4e} < {omega_tol}")
+
+    # The constraints hold the body in the plane
+    assert z_sim == 0.0, f"z constraint not held: z={z_sim}"
+    print("Check: body stayed in the x-y plane (z = 0).")
 
     # Projectile should have gone forward
     assert x_sim > 10.0, f"Projectile didn't travel far enough: x={x_sim}"

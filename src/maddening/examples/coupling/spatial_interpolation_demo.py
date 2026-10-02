@@ -31,8 +31,10 @@ differentiable, and compatible with ``jax.grad`` through the graph.
 Usage
 -----
     python -m maddening.examples.coupling.spatial_interpolation_demo
+    python -m maddening.examples.coupling.spatial_interpolation_demo --heat-steps 2000
 """
 
+import argparse
 import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -109,7 +111,11 @@ def demo_conservative_projection():
     print("  interpolation does NOT guarantee this; conservative projection does.")
     print()
 
-    n_coarse, n_fine = 8, 32
+    # 30 fine cells, not 32: on a grid that splits every coarse cell into
+    # the same number of fine ones, linear interpolation between cell
+    # centres happens to conserve the integral too (its corrections
+    # telescope), which would hide the difference this part shows.
+    n_coarse, n_fine = 8, 30
     coarse_bounds = jnp.linspace(0, 1, n_coarse + 1)
     fine_bounds = jnp.linspace(0, 1, n_fine + 1)
     coarse_centers = 0.5 * (coarse_bounds[:-1] + coarse_bounds[1:])
@@ -139,12 +145,17 @@ def demo_conservative_projection():
     print(f"  Linear interp ({n_fine} cells):     {integral_lin:.6f}  "
           f"error = {abs(integral_lin - integral_source):.2e}")
     print()
-    print("  Conservative projection preserves the integral exactly.")
-    print("  Linear interpolation introduces a small integration error.")
+    err_cons = abs(integral_cons - integral_source)
+    err_lin = abs(integral_lin - integral_source)
+    assert err_cons < 1e-5 * abs(integral_source), err_cons
+    assert err_lin > 10 * err_cons, (err_lin, err_cons)
+    print("  Conservative projection preserves the integral to float32")
+    print("  round-off; linear interpolation does not on these non-nested")
+    print("  grids.")
     print()
 
 
-def demo_coupled_heat_rods():
+def demo_coupled_heat_rods(n_steps=20000):
     """Two heat rods at different resolutions, coupled at boundary."""
     print("=" * 65)
     print("Part 3: Coupled Heat Rods (Different Resolutions)")
@@ -154,7 +165,6 @@ def demo_coupled_heat_rods():
     n_fine = 32
     dt = 0.00005
     alpha = 0.05  # higher diffusivity for faster response
-    n_steps = 20000
 
     print()
     print(f"  Rod A: COARSE ({n_coarse} cells), starts at 100 C")
@@ -213,7 +223,10 @@ def demo_coupled_heat_rods():
 
     interface_gap = abs(T_c[-2] - T_f[1])
     print(f"  Interface: coarse[-2]={T_c[-2]:.1f} C, fine[1]={T_f[1]:.1f} C")
-    print(f"  Gap = {interface_gap:.1f} C (narrows as system approaches steady state)")
+    print(f"  Gap = {interface_gap:.1f} C: the two values sit 1.5 cells either")
+    print(f"  side of the interface, {1.5 / n_coarse + 1.5 / n_fine:.2f} m apart, "
+          f"so a gap remains")
+    print("  for as long as heat flows across it.")
     print()
 
 
@@ -246,10 +259,14 @@ def demo_gradient_through_interpolation():
     print()
 
 
-def main() -> None:
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description="Spatial interpolation maps demo")
+    parser.add_argument("--heat-steps", type=int, default=20000,
+                        help="Steps of the coupled heat rods in Part 3 (default: 20000)")
+    args = parser.parse_args(argv)
     demo_interpolation_accuracy()
     demo_conservative_projection()
-    demo_coupled_heat_rods()
+    demo_coupled_heat_rods(args.heat_steps)
     demo_gradient_through_interpolation()
     print("All demos complete.")
 

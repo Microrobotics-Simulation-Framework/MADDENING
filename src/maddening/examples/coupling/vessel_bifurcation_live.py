@@ -11,12 +11,14 @@ Demonstrates the full MADDENING real-time pipeline:
 
 The physics runs at dt=0.0001 on a background thread.  The renderer
 polls the StateRelay at ~30 fps and updates the 3D tube coloring.
-Meanwhile, every 100th physics step is written to a USD file for
-later replay.
+Meanwhile, every 100th physics step is written to
+``vessel_bifurcation_live.usda`` in the current directory for later
+replay (the phantom goes to ``vessel_bifurcation_live_phantom.usda``).
 
-After 5 seconds of sim time, a heat source pulse is injected into
-the parent tube (demonstrating external input / command injection).
-The pulse propagates through the bifurcation to both daughters.
+About 3 wall-clock seconds after start, a heat source pulse is injected
+into the parent tube for 5 wall-clock seconds (demonstrating external
+input / command injection).  The pulse propagates through the
+bifurcation to both daughters.
 
 Architecture::
 
@@ -34,18 +36,25 @@ Keyboard controls:
     Mouse       rotate, zoom, pan
     Close window to stop
 
+Needs PyVista and a display.
+
 Usage::
 
-    JAX_PLATFORMS=cpu python -m maddening.examples.coupling.vessel_bifurcation_live
+    python -m maddening.examples.coupling.vessel_bifurcation_live
+    python -m maddening.examples.coupling.vessel_bifurcation_live --gpu
 """
 
 import os
 import sys
-import tempfile
 import threading
 import time
 
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# Decide the JAX backend before anything imports JAX: JAX reads
+# JAX_PLATFORMS once, at import, so setting it later has no effect.
+if "--gpu" in sys.argv:
+    os.environ["JAX_PLATFORMS"] = ""   # let JAX pick CUDA/ROCm if present
+else:
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax.numpy as jnp
 import numpy as np
@@ -85,9 +94,8 @@ def main():
     # 1. Create vessel phantom
     # ------------------------------------------------------------------
     print("\n1. Creating vessel phantom...")
-    tmpdir = tempfile.mkdtemp()
-    vessel_path = os.path.join(tmpdir, "vessel.usda")
-    results_path = os.path.join(tmpdir, "live_results.usda")
+    vessel_path = os.path.abspath("vessel_bifurcation_live_phantom.usda")
+    results_path = os.path.abspath("vessel_bifurcation_live.usda")
 
     vessel_stage = create_vessel_phantom(
         vessel_path,
@@ -182,7 +190,8 @@ def main():
     # after a few seconds of sim time, demonstrating external inputs.
     pulse_active = [False]
     ext_inputs_lock = threading.Lock()
-    ext_inputs = [gm._default_external_inputs()]
+    # An empty dict means "every declared input at zero".
+    ext_inputs = [{}]
 
     def pulse_injector():
         """Inject a heat pulse into the parent tube's midsection."""
@@ -206,7 +215,7 @@ def main():
         print("  >> Heat pulse OFF")
         pulse_active[0] = False
         with ext_inputs_lock:
-            ext_inputs[0] = gm._default_external_inputs()
+            ext_inputs[0] = {}
 
     pulse_thread = threading.Thread(target=pulse_injector, daemon=True)
 
@@ -293,18 +302,11 @@ def main():
             print(f"   Parent: T=[{T_p.min():.1f}, {T_p.max():.1f}] C")
             print(f"   Left:   T=[{T_l.min():.1f}, {T_l.max():.1f}] C")
 
-    try:
-        os.unlink(vessel_path)
-        os.unlink(results_path)
-        os.rmdir(tmpdir)
-    except OSError:
-        pass
-
+    print(f"   Replay file: {results_path}")
     print("\nDone.")
 
 
 if __name__ == "__main__":
     if "--gpu" in sys.argv:
-        os.environ["JAX_PLATFORMS"] = ""
         print("GPU mode: JAX auto-detecting backend")
     main()

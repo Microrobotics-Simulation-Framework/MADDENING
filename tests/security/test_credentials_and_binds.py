@@ -163,9 +163,11 @@ def test_the_signaling_server_bind_can_be_chosen():
 def _host_literals(path: pathlib.Path) -> list[str]:
     """Every bind address this module names as a literal.
 
-    Covers ``uvicorn.run(..., host="X")`` and
-    ``add_argument("--host", ..., default="X")``.  Parsed rather than
-    imported: these modules pull in JAX, build LBM grids and start
+    Covers ``uvicorn.run(..., host="X")``,
+    ``add_argument("--host", ..., default="X")`` and
+    ``<socket>.bind(("X", port))`` -- the examples bind their own socket
+    so that ``--port 0`` can report the port the OS chose.  Parsed rather
+    than imported: these modules pull in JAX, build LBM grids and start
     runners at import time.
     """
     tree = ast.parse(path.read_text())
@@ -173,6 +175,14 @@ def _host_literals(path: pathlib.Path) -> list[str]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
+        if (
+            isinstance(node.func, ast.Attribute) and node.func.attr == "bind"
+            and node.args and isinstance(node.args[0], ast.Tuple)
+            and node.args[0].elts
+            and isinstance(node.args[0].elts[0], ast.Constant)
+            and isinstance(node.args[0].elts[0].value, str)
+        ):
+            hosts.append(node.args[0].elts[0].value)
         positional = [
             arg.value for arg in node.args
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
@@ -217,3 +227,16 @@ def test_the_bind_enumeration_actually_reads_the_hosts():
     path = root / "src/maddening/examples/servers/vessel_flow_server.py"
 
     assert "127.0.0.1" in _host_literals(path)
+
+
+def test_the_bind_enumeration_reads_socket_binds(tmp_path):
+    """The HTTP example servers bind their own socket; a public bind there
+    must be seen, or the enumeration passes on servers it cannot read."""
+    root = pathlib.Path(__file__).resolve().parents[2]
+    api = root / "src/maddening/examples/servers/api_server.py"
+    assert _host_literals(api) == ["127.0.0.1"]
+
+    exposed = tmp_path / "exposed.py"
+    exposed.write_text(api.read_text().replace(
+        'sock.bind(("127.0.0.1", port))', 'sock.bind(("0.0.0.0", port))'))
+    assert "0.0.0.0" in _host_literals(exposed)

@@ -17,7 +17,7 @@ less than their names say (MADD-ANO-027): ``waveform_iterations`` re-runs
 the same fixed-point solve rather than relaxing a boundary waveform, and
 ``boundary_interpolation="quadratic"`` is exactly ``"linear"``.
 
-Sections 4-7 couple two ``SpringDamperNode``\ s anchored to each other.
+Sections 4-7 couple two ``SpringDamperNode`` nodes anchored to each other.
 ``SpringDamperNode`` pulls its end towards ``anchor + rest_length``, so
 the two ends get rest lengths +1 and -1: one spring between two masses,
 with a rest state.  (With the same sign at both ends there is none and

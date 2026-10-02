@@ -26,7 +26,7 @@ norm with ``tolerance``; ``"mixed"`` takes a per-field RMS of
 does the same over the coupling-edge fields only.  Part 3 runs all
 three.
 
-Setup: two masses joined by one spring (two ``SpringDamperNode``\\ s
+Setup: two masses joined by one spring (two ``SpringDamperNode`` nodes
 anchored to each other, ``rest_length`` +1 and -1).  A Gauss-Seidel pass
 scales the error by ``(k * dt**2 / m)**2 = 0.01`` here, so the iteration
 needs about four passes to reach ``tolerance=1e-6``.

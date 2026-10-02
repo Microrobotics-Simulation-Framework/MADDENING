@@ -7,7 +7,7 @@ cycles -- back-edges read previous timestep) and *Gauss-Seidel*
 coupling via ``add_coupling_group()`` / ``auto_couple()``.
 
 Setup: two masses joined by one spring, modelled as two
-``SpringDamperNode``\ s whose anchors are each other's position.  This
+``SpringDamperNode`` nodes whose anchors are each other's position.  This
 creates a bidirectional coupling (a cycle in the graph).
 
 ``SpringDamperNode`` pulls its end towards ``anchor + rest_length``, so

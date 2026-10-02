@@ -23,7 +23,7 @@ Compares four ways of iterating a coupling group to its fixed point:
   converges where plain iteration diverges in Part 2.
 
 Setup: two masses joined by one spring, modelled as two
-``SpringDamperNode``\\ s anchored to each other (``rest_length`` +1 on one
+``SpringDamperNode`` nodes anchored to each other (``rest_length`` +1 on one
 end and -1 on the other, so the pair is a single spring with equal and
 opposite forces).  Within a step each node's new position responds to
 its partner's with gain ``r = k * dt**2 / m``, so a Gauss-Seidel pass

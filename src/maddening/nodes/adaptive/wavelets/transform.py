@@ -312,13 +312,41 @@ def _level_labels_np(n_levels: int, n_coarse: int, dim: int = 1) -> "np.ndarray"
     block plus the first detail band) has ``(2 n_coarse) ** dim`` entries.
     """
     _check_dim(dim)
+    n_levels, n_coarse, dim = int(n_levels), int(n_coarse), int(dim)
+    _check_label_count(n_levels, n_coarse, dim, bits_per_level=dim)
     per_level = 2 ** dim - 1
-    labs = [0] * (n_coarse ** dim)
-    cur = n_coarse
-    for lvl in range(n_levels):
-        labs += [lvl] * (per_level * cur ** dim)
-        cur *= 2
-    return np.asarray(labs, dtype=np.int32)
+    # One count per level and one ``np.repeat``.  This used to grow a Python
+    # list entry by entry, so ``n_levels=10_000_000`` -- a 2**10**7-function
+    # basis no machine holds -- ran until the OOM killer stopped the process
+    # (57.7 GB) instead of failing; ``_check_label_count`` refuses it first.
+    counts = [n_coarse ** dim] + [
+        per_level * (n_coarse << lvl) ** dim for lvl in range(n_levels)
+    ]
+    labels = np.asarray([0] + list(range(n_levels)), dtype=np.int32)
+    return np.repeat(labels, np.asarray(counts, dtype=np.int64))
+
+
+#: Largest basis, as a power of two, :func:`_level_labels_np` and the
+#: Dirichlet labels will build: past ``2**62`` functions the count does not
+#: fit the ``int64`` NumPy indexes with, and no machine holds that many.
+_MAX_LABEL_BITS = 62
+
+
+def _check_label_count(n_levels: int, n_coarse: int, dim: int, *, bits_per_level: int) -> None:
+    """Refuse a basis too large to label, before anything is built.
+
+    Decided on bit lengths -- ``dim`` bits per coarse point's width and
+    *bits_per_level* per refinement -- so ``n_levels=10_000_000`` is
+    refused in microseconds, never after its ``2**10**7``-sized count has
+    been formed.
+    """
+    bits = dim * (int(n_coarse) + 1).bit_length() + bits_per_level * int(n_levels)
+    if n_levels < 0 or n_coarse < 0 or bits > _MAX_LABEL_BITS:
+        raise ValueError(
+            f"a basis with n_levels={n_levels}, n_coarse={n_coarse}, dim={dim} has "
+            f"about 2**{bits} functions or more: too large to build "
+            f"(at most 2**{_MAX_LABEL_BITS})"
+        )
 
 
 @stability(StabilityLevel.EXPERIMENTAL)

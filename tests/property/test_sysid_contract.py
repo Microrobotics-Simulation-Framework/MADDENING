@@ -320,8 +320,8 @@ class TestTrainableContract:
     that may have moved.
     """
 
-    # Per push: test_a_leaf_outside_the_mask_is_bit_identical_after_a_fit (below, every
-    # fitter) and tests/core/test_sysid.py::test_fit_mask_overrides_specs_and_tol_stops_early.
+    # Per push: tests/property/test_sysid_contract.py::TestTrainableContract::test_a_leaf_outside_the_mask_is_bit_identical_after_a_fit
+    # (below, every fitter) and tests/core/test_sysid.py::test_fit_mask_overrides_specs_and_tol_stops_early.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(recipe=graph_recipes(max_nodes=3), data=st.data(),
            n_iter=st.integers(min_value=1, max_value=4))
@@ -509,7 +509,7 @@ class TestTrainableContract:
     # ``fitter`` is drawn rather than ``@pytest.mark.parametrize``\ d: a
     # parametrised ``@given`` *method* gets a fresh class instance per
     # case, which Hypothesis rejects as ``HealthCheck.differing_executors``.
-    # Per push, one fitter each: tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec,
+    # Per push: one fitter each, tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec,
     # tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_lm_gets_its_iterate_back_bit_for_bit,
     # tests/core/test_sysid_contract_examples.py::test_multiple_shooting_leaves_a_spec_frozen_leaf_bit_identical.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
@@ -730,8 +730,8 @@ class TestBoundsAndTransforms:
         note(f"spec={spec} u={u}")
         spec.check(spec.to_constrained(jnp.float32(u)))
 
-    # Per push: test_a_bound_no_float32_can_hold_is_met_at_the_leafs_precision (below),
-    # TestTrainableContract::test_a_frozen_leaf_made_trainable_in_the_spec_respects_its_bounds
+    # Per push: tests/property/test_sysid_contract.py::TestBoundsAndTransforms::test_a_bound_no_float32_can_hold_is_met_at_the_leafs_precision
+    # (below), tests/property/test_sysid_contract.py::TestTrainableContract::test_a_frozen_leaf_made_trainable_in_the_spec_respects_its_bounds
     # (an upper bound), tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(bounds=st.tuples(_finite(0.5, 5.0), _finite(6.0, 40.0)),
@@ -945,7 +945,7 @@ class TestFIMAgainstFiniteDifference:
         assert np.abs(F - F_fd).max() <= 2e-2 * scale, (F, F_fd)
 
     # Per push: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_central_finite_difference_and_its_bound_is_the_inverse
-    # and test_crb_is_infinite_along_an_exact_null_direction (below).
+    # and tests/property/test_sysid_contract.py::TestFIMAgainstFiniteDifference::test_crb_is_infinite_along_an_exact_null_direction (below).
     @pytest.mark.slow  # shares the slow test above's analytic-residual compiles; alone it paid them (4.6 s -> 11.6 s locally)
     @given(problem=analytic_residual())
     @settings(max_examples=EXAMPLES_STANDARD, deadline=None)
@@ -1154,7 +1154,7 @@ class TestFIMMaskingAndScaling:
     class was filtered when this one was missed."""
 
 
-    # Per push: tests/core/test_sysid_fim_nominal_scale.py::test_a_masked_column_keeps_its_own_spec
+    # Per push: tests/core/test_sysid_fim_nominal_scale.py::TestCompositionWithNoiseAndMask::test_a_masked_column_keeps_its_own_spec
     # and tests/core/test_sysid.py::test_fim_mask_restricts_to_selected_leaves.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(problem=analytic_residual(), data=st.data(),
@@ -1702,6 +1702,8 @@ class TestTuneCouplingParams:
 
     # No per-push check: each configuration builds and compiles a coupled graph (a two-point
     # grid took 29 s cold on three local cores), over an API deprecated for removal in 0.5.0.
+    # Slow-only on purpose, with the class's other test: the deprecated calibration APIs'
+    # row of "What only the slow lane checks" in docs/developer_guide/testing_standards.md.
     @pytest.mark.slow  # graphs, fits or Jacobians compiled per example: over 5 s on CI
     @given(tolerances=st.lists(st.sampled_from([1e-3, 1e-6, 1e-9]),
                                min_size=1, max_size=2, unique=True),

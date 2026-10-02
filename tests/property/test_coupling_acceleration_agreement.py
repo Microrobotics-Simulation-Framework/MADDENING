@@ -253,6 +253,7 @@ _RECIPES = graph_recipes(
 # invariant runs on every push over the registry fixtures, in
 # ``test_every_l2_configuration_reaches_the_same_fixed_point`` in
 # ``tests/core/test_coupling_fixture_invariants.py``.
+# Per push: tests/core/test_coupling_fixture_invariants.py::test_every_l2_configuration_reaches_the_same_fixed_point[heterogeneous-2000]
 @pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(

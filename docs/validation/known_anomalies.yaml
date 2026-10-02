@@ -498,7 +498,7 @@ anomalies:
       along the pass's longest chain of same-pass reads -- a later
       confirmation audit found the worst node's count let a stalled
       32-relay Gauss-Seidel ring read 0.51x its true distance with the
-      flag set (MADD-ANO-086).
+      flag set (MADD-ANO-093).
       Nothing outside update() can see an undeclared loop, so where the
       residual is at the floor -- where that count is the whole bound --
       a group with an undeclared node reports spectral_usable=False and
@@ -6706,7 +6706,7 @@ anomalies:
       with 200 too.  Found by the second security round of
       the 0.4.0 audit and described in the CHANGELOG, but not registered
       until the round-3 confirmation audit.
-      Partially resolved in 0.4.0 (afddbf8, 2026-09-20): a state-changing
+      First fixed in 0.4.0 (afddbf8, 2026-09-20): a state-changing
       request or a WebSocket handshake whose `Origin` names neither the
       server itself (its authority compared with the `Host` header) nor an
       origin passed in `SimulationServer(allowed_origins=)` is refused with
@@ -6714,6 +6714,21 @@ anomalies:
       userinfo-prefixed one.  A request with no `Origin` (curl, a script)
       and a cross-origin `GET`, whose reply a page cannot read, are served
       as before.
+      That left DNS rebinding.  A page served from
+      `http://attacker.example:8000`, whose name the attacker then
+      re-points at 127.0.0.1, sends a `Host` and an `Origin` that both name
+      its own domain, so it passed the comparison.  On the 0.4.0 tree
+      (CPU, `TestClient`, a loopback bind with no token), with `Host` and
+      `Origin` both naming `attacker.example:8000`, `POST /sim/reset` and
+      `POST /checkpoint/save` answered 200 (the file was written under
+      `checkpoint_root`), `GET /graph` answered 200, and a `/ws/state`
+      handshake was accepted.  Resolved in 0.4.0 by a `Host` allowlist.
+      Where no token is demanded and the peer is a TCP address, a request
+      or WebSocket handshake whose `Host` is not `localhost`, a
+      `127.0.0.0/8` or `::1` literal (any port), or a name in
+      `SimulationServer(allowed_hosts=)` is refused with 403 or a 1008
+      close.  That covers every route, `GET` and `/healthz` included, and
+      `POST /cloud/launch`.
     severity: "critical"
     safety_relevance: "safety_relevant"
     safety_relevance_rationale: >
@@ -6727,9 +6742,9 @@ anomalies:
       other hosts' requests to the port itself.  The definition's note that
       a loopback default is not an exposure to other hosts rests on only
       local users reaching a loopback socket, which is exactly what this
-      defect made false.  The part still reachable in 0.4.0 (residual_risk)
-      is reached in the shipped default configuration, a loopback bind with
-      no token.
+      defect made false.  The rebinding form reached the shipped default
+      configuration of the 0.4.0 tree, a loopback bind with no token, until
+      the `Host` allowlist.
       Graded `safety_relevant` on the ground MADD-ANO-051 is: the writes
       change what the simulation computes with nothing in the reply or the
       state to show it, a checkpoint loaded into the graph or overwritten on
@@ -6738,43 +6753,33 @@ anomalies:
     affected_components:
       - "maddening.api.server.SimulationServer.create_app"
       - "maddening.api.server.origin_is_same_site"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Before 0.4.0: do not leave the API running while a browser on the same
       machine has pages open that you do not trust, or put it behind a
-      reverse proxy that refuses a request carrying a foreign `Origin`.
-      From 0.4.0, against the DNS rebinding that residual_risk describes:
-      run the API only while it is in use, or front it with a proxy that
-      refuses any `Host` header other than the loopback names you reach it
-      by.
-    resolution_status: "partially_resolved"
+      reverse proxy that refuses a request carrying a foreign `Origin` or a
+      `Host` other than the loopback names you reach it by.
+    resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      Live in 0.4.0, which is why this entry is partially resolved rather
-      than resolved: the check compares the `Origin` with the `Host` header,
-      and a DNS-rebinding page sends both naming its own domain.  A page
-      served from `http://attacker.example:8000`, whose name the attacker
-      then re-points at 127.0.0.1, is same-origin in the browser's eyes, so
-      it can send any request, JSON bodies included, and read the replies.
-      Measured on the 0.4.0 tree (CPU, `TestClient`, a loopback bind with
-      no token): with `Host` and `Origin` both naming
-      `attacker.example:8000`, `POST /sim/reset` and `POST /checkpoint/save`
-      answered 200 (the file was written under `checkpoint_root`), `GET
-      /graph` answered 200 and a `/ws/state` handshake was accepted.  The
-      server checks the `Host` against no list of the names it is reached
-      by, which is the defence against rebinding.  Some browsers now block
+      The check is skipped for a peer that is not an IP address: an
+      in-process client, and a connection over a Unix socket.  A browser
+      reaches the API only through a proxy there, and a same-host proxy
+      that forwards remote requests to a loopback-bound API is outside the
+      loopback trust model in any case (MADD-ANO-051's residual risk); such
+      a proxy should check `Host` itself.  A name added with
+      `allowed_hosts` is trusted on every port.  Some browsers also block
       or prompt for a public page's requests to a private address; the
       library does not rely on that.  Off loopback the bearer token is
-      demanded (MADD-ANO-051) and a rebound page does not hold it.  Pinned
-      by test_a_dns_rebound_page_passes_the_origin_check, which fails when
-      the hole is closed.
+      demanded (MADD-ANO-051), and a rebound page does not hold it.
     verification:
       - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_state_change_is_refused"
       - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_checkpoint_write_never_reaches_the_filesystem"
       - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_page_cannot_open_the_state_stream"
       - "tests/api/test_cross_origin_requests.py::test_the_token_a_non_loopback_bind_demands_refuses_a_rebound_page"
-      # What stays open, pinned so that closing it fails.
-      - "tests/api/test_cross_origin_requests.py::test_a_dns_rebound_page_passes_the_origin_check"
+      - "tests/api/test_cross_origin_requests.py::test_a_dns_rebound_page_is_refused_by_its_host"
+      - "tests/api/test_cross_origin_requests.py::test_a_dns_rebound_page_cannot_reach_the_cloud_launch_route"
+      - "tests/api/test_cross_origin_requests.py::test_a_host_that_is_not_a_loopback_name_fails_closed"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-077"
@@ -7333,6 +7338,376 @@ anomalies:
       - "tests/fmi/test_advertised_bounds.py::test_the_sidecars_own_specs_are_kept_and_not_written_into"
       - "tests/fmi/test_advertised_bounds.py::test_an_fmu_started_outside_its_advertised_bounds_restores_its_own_snapshot"
   - anomaly_id: "MADD-ANO-086"
+    title: "A REST request could make the server allocate without bound: before 0.4.0 POST /graph/nodes built any size, and 0.4.0's size checks ran only after the node was built"
+    description: >
+      From v0.1.0 to v0.3.1 `POST /graph/nodes` called the node's
+      constructor with whatever params the request carried and added the
+      node to the graph, with no bound on any size.  Checked at each tag,
+      v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1, on 2026-10-02 (`git
+      archive` of each, CPU, jaxlib 0.11.0, FastAPI `TestClient`): a D3Q19
+      `LBMNode` with `grid_shape` [100, 100, 100] answered 201, its
+      25-million-element state resident (+174 to +179 MB of RSS).  Nothing
+      bounded the product, so a request could name more memory than any
+      host has.  `GraphManager.from_dict` and `load_graph_from_usd` built
+      every node a config or a stage named in the same way.
+
+      0.4.0 bounded the request (each integer at 10^7, the request at 10^6
+      values, a new node's state at 2*10^7 elements), but every size check
+      ran on the built node: `POST /graph/nodes` measured the state it had
+      just allocated, and `PUT /graph/params` checked a write by calling
+      the node's constructor with the new value.  The abstract pre-check
+      could not see a size the constructor derives (`LBMNode` sizes its
+      state from `self._grid_shape`).  Measured on the 0.4.0 development
+      tree (d44d3bb, CPU, jaxlib 0.11.0): a D3Q19 `LBMNode` of 140^3 cells
+      took +1.1 GB before the state cap refused it, and a D2Q9 `PUT
+      grid_shape` of 16000^2 took +247 MB.  On the new `WaveletAdaptiveNode`,
+      `n_levels` of 22, 24 and 26 took +56, +396 and +655 MB before their
+      400.  `PUT {"n_levels": 10000000}` was never refused: the constructor
+      built its level labels as a Python list of `n_coarse * 2**n_levels`
+      entries before any check.  One such request grew a process to
+      57.7 GB, and the kernel's global OOM killer then took down the
+      machine.
+
+      Resolved in 0.4.0.  `HeatNode`, `LBMNode`, `LBMPipeNode` and
+      `WaveletAdaptiveNode` estimate, from their constructor arguments
+      alone, the state they build (exactly) and the memory their
+      constructor takes (`_allocation_estimate`, read by the private
+      `maddening.core._size_estimate`).  `POST /graph/nodes` and `PUT
+      /graph/params` check every constructor call they would make against
+      `MAX_NODE_STATE_ELEMENTS` and a new `MAX_NODE_BUILD_BYTES` (2 GiB)
+      first.  `GraphManager.from_dict` and `load_graph_from_usd` raise
+      `ValueError` for a node that would not fit in the machine's memory.
+      `WaveletAdaptiveNode` refuses a basis it cannot build before it
+      builds any of it, and builds the labels with `np.repeat` behind a
+      bit-length guard.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A crash, never a wrong result, so not `critical`; graded `major`
+      because its reach is the host, not the feature.  The kernel's OOM
+      killer picks the largest process, which need not be the server: on
+      the machine where this was found it ended every other job, and the
+      machine went down.  Up to v0.3.1 the API was unauthenticated and the
+      cloud container bound it to `0.0.0.0` (MADD-ANO-051), so anyone who
+      could route to port 8000 could do it.  Since 0.4.0 it takes a local
+      user on a loopback bind, or a token holder.  `context_dependent`:
+      what else the host runs is the deployment's, not the library's.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.core.graph_manager.GraphManager.from_dict"
+      - "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep the API on loopback and let only trusted callers
+      reach it (MADD-ANO-051's workaround), and load configs and USD stages
+      only from trusted sources.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A node class without an estimate (a user's own) is still measured on
+      the state it built, after building it, as before.  The estimates
+      bound the peak within a small factor (measured 3 to 4 times the
+      state for the lattices, 48 to 76 bytes per operator entry for the
+      wavelet basis), not exactly.  The bounds are per request, so
+      concurrent requests add up.  `from_dict` and `load_graph_from_usd`
+      refuse only what exceeds the machine's physical memory, so a config
+      can still ask for most of it.
+    verification:
+      - "tests/api/test_node_size_refused_before_construction.py::test_post_refuses_an_oversized_node_before_constructing_it"
+      - "tests/api/test_node_size_refused_before_construction.py::test_put_refuses_a_wavelet_level_count_before_constructing_it"
+      - "tests/api/test_node_size_refused_before_construction.py::test_put_refuses_a_grid_shape_before_constructing_it"
+      - "tests/api/test_node_size_refused_before_construction.py::test_put_on_a_sharded_node_asks_the_class_it_wraps"
+      - "tests/api/test_node_size_refused_before_construction.py::test_from_dict_refuses_a_node_no_machine_holds_before_constructing_it"
+      - "tests/api/test_node_size_refused_before_construction.py::test_the_estimate_is_the_state_the_node_builds"
+      - "tests/api/test_node_size_refused_before_construction.py::test_an_impossible_basis_is_refused_at_once_not_built"
+      - "tests/usd/test_usd_node_size_refused_before_construction.py::test_a_stage_naming_an_impossible_node_is_refused_unbuilt"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-087"
+    title: "PUT /graph/params answered 200 to a value the running node could not step with, and every POST /sim/step after it was a 500"
+    description: >
+      From v0.1.0 to v0.3.1 `PUT /graph/params` wrote any value into
+      `node.params`, and `POST /sim/step` turned only a `RuntimeError` into
+      a 4xx.  Checked at each tag, v0.1.0 to v0.3.1, on 2026-10-02 (`git
+      archive` of each, CPU, jaxlib 0.11.0, FastAPI `TestClient`):
+      `RigidBodyNode` `constraints` of `null`, `{"w": 0}`, `{"y":
+      {"finite": true}}` or `{"z": "high"}` each answered 200, and every
+      `POST /sim/step` after it answered 500.  0.4.0's route asked whether
+      a written value is *used*, and counted a trace that raised as "cannot
+      tell", so the same four writes still answered 200 on the development
+      tree (d44d3bb).  `POST /graph/nodes` refused three of them by
+      dry-running the new node's update.  Resolved in 0.4.0: the route
+      traces the node's hooks, on a copy and with the request's values,
+      and refuses a value whose trace raises where the current values'
+      trace does not.  `POST /sim/step` and `POST /sim/run` answer a graph
+      that cannot step with a 400 naming the error, with nothing stepped.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: every step after the write failed with a 500, and no value was
+      computed with the bad parameter.  Writing a usable value back
+      restored the graph, so the feature stayed usable.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: write only values the node's constructor documents,
+      and after a step answers 500, write the previous value back.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The trace is abstract: a value the node's code fails on only with
+      concrete numbers (a check on a computed value) is not caught before
+      it is written, and its step is then a 400 naming the error, not a
+      500.  A value whose trace needs concrete values is not refused.
+    verification:
+      - "tests/api/test_params_writes_the_step_cannot_run_with.py::test_a_constraint_the_step_cannot_run_with_is_refused_and_steps_go_on"
+      - "tests/api/test_params_writes_the_step_cannot_run_with.py::test_a_sharded_body_is_asked_through_the_body_it_wraps"
+      - "tests/api/test_params_writes_the_step_cannot_run_with.py::test_a_graph_configured_so_it_cannot_step_is_a_400_naming_why"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-088"
+    title: "POST /sim/stop answered \"stopped\" while the runner's thread kept stepping, and a reset after it was overwritten"
+    description: >
+      `RealtimeRunner` read its stop flag only between frames, `stop()`
+      waited two seconds for the thread, and `SimulationServer` then
+      dropped its handle and answered `{"status": "stopped"}` whatever the
+      thread was doing.  `PUT /sim/stride` took any `steps_per_frame`.  So
+      a frame longer than two seconds left an orphaned thread stepping the
+      graph over whatever the API wrote next.  A large `steps_per_frame`
+      does it, and so can one long step: the recompile a parameter write
+      asks for runs on the runner's thread.  Checked at each tag, v0.1.0
+      to v0.3.1, and on the 0.4.0 development tree (d44d3bb), on 2026-10-02
+      (CPU, jaxlib 0.11.0, FastAPI `TestClient`, a `BallNode` at dt =
+      1e-3).  With `steps_per_frame=1000000`, `POST /sim/stop` answered
+      "stopped" after 2.0 s with the thread alive.  `POST /sim/reset` then
+      answered position 1.0, and 0.5 s later `GET /graph/state` served
+      -605639 to -679148 (-158104 on d44d3bb), with nothing running by the
+      API's account.  The process aborted at exit.  Resolved in 0.4.0: the
+      runner checks its stop and pause flags between every step, and
+      `stop()` returns whether the thread exited.  The server answers 503
+      and keeps the runner while the thread is still in a step after ten
+      seconds, and never reports "stopped" before it has exited.  `/sim/step`,
+      `/sim/run`, `PUT /graph/state` and `/checkpoint/load` are refused while
+      a runner thread is alive (409 running, 503 stopping), and
+      `steps_per_frame` and `relay_stride` are bounded at 100000.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong, so never `minor`: the reset's reply showed the reset
+      state, the stop's reply said stopped, and the state the API served
+      next was an orphaned thread's, with no error.  Not `critical`: it
+      needs a frame or a step longer than two seconds, and the state moved
+      visibly.  `context_dependent` because what reads the overwritten
+      state decides what it costs.
+    affected_components:
+      - "maddening.viz.runner.RealtimeRunner.stop"
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep `steps_per_frame` small enough that a frame takes
+      well under two seconds, and after `POST /sim/stop` check that the
+      state stops changing before writing it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      One step still runs to completion once started, so stop waits for it
+      (up to ten seconds, then 503).  `PUT /graph/params` and structural
+      edits still reach a running graph, as the bundled UI's sliders need;
+      a structural edit while the runner runs recompiles on its thread.
+    verification:
+      - "tests/api/test_runner_stop_and_stride.py::test_stop_mid_frame_stops_the_thread_and_a_reset_stays_reset"
+      - "tests/api/test_runner_stop_and_stride.py::test_a_stop_that_times_out_is_a_503_and_keeps_the_runner"
+      - "tests/api/test_runner_stop_and_stride.py::test_while_the_runner_is_still_stopping_state_writes_are_503s"
+      - "tests/api/test_runner_stop_and_stride.py::test_a_reset_whose_stop_times_out_resets_nothing"
+      - "tests/api/test_runner_stop_and_stride.py::test_the_runner_stops_within_a_step_of_a_long_frame"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-089"
+    title: "A checkpoint path that resolved to the checkpoint root itself wrote, and loaded, <root>.npz in the root's parent"
+    description: >
+      0.4.0 confines `/checkpoint/save` and `/checkpoint/load` to
+      `SimulationServer(checkpoint_root=)` (MADD-ANO-052), but the check
+      accepted a target equal to the root.  `path=""`, `"."` or `"sub/.."`
+      resolved to the root, `numpy.savez` appended `.npz`, and the file
+      written was `<root>.npz`, in the root's parent; `/checkpoint/load`
+      read it back.  A path with a NUL byte was a 500.  Measured on the
+      0.4.0 development tree (2026-10-02, CPU, jaxlib 0.11.0).  No tagged
+      release had a checkpoint root at all, so none carried this narrower
+      form (MADD-ANO-052 is the wider one they did carry).  Resolved in
+      0.4.0: the check runs on the file NumPy actually writes or reads,
+      after symlinks are followed, and must be strictly inside the root.
+      A NUL byte or a path the file system cannot represent is a 400.
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Unauthorised access in the registry's sense: a write outside the
+      directory the operator confined the routes to.  It was one file of a
+      fixed name holding the graph's own arrays, and a caller needed API
+      access in the first place, which a non-loopback bind gates with the
+      token.  Graded `major`, as unauthorised access a shipped default does
+      not expose to other hosts.  `not_safety_relevant`: it could replace a
+      file called `<root>.npz` beside the root and nothing else.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: "none"
+    workaround: >
+      Not needed in a release.  On 0.4.0 development builds: name
+      checkpoints with a file name.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known beyond MADD-ANO-052's: any caller the API admits can
+      overwrite or load any checkpoint inside the root.
+    verification:
+      - "tests/api/test_checkpoint_paths_stay_inside_the_root.py::test_a_path_that_is_not_a_file_inside_the_root_is_a_400"
+      - "tests/api/test_checkpoint_paths_stay_inside_the_root.py::test_a_symlink_inside_the_root_does_not_lead_out_of_it"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-090"
+    title: "PUT /sim/stride echoed values it did not apply, and DELETE /graph/edges answered 200 for an edge the graph did not have"
+    description: >
+      Three replies that described something the server had not done.
+      `PUT /sim/stride` before any runner existed echoed its
+      `steps_per_frame` and dropped it, so `POST /sim/start` ran at 1;
+      `relay_stride=0` was echoed as 0 and applied as 1; and `DELETE
+      /graph/edges` for an edge the graph did not have answered 200.
+      Checked at each tag, v0.1.0 to v0.3.1, and on the 0.4.0 development
+      tree, on 2026-10-02 (CPU, jaxlib 0.11.0, FastAPI `TestClient`):
+      `PUT /sim/stride?steps_per_frame=7&relay_stride=0` answered with
+      both values as sent, the started runner held 1 and the relay 1, and
+      the missing edge's `DELETE` answered 200.  Resolved in
+      0.4.0: the stride is kept for the runner a later start creates, both
+      values are bounded to 1 to 100000 (a 422 outside), the reply is what
+      the runner and relay hold, and a missing edge is a 404.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      The stride changes pacing and how often the relay publishes, never a
+      computed value; the edge reply changed nothing in the graph.  Minor
+      as a defect in a count of work done.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: set the stride after `POST /sim/start`, with
+      `relay_stride` of at least 1; read `GET /graph` to see an edge
+      removal.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_runner_stop_and_stride.py::test_a_stride_set_before_the_runner_exists_is_the_runners_stride"
+      - "tests/api/test_runner_stop_and_stride.py::test_a_stride_outside_its_bounds_is_a_422_and_changes_nothing"
+      - "tests/api/test_runner_stop_and_stride.py::test_deleting_an_edge_that_does_not_exist_is_a_404"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-091"
+    title: "A state or render WebSocket stream never noticed a client that left after the simulation stopped, so the server could not shut down; an ordinary disconnect was logged as an error"
+    description: >
+      `/ws/state`, `/ws/state/binary` and `/ws/render` learned that a
+      client had gone only when a send failed, and they send only when the
+      simulation has produced a new snapshot.  Their receive task did see
+      the disconnect, and ended without telling the stream.  So a client
+      that left after `POST /sim/stop` was never noticed, and neither was
+      the close uvicorn sends on shutdown: the handler slept on, and SIGINT
+      never completed.  A client that left while the simulation ran made
+      the next send fail with uvicorn's `RuntimeError` ("Unexpected ASGI
+      message 'websocket.send', after sending 'websocket.close'"), which
+      every stream logged with a traceback as "WebSocket error".  Checked
+      at v0.1.0, v0.2.0 and v0.3.1 (`git archive` of each) and on the 0.4.0
+      development tree, on 2026-10-02 (CPU, jaxlib 0.11.0, uvicorn 0.35,
+      websockets 16).  Start the simulation, open each stream, receive two
+      frames, `POST /sim/stop`, close the client, send SIGINT: the server
+      had not exited 10 s later, on all three streams.  Closing the client
+      before the stop instead logged one traceback per stream.  Resolved in
+      0.4.0: every stream ends as soon as its client leaves, the
+      connection breaks or the handler is cancelled, and it waits between
+      frames on that event, so shutdown takes a fraction of a second.  A
+      send that fails because the client left is logged at INFO.  A
+      malformed client message is ignored; it used to end the receive task
+      and, with it, the stream's view of the client.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud and outside the computation: the process would not exit, and
+      the log carried spurious tracebacks.  A second SIGINT makes uvicorn
+      exit, so the server stayed usable.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: send SIGINT twice (uvicorn then exits at once), or
+      close WebSocket clients while the simulation is still running.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A frame being rendered when the client leaves is finished first;
+      `/ws/render` renders in an executor thread.
+    verification:
+      - "tests/api/test_websocket_streams_end_with_their_client.py::test_streams_whose_clients_left_let_the_server_shut_down"
+      - "tests/api/test_websocket_streams_end_with_their_client.py::test_streams_with_their_clients_still_open_let_the_server_shut_down"
+      - "tests/api/test_websocket_streams_end_with_their_client.py::test_what_counts_as_the_client_having_left"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-092"
+    title: "POST /sim/run and POST /surrogate/train took any size: one request could hold a worker indefinitely or name more memory than the host has"
+    description: >
+      From v0.1.0 to v0.3.1 `POST /sim/run?n_steps=` and the body of `POST
+      /surrogate/train` (`n_epochs`, `batch_size`, `hidden_sizes`) were not
+      bounded, and the API answered any caller who could reach it
+      (MADD-ANO-051).  `/sim/run` steps synchronously, holding a worker
+      thread until the run ends, and a training job allocates its network
+      in a background thread.  Checked at each tag, v0.1.0, v0.2.0, v0.2.1,
+      v0.3.0 and v0.3.1, on 2026-10-02 (`git archive` of each, CPU, jaxlib
+      0.11.0, FastAPI `TestClient`, memory-capped, an empty `HOME`, no cloud
+      route):
+        - `POST /sim/run?n_steps=1000000000` on a `BallNode` graph was
+          still running after 3 s, and would have run for hours;
+        - `POST /surrogate/train` with `hidden_sizes` of [2^20, 2^20],
+          `n_epochs` and `batch_size` of 10^9 answered 200 "started", and
+          its job then tried to allocate 4 TiB.
+      A merely large layer width, below what fails at once, is allocated
+      in full.  `POST /graph/nodes`, whose sizes are the third such door,
+      is MADD-ANO-086.  Resolved in 0.4.0 (f2cf733, 2026-09-19): `n_steps`
+      is at most `MAX_RUN_STEPS` (100000), and the training request is
+      bounded on its model: data steps, epochs, batch size, layer count and
+      width.  Each limit is a 422 naming the field, published in
+      `/openapi.json`.  On the 0.4.0 tree both requests above answer 422.
+      Found by the round-4 confirmation audit's check of the CHANGELOG's
+      Security claims; registered then.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A denial of service, never a wrong result, so not `critical`.  Graded
+      `major` as MADD-ANO-086 is.  An oversized network exhausts the
+      host's memory, and the OOM killer then picks the largest process,
+      which need not be the server.  Every run request held one of the
+      server's worker threads, so a handful of them stopped it answering.
+      Up to v0.3.1 any caller who could route to the cloud container's
+      port could do this (MADD-ANO-051).  `context_dependent`: what else the
+      host runs is the deployment's, not the library's.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.api.server.TrainSurrogateRequest"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep the API on loopback and let only trusted callers
+      reach it (MADD-ANO-051's workaround); for long runs, use `POST
+      /sim/start` and stop it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The bounds are per request, so concurrent requests add up.  A training
+      job at the maxima (16 layers of 8192, batch 65536) still takes
+      gigabytes; the limits keep it finite, not small.
+    verification:
+      - "tests/api/test_request_bounds.py::TestSimRunIsBounded::test_step_count_above_the_limit_is_422"
+      - "tests/api/test_request_bounds.py::TestTrainSurrogateIsBounded::test_out_of_range_training_arguments_are_422"
+      - "tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_an_array_dimension_above_the_limit_is_rejected"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-093"
     title: "Under Gauss-Seidel the coupling bound's float floor counted the worst node's evaluations, not the chain a pass composes: a stalled 32-relay ring read its spectral bound at 0.51x the true distance with spectral_usable=True"
     description: >
       `spectral_error_bound` adds the residual's float resolution before
@@ -7413,7 +7788,7 @@ anomalies:
       - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_report_and_the_step_count_the_same_chain"
       - "tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_long_gauss_seidel_chain"
     github_issue: null
-  - anomaly_id: "MADD-ANO-087"
+  - anomaly_id: "MADD-ANO-094"
     title: "After run_adaptive or run_adaptive_scan the coupling report described only the second kept half step: a first half step stopped at max_iterations was hidden, and converged read True where strict_convergence refused the step"
     description: >
       An accepted adaptive attempt keeps two solves per coupling group,
@@ -7484,3 +7859,4 @@ anomalies:
       - "tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_a_waveform_group_reports_the_sum_of_both_halves_passes"
       - "tests/core/test_strict_convergence_threshold.py::test_the_adaptive_strict_check_raises_at_twice_the_threshold"
     github_issue: null
+

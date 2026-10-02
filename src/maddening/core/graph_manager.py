@@ -1162,7 +1162,7 @@ def _group_evaluations(group, nodes, schedule, edges):
     residual at the float32 stall is 0.6, 1.2 and 2.3x the per-pass
     floor at ``N`` = 16, 32 and 64, and the bound, which took the worst
     node's count, read 0.51x (``N = 32``) and 0.30x (``N = 64``) the
-    true distance with ``spectral_usable=True`` (MADD-ANO-086); counted
+    true distance with ``spectral_usable=True`` (MADD-ANO-093); counted
     along the chain the floor is ``N`` times larger and the bound reads
     23x and 16x over at ``N`` = 16 and 32 (the gradient bound 36x and
     17x over its true error; jaxlib 0.11.0, CPU).  The
@@ -7894,7 +7894,7 @@ class GraphManager:
               counting the declared evaluations along a Gauss-Seidel
               pass's longest chain of same-pass reads, without which a
               stalled 32-relay ring read 0.51x its true distance with the
-              flag set (MADD-ANO-086).
+              flag set (MADD-ANO-093).
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -8077,7 +8077,7 @@ class GraphManager:
             converge, the verdict ``strict_convergence`` acts on.  (It
             used to be the second half's report alone, which said
             ``converged=True`` beside a first half stopped at the cap:
-            MADD-ANO-087.)
+            MADD-ANO-094.)
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value
@@ -9742,6 +9742,12 @@ class GraphManager:
         unstructured partition layout), which need not exist on the
         machine loading it.  Until 0.4.0 the sharding was dropped with no
         word (MADD-ANO-036).
+
+        A node whose class can estimate what it would allocate (the
+        built-in grid and basis nodes) is checked before its constructor
+        runs: one that would take more memory than this machine has raises
+        ``ValueError`` naming the node, where it used to run the process
+        into the OOM killer.
         """
         from maddening.serialization.json_codec import (  # noqa: PLC0415
             decode_non_finite,
@@ -9780,10 +9786,20 @@ class GraphManager:
                 UserWarning, stacklevel=3,
             )
 
+        from maddening.core._size_estimate import (  # noqa: PLC0415
+            refuse_beyond_memory,
+        )
+
         config = decode_non_finite(config)
         gm = cls()
         for nd in config["nodes"]:
             node_cls = node_registry[nd["type"]]
+            # A config is untrusted input, and its params can name a node no
+            # machine holds (a wavelet basis of n_levels=10_000_000): told
+            # from the class's own size estimate, before its constructor
+            # runs, as a ValueError naming the node.  Only what cannot fit
+            # in this machine's memory is refused.
+            refuse_beyond_memory(node_cls, nd["name"], nd.get("params", {}))
             node = node_cls(name=nd["name"], timestep=nd["timestep"], **nd.get("params", {}))
             gm.add_node(node)
             if nd.get("sharded"):

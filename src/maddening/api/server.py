@@ -24,7 +24,11 @@ Usage
 Security
 --------
 A **loopback bind is unauthenticated**, exactly as it always was: bind
-``127.0.0.1`` and nothing changes for local development.  **Any other
+``127.0.0.1`` and nothing changes for local development.  It answers only
+to the names this machine is reached by (``localhost``, ``127.0.0.1``,
+``[::1]``, and any ``allowed_hosts``) and refuses a state change from a
+foreign ``Origin``, so a web page in the developer's browser -- DNS
+rebinding included -- cannot drive it.  **Any other
 bind requires a bearer token on every route** except ``/healthz`` and
 the static ``/viz/*`` pages -- see :mod:`maddening.api.auth` for where
 the token comes from and how a client presents it.  Tell the server
@@ -44,6 +48,7 @@ the best-supported way to reach this API from another machine.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import math
 import os
@@ -60,7 +65,7 @@ import jax.numpy as jnp
 import numpy as np
 
 try:
-    from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, Query, WebSocket
     from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field, field_validator
 except ImportError as _exc:
@@ -80,6 +85,12 @@ from maddening.api.auth import (
     bearer_from_headers,
     bearer_from_subprotocols,
     is_loopback,
+)
+from maddening.core._size_estimate import (
+    AllocationEstimate,
+    estimate_allocation,
+    format_bytes,
+    format_count,
 )
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -205,8 +216,42 @@ MAX_NODE_PARAM_ELEMENTS = 1_000_000
 
 #: Upper bound on the elements of a new node's initial state, summed over
 #: its fields.  Catches dimensions that multiply (each factor small, the
-#: product not).  20e6 float32 elements is 80 MB.
+#: product not).  20e6 float32 elements is 80 MB.  Enforced *before* the
+#: node is constructed for a class that can say what it would build (see
+#: :data:`MAX_NODE_BUILD_BYTES`), and on the built state for any other.
 MAX_NODE_STATE_ELEMENTS = 20_000_000
+
+#: Upper bound on the memory constructing one node and building its initial
+#: state may take, for a node class that can say so before it is built (the
+#: built-in grid and basis nodes: ``HeatNode``, ``LBMNode``,
+#: ``LBMPipeNode``, ``WaveletAdaptiveNode``).  Checked, with
+#: :data:`MAX_NODE_STATE_ELEMENTS`, *before* any constructor call in
+#: ``POST /graph/nodes`` and ``PUT /graph/params``: both used to build the
+#: node first and refuse it afterwards, and one ``PUT
+#: {"n_levels": 10000000}`` to a wavelet node grew the server to 57.7 GB
+#: before the kernel killed it.  2 GiB is several times what the largest
+#: lattice the state cap admits takes to build (about 0.3 GB) and admits
+#: ``WaveletAdaptiveNode``'s validated range (a 4096-function basis --
+#: 64^2, 16^3 -- assembles a dense operator in about 1 GiB).
+MAX_NODE_BUILD_BYTES = 2 * 1024 ** 3
+
+#: Upper bound on ``PUT /sim/stride?steps_per_frame=``: one frame of the
+#: background runner is at most as many steps as one ``POST /sim/run``.
+#: The runner checks its stop and pause flags between every step, so a
+#: large value no longer delays ``POST /sim/stop``; the bound keeps one
+#: frame's work, and the gap between relay snapshots, finite.
+MAX_STEPS_PER_FRAME = MAX_RUN_STEPS
+
+#: Upper bound on ``PUT /sim/stride?relay_stride=``: the relay keeps every
+#: Nth step, and a stride past one run's length would never publish one.
+MAX_RELAY_STRIDE = MAX_RUN_STEPS
+
+#: How long ``POST /sim/stop`` (and every route that stops the runner
+#: first) waits for the runner's thread to finish the step it is in.
+#: Past it the route answers 503 and keeps the runner: the thread is
+#: still alive, and reporting "stopped" -- or dropping the handle -- while
+#: it steps is how a reset used to be overwritten.
+_RUNNER_STOP_TIMEOUT = 10.0
 
 #: Bounds on ``POST /surrogate/train``.
 MAX_SURROGATE_DATA_STEPS = 100_000
@@ -369,9 +414,11 @@ def _non_finite_param(value: Any, path: str = "") -> Optional[str]:
 def _same_param_value(old: Any, new: Any) -> bool:
     """Is a JSON *new* value for a structural parameter the value it has?
 
-    Strict on purpose: ``5`` and ``5.0`` differ (the write would turn an
-    integer constant into a float one), and anything that does not compare
-    cleanly counts as changed.  "Changed" only means the write is checked.
+    Asked of the value :func:`_coerced_to_param_type` returns, so a JSON
+    ``2.0`` for an integer ``2`` is the same value and nothing is written.
+    Strict otherwise: values of different types differ, and anything that
+    does not compare cleanly counts as changed.  "Changed" only means the
+    write is checked.
     """
     if type(old) is not type(new):
         return False
@@ -379,6 +426,68 @@ def _same_param_value(old: Any, new: Any) -> bool:
         return bool(old == new)
     except Exception:  # noqa: BLE001 - an array-valued entry, say
         return False
+
+
+def _is_integer(value: Any) -> bool:
+    return isinstance(value, (int, np.integer)) and not isinstance(value, bool)
+
+
+def _coerced_to_param_type(old: Any, new: Any) -> tuple[Any, Optional[str]]:
+    """``(value, problem)``: a JSON *new* value for a structural parameter
+    whose current value is *old*, in *old*'s numeric type -- or ``problem``,
+    why it cannot be.
+
+    A JSON number does not say whether it is an integer (``4`` and ``4.0``
+    are one number to most clients), and ``node.params`` is what
+    ``params_pytree()``, ``to_dict()`` and every rebuild read.  Writing the
+    raw value used to change the parameter's type: ``PUT`` HeatNode
+    ``stencil_order: 4.0`` stored a float, which ``params_pytree()`` then
+    exposed as a new *trainable* leaf of ``gm.params``, and an integer
+    written for a structural float parameter stored an ``int``.  (A leaf of
+    the params pytree is cast to its own dtype before this is asked.)  The
+    rule:
+
+    * an integer parameter takes an integer, or a float with no fractional
+      part, stored as ``int`` (the convention the constructors' own count
+      checks follow); any other float is refused;
+    * a float parameter takes a float or an integer, stored as ``float``;
+    * a list of integers (a grid shape) takes integers or integral floats,
+      element by element, stored as ``int``; a list of floats takes
+      numbers, stored as ``float``;
+    * anything else is passed through unchanged for the checks after this
+      one (a constructor refuses what it cannot use).
+
+    Booleans are decided before this is asked.
+    """
+    if old is None or isinstance(old, bool) or isinstance(new, bool):
+        return new, None
+    if _is_integer(old):
+        if _is_integer(new):
+            return int(new), None
+        if isinstance(new, float):
+            if math.isfinite(new) and new.is_integer():
+                return int(new), None
+            return None, f"expected an integer (the parameter is {old!r}), got {new!r}"
+        return new, None
+    if isinstance(old, (float, np.floating)):
+        if _is_integer(new):
+            return float(new), None
+        return new, None
+    if isinstance(old, (list, tuple)) and isinstance(new, list) and old \
+            and not any(isinstance(x, (list, tuple, dict)) for x in old):
+        if all(_is_integer(x) for x in old):
+            out = []
+            for item in new:
+                if isinstance(item, float) and not isinstance(item, bool):
+                    if not (math.isfinite(item) and item.is_integer()):
+                        return None, (f"expected integers (the parameter is {old!r}), "
+                                      f"got {new!r}")
+                    item = int(item)
+                out.append(item)
+            return out, None
+        if all(isinstance(x, (float, np.floating)) for x in old):
+            return [float(x) if _is_integer(x) else x for x in new], None
+    return new, None
 
 
 def _state_elements(state: Any) -> int:
@@ -416,6 +525,26 @@ def _dry_run_node(node, state: Any = None) -> None:
     jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
 
 
+#: What a step raises because of the graph it is asked to run -- a node's
+#: code failing on its params while the step is traced and compiled, a
+#: structure ``compile()`` refuses -- rather than because the server is
+#: broken.  ``POST /sim/step`` and ``POST /sim/run`` answer these 400 with
+#: the message (nothing is stepped); they used to answer every one but
+#: ``RuntimeError`` with an uncaught 500.
+_GRAPH_CONFIGURATION_ERRORS = (
+    RuntimeError, ValueError, TypeError, KeyError, AttributeError, IndexError,
+    ArithmeticError,
+)
+
+
+def _cannot_step_detail(exc: BaseException) -> str:
+    """The 400 body for a step that raised *exc*."""
+    if isinstance(exc, RuntimeError):
+        return str(exc)
+    return (f"the graph cannot step with its current configuration "
+            f"({type(exc).__name__}: {exc}); nothing was stepped")
+
+
 # ------------------------------------------------------------------
 # PUT /graph/params: what a write would do, asked before it is made
 # ------------------------------------------------------------------
@@ -434,11 +563,12 @@ _NEEDS_CONCRETE_VALUES = (
 
 
 def _probe_pair_with(node: Any, changes: dict[str, Any]) -> Optional[tuple]:
-    """``(old, new)``: shallow copies of the node a write of every entry of
-    *changes* into ``node.params`` lands on, reading the current params and
-    the written ones -- the node, or the node a wrapper that cannot be
-    copied wraps (``_param_probe_pair``'s rule, for several keys at once).
-    ``None`` when no faithful copy can be made.  Nothing is constructed."""
+    """``(old, new, descended)``: shallow copies of the node a write of
+    every entry of *changes* into ``node.params`` lands on, reading the
+    current params and the written ones -- the node, or the node a wrapper
+    that cannot be copied wraps (``_param_probe_pair``'s rule, for several
+    keys at once; ``descended`` says it is the wrapped one).  ``None`` when
+    no faithful copy can be made.  Nothing is constructed."""
     shared = getattr(node, "params", None)
     if not isinstance(shared, dict):
         return None
@@ -446,7 +576,132 @@ def _probe_pair_with(node: Any, changes: dict[str, Any]) -> Optional[tuple]:
         old = _node_with_params(candidate, dict(shared))
         new = _node_with_params(candidate, {**shared, **changes})
         if old is not None and new is not None:
-            return old, new
+            return old, new, candidate is not node
+    return None
+
+
+def _allocation_refusal(estimate: AllocationEstimate) -> Optional[str]:
+    """Why a node that would allocate *estimate* is refused over the API
+    (:data:`MAX_NODE_STATE_ELEMENTS`, :data:`MAX_NODE_BUILD_BYTES`), or
+    ``None``.  Phrased to follow "the node" / "node 'x'"."""
+    if estimate.state_elements > MAX_NODE_STATE_ELEMENTS:
+        return (f"would hold {format_count(estimate.state_elements)} state "
+                f"elements; at most {MAX_NODE_STATE_ELEMENTS} are accepted over "
+                "the API (this server is unauthenticated -- build a graph this "
+                "size in-process)")
+    if estimate.peak_bytes > MAX_NODE_BUILD_BYTES:
+        return (f"would take about {format_bytes(estimate.peak_bytes)} to build; "
+                f"at most {format_bytes(MAX_NODE_BUILD_BYTES)} is accepted over "
+                "the API (this server is unauthenticated -- build a graph this "
+                "size in-process)")
+    return None
+
+
+def _allocation_write_reason(gm: GraphManager, owner: str,
+                             changes: dict[str, Any]) -> Optional[tuple[list, str]]:
+    """``(keys, reason)``: why a write of *changes* into node *owner*'s
+    params is refused for the size of what the checks after this one would
+    build, and the keys it is refused for; or ``None``.
+
+    Those checks call the node's constructor with the new values -- one key
+    at a time (:meth:`GraphManager._constructor_write_reason`, the mapping
+    check), every key at once, and every key at once over the params a save
+    would carry (:func:`_saved_graph_write_reason`) -- and build the state
+    it makes.  Each of those calls is estimated here first, for every class
+    a write lands on (the node, or the node a wrapper wraps), by the class's
+    own ``_allocation_estimate``; nothing is constructed.  A class without
+    an estimate is not checked here, and its built state is bounded by the
+    checks that follow, as before.
+    """
+    node = gm._nodes[owner].node
+    shared = getattr(node, "params", None)
+    if not isinstance(shared, dict):
+        return None
+    ctor = {k: v for k, v in changes.items() if k in shared}
+    if not ctor:
+        return None
+    candidates = [([key], {**shared, key: value}) for key, value in ctor.items()]
+    candidates.append((list(ctor), {**shared, **ctor}))
+    try:
+        candidates.append((list(ctor), {**gm.effective_node_params(owner), **ctor}))
+    except Exception:  # noqa: BLE001 - the graph cannot say what it would save
+        pass
+    for holder in _params_holders(node):
+        cls = type(holder)
+        for keys, params in candidates:
+            estimate = estimate_allocation(cls, params)
+            if estimate is None:
+                continue
+            refusal = _allocation_refusal(estimate)
+            if refusal is not None:
+                return keys, (f"with it the {cls.__name__} {refusal}; this is told "
+                              "from the parameters, before anything of that size "
+                              "is built")
+    return None
+
+
+def _trace_hooks(spec, probe: Any, descended: bool, state: Any, leaves: Any) -> None:
+    """Trace *probe*'s hooks the way the graph calls them (``update``, and
+    the flux and interface-correction hooks where it has them) on *state*
+    with a zero for every declared boundary input and *leaves* as the
+    injected params.  Raises whatever the node's code raises."""
+    probe_spec = _NodeSpec(
+        node=probe, update_fn=probe.update, timestep=spec.timestep,
+        accepts_params=(
+            _method_accepts_params(probe, "update") and leaves is not None
+            if descended else spec.accepts_params),
+        flux_accepts_params=(
+            _method_accepts_params(probe, "compute_boundary_fluxes")
+            and leaves is not None
+            if descended else spec.flux_accepts_params),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bi = _declared_boundary_zeros(probe)
+        jax.make_jaxpr(
+            lambda st, b, p: _hook_outputs(probe_spec, st, b, p),
+        )(state, bi, leaves)
+
+
+def _step_trace_write_reason(gm: GraphManager, owner: str, changes: dict[str, Any],
+                             leaves_before: Any, leaves_after: Any) -> Optional[str]:
+    """Why the running node could not step with *changes* written into its
+    params, or ``None``: its hooks trace with the current params and raise
+    with the new ones (for a reason other than needing a concrete value).
+
+    The other checks of ``PUT /graph/params`` ask whether a value is used,
+    and a trace that raised counted as "cannot tell" -- so a value the step
+    cannot run with was taken: ``RigidBodyNode`` ``constraints`` of
+    ``null``, ``{"w": 0}``, ``{"y": {"finite": true}}`` or ``{"z": "high"}``
+    each answered 200, after which every ``POST /sim/step`` was a 500.
+    ``POST /graph/nodes`` dry-runs a new node's update for the same reason
+    (:func:`_dry_run_node`).  Traced on shallow copies (the node is never
+    written), abstractly: nothing is computed.  *leaves_before* and
+    *leaves_after* are the injected params the step runs with before and
+    after the write, or ``None`` for a node that takes none.
+    """
+    spec = gm._nodes[owner]
+    pair = _probe_pair_with(spec.node, changes)
+    if pair is None:
+        return None
+    old, new, descended = pair
+    try:
+        state = old.initial_state() if descended else gm._state[owner]
+    except Exception:  # noqa: BLE001 - cannot tell
+        return None
+    try:
+        _trace_hooks(spec, old, descended, state, leaves_before)
+    except Exception:  # noqa: BLE001 - the running node is not traced this way
+        return None
+    try:
+        _trace_hooks(spec, new, descended, state, leaves_after)
+    except _NEEDS_CONCRETE_VALUES:
+        return None
+    except Exception as exc:  # noqa: BLE001 - the node's own failure
+        return (f"{type(spec.node).__name__}'s step cannot run with it: its "
+                f"hooks trace with the current value and raise with the new one "
+                f"({type(exc).__name__}: {exc}), so every step after the write "
+                "would fail")
     return None
 
 
@@ -795,6 +1050,86 @@ _CROSS_ORIGIN_DETAIL = (
 )
 
 
+def _host_name(host_header: str) -> Optional[str]:
+    """The host part of a ``Host`` header -- lowercased, without its port
+    or a trailing dot, an IPv6 literal without its brackets -- or ``None``
+    when the header is not a valid ``host[:port]``."""
+    value = host_header.strip().lower()
+    if not value:
+        return None
+    if value.startswith("["):
+        end = value.find("]")
+        rest = value[end + 1:] if end > 0 else None
+        if rest is None or (rest and not (rest.startswith(":") and rest[1:].isdigit())):
+            return None
+        return value[1:end]
+    if value.count(":") > 1:           # a bare IPv6 address is not a valid Host
+        return None
+    name, colon, port = value.partition(":")
+    if colon and not port.isdigit():
+        return None
+    return name.rstrip(".") or None
+
+
+def _is_ip_address(peer: Optional[str]) -> bool:
+    try:
+        ipaddress.ip_address((peer or "").split("%", 1)[0])
+    except ValueError:
+        return False
+    return True
+
+
+def _rebinding_refusal(auth: APIAuth, peer: Optional[str], host_header: Optional[str],
+                       allowed_hosts: frozenset) -> Optional[str]:
+    """Why a request that reached a loopback-bound API without a token is
+    refused for its ``Host``, or ``None``.
+
+    The ``Origin`` check compares the ``Origin`` with the ``Host``, and a
+    DNS-rebinding page sends both naming its own domain: served from
+    ``http://attacker.example:8000`` and then re-pointed at 127.0.0.1, it is
+    same-origin in the browser's eyes, so it could reset the simulation,
+    write checkpoints, read every reply and open ``/ws/state`` -- and
+    ``POST /cloud/launch``.  It cannot choose the ``Host`` its browser
+    sends, which names its own domain, so a loopback-bound API serves only
+    the names this machine is reached by: ``localhost``, a ``127.0.0.0/8``
+    or ``::1`` literal (any port), and the names in *allowed_hosts*.
+
+    Asked only where nothing else authenticates the caller: a request that
+    must present the bearer token (a non-loopback bind, or a routable peer)
+    is not, since the token is what a rebound page does not hold.  And
+    only of a peer that is an IP address, because a browser reaches the API
+    over TCP: an in-process client (Starlette's ``TestClient`` reports the
+    peer ``"testclient"``) or a Unix-socket connection (no peer address) is
+    not a browser's.  A request with no ``Host`` at all is not a browser's
+    either and is served.
+    """
+    if auth.required_for_peer(peer) or not _is_ip_address(peer) or host_header is None:
+        return None
+    name = _host_name(host_header)
+    if name is not None and (is_loopback(name) or name in allowed_hosts):
+        return None
+    return (
+        f"This request named the host {host_header!r}, which is not a name of "
+        "this loopback-bound server (localhost, 127.0.0.1, [::1]).  On a "
+        "loopback bind the API is unauthenticated, and a request for another "
+        "name is how a DNS-rebinding web page reaches it from the developer's "
+        "browser.  To serve this server under another name (a reverse proxy, "
+        "an /etc/hosts alias), pass allowed_hosts to SimulationServer."
+    )
+
+
+def _normalised_hosts(hosts: Iterable[str]) -> frozenset:
+    """*hosts* as :func:`_host_name` reads a ``Host`` header (port and
+    case ignored); an entry that is not a host name raises ``ValueError``."""
+    out = set()
+    for host in hosts:
+        name = _host_name(str(host))
+        if name is None:
+            raise ValueError(f"allowed_hosts entry {host!r} is not a host name")
+        out.add(name)
+    return frozenset(out)
+
+
 class _WebSocketAuthMiddleware:
     """Default-deny for WebSocket handshakes.
 
@@ -820,10 +1155,12 @@ class _WebSocketAuthMiddleware:
         The token and the rule for when it is demanded.
     """
 
-    def __init__(self, app, auth: APIAuth, allowed_origins: Iterable[str] = ()) -> None:
+    def __init__(self, app, auth: APIAuth, allowed_origins: Iterable[str] = (),
+                 allowed_hosts: frozenset = frozenset()) -> None:
         self.app = app
         self._auth = auth
         self._allowed_origins = frozenset(allowed_origins)
+        self._allowed_hosts = frozenset(allowed_hosts)
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "websocket":
@@ -835,6 +1172,17 @@ class _WebSocketAuthMiddleware:
             key.decode("latin-1").lower(): value.decode("latin-1")
             for key, value in (scope.get("headers") or ())
         }
+        # A DNS-rebinding page passes the origin check below (its Origin
+        # and Host both name its own domain); its Host is what gives it
+        # away.  See _rebinding_refusal.
+        if _rebinding_refusal(self._auth, peer, headers.get("host"),
+                              self._allowed_hosts) is not None:
+            logger.warning(
+                "Refused WebSocket %s for host %r: not a name of this "
+                "loopback-bound server", scope.get("path", "?"), headers.get("host"),
+            )
+            await self._refuse(receive, send)
+            return
         # The origin check runs whether or not a token is demanded.  A
         # loopback bind demands none, and WebSocket is exempt from the
         # same-origin policy, so without this a page on any origin could
@@ -935,6 +1283,81 @@ def warn_if_publicly_bound(host: str, port: int = 8000) -> bool:
     return True
 
 
+# ------------------------------------------------------------------
+# WebSocket streams: noticing a client that left
+# ------------------------------------------------------------------
+
+async def _receive_until_disconnect(websocket: WebSocket, on_message,
+                                    disconnected: asyncio.Event) -> None:
+    """Hand every JSON object a client sends to *on_message* until the
+    client leaves, then set *disconnected*.
+
+    The streams only learned that a client had gone when a send failed,
+    and they send only when the simulation produced a new snapshot.  A
+    client that left after the simulation stopped was never noticed, and
+    neither was the close uvicorn sends on shutdown, so the handler slept
+    on and SIGINT never completed.  Every way out of here -- the client's
+    disconnect, a broken connection, cancellation -- sets *disconnected*,
+    which ends the stream.  A message that is not a JSON object, or that
+    *on_message* cannot apply, is ignored; it used to end this loop
+    silently, and with it the stream's view of the client.
+    """
+    import json as _json  # noqa: PLC0415
+
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
+            raw = message.get("text")
+            if raw is None:
+                continue
+            try:
+                msg = _json.loads(raw)
+                if isinstance(msg, dict):
+                    on_message(msg)
+            except Exception:  # noqa: BLE001 - a malformed message is ignored
+                logger.debug("ignored WebSocket message %r", raw[:200], exc_info=True)
+    except Exception:  # noqa: BLE001 - the connection broke: the client is gone
+        return
+    finally:
+        disconnected.set()
+
+
+async def _sleep_unless_disconnected(disconnected: asyncio.Event, seconds: float) -> None:
+    """Sleep *seconds*, or until the client leaves, whichever is first."""
+    try:
+        await asyncio.wait_for(disconnected.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
+
+
+#: Exception class names (anywhere in the MRO) that mean the peer closed
+#: the WebSocket: Starlette's, the ``websockets`` library's, uvicorn's.
+_DISCONNECT_EXCEPTION_NAMES = ("WebSocketDisconnect", "ConnectionClosed", "ClientDisconnected")
+
+
+def _client_left(websocket: WebSocket, exc: BaseException,
+                 disconnected: asyncio.Event) -> bool:
+    """Whether a send that raised *exc* failed only because the client had
+    left -- a normal end of the stream, not an error to log with a
+    traceback.  uvicorn reports a send after the close as a
+    ``RuntimeError`` ("Unexpected ASGI message 'websocket.send', after
+    sending 'websocket.close'"), which every stream logged as an error on
+    each ordinary disconnect."""
+    from starlette.websockets import WebSocketState  # noqa: PLC0415
+
+    if disconnected.is_set():
+        return True
+    if any(cls.__name__.startswith(_DISCONNECT_EXCEPTION_NAMES)
+           for cls in type(exc).__mro__):
+        return True
+    if WebSocketState.DISCONNECTED in (getattr(websocket, "client_state", None),
+                                       getattr(websocket, "application_state", None)):
+        return True
+    return isinstance(exc, RuntimeError) and "websocket.close" in str(exc)
+
+
 def _graph_structure_snapshot(gm) -> dict:
     """Shallow copies of every container a structural edit mutates.
 
@@ -995,6 +1418,14 @@ class SimulationServer:
         an embedder that serves its UI from another port.  The default
         -- none -- means same-origin only, which is the safe answer for
         every shipped configuration: see :func:`origin_is_same_site`.
+    allowed_hosts : iterable of str, optional
+        Host names, besides ``localhost`` and the loopback addresses, that
+        a loopback-bound server answers to (a reverse proxy's name, an
+        ``/etc/hosts`` alias); ports are ignored.  On a loopback bind the
+        API is unauthenticated, and a request whose ``Host`` names
+        anything else is refused with 403: that is how a DNS-rebinding web
+        page reaches it.  Not consulted where the bearer token is demanded
+        (a non-loopback bind, or a routable peer).
 
     Attributes
     ----------
@@ -1006,7 +1437,8 @@ class SimulationServer:
     Raises
     ------
     ValueError
-        If ``MADDENING_API_TOKEN`` or *api_token* is set but blank.
+        If ``MADDENING_API_TOKEN`` or *api_token* is set but blank, or an
+        *allowed_hosts* entry is not a host name.
     """
 
     def __init__(
@@ -1018,10 +1450,12 @@ class SimulationServer:
         bind_host: Optional[str] = None,
         api_token: Optional[str] = None,
         allowed_origins: Optional[Iterable[str]] = None,
+        allowed_hosts: Optional[Iterable[str]] = None,
     ) -> None:
         self.registry = dict(node_registry)
         self.auth = APIAuth(bind_host=bind_host, token=api_token)
         self.allowed_origins = frozenset(allowed_origins or ())
+        self.allowed_hosts = _normalised_hosts(allowed_hosts or ())
         self.gm = graph_manager if graph_manager is not None else GraphManager()
         # /checkpoint/{save,load} only touch files under this directory:
         # a client must not choose arbitrary server paths.  That holds
@@ -1031,6 +1465,12 @@ class SimulationServer:
         self.relay = StateRelay()
         self.runner: Optional[RealtimeRunner] = None
         self._runner_started = False
+        # ``PUT /sim/stride``'s value, kept for the runner a later
+        # ``POST /sim/start`` creates (it used to be echoed and dropped).
+        self._steps_per_frame = 1
+        # A stop was asked for and timed out: the runner is kept until its
+        # thread is seen to have exited (``POST /sim/stop`` again).
+        self._runner_stop_pending = False
         self._relay_attached = False
         # Eagerly attach relay when a pre-built graph is provided
         if graph_manager is not None:
@@ -1129,8 +1569,40 @@ class SimulationServer:
     def _ensure_runner(self) -> RealtimeRunner:
         if self.runner is None:
             self._ensure_relay_attached()
-            self.runner = RealtimeRunner(self.gm, self.relay)
+            self.runner = RealtimeRunner(self.gm, self.relay,
+                                         steps_per_frame=self._steps_per_frame)
         return self.runner
+
+    def _runner_stopping(self) -> bool:
+        """Whether a runner thread is still alive after it was told to stop."""
+        runner = self.runner
+        return runner is not None and not self._runner_started and runner.is_alive
+
+    def _runner_alive(self) -> bool:
+        """Whether a runner thread is stepping the graph (running, paused,
+        or still finishing after a stop)."""
+        return self.runner is not None and self.runner.is_alive
+
+    def _refuse_while_runner_alive(self, action: str) -> None:
+        """Refuse a write of the graph's state while a runner thread can
+        overwrite it: a 409 while the runner runs, a 503 while it is still
+        stopping.  The runner stores each step's state over whatever is
+        there, so a state written beside it used to be answered 200 and
+        then lost -- a reset after a stop that had not finished came back
+        with positions in the hundreds of thousands."""
+        if self._runner_stopping():
+            raise HTTPException(
+                status_code=503,
+                detail=(f"Cannot {action}: the runner was told to stop and its "
+                        "thread is still finishing a step. Retry shortly."),
+                headers={"Retry-After": "1"},
+            )
+        if self._runner_alive():
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Cannot {action} while the runner is started; "
+                        "POST /sim/stop first."),
+            )
 
     def _state_json(self) -> dict:
         """The whole state, ``_meta`` included, as a reply body
@@ -1140,12 +1612,40 @@ class SimulationServer:
     def _node_state_json(self, name: str) -> dict:
         return _json_reply(self.gm.get_node_state(name))
 
-    def _stop_runner(self) -> None:
-        """Stop the runner if it's running. Safe to call multiple times."""
-        if self.runner is not None and self._runner_started:
-            self.runner.stop()
+    def _stop_runner(self) -> bool:
+        """Stop the runner and wait for its thread; ``True`` once no runner
+        thread is alive.  Safe to call multiple times.
+
+        ``False`` when the thread is still alive after
+        :data:`_RUNNER_STOP_TIMEOUT` seconds: the runner is kept, marked as
+        stopping, and the caller must not report it stopped or write the
+        state it steps.  This used to give up after two seconds and drop
+        the handle while the thread kept stepping -- ``POST /sim/stop``
+        answered "stopped", and a reset after it was overwritten.
+        """
+        runner = self.runner
+        if runner is None:
+            return True
+        if self._runner_started or runner.is_alive:
             self._runner_started = False
-            self.runner = None
+            if not runner.stop(timeout=_RUNNER_STOP_TIMEOUT):
+                self._runner_stop_pending = True
+                return False
+        self.runner = None
+        self._runner_stop_pending = False
+        return True
+
+    def _stop_runner_or_refuse(self, action: str) -> None:
+        """:meth:`_stop_runner`, as a 503 when the thread will not stop in
+        time; nothing else is done."""
+        if not self._stop_runner():
+            raise HTTPException(
+                status_code=503,
+                detail=(f"Cannot {action}: the runner's thread is still "
+                        f"finishing a step after {_RUNNER_STOP_TIMEOUT:g} s. "
+                        "Nothing was changed; retry shortly."),
+                headers={"Retry-After": "1"},
+            )
 
     def _reset_state(self) -> None:
         """Reset all nodes to their initial state (normalised, no retrace)."""
@@ -1213,6 +1713,7 @@ class SimulationServer:
             _WebSocketAuthMiddleware,
             auth=self.auth,
             allowed_origins=self.allowed_origins,
+            allowed_hosts=self.allowed_hosts,
         )
 
         @app.middleware("http")
@@ -1232,6 +1733,17 @@ class SimulationServer:
                         content={"detail": self._unauthorized_detail(peer)},
                         headers={"WWW-Authenticate": "Bearer"},
                     )
+            # Every method, GET included: a rebound page is same-origin to
+            # its browser, so it can read the replies it gets.
+            rebinding = _rebinding_refusal(self.auth, peer, request.headers.get("host"),
+                                           self.allowed_hosts)
+            if rebinding is not None:
+                logger.warning(
+                    "Refused %s %s for host %r: not a name of this "
+                    "loopback-bound server", request.method, request.url.path,
+                    request.headers.get("host"),
+                )
+                return JSONResponse(status_code=403, content={"detail": rebinding})
             if (request.method in _STATE_CHANGING_METHODS
                     and not origin_is_same_site(
                         request.headers.get("origin"),
@@ -1323,6 +1835,21 @@ class SimulationServer:
                     detail=f"params.{bad}: value must be finite",
                 )
             node_cls = self.registry[req.type]
+            # Before the constructor, for a class that can say what it would
+            # build: the size checks below run on the built node and state,
+            # so they used to refuse a D3Q19 lattice of 140^3 cells after
+            # 1.1 GB had been allocated -- and a wavelet basis of
+            # n_levels=10000000 was never refused at all, the constructor
+            # running into the OOM killer first.
+            estimate = estimate_allocation(node_cls, req.params)
+            if estimate is not None:
+                refusal = _allocation_refusal(estimate)
+                if refusal is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"node '{req.name}' {refusal}; this is told from "
+                                "its params, before anything of that size is built"),
+                    )
             try:
                 node = node_cls(name=req.name, timestep=req.timestep, **req.params)
             except Exception as exc:
@@ -1406,6 +1933,19 @@ class SimulationServer:
 
         @app.delete("/graph/edges", tags=["graph"], response_model=None)
         def remove_edge(req: RemoveEdgeRequest) -> dict[str, str]:
+            """Remove every edge with these endpoints and fields; a 404 when
+            the graph has none (it used to answer 200 and change nothing)."""
+            if not any(
+                e.source_node == req.source_node and e.target_node == req.target_node
+                and e.source_field == req.source_field
+                and e.target_field == req.target_field
+                for e in self.gm._edges
+            ):
+                raise HTTPException(
+                    status_code=404,
+                    detail=(f"No edge {req.source_node}.{req.source_field} -> "
+                            f"{req.target_node}.{req.target_field}."),
+                )
             self.gm.remove_edge(
                 source=req.source_node, target=req.target_node,
                 source_field=req.source_field, target_field=req.target_field,
@@ -1445,6 +1985,7 @@ class SimulationServer:
             a 400 names the field and writes nothing."""
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
+            self._refuse_while_runner_alive("write a node's state")
             live = self.gm.get_node_state(node_name)
             if set(req.state) != set(live):
                 raise HTTPException(
@@ -1512,15 +2053,26 @@ class SimulationServer:
             saved graph rebuilds -- a constructor that derives a branch or
             an array from the value (``LBMPipeNode``'s multiphase switch
             from ``G != 0``) leaves the running node computing with what it
-            derived from the old one.
+            derived from the old one.  And so is a value the node's step
+            cannot run with: its hooks are traced with the request's values
+            on a copy of the node, and a trace that raises where the
+            current values' trace does not is a 400 naming the error.
+
+            A structural value is stored in the parameter's own numeric
+            type: a float with no fractional part written for an integer
+            parameter is stored as that integer (``stencil_order: 4.0`` is
+            ``4``), any other float for one is a 400, and an integer for a
+            float parameter is stored as a float.
 
             A non-finite number anywhere in the request is a 400 before
             anything else.  Integers and element counts are bounded as in
-            ``POST /graph/nodes`` (a 422 from the request model), and a
-            value that would take the node's state past
-            :data:`MAX_NODE_STATE_ELEMENTS`, or change its layout, is
-            refused before any node or state is built with it wherever the
-            node's ``initial_state()`` can be evaluated abstractly.
+            ``POST /graph/nodes`` (a 422 from the request model, or from
+            this route for an integral float), and a value that would take
+            the node past :data:`MAX_NODE_STATE_ELEMENTS` or
+            :data:`MAX_NODE_BUILD_BYTES`, or change its state's layout, is
+            refused before any node or state is built with it -- told from
+            the class's own size estimate where it has one, and wherever
+            the node's ``initial_state()`` can be evaluated abstractly.
             """
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
@@ -1562,6 +2114,9 @@ class SimulationServer:
             # loop only writes, so a 400 on the third key of a request
             # leaves the first two untouched too.
             staged: dict[str, Any] = {}
+            # What a structural (non-leaf) key would store in node.params:
+            # the JSON value in the parameter's own numeric type.
+            structural: dict[str, Any] = {}
             for key, value in req.params.items():
                 if key not in node.params and key not in live:
                     raise HTTPException(
@@ -1578,8 +2133,22 @@ class SimulationServer:
                             status_code=400,
                             detail=f"{key}: expected a number, got a boolean",
                         )
+                    structural[key] = value
                     continue
                 if key not in live:
+                    # Kept in the parameter's type: a float written for an
+                    # integer used to be stored as a float (HeatNode
+                    # ``stencil_order: 4.0`` became a trainable leaf of
+                    # gm.params), an integer for a float as an int.
+                    coerced, problem = _coerced_to_param_type(node.params.get(key), value)
+                    if problem is not None:
+                        raise HTTPException(status_code=400, detail=f"{key}: {problem}")
+                    # An integral float is an integer from here on, so it is
+                    # bounded as the request model bounds one sent as such.
+                    oversized = _oversized_param(coerced, key)
+                    if oversized is not None:
+                        raise HTTPException(status_code=422, detail=oversized)
+                    structural[key] = coerced
                     continue
                 # Before the cast, which overflows 1e39 into float32's inf
                 # with a RuntimeWarning (a 500 under -W error) and so made
@@ -1623,6 +2192,7 @@ class SimulationServer:
                         continue
                     changes[key] = np.asarray(staged[key]).tolist()
                 else:
+                    value = structural[key]
                     if key in node.params and _same_param_value(node.params[key], value):
                         continue
                     changes[key] = value
@@ -1643,6 +2213,14 @@ class SimulationServer:
                     ),
                 )
 
+            # Before every check that builds the node with the new values
+            # (its constructor, the state it makes): the size of what they
+            # would build, for a class that can say so without building it.
+            # They used to run first, and ``n_levels=10000000`` on a wavelet
+            # node grew the server to 57.7 GB before the kernel killed it.
+            found = _allocation_write_reason(self.gm, node_name, changes)
+            if found is not None:
+                raise refused(*found)
             # A state of another layout -- or over the API's state cap -- is
             # refused whatever else is true of the value, and the checks
             # below that establish it on concrete values build the node and
@@ -1686,6 +2264,21 @@ class SimulationServer:
                 reason = self.gm._mapping_point_write_reason(node_name, {key: node_value})
                 if reason is not None:
                     raise refused([key], reason)
+            # The step must still run with the values: every check above
+            # asks whether a value is *used*, and counted a trace that
+            # raised as "cannot tell", so RigidBodyNode ``constraints:
+            # {"w": 0}`` answered 200 and every later step was a 500.
+            # Asked of the whole request at once, as it is written.
+            accepts = self.gm._nodes[node_name].accepts_params
+            touched = [k for k in changes if k not in staged]
+            if touched:
+                reason = _step_trace_write_reason(
+                    self.gm, node_name, changes,
+                    dict(live) if accepts else None,
+                    {**live, **staged} if accepts else None,
+                )
+                if reason is not None:
+                    raise refused(touched, reason)
             # And the graph a save after the write would reload must load,
             # and run what the running graph runs: the constructor asked
             # with every changed key at once and every other key's live
@@ -1695,7 +2288,6 @@ class SimulationServer:
             # running one does with it.
             saved = {k: v for k, v in changes.items() if k in node.params}
             if saved:
-                accepts = self.gm._nodes[node_name].accepts_params
                 reason = _saved_graph_write_reason(
                     self.gm, node_name, saved,
                     dict(live) if accepts else None,
@@ -1718,28 +2310,56 @@ class SimulationServer:
                         # ``params_pytree`` no longer exposes.
                         node.params[key] = np.asarray(staged[key]).tolist()
                 else:
-                    node.params[key] = value
+                    node.params[key] = structural[key]
                     self.gm._dirty = True
             shown = _json_reply({**_jax_to_python(node.params), **_jax_to_python(live)})
             return {"status": "ok", "params": shown}
 
         # -- checkpoint endpoints -------------------------------------------
 
-        def _checkpoint_path(name: str) -> Path:
+        def _checkpoint_path(name: str, *, loading: bool = False) -> Path:
+            """The file ``/checkpoint/save`` writes (or ``/load`` reads) for
+            *name*, resolved, after checking it is a file strictly inside
+            the checkpoint root.
+
+            The check is made on the file NumPy actually touches, not only
+            on the name: ``numpy.savez`` appends ``.npz``, so a name that
+            resolved to the root itself (``""``, ``"."``, ``"sub/.."``) used
+            to write -- and load -- ``<root>.npz``, in the root's parent.
+            A name with a NUL byte, or one the filesystem cannot represent,
+            is a 400 rather than a 500.
+            """
             root = self.checkpoint_root
-            target = (root / name).resolve()
-            if root != target and root not in target.parents:
+            outside = HTTPException(
+                status_code=400,
+                detail=(f"checkpoint path must stay under {root}, naming a file "
+                        f"inside it (got {name!r})"),
+            )
+            if not name or "\x00" in name:
+                raise outside
+            try:
+                target = (root / name).resolve()
+                if root == target or root not in target.parents:
+                    raise outside
+                if not (loading and target.is_file()) and target.suffix != ".npz":
+                    target = target.with_suffix(target.suffix + ".npz")
+                target = target.resolve()
+            except HTTPException:
+                raise
+            except (OSError, ValueError, RuntimeError) as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"checkpoint path must stay under {root} (got {name!r})",
-                )
+                    detail=f"checkpoint path {name!r} is not usable: {exc}",
+                ) from None
+            if root == target or root not in target.parents:
+                raise outside
             return target
 
         @app.post("/checkpoint/save", tags=["checkpoint"], response_model=None)
         def checkpoint_save(path: str = "checkpoint.npz") -> dict[str, str]:
             target = _checkpoint_path(path)
-            target.parent.mkdir(parents=True, exist_ok=True)
             try:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 saved = self.gm.save_state(str(target))
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=400, detail=f"could not save checkpoint: {exc}")
@@ -1747,8 +2367,15 @@ class SimulationServer:
 
         @app.post("/checkpoint/load", tags=["checkpoint"], response_model=None)
         def checkpoint_load(path: str = "checkpoint.npz") -> dict[str, Any]:
-            target = _checkpoint_path(path)
-            if not target.exists() and not target.with_suffix(target.suffix + ".npz").exists():
+            # A load replaces the state a running runner is stepping, and the
+            # runner's next store would overwrite it: stop it first.
+            self._refuse_while_runner_alive("load a checkpoint")
+            target = _checkpoint_path(path, loading=True)
+            try:
+                found = target.is_file()
+            except OSError:
+                found = False
+            if not found:
                 raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
             from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
                 _restore_state_and_params,
@@ -1786,10 +2413,14 @@ class SimulationServer:
 
         @app.post("/sim/step", tags=["sim"], response_model=None)
         def sim_step() -> dict[str, Any]:
+            """Advance the graph one step.  A graph that cannot step is a
+            400 naming why (nothing is stepped); a 409 while the runner is
+            started, whose next step would overwrite this one's."""
+            self._refuse_while_runner_alive("step the graph")
             try:
                 self.gm.step()
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
+            except _GRAPH_CONFIGURATION_ERRORS as exc:
+                raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
             return self._state_json()
 
         @app.post("/sim/run", tags=["sim"], response_model=None)
@@ -1804,14 +2435,23 @@ class SimulationServer:
                             "/sim/start.",
             ),
         ) -> dict[str, Any]:
+            self._refuse_while_runner_alive("run the graph")
             try:
                 self.gm.run(n_steps)
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
+            except _GRAPH_CONFIGURATION_ERRORS as exc:
+                raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
             return self._state_json()
 
         @app.post("/sim/start", tags=["sim"], response_model=None)
         def sim_start() -> dict[str, str]:
+            if self._runner_stopping():
+                raise HTTPException(
+                    status_code=503,
+                    detail=("The previous run's thread is still finishing a step "
+                            "after POST /sim/stop; two runners would step one "
+                            "graph. Retry shortly."),
+                    headers={"Retry-After": "1"},
+                )
             runner = self._ensure_runner()
             if self._runner_started:
                 raise HTTPException(status_code=409, detail="Runner is already started.")
@@ -1819,6 +2459,7 @@ class SimulationServer:
                 self._ensure_relay_attached()
                 runner.start()
                 self._runner_started = True
+                self._runner_stop_pending = False
             except RuntimeError as exc:
                 raise HTTPException(status_code=400, detail=str(exc))
             return {"status": "started"}
@@ -1839,38 +2480,73 @@ class SimulationServer:
 
         @app.post("/sim/stop", tags=["sim"], response_model=None)
         def sim_stop() -> dict[str, str]:
-            if self.runner is None or not self._runner_started:
+            """Stop the runner and wait for its thread to exit.
+
+            "stopped" means no runner thread is stepping the graph.  When
+            the thread is still in a step after the wait, the answer is a
+            503 and the runner is kept as stopping: retry, and the route
+            waits for it again.
+            """
+            if self.runner is None or not (
+                    self._runner_started or self._runner_stop_pending):
                 raise HTTPException(status_code=409, detail="Runner is not started.")
-            self._stop_runner()
+            self._stop_runner_or_refuse("report the runner stopped")
             return {"status": "stopped"}
 
         @app.post("/sim/reset", tags=["sim"], response_model=None)
         def sim_reset() -> dict[str, Any]:
-            """Stop the runner and reset all nodes to initial state."""
+            """Stop the runner and reset all nodes to initial state.  A 503,
+            with nothing reset, when the runner's thread will not stop in
+            time (it would overwrite the reset)."""
             was_running = self._runner_started
-            self._stop_runner()
+            self._stop_runner_or_refuse("reset the graph")
             self._reset_state()
             self.gm._dirty = True
             return {"status": "ok", "was_running": was_running, "state": self._state_json()}
 
         @app.put("/sim/stride", tags=["sim"], response_model=None)
-        def sim_set_stride(steps_per_frame: int = 1, relay_stride: int = 1) -> dict[str, int]:
+        def sim_set_stride(
+            steps_per_frame: int = Query(
+                1, ge=1, le=MAX_STEPS_PER_FRAME,
+                description="Physics steps batched per wall-clock frame in the "
+                            "runner, at most MAX_STEPS_PER_FRAME (one POST "
+                            "/sim/run's worth).  Kept for a runner started "
+                            "later.",
+            ),
+            relay_stride: int = Query(
+                1, ge=1, le=MAX_RELAY_STRIDE,
+                description="Capture only every Nth step in the relay, at "
+                            "least 1 and at most MAX_RELAY_STRIDE.",
+            ),
+        ) -> dict[str, int]:
             """Adjust physics-to-render rate decoupling.
 
             Parameters
             ----------
             steps_per_frame : int
-                Physics steps batched per wall-clock frame in the runner.
+                Physics steps batched per wall-clock frame in the runner,
+                ``1`` to :data:`MAX_STEPS_PER_FRAME`.  Applied to the
+                running runner, and kept for the one a later ``POST
+                /sim/start`` creates (it used to be echoed and dropped when
+                no runner existed yet).
             relay_stride : int
                 Only capture every Nth step in the relay (reduces observer
-                overhead for very fast physics).
+                overhead for very fast physics), ``1`` to
+                :data:`MAX_RELAY_STRIDE`.  ``0`` used to be echoed as ``0``
+                and applied as ``1``; it is a 422 now.
+
+            Returns
+            -------
+            dict
+                The values in force, as the runner and the relay hold them.
             """
+            self._steps_per_frame = steps_per_frame
             if self.runner is not None:
                 self.runner.steps_per_frame = steps_per_frame
             self.relay.stride = relay_stride
             return {
-                "steps_per_frame": steps_per_frame,
-                "relay_stride": relay_stride,
+                "steps_per_frame": self._steps_per_frame,
+                "relay_stride": self.relay.stride,
             }
 
         # -- surrogate endpoints --------------------------------------------
@@ -1909,7 +2585,10 @@ class SimulationServer:
             def _train_worker():
                 try:
                     # Stop runner if going, generate data from varied ICs
-                    self._stop_runner()
+                    if not self._stop_runner():
+                        raise RuntimeError(
+                            "the runner's thread did not stop in time; nothing "
+                            "was reset or trained -- retry once it has stopped")
                     self._reset_state()
                     self.gm._dirty = True
 
@@ -2033,7 +2712,7 @@ class SimulationServer:
                     initial_values[k] = v
 
             was_running = self._runner_started
-            self._stop_runner()
+            self._stop_runner_or_refuse("activate a surrogate")
 
             surrogate = result.to_node(
                 name=node_name,
@@ -2059,7 +2738,7 @@ class SimulationServer:
                 )
 
             was_running = self._runner_started
-            self._stop_runner()
+            self._stop_runner_or_refuse("deactivate a surrogate")
 
             orig_node, orig_edges, orig_ext = self._original_nodes[node_name]
 
@@ -2342,32 +3021,21 @@ class SimulationServer:
 
             sub_fields = [None]   # mutable: {node: [fields]} or None
             target_fps = [30.0]
-            config_changed = asyncio.Event()
+            disconnected = asyncio.Event()
 
-            async def _receive():
-                import json as _json
-                try:
-                    while True:
-                        raw = await websocket.receive_text()
-                        try:
-                            msg = _json.loads(raw)
-                            if msg.get("type") == "subscribe":
-                                sub_fields[0] = msg.get("fields")
-                            elif msg.get("type") == "config":
-                                if "fps" in msg:
-                                    target_fps[0] = max(1, min(120, msg["fps"]))
-                            config_changed.set()
-                        except (ValueError, KeyError):
-                            pass
-                except (WebSocketDisconnect, Exception):
-                    pass
+            def _on_message(msg: dict) -> None:
+                if msg.get("type") == "subscribe":
+                    sub_fields[0] = msg.get("fields")
+                elif msg.get("type") == "config":
+                    if "fps" in msg:
+                        target_fps[0] = max(1, min(120, msg["fps"]))
 
-            receiver = asyncio.create_task(_receive())
+            receiver = asyncio.create_task(
+                _receive_until_disconnect(websocket, _on_message, disconnected))
 
             last_sim_time = -1.0
             try:
-                while True:
-                    config_changed.clear()
+                while not disconnected.is_set():
                     sim_time, snapshot = self.relay.latest_snapshot()
                     if snapshot is not None and sim_time != last_sim_time:
                         last_sim_time = sim_time
@@ -2389,11 +3057,13 @@ class SimulationServer:
                             "state": _json_reply(state),
                         }
                         await websocket.send_json(payload)
-                    await asyncio.sleep(1.0 / target_fps[0])
-            except WebSocketDisconnect:
+                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                 logger.info("WebSocket client disconnected from /ws/state")
-            except Exception:
-                logger.exception("WebSocket error on /ws/state")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if _client_left(websocket, exc, disconnected):
+                    logger.info("WebSocket client disconnected from /ws/state")
+                else:
+                    logger.exception("WebSocket error on /ws/state")
             finally:
                 receiver.cancel()
 
@@ -2433,58 +3103,50 @@ class SimulationServer:
             current_compression = ["none"]
             current_fields: list[dict | None] = [None]
             schema_dirty = asyncio.Event()
+            disconnected = asyncio.Event()
 
             await websocket.send_json(current_encoder[0].schema())
 
-            async def _receive():
-                import json as _json
-                try:
-                    while True:
-                        raw = await websocket.receive_text()
-                        try:
-                            msg = _json.loads(raw)
-                            if msg.get("type") == "subscribe":
-                                from maddening.api.binary_encoder import (
-                                    BinaryStateEncoder, VALID_COMPRESSIONS,
-                                )
-                                if "fields" in msg:
-                                    current_fields[0] = msg["fields"]
-                                if "compression" in msg:
-                                    comp = msg["compression"]
-                                    if comp in VALID_COMPRESSIONS:
-                                        current_compression[0] = comp
-                                user_state = {
-                                    k: v for k, v in self.gm._state.items()
-                                    if k != "_meta"
-                                }
-                                try:
-                                    current_encoder[0] = BinaryStateEncoder(
-                                        user_state,
-                                        fields=current_fields[0],
-                                        compression=current_compression[0],
-                                    )
-                                except ImportError:
-                                    # zstandard not installed — fall back
-                                    current_compression[0] = "none"
-                                    current_encoder[0] = BinaryStateEncoder(
-                                        user_state,
-                                        fields=current_fields[0],
-                                        compression="none",
-                                    )
-                                schema_dirty.set()
-                            elif msg.get("type") == "config":
-                                if "fps" in msg:
-                                    target_fps[0] = max(1, min(120, msg["fps"]))
-                        except (ValueError, KeyError):
-                            pass
-                except (WebSocketDisconnect, Exception):
-                    pass
+            def _on_message(msg: dict) -> None:
+                if msg.get("type") == "subscribe":
+                    from maddening.api.binary_encoder import (  # noqa: PLC0415
+                        BinaryStateEncoder, VALID_COMPRESSIONS,
+                    )
+                    if "fields" in msg:
+                        current_fields[0] = msg["fields"]
+                    if "compression" in msg:
+                        comp = msg["compression"]
+                        if comp in VALID_COMPRESSIONS:
+                            current_compression[0] = comp
+                    user_state = {
+                        k: v for k, v in self.gm._state.items()
+                        if k != "_meta"
+                    }
+                    try:
+                        current_encoder[0] = BinaryStateEncoder(
+                            user_state,
+                            fields=current_fields[0],
+                            compression=current_compression[0],
+                        )
+                    except ImportError:
+                        # zstandard not installed — fall back
+                        current_compression[0] = "none"
+                        current_encoder[0] = BinaryStateEncoder(
+                            user_state,
+                            fields=current_fields[0],
+                            compression="none",
+                        )
+                    schema_dirty.set()
+                elif msg.get("type") == "config":
+                    if "fps" in msg:
+                        target_fps[0] = max(1, min(120, msg["fps"]))
 
-            receiver = asyncio.create_task(_receive())
+            receiver = asyncio.create_task(
+                _receive_until_disconnect(websocket, _on_message, disconnected))
 
             last_sim_time = -1.0
             try:
-                while True:
+                while not disconnected.is_set():
                     # Re-send schema if subscription changed
                     if schema_dirty.is_set():
                         schema_dirty.clear()
@@ -2495,11 +3157,13 @@ class SimulationServer:
                         last_sim_time = sim_time
                         frame = current_encoder[0].encode(sim_time, snapshot)
                         await websocket.send_bytes(frame)
-                    await asyncio.sleep(1.0 / target_fps[0])
-            except WebSocketDisconnect:
+                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                 logger.info("WebSocket client disconnected from /ws/state/binary")
-            except Exception:
-                logger.exception("WebSocket error on /ws/state/binary")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                if _client_left(websocket, exc, disconnected):
+                    logger.info("WebSocket client disconnected from /ws/state/binary")
+                else:
+                    logger.exception("WebSocket error on /ws/state/binary")
             finally:
                 receiver.cancel()
 
@@ -2550,37 +3214,24 @@ class SimulationServer:
             })
 
             config_changed = asyncio.Event()
+            disconnected = asyncio.Event()
 
-            async def _receive_client_messages():
-                """Background task: listen for client config messages."""
-                import json as _json
-                try:
-                    while True:
-                        raw = await websocket.receive_text()
-                        try:
-                            msg = _json.loads(raw)
-                            if msg.get("type") == "config":
-                                if "format" in msg:
-                                    renderer.set_format(
-                                        msg["format"], msg.get("quality"),
-                                    )
-                                if "fps" in msg:
-                                    target_fps[0] = max(1, min(60, msg["fps"]))
-                                config_changed.set()
-                            elif msg.get("type") == "reset":
-                                renderer.reset()
-                        except (ValueError, KeyError):
-                            pass
-                except WebSocketDisconnect:
-                    pass
-                except Exception:
-                    pass
+            def _on_message(msg: dict) -> None:
+                if msg.get("type") == "config":
+                    if "format" in msg:
+                        renderer.set_format(msg["format"], msg.get("quality"))
+                    if "fps" in msg:
+                        target_fps[0] = max(1, min(60, msg["fps"]))
+                    config_changed.set()
+                elif msg.get("type") == "reset":
+                    renderer.reset()
 
-            receiver = asyncio.create_task(_receive_client_messages())
+            receiver = asyncio.create_task(
+                _receive_until_disconnect(websocket, _on_message, disconnected))
 
             last_sim_time = -1.0
             try:
-                while True:
+                while not disconnected.is_set():
                     # Re-send config if client changed settings
                     if config_changed.is_set():
                         config_changed.clear()
@@ -2601,11 +3252,15 @@ class SimulationServer:
                         )
                         await websocket.send_bytes(frame)
 
-                    await asyncio.sleep(1.0 / target_fps[0])
-            except WebSocketDisconnect:
+                    await _sleep_unless_disconnected(disconnected, 1.0 / target_fps[0])
                 logger.info("WebSocket client disconnected from /ws/render")
-            except Exception:
-                logger.exception("WebSocket error on /ws/render")
+            except Exception as exc:  # noqa: BLE001 - classified below
+                # A client that closed its viewer is the ordinary end of a
+                # render stream; it used to log a traceback every time.
+                if _client_left(websocket, exc, disconnected):
+                    logger.info("WebSocket client disconnected from /ws/render")
+                else:
+                    logger.exception("WebSocket error on /ws/render")
             finally:
                 receiver.cancel()
 

@@ -125,10 +125,10 @@ _SCALE_FINDING = ("CPL-010: at 2**-110 the accelerator step subtracts the iterat
 
 @pytest.mark.parametrize("acceleration", [
     "none",
-    pytest.param("aitken", marks=pytest.mark.xfail(strict=True, reason=_SCALE_FINDING)),
-    pytest.param("fixed", marks=pytest.mark.xfail(strict=True, reason=_SCALE_FINDING)),
+    pytest.param("aitken", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=_SCALE_FINDING)),
+    pytest.param("fixed", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=_SCALE_FINDING)),
     "iqn-ils",
-    pytest.param("iqn-imvj", marks=pytest.mark.xfail(strict=True, reason=_SCALE_FINDING)),
+    pytest.param("iqn-imvj", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=_SCALE_FINDING)),
 ])
 def test_a_group_at_2_to_the_minus_110_takes_the_unscaled_passes(acceleration):
     """CPL-010: "a group at any power-of-two scale reproduce[s] the unscaled run bit for bit".
@@ -209,7 +209,7 @@ def test_one_pass_reads_the_iterate_its_mode_documents(mode):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "CPL-025: a node downstream of a coupling group added before the group's members "
     "is scheduled before them and reads their previous-step output; pending fix"))
 def test_a_node_downstream_of_a_group_reads_it_in_the_same_step():
@@ -234,7 +234,7 @@ def test_a_node_downstream_of_a_group_reads_it_in_the_same_step():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=(
     "CPL-031: forward-mode AD does work through solver='fori' (the docstring says it does "
     "not); pending a docs fix"))
 def test_forward_mode_through_a_fori_group_is_refused():
@@ -521,7 +521,7 @@ def test_a_group_whose_norm_reads_nothing_is_not_precision_limited():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "CPL-086: coupling_diagnostics re-derives the float floor from the current edges, not "
     "the committed ones; pending fix"))
 def test_an_edge_added_after_the_step_does_not_rejudge_its_floor():
@@ -641,7 +641,7 @@ def test_the_report_flags_an_unsettled_spectral_bound_only_where_one_was_compute
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, reason=(
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "CPL-134: run_adaptive keeps a rejected attempt when the shrunk step would fall to "
     "dt_min; run_adaptive_scan rejects it and retries at dt_min; pending fix"))
 def test_both_adaptive_steppers_accept_the_same_steps_at_dt_min():
@@ -709,7 +709,7 @@ def test_the_ift_gradient_of_an_affine_group_is_the_same_under_every_acceleratio
 
 @pytest.mark.parametrize("scale", [
     1.0,
-    pytest.param(1e-12, marks=pytest.mark.xfail(strict=True, reason=(
+    pytest.param(1e-12, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
         "CPL-143: the adjoint's GMRES atol is 1e-8 + rtol * max|b|, absolute for a small "
         "cotangent, so the solve returns zero; pending fix"))),
 ])

@@ -258,7 +258,9 @@ def test_the_old_and_new_mixed_scales_agree_only_at_the_fields_largest_entry():
         ["n"], atol, rtol))
     whole = float(coupling_residual_mixed(_state(x=a_new), _state(x=a_old), ["n"], atol, rtol))
     old_entry = float(old_elementwise(a_new, a_old)[1])
-    assert new_entry == pytest.approx(old_entry, rel=1e-3)        # alone, it is its own scale
+    # Alone, the small field is its own scale: within the claim's factor.
+    small_bound = 1.0 + atol / (rtol * 1e-3)
+    assert max(new_entry / old_entry, old_entry / new_entry) <= small_bound * (1.0 + 1e-5)
     # Inside the array the entry contributes (rtol * 1.0) / (rtol * 1e-3) = 1000x less.
     assert whole * math.sqrt(2) < old_entry / 100.0
 

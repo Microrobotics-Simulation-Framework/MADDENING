@@ -626,6 +626,10 @@ def test_a_rest_write_to_a_value_the_wrapped_node_copied_at_construction_is_refu
     gm, inner, _, _ = _legacy_graph(kind, _LEGACY_WRITES[kind][1])
     inner.params["baked"] = 3.0
     inner._baked = 3.0           # copied at construction, never read again
+    # The setup's own node.params write is a write: compile it in, so the
+    # graph is clean before the request and "not dirty" below is about the
+    # refused write alone.
+    gm.compile()
     wrapped = gm._nodes["d"].node
     client = TestClient(SimulationServer({}, gm).create_app(),
                         raise_server_exceptions=False)

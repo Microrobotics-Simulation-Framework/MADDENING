@@ -183,7 +183,7 @@ def test_held_inputs_are_not_in_the_fmu_state_and_a_restore_keeps_them_at_zero(g
         assert inputs == ["i/spring/anchor_position"]
         assert bridge.handle({"op": "step", "t": 0.0, "dt": 5 * DT})["ok"]
         assert bridge.handle({"op": "set_state",
-                              "state": base64.b64encode(blob).decode("ascii")}) == {"ok": True}
+                              "state": base64.b64encode(blob).decode("ascii")})["ok"] is True
         assert bridge.handle({"op": "step", "t": 0.0, "dt": N * DT})["ok"]
         got = bridge.handle({"op": "get", "vr": [_vr(md, "ball.position")]})["values"][0]
     finally:

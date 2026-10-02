@@ -102,7 +102,15 @@ def _trajectory(model, params, n):
 
 def _every_entry_point(gm, model, params):
     """What each entry point does from ``X0``, as ``{name: final x}``, and the
-    windowed loss against the model's own trajectory (0 iff it runs it)."""
+    windowed loss against the model's own trajectory (0 iff it runs it).
+
+    The loss is taken *first*, before any run method has had the chance to
+    recompile the graph for it: an entry point must notice a write on its
+    own."""
+    expected = jnp.asarray([X0] + _trajectory(model, params, 4), jnp.float32)
+    _from(gm)
+    loss = float(windowed_loss(gm, gm.params, {"n": {"x": expected}},
+                               obs_fn=lambda s: s["n"]["x"], window=4))
     out = {}
     for name, n, run in (
         ("step", 1, lambda: gm.step()),
@@ -115,10 +123,6 @@ def _every_entry_point(gm, model, params):
         _from(gm)
         run()
         out[name] = (_x(gm), _trajectory(model, params, n)[-1])
-    _from(gm)
-    expected = jnp.asarray([X0] + _trajectory(model, params, 4), jnp.float32)
-    loss = float(windowed_loss(gm, gm.params, {"n": {"x": expected}},
-                               obs_fn=lambda s: s["n"]["x"], window=4))
     return out, loss
 
 

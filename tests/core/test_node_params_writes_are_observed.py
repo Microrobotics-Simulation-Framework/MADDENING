@@ -233,3 +233,27 @@ def test_windowed_loss_runs_the_written_model_as_gm_step_does():
     obs = jax.tree.map(lambda a, h: jnp.concatenate([jnp.asarray(a)[None], h]), s0, hist)
     loss = windowed_loss(gm, gm.params, obs, obs_fn=lambda s: s["c"]["x"], window=4)
     assert float(loss) == 0.0
+
+
+@pytest.mark.parametrize("fitter", ["fit", "fit_lm", "fit_multiple_shooting"])
+def test_a_fitter_starts_from_the_written_value(fitter):
+    """A fit started after a node write, with no compile, starts where the
+    graph now is: it used to read ``gm.params`` before the write had reached
+    it and fit from the old value."""
+    from maddening import sysid
+
+    gm = _counted()
+    gm.step()
+    gm.get_node("c").params["gain"] = 4.0
+    mask = jax.tree.map(lambda _: False, gm.trainable_mask(gm.params))
+    mask["nodes"]["c"]["gain"] = True
+    if fitter == "fit":
+        res = sysid.fit(gm, lambda p: jnp.sum(p["nodes"]["c"]["gain"] ** 2), mask=mask,
+                        n_iter=0)
+    elif fitter == "fit_lm":
+        res = sysid.fit_lm(gm, lambda p: p["nodes"]["c"]["gain"][None], mask=mask, n_iter=0)
+    else:
+        obs = {"c": {"x": jnp.zeros(3, jnp.float32)}}
+        res, _ = sysid.fit_multiple_shooting(gm, obs, obs_fn=lambda s: s["c"]["x"],
+                                             window=1, mask=mask, n_iter=0)
+    assert float(res.params["nodes"]["c"]["gain"]) == 4.0

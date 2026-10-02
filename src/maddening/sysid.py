@@ -288,6 +288,16 @@ def _refuse_unmaskable_groups(gm, meta0, thresholds) -> None:
         )
 
 
+def _sync_compiled(gm) -> None:
+    """Compile ``gm`` if a run method would: dirty, never compiled, a
+    changed static, or a ``node.params`` write the compiled step has not
+    taken.  The fitters and :func:`windowed_loss` call it before they read
+    ``gm.params``, so they start from the values ``gm.step`` would run."""
+    gm._check_static_data_dirty()  # noqa: SLF001
+    if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
+        gm.compile()
+
+
 @stability(StabilityLevel.EVOLVING)
 def windowed_loss(
     gm,
@@ -413,10 +423,12 @@ def windowed_loss(
         _check_count("start_step", start_step)
     # As every run method does first: a ``node.params`` write or a changed
     # static since the last compile makes the graph recompile, so this loss
-    # traces the same model ``gm.step`` runs.
-    gm._check_static_data_dirty()  # noqa: SLF001
-    if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
-        gm.compile()
+    # traces the same model ``gm.step`` runs.  A caller that passed the live
+    # ``gm.params`` meant the live values, which that recompile replaces.
+    live = params is gm.params
+    _sync_compiled(gm)
+    if live:
+        params = gm.params
     # The windows scan the graph step: a sharded node XLA miscompiles
     # inside a loop is refused here as in ``run_scan`` (MADD-ANO-068).
     gm._refuse_xla_loop_hazards("sysid.windowed_loss", scan=True)  # noqa: SLF001
@@ -3764,6 +3776,7 @@ def fit(
     """
     _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
     _check_hold_undetermined(hold_undetermined)
+    _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -4085,6 +4098,7 @@ def fit_lm(
                          "own float resolution.")
     _check_count("notify_every", notify_every)
     _check_hold_undetermined(hold_undetermined)
+    _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -4386,6 +4400,7 @@ def fit_multiple_shooting(
     if start_step is not None:
         _check_count("start_step", start_step)
     _check_hold_undetermined(hold_undetermined)
+    _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)

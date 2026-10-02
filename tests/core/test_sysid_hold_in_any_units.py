@@ -300,6 +300,51 @@ def test_the_guard_decides_the_same_in_any_units(curvature, units):
         np.testing.assert_allclose(held, base, rtol=1e-5, atol=1e-6)
 
 
+#: Two residual rows over three identity parameters: ``(0, -0.5, 1)`` is
+#: undetermined and ``(0, 1, 0.5)`` determined.
+_M2 = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.5]])
+
+
+@pytest.mark.parametrize("curvature", ["gauss_newton", "hessian"])
+@pytest.mark.parametrize("units", [(1.0, 1e-5, 1.0), (1e6, 1.0, 1e-3)])
+def test_holding_part_of_the_candidates_is_the_same_in_any_units(curvature, units):
+    """A short run whose gradients all pointed along the first parameter
+    leaves two candidates, of which the curvature test confirms one: the
+    hold removes the move along that one only, orthogonally in the guard's
+    coordinates, and lands on the same physical point in every unit."""
+    def guard(u):
+        u = np.asarray(u, dtype=np.float64)
+        J = _M2 * u[None, :]
+        tracker = _ExcitationTracker(3, np.float32)
+        for _ in range(4):
+            tracker.observe((J.T @ np.array([1.0, 0.0])).astype(np.float32))
+        theta0 = jnp.asarray(np.array([1.0, 2.0, 0.5]) / u, jnp.float32)
+        theta = jnp.asarray(np.array([1.3, 2.4, 0.3]) / u, jnp.float32)
+
+        def flatness(candidates, spanned, scale):
+            if curvature == "gauss_newton":
+                return _gauss_newton_flatness(J, candidates, np.float32, scale=scale)
+            return _hessian_flatness(lambda V: (J.T @ J) @ V, candidates, spanned,
+                                     np.float32, "test", scale)
+
+        objective = _SelectedObjective(
+            loss=lambda th: 0.0, reference=lambda: (0.0, np.zeros(3)), flatness=flatness,
+            transformed=np.zeros(3, dtype=bool), columns=tracker.gradient_scale)
+        out, rank, _, declined = _hold_undetermined_directions(
+            tracker, theta, theta0, objective, "test")
+        return np.asarray(out, np.float64) * u, rank, declined
+
+    base, base_rank, base_declined = guard((1.0, 1.0, 1.0))
+    held, rank, declined = guard(units)
+    assert (base_rank, base_declined) == (2, False)
+    assert (rank, declined) == (2, False)
+    # The determined combination is where the fit put it; the held point
+    # moved off the selected one.
+    assert base[1] + 0.5 * base[2] == pytest.approx(2.4 + 0.5 * 0.3, rel=1e-6)
+    assert not np.allclose(base, [1.3, 2.4, 0.3])
+    np.testing.assert_allclose(held, base, rtol=1e-5, atol=1e-6)
+
+
 @pytest.mark.parametrize("curvature", ["gauss_newton", "hessian"])
 @pytest.mark.parametrize("unit", [1.0, 1e-5, 1e6])
 def test_a_determined_direction_no_gradient_spanned_is_not_held_in_any_units(

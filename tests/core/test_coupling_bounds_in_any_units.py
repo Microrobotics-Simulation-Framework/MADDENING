@@ -153,3 +153,95 @@ def test_a_usable_gradient_bound_is_not_zero_on_a_tiny_group(k):
     assert got["gradient_bound_usable"]
     assert got["gradient_relative_error_bound"] == want["gradient_relative_error_bound"]
     assert got["gradient_relative_error_bound"] >= true_rel, (got, true_rel)
+
+
+class _Bent(SimulationNode):
+    """``x <- g u + c + k (u1 / |u0|) u1`` on two entries: smooth, nonlinear, of degree one.
+
+    The ratio is formed as ``u1 * exp(-log|u0|)``, whose derivative
+    intermediates stay at the state's own relative size under a tangent in
+    state units (JAX's rule for ``u1 / u0`` forms ``u0**-2``, which
+    overflows below ``|u0| ~ 1e-19`` whatever the tangent).  Its Jacobian
+    depends on the point's direction, not its size, so the dimensionless
+    report is the same at every scale up to rounding -- ``exp`` and ``log``
+    do not scale exactly, so not to the bit.
+    """
+
+    def __init__(self, name, g, c, k):
+        c = np.asarray(c, np.float32)
+        super().__init__(name, 1.0, g=jnp.float32(g), c=jnp.asarray(c), k=jnp.float32(k))
+        self._c = c
+
+    def initial_state(self):
+        return {"x": jnp.asarray(self._c)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(2,), dtype=jnp.float32,
+                                       default=jnp.zeros(2, jnp.float32))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        u = boundary_inputs["u"]
+        ratio = u[1] * jnp.exp(-jnp.log(jnp.abs(u[0])))
+        bend = jnp.stack([jnp.float32(0.0), ratio * u[1]])
+        return {"x": p["g"] * u + p["c"] + p["k"] * bend}
+
+    def update_evaluations(self):
+        return 1
+
+
+_CB = np.array([1.0, 0.5], np.float32)
+
+
+@functools.lru_cache(maxsize=None)
+def _bent_pair():
+    gm = GraphManager()
+    # Loop gain 0.82 at the fixed point (2.64 in the bent entry).
+    gm.add_node(_Bent("a", 0.8, _CB, 0.02))
+    gm.add_node(_Bent("b", 1.0, [0.0, 0.0], 0.0))
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_coupling_group(["a", "b"], tolerance=1e-3, max_iterations=200, diagnostics=True)
+    gm.compile()
+    return gm
+
+
+def _bent_report(k):
+    gm = _bent_pair()
+    s = np.float32(2.0 ** k)
+    gm.reset_state()
+    p = jax.tree.map(lambda v: v, gm.params)
+    p["nodes"]["a"]["c"] = jnp.asarray(_CB * s)
+    for nm in ("a", "b"):
+        gm.set_node_state(nm, {"x": jnp.asarray(_CB * s)})
+    gm.step(params=p)
+    return gm.coupling_diagnostics()["a+b"]
+
+
+@pytest.mark.parametrize("k", [60, 100, -100, -116, -122])
+def test_a_nonlinear_group_never_reports_a_usable_bound_its_control_disowns(k):
+    """A degree-one nonlinear pair at ``2**k``: the control's numbers, or no usable bound.
+
+    The report's Jacobian-vector products take their tangent in state
+    units, lifted out of the underflow range only where the group is that
+    small (``_tangent_lift``).  A tangent framed to order one at every
+    magnitude was tried first and was wrong both ways on this pair: at
+    ``2**60`` the gradient bound read 0.79x its control with
+    ``gradient_bound_usable=True`` (the node's derivative intermediates,
+    relative perturbations of ``2**-60``, underflowed), and at ``2**-100``
+    nothing was usable.  Before any frame, at ``2**-116`` and below, the
+    gradient bound read exactly ``0.0``, usable.  At ``2**-122`` the lifted
+    tangent overflows this node's ``1/|u0|`` derivative: no usable report,
+    which is the most it can say there.
+    """
+    ref = _bent_report(0)
+    got = _bent_report(k)
+    assert ref["gradient_bound_usable"] and ref["spectral_usable"], dict(ref)
+    assert got["iterations"] == ref["iterations"]
+    if got["gradient_bound_usable"]:
+        assert got["gradient_relative_error_bound"] == pytest.approx(
+            ref["gradient_relative_error_bound"], rel=2e-2), (k, dict(got))
+    if got["spectral_usable"]:
+        assert got["rho_spectral"] == pytest.approx(ref["rho_spectral"], rel=1e-3), (k, dict(got))
+    if k >= -116:
+        assert got["gradient_bound_usable"] and got["spectral_usable"], (k, dict(got))

@@ -515,19 +515,20 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         xx, cc, dd, ww, rr = operands
         live = ww > 0
         w_inv = jnp.where(live, 1.0 / jnp.where(live, ww, 1.0), 0.0)
-        # The tangent is taken in a power-of-two frame (``_framed_jvp``)
-        # and the residual's difference entry by entry in one
+        # The tangent lifted out of the underflow range where the group is
+        # that small (``_tangent_lift``; 1 elsewhere) and the residual's
+        # difference taken entry by entry in a power-of-two frame
         # (``_framed_difference``): in state units a group of magnitude
         # ~1e-34 handed the JVP tangents below the normal range, and its
         # residual ``F(x) - x`` flushed to zero.
-        frame = _pow2_normaliser(w_inv)
+        lift = _tangent_lift(w_inv)
 
         def matvec(v):
             _, Jv = jax.jvp(
                 lambda x_: _F_dispatch(step_pure, x_, cc), (xx,),
-                ((v * (w_inv * frame)).astype(xx.dtype),)
+                ((v * (w_inv * lift)).astype(xx.dtype),)
             )
-            return (ww / frame) * Jv.astype(work)
+            return (ww / lift) * Jv.astype(work)
 
         r_w = _framed_difference(_F_dispatch(step_pure, xx, cc).astype(work),
                                  xx.astype(work), ww)
@@ -592,6 +593,38 @@ def _framed_difference(a, b, weight):
 
     k = _pow2_entrywise(a, b)
     return (a * k - b * k) * (weight / k)
+
+
+def _tangent_lift(scale):
+    """The least power of two ``>= 1`` that keeps a JVP tangent of size ``max|scale|`` normal.
+
+    The report's Jacobian-vector products take their tangent in state
+    units (``v * max|field|`` for a unit vector ``v``: a relative
+    perturbation of order one), which keeps every intermediate a node's
+    derivative forms at its natural size.  Below ``tiny / eps`` (``2**-102``
+    in float32) the small components of such a tangent are subnormal and
+    flush to zero, and the products read a different Jacobian.  There, and
+    only there, the tangent is multiplied by the least power of two that
+    brings its largest entry to ``tiny / eps`` -- every component down to
+    one ``eps`` of it normal -- and the product is divided by it again,
+    exactly (``J`` is linear).  It is 1 at every other magnitude, so the
+    program is the one it was.  Lifting to order one instead was tried and
+    is wrong both ways: at a large state a tangent of order one is a
+    relative perturbation of ``1/|x|``, and a nonlinear node's derivative
+    intermediates (``d(1/u) = -du/u**2``) underflowed -- a gradient bound
+    0.79x its control at ``|x| ~ 1e18``, usable -- and at a tiny state its
+    ``1/u`` times an order-one tangent overflowed.  A node whose derivative
+    intermediates are within ``2**24`` of overflow at a near-subnormal
+    state can still overflow under the lift, which reads as a non-finite
+    report (``spectral_usable=False``), not a wrong number.
+    """
+    dtype = jnp.asarray(scale).dtype
+    info = jnp.finfo(dtype)
+    biggest = jnp.max(jnp.abs(scale))
+    usable = jnp.logical_and(jnp.isfinite(biggest), biggest > 0)
+    _, have = jnp.frexp(jnp.where(usable, biggest, jnp.ones_like(biggest)))
+    _, want = np.frexp(float(info.tiny) / float(info.eps))
+    return jnp.ldexp(jnp.ones((), dtype), jnp.maximum(int(want) - have, 0))
 
 
 def _framed_shift(x, step, scale):
@@ -819,18 +852,17 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
                 out.append(np.zeros(c.shape, dtype=jax.dtypes.float0))
         return tuple(out)
 
-    # The state tangent in a power-of-two frame, as ``_spectral_rate_at``
-    # takes it: ``J`` is linear, and in state units a tiny group's tangents
-    # fell below the normal range.
-    frame = _pow2_normaliser(s_inv)
+    # The state tangent lifted out of the underflow range where the group
+    # is that small, as ``_spectral_rate_at`` takes it (``_tangent_lift``).
+    lift = _tangent_lift(s_inv)
 
     def matvec(z):
         """``J(x_k)`` in the scaled coordinates."""
         _, Jv = jax.jvp(
             lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,),
-            ((z * (s_inv * frame)).astype(x_dtype),)
+            ((z * (s_inv * lift)).astype(x_dtype),)
         )
-        return (s / frame) * Jv.astype(dtype)
+        return (s / lift) * Jv.astype(dtype)
 
     U, M, captured = jacobian_range_basis(matvec, x_sg.shape[0], dtype=dtype)
 

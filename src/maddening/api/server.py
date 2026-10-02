@@ -669,8 +669,10 @@ def _dry_run_node(node, state: Any = None) -> None:
 #: code failing on its params while the step is traced and compiled, a
 #: structure ``compile()`` refuses -- rather than because the server is
 #: broken.  ``POST /sim/step`` and ``POST /sim/run`` answer these 400 with
-#: the message (nothing is stepped); they used to answer every one but
-#: ``RuntimeError`` with an uncaught 500.
+#: the message; they used to answer every one but ``RuntimeError`` with an
+#: uncaught 500.  A failing ``/sim/step`` stores nothing; a ``/sim/run``
+#: whose step raises at run time part-way through keeps the steps before
+#: it, and its 400 says how many (``steps_run``).
 _GRAPH_CONFIGURATION_ERRORS = (
     RuntimeError, ValueError, TypeError, KeyError, AttributeError, IndexError,
     ArithmeticError,

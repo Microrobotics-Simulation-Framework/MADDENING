@@ -288,6 +288,16 @@ def _refuse_unmaskable_groups(gm, meta0, thresholds) -> None:
         )
 
 
+def _sync_compiled(gm) -> None:
+    """Compile ``gm`` if a run method would: dirty, never compiled, a
+    changed static, or a ``node.params`` write the compiled step has not
+    taken.  The fitters and :func:`windowed_loss` call it before they read
+    ``gm.params``, so they start from the values ``gm.step`` would run."""
+    gm._check_static_data_dirty()  # noqa: SLF001
+    if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
+        gm.compile()
+
+
 @stability(StabilityLevel.EVOLVING)
 def windowed_loss(
     gm,
@@ -301,6 +311,7 @@ def windowed_loss(
     mask_unconverged: bool = False,
     window_states: Optional[dict] = None,
     continuity_weight: float = 0.0,
+    start_step: Optional[int] = None,
 ) -> jnp.ndarray:
     """Windowed squared-error loss of a graph against data.
 
@@ -378,6 +389,22 @@ def windowed_loss(
         refuses it: a negative or NaN weight used to read as ``0.0`` -- no
         penalty and no error -- because the penalty was guarded by
         ``continuity_weight > 0.0``.
+    start_step : int, optional
+        *Experimental, new in 0.4.0.*  The base step of the graph's
+        multi-rate schedule at which sample ``0`` was recorded: ``0`` for a
+        record that starts at ``compile()`` or ``reset_state()``, ``n`` for
+        one that starts after ``gm.run(n)``.  Window ``w`` restarts at base
+        step ``start_step + k * sample_every`` (``k`` its first sample), so
+        each node fires on the sub-step it fired on when the record was
+        made.  The observations are user state and cannot carry the
+        recording's own step counter, so on a multi-rate graph this is the
+        only way to know it: without it a record that began on an odd base
+        step of a graph whose slowest node fires every second step is
+        replayed on the wrong phase in every window, and the loss at the
+        generating parameters is not zero (1.3e-2 for a ball and table).
+        ``None`` (the default) assumes ``0`` and, on a multi-rate graph,
+        warns (``UserWarning``) that it is assuming it.  It has no effect on
+        a single-rate graph.
 
     Returns
     -------
@@ -392,8 +419,16 @@ def windowed_loss(
     _check_flag("mask_unconverged", mask_unconverged)
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
                  why=_CONTINUITY_WEIGHT_WHY)
-    if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
-        gm.compile()
+    if start_step is not None:
+        _check_count("start_step", start_step)
+    # As every run method does first: a ``node.params`` write or a changed
+    # static since the last compile makes the graph recompile, so this loss
+    # traces the same model ``gm.step`` runs.  A caller that passed the live
+    # ``gm.params`` meant the live values, which that recompile replaces.
+    live = params is gm.params
+    _sync_compiled(gm)
+    if live:
+        params = gm.params
     # The windows scan the graph step: a sharded node XLA miscompiles
     # inside a loop is refused here as in ``run_scan`` (MADD-ANO-068).
     gm._refuse_xla_loop_hazards("sysid.windowed_loss", scan=True)  # noqa: SLF001
@@ -425,6 +460,20 @@ def windowed_loss(
     meta0 = gm._state.get(_META_KEY)  # noqa: SLF001
     thresholds = _group_thresholds(gm) if mask_unconverged else []
     _refuse_unmaskable_groups(gm, meta0, thresholds)
+    # ``step_count`` exists exactly when the graph is multi-rate: the phase
+    # of its schedule is then part of the state a window restarts from.
+    if start_step is None:
+        if meta0 is not None and "step_count" in meta0:
+            warnings.warn(
+                "windowed_loss: the graph is multi-rate and the record's "
+                "starting base step is not known, so it is assumed to be 0. "
+                "A record that began elsewhere is replayed on the wrong phase "
+                "of the schedule in every window. Pass start_step= (0 for a "
+                "record taken from compile() or reset_state(), n after "
+                "gm.run(n)) to say where it began.",
+                UserWarning, stacklevel=2,
+            )
+        start_step = 0
 
     def _state_from_obs(obs_k, k):
         s = {nn: dict(fields) for nn, fields in obs_k.items()}
@@ -432,7 +481,7 @@ def windowed_loss(
             m = jax.tree.map(jnp.zeros_like, meta0)
             if "step_count" in m:
                 m["step_count"] = jnp.asarray(
-                    k * sample_every, dtype=meta0["step_count"].dtype,
+                    start_step + k * sample_every, dtype=meta0["step_count"].dtype,
                 )
             s[_META_KEY] = m
         return s
@@ -1140,6 +1189,104 @@ def _physical_params(gm, start: dict, flat_u, unravel, idx):
         ])
 
     return to_params
+
+
+class _CoordinateBounds:
+    """The bounds of each optimiser coordinate ``theta``, and the projection
+    onto them.
+
+    A trainable leaf whose :class:`~maddening.core.params.ParamSpec` has
+    bounds and ``transform=None`` is optimised in its own (physical)
+    coordinate, and ``constrain`` *clips* it.  The clip's derivative is 0
+    strictly outside the bounds, so a coordinate one step carried past its
+    bound had no gradient back and stayed clipped for the rest of the run:
+    a spring's damping, started at 4 against a truth of 0.05, landed on 0
+    after one Levenberg-Marquardt step and stayed there, and ``fit_lm``
+    called it converged because the physical change of every later step was
+    0.  So every fitter projects its coordinate back onto the bounds after
+    each update; a coordinate on its bound has the one-sided derivative
+    into the range, and a step that would leave the range again moves it by
+    nothing.  A ``log`` / ``logit`` coordinate is bounded the same way to the
+    range where ``constrain`` is its transform and not its clamp
+    (:meth:`ParamSpec._optimiser_interval`), since past that its derivative
+    is 0 too.  Inside the bounds the projection is the identity, bit for bit.
+    """
+
+    def __init__(self, gm, start: dict, idx, dtype) -> None:
+        specs = _resolve_specs(start, gm.param_specs())
+        los, his, p_los, p_his = [], [], [], []
+        for leaf, spec in zip(jax.tree.leaves(start), specs):
+            n = _leaf_size(leaf)
+            lo, hi = -np.inf, np.inf
+            p_lo, p_hi = -np.inf, np.inf
+            if spec.trainable and _is_differentiable(leaf):
+                p_lo, p_hi = _physical_edges(spec, jnp.result_type(leaf))
+                # A ``log`` / ``logit`` coordinate is unbounded in principle,
+                # but past the point where ``constrain`` clamps it (``exp``
+                # at its floor or overflowing, the sigmoid at the edge of
+                # the representable interior) its derivative is 0 as well:
+                # a logit-bounded damping driven past it sat at 1.999998 of
+                # (0.5, 2) with ``converged=True``.  Same projection.
+                lo, hi = spec._optimiser_interval(jnp.result_type(leaf))  # noqa: SLF001
+            los.append(np.full(n, lo))
+            his.append(np.full(n, hi))
+            p_los.append(np.full(n, p_lo))
+            p_his.append(np.full(n, p_hi))
+        lo_all = np.concatenate(los) if los else np.zeros(0)
+        hi_all = np.concatenate(his) if his else np.zeros(0)
+        lo_np, hi_np = lo_all[idx], hi_all[idx]
+        #: The physical values the edges of each coordinate's range map to.
+        self.p_lo = (np.concatenate(p_los) if p_los else np.zeros(0))[idx]
+        self.p_hi = (np.concatenate(p_his) if p_his else np.zeros(0))[idx]
+        #: Whether any coordinate is bounded at all; when not, every method
+        #: here is the identity and costs nothing.
+        self.active = bool(np.isfinite(lo_np).any() or np.isfinite(hi_np).any())
+        # At the coordinates' own dtype, rounded as ``constrain``'s clip
+        # rounds a Python-float bound, so the two agree on where the bound is.
+        self.lo = jnp.asarray(lo_np, dtype)
+        self.hi = jnp.asarray(hi_np, dtype)
+
+    def project(self, theta):
+        return jnp.clip(theta, self.lo, self.hi) if self.active else theta
+
+    def inward_descent(self, theta, g, physical=None, rel_tol: Any = 0.0) -> bool:
+        """Whether a coordinate on its bound could lower the loss by moving
+        into the range: ``g`` (the gradient, with the one-sided derivative on
+        the bound) pointing inward.  Such a point is not a constrained
+        stationary point, whatever the size of the step proposed there.
+
+        "On its bound" is also read physically, when ``physical`` (the
+        coordinates' physical values) is given: within ``rel_tol`` of the
+        value an edge maps to.  A ``logit`` coordinate near the edge of its
+        range moves its value by almost nothing for a large step in ``u``
+        (the sigmoid is flat there), so a fit pushed there proposed steps
+        that changed the value by under ``step_tol`` and stopped,
+        "converged", at 1.999997 of ``(0.5, 2)`` with the truth at 1.25.
+        """
+        if not self.active:
+            return False
+        th, gg = np.asarray(theta), np.asarray(g)
+        lo, hi = np.asarray(self.lo), np.asarray(self.hi)
+        on_lo, on_hi = th <= lo, th >= hi
+        if physical is not None:
+            p = np.asarray(physical, dtype=np.float64)
+            margin = np.asarray(rel_tol) * np.abs(p)
+            on_lo = on_lo | (p - self.p_lo <= margin)
+            on_hi = on_hi | (self.p_hi - p <= margin)
+        return bool(((on_lo & (gg < 0)) | (on_hi & (gg > 0))).any())
+
+
+def _physical_edges(spec, dtype) -> tuple[float, float]:
+    """The physical values a trainable leaf's coordinate range ends at: its
+    bounds under ``transform=None``, the floor ``constrain`` keeps a ``log``
+    leaf above, the representable interior of a ``logit`` leaf."""
+    if spec.transform is None:
+        lo, hi = spec.bounds
+        return (-np.inf if lo is None else float(lo), np.inf if hi is None else float(hi))
+    fi = np.finfo(dtype)
+    if spec.transform == "log":
+        return spec._lo() + spec._log_floor(fi), np.inf  # noqa: SLF001
+    return spec._logit_interior(fi)  # noqa: SLF001
 
 
 def _inverse_noise_std(noise_std, residual):
@@ -3287,7 +3434,16 @@ class FitResult:
           counts whether or not it lowered the loss, because at the float
           floor it rounds to (nearly) nothing and cannot strictly lower a
           loss that is rounding noise.  Then ``losses[-1]`` is the loss of
-          the iterate the proposal was made from.
+          the iterate the proposal was made from;
+        * :func:`fit_lm` only, the floor rule: after the run has lowered the
+          loss at least once, an iteration rejected every candidate down to
+          one damped within ``step_tol`` -- no step the tolerance resolves
+          lowers the loss any more.
+
+        Neither :func:`fit_lm` test fires while a parameter held on its
+        bound (``transform=None`` with ``bounds``) could lower the loss by
+        moving into its range: that point is not a constrained stationary
+        point, however small the step proposed there.
 
         It says the iteration stopped moving, not that the data determined
         the parameters: a residual that reads none of the trainable
@@ -3620,6 +3776,7 @@ def fit(
     """
     _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
     _check_hold_undetermined(hold_undetermined)
+    _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -3639,6 +3796,7 @@ def fit(
         return loss_fn(gm.constrain(u))
 
     value_and_grad = jax.jit(jax.value_and_grad(objective))
+    bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
     def adam_step(theta, m, v, g, i):
@@ -3646,7 +3804,9 @@ def fit(
         v = b2 * v + (1 - b2) * g * g
         m_hat = m / (1 - b1 ** i)
         v_hat = v / (1 - b2 ** i)
-        return theta - lr * m_hat / (jnp.sqrt(v_hat) + eps), m, v
+        # Back onto the bounds of a clipped coordinate (``_CoordinateBounds``):
+        # past its bound it has no gradient and would stay clipped.
+        return bounds.project(theta - lr * m_hat / (jnp.sqrt(v_hat) + eps)), m, v
 
     theta = theta0
     m = jnp.zeros_like(theta)
@@ -3718,6 +3878,40 @@ def fit(
     )
 
 
+@jax.jit
+def _marquardt_step(th, r, J, lam, lo, hi):
+    """One Levenberg-Marquardt candidate from ``th``, projected onto
+    ``[lo, hi]`` (:class:`_CoordinateBounds`).
+
+    Module-level, so its compiled form is shared by every :func:`fit_lm`
+    call of the same shapes rather than compiled again per call.
+    """
+    A = J.T @ J
+    g = J.T @ r
+    # A coordinate on its bound whose gradient points out of the range is
+    # held (its row and column replaced by the identity, its gradient by 0):
+    # that is the constraint active, and solving for it as if free would
+    # couple a step it cannot take into the others.
+    hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+    free = jnp.where(hold, 0.0, 1.0).astype(A.dtype)
+    A = A * free[:, None] * free[None, :]
+    g = g * free
+    n = A.shape[0]
+    # The floor that keeps the solve regular is *relative*, ``eps`` times
+    # the mean of ``diag(A)``: an absolute ``1e-12 * I`` was not negligible
+    # once the residual was small in its own units (a residual scaled by
+    # 1e-7 made it 1e-12 / 1e-14 of the curvature it was added to), and the
+    # fit stopped being Gauss-Newton -- it did not converge in 50 iterations
+    # at 1e-7 and barely moved at 1e-8.  Relative, the step is the same for
+    # every scaling of the residual.
+    scale = jnp.trace(A) / n
+    floor = jnp.where(scale > 0, jnp.finfo(A.dtype).eps * scale, 1.0)
+    A_damped = (A + lam * jnp.diag(jnp.diag(A))
+                + floor * jnp.eye(n, dtype=A.dtype) + jnp.diag(1.0 - free))
+    delta = jnp.linalg.solve(A_damped, g)
+    return jnp.clip(th - delta, lo, hi)
+
+
 @stability(StabilityLevel.EVOLVING)
 def fit_lm(
     gm,
@@ -3754,9 +3948,28 @@ def fit_lm(
     *proposed* -- its first candidate, at the damping it started with --
     moved every trainable parameter by no more than ``step_tol`` of its
     own magnitude, whether or not that step lowered the loss (see
-    ``step_tol``).  A run that ends because twelve damping retries were
-    all rejected after a larger proposal is not converged, and neither is
-    one that ran out of ``n_iter``.
+    ``step_tol``), or -- once the run has lowered the loss at least once --
+    when every candidate of an iteration was rejected down to one damped
+    within ``step_tol`` (the rounding floor; see ``step_tol``).  A run that
+    never lowered the loss and rejected every candidate is not converged,
+    and neither is one that ran out of ``n_iter``.
+
+    A trainable leaf with ``bounds`` and ``transform=None`` is optimised in
+    its own coordinate and clipped by ``constrain``.  Every step is projected
+    back onto the bounds, so a coordinate one step carried past its bound
+    sits on it -- where its derivative is the one-sided one into the range
+    -- rather than outside it with no gradient back (earlier 0.4.0
+    development builds left a spring's damping at 0 for the rest of the
+    run, and called it converged).  A coordinate on its bound whose gradient
+    points out of the range is held there: the constraint is active, and
+    the step for the rest is solved without it.  No ``converged`` test fires
+    while a coordinate on its bound could lower the loss by moving into the
+    range.
+
+    The Marquardt solve's floor, which keeps it regular, is ``eps`` times
+    the mean of ``diag(JᵀJ)``: relative, so the step is the same for every
+    scaling of the residual (an absolute ``1e-12`` made a residual of 1e-7
+    in its own units fail to converge in 50 iterations).
 
     Like :func:`fit`, it returns the **lowest-loss iterate** it evaluated,
     and here that is always the last one: a step is accepted only when it
@@ -3798,9 +4011,14 @@ def fit_lm(
         proposal moved neither parameter by a single bit.  Only the
         *proposal* counts, not a damped retry: retries shrink the step by
         a factor of ``lam_up`` each whatever the loss is doing, so a short
-        retry is evidence about the damping and not about the iterate.
-        Changed from an absolute ``1e-8`` during 0.4.0 development, before
-        any release.
+        retry is evidence about the damping and not about the iterate --
+        except once the run has lowered the loss and *every* candidate,
+        down to one within ``step_tol``, is rejected: then no step the
+        tolerance resolves lowers the loss, which is the rounding floor.  A
+        parameter the data determine only weakly needs that rule, because
+        its proposal at the floor fits the residual's rounding noise and can
+        be many ulps of it.  Changed from an absolute ``1e-8`` during 0.4.0
+        development, before any release.
     hold_undetermined : bool
         Keep the fitted parameters out of the directions the data does not
         determine, exactly as :func:`fit` does and by the same shared
@@ -3880,6 +4098,7 @@ def fit_lm(
                          "own float resolution.")
     _check_count("notify_every", notify_every)
     _check_hold_undetermined(hold_undetermined)
+    _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -3910,13 +4129,8 @@ def fit_lm(
     residual_and_jac = jax.jit(lambda th: (_residual(th), jax.jacfwd(_residual)(th)))
     residual_only = jax.jit(_residual)
 
-    @jax.jit
-    def _lm_step(th, r, J, lam):
-        A = J.T @ J
-        g = J.T @ r
-        A_damped = A + lam * jnp.diag(jnp.diag(A)) + 1e-12 * jnp.eye(A.shape[0], dtype=A.dtype)
-        delta = jnp.linalg.solve(A_damped, g)
-        return th - delta
+    bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
+    _lm_step = _marquardt_step
 
     # The step test, on the physical trainable entries (see ``step_tol``):
     # per entry, a relative tolerance -- ``step_tol``, or ``2**4`` ulps of
@@ -3949,6 +4163,8 @@ def fit_lm(
     # moving off that iterate rather than forming it again.
     rJ, rJ_iteration = None, None
     converged = False
+    # Whether any step has lowered the loss yet: see the floor rule below.
+    progressed = False
     i = 0
     for i in range(1, n_iter + 1):
         r, J = residual_and_jac(theta)
@@ -3986,16 +4202,24 @@ def fit_lm(
         # shorter only because it is damped more, so it is not tested.
         accepted = False
         stationary = False
+        # A coordinate on its bound that could lower the loss by moving into
+        # the range makes this no constrained stationary point, so its
+        # proposal cannot converge the run even if it moves nothing (the
+        # coupled solve can point such a coordinate outward); the retries,
+        # damped towards the gradient, move it inward.
+        stuck_inward = bounds.inward_descent(theta, J.T @ r, _physical(theta), rel_tol)
         for attempt in range(12):
-            cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype))
+            cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype), bounds.lo, bounds.hi)
             r_new = residual_only(cand)
             loss_new = 0.5 * float(jnp.sum(r_new * r_new))
-            proposal_within = attempt == 0 and _within_step_tol(theta, cand)
+            proposal_within = (attempt == 0 and not stuck_inward
+                               and _within_step_tol(theta, cand))
             if np.isfinite(loss_new) and loss_new < loss:
                 theta = cand
                 theta_iteration, theta_loss = i, loss_new
                 lam = max(lam * lam_down, 1e-12)
                 accepted = True
+                progressed = True
                 stationary = proposal_within
                 break
             if proposal_within:
@@ -4003,6 +4227,21 @@ def fit_lm(
                 stationary = True
                 break
             lam = min(lam * lam_up, 1e12)
+        if not accepted and not stationary and progressed and not stuck_inward:
+            # The floor rule.  Every candidate was rejected, down to one damped
+            # within ``step_tol``: no step the tolerance resolves lowers the
+            # loss.  After a run that has already lowered it, that is the
+            # rounding floor (MINPACK's ``xtol`` declares the same when its
+            # trust region shrinks below the tolerance without a success).  A
+            # parameter the data determine only weakly needs it: at the floor
+            # its proposal is the Gauss-Newton fit of the residual's rounding
+            # noise, which can be many ulps of the parameter (a spring's
+            # damping of 0.05, seen through 100 position samples, proposes
+            # ~1e-5 relative there), so the proposal test alone left such a
+            # fit unconverged at loss 1e-13.  A run that never lowered the
+            # loss gets no such reading: a residual whose Jacobian is wrong
+            # rejects every candidate from its start.
+            stationary = _within_step_tol(theta, cand)
         if stationary and accepted and tracker is not None:
             # Stopping on an accepted proposal leaves the run at an iterate
             # whose gradient no iteration formed.  A run that kept going
@@ -4080,6 +4319,7 @@ def fit_multiple_shooting(
     callback: Optional[Callable[[int, float, dict], None]] = None,
     notify_every: int = 1,
     hold_undetermined: bool = True,
+    start_step: Optional[int] = None,
 ) -> tuple[FitResult, dict]:
     """Multiple-shooting fit: Adam jointly over the trainable params (in
     unconstrained coordinates) and the free per-window initial states.
@@ -4104,6 +4344,11 @@ def fit_multiple_shooting(
 
     Parameters
     ----------
+    start_step : int, optional
+        *Experimental, new in 0.4.0.*  The base step of a multi-rate graph's
+        schedule at which the record's sample ``0`` was taken, passed to
+        :func:`windowed_loss` (see there; ``None`` assumes ``0`` and warns on
+        a multi-rate graph).
     hold_undetermined : bool
         Keep the fitted **parameters** out of the directions the data does
         not determine, exactly as :func:`fit` does and by the same shared
@@ -4152,7 +4397,10 @@ def fit_multiple_shooting(
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
                  why=_CONTINUITY_WEIGHT_WHY)
     _check_count("sample_every", sample_every, minimum=1)
+    if start_step is not None:
+        _check_count("start_step", start_step)
     _check_hold_undetermined(hold_undetermined)
+    _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
@@ -4176,9 +4424,11 @@ def fit_multiple_shooting(
             gm, p, observations, obs_fn=obs_fn, window=window,
             sample_every=sample_every, external_inputs=external_inputs,
             window_states=unravel_ws(ws_flat), continuity_weight=continuity_weight,
+            start_step=start_step,
         )
 
     value_and_grad = jax.jit(jax.value_and_grad(objective, argnums=(0, 1)))
+    bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
     def adam(x, m, v, g, i, rate):
@@ -4218,6 +4468,8 @@ def fit_multiple_shooting(
             break
         it = jnp.asarray(i, theta.dtype)
         theta, m_t, v_t = adam(theta, m_t, v_t, g_t, it, lr)
+        # As in ``fit``: a clipped coordinate is put back on its bound.
+        theta = bounds.project(theta)
         ws, m_s, v_s = adam(ws, m_s, v_s, g_s, it, lr_s)
 
     if i > 0 and not converged:

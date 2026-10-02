@@ -503,6 +503,7 @@ def compile_counts(
     assertion that passes today and would be the only warning if a JAX
     upgrade changed it.
     """
+    gm._check_static_data_dirty()       # a node.params write, as every run method checks
     if gm._dirty or gm._compiled_step is None:
         gm.compile()
 
@@ -658,10 +659,7 @@ def _one_iteration_variant(gm):
         # their own, which would record a pending ``node.params`` write as
         # already taken while ``gm.params`` is restored to the old value
         # beside it, and the caller's next compile then kept the old value.
-        pending = gm._params_snapshot_pending
-        saved_snapshot = (pending if pending is not None
-                          and pending[0] == gm._compile_generation
-                          else gm._params_snapshot)
+        saved_snapshot = gm._committed_params_snapshot()
         try:
             # ``dataclasses.replace`` re-runs ``__post_init__``, whose
             # inert-knob rules then warn that the *user's* acceleration
@@ -901,6 +899,7 @@ def profile_graph(
     ProfileReport
         Detailed profiling results.
     """
+    gm._check_static_data_dirty()       # a node.params write, as every run method checks
     if gm._dirty or gm._compiled_step is None:
         gm.compile()
 

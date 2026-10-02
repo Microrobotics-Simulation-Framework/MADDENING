@@ -223,16 +223,27 @@ first compile compiles the graph so its params are not lost.
 A recompile takes each node constant from **whichever of `node.params`
 and `gm.params` was written since the previous compile**.  Writing
 `gm.params` takes effect on the next step with no recompile, and is the
-way to change a constant mid-run; writing `node.params` after the graph
-was compiled takes effect at the next `compile()` (or the next run of a
-graph marked dirty), as a structural value always has.  If both were
-written since the last compile, to different values, `gm.params`' value
--- the one the step was already running -- is kept and `compile()`
-warns (`RuntimeWarning`), naming the leaf and both values; both written
-to the same value, as `PUT /graph/params` does, is no conflict.  Before
-this rule a recompile kept every live leaf, so a `node.params` write
-after the first compile was dropped without a word: a `HeartPumpNode`
-set to 144 bpm and recompiled went on at 72.
+way to change a constant mid-run.  `node.params` counts its writes, so a
+write is a write even when it stores the value the node already held
+(writing a constructor value back reverts a calibration).  A
+`node.params` write after the graph was compiled takes effect at the
+next run of **any** entry point -- `step`, `run`, every `run_scan*`, the
+sysid fitters and `windowed_loss` all recompile for it first -- or at
+the next `compile()`, whichever comes first, so they all run the same
+model.  (Until 0.4.0 the value a node read from `self.params` when its
+step was traced went into whichever program was traced next: `gm.step`
+kept its cached trace while a new `run_scan` length picked the write up.)
+A write the running step already reflects -- a constant `gm.params`
+carries, written to the value `gm.params` holds, as `PUT /graph/params`
+writes both -- costs no recompile.  If both were written since the last
+compile, to different values, `gm.params`' value -- the one the step was
+already running -- is kept and `compile()` warns (`RuntimeWarning`),
+naming the leaf and both values.  `load_state()` restores `gm.params`
+and supersedes every earlier `node.params` write to a constant it
+carries; a structural value a checkpoint does not hold stays written.
+Before this rule a recompile kept every live leaf, so a `node.params`
+write after the first compile was dropped without a word: a
+`HeartPumpNode` set to 144 bpm and recompiled went on at 72.
 
 <!-- snippet: continues -->
 ```python
@@ -315,7 +326,13 @@ nothing about `k` or `c`.  `gm.reset_state()` starts it again from
 measured state, so gradients cannot compound over a long stiff rollout
 (`mask_unconverged=True` drops, from the loss and from its gradient,
 windows in which a coupling group exited at `max_iterations`
-unconverged, including a window that diverged).
+unconverged, including a window that diverged).  On a multi-rate graph
+each window also restarts on the sub-step its first sample was recorded
+at, which needs to know where the record began: pass `start_step=` (0
+for a record taken from `compile()` or `reset_state()`, `n` after
+`gm.run(n)`; experimental).  A multi-rate graph without it warns that 0
+is assumed; a record that began elsewhere would be replayed on the wrong
+phase in every window.
 
 Before fitting, ask what the data can identify:
 
@@ -485,9 +502,22 @@ iteration proposed moved every trainable parameter by no more than
 `step_tol` of its own magnitude -- whether or not that step lowered the
 loss, since at the float floor a fit's proposal rounds to nothing and
 cannot.  The default `step_tol` is `2**4` ulps of each parameter's dtype,
-so a float32 fit that reaches its optimum reports it.  (`fit` and
-`fit_multiple_shooting` have only the `tol` test, so with the default
-`tol=0.0` their `converged` is always `False`; read `best_loss`.)
+so a float32 fit that reaches its optimum reports it; and once the fit
+has lowered the loss, an iteration that rejects every candidate down to
+one within `step_tol` has reached the rounding floor and converges too.
+Neither fires while a parameter on its bound could lower the loss by
+moving into its range.  (`fit` and `fit_multiple_shooting` have only the
+`tol` test, so with the default `tol=0.0` their `converged` is always
+`False`; read `best_loss`.)  The solve's floor is relative, so the
+answer does not depend on the residual's units.
+
+Every fitter keeps each optimiser coordinate where `constrain` is its
+transform and not a clamp: a `transform=None` leaf inside its bounds,
+and a `log` / `logit` leaf short of where `exp` floors or overflows and
+the sigmoid meets the edge of its representable range.  Past those the
+derivative is 0, and a coordinate one step carried there used to stay
+there: a spring's damping started at 4 against a truth of 0.05 landed on
+0 and `fit_lm` called it converged.
 
 For noisy data, `fit_multiple_shooting` replaces teacher forcing with
 free per-window initial states and a continuity penalty

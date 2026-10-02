@@ -153,12 +153,15 @@ def run(args, tmp: Path) -> None:
 
     section("4. The sidecar, driven in-process")
     # The wiring the FMU user guide gives: the sidecar holds the graph's
-    # compiled step and seed state.  ``_compiled_step`` and ``_state`` are
-    # GraphManager internals, read here exactly as that guide reads them.
+    # compiled step and seed state, and completes the inputs a step is
+    # given the way GraphManager.step does.  ``_compiled_step``, ``_state``
+    # and ``_resolve_external_inputs`` are GraphManager internals, read
+    # here exactly as that guide reads them.
     sidecar = FmuSidecar(SidecarConfig(
         schema_token=md.instantiation_token, step_fn=gm._compiled_step,
         initial_state=gm._state, params=gm.params, param_specs=gm.param_specs(),
         fixed_params=md.fixed_parameters,
+        input_resolver=gm._resolve_external_inputs,
     ))
     sidecar.set_params({"spring.params.stiffness": 45.0})
     anchor = {"spring": {"anchor_position": jnp.float32(0.25)}}

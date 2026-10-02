@@ -199,8 +199,8 @@ def create_app(grid_shape=(64, 32, 32), vessel_params=None):
     #
     # Through the graph's parameter pytree, ``gm.params``: the compiled
     # step reads it on every call, so an edit takes effect on the next
-    # step with no recompile.  (Writing ``node.params`` instead does
-    # nothing once the graph is compiled -- the live pytree wins.)
+    # step with no recompile.  (Writing ``node.params`` instead takes
+    # effect only at the next compile.)
 
     def _set_heart_param(key, value):
         gm.params["nodes"]["heart"][key] = jnp.asarray(value, dtype=jnp.float32)

@@ -339,6 +339,8 @@ guidance; the itemized changes follow.
 - **`run_pod.py`'s wrapper goals see a fault confined to one spatial axis on four devices** (schema 6): each axis is split over all four on a
   1-D mesh of its own, beside a 1 x 4 two-axis mesh and the 2 x 2 pencil, on non-square grids whose inputs differ block to block (three seeded
   faults closed all six items).  `--summarise` names each item's commit, and exits 4 with `MIXED COMMITS` across commits.  Action: re-run dry runs.
+- **A `node.params` write after compile reaches the step at the next `compile()`** (MADD-ANO-093, never released: it was dropped); `fit_lm` reports `converged` at the float floor (its proposal is tested accepted or not; `step_tol` is relative, default 16 ulps); `windowed_loss` refuses a negative/NaN `continuity_weight` and a non-bool `mask_unconverged`;
+  a clipped leaf on its bound has its full derivative into the range; a refused mask names the missing empty container.  Action: change a constant mid-run through `gm.params`; pass `step_tol` as a relative change.
 - **REST, round-4 audit** (MADD-ANO-086 to 092): `POST /graph/nodes`, `PUT /graph/params`, `from_dict` and USD loading check the grid/basis nodes' size estimates before building (one `PUT n_levels=10000000` grew the server to 57.7 GB); `POST /sim/stop`
   never answers "stopped" while the runner's thread steps (503; state writes 409 while it runs); `PUT /graph/params` refuses values the step cannot trace and keeps a parameter's numeric type; the WebSocket
   streams end with their client (SIGINT hung); `PUT /sim/stride` is bounded (422); a missing edge's DELETE is a 404; root-equal checkpoint paths are a 400.  Action: send integers for integer params; stop the runner before writing state.

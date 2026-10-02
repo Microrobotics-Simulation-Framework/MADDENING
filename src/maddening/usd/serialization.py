@@ -58,6 +58,7 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 from pxr import Sdf, Usd, Vt
 
+from maddening.core._size_estimate import refuse_beyond_memory
 from maddening.core.coupling.group import coupling_group_kwargs
 from maddening.core.transforms import (
     UnregisteredTransformError,
@@ -533,6 +534,11 @@ def load_graph_from_usd(
             name_attr = child.GetAttribute("maddening:nodeName")
             node_name = (name_attr.Get() if name_attr else None) or child.GetName()
 
+            # A stage is untrusted input, and its params can name a node no
+            # machine holds (a wavelet basis of n_levels=10_000_000): refused
+            # from the class's own size estimate before the constructor runs,
+            # as GraphManager.from_dict refuses it.
+            refuse_beyond_memory(cls, node_name, params)
             # Create the node
             node = cls(name=node_name, timestep=timestep, **params)
             gm.add_node(node)

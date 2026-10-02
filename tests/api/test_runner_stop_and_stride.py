@@ -103,10 +103,19 @@ def test_the_largest_stride_is_accepted_and_echoed_as_applied():
 # POST /sim/stop is honest
 # ---------------------------------------------------------------------------
 
-def test_stop_mid_frame_stops_the_thread_and_a_reset_stays_reset():
-    """The audited sequence at the largest frame the API now accepts: a
-    100000-step frame takes seconds, and stop no longer waits for it."""
+def test_stop_mid_frame_stops_the_thread_and_a_reset_stays_reset(monkeypatch):
+    """The audited sequence at the largest frame the API now accepts.  Each
+    step is slowed to a fraction of a millisecond so that the frame lasts
+    well past the two seconds the old ``stop()`` waited, on any machine:
+    stop must not wait for the frame."""
     gm, server, client = _make()
+    real_step = gm.step
+
+    def slowed(*args, **kwargs):
+        time.sleep(2e-4)
+        return real_step(*args, **kwargs)
+
+    monkeypatch.setattr(gm, "step", slowed)
     assert client.post("/sim/start").status_code == 200
     resp = client.put("/sim/stride", params={"steps_per_frame": MAX_STEPS_PER_FRAME})
     assert resp.status_code == 200, resp.text

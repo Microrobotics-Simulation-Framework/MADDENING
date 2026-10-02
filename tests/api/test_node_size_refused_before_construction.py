@@ -304,7 +304,11 @@ def test_put_on_a_sharded_node_asks_the_class_it_wraps(monkeypatch):
     calls = _guard_constructor(monkeypatch, HeatNode)
     resp = _client(gm).put("/graph/params/rod", json={"params": {"n_cells": 101}})
     assert resp.status_code == 400, resp.text
-    assert "101 state elements" in resp.json()["detail"]
+    # The estimate's refusal, not the abstract state check's (which would
+    # also name 101 elements here, under the patched cap).
+    detail = resp.json()["detail"]
+    assert "the HeatNode would hold 101 state elements" in detail
+    assert "before anything of that size is built" in detail
     assert calls == []
     assert gm.get_node("rod").params["n_cells"] == 8
 

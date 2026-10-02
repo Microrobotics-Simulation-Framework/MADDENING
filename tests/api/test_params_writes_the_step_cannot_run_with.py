@@ -103,6 +103,23 @@ def test_a_constraint_the_step_runs_with_is_taken():
     assert step.json()["body"]["position"][2] == pytest.approx(0.5)
 
 
+def test_a_sharded_body_is_asked_through_the_body_it_wraps():
+    """A wrapper that closes over the node it wraps cannot be copied; the
+    wrapped node, which shares its params and runs the physics, is traced
+    instead (the descended path)."""
+    from maddening.cloud.multigpu.device_mesh import create_device_mesh
+    from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
+
+    body = RigidBodyNode("body", 0.01, initial_velocity=(0.1, 0.0, 0.2))
+    gm = _graph(ShardedPointwiseNode(body, create_device_mesh(shape=(1,))))
+    client = _client(gm)
+    resp = client.put("/graph/params/body", json={"params": {"constraints": {"w": 0.0}}})
+    assert resp.status_code == 400, resp.text
+    assert "step cannot run with it" in resp.json()["detail"]
+    assert body.params["constraints"] == {}
+    assert client.post("/sim/step").status_code == 200
+
+
 def test_one_bad_key_beside_a_good_one_writes_neither():
     gm = _body()
     resp = _client(gm).put("/graph/params/body", json={"params": {

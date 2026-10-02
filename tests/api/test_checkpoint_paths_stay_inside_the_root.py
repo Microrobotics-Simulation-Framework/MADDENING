@@ -60,6 +60,22 @@ def test_a_path_that_is_not_a_file_inside_the_root_is_a_400(server_dirs, op, pat
     assert _files(base) == before
 
 
+@pytest.mark.parametrize("path", ["", ".", "sub/.."])
+def test_a_load_does_not_read_the_file_beside_the_root(server_dirs, path):
+    """The audited read-back: with the root directory absent, the old load
+    fell back to ``<root>.npz`` -- the file a root-equal save had written
+    in the root's parent -- and restored it."""
+    gm, client, base, root = server_dirs
+    assert client.post("/checkpoint/save", params={"path": "real.npz"}).status_code == 200
+    (root / "real.npz").rename(root.parent / "checkpoints.npz")
+    root.rmdir()
+    gm.step()
+    before = float(gm.get_node_state("ball")["position"])
+    resp = client.post("/checkpoint/load", params={"path": path})
+    assert resp.status_code == 400, resp.text
+    assert float(gm.get_node_state("ball")["position"]) == before
+
+
 def test_a_symlink_inside_the_root_does_not_lead_out_of_it(server_dirs):
     gm, client, base, root = server_dirs
     outside = base / "outside.npz"

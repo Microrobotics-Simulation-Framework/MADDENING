@@ -144,20 +144,44 @@ def test_fit_multiple_shooting_brings_a_clipped_coordinate_back_into_its_range()
     assert _damping(res) == pytest.approx(TRUE_C, rel=5e-2)
 
 
-def test_a_fit_whose_optimum_is_past_the_bound_converges_on_the_bound():
-    """The other side: data from a damping the bounds exclude (-0.3) put the
-    constrained optimum *on* the bound, where the gradient points out of the
-    range.  That is a constrained stationary point, so it converges there."""
+@pytest.fixture(scope="module")
+def record_past_the_bound():
+    """Data from a damping the bounds exclude (-0.3): the constrained
+    optimum is *on* the bound, where the gradient points out of the range."""
     gm_data = GraphManager()
     gm_data.add_node(_Spring(name="s", timestep=DT, stiffness=30.0, damping=-0.3, mass=1.0,
                              rest_length=1.0, initial_position=0.2, initial_velocity=0.0))
     gm_data.set_param_spec("s", "damping", ParamSpec())          # unbounded, for the record
     gm_data.compile()
-    obs = gm_data.run_scan_with_history(N)[1]["s"]["position"]
+    return gm_data.run_scan_with_history(N)[1]["s"]["position"]
+
+
+def test_a_fit_whose_optimum_is_past_the_bound_converges_on_the_bound(record_past_the_bound):
+    """A constrained stationary point converges there."""
     gm = _spring(damping=2.0)
-    res = fit_lm(gm, _residual_against(obs), mask=_only(gm, "damping"), n_iter=50)
+    res = fit_lm(gm, _residual_against(record_past_the_bound), mask=_only(gm, "damping"),
+                 n_iter=50)
     assert res.converged
     assert _damping(res) == 0.0
+
+
+def test_the_active_bound_is_held_out_of_the_coupled_step(record_past_the_bound):
+    """Stiffness free, damping on its bound with the gradient pointing out:
+    the step for stiffness is solved with damping held.  Solved as if
+    damping could follow its own (clipped) step, stiffness was moved by the
+    coupled amount, the loss rose, and the run crept for all 50 iterations
+    without converging; held, it converges in a few, at the stiffness that
+    is optimal with damping at 0."""
+    residual = _residual_against(record_past_the_bound)
+    gm = _spring(damping=0.0)
+    on_bound = fit_lm(gm, residual, mask=_only(gm, "stiffness"), n_iter=50)
+    assert on_bound.converged
+    k_constrained = float(on_bound.params["nodes"]["s"]["stiffness"])
+    gm = _spring(damping=2.0)
+    res = fit_lm(gm, residual, mask=_only(gm, "stiffness", "damping"), n_iter=50)
+    assert res.converged and res.n_iter <= 20, (res.converged, res.n_iter)
+    assert _damping(res) == 0.0
+    assert float(res.params["nodes"]["s"]["stiffness"]) == pytest.approx(k_constrained, rel=1e-4)
 
 
 def test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on_the_bound(

@@ -49,7 +49,8 @@ class _Relay(SimulationNode):
                                        default=jnp.zeros(2, jnp.float32))}
 
     def update(self, state, boundary_inputs, dt):
-        return {"x": jnp.float32(0.5) * boundary_inputs["u"] + self.params["bias"]}
+        u = boundary_inputs.get("u", jnp.zeros(2, jnp.float32))
+        return {"x": jnp.float32(0.5) * u + self.params["bias"]}
 
 
 def _graph(cap=4, strict=False, waveform=1):
@@ -153,3 +154,23 @@ def test_the_fold_leaves_the_state_alone(entry):
     for nm in ("a", "b"):
         np.testing.assert_array_equal(np.asarray(gm.get_node_state(nm)["x"]),
                                       np.asarray(state[nm]["x"]))
+
+
+@pytest.mark.parametrize("entry", ["run_adaptive", "run_adaptive_scan"])
+def test_a_graph_without_coupling_keeps_its_state_structure(entry):
+    """No report slots, nothing to fold: the state gains no ``_meta`` key.
+
+    The fold used to return the second half step's state with a ``_meta``
+    entry whatever it held, which changed the scan carry's structure on a
+    graph that has none (``run_adaptive_scan`` raised a pytree structure
+    error) and left an empty ``_meta`` in a ``run_adaptive`` graph's state.
+    """
+    gm = GraphManager()
+    gm.add_node(_Relay("a", [1.0, 2.0]))
+    gm.compile()
+    before = set(gm._state)
+    if entry == "run_adaptive":
+        gm.run_adaptive(0.1, **ADAPTIVE)
+    else:
+        gm.run_adaptive_scan(0.1, max_steps=1, **ADAPTIVE)
+    assert set(gm._state) == before, (before, set(gm._state))

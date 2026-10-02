@@ -2400,8 +2400,12 @@ def _fold_kept_half_step_reports(groups, first_state, second_state):
         estimated_error,
     )
 
-    first_meta = first_state.get(_META_KEY, {})
-    meta = dict(second_state.get(_META_KEY, {}))
+    if _META_KEY not in second_state or _META_KEY not in first_state:
+        # No report slots to fold (a graph without coupling groups, or a
+        # hand-built state): the state keeps its structure exactly.
+        return second_state
+    first_meta = first_state[_META_KEY]
+    meta = dict(second_state[_META_KEY])
     for group in groups:
         key = "+".join(sorted(group.nodes))
         iter_key = f"coupling_{key}_iterations"

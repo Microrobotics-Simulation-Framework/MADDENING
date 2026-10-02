@@ -4716,6 +4716,7 @@ anomalies:
       through `gm.params` or a fit since.
     affected_components:
       - "maddening.api.server.SimulationServer"
+      - "maddening.core.graph_manager.GraphManager.to_dict"
     affected_versions: ">=0.1.0"
     workaround: >
       Before 0.4.0: keep a value written through `PUT /graph/params` within

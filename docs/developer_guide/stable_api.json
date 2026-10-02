@@ -1342,6 +1342,11 @@
           "parameters": [],
           "returns": "dict[str, dict]"
         },
+        "coupling_report": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "InspectionTable"
+        },
         "edges": {
           "kind": "property",
           "parameters": [],
@@ -1394,6 +1399,18 @@
             }
           ],
           "returns": "None"
+        },
+        "format_graph": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "int",
+              "default": "100",
+              "kind": "KEYWORD_ONLY",
+              "name": "width"
+            }
+          ],
+          "returns": "str"
         },
         "from_dict": {
           "kind": "classmethod",
@@ -1454,6 +1471,11 @@
           ],
           "returns": "None"
         },
+        "memory_estimate": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "InspectionTable"
+        },
         "node_names": {
           "kind": "property",
           "parameters": [],
@@ -1475,6 +1497,11 @@
           "parameters": [],
           "returns": "dict"
         },
+        "params_table": {
+          "kind": "method",
+          "parameters": [],
+          "returns": "InspectionTable"
+        },
         "point_resolver": {
           "kind": "method",
           "parameters": [
@@ -1485,6 +1512,132 @@
             }
           ],
           "returns": "Callable[[dict], Any]"
+        },
+        "print_coupling_report": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[TextIO]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "file"
+            },
+            {
+              "annotation": "int",
+              "default": "100",
+              "kind": "KEYWORD_ONLY",
+              "name": "width"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "KEYWORD_ONLY",
+              "name": "rich"
+            }
+          ],
+          "returns": "None"
+        },
+        "print_graph": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[TextIO]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "file"
+            },
+            {
+              "annotation": "int",
+              "default": "100",
+              "kind": "KEYWORD_ONLY",
+              "name": "width"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "KEYWORD_ONLY",
+              "name": "rich"
+            }
+          ],
+          "returns": "None"
+        },
+        "print_memory_estimate": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[TextIO]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "file"
+            },
+            {
+              "annotation": "int",
+              "default": "100",
+              "kind": "KEYWORD_ONLY",
+              "name": "width"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "KEYWORD_ONLY",
+              "name": "rich"
+            }
+          ],
+          "returns": "None"
+        },
+        "print_params_table": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[TextIO]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "file"
+            },
+            {
+              "annotation": "int",
+              "default": "100",
+              "kind": "KEYWORD_ONLY",
+              "name": "width"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "KEYWORD_ONLY",
+              "name": "rich"
+            }
+          ],
+          "returns": "None"
+        },
+        "print_state_summary": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[TextIO]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "file"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "KEYWORD_ONLY",
+              "name": "include_meta"
+            },
+            {
+              "annotation": "int",
+              "default": "100",
+              "kind": "KEYWORD_ONLY",
+              "name": "width"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "KEYWORD_ONLY",
+              "name": "rich"
+            }
+          ],
+          "returns": "None"
         },
         "rate_dividers": {
           "kind": "property",
@@ -1852,6 +2005,18 @@
           ],
           "returns": "None"
         },
+        "state_summary": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "KEYWORD_ONLY",
+              "name": "include_meta"
+            }
+          ],
+          "returns": "InspectionTable"
+        },
         "step": {
           "kind": "method",
           "parameters": [
@@ -1887,6 +2052,30 @@
             }
           ],
           "returns": "dict"
+        },
+        "to_dot": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'LR'",
+              "kind": "KEYWORD_ONLY",
+              "name": "rankdir"
+            }
+          ],
+          "returns": "str"
+        },
+        "to_mermaid": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "str",
+              "default": "'LR'",
+              "kind": "KEYWORD_ONLY",
+              "name": "direction"
+            }
+          ],
+          "returns": "str"
         },
         "trace_count": {
           "kind": "property",

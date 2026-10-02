@@ -671,6 +671,54 @@ class FIMReport:
         i = int(np.argmax(v))
         return self.param_names[i], float(v[i])
 
+    def __str__(self) -> str:
+        """A short human summary: rank, conditioning, the weakest
+        direction and each parameter's Cramér–Rao bound.  ``repr`` is the
+        dataclass's own, field by field."""
+        n = len(self.param_names)
+        undetermined = n - int(self.rank)
+        lines = [
+            f"FIMReport: rank {int(self.rank)} of {n} parameter{'s' * (n != 1)}"
+            + (f" ({undetermined} undetermined direction{'s' * (undetermined != 1)})"
+               if undetermined else " (all determined)")
+            + f"; cond {_summary_number(self.cond)}"
+        ]
+        if n:
+            try:
+                name, weight = self.least_identifiable()
+                lines.append(f"  least identifiable: {name} "
+                             f"(weight {weight:.3g} in the weakest direction)")
+            except Exception:   # noqa: BLE001 - a summary never raises
+                pass
+            try:
+                crb = np.asarray(self.crb).reshape(-1)
+            except Exception:   # noqa: BLE001
+                crb = None
+            if crb is not None and crb.size == n:
+                lines.append("  Cramér–Rao bound on each variance (inf: not identifiable):")
+                width = max(len(p) for p in self.param_names)
+                for p, b in zip(self.param_names, crb):
+                    lines.append(f"    {p.ljust(width)}  {_summary_number(b)}")
+        for label, names in (("zero_scaled", self.zero_scaled),
+                             ("value_scaled", self.value_scaled),
+                             ("integer_excluded", self.integer_excluded)):
+            if names:
+                lines.append(f"  {label}: {', '.join(names)}")
+        return "\n".join(lines)
+
+
+def _summary_number(x) -> str:
+    """``x`` for a human summary: ``.4g``, ``inf`` / ``nan`` spelled out."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return str(x)
+    if math.isnan(v):
+        return "nan"
+    if math.isinf(v):
+        return "inf" if v > 0 else "-inf"
+    return f"{v:.4g}"
+
 
 def _leaf_size(leaf) -> int:
     """Number of entries in a params leaf, **without reading it**.
@@ -3219,6 +3267,54 @@ class FitResult:
     best_iteration: Optional[int] = None
     best_loss: Optional[float] = None
     hold_declined: Optional[bool] = None
+
+    def __str__(self) -> str:
+        """A short human summary: whether the fit converged, its losses,
+        which iterate it returned, the identifiability guard's verdict and
+        the fitted leaves (the first ten).  ``repr`` is the dataclass's
+        own, field by field."""
+        losses = np.asarray(self.losses, dtype=np.float64).reshape(-1)
+        lines = [f"FitResult: {'converged' if self.converged else 'not converged'} "
+                 f"after {int(self.n_iter)} iteration{'s' * (int(self.n_iter) != 1)}"]
+        if losses.size:
+            loss = (f"  loss: first {_summary_number(losses[0])}, "
+                    f"last {_summary_number(losses[-1])}")
+            if self.best_loss is not None:
+                loss += f", best {_summary_number(self.best_loss)}"
+                if self.best_iteration is not None:
+                    loss += f" (iterate {int(self.best_iteration)})"
+            lines.append(loss)
+        else:
+            lines.append("  loss: none evaluated")
+        if self.excited_rank is None:
+            lines.append("  identifiability guard: not measured")
+        else:
+            guard = f"  identifiability guard: excited rank {int(self.excited_rank)}"
+            if self.undetermined_drift is not None:
+                guard += f", undetermined drift {_summary_number(self.undetermined_drift)}"
+            if self.hold_declined:
+                guard += " (hold declined: params are the raw iterate)"
+            lines.append(guard)
+        try:
+            leaves = jax.tree_util.tree_flatten_with_path(self.params)[0]
+        except Exception:   # noqa: BLE001 - a summary never raises
+            leaves = []
+        if leaves:
+            lines.append(f"  params ({len(leaves)} lea{'f' if len(leaves) == 1 else 'ves'}):")
+            for path, leaf in leaves[:10]:
+                name = jax.tree_util.keystr(path)
+                shape = tuple(np.shape(leaf))
+                if math.prod(shape) != 1:
+                    text = f"array{shape}"
+                else:
+                    try:
+                        text = _summary_number(np.asarray(leaf).reshape(()))
+                    except Exception:   # noqa: BLE001 - a tracer has no value
+                        text = "(no value)"
+                lines.append(f"    {name} = {text}")
+            if len(leaves) > 10:
+                lines.append(f"    ... and {len(leaves) - 10} more")
+        return "\n".join(lines)
 
 
 @stability(StabilityLevel.EVOLVING)

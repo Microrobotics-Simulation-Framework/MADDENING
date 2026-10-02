@@ -2383,24 +2383,72 @@ def _outside_jax_trace() -> bool:
         return False
 
 
+def _underflow_range_fields(groups, state) -> dict[str, list]:
+    """``{group key: [(node, field, magnitude, dtype), ...]}``, smallest first.
+
+    The floating fields of each coupled group whose magnitude ``max|field|``
+    is nonzero, finite and below ``finfo(dtype).tiny / finfo(dtype).eps``:
+    the range where a change of one ulp of the field is subnormal.  An
+    exactly zero field (or an empty one) is never listed -- zero is not a
+    small unit -- nor is a non-finite one, which the coupling verdict
+    already reports.  Read on the host (``numpy``), so it compiles nothing.
+    """
+    out: dict[str, list] = {}
+    for group in groups:
+        key = "+".join(sorted(group.nodes))
+        hits = []
+        for nn in sorted(group.nodes):
+            for fld, value in sorted((state.get(nn) or {}).items()):
+                arr = np.asarray(jax.device_get(value))
+                # ``jnp``'s dtype predicates and ``finfo``: numpy's do not
+                # know bfloat16.  Neither traces anything.
+                if arr.size == 0 or not jnp.issubdtype(arr.dtype, jnp.floating):
+                    continue
+                mag = float(np.max(np.abs(arr.astype(np.float64))))
+                info = jnp.finfo(arr.dtype)
+                if 0.0 < mag < float(info.tiny) / float(info.eps):
+                    hits.append((nn, fld, mag, arr.dtype))
+        if hits:
+            out[key] = sorted(hits, key=lambda h: h[2])
+    return out
+
+
 # ------------------------------------------------------------------
 # Floating-point-tolerant GCD
 # ------------------------------------------------------------------
 
-def _float_gcd(a: float, b: float, tol: float = 1e-9) -> float:
-    """GCD of two positive floats using Euclidean algorithm with tolerance."""
+#: Relative tolerance of the timestep GCD: a Euclidean remainder at or below
+#: this fraction of the largest timestep is representation noise, not a
+#: smaller common step.  Decimal timesteps carry a few float64 ulps of noise
+#: (``0.3 % 0.1`` is ``0.0999...98``, then ``2.8e-17``), far below it, and a
+#: genuine common step is a decimal digit away from the noise, far above it.
+#: Until 0.4.0 the tolerance was an *absolute* ``1e-9`` (seconds, in effect),
+#: so a graph whose timesteps were themselves near a nanosecond stopped the
+#: algorithm before its first step: nodes at ``1e-9`` and ``2e-9`` got a base
+#: step of ``2e-9``, the fast node advanced ``1e-9`` per base step while the
+#: slow one advanced ``2e-9``, and their clocks drifted apart with no error.
+#: Relative to the largest timestep it is the old ``1e-9`` exactly for a
+#: graph whose largest timestep is one second.
+_GCD_RTOL = 1e-9  # units: dimensionless, a fraction of the largest timestep
+
+
+def _float_gcd(a: float, b: float, rtol: float = _GCD_RTOL, scale: Optional[float] = None) -> float:
+    """GCD of two positive floats: Euclid's algorithm, stopping on a remainder
+    at or below ``rtol * scale`` (``scale`` defaults to ``max(a, b)``)."""
     if a < b:
         a, b = b, a
+    tol = rtol * (a if scale is None else scale)
     while b > tol:
         a, b = b, a % b
     return a
 
 
-def _multi_gcd(values: Sequence[float], tol: float = 1e-9) -> float:
-    """GCD of multiple positive floats."""
+def _multi_gcd(values: Sequence[float], rtol: float = _GCD_RTOL) -> float:
+    """GCD of multiple positive floats, to ``rtol`` of the largest of them."""
+    scale = max(values)
     result = values[0]
     for v in values[1:]:
-        result = _float_gcd(result, v, tol)
+        result = _float_gcd(result, v, rtol, scale)
     return result
 
 
@@ -4962,6 +5010,11 @@ class GraphManager:
         # boundary input supplied, keyed by compile generation and by the
         # node object (a node replaced under the same name is asked again).
         self._node_reads: dict[str, tuple[int, Any, set]] = {}
+        # The underflow-range check (``_warn_underflow_range``): pending
+        # until the first untraced step after each compile, and the groups
+        # already warned about, which are never warned about again.
+        self._underflow_check_pending = False
+        self._underflow_warned: set[str] = set()
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
@@ -7499,6 +7552,7 @@ class GraphManager:
         self._static_data_hashes = static_data_hashes
 
         self._dirty = False
+        self._underflow_check_pending = bool(self._coupling_groups)
         # A rebuilt step invalidates every scan built against the old
         # one.  Bumping the generation as well as clearing means a scan
         # a caller still holds can never be re-entered into the cache.
@@ -8104,6 +8158,44 @@ class GraphManager:
             self._state_traced = False
             self._state_before_trace = None
         self._state = new_state
+        if self._underflow_check_pending and not self._state_traced:
+            self._underflow_check_pending = False
+            self._warn_underflow_range(new_state)
+
+    def _warn_underflow_range(self, state: dict) -> None:
+        """Warn once per coupled group whose fields are in the subnormal range.
+
+        Runs on the host, once per compile, on the first state a stepper
+        stores outside a transform (:meth:`_store_state`): the remedy --
+        rescaling the field's units -- is a decision about the model's
+        configuration, and the first step is where every caller passes,
+        whether or not they ever read :meth:`coupling_diagnostics`.  It reads
+        each group field once (one device-to-host copy per compile) and
+        nothing inside the compiled step changes, so stepping and its
+        results are untouched.  A state that decays into the range after the
+        first step is not re-checked.  See
+        :class:`~maddening.warnings.UnderflowRangeWarning`.
+        """
+        from maddening.warnings import UnderflowRangeWarning  # noqa: PLC0415
+
+        for key, hits in _underflow_range_fields(self._coupling_groups, state).items():
+            if key in self._underflow_warned or not hits:
+                continue
+            self._underflow_warned.add(key)
+            (nn, fld, mag, dtype), more = hits[0], len(hits) - 1
+            info = jnp.finfo(dtype)
+            threshold = float(info.tiny) / float(info.eps)
+            warnings.warn(
+                f"coupling group {key!r}: field {nn}.{fld} has magnitude {mag:.3g}, "
+                f"inside the {dtype} subnormal range (below tiny/eps = {threshold:.3g}): "
+                f"a change of one ulp of it is smaller than the smallest normal number, "
+                f"which XLA's CPU backend flushes to zero, so the nodes' arithmetic on it "
+                f"loses resolution, and below tiny = {float(info.tiny):.3g} the group's "
+                f"convergence norm reads it as exactly zero.  Rescale the field's units "
+                f"so that it is of order one."
+                + (f"  {more} more field(s) of this group are in the range too." if more else ""),
+                UnderflowRangeWarning, stacklevel=4,
+            )
 
     def _recover_from_escaped_tracers(self, *, warn: bool = True) -> None:
         """Put the graph back to the last untraced state, if it needs it.
@@ -8482,6 +8574,20 @@ class GraphManager:
               pass's longest chain of same-pass reads, without which a
               stalled 32-relay ring read 0.51x its true distance with the
               flag set (MADD-ANO-094).
+              **The flag assumes the counted floor is honest, which
+              nothing here can check.**  The count trusts each node to
+              declare ``update_evaluations()`` truthfully and not to
+              cancel inside itself.  Measured on 154 fixture
+              configurations (float32 and float64, CPU, the 0.4.0 floor
+              study): a node taking 2000 sub-steps per update but
+              declaring one evaluation read 0.26-0.60x the true distance
+              with this flag set, and a node forming its output as the
+              difference of two terms about 1000x its size read
+              0.02-0.65x, flag set.  In the other direction the count
+              adds gain magnitudes, so mixed-sign Gauss-Seidel chains read
+              very conservatively (up to 1e7x the true distance) and
+              sub-cycled groups 1e3-1e5x.  A measured, opt-in
+              ``diagnostics="rounding"`` level is planned for 0.5.0.
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked

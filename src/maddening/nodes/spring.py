@@ -324,9 +324,9 @@ def _anchored_pair_step_matrix(a, b, dt):
     exactly 1, and the reason the full 4x4 map has a Jordan block on the
     limit) is left out: the state is ``s = (x_a - x_b, v_a, v_b)``.
 
-    ``None`` when ``alpha_a * alpha_b >= 1``: Gauss-Seidel contracts by
-    that product per pass, so the coupling iteration does not converge and
-    the step that runs is not this one.  ``tests/nodes/
+    ``None`` when ``alpha_a * alpha_b`` is 1 or more (or within a millionth
+    of 1): Gauss-Seidel contracts by that product per pass, so the coupling
+    iteration does not converge and the step that runs is not this one.  ``tests/nodes/
     test_spring_stability_limits.py`` checks the matrix against the node.
     """
     (ka, ca, ma), (kb, cb, mb) = a, b
@@ -346,6 +346,12 @@ def _anchored_pair_step_matrix(a, b, dt):
 
 def _fmt(value):
     return f"{value:.4g}"
+
+
+def _fmt_growth(value):
+    """A growth factor, with the digits that tell it from 1: the warning
+    fires from one part in a million."""
+    return f"{value:.7g}"
 
 
 def _anchored_pair_advisories(*, group, nodes, timesteps, edges, feeds,
@@ -464,17 +470,18 @@ def _anchored_pair_advisories(*, group, nodes, timesteps, edges, feeds,
             continue
         if dt != dt_b or not math.isfinite(dt) or dt <= 0:
             continue
-        ca_ = _live_spring_constants(springs[a], live_params.get(a))
-        cb_ = _live_spring_constants(springs[b], live_params.get(b))
-        if ca_ is None or cb_ is None:
+        consts_a = _live_spring_constants(springs[a], live_params.get(a))
+        consts_b = _live_spring_constants(springs[b], live_params.get(b))
+        if consts_a is None or consts_b is None:
             continue
-        step = _anchored_pair_step_matrix(ca_, cb_, dt)
+        step = _anchored_pair_step_matrix(consts_a, consts_b, dt)
         if step is None:
             continue
         rho = float(np.max(np.abs(np.linalg.eigvals(step))))
         if not rho > 1.0 + _ANCHORED_PAIR_GROWTH_TOL:
             continue
-        issues.append(_anchored_pair_message(group, a, b, ca_, cb_, dt, rho))
+        issues.append(
+            _anchored_pair_message(group, a, b, consts_a, consts_b, dt, rho))
     return issues
 
 
@@ -488,9 +495,9 @@ def _anchored_pair_message(group, a, b, consts_a, consts_b, dt, rho):
         f"other in the coupling group {sorted(group.nodes)}: each one's "
         f"position is the other's anchor_position, and the group converges "
         f"that exchange within the step.  Each node is then explicit in its "
-        f"own position and implicit in its partner's, so the spring forces "
-        f"on the two do not cancel and the pair's momentum is not "
-        f"conserved.  "
+        f"own position and implicit in its partner's, and the step that "
+        f"results has a stability limit of its own, tighter than either "
+        f"node's.  "
     )
     if equal:
         k, c, m = ka, ca, ma
@@ -513,16 +520,16 @@ def _anchored_pair_message(group, a, b, consts_a, consts_b, dt, rho):
         if why is not None and math.isclose(abs(g), rho, rel_tol=1e-6):
             growth = (
                 f"Both have k = {_fmt(k)}, c = {_fmt(c)} and m = {_fmt(m)}, "
-                f"with dt = {_fmt(dt)}, so the converged step multiplies the "
-                f"pair's centre-of-mass velocity by g = (m - c*dt)/"
-                f"(m - k*dt**2) = {_fmt(g)} every step, {why} "
-                f"(MADD-ANO-098).  "
+                f"with dt = {_fmt(dt)}.  The spring forces on the two do not "
+                f"cancel, and the converged step multiplies the pair's "
+                f"centre-of-mass velocity by g = (m - c*dt)/(m - k*dt**2) = "
+                f"{_fmt_growth(g)} every step, {why} (MADD-ANO-098).  "
             )
         else:
             growth = (
                 f"Both have k = {_fmt(k)}, c = {_fmt(c)} and m = {_fmt(m)}, "
                 f"with dt = {_fmt(dt)}, and the converged step grows by "
-                f"g = {_fmt(rho)} per step, its spectral radius "
+                f"g = {_fmt_growth(rho)} per step, its spectral radius "
                 f"(MADD-ANO-098).  "
             )
         remedy = (
@@ -536,9 +543,9 @@ def _anchored_pair_message(group, a, b, consts_a, consts_b, dt, rho):
             f"{a!r} has k = {_fmt(ka)}, c = {_fmt(ca)} and m = {_fmt(ma)}, "
             f"{b!r} has k = {_fmt(kb)}, c = {_fmt(cb)} and m = {_fmt(mb)}, "
             f"with dt = {_fmt(dt)}, and the converged step grows by "
-            f"g = {_fmt(rho)} per step, its spectral radius once the pair's "
-            f"common translation is left out, so the pair moves off without "
-            f"bound while the spring between them can look right "
+            f"g = {_fmt_growth(rho)} per step, its spectral radius once the "
+            f"pair's common translation is left out, so the pair moves off "
+            f"without bound while the spring between them can look right "
             f"(MADD-ANO-098).  "
         )
         remedy = (

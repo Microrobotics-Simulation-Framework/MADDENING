@@ -342,8 +342,11 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **`fit_lm` no longer depends on the parameters' units, and a shrunken step cannot read as converged** (MADD-ANO-113, never released): the Marquardt floor is per column, and `converged` also needs the undamped Gauss-Newton step to be stationary;
-  **every reader of `gm.params` sees a pending `node.params` write** (MADD-ANO-114, never released): one sync point, the `gm.params` getter, serves readers and runners alike, and the later write wins.  Action: none.
+- **`fit_lm` no longer depends on the parameters' units, and a shrunken step cannot read as converged** (MADD-ANO-119, never released): the Marquardt floor is per column, and `converged` also needs the undamped Gauss-Newton step to be stationary;
+  **every reader of `gm.params` sees a pending `node.params` write** (MADD-ANO-120, never released): one sync point, the `gm.params` getter, serves readers and runners alike, and the later write wins.  Action: none.
+- **Coupling round-4 audit fixes** (MADD-ANO-113 to 118, new, resolved; 094 extended): the IFT tangent/adjoint is scale-free (it was exactly 0 for an rhs below ~1e-8, since 0.3.0); the float floor weights every read by its measured gain (a squaring ring read its bounds at 0.02-0.2x the truth, flags set) and the report reads the step's count, not the live graph;
+  accelerators and the report's residuals, secant and tangents no longer flush below ~1e-31 (converged=True at 7x the threshold; a usable gradient bound of 0.0); fori+Aitken/IQN on 16-bit groups traces; per-node profiling feeds declared inputs; both adaptive steppers share one acceptance rule (`adaptive.step_decision`).
+  Action: recompute IFT gradients of small-unit groups or near-minimum losses; re-read `diagnostics=True` bounds; `run_adaptive` now retries a failed attempt at `dt_min` instead of accepting it.
 - **The REST server uses its graph one request at a time, and bounds what a request can take** (MADD-ANO-106 to 112; 086 and 092 completed): concurrent `/sim/step`s no longer lose steps, `/surrogate/train` leaves the live simulation alone (one job, memory estimated first), streams follow a checkpoint load and a replaced node, `/sim/run` stops on shutdown (503),
   a dead runner is reported, structural edits beside the runner are 409, bodies over 32 MiB are 413, the whole graph holds at most 1e8 state elements; `run_pod.py --keep-going` records a goal that raises, and `--summarise` exits 4 when no file records a commit.
   Action: expect 409 for writes during a `/sim/run` or beside the runner, and read `/checkpoint/load`'s `sim_time`; a 503 from `/sim/run` names the steps it took.

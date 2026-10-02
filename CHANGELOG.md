@@ -330,7 +330,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **REST, round-4 audit** (MADD-ANO-083 to 088): `POST /graph/nodes`, `PUT /graph/params`, `from_dict` and USD loading check the grid/basis nodes' size estimates before building (one `PUT n_levels=10000000` grew the server to 57.7 GB); `POST /sim/stop`
+- **REST, round-4 audit** (MADD-ANO-083 to 089): `POST /graph/nodes`, `PUT /graph/params`, `from_dict` and USD loading check the grid/basis nodes' size estimates before building (one `PUT n_levels=10000000` grew the server to 57.7 GB); `POST /sim/stop`
   never answers "stopped" while the runner's thread steps (503; state writes 409 while it runs); `PUT /graph/params` refuses values the step cannot trace and keeps a parameter's numeric type; the WebSocket
   streams end with their client (SIGINT hung); `PUT /sim/stride` is bounded (422); a missing edge's DELETE is a 404; root-equal checkpoint paths are a 400.  Action: send integers for integer params; stop the runner before writing state.
 - **Coupling harness findings** (MADD-ANO-070 to 074, new, resolved): a group's integer/boolean fields are those the pass gives at the returned state, on both solvers (`ift` returned first-pass flags and froze edge-carried ones); predictor + mixed norm with such a field, Jacobi with a flux-reading producer, `reset_state`/`set_node_state` after `jax.grad`, under-relaxed `fixed` stopping on its first pass (~2x short) and the adaptive norm on integer leaves all fixed.

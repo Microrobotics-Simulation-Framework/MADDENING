@@ -7401,3 +7401,60 @@ anomalies:
       - "tests/api/test_websocket_streams_end_with_their_client.py::test_streams_with_their_clients_still_open_let_the_server_shut_down"
       - "tests/api/test_websocket_streams_end_with_their_client.py::test_what_counts_as_the_client_having_left"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-089"
+    title: "POST /sim/run and POST /surrogate/train took any size: one request could hold a worker indefinitely or name more memory than the host has"
+    description: >
+      From v0.1.0 to v0.3.1 `POST /sim/run?n_steps=` and the body of `POST
+      /surrogate/train` (`n_epochs`, `batch_size`, `hidden_sizes`) were not
+      bounded, and the API answered any caller who could reach it
+      (MADD-ANO-051).  `/sim/run` steps synchronously, holding a worker
+      thread until the run ends, and a training job allocates its network
+      in a background thread.  Checked at each tag, v0.1.0, v0.2.0, v0.2.1,
+      v0.3.0 and v0.3.1, on 2026-10-02 (`git archive` of each, CPU, jaxlib
+      0.11.0, FastAPI `TestClient`, memory-capped, an empty `HOME`, no cloud
+      route):
+        - `POST /sim/run?n_steps=1000000000` on a `BallNode` graph was
+          still running after 3 s, and would have run for hours;
+        - `POST /surrogate/train` with `hidden_sizes` of [2^20, 2^20],
+          `n_epochs` and `batch_size` of 10^9 answered 200 "started", and
+          its job then tried to allocate 4 TiB.
+      A merely large layer width, below what fails at once, is allocated
+      in full.  `POST /graph/nodes`, whose sizes are the third such door,
+      is MADD-ANO-083.  Resolved in 0.4.0 (f2cf733, 2026-09-19): `n_steps`
+      is at most `MAX_RUN_STEPS` (100000), and the training request is
+      bounded on its model: data steps, epochs, batch size, layer count and
+      width.  Each limit is a 422 naming the field, published in
+      `/openapi.json`.  On the 0.4.0 tree both requests above answer 422.
+      Found by the round-4 confirmation audit's check of the CHANGELOG's
+      Security claims; registered then.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A denial of service, never a wrong result, so not `critical`.  Graded
+      `major` as MADD-ANO-083 is.  An oversized network exhausts the
+      host's memory, and the OOM killer then picks the largest process,
+      which need not be the server.  Every run request held one of the
+      server's worker threads, so a handful of them stopped it answering.
+      Up to v0.3.1 any caller who could route to the cloud container's
+      port could do this (MADD-ANO-051).  `context_dependent`: what else the
+      host runs is the deployment's, not the library's.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.api.server.TrainSurrogateRequest"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: keep the API on loopback and let only trusted callers
+      reach it (MADD-ANO-051's workaround); for long runs, use `POST
+      /sim/start` and stop it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The bounds are per request, so concurrent requests add up.  A training
+      job at the maxima (16 layers of 8192, batch 65536) still takes
+      gigabytes; the limits keep it finite, not small.
+    verification:
+      - "tests/api/test_request_bounds.py::TestSimRunIsBounded::test_step_count_above_the_limit_is_422"
+      - "tests/api/test_request_bounds.py::TestTrainSurrogateIsBounded::test_out_of_range_training_arguments_are_422"
+      - "tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_an_array_dimension_above_the_limit_is_rejected"
+    github_issue: null

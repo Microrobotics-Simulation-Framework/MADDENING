@@ -4243,12 +4243,17 @@ class SimulationServer:
                         # from the snapshot about to be encoded, or from the
                         # graph when there is none yet.
                         if schema_dirty.is_set() or generation != self._layout_generation:
+                            resubscribed = schema_dirty.is_set()
                             schema_dirty.clear()
                             generation = self._layout_generation
                             source = snapshot if snapshot is not None else \
                                 await loop.run_in_executor(None, self._user_state_locked)
-                            encoder, layout = build(source), _state_layout(source)
-                            await websocket.send_json(encoder.schema())
+                            # A compile that left the layout as it was (the
+                            # recompile after a reset or a parameter write)
+                            # sends no schema; a subscription always does.
+                            if resubscribed or _state_layout(source) != layout:
+                                encoder, layout = build(source), _state_layout(source)
+                                await websocket.send_json(encoder.schema())
                         if snapshot is not None and seq != last_seq:
                             last_seq = seq
                             # A snapshot of another layout than the schema's

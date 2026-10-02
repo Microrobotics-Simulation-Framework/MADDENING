@@ -132,6 +132,19 @@ def test_a_snapshot_of_another_layout_gets_its_schema_first_whatever_published_i
                                 for n, d in state.items()})
 
 
+def test_a_recompile_that_keeps_the_layout_sends_no_new_schema():
+    """A schema goes out when the layout changes, not on every compile: the
+    recompile after a reset or a parameter write leaves the frames as they
+    were, and a client reading schema-then-frames is not interrupted."""
+    gm, server, client = _server()
+    with client.websocket_connect("/ws/state/binary") as ws:
+        schema = ws.receive_json()
+        gm._dirty = True                         # the next step recompiles
+        assert client.post("/sim/step").status_code == 200
+        frame = ws.receive_bytes()
+    _assert_frame_is_the_state(frame, schema, client.get("/graph/state").json())
+
+
 @pytest.mark.parametrize("edit", ["add", "remove", "compile"])
 def test_the_cached_encoder_is_dropped_by_a_structural_change(edit):
     gm, server, client = _server()

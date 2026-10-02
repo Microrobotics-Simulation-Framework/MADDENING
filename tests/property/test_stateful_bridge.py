@@ -414,6 +414,9 @@ def encode_binary_list() -> bytes:
     return _HEADER.pack(len(header)) + header + b""
 
 
+# Per push: tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence
+# (generated set / get / step / get_state / set_state / reset sequences, the bridge against
+# the graph, after every operation) and the pinned sequences below.
 @pytest.mark.slow  # a state machine over the FMU bridge: 11 s on CI
 def test_arbitrary_sidecar_sequences_keep_the_bridge_and_the_model_in_step():
     """Any frame sequence: the wire agrees with the model, malformed or not.

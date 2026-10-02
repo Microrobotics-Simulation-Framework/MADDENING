@@ -187,6 +187,8 @@ _MAGNITUDES = st.sampled_from(
 # is held on every push by the property below, which draws values only, and
 # by ``test_a_small_field_far_from_its_fixed_point_is_not_reported_converged``
 # in ``tests/core/test_coupling_error_bound.py``.
+# Per push: tests/property/test_coupling_convergence_at_every_field_scale.py::test_a_small_field_is_not_dropped_merely_for_being_small
+# and tests/core/test_coupling_error_bound.py::test_a_small_field_far_from_its_fixed_point_is_not_reported_converged
 @pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(

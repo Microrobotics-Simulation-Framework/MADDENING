@@ -308,6 +308,9 @@ def test_a_single_phase_pipe_refuses_a_nonzero_interaction_strength():
     _assert_nothing_written(gm, "p", before)
 
 
+# Per push: tests/api/test_params_endpoint_reload_agreement.py::test_switching_a_multiphase_pipe_to_single_phase_is_refused_and_the_reload_matches
+# and tests/api/test_params_endpoint_reload_agreement.py::test_a_uniform_rod_takes_a_new_length_and_the_reload_matches
+# (the refusal on the pipe, and the compiled reload comparison on a cheaper node).
 @pytest.mark.slow  # two multiphase-pipe compiles and scans: ~8 s on 3 cores
 def test_a_compiled_multiphase_pipe_takes_writes_within_its_branch_and_the_reload_matches():
     """On the compiled graph the audit drove: ``G=0`` refused, and each

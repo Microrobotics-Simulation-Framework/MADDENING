@@ -154,6 +154,8 @@ def test_wrapper_matches_unsharded_under_both_transports():
         ShardedUnstructuredNode(node, mesh, layout, exchange="carrier-pigeon")
 
 
+# Per push: tests/cloud/multigpu/test_exchange_ppermute.py::test_ppermute_matches_all_to_all_bit_for_bit
+# (the same parity on small scattered and contiguous layouts).
 @pytest.mark.slow
 def test_hundred_thousand_cell_ring_ppermute_matches_dense():
     n = 100_000
@@ -170,6 +172,8 @@ def test_hundred_thousand_cell_ring_ppermute_matches_dense():
     assert t["ppermute"] <= t["all_to_all"]
 
 
+# Per push: tests/cloud/multigpu/test_exchange_ppermute.py::test_ppermute_matches_all_to_all_bit_for_bit and
+# tests/cloud/multigpu/test_exchange_ppermute.py::test_traffic_accounting_ring_and_random.
 @pytest.mark.slow
 def test_million_cell_ring_both_transports_bit_identical():
     """10^6 cells over 4 shards: layout build, both exchanges, parity.

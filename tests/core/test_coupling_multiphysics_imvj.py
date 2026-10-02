@@ -119,6 +119,7 @@ def test_imvj_uses_fewer_iterations_than_none():
 # group, 7-13 s on the CI runner.  The forward is checked on every push above,
 # and the gradient against finite differences, over three steps, by
 # tests/core/test_imvj_gradient_matches_finite_differences.py.
+# Per push: tests/core/test_imvj_gradient_matches_finite_differences.py::test_the_gradient_through_a_multiphysics_imvj_group_matches_finite_differences
 @pytest.mark.slow
 def test_gradient_through_multiphysics_imvj_matches_fd():
     gm = _graph()

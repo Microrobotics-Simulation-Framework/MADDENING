@@ -125,6 +125,7 @@ def _check(gm: GraphManager, n_devices: int, *, after_write: str) -> None:
                            what=f"{after_write}: after a reset")
 
 
+# Per push: tests/cloud/multigpu/test_property_sharded_state_io_differential.py::test_a_rest_write_into_a_sharded_rod_is_refused_whole_or_runs_as_its_reload[2] (two devices; four in the slow lane).
 @pytest.mark.parametrize("n_devices", DEVICES)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
@@ -156,6 +157,7 @@ def test_a_rest_write_into_a_sharded_rod_is_refused_whole_or_runs_as_its_reload(
     _check(gm, n_devices, after_write=f"REST {write.params!r}")
 
 
+# Per push: tests/cloud/multigpu/test_property_sharded_state_io_differential.py::test_a_param_write_into_a_sharded_rod_runs_as_its_reload[2] (two devices; four in the slow lane).
 @pytest.mark.parametrize("n_devices", DEVICES)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
@@ -172,6 +174,7 @@ def test_a_param_write_into_a_sharded_rod_runs_as_its_reload(n_devices, data):
     _check(gm, n_devices, after_write=f"gm.params {key} x{factor}")
 
 
+# Per push: tests/cloud/multigpu/test_property_sharded_state_io_differential.py::test_a_checkpoint_of_a_sharded_rod_resumes_the_uninterrupted_run[2] (two devices; four in the slow lane).
 @pytest.mark.parametrize("n_devices", DEVICES)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
@@ -190,6 +193,7 @@ def test_a_checkpoint_of_a_sharded_rod_resumes_the_uninterrupted_run(n_devices, 
                            what="continued")
 
 
+# Per push: tests/cloud/multigpu/test_property_sharded_state_io_differential.py::test_a_sharded_rod_config_reloads_unsharded_with_a_warning_and_rewrapped_bit_for_bit[2] (two devices; four in the slow lane).
 @pytest.mark.parametrize("n_devices", DEVICES)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())

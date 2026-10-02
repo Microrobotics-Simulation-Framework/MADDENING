@@ -332,6 +332,7 @@ def _make_chain_gm(n: int, solver: str, acceleration: str,
 # Slow-marked (still run by slow-tests.yml): a 50-node chain, its gradient and
 # ten finite-difference solves, 33-48 s on the CI runner.  IQN-IMVJ backward
 # parity is checked on every push at small scale above.
+# Per push: tests/core/test_coupling_ift_iqn_imvj.py::test_backward_parity_ift_iqn_imvj_through_jit
 @pytest.mark.slow
 def test_atscale_fd_matches_autodiff_ift_iqn_imvj():
     """N=50 chain: autodiff gradient agrees with FD on sampled inputs."""

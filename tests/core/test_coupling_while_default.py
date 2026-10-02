@@ -205,6 +205,9 @@ def test_strict_convergence_silent_when_converged():
     assert bool(jnp.isfinite(s["spring_a"]["position"]))
 
 
+# Per push: tests/core/test_coupling_while_default.py::test_forward_and_reverse_ad_through_previously_excluded_configs (its other four
+# configurations) and tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises,
+# which differentiates a diagnostics group.
 @pytest.mark.parametrize("cfg", [
     dict(acceleration="none", iteration_mode="jacobi"),
     # Slow-marked: the diagnostics machinery compiled three times (step,
@@ -240,6 +243,7 @@ def test_forward_and_reverse_ad_through_previously_excluded_configs(cfg):
 # Slow-marked (still run by slow-tests.yml): three rigid-body groups compiled
 # for three static caps, 8-10 s on the CI runner.  Early exit itself is
 # checked on every push by ``test_exits_early_and_reports_convergence``.
+# Per push: tests/core/test_coupling_while_default.py::test_exits_early_and_reports_convergence
 @pytest.mark.slow
 def test_the_passes_run_do_not_scale_with_max_iterations():
     """Early exit: raising the cap on an easily converging group must not
@@ -272,6 +276,7 @@ def test_the_passes_run_do_not_scale_with_max_iterations():
         assert 1 < next(iter(by_cap.values())) < 3, (key, by_cap)
 
 
+# Per push: tests/core/test_coupling_while_default.py::test_exits_early_and_reports_convergence (early exit, which is what keeps the cost flat).
 @pytest.mark.slow
 def test_step_cost_does_not_scale_with_max_iterations():
     """The same claim on the clock, kept as a coarse smoke check.

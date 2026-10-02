@@ -8,10 +8,14 @@ Starts a FastAPI server with a pre-loaded simulation graph:
 
 Usage
 -----
-    pip install fastapi uvicorn   # if not already installed
+    pip install "maddening[api]"   # fastapi, uvicorn, websockets
     python -m maddening.examples.servers.api_server
+    python -m maddening.examples.servers.api_server --port 0   # any free port
 
-Then open http://localhost:8000/docs for the interactive API docs.
+Then open http://localhost:8000/docs for the interactive API docs (the
+server prints the address it is serving on; ``--port 0`` lets the OS pick
+a free one).  It binds 127.0.0.1 only; to reach it from another machine,
+forward the port: ``ssh -L 8000:127.0.0.1:8000 <host>``.
 
 Quick smoke test
 ----------------
@@ -40,6 +44,8 @@ asyncio.run(listen())
 "
 """
 
+import argparse
+import socket
 import sys
 
 from maddening.api.server import SimulationServer
@@ -93,7 +99,20 @@ def build_demo_graph() -> GraphManager:
     return gm
 
 
-def main() -> None:
+def bind_loopback(port: int) -> socket.socket:
+    """Bind 127.0.0.1:*port* (0 = a free port the OS picks) for uvicorn."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", port))
+    return sock
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description="MADDENING API server demo")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="Port on 127.0.0.1 (default: 8000; 0 = any free port)")
+    args = parser.parse_args(argv)
+
     gm = build_demo_graph()
     print(f"Graph: {gm}")
     print(f"Schedule: {gm.schedule}")
@@ -116,14 +135,18 @@ def main() -> None:
         )
         sys.exit(1)
 
-    print("\nStarting MADDENING API server on http://127.0.0.1:8000")
-    print("Interactive docs at http://127.0.0.1:8000/docs\n")
-    # Bound to loopback: every line this script prints points at
-    # http://localhost:8000, and a loopback bind is the one the API
-    # serves without a bearer token.  Binding 0.0.0.0 here (as this
-    # used to) published a graph-mutating API on the LAN.  To reach
-    # it from another machine: ssh -L 8000:127.0.0.1:8000 <host>.
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # Bound to loopback: a loopback bind is the one the API serves
+    # without a bearer token.  Binding 0.0.0.0 here (as this used to)
+    # published a graph-mutating API on the LAN.  To reach it from
+    # another machine: ssh -L 8000:127.0.0.1:8000 <host>.
+    sock = bind_loopback(args.port)
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+    print(f"\nServing on {url}", flush=True)
+    print(f"Interactive docs at {url}/docs\n", flush=True)
+    try:
+        uvicorn.Server(uvicorn.Config(app)).run(sockets=[sock])
+    except KeyboardInterrupt:   # uvicorn re-raises Ctrl-C after shutting down
+        pass
 
 
 if __name__ == "__main__":

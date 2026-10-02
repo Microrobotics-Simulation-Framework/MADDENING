@@ -20,9 +20,9 @@ for the GIR typelibs it pulls in; its C extension is 3.10-only and is not
 used.
 
 Usage:
-    python 06_selkies_test.py
-    python 06_selkies_test.py --gpu RTX4090
-    python 06_selkies_test.py --keep
+    python -m maddening.examples.cloud.streaming.06_selkies_test
+    python -m maddening.examples.cloud.streaming.06_selkies_test --gpu RTX4090
+    python -m maddening.examples.cloud.streaming.06_selkies_test --keep
 """
 
 import argparse

@@ -13,7 +13,9 @@ naming only it; a third mesh axis; nesting; a gradient through
 axis but its own this way and is the model followed.
 
 The XLA miscompile found while widening the differential harness to
-such meshes is pinned at the end as strict xfails (MADD-ANO-068).
+such meshes (MADD-ANO-068) is pinned at the end: ``run_scan`` refuses the
+two configurations it was found in, ``step`` still answers as unsharded,
+and the pure-JAX reproducer still miscompiles on this jaxlib.
 """
 
 from __future__ import annotations
@@ -136,35 +138,48 @@ def test_the_unstructured_wrapper_on_a_2d_mesh_answers_as_unsharded(integral, me
 
 # ---------------------------------------------------------------------------
 # MADD-ANO-068: XLA miscompiles a sharded static replicated over a mesh
-# axis inside lax.scan.  Strict xfails: an XLA that fixes it flips them,
-# and PENDING_XLA_REPLICATED_STATIC_IN_SCAN in the harness can then go.
+# axis inside lax.scan.  GraphManager refuses the loop; step() is right.
+# These were strict xfails until the refusal; the pure-JAX one is now the
+# tripwire that says when an XLA release has fixed the compiler.
 # ---------------------------------------------------------------------------
-
-_XLA_REASON = (
-    "MADD-ANO-068: XLA (jaxlib 0.10.2-0.11.2) miscompiles a ShardedStencilNode step "
-    "inside lax.scan when a sharded StaticArray is replicated over a mesh axis of 2+ "
-    "devices and the node reads it in its halo and a replicated array through a window "
-    "at its shard_info offset")
 
 #: ``kappa`` (a sharded static) read in the halo, ``table`` (a replicated
 #: array) read through a window at the shard's offset, on a mesh axis
 #: the axis_map leaves unused: what the generated harness found.
 _XLA_UNUSED_AXIS = replace(_ROD, integral=None, table="halo", source="none", gain=False,
                            faces=False, steps=1, seed=0)
+#: The same kernel on a (2, 2) pencil, its static split along axis 0 only.
+_XLA_PENCIL = replace(_XLA_UNUSED_AXIS, axis_map=(("px", 0), ("py", 1)), shape=(4, 4),
+                      halo=(1, 1))
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_XLA_REASON)
-def test_a_static_replicated_over_an_unused_axis_scans_as_unsharded():
-    """Silent: every cell of ``run_scan``'s result 1e-3 to 1e-2 off; ``step`` is right."""
-    D.check_config(_XLA_UNUSED_AXIS, surfaces=("step", "run_scan"))
+@pytest.mark.parametrize("cfg", [_XLA_UNUSED_AXIS, _XLA_PENCIL], ids=["unused-axis", "pencil"])
+def test_run_scan_refuses_the_miscompiled_configurations_and_step_answers_as_unsharded(cfg):
+    """Silent (every cell 1e-3 to 1e-2 off) on the unused axis, a compile failure
+    on the pencil; both are now a refusal naming the static and mesh axis ``py``,
+    and ``step`` still answers as the unsharded node."""
+    assert D.loop_refusal_expected(cfg)
+    out = D.check_config(cfg, surfaces=("step", "run_scan"))
+    assert out["run_scan"][0] == "refused"
 
 
-@pytest.mark.xfail(strict=True, raises=jax.errors.JaxRuntimeError, reason=_XLA_REASON)
-def test_a_profile_static_on_a_pencil_scans_as_unsharded():
-    """Loud: the same kernel on a (2, 2) pencil, its static split along axis 0 only,
-    fails to compile inside ``run_scan`` (``Failed to translate module to LLVM IR``)."""
-    D.check_config(replace(_XLA_UNUSED_AXIS, axis_map=(("px", 0), ("py", 1)), shape=(4, 4),
-                           halo=(1, 1)), surfaces=("step", "run_scan"))
+@pytest.mark.parametrize("cfg", [_XLA_UNUSED_AXIS, _XLA_PENCIL], ids=["unused-axis", "pencil"])
+def test_the_refusal_leaves_the_graph_where_it_was(cfg):
+    """Refused before anything runs: the state is not advanced, and a ``step``
+    afterwards continues from the initial state."""
+    case = D.build_case(cfg)
+    gm, _ = D.build_graph(case, True)
+    before = np.asarray(jax.device_get(gm.get_node_state(case.name)["f"]))
+    with pytest.raises(RuntimeError, match=r"MADD-ANO-068.*'kappa'.*mesh axis 'py'"):
+        gm.run_scan(1)
+    np.testing.assert_array_equal(
+        np.asarray(jax.device_get(gm.get_node_state(case.name)["f"])), before)
+    gm.step()
+    plain, _ = D.build_graph(case, False)
+    plain.step()
+    np.testing.assert_array_equal(
+        np.asarray(jax.device_get(gm.get_node_state(case.name)["f"])),
+        np.asarray(plain.get_node_state(case.name)["f"]))
 
 
 def _pure_jax_case():
@@ -198,7 +213,21 @@ def test_the_pure_jax_reproducer_is_right_outside_a_scan():
     np.testing.assert_array_equal(once, [27.5, 45.0, 125.0, 240.0])
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_XLA_REASON)
-def test_the_pure_jax_reproducer_is_right_inside_a_scan():
+@pytest.mark.skipif(jax.default_backend() != "cpu",
+                    reason="MADD-ANO-068 was measured on XLA's CPU backend; the tripwire "
+                           "pins it there, and an accelerator backend compiles another program")
+def test_the_pure_jax_reproducer_still_miscompiles_inside_a_scan():
+    """The upstream defect the refusal exists for, on the jaxlib under test.
+
+    When this fails, the installed XLA compiles the reproducer right: check
+    the two configurations above with the refusal lifted, and if they agree
+    too, lift ``GraphManager``'s MADD-ANO-068 refusal for jaxlib versions
+    from that one and close the anomaly.  (Before the refusal this was a
+    strict xfail of the opposite assertion.)
+    """
+    import jaxlib
+
     once, scanned = _pure_jax_case()
-    np.testing.assert_array_equal(scanned, once)
+    assert not np.array_equal(scanned, once), (
+        f"jaxlib {jaxlib.__version__}: jit(scan) now agrees with jit "
+        f"({scanned} == {once}); see MADD-ANO-068")

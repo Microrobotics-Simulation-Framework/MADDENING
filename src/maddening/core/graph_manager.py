@@ -176,6 +176,35 @@ def _node_update(spec: _NodeSpec, state, boundary_inputs, dt, node_params):
         return spec.update_fn(state, boundary_inputs, dt)
 
 
+def _is_stencil_wrapper(node: Any) -> bool:
+    """A ``ShardedStencilNode`` (or subclass), asked without importing it."""
+    return callable(getattr(node, "_xla_scan_hazards", None)) and callable(
+        getattr(node, "_statics_replicated_over_devices", None))
+
+
+def _outermost_stencil_wrapper(node: Any, _depth: int = 0) -> Any:
+    """The first ``ShardedStencilNode`` under ``node``, through the wrappers
+    that hold their node as ``physics_node`` (``HybridNode``) or ``_inner``;
+    ``None`` when there is none."""
+    while node is not None and _depth < 64:
+        if _is_stencil_wrapper(node):
+            return node
+        nxt = getattr(node, "physics_node", None)
+        node = getattr(node, "_inner", None) if nxt is None else nxt
+        _depth += 1
+    return None
+
+
+def _innermost_wrapped(node: Any) -> Any:
+    """The node a chain of ``_inner`` wrappers ends at."""
+    for _ in range(64):
+        nxt = getattr(node, "_inner", None)
+        if nxt is None:
+            break
+        node = nxt
+    return node
+
+
 class _ResolvedParams(NamedTuple):
     """The graph parameter pytree split for the step builders: per-node
     pytrees (``nodes[name]``) and per-edge mapping weights
@@ -4390,6 +4419,9 @@ class GraphManager:
         # the group that wrote them, which until the next compile is this
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
+        # MADD-ANO-068, per compile generation: ``[generation, candidates,
+        # hazards]``; see ``_refuse_xla_loop_hazards``.
+        self._xla_loop_hazards: Optional[list] = None
 
     def _snapshot_params(self) -> dict:
         return {
@@ -8055,6 +8087,7 @@ class GraphManager:
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
+        self._refuse_xla_loop_hazards("step", scan=False)
 
         step_fn = self._compiled_step
         assert step_fn is not None  # `compile()` above always sets it
@@ -8113,6 +8146,7 @@ class GraphManager:
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
+        self._refuse_xla_loop_hazards("run", scan=False)
 
         step_fn = self._compiled_step
         assert step_fn is not None  # `compile()` above always sets it
@@ -8182,6 +8216,121 @@ class GraphManager:
             self._scan_cache[full_key] = fn
         return fn
 
+    def _xla_loop_candidates(self) -> list[tuple[str, Any, bool]]:
+        """``(graph node, wrapper, in a coupling group)`` for every
+        ``ShardedStencilNode`` with a sharded static replicated over a mesh
+        axis of two or more devices -- the declaration half of the
+        MADD-ANO-068 condition, cheap and taken without tracing.
+
+        The wrapper is the outermost ``ShardedStencilNode`` under the graph
+        node (through ``HybridNode`` and nesting): it is the one whose
+        ``update`` runs, since an inner wrapper only forwards
+        ``update_padded``.
+        """
+        grouped: set = set()
+        for group in self._committed_coupling_groups.values():
+            grouped |= set(group.nodes)
+        out = []
+        for name, spec in self._nodes.items():
+            wrapper = _outermost_stencil_wrapper(spec.node)
+            if wrapper is not None and wrapper._statics_replicated_over_devices():
+                out.append((name, wrapper, name in grouped))
+        return out
+
+    def _refuse_xla_loop_hazards(self, entry: str, *, scan: bool) -> None:
+        """Refuse a path that would put a miscompiled step inside a loop.
+
+        MADD-ANO-068: XLA (jaxlib 0.10.2, 0.11.0 and 0.11.2; not 0.5.3)
+        compiles a ``ShardedStencilNode`` step wrongly when it is traced
+        inside ``lax.scan``, ``fori_loop`` or ``while_loop`` and the node
+        reads a sharded ``StaticArray`` in its halo, reads another array
+        through a window at a ``shard_info`` offset, and the static is
+        replicated over a mesh axis of two or more devices.  The result is
+        silently wrong (every cell 1e-3 to 1e-2 off on a mesh axis the
+        ``axis_map`` leaves unused) or fails to compile (a pencil).  The
+        step under ``jit`` alone is right.
+
+        ``scan=True`` is an entry point that builds a loop over the graph
+        step (``run_scan`` and its siblings, ``sysid``): any such node
+        refuses it.  ``scan=False`` is one that does not (``step``,
+        ``run``, ``run_adaptive``): only a node inside a coupling group
+        refuses it, because the group's iteration -- or a sub-cycling
+        group's sub-steps -- runs its update inside a loop within the step
+        itself.
+
+        Which nodes read their statics that way is learnt from one trace
+        of the step (``jax.eval_shape``, never compiled) under
+        :func:`~maddening.cloud.multigpu._scan_hazards.probe_scan_hazards`,
+        taken only when a wrapper declares a static replicated that way,
+        and kept for the compile generation.  A wrapper the trace did not
+        reach is refused, not passed.
+        """
+        gen = self._compile_generation
+        cache = self._xla_loop_hazards
+        if cache is None or cache[0] != gen:
+            cache = [gen, self._xla_loop_candidates(), None]
+            self._xla_loop_hazards = cache
+        candidates = cache[1]
+        if not any(scan or grouped for _, _, grouped in candidates):
+            return
+        if cache[2] is None:
+            cache[2] = self._probe_xla_loop_hazards(candidates)
+        hazards = [(name, grouped, h) for name, grouped, h in cache[2] if scan or grouped]
+        if not hazards:
+            return
+        name, grouped, hazard = hazards[0]
+        others = sorted({n for n, _, _ in hazards[1:] if n != name})
+        axes = ", ".join(repr(a) for a, _ in hazard.replicated_over)
+        # A member of a coupling group is refused on every path, step() too.
+        coupled = grouped
+        where = (
+            f"graph node {name!r} is a member of a coupling group, whose "
+            "iteration runs its update inside a loop on every entry point"
+            if coupled else
+            f"{entry} traces the step of graph node {name!r} inside a loop"
+        )
+        fixes = (
+            f"use a mesh without mesh axis {axes} (a sharded static is split "
+            "along one mesh axis and copied along every other one); or "
+            + ("take the node out of the coupling group." if coupled else
+               "advance the graph with step() / run(), which are not affected.")
+        )
+        raise RuntimeError(
+            f"{entry}: refused (MADD-ANO-068).  {where}, and XLA (jaxlib 0.10.2 to "
+            "0.11.2) miscompiles that step there: "
+            f"{hazard.describe()}.  Inside a loop the result is silently wrong "
+            "(every cell 1e-3 to 1e-2 off) or fails to compile.  Workarounds: "
+            f"{fixes}"
+            + (f"  Also affected: {others}." if others else "")
+        )
+
+    def _probe_xla_loop_hazards(self, candidates) -> list[tuple[str, bool, Any]]:
+        """``(graph node, in a coupling group, ScanHazard)`` for each hazard
+        found by one ``eval_shape`` trace of the step; see
+        :meth:`_refuse_xla_loop_hazards`."""
+        from maddening.cloud.multigpu._scan_hazards import (  # noqa: PLC0415
+            ScanHazard,
+            probe_scan_hazards,
+        )
+        with warnings.catch_warnings(), probe_scan_hazards() as found:
+            # A node that warns at trace time warns on the real trace too.
+            warnings.simplefilter("ignore")
+            jax.eval_shape(self._build_step_fn(), self._state,
+                           self._default_external_inputs(), self.params)
+        out = []
+        for name, wrapper, grouped in candidates:
+            record = found.get(id(wrapper))
+            if record is None:
+                inner = _innermost_wrapped(wrapper)
+                for key, axes in sorted(wrapper._statics_replicated_over_devices().items()):
+                    out.append((name, grouped, ScanHazard(
+                        node=wrapper.name, node_type=type(inner).__name__, static=key,
+                        shard_axis=wrapper._sharded_static[key].shard_axis,
+                        replicated_over=axes, window="")))
+                continue
+            out.extend((name, grouped, hazard) for hazard in record[1])
+        return out
+
     def run_scan(
         self,
         n_steps: int,
@@ -8243,6 +8392,7 @@ class GraphManager:
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
+        self._refuse_xla_loop_hazards("run_scan", scan=True)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
@@ -8328,6 +8478,7 @@ class GraphManager:
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
+        self._refuse_xla_loop_hazards("run_scan_with_history", scan=True)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
@@ -8424,6 +8575,7 @@ class GraphManager:
         self._check_static_data_dirty()
         if self._dirty or self._compiled_step is None:
             self.compile()
+        self._refuse_xla_loop_hazards("run_sweep", scan=True)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
@@ -8779,6 +8931,7 @@ class GraphManager:
         # had just stopped being multi-rate.
         if self._is_multirate:
             raise RuntimeError(self._adaptive_multirate_message("run_adaptive"))
+        self._refuse_xla_loop_hazards("run_adaptive", scan=False)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 
@@ -8964,6 +9117,7 @@ class GraphManager:
         # After the recompile, for the reason given in ``run_adaptive``.
         if self._is_multirate:
             raise RuntimeError(self._adaptive_multirate_message("run_adaptive_scan"))
+        self._refuse_xla_loop_hazards("run_adaptive_scan", scan=True)
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 

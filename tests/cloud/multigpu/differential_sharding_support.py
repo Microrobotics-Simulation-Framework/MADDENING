@@ -806,24 +806,54 @@ def _misshapen_candidates(shape: tuple, block: dict, halo: tuple) -> list[tuple]
 
 
 #: XLA (jaxlib 0.10.2, 0.11.0 and 0.11.2; not 0.5.3) miscompiles a
-#: ``ShardedStencilNode`` step inside ``lax.scan`` -- ``run_scan`` -- when
-#: a sharded ``StaticArray`` is replicated along a mesh axis of more than
-#: one device and the node reads it in its halo and reads a replicated
-#: array through a window at its ``shard_info`` offset (``kappa="halo"``
-#: with ``table="halo"`` here): on a mesh axis the ``axis_map`` leaves
-#: unused every cell comes back wrong, silently; on a pencil whose static
-#: is split along one axis only the step fails to compile.  ``step`` and
-#: ``run`` are right.  Reproduced without MADDENING; see
-#: ``test_unused_mesh_axis_integrals.py``.  While it is pending, such a
-#: configuration reads the table in the interior instead (still drawn,
-#: one window narrower); the exact cases are strict xfails.
-PENDING_XLA_REPLICATED_STATIC_IN_SCAN = True
+#: ``ShardedStencilNode`` step inside a loop when the node reads a sharded
+#: ``StaticArray`` in its halo and another array through a window at a
+#: ``shard_info`` offset, and the static is replicated over a mesh axis of
+#: two or more devices (MADD-ANO-068): on a mesh axis the ``axis_map``
+#: leaves unused every cell comes back wrong, silently; on a pencil whose
+#: static is split along one axis the step fails to compile.
+#: ``GraphManager`` refuses every path that loops over such a step -- here
+#: every surface but ``step`` and ``run`` -- and the oracle requires that
+#: refusal where :func:`loop_refusal_expected` predicts it.  (Until the
+#: refusal, this harness substituted an interior read of the table for
+#: such a configuration and the exact cases were strict xfails.)
+LOOP_SURFACES = tuple(s for s in SURFACES if s not in ("step", "run"))
 
 
 def _static_replicated_over_devices(mesh_shape, axis_names, axis_map, shard_axis) -> bool:
     """Is a static split along ``shard_axis`` replicated over a mesh axis of 2+ devices?"""
+    return bool(replicated_mesh_axes(mesh_shape, axis_names, axis_map, shard_axis))
+
+
+def replicated_mesh_axes(mesh_shape, axis_names, axis_map, shard_axis) -> tuple:
+    """The mesh axes of 2+ devices a static split along ``shard_axis`` is copied along."""
     on = {ma for ma, sa in axis_map if sa == shard_axis}
-    return any(int(n) > 1 for ma, n in zip(axis_names, mesh_shape) if ma not in on)
+    return tuple(ma for ma, n in zip(axis_names, mesh_shape) if ma not in on and int(n) > 1)
+
+
+def loop_refusal_expected(cfg) -> bool:
+    """Does ``GraphManager`` refuse to loop over this configuration's step?
+
+    MADD-ANO-068 (see :data:`LOOP_SURFACES`), as the refusal decides it
+    for this harness's kernel: ``kappa`` (the sharded static) read in its
+    halo -- smoothed, not sliced to its interior -- and replicated over a
+    mesh axis of 2+ devices, and a window at a ``shard_info`` offset into
+    another array: the table at ``offsets[0]`` (interior or halo-wide
+    alike) when axis 0 is sharded, or a face input at ``offsets[1]`` on a
+    2-D grid sharded along axis 1.  Without ``shard_info`` the offsets
+    are literal zeros and there is no window.
+    """
+    if getattr(cfg, "family", None) != "stencil" or cfg.kappa != "halo":
+        return False
+    if not cfg.reads_shard_info or cfg.kappa_axis not in cfg.sharded_axes:
+        return False
+    if not _static_replicated_over_devices(cfg.mesh_shape, cfg.axis_names, cfg.axis_map,
+                                           cfg.kappa_axis):
+        return False
+    sharded = cfg.sharded_axes
+    table_window = cfg.table is not None and 0 in sharded
+    face_window = cfg.faces and cfg.ndim == 2 and 1 in sharded
+    return bool(table_window or face_window)
 
 
 @st.composite
@@ -883,10 +913,6 @@ def stencil_configs(draw, *, ndim: Optional[int] = None, pencils: Optional[bool]
     kappa = draw(st.sampled_from(["halo", "interior", None]))
     kappa_axis = draw(st.sampled_from(list(range(ndim))))
     table = draw(st.sampled_from(["halo", "interior", None])) if reads else None
-    if (PENDING_XLA_REPLICATED_STATIC_IN_SCAN and kappa == "halo" and table == "halo"
-            and _static_replicated_over_devices(mesh_shape, axis_names, axis_map,
-                                                kappa_axis)):
-        table = "interior"
     return StencilConfig(
         mesh_shape=tuple(mesh_shape), axis_names=tuple(axis_names),
         axis_map=tuple(axis_map), shape=shape, halo=halo,
@@ -1974,6 +2000,28 @@ def _expect_refusal(case: Case, run: Callable[[], Any], stage_now: str, context:
                          f"at {stage_now}, but the sharded path ran")
 
 
+def expect_loop_refusal(case: Case, surface: str, context: str) -> str:
+    """The sharded path of ``surface`` refuses with MADD-ANO-068; returns the message.
+
+    The message must name the anomaly, the static (``kappa``) and every
+    mesh axis it is replicated over, so that a refusal fired for the
+    wrong static or on the wrong axis does not pass.
+    """
+    cfg = case.cfg
+    try:
+        run_surface(case, surface, True)
+    except RuntimeError as e:
+        msg = str(e)
+    else:
+        raise AssertionError(f"{surface}: {context}: ran; expected the MADD-ANO-068 refusal")
+    assert "MADD-ANO-068" in msg and "'kappa'" in msg, f"{surface}: {context}: {msg}"
+    for axis in replicated_mesh_axes(cfg.mesh_shape, cfg.axis_names, cfg.axis_map,
+                                     cfg.kappa_axis):
+        assert "mesh axis" in msg and f"'{axis}'" in msg, (
+            f"{surface}: {context}: the refusal does not name mesh axis {axis!r}: {msg}")
+    return msg
+
+
 def check_construction_refusals(case: Case) -> None:
     """The fills a stencil wrapper must refuse at construction, every time.
 
@@ -2024,7 +2072,12 @@ def check_config(cfg, *, surfaces: Optional[tuple] = None) -> dict:
                     f"{context}: the unsharded node took the mis-shaped input")
             return {"refused": "run", "known": case.known}
         done = {}
+        loop_refused = loop_refusal_expected(cfg)
         for surface in surfaces:
+            if loop_refused and surface in LOOP_SURFACES:
+                expect_loop_refusal(case, surface, context)
+                done[surface] = ("refused", run_surface(case, surface, False))
+                continue
             sharded = run_surface(case, surface, True)
             unsharded = run_surface(case, surface, False)
             if surface == "gradient":

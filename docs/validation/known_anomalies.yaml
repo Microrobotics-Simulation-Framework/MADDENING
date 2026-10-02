@@ -7802,7 +7802,12 @@ anomalies:
       counts its writes, so a write is seen as a write; `load_state`
       supersedes every earlier write to a constant it restores; and every
       entry point recompiles for a write the compiled step has not taken
-      (MADD-ANO-105).
+      (MADD-ANO-105).  Refined again (1fa529b, 2026-10-02) after the round-6
+      audit found the readers of `gm.params` left out (MADD-ANO-122): the
+      write now reaches `gm.params` through one sync point that every read
+      of it runs, and the rule is simply that the later write wins -- a
+      `gm.params` write reads `gm.params` first, so the two are always
+      ordered, and the both-written warning is gone.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -7832,7 +7837,7 @@ anomalies:
       compiled step it was given.
     verification:
       - "tests/core/test_node_params_write_after_compile.py::test_a_node_params_write_after_compile_takes_effect_at_the_next_compile"
-      - "tests/core/test_node_params_write_after_compile.py::test_two_disagreeing_writes_since_one_compile_keep_the_live_value_and_warn"
+      - "tests/core/test_node_params_write_after_compile.py::test_the_later_of_two_disagreeing_writes_wins"
       - "tests/core/test_node_params_write_after_compile.py::test_a_compile_that_raises_does_not_lose_the_write"
       - "tests/core/test_node_params_write_after_compile.py::test_a_calibrated_leaf_survives_a_recompile_its_node_did_not_change"
       - "tests/core/test_node_params_writes_are_observed.py::test_writing_the_nodes_own_value_back_reverts_a_calibration"
@@ -8640,13 +8645,14 @@ anomalies:
       each tag, CPU, jaxlib 0.11.0; at v0.1.0 the probe node also defines
       the `requires_halo` that version required).  Found by the round-5
       sysid audit (2026-10-02).
-      Resolved in 0.4.0 (4a09c63 and 154fb70, 2026-10-02): `node.params`
-      counts its writes, and every entry point -- the run methods, the
-      sysid fitters, `windowed_loss` and the profiler -- recompiles for a
-      write the compiled step has not taken before it runs, so all of them
-      run the written value; a write the running step already reflects
-      (`PUT /graph/params` writes both the node and `gm.params`) costs no
-      recompile.
+      Resolved in 0.4.0 (4a09c63 and 154fb70, 2026-10-02; one sync point
+      since 1fa529b): `node.params` counts its writes, and a single sync
+      (`GraphManager._sync_node_param_writes`), run by every entry point --
+      the run methods, the sysid fitters, `windowed_loss`, the profiler --
+      by `compile()` and by every read of `gm.params`, takes each write in
+      before anything runs or reads: a constant `gm.params` carries is
+      copied into it, and any other write marks the graph dirty so the next
+      run recompiles.  All entry points then run the written value.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -9027,6 +9033,7 @@ anomalies:
       - "tests/api/test_state_stream_encodes_off_the_event_loop.py::test_a_frame_of_the_whole_state_is_encoded_once_for_every_client"
       - "tests/api/test_state_stream_encodes_off_the_event_loop.py::test_streams_past_the_cap_are_refused_with_1013"
     github_issue: null
+
   - anomaly_id: "MADD-ANO-113"
     title: "The IFT adjoint (and in 0.4.0's development the tangent) of a coupled step was exactly zero, reported successful, whenever its right-hand side was below about 1e-8"
     description: >
@@ -9465,6 +9472,118 @@ anomalies:
       - "tests/core/test_schedule.py::test_every_component_is_contiguous_and_keeps_its_build_order"
       - "tests/core/test_schedule.py::test_a_schedule_rebuilt_in_its_own_order_is_itself"
       - "tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-121"
+    title: "fit_lm's Marquardt floor, scaled to the mean curvature, crushed the step of a parameter measured in small units, and fit_lm reported converged=True away from the truth"
+    description: >
+      MADD-ANO-104's fix made `fit_lm`'s regularising floor `eps` times the
+      *mean* of `diag(J^T J)`, to make the step independent of the
+      residual's units.  It made the step depend on the parameters' units
+      instead: a coordinate whose Jacobian column is small beside another's
+      had its step crushed by a floor set by the larger, its proposal fell
+      inside `step_tol`, and the run reported `converged=True` with that
+      parameter where it started.  A spring in SI units (mass 1e6 kg,
+      damping in N s/m beside a log stiffness) fitted from damping 3x its
+      truth stopped after two iterations, `converged=True`, the loss
+      unchanged, damping still 3x; the same spring in tonnes reached the
+      truth.  Found by the round-6 sysid audit (2026-10-02).  No tagged
+      release carried it: `fit_lm` is new in 0.4.0, and the floor was
+      introduced (12eae80) and fixed within the cycle.
+      Resolved in 0.4.0 (5484ab9, 2026-10-02): the floor is `eps` times
+      each column's own `diag(J^T J)_i` (1.0 for a column of zeros), so the
+      step is invariant to the units of every parameter and of the
+      residual; and neither convergence test fires unless the undamped,
+      column-equilibrated Gauss-Newton step from the iterate (least
+      squares, no damping, no floor) is also within `step_tol` -- or, for
+      the floor rule, does not lower the loss -- so a shrunken step cannot
+      read as stationary whatever shrank it.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the fit returned a parameter at its starting value and said
+      it had converged, in SI units, the units most models are written in.
+      Graded `major` under the 0.4.0 severity definition (a silent wrong
+      result is never `minor`), and registered although no release carried
+      it, because it is major.  Not `critical`: the loss it returned was
+      its starting loss, visibly far above the floor.  `context_dependent`
+      because what a misidentified constant does depends on the model.
+    affected_components:
+      - "maddening.sysid.fit_lm"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: scale the parameters to comparable magnitudes, or check a
+      converged fit's loss against its floor.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The stationarity test's evaluated fallback (the floor rule's
+      Gauss-Newton step that lowers no loss) reads a model plateau -- a
+      residual that stops depending on a parameter -- as stationary, as
+      any optimiser does.
+    verification:
+      - "tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system"
+      - "tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_shrunken_step_never_reads_as_stationary"
+      - "tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_run_of_stalled_candidates_is_not_the_rounding_floor"
+      - "tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-122"
+    title: "A pending node.params write reached the entry points that run the graph but not the code that reads gm.params: a jitted or differentiated sysid loss, the FMU export, save_state and GET /graph/params used the old value"
+    description: >
+      MADD-ANO-105's fix synced a `node.params` write at every entry point
+      that *runs* the model, so code that only *read* `gm.params` before
+      anything ran saw the value from before the write: `jax.jit` and
+      `jax.grad` of `windowed_loss(gm, gm.params, ...)` -- the sysid
+      module's own documented pattern -- used it on the first call (the
+      argument was read before the loss synced inside its trace);
+      `build_model_description` with the documented sidecar wiring
+      exported it as the start value and stepped with it; `save_state`
+      checkpointed it; `GET /graph/params/{node}` reported it.  And a
+      `gm.params` write of the old value after a node write was silently
+      lost, because `gm.params` writes were judged by value.  Found by the
+      round-6 sysid audit (2026-10-02).  No tagged release carried it: the
+      sync was introduced (4a09c63) and fixed within the cycle, and v0.3.1
+      has no `gm.params`.
+      Resolved in 0.4.0 (1fa529b, 2026-10-02): `gm.params` is a property
+      whose getter runs the one sync point
+      (`GraphManager._sync_node_param_writes`) that the entry points,
+      `compile()` and the setter also run, so every reader and serializer
+      sees what the next step runs, with no change to any of them.  A
+      `gm.params` write reads `gm.params` first, so it is ordered after any
+      node write before it and wins.  The REST routes read `gm.params`
+      inside the server's graph lock (MADD-ANO-106), so the sync runs under
+      it, with no change to the server.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a checkpoint, an exported FMU or a gradient computed from a
+      model other than the one the graph ran next.  Graded `major` under
+      the 0.4.0 severity definition (a silent wrong result is never
+      `minor`), and registered although no release carried it, because it
+      is major.  Not `critical`: it needs a `node.params` write followed by
+      a read before any run.  `context_dependent` because what a stale
+      constant does depends on the model.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: step the graph once, or write the value into `gm.params`
+      instead, before reading or exporting it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A `gm.params` leaf written through a reference held across a
+      `node.params` write, with no read of `gm.params` in between, is
+      replaced by the node write.  Reading `gm.params` costs one comparison
+      per node.
+    verification:
+      - "tests/property/test_differential_entry_points_after_a_node_write.py::test_every_reader_reads_the_written_model"
+      - "tests/core/test_node_params_writes_are_observed.py::test_the_fmu_export_reads_a_pending_node_write"
+      - "tests/core/test_node_params_write_after_compile.py::test_the_later_of_two_disagreeing_writes_wins"
+      - "tests/core/test_node_params_writes_are_observed.py::test_assigning_gm_params_is_later_than_a_node_write_before_it"
     github_issue: null
   - anomaly_id: "MADD-ANO-123"
     title: "sharded_cg, sharded_gmres and ift_linear_solve defaulted to an absolute atol=1e-8: a right-hand side near 1e-9 came back wrong (relative error 0.4-1.0) with converged=True"

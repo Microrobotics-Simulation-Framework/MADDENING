@@ -7803,7 +7803,7 @@ anomalies:
       supersedes every earlier write to a constant it restores; and every
       entry point recompiles for a write the compiled step has not taken
       (MADD-ANO-105).  Refined again (1fa529b, 2026-10-02) after the round-6
-      audit found the readers of `gm.params` left out (MADD-ANO-120): the
+      audit found the readers of `gm.params` left out (MADD-ANO-121): the
       write now reaches `gm.params` through one sync point that every read
       of it runs, and the rule is simply that the later write wins -- a
       `gm.params` write reads `gm.params` first, so the two are always
@@ -9354,6 +9354,51 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-119"
+    title: "An FMU-state archive installed new interface-mapping weights, which are not FMI variables: the FMU then computed a coupling its model description does not describe"
+    description: >
+      The bridge's contract is that an FMU-state archive may only install
+      what a `set` of the same variables could.  Interface-mapping weights
+      (`params["mappings"]`) are never FMI variables, so no `set` reaches
+      them, but the archive carries them as `p/mappings/<edge>/<key>`, and
+      `set_state` and `FmuSidecar.set_fmu_state` installed any finite array
+      of the right shape.  The step reads them.  On the 0.4.0 development
+      tree on 2026-10-02 (CPU, jaxlib 0.11.0), an edge mapped with the
+      identity carried `b.x = [1, 2]`.  After an archive restore with the
+      weights forged to `[[0, 10], [-3, 0]]`, `set_state` answered `ok` and
+      the next step gave `[20, -3]`.  The description exports no variable
+      that could have produced that.  No release carried it: v0.1.0 to
+      v0.3.1 have no TCP bridge, and their sidecar carried no parameters.
+      Found by the round-6 FMU audit.  Resolved in 0.4.0: every mapping
+      leaf is fixed on both restore doors.  A snapshot that would change one
+      is refused with the same message on both, naming the edge, and
+      nothing is written.  The FMU's own snapshots, which hold the weights
+      it was built with, restore.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: every value the FMU returned
+      after the restore came from a coupling nobody configured, every call
+      `ok`.  Not `critical`: it needs an archive that was edited, never one
+      the FMU handed out.  Registered although no release carried it,
+      because it is major.  `context_dependent` because the error is
+      whatever the forged coupling makes it.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.sidecar.FmuSidecar.set_fmu_state"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: restore only archives the FMU wrote.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_an_archive_with_new_mapping_weights_is_refused"
+      - "tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_the_sidecars_own_restore_door_refuses_the_same_weights"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-120"
     title: "fit_lm's Marquardt floor, scaled to the mean curvature, crushed the step of a parameter measured in small units, and fit_lm reported converged=True away from the truth"
     description: >
       MADD-ANO-104's fix made `fit_lm`'s regularising floor `eps` times the
@@ -9408,7 +9453,7 @@ anomalies:
       - "tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-120"
+  - anomaly_id: "MADD-ANO-121"
     title: "A pending node.params write reached the entry points that run the graph but not the code that reads gm.params: a jitted or differentiated sysid loss, the FMU export, save_state and GET /graph/params used the old value"
     description: >
       MADD-ANO-105's fix synced a `node.params` write at every entry point

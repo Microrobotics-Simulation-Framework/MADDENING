@@ -53,6 +53,63 @@ def test_c_unit_tests(tmp_path, sanitized):
     assert "0 failures" in out, out
 
 
+# Languages whose locales use ',' as the decimal point, tried in order.
+_COMMA_LANGUAGES = ("nl", "de", "fr", "da", "es", "it", "pt", "sv", "fi", "pl", "cs", "ru")
+
+
+def _comma_locale(tmp_path: Path) -> tuple[str, dict] | None:
+    """A locale whose decimal point is ',', and the environment that selects
+    it, or ``None``.
+
+    An installed one if ``locale -a`` lists any; otherwise one compiled into
+    ``tmp_path`` with ``localedef`` (no root needed, found through
+    ``LOCPATH``), which works wherever glibc's locale sources are installed
+    -- as they are on GitHub's Ubuntu runners, which install no such locale
+    themselves.
+    """
+    try:
+        names = subprocess.run(["locale", "-a"], capture_output=True, text=True,
+                               timeout=30).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        names = []
+    for lang in _COMMA_LANGUAGES:
+        for name in names:
+            if name.startswith(lang + "_") and name.lower().endswith(("utf8", "utf-8")):
+                return name, {"LC_ALL": name}
+    localedef = shutil.which("localedef")
+    if localedef is None:
+        return None
+    for lang, region in (("de", "DE"), ("nl", "NL"), ("fr", "FR")):
+        name = f"{lang}_{region}.UTF-8"
+        proc = subprocess.run([localedef, "-i", f"{lang}_{region}", "-f", "UTF-8",
+                               str(tmp_path / name)], capture_output=True, text=True,
+                              timeout=120)
+        if (tmp_path / name).exists():
+            return name, {"LC_ALL": name, "LOCPATH": str(tmp_path)}
+        del proc
+    return None
+
+
+def test_c_unit_tests_under_a_comma_decimal_locale(tmp_path):
+    """The whole unit-test binary again, under a locale whose decimal point
+    is ','.  ``%.17g`` and ``strtod`` follow ``LC_NUMERIC``, so before the
+    wrapper formatted and parsed in the C locale every ``fmi3DoStep`` of an
+    importer running under such a locale sent ``"dt":0,01`` (not JSON) and
+    failed; here every request-string and parsed-value check in the binary
+    is a check that the wire ignores the locale.  The binary prints the
+    decimal point it ran under, so a locale that did not take is a failure,
+    not a silent pass."""
+    found = _comma_locale(tmp_path)
+    if found is None:
+        pytest.skip("no locale with a ',' decimal point is installed and localedef "
+                    "could not build one (glibc's locale sources are missing)")
+    name, env = found
+    exe = _build(C_DIR / "test_maddening_fmu.c", tmp_path / "unit")
+    out = _run(exe, env=env)
+    assert "decimal point in effect: ," in out, (name, out[:400])
+    assert "0 failures" in out, out
+
+
 # The wrapper paths the fuzz harness counts (MADDENING_FUZZ_COUNTERS); every
 # one must be reached in every run, or the harness is not fuzzing what it
 # claims to.  From 86dafe1 ("thread-free fuzz harness") until the audit of

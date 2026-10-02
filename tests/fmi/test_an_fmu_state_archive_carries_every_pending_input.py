@@ -81,7 +81,7 @@ def test_a_complete_archive_restores_its_inputs(served):
     bridge.handle({"op": "set", "vr": [anchor], "values": [0.4]})
     snapshot = bridge.handle({"op": "get_state"})["state"]
     bridge.handle({"op": "set", "vr": [anchor], "values": [-0.7]})
-    assert bridge.handle({"op": "set_state", "state": snapshot}) == {"ok": True}
+    assert bridge.handle({"op": "set_state", "state": snapshot})["ok"] is True
     assert _anchor(md, bridge) == pytest.approx(0.4)
 
 
@@ -93,7 +93,7 @@ def test_a_model_with_no_inputs_restores_an_archive_with_none(gm):
         assert not [v for v in md.variables if v.causality == "input"]
         members = _members(bridge)
         assert not [k for k in members if k.startswith("i/")]
-        assert bridge.handle({"op": "set_state", "state": _wire(members)}) == {"ok": True}
+        assert bridge.handle({"op": "set_state", "state": _wire(members)})["ok"] is True
         members["i/spring/anchor_position"] = np.asarray(0.0, np.float32)
         reply = bridge.handle({"op": "set_state", "state": _wire(members)})
         assert reply["ok"] is False and "extra ['i/spring/anchor_position']" in reply["error"]
@@ -109,7 +109,7 @@ def test_a_clocked_fmu_archive_carries_no_member_for_its_clocks(gm):
         assert any(v.is_clock for v in md.variables)
         members = _members(bridge)
         assert sorted(k for k in members if k.startswith("i/")) == ["i/spring/anchor_position"]
-        assert bridge.handle({"op": "set_state", "state": _wire(members)}) == {"ok": True}
+        assert bridge.handle({"op": "set_state", "state": _wire(members)})["ok"] is True
         members["i/clock_0/"] = np.asarray(0.0)
         assert bridge.handle({"op": "set_state", "state": _wire(members)})["ok"] is False
     finally:

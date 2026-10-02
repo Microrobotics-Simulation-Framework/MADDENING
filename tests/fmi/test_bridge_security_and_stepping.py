@@ -304,7 +304,7 @@ def test_set_state_round_trip_still_passes_the_directory_check():
     assert names <= set(bridge._member_caps()) and "_token" in names
     before = bridge.handle({"op": "get", "vr": [pos]})["values"]
     bridge.handle({"op": "step", "t": 0.0, "dt": 3 * DT})
-    assert bridge.handle({"op": "set_state", "state": snap}) == {"ok": True}
+    assert bridge.handle({"op": "set_state", "state": snap})["ok"] is True
     assert bridge.handle({"op": "get", "vr": [pos]})["values"] == before
 
 

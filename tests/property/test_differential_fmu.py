@@ -570,7 +570,8 @@ def op_set_state(paths: Paths, index: int) -> None:
     blob, snap, inputs, t, path = paths.snapshots[index % len(paths.snapshots)]
     reply = paths._wire({"op": "set_state",
                          "state": base64.b64encode(blob).decode("ascii")})
-    assert reply == {"ok": True}, reply
+    # the reply carries the restored time (the C wrapper's clock)
+    assert reply == {"ok": True, "t": t}, reply
     paths.side.set_fmu_state(snap)
     paths.side_inputs = {n: dict(f) for n, f in inputs.items()}
     paths.side_time = t
@@ -716,7 +717,7 @@ def op_set_bad_state(paths: Paths, kind: str, pick: int) -> None:
         side_error = exc
     note(f"bad state {kind}: bridge {reply}, sidecar {side_error!r}")
     if side_error is None:
-        assert reply == {"ok": True}, (kind, reply)
+        assert reply["ok"] is True, (kind, reply)
         # The edit was a no-op (no such member): both restored the snapshot.
         return
     assert reply["ok"] is False, (kind, reply, str(side_error))

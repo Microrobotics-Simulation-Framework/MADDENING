@@ -288,7 +288,8 @@ static void one_iteration(unsigned char *buf, size_t cap) {
         sock_close(sv[0]);
     }
     sock_close(sv[1]);
-    free(in->req); free(in->resp); free(in);
+    in->sock = SOCK_INVALID;               /* closed above, whichever end did it */
+    instance_release(in);
 }
 
 #ifdef LIBFUZZER

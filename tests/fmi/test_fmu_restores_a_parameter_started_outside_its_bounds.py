@@ -119,7 +119,7 @@ def test_the_instantiation_snapshot_restores_after_a_legal_set(model, paths):
     sc.step(_ext(model))
     assert bridge.handle({"op": "step", "t": 0.0, "dt": 1e-2})["ok"]
     sc.set_fmu_state(snap)
-    assert bridge.handle({"op": "set_state", "state": blob}) == {"ok": True}
+    assert bridge.handle({"op": "set_state", "state": blob})["ok"] is True
     assert _stiffness(sc) == 30.0
     assert float(bridge._sidecar.get_params()[STIFFNESS]) == 30.0  # noqa: SLF001
 
@@ -144,7 +144,7 @@ def test_both_restore_paths_judge_a_forged_value_alike(paths, value, refusal):
     reply = bridge.handle({"op": "set_state", "state": _with_stiffness_archive(blob, value)})
     snap = _with_stiffness_snapshot(sc, value)
     if refusal is None:
-        assert reply == {"ok": True}, reply
+        assert reply["ok"] is True, reply
         sc.set_fmu_state(snap)
         assert _stiffness(sc) == value
         return
@@ -207,7 +207,7 @@ def test_a_snapshot_of_the_nan_seeded_diagnostics_restores_on_both_paths(diagnos
     try:
         blob = state_of(bridge.handle({"op": "get_state"}))
         assert bridge.handle({"op": "step", "t": 0.0, "dt": 1e-2})["ok"]
-        assert bridge.handle({"op": "set_state", "state": blob}) == {"ok": True}
+        assert bridge.handle({"op": "set_state", "state": blob})["ok"] is True
     finally:
         bridge.stop()
 

@@ -661,15 +661,6 @@ def _one_iteration_variant(gm):
         saved_state = jax.tree.map(lambda x: x, gm._state)
         saved_params = gm.params
         saved_step = gm._compiled_step
-        # What the caller's last committed compile took from the nodes and
-        # left in ``gm.params`` -- the reference ``compile`` judges a later
-        # ``node.params`` write against (``GraphManager._merge_live_params``:
-        # a snapshot still pending is the committed one when its generation
-        # is the current one).  The two compiles below commit snapshots of
-        # their own, which would record a pending ``node.params`` write as
-        # already taken while ``gm.params`` is restored to the old value
-        # beside it, and the caller's next compile then kept the old value.
-        saved_snapshot = gm._committed_params_snapshot()
         try:
             # ``dataclasses.replace`` re-runs ``__post_init__``, whose
             # inert-knob rules then warn that the *user's* acceleration
@@ -705,8 +696,6 @@ def _one_iteration_variant(gm):
                 gm.compile()
             gm._state = saved_state
             gm.params = saved_params
-            gm._params_snapshot = saved_snapshot
-            gm._params_snapshot_pending = None
             # ``compile`` rebuilt the step; the original object is fine
             # to keep for callers holding a reference (same graph).
             del saved_step

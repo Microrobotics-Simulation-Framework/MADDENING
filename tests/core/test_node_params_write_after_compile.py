@@ -6,10 +6,11 @@ the first compile was dropped, even across a recompile, with no sign: a
 ``HeartPumpNode`` set to 144 bpm and recompiled went on at 72.  (0.3.x, which
 had no ``gm.params``, took such a write at the recompile.)
 
-The rule now, per leaf: the value written since the previous compile wins.
-Only ``gm.params`` changed (a calibration) -> it is kept; only the node
-changed -> the node's value is taken; both changed and disagree -> the live
-value is kept and ``compile()`` warns, naming the leaf and both values.
+The rule now, per leaf: the later write wins.  A ``node.params`` write
+reaches ``gm.params`` at the next read of it, the next run or the next
+compile; a ``gm.params`` write reads ``gm.params`` first, so the two are
+always ordered.  A calibration written into ``gm.params`` survives a
+recompile; a node write after it replaces it.
 """
 
 import os
@@ -94,20 +95,28 @@ def test_the_newer_write_wins_across_compiles():
     assert float(gm.params["nodes"]["s"]["stiffness"]) == 41.0
 
 
-def test_two_disagreeing_writes_since_one_compile_keep_the_live_value_and_warn():
+def test_the_later_of_two_disagreeing_writes_wins():
+    """A ``gm.params`` write reads ``gm.params`` first, which takes in any
+    pending ``node.params`` write, so the order of the two is exact: the
+    later wins, either way round, with nothing to warn about.  (0.4.0
+    development builds kept ``gm.params`` and warned, which lost a
+    ``gm.params`` write of the value the node had before -- reverting a
+    node write through ``gm.params``.)"""
     gm = _spring()
     gm.get_node("s").params["stiffness"] = 50.0
-    gm.params["nodes"]["s"]["stiffness"] = _f32(41.0)
-    with pytest.warns(RuntimeWarning, match=r"both written since the last compile") as record:
-        gm.compile()
-    message = str(record[0].message)
-    assert "nodes['s']['stiffness']" in message and "50." in message and "41." in message
-    assert float(gm.params["nodes"]["s"]["stiffness"]) == 41.0
-    # Warned once: the next compile has nothing new to reconcile.
+    gm.params["nodes"]["s"]["stiffness"] = _f32(41.0)      # later
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         gm.compile()
     assert float(gm.params["nodes"]["s"]["stiffness"]) == 41.0
+    gm.params["nodes"]["s"]["stiffness"] = _f32(43.0)
+    gm.get_node("s").params["stiffness"] = 52.0              # later
+    gm.compile()
+    assert float(gm.params["nodes"]["s"]["stiffness"]) == 52.0
+    gm.get_node("s").params["stiffness"] = 60.0
+    gm.params["nodes"]["s"]["stiffness"] = _f32(52.0)      # back to what it was: still a write
+    gm.compile()
+    assert float(gm.params["nodes"]["s"]["stiffness"]) == 52.0
 
 
 def test_two_agreeing_writes_are_no_conflict():

@@ -2848,6 +2848,7 @@ _HOLD_LOSS_ROUNDINGS = 4.0
 _STEP_TOL_ULPS = 2.0 ** 4
 
 
+
 def _float_resolution(tree) -> np.ndarray:
     """``eps`` of each entry's own dtype, in ``ravel_pytree(tree)`` order.
 
@@ -3896,20 +3897,45 @@ def _marquardt_step(th, r, J, lam, lo, hi):
     free = jnp.where(hold, 0.0, 1.0).astype(A.dtype)
     A = A * free[:, None] * free[None, :]
     g = g * free
-    n = A.shape[0]
-    # The floor that keeps the solve regular is *relative*, ``eps`` times
-    # the mean of ``diag(A)``: an absolute ``1e-12 * I`` was not negligible
-    # once the residual was small in its own units (a residual scaled by
-    # 1e-7 made it 1e-12 / 1e-14 of the curvature it was added to), and the
-    # fit stopped being Gauss-Newton -- it did not converge in 50 iterations
-    # at 1e-7 and barely moved at 1e-8.  Relative, the step is the same for
-    # every scaling of the residual.
-    scale = jnp.trace(A) / n
-    floor = jnp.where(scale > 0, jnp.finfo(A.dtype).eps * scale, 1.0)
-    A_damped = (A + lam * jnp.diag(jnp.diag(A))
-                + floor * jnp.eye(n, dtype=A.dtype) + jnp.diag(1.0 - free))
+    d = jnp.diag(A)
+    # The floor that keeps the solve regular is ``eps`` times each column's
+    # *own* curvature, ``diag(A)_i`` -- Marquardt's scaling with ``lambda``
+    # raised by ``eps`` -- so the step is the same for every scaling of the
+    # residual *and* of each parameter.  An absolute ``1e-12 * I`` was not
+    # negligible for a residual small in its own units (1e-7: unconverged
+    # after 50 iterations); a floor of ``eps`` times the *mean* of
+    # ``diag(A)`` then crushed the step of a coordinate whose column was
+    # small beside another's: a spring in SI units (damping in N s/m, beside
+    # a log stiffness) stopped after two iterations, "converged", with
+    # damping at 3x its truth, where the same spring in tonnes reached it.
+    # A column of exact zeros gets 1.0 (its gradient entry is 0 as well).
+    floor = jnp.where(d > 0, jnp.finfo(A.dtype).eps * d, 1.0)
+    A_damped = A + jnp.diag(lam * d + floor + (1.0 - free))
     delta = jnp.linalg.solve(A_damped, g)
     return jnp.clip(th - delta, lo, hi)
+
+
+@jax.jit
+def _gauss_newton_step(th, r, J, lo, hi):
+    """The undamped Gauss-Newton candidate from ``th``, projected onto
+    ``[lo, hi]``: least squares on the column-equilibrated Jacobian.
+
+    The stationarity test :func:`fit_lm`'s ``converged`` also requires.  It
+    shares nothing with the Marquardt solve -- no ``lambda``, no floor, a
+    different factorisation -- so a step that the damping or a mis-scaled
+    floor shrank cannot read as stationary through it: if the undamped step
+    from the iterate would still move a parameter by more than
+    ``step_tol``, the iterate is not stationary.  Equilibrating the columns
+    (each scaled to unit norm) makes it invariant to the units of every
+    parameter and of the residual.  A coordinate held on its bound (its
+    gradient pointing out of the range) is left out, as in the step.
+    """
+    g = J.T @ r
+    hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+    norms = jnp.sqrt(jnp.sum(J * J, axis=0))
+    scale = jnp.where((norms > 0) & ~hold, 1.0 / jnp.where(norms > 0, norms, 1.0), 0.0)
+    y = jnp.linalg.lstsq(J * scale[None, :], -r)[0]
+    return jnp.clip(th + scale * y, lo, hi)
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -4147,6 +4173,31 @@ def fit_lm(
         before, after = _physical(th), _physical(cand)
         return bool(np.all(np.abs(after - before) <= rel_tol * np.abs(before)))
 
+    def _gauss_newton_stationary(th, r, J, loss_at_th=None) -> bool:
+        """Whether ``th`` is stationary by the undamped, equilibrated
+        Gauss-Newton step from it (:func:`_gauss_newton_step`), which neither
+        the damping nor the Marquardt floor can shrink -- required, beside
+        the step tests below, before ``converged`` is reported.
+
+        Stationary when that step moves every parameter by no more than
+        ``step_tol``.  For the floor rule (``loss_at_th`` given) also when
+        the step does not lower the loss: a parameter the data determine
+        only weakly has, at its rounding floor, a Gauss-Newton step that
+        fits the residual's rounding noise and can be many ulps long, but
+        it lowers nothing.  A measure built from ``r`` and ``J`` alone
+        cannot tell that floor from a real error -- the residual there is
+        structured rounding, whose cosines with the columns measured 0.5-0.9
+        on a spring -- so the second test evaluates the step.
+        """
+        candidate = _gauss_newton_step(th, r, J, bounds.lo, bounds.hi)
+        if _within_step_tol(th, candidate):
+            return True
+        if loss_at_th is None:
+            return False
+        r_gn = residual_only(candidate)
+        loss_gn = 0.5 * float(jnp.sum(r_gn * r_gn))
+        return not (np.isfinite(loss_gn) and loss_gn < loss_at_th)
+
     lam = float(lam0)
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
     losses: list[float] = []
@@ -4213,7 +4264,8 @@ def fit_lm(
             r_new = residual_only(cand)
             loss_new = 0.5 * float(jnp.sum(r_new * r_new))
             proposal_within = (attempt == 0 and not stuck_inward
-                               and _within_step_tol(theta, cand))
+                               and _within_step_tol(theta, cand)
+                               and _gauss_newton_stationary(theta, r, J))
             if np.isfinite(loss_new) and loss_new < loss:
                 theta = cand
                 theta_iteration, theta_loss = i, loss_new
@@ -4241,7 +4293,8 @@ def fit_lm(
             # fit unconverged at loss 1e-13.  A run that never lowered the
             # loss gets no such reading: a residual whose Jacobian is wrong
             # rejects every candidate from its start.
-            stationary = _within_step_tol(theta, cand)
+            stationary = (_within_step_tol(theta, cand)
+                          and _gauss_newton_stationary(theta, r, J, loss))
         if stationary and accepted and tracker is not None:
             # Stopping on an accepted proposal leaves the run at an iterate
             # whose gradient no iteration formed.  A run that kept going

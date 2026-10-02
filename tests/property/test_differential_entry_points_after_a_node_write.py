@@ -161,3 +161,75 @@ def test_two_writes_without_a_compile_leave_the_last(case):
     gm.step()
     node.params[key] = before[key]           # written back to the original
     _assert_all_run(gm, model, before, "after writing it back")
+
+
+# ---------------------------------------------------------------------------
+# Readers agree too: whatever reads gm.params reads what the next step runs
+# (audit_040_p4_6/fmu-sysid/repro_q4_node_params_entry_points.py)
+# ---------------------------------------------------------------------------
+
+
+def _expected_record(model, params):
+    return {"n": {"x": jnp.asarray([X0] + _trajectory(model, params, 4), jnp.float32)}}
+
+
+def _loss_fn(gm, record):
+    return lambda p: windowed_loss(gm, p, record, obs_fn=lambda s: s["n"]["x"], window=4)
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
+def test_every_reader_reads_the_written_model(case, tmp_path):
+    """After a ``node.params`` write with no compile and nothing run: a
+    ``jax.jit`` and a ``jax.grad`` of a sysid loss handed ``gm.params`` (the
+    sysid module's own usage pattern), a saved config reloaded, and -- for a
+    leaf ``gm.params`` carries -- ``gm.params`` itself, a checkpoint and
+    ``GET /graph/params``.  Each used to read the value from before the
+    write until something *ran* the graph.  (The FMU export reads
+    ``gm.params`` the same way; it exports only stability-tagged nodes, so
+    ``tests/core/test_node_params_writes_are_observed.py`` checks it on a
+    spring.)"""
+    _, factory, key, value, model = case
+    after = {**dict(factory().params), key: value}
+
+    gm = _graph(factory)
+    gm.get_node("n").params[key] = value
+    record = _expected_record(model, after)
+    assert float(jax.jit(_loss_fn(gm, record))(gm.params)) <= 1e-10, "jax.jit(loss)(gm.params)"
+
+    gm = _graph(factory)
+    gm.get_node("n").params[key] = value
+    if key in gm.params["nodes"].get("n", {}):
+        grad = jax.grad(_loss_fn(gm, record))(gm.params)
+        assert float(grad["nodes"]["n"][key]) == 0.0, "jax.grad(loss)(gm.params) at the truth"
+
+    gm = _graph(factory)
+    gm.get_node("n").params[key] = value
+    reloaded = GraphManager.from_dict(gm.to_dict(), {type(gm.get_node("n")).__name__:
+                                                     type(gm.get_node("n"))})
+    _from(reloaded)
+    reloaded.step()
+    assert _x(reloaded) == pytest.approx(model(np.float32(X0), after), rel=1e-6), "to_dict"
+
+    if key not in _graph(factory).params["nodes"].get("n", {}):
+        return                       # the remaining readers read gm.params leaves
+
+    gm = _graph(factory)
+    gm.get_node("n").params[key] = value
+    assert float(gm.params["nodes"]["n"][key]) == value, "gm.params"
+
+    gm = _graph(factory)
+    gm.get_node("n").params[key] = value
+    gm.save_state(str(tmp_path / "ck.npz"))
+    fresh = _graph(factory)
+    fresh.load_state(str(tmp_path / "ck.npz"))
+    _from(fresh)
+    fresh.step()
+    assert _x(fresh) == pytest.approx(model(np.float32(X0), after), rel=1e-6), "save_state"
+
+    from fastapi.testclient import TestClient
+    from maddening.api.server import SimulationServer
+
+    gm = _graph(factory)
+    gm.get_node("n").params[key] = value
+    client = TestClient(SimulationServer({}, gm, checkpoint_root=str(tmp_path)).create_app())
+    assert client.get("/graph/params/n").json()[key] == value, "GET /graph/params"

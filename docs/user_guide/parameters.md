@@ -220,37 +220,38 @@ dropped with a `RuntimeWarning`.  `gm.reset_params()` is the explicit
 way back to the constructor snapshot.  A checkpoint loaded before the
 first compile compiles the graph so its params are not lost.
 
-A recompile takes each node constant from **whichever of `node.params`
-and `gm.params` was written since the previous compile**.  Writing
-`gm.params` takes effect on the next step with no recompile, and is the
-way to change a constant mid-run.  `node.params` counts its writes, so a
-write is a write even when it stores the value the node already held
-(writing a constructor value back reverts a calibration).  A
-`node.params` write after the graph was compiled takes effect at the
-next run of **any** entry point -- `step`, `run`, every `run_scan*`, the
-sysid fitters and `windowed_loss` all recompile for it first -- or at
-the next `compile()`, whichever comes first, so they all run the same
-model.  (Until 0.4.0 the value a node read from `self.params` when its
-step was traced went into whichever program was traced next: `gm.step`
-kept its cached trace while a new `run_scan` length picked the write up.)
-A write the running step already reflects -- a constant `gm.params`
-carries, written to the value `gm.params` holds, as `PUT /graph/params`
-writes both -- costs no recompile.  If both were written since the last
-compile, to different values, `gm.params`' value -- the one the step was
-already running -- is kept and `compile()` warns (`RuntimeWarning`),
-naming the leaf and both values.  `load_state()` restores `gm.params`
-and supersedes every earlier `node.params` write to a constant it
-carries; a structural value a checkpoint does not hold stays written.
-Before this rule a recompile kept every live leaf, so a `node.params`
-write after the first compile was dropped without a word: a
-`HeartPumpNode` set to 144 bpm and recompiled went on at 72.
+**The later of a `node.params` write and a `gm.params` write wins.**
+Writing `gm.params` takes effect on the next step with no recompile, and
+is the way to change a constant mid-run.  A `node.params` write reaches
+the graph the next time anything reads `gm.params` -- your code,
+`save_state`, `to_dict`, the FMU export, `GET /graph/params`, a
+`jax.jit` of a sysid loss handed `gm.params` -- or runs it (`step`,
+`run`, every `run_scan*`, the fitters, `windowed_loss`), or compiles it,
+whichever comes first: one sync point takes it in.  A constant
+`gm.params` carries is copied into it (no recompile); anything else --
+a structural value, any constant of a node on the three-argument
+contract -- marks the graph dirty, and the next run recompiles, so every
+entry point runs the same model.  `node.params` counts its writes, so
+writing a constructor value back is a write (it reverts a calibration).
+A `gm.params` write reads `gm.params` first, which takes in any pending
+node write, so the two are always ordered and the later wins; the one
+exception is a `gm.params` leaf written through a reference held across
+a node write, with no read in between, which the node write replaces.
+`gm.params = tree` is later than every node write before it, and
+`load_state()` restores `gm.params` later than them too.  (Until 0.4.0 a
+recompile kept every live leaf, so a `node.params` write after the first
+compile was dropped without a word -- a `HeartPumpNode` set to 144 bpm
+and recompiled went on at 72 -- and then for a time it reached the
+entry points that ran the graph but not the code that read
+`gm.params`.)
 
 <!-- snippet: continues -->
 ```python
 gm.get_node("ball").params["elasticity"] = 0.6    # on the node, after compile
-assert float(gm.params["nodes"]["ball"]["elasticity"]) == float(jnp.float32(0.7))
-gm.compile()                                       # the next compile takes it
 assert float(gm.params["nodes"]["ball"]["elasticity"]) == float(jnp.float32(0.6))
+gm.params["nodes"]["ball"]["elasticity"] = jnp.float32(0.7)   # later: it wins
+gm.compile()
+assert float(gm.params["nodes"]["ball"]["elasticity"]) == float(jnp.float32(0.7))
 ```
 
 The graph's *state* survives the same recompile, and so does the
@@ -508,8 +509,15 @@ one within `step_tol` has reached the rounding floor and converges too.
 Neither fires while a parameter on its bound could lower the loss by
 moving into its range.  (`fit` and `fit_multiple_shooting` have only the
 `tol` test, so with the default `tol=0.0` their `converged` is always
-`False`; read `best_loss`.)  The solve's floor is relative, so the
-answer does not depend on the residual's units.
+`False`; read `best_loss`.)  The solve's floor is `eps` times each
+column's own curvature, so the answer depends neither on the residual's
+units nor on any parameter's (a floor shared across columns once crushed
+the step of a parameter measured in small units, which then read as
+converged).  And neither test fires unless the undamped Gauss-Newton step
+from the iterate -- least squares on the equilibrated Jacobian, with no
+damping and no floor -- would also move every parameter by no more than
+`step_tol`, or, at the floor, would not lower the loss: a shrunken step
+cannot read as stationary.
 
 Every fitter keeps each optimiser coordinate where `constrain` is its
 transform and not a clamp: a `transform=None` leaf inside its bounds,

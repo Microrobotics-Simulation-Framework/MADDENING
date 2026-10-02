@@ -146,15 +146,23 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
         If the incoming value is not a number (a string, an object, a
         boolean for a numeric leaf: :func:`_number_kind_error`), is not
         finite, or if ``dtype`` cannot hold it: a float32 leaf set to
-        ``1e39`` would be stored (and read back) as ``inf``, and an
-        integer would wrap or truncate silently.
+        ``1e39`` would be stored (and read back) as ``inf``, an integer
+        would wrap or truncate silently, and a boolean leaf takes a
+        boolean or exactly 0 or 1 -- ``0.5``, ``2.0`` and ``-3.0`` used to
+        be stored as ``True`` by their truthiness, from a ``set`` and from
+        an FMU-state archive alike.
     """
     a = np.asarray(arr)
-    refusal = _number_kind_error(a, np.dtype(dtype), what)
+    target = np.dtype(dtype)
+    refusal = _number_kind_error(a, target, what)
     if refusal is not None:
         raise refusal
     if np.issubdtype(a.dtype, np.inexact) and not bool(np.all(np.isfinite(a))):
         raise ValueError(f"{what}: value must be finite")
+    if target.kind == "b" and a.dtype.kind in "iuf" and not bool(np.all((a == 0) | (a == 1))):
+        raise ValueError(
+            f"{what}: a Boolean takes true / false or exactly 1 / 0, got "
+            f"{np.array2string(a, threshold=8)}; nothing was written")
     with np.errstate(over="ignore", invalid="ignore"):
         cast = a.astype(dtype)
     if np.issubdtype(cast.dtype, np.floating):
@@ -162,7 +170,7 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
     elif np.issubdtype(cast.dtype, np.integer):
         fits = bool(np.array_equal(cast.astype(np.float64), a.astype(np.float64)))
     else:
-        fits = True                                       # bool
+        fits = True                     # bool: only 0 / 1 reach here (above)
     if not fits:
         raise ValueError(f"{what}: value does not fit its type {dtype}")
     return cast
@@ -213,8 +221,9 @@ def _param_key(section: str, owner: str, key: str) -> str:
 
 
 def _key_set_error(what: str, expected: set, got: set) -> Optional[ValueError]:
-    """The refusal for a snapshot whose ``what`` (``"fields"`` or
-    ``"parameters"``) are not exactly the live model's, or ``None``.
+    """The refusal for a snapshot whose ``what`` (``"fields"``,
+    ``"parameters"`` or, for the bridge's archive, ``"inputs"``) are not
+    exactly the live model's, or ``None``.
 
     Shared by :meth:`FmuSidecar.set_fmu_state` and the TCP bridge's
     ``set_state``, which name members the same way (``s/<node>/<field>``,

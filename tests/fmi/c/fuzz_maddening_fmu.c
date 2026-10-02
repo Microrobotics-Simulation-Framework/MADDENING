@@ -246,8 +246,8 @@ static void one_iteration(unsigned char *buf, size_t cap) {
     for (size_t i = 0; i < 8; ++i) vr[i] = (fmi3ValueReference)rnd();
     for (size_t i = 0; i < 16; ++i) vals[i] = (double)(int64_t)rnd() / 1e6;
     switch (op) {
-    case OP_GET: do_get(in, vr, nvr, vals, nvals); break;
-    case OP_SET: do_set(in, vr, nvr, vals, nvals); break;
+    case OP_GET: do_get(in, "Float64", vr, nvr, vals, nvals); break;
+    case OP_SET: do_set(in, (rnd() % 2) ? "Float32" : NULL, vr, nvr, vals, nvals); break;
     case OP_SET_STATE: { /* set_state with importer-supplied bytes of either encoding */
               unsigned char blob[64]; size_t bl = rnd() % 64;
               for (size_t i = 0; i < bl; ++i) blob[i] = (rnd() % 2) ? (unsigned char)rnd() : 'A';

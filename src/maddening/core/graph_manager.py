@@ -1713,6 +1713,7 @@ def _fixed_point_while(
     def _accelerate(x, x_raw, acc, i):
         if acceleration == "none":
             return x_raw, acc
+        assert frame is not None  # formed for every acceleration but "none"
         # In the frame (see above); the step is scaled back on the way out.
         x, x_raw = x * frame, x_raw * frame
         if acceleration == "fixed":

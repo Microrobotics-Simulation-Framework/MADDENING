@@ -286,19 +286,33 @@ def _files_named() -> set[str]:
     return {i.split("::", 1)[0] for t in texts for i in _NODE_ID.findall(t)}
 
 
+def may_hold_a_slow_mark(text: str) -> bool:
+    """Whether a test file can carry a slow mark: its text says "slow".
+
+    A mark is spelled ``pytest.mark.slow``, or a name bound to it, in the
+    file itself; no conftest or plugin under ``tests/`` adds marks
+    (:func:`test_no_conftest_or_plugin_adds_a_mark` holds that).  Collecting
+    only these files and the witnesses' (about a third of the framework files)
+    keeps this module inside the default lane's 5 s budget.
+    """
+    return "slow" in text.lower()
+
+
 @pytest.fixture(scope="module")
 def collection(tmp_path_factory) -> Collection:
-    """Every item under the framework paths, plus the files the comments and
-    the table name elsewhere, collected once with ``-m "slow or not slow"``."""
-    extra = sorted(f for f in _files_named()
-                   if not f.startswith(FRAMEWORK_PATHS) and (REPO_ROOT / f).is_file())
+    """Every item in a framework file that can hold a slow mark, plus the
+    files the comments and the table name, collected once with
+    ``-m "slow or not slow"``."""
+    paths = sorted({rel for rel in _framework_files()
+                    if may_hold_a_slow_mark((REPO_ROOT / rel).read_text(encoding="utf-8"))}
+                   | {f for f in _files_named() if (REPO_ROOT / f).is_file()})
     dump = tmp_path_factory.mktemp("slow_rule") / "items.json"
     env = {k: v for k, v in os.environ.items()
            if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING", "PYTEST_ADDOPTS")}
     env.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", JAX_PLATFORMS="cpu", SLOW_RULE_DUMP=str(dump))
     proc = subprocess.run(
         [sys.executable, "-c", _COLLECT, "--collect-only", "-q", "-p", "no:cacheprovider",
-         "-m", "slow or not slow", *FRAMEWORK_PATHS, *extra],
+         "-m", "slow or not slow", *paths],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=600)
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
     return partition(json.loads(dump.read_text()))
@@ -548,3 +562,26 @@ def test_the_framework_paths_are_the_ones_the_testing_standards_name():
     para = para[:para.index("using pytest's own collection")]
     named = set(re.findall(r"`(tests/[\w/]+)`", para))
     assert named == {p.rstrip("/") for p in FRAMEWORK_PATHS}, (named, FRAMEWORK_PATHS)
+
+
+def test_no_conftest_or_plugin_adds_a_mark():
+    """What lets the collection skip files that never say "slow": a mark can
+    only come from the file itself.  A conftest or plugin under ``tests/``
+    that added one to items would put slow tests where this module does not
+    look."""
+    found = []
+    for path in sorted((REPO_ROOT / "tests").rglob("*.py")):
+        if path.name != "conftest.py" and not path.name.startswith("_"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "add_marker(" in text or "pytest_itemcollected" in text:
+            found.append(path.relative_to(REPO_ROOT).as_posix())
+    assert not found, (
+        f"{found} add marks to collected items; collect every framework file in this "
+        "module's `collection` fixture instead of only those that say \"slow\"")
+
+
+def test_a_file_that_never_says_slow_is_the_only_one_skipped():
+    assert may_hold_a_slow_mark("@pytest.mark.slow\ndef test_x(): pass")
+    assert may_hold_a_slow_mark("from tests.helpers import SLOW_CASES")
+    assert not may_hold_a_slow_mark("def test_x():\n    pass\n")

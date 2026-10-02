@@ -635,9 +635,10 @@ def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
 def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient():
     """The test above, per push, with the float64 fixed point's gradient
     as the reference in place of the two arms of twenty thousand passes,
-    which match it to 1e-4 (the gradient here is ~25% off).  The capped
-    gradient keeps diagnostics on: the criterion stops this solve, so it
-    is taken exactly as the bound above it was."""
+    which match it to 1e-4 (the gradient here is ~25% off).  The gradient
+    is taken without diagnostics, which leave the returned iterate
+    bit-identical (``tests/core/test_coupling_diagnostics_leave_the_state_alone.py``),
+    and so the gradient at it: measured equal to the last bit (997.6342)."""
     q = _HIDDEN_Q
     gm = _two_mode_graph(q)
     gm.step()
@@ -646,7 +647,7 @@ def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_t
     assert d["converged"] is True and d["gradient_bound_usable"] is True, d
     assert distance > 50 * d["error_estimate"], (
         "fixture premise: error_estimate understates the distance", d, distance)
-    g_k = float(_gradients(functools.partial(_two_mode_graph, q))["c_slow"])
+    g_k = float(_gradients(functools.partial(_two_mode_graph, q), diagnostics=False)["c_slow"])
     _, g_star = _two_mode_fixed_point(q)
     true = abs(g_k - g_star) / abs(g_k)
     bound = d["gradient_relative_error_bound"]

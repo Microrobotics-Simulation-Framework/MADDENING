@@ -245,3 +245,46 @@ def test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal():
                                           "vr": [var.value_reference]}))[0])
     assert not reply["ok"], (reply, read)
     assert read >= float(var.min)
+
+
+@pytest.mark.parametrize("dts, subcycled", [((0.02, 0.03), False), ((0.01, 0.02), True)],
+                         ids=["multirate-not-dividing", "subcycled"])
+def test_the_compiled_fmu_is_the_graph_on_a_multi_rate_and_a_sub_cycled_graph(
+        tmp_path, dts, subcycled):
+    """FMU-002 at the edge of its conditions: FMPy drives the compiled wrapper through the
+    bridge, and the outputs are the graph's after the same simulated time."""
+    fmpy = pytest.importorskip("fmpy")
+    from maddening.fmi.package import build_fmu_binary, find_c_compiler, write_fmu
+
+    if find_c_compiler() is None:
+        pytest.skip("no C compiler")
+
+    def build():
+        gm = GraphManager()
+        for i, dt in enumerate(dts):
+            gm.add_node(SpringDamperNode(f"s{i}", dt, stiffness=30.0, damping=0.5,
+                                         rest_length=1.0 - 2.0 * i, initial_position=0.25 * i))
+        gm.add_edge("s0", "s1", "position", "anchor_position")
+        gm.add_edge("s1", "s0", "position", "anchor_position")
+        if subcycled:
+            gm.add_coupling_group(["s0", "s1"], max_iterations=20, tolerance=1e-6,
+                                  subcycling=True)
+        gm.compile()
+        return gm
+
+    gm = build()
+    md = build_model_description(gm, model_name="m", model_identifier="maddening_fmu")
+    bridge = _bridge(gm, md)
+    so = build_fmu_binary(tmp_path)
+    stop = 10 * gm.timestep
+    with bridge:
+        fmu = write_fmu(md, tmp_path / "plant.fmu", binary=so, endpoint=bridge.endpoint)
+        res = fmpy.simulate_fmu(str(fmu), start_time=0.0, stop_time=stop,
+                                step_size=gm.timestep, output_interval=gm.timestep,
+                                output=["s0.position", "s1.position"])
+    ref = build()
+    ref.run(10)
+    assert res["time"][-1] == pytest.approx(stop)
+    for name in ("s0", "s1"):
+        assert res[f"{name}.position"][-1] == pytest.approx(
+            float(ref.get_node_state(name)["position"]), rel=1e-5), name

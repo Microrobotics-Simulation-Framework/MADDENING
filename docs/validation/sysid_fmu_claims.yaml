@@ -1707,6 +1707,26 @@ claims:
     - tests/core/test_params_persistence_edge_cases.py::test_checkpoint_carries_mapping_weights
   status: verified
 
+- id: SYS-122
+  area: params pytree
+  claim: >-
+    "GraphManager.params holds the compile-time snapshot"; after a
+    node.params write on a compiled graph, gm.params still holds the
+    compiled value, and "the next compile takes it" (the guide's snippet
+    asserts both).
+  sources:
+    - docs/user_guide/parameters.md (opening section; Live values, recompiles and partial pytrees)
+  conditions: a write to a constant gm.params carries, before any run or compile.
+  oracle: the snippet's assertions, run by the docs-snippet runner; the value after compile().
+  tests:
+    - tests/compliance/test_docs_snippets.py::test_every_runnable_snippet_runs
+    - tests/core/test_node_params_write_after_compile.py::test_a_node_params_write_after_compile_takes_effect_at_the_next_compile
+  status: verified
+  notes: >-
+    #203 adds a sync-on-read point for pending node.params writes; if
+    reading gm.params comes to apply a pending write, this row and the
+    guide's snippet move together (and FMU-040 may flip).
+
 # ---------------------------------------------------------------------------
 # FMU: the package and the model description
 # ---------------------------------------------------------------------------
@@ -1737,12 +1757,13 @@ claims:
     round-off"; FMPy's validate_fmu reports no problems.
   sources:
     - docs/user_guide/fmu_export.md (Verification)
-  conditions: a C compiler and FMPy; a single-rate graph.
-  oracle: gm.run_scan with the same parameter and input.
+  conditions: a C compiler and FMPy; a single-rate graph with a set parameter and a driven input; a multi-rate graph whose timesteps do not divide (0.02 / 0.03) and a sub-cycled one.
+  oracle: gm.run_scan / gm.run over the same simulated time.
   tests:
     - tests/fmi/test_c_wrapper.py::test_fmpy_drives_the_compiled_fmu_against_the_graph
     - tests/fmi/test_c_wrapper.py::test_fmpy_validate_fmu_reports_no_problems
     - tests/fmi/test_c_wrapper.py::test_bridge_handler_set_get_step_matches_graph
+    - tests/fmi/test_fmu_claims_edges.py::test_the_compiled_fmu_is_the_graph_on_a_multi_rate_and_a_sub_cycled_graph
   status: verified
 
 - id: FMU-003

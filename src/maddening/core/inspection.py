@@ -1231,14 +1231,17 @@ def coupling_report(gm: "GraphManager") -> InspectionTable:
     rows = []
     for group in groups:
         key = _group_key(group)
-        row: dict[str, Any] = {"group": key, "solver": group.solver,
-                               "max_iterations": int(group.max_iterations)}
-        row.update({k: None for k in _REPORT_KEYS})
         d = diags.get(key)
+        # A report was judged under the group the compiled step ran, which
+        # differs from the registered one if it was replaced since.
+        ran = committed.get(key, group) if d is not None else group
+        row: dict[str, Any] = {"group": key, "solver": ran.solver,
+                               "max_iterations": int(ran.max_iterations)}
+        row.update({k: None for k in _REPORT_KEYS})
         if d is not None:
             for k in _REPORT_KEYS:
                 row[k] = d.get(k)
-            row[_FLAGS] = tuple(_coupling_flags(committed.get(key, group), d))
+            row[_FLAGS] = tuple(_coupling_flags(ran, d))
         elif status.traced or not status.ever_compiled:
             row[_FLAGS] = ()
         elif group.solver == "fori" and not group.diagnostics:

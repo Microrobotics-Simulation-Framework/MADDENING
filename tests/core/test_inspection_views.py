@@ -838,3 +838,15 @@ def test_golden_memory_estimate(golden):
 
 def test_golden_coupling_report_before_the_first_step(golden):
     assert str(golden.coupling_report()) == GOLDEN_COUPLING
+
+
+def test_coupling_report_judges_a_replaced_group_under_the_one_that_ran():
+    """Until the next compile the report is the last step's, judged (and
+    capped) under the group that step ran, as coupling_diagnostics() does."""
+    gm = build("coupled")
+    gm.remove_coupling_group(["a", "b"])
+    gm.add_coupling_group(["a", "b"], max_iterations=3, tolerance=1e-6)
+    (row,) = gm.coupling_report()
+    assert row["max_iterations"] == 8
+    assert row["iterations"] == gm.coupling_diagnostics()["a+b"]["iterations"]
+    assert any("modified since the last compile" in n for n in gm.coupling_report().notes)

@@ -1142,6 +1142,61 @@ def _physical_params(gm, start: dict, flat_u, unravel, idx):
     return to_params
 
 
+class _CoordinateBounds:
+    """The bounds of each optimiser coordinate ``theta``, and the projection
+    onto them.
+
+    A trainable leaf whose :class:`~maddening.core.params.ParamSpec` has
+    bounds and ``transform=None`` is optimised in its own (physical)
+    coordinate, and ``constrain`` *clips* it.  The clip's derivative is 0
+    strictly outside the bounds, so a coordinate one step carried past its
+    bound had no gradient back and stayed clipped for the rest of the run:
+    a spring's damping, started at 4 against a truth of 0.05, landed on 0
+    after one Levenberg-Marquardt step and stayed there, and ``fit_lm``
+    called it converged because the physical change of every later step was
+    0.  So every fitter projects its coordinate back onto the bounds after
+    each update; a coordinate on its bound has the one-sided derivative
+    into the range, and a step that would leave the range again moves it by
+    nothing.  ``log`` / ``logit`` coordinates are unbounded and never move
+    here; inside the bounds the projection is the identity, bit for bit.
+    """
+
+    def __init__(self, gm, start: dict, idx, dtype) -> None:
+        specs = _resolve_specs(start, gm.param_specs())
+        los, his = [], []
+        for leaf, spec in zip(jax.tree.leaves(start), specs):
+            n = _leaf_size(leaf)
+            lo = hi = None
+            if spec.trainable and spec.transform is None:
+                lo, hi = spec.bounds
+            los.append(np.full(n, -np.inf if lo is None else float(lo)))
+            his.append(np.full(n, np.inf if hi is None else float(hi)))
+        lo_all = np.concatenate(los) if los else np.zeros(0)
+        hi_all = np.concatenate(his) if his else np.zeros(0)
+        lo_np, hi_np = lo_all[idx], hi_all[idx]
+        #: Whether any coordinate is bounded at all; when not, every method
+        #: here is the identity and costs nothing.
+        self.active = bool(np.isfinite(lo_np).any() or np.isfinite(hi_np).any())
+        # At the coordinates' own dtype, rounded as ``constrain``'s clip
+        # rounds a Python-float bound, so the two agree on where the bound is.
+        self.lo = jnp.asarray(lo_np, dtype)
+        self.hi = jnp.asarray(hi_np, dtype)
+
+    def project(self, theta):
+        return jnp.clip(theta, self.lo, self.hi) if self.active else theta
+
+    def inward_descent(self, theta, g) -> bool:
+        """Whether a coordinate on its bound could lower the loss by moving
+        into the range: ``g`` (the gradient, with the one-sided derivative on
+        the bound) pointing inward.  Such a point is not a constrained
+        stationary point, whatever the size of the step proposed there."""
+        if not self.active:
+            return False
+        th, gg = np.asarray(theta), np.asarray(g)
+        lo, hi = np.asarray(self.lo), np.asarray(self.hi)
+        return bool((((th <= lo) & (gg < 0)) | ((th >= hi) & (gg > 0))).any())
+
+
 def _inverse_noise_std(noise_std, residual):
     """``1 / sigma`` flattened like ``ravel_pytree(residual)``, or ``None``.
 
@@ -3287,7 +3342,16 @@ class FitResult:
           counts whether or not it lowered the loss, because at the float
           floor it rounds to (nearly) nothing and cannot strictly lower a
           loss that is rounding noise.  Then ``losses[-1]`` is the loss of
-          the iterate the proposal was made from.
+          the iterate the proposal was made from;
+        * :func:`fit_lm` only, the floor rule: after the run has lowered the
+          loss at least once, an iteration rejected every candidate down to
+          one damped within ``step_tol`` -- no step the tolerance resolves
+          lowers the loss any more.
+
+        Neither :func:`fit_lm` test fires while a parameter held on its
+        bound (``transform=None`` with ``bounds``) could lower the loss by
+        moving into its range: that point is not a constrained stationary
+        point, however small the step proposed there.
 
         It says the iteration stopped moving, not that the data determined
         the parameters: a residual that reads none of the trainable
@@ -3639,6 +3703,7 @@ def fit(
         return loss_fn(gm.constrain(u))
 
     value_and_grad = jax.jit(jax.value_and_grad(objective))
+    bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
     def adam_step(theta, m, v, g, i):
@@ -3646,7 +3711,9 @@ def fit(
         v = b2 * v + (1 - b2) * g * g
         m_hat = m / (1 - b1 ** i)
         v_hat = v / (1 - b2 ** i)
-        return theta - lr * m_hat / (jnp.sqrt(v_hat) + eps), m, v
+        # Back onto the bounds of a clipped coordinate (``_CoordinateBounds``):
+        # past its bound it has no gradient and would stay clipped.
+        return bounds.project(theta - lr * m_hat / (jnp.sqrt(v_hat) + eps)), m, v
 
     theta = theta0
     m = jnp.zeros_like(theta)
@@ -3754,9 +3821,28 @@ def fit_lm(
     *proposed* -- its first candidate, at the damping it started with --
     moved every trainable parameter by no more than ``step_tol`` of its
     own magnitude, whether or not that step lowered the loss (see
-    ``step_tol``).  A run that ends because twelve damping retries were
-    all rejected after a larger proposal is not converged, and neither is
-    one that ran out of ``n_iter``.
+    ``step_tol``), or -- once the run has lowered the loss at least once --
+    when every candidate of an iteration was rejected down to one damped
+    within ``step_tol`` (the rounding floor; see ``step_tol``).  A run that
+    never lowered the loss and rejected every candidate is not converged,
+    and neither is one that ran out of ``n_iter``.
+
+    A trainable leaf with ``bounds`` and ``transform=None`` is optimised in
+    its own coordinate and clipped by ``constrain``.  Every step is projected
+    back onto the bounds, so a coordinate one step carried past its bound
+    sits on it -- where its derivative is the one-sided one into the range
+    -- rather than outside it with no gradient back (earlier 0.4.0
+    development builds left a spring's damping at 0 for the rest of the
+    run, and called it converged).  A coordinate on its bound whose gradient
+    points out of the range is held there: the constraint is active, and
+    the step for the rest is solved without it.  No ``converged`` test fires
+    while a coordinate on its bound could lower the loss by moving into the
+    range.
+
+    The Marquardt solve's floor, which keeps it regular, is ``eps`` times
+    the mean of ``diag(JᵀJ)``: relative, so the step is the same for every
+    scaling of the residual (an absolute ``1e-12`` made a residual of 1e-7
+    in its own units fail to converge in 50 iterations).
 
     Like :func:`fit`, it returns the **lowest-loss iterate** it evaluated,
     and here that is always the last one: a step is accepted only when it
@@ -3798,9 +3884,14 @@ def fit_lm(
         proposal moved neither parameter by a single bit.  Only the
         *proposal* counts, not a damped retry: retries shrink the step by
         a factor of ``lam_up`` each whatever the loss is doing, so a short
-        retry is evidence about the damping and not about the iterate.
-        Changed from an absolute ``1e-8`` during 0.4.0 development, before
-        any release.
+        retry is evidence about the damping and not about the iterate --
+        except once the run has lowered the loss and *every* candidate,
+        down to one within ``step_tol``, is rejected: then no step the
+        tolerance resolves lowers the loss, which is the rounding floor.  A
+        parameter the data determine only weakly needs that rule, because
+        its proposal at the floor fits the residual's rounding noise and can
+        be many ulps of it.  Changed from an absolute ``1e-8`` during 0.4.0
+        development, before any release.
     hold_undetermined : bool
         Keep the fitted parameters out of the directions the data does not
         determine, exactly as :func:`fit` does and by the same shared
@@ -3910,13 +4001,35 @@ def fit_lm(
     residual_and_jac = jax.jit(lambda th: (_residual(th), jax.jacfwd(_residual)(th)))
     residual_only = jax.jit(_residual)
 
+    bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
+    lm_floor = float(np.finfo(np.dtype(theta0.dtype)).eps)
+
     @jax.jit
-    def _lm_step(th, r, J, lam):
+    def _lm_step(th, r, J, lam, lo, hi):
         A = J.T @ J
         g = J.T @ r
-        A_damped = A + lam * jnp.diag(jnp.diag(A)) + 1e-12 * jnp.eye(A.shape[0], dtype=A.dtype)
+        # A coordinate on its bound whose gradient points out of the range
+        # is held (its row and column replaced by the identity, its
+        # gradient by 0): that is the constraint active, and solving for it
+        # as if free would couple a step it cannot take into the others.
+        hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+        free = jnp.where(hold, 0.0, 1.0).astype(A.dtype)
+        A = A * free[:, None] * free[None, :]
+        g = g * free
+        n = A.shape[0]
+        # The floor that keeps the solve regular is *relative*, ``eps``
+        # times the mean of ``diag(A)``: an absolute ``1e-12 * I`` was not
+        # negligible once the residual was small in its own units (a
+        # residual scaled by 1e-7 made it 1e-12 / 1e-14 of the curvature it
+        # was added to), and the fit stopped being Gauss-Newton -- it did
+        # not converge in 50 iterations at 1e-7 and barely moved at 1e-8.
+        # Relative, the step is the same for every scaling of the residual.
+        scale = jnp.trace(A) / n
+        floor = jnp.where(scale > 0, lm_floor * scale, 1.0)
+        A_damped = (A + lam * jnp.diag(jnp.diag(A))
+                    + floor * jnp.eye(n, dtype=A.dtype) + jnp.diag(1.0 - free))
         delta = jnp.linalg.solve(A_damped, g)
-        return th - delta
+        return jnp.clip(th - delta, lo, hi)
 
     # The step test, on the physical trainable entries (see ``step_tol``):
     # per entry, a relative tolerance -- ``step_tol``, or ``2**4`` ulps of
@@ -3949,6 +4062,8 @@ def fit_lm(
     # moving off that iterate rather than forming it again.
     rJ, rJ_iteration = None, None
     converged = False
+    # Whether any step has lowered the loss yet: see the floor rule below.
+    progressed = False
     i = 0
     for i in range(1, n_iter + 1):
         r, J = residual_and_jac(theta)
@@ -3986,16 +4101,24 @@ def fit_lm(
         # shorter only because it is damped more, so it is not tested.
         accepted = False
         stationary = False
+        # A coordinate on its bound that could lower the loss by moving into
+        # the range makes this no constrained stationary point, so its
+        # proposal cannot converge the run even if it moves nothing (the
+        # coupled solve can point such a coordinate outward); the retries,
+        # damped towards the gradient, move it inward.
+        stuck_inward = bounds.inward_descent(theta, J.T @ r)
         for attempt in range(12):
-            cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype))
+            cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype), bounds.lo, bounds.hi)
             r_new = residual_only(cand)
             loss_new = 0.5 * float(jnp.sum(r_new * r_new))
-            proposal_within = attempt == 0 and _within_step_tol(theta, cand)
+            proposal_within = (attempt == 0 and not stuck_inward
+                               and _within_step_tol(theta, cand))
             if np.isfinite(loss_new) and loss_new < loss:
                 theta = cand
                 theta_iteration, theta_loss = i, loss_new
                 lam = max(lam * lam_down, 1e-12)
                 accepted = True
+                progressed = True
                 stationary = proposal_within
                 break
             if proposal_within:
@@ -4003,6 +4126,21 @@ def fit_lm(
                 stationary = True
                 break
             lam = min(lam * lam_up, 1e12)
+        if not accepted and not stationary and progressed and not stuck_inward:
+            # The floor rule.  Every candidate was rejected, down to one damped
+            # within ``step_tol``: no step the tolerance resolves lowers the
+            # loss.  After a run that has already lowered it, that is the
+            # rounding floor (MINPACK's ``xtol`` declares the same when its
+            # trust region shrinks below the tolerance without a success).  A
+            # parameter the data determine only weakly needs it: at the floor
+            # its proposal is the Gauss-Newton fit of the residual's rounding
+            # noise, which can be many ulps of the parameter (a spring's
+            # damping of 0.05, seen through 100 position samples, proposes
+            # ~1e-5 relative there), so the proposal test alone left such a
+            # fit unconverged at loss 1e-13.  A run that never lowered the
+            # loss gets no such reading: a residual whose Jacobian is wrong
+            # rejects every candidate from its start.
+            stationary = _within_step_tol(theta, cand)
         if stationary and accepted and tracker is not None:
             # Stopping on an accepted proposal leaves the run at an iterate
             # whose gradient no iteration formed.  A run that kept going
@@ -4179,6 +4317,7 @@ def fit_multiple_shooting(
         )
 
     value_and_grad = jax.jit(jax.value_and_grad(objective, argnums=(0, 1)))
+    bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
     def adam(x, m, v, g, i, rate):
@@ -4218,6 +4357,8 @@ def fit_multiple_shooting(
             break
         it = jnp.asarray(i, theta.dtype)
         theta, m_t, v_t = adam(theta, m_t, v_t, g_t, it, lr)
+        # As in ``fit``: a clipped coordinate is put back on its bound.
+        theta = bounds.project(theta)
         ws, m_s, v_s = adam(ws, m_s, v_s, g_s, it, lr_s)
 
     if i > 0 and not converged:

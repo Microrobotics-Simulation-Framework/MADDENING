@@ -205,7 +205,7 @@ def test_the_sysid_mask_keeps_a_window_whose_applied_solve_converged():
     # Offset the measurements so the loss is not zero.
     history["a"] = {**history["a"], "x": history["a"]["x"] + 1.0}
     obs = observations_from_history(init, history)
-    kw = dict(obs_fn=lambda s: s["a"]["x"], window=DIVIDER)
+    kw = dict(obs_fn=lambda s: s["a"]["x"], window=DIVIDER, start_step=0)
     unmasked = float(windowed_loss(gm, gm.params, obs, mask_unconverged=False, **kw))
     masked = float(windowed_loss(gm, gm.params, obs, mask_unconverged=True, **kw))
     assert unmasked > 0.0

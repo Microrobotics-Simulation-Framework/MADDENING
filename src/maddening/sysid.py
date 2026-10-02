@@ -301,6 +301,7 @@ def windowed_loss(
     mask_unconverged: bool = False,
     window_states: Optional[dict] = None,
     continuity_weight: float = 0.0,
+    start_step: Optional[int] = None,
 ) -> jnp.ndarray:
     """Windowed squared-error loss of a graph against data.
 
@@ -378,6 +379,22 @@ def windowed_loss(
         refuses it: a negative or NaN weight used to read as ``0.0`` -- no
         penalty and no error -- because the penalty was guarded by
         ``continuity_weight > 0.0``.
+    start_step : int, optional
+        *Experimental, new in 0.4.0.*  The base step of the graph's
+        multi-rate schedule at which sample ``0`` was recorded: ``0`` for a
+        record that starts at ``compile()`` or ``reset_state()``, ``n`` for
+        one that starts after ``gm.run(n)``.  Window ``w`` restarts at base
+        step ``start_step + k * sample_every`` (``k`` its first sample), so
+        each node fires on the sub-step it fired on when the record was
+        made.  The observations are user state and cannot carry the
+        recording's own step counter, so on a multi-rate graph this is the
+        only way to know it: without it a record that began on an odd base
+        step of a graph whose slowest node fires every second step is
+        replayed on the wrong phase in every window, and the loss at the
+        generating parameters is not zero (1.3e-2 for a ball and table).
+        ``None`` (the default) assumes ``0`` and, on a multi-rate graph,
+        warns (``UserWarning``) that it is assuming it.  It has no effect on
+        a single-rate graph.
 
     Returns
     -------
@@ -392,6 +409,8 @@ def windowed_loss(
     _check_flag("mask_unconverged", mask_unconverged)
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
                  why=_CONTINUITY_WEIGHT_WHY)
+    if start_step is not None:
+        _check_count("start_step", start_step)
     if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
         gm.compile()
     # The windows scan the graph step: a sharded node XLA miscompiles
@@ -425,6 +444,20 @@ def windowed_loss(
     meta0 = gm._state.get(_META_KEY)  # noqa: SLF001
     thresholds = _group_thresholds(gm) if mask_unconverged else []
     _refuse_unmaskable_groups(gm, meta0, thresholds)
+    # ``step_count`` exists exactly when the graph is multi-rate: the phase
+    # of its schedule is then part of the state a window restarts from.
+    if start_step is None:
+        if meta0 is not None and "step_count" in meta0:
+            warnings.warn(
+                "windowed_loss: the graph is multi-rate and the record's "
+                "starting base step is not known, so it is assumed to be 0. "
+                "A record that began elsewhere is replayed on the wrong phase "
+                "of the schedule in every window. Pass start_step= (0 for a "
+                "record taken from compile() or reset_state(), n after "
+                "gm.run(n)) to say where it began.",
+                UserWarning, stacklevel=2,
+            )
+        start_step = 0
 
     def _state_from_obs(obs_k, k):
         s = {nn: dict(fields) for nn, fields in obs_k.items()}
@@ -432,7 +465,7 @@ def windowed_loss(
             m = jax.tree.map(jnp.zeros_like, meta0)
             if "step_count" in m:
                 m["step_count"] = jnp.asarray(
-                    k * sample_every, dtype=meta0["step_count"].dtype,
+                    start_step + k * sample_every, dtype=meta0["step_count"].dtype,
                 )
             s[_META_KEY] = m
         return s
@@ -4218,6 +4251,7 @@ def fit_multiple_shooting(
     callback: Optional[Callable[[int, float, dict], None]] = None,
     notify_every: int = 1,
     hold_undetermined: bool = True,
+    start_step: Optional[int] = None,
 ) -> tuple[FitResult, dict]:
     """Multiple-shooting fit: Adam jointly over the trainable params (in
     unconstrained coordinates) and the free per-window initial states.
@@ -4242,6 +4276,11 @@ def fit_multiple_shooting(
 
     Parameters
     ----------
+    start_step : int, optional
+        *Experimental, new in 0.4.0.*  The base step of a multi-rate graph's
+        schedule at which the record's sample ``0`` was taken, passed to
+        :func:`windowed_loss` (see there; ``None`` assumes ``0`` and warns on
+        a multi-rate graph).
     hold_undetermined : bool
         Keep the fitted **parameters** out of the directions the data does
         not determine, exactly as :func:`fit` does and by the same shared
@@ -4290,6 +4329,8 @@ def fit_multiple_shooting(
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
                  why=_CONTINUITY_WEIGHT_WHY)
     _check_count("sample_every", sample_every, minimum=1)
+    if start_step is not None:
+        _check_count("start_step", start_step)
     _check_hold_undetermined(hold_undetermined)
     start = gm._params_or_default(params)  # noqa: SLF001
     gm.check_params(start)
@@ -4314,6 +4355,7 @@ def fit_multiple_shooting(
             gm, p, observations, obs_fn=obs_fn, window=window,
             sample_every=sample_every, external_inputs=external_inputs,
             window_states=unravel_ws(ws_flat), continuity_weight=continuity_weight,
+            start_step=start_step,
         )
 
     value_and_grad = jax.jit(jax.value_and_grad(objective, argnums=(0, 1)))

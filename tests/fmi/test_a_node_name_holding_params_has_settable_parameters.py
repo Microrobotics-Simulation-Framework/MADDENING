@@ -27,7 +27,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 from maddening.core.graph_manager import GraphManager
+from maddening.core.node import SimulationNode
+from maddening.core.params import ParamSpec
 from maddening.fmi import build_model_description
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
 from maddening.fmi.tcp_bridge import FmuTcpBridge, state_of, values_of
@@ -132,3 +136,47 @@ def test_two_parameters_spelling_one_name_are_refused_by_that_name():
                           "a": {"b.params.c": jnp.asarray(2.0)}}, "mappings": {}}))
     with pytest.raises(KeyError, match="is ambiguous"):
         sidecar.set_params({"a.params.b.params.c": 3.0})
+
+
+@stability(StabilityLevel.STABLE)
+class _KeyWithInfix(SimulationNode):
+    """A parameter whose *key* holds ``.params.``: only the pair the variable
+    carries says where its name splits (the last ``.params.`` would name a
+    node ``a.params.b`` that does not exist)."""
+
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep, **{"b.params.c": 0.5})
+
+    def params_pytree(self):
+        return {"b.params.c": jnp.asarray(self.params["b.params.c"], jnp.float32)}
+
+    def param_specs(self):
+        return {"b.params.c": ParamSpec(bounds=(0.0, 1.0))}
+
+    def initial_state(self):
+        return {"x": jnp.asarray(0.0, jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": state["x"] + p["b.params.c"] * dt}
+
+
+def test_the_bridge_uses_the_pair_the_variable_carries_not_the_name():
+    gm = GraphManager()
+    gm.add_node(_KeyWithInfix("a", 0.01))
+    gm.compile()
+    md = build_model_description(gm, model_name="K")
+    var = next(v for v in md.variables if v.causality == "parameter")
+    assert var.name == "a.params.b.params.c" and (var.node, var.field) == ("a", "b.params.c")
+    sidecar = FmuSidecar(SidecarConfig(
+        schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+        initial_state=gm._state, params=gm.params))
+    bridge = FmuTcpBridge(sidecar, md, master_dt=0.01)
+    try:
+        # the advertised bound reached the sidecar under the right (node, key)
+        reply = bridge.handle({"op": "set", "vr": [var.value_reference], "values": [1.5]})
+        assert reply["ok"] is False and "above bound" in reply["error"], reply
+        assert bridge.handle({"op": "set", "vr": [var.value_reference],
+                              "values": [0.25]}) == {"ok": True}
+    finally:
+        bridge.stop()

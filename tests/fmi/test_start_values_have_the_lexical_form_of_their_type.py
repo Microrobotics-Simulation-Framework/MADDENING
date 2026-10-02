@@ -54,7 +54,8 @@ class TypedGate(SimulationNode):
     def param_specs(self):
         return {"rate": ParamSpec(bounds=(0.0, 5.0)),
                 "gain": ParamSpec(bounds=(-2.5, 10.5)),
-                "enabled": ParamSpec()}
+                # bounds on a Boolean, which the XML must not carry over
+                "enabled": ParamSpec(bounds=(0.0, 1.0))}
 
     def initial_state(self):
         return {"level": jnp.asarray(0.0, jnp.float32), "was_open": jnp.asarray(False),

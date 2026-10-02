@@ -406,3 +406,75 @@ def test_fim_core_cannot_be_built_positionally():
     fields = [getattr(core, name) for name in ("fim", "eigvals", "eigvecs", "rank", "cond")]
     with pytest.raises(TypeError):
         FIMCore(*fields)
+
+
+# ---------------------------------------------------------------------------
+# ParamSpec bounds at zero
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=(
+    "SYS-109: ParamSpec.check compares through jnp, which on CPU flushes a subnormal to "
+    "zero, so a value below a zero bound by less than the smallest normal passes; "
+    "pending fix"))
+@pytest.mark.parametrize("value", [-1e-45, -1e-40, -1e-38])
+def test_a_value_below_a_zero_bound_is_refused_however_small(value):
+    """SYS-109: ``check`` raises "if a concrete value ... violates bounds", and
+    ``gm.check_params`` names "the first leaf out of range".  A negative float32 subnormal
+    is below the lower bound 0 of ``SpringDamperNode``'s ``damping``."""
+    with pytest.raises(ValueError, match="below bound"):
+        ParamSpec(bounds=(0.0, None)).check(np.float32(value), name="damping")
+
+
+def test_a_value_below_a_zero_bound_by_a_normal_amount_is_refused():
+    """SYS-105's edge on the normal side: the smallest negative normal float32 is refused,
+    by ``check`` and by ``gm.check_params``."""
+    with pytest.raises(ValueError, match="below bound"):
+        ParamSpec(bounds=(0.0, None)).check(-np.finfo(np.float32).tiny, name="damping")
+    gm = _spring()
+    p = jax.tree.map(lambda x: x, gm.params)
+    p["nodes"]["s"]["damping"] = jnp.float32(-np.finfo(np.float32).tiny)
+    with pytest.raises(ValueError, match=r"\['damping'\].*below bound 0.0"):
+        gm.check_params(p)
+
+
+# ---------------------------------------------------------------------------
+# fim and fim_core near the rank cutoff
+# ---------------------------------------------------------------------------
+
+
+def _near_cutoff(rng, factor, n=3, m=8):
+    """A residual ``J p`` whose ``JᵀJ`` has eigenvalues from 1 down to 0.5 and one at
+    ``factor`` times the default rank cutoff, in float32."""
+    eps = float(np.finfo(np.float32).eps)
+    cutoff = max(n, np.sqrt(m)) * eps
+    eig = np.concatenate([np.linspace(1.0, 0.5, n - 1), [factor * cutoff]])
+    U, _ = np.linalg.qr(rng.normal(size=(m, n)))
+    V, _ = np.linalg.qr(rng.normal(size=(n, n)))
+    J = jnp.asarray(U @ np.diag(np.sqrt(eig)) @ V.T, jnp.float32)
+    return lambda p: J @ p["p"]
+
+
+# Per push: tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_rank_and_crb_infinities_match_fim
+@pytest.mark.slow
+def test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff():
+    """SYS-043: "they reach a different (rank, precision_limited) on 0.39% of them, never
+    above five times the rank cutoff" -- on matrices whose deciding eigenvalue is spread
+    log-uniformly from a hundredth to a hundred times the cutoff."""
+    rng = np.random.default_rng(11)
+    disagreements, limited_count = [], 0
+    for n, m in ((3, 8), (3, 512), (6, 512), (6, 4096)):
+        params = {"p": jnp.ones(n, jnp.float32)}
+        for _ in range(150):
+            factor = float(10.0 ** rng.uniform(-2.0, 2.0))
+            residual = _near_cutoff(rng, factor, n, m)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                report = fim(residual, params, scale=None)
+            limited = any("PrecisionLimit" in type(w.message).__name__ for w in caught)
+            limited_count += limited
+            core = fim_core(residual, params, scale=None)
+            if (report.rank, limited) != (int(core.rank), bool(core.precision_limited)):
+                disagreements.append((n, m, factor))
+    assert limited_count > 0, "the population must reach the precision band"
+    assert all(0.2 <= f <= 5.0 for _, _, f in disagreements), disagreements

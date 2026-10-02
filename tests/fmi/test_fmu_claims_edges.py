@@ -11,6 +11,7 @@ together.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from maddening.core.graph_manager import GraphManager
@@ -221,3 +222,26 @@ def test_the_bridges_waits_and_limits_are_the_documented_numbers():
     assert tcp_bridge.MAX_STEPS_PER_REQUEST == 100_000
     assert tcp_bridge._STOP_JOIN_TIMEOUT == 5.0
     assert tcp_bridge._COMM_POINT_TOLERANCE == 1e-6
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "FMU-039: the bounds check behind set and set_state goes through ParamSpec.check, which "
+    "flushes a subnormal to zero, so a parameter can be set below an advertised min of 0; "
+    "pending fix"))
+def test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal():
+    """FMU-039: "Setting a parameter is held to the min / max the description advertises".
+    ``damping`` advertises ``min="0.0"``; a negative float32 subnormal is below it."""
+    gm = _springs(0.01)
+    md = build_model_description(gm, model_name="m")
+    bridge = _bridge(gm, md)
+    var = {v.name: v for v in md.variables}["s0.params.damping"]
+    assert float(var.min) == 0.0
+    tiny = bridge.handle({"op": "set", "type": "Float32", "vr": [var.value_reference],
+                          "values": [-np.finfo(np.float32).tiny]})
+    assert not tiny["ok"]                                   # a normal one is refused
+    reply = bridge.handle({"op": "set", "type": "Float32", "vr": [var.value_reference],
+                           "values": [-1e-40]})
+    read = float(values_of(bridge.handle({"op": "get", "type": "Float32",
+                                          "vr": [var.value_reference]}))[0])
+    assert not reply["ok"], (reply, read)
+    assert read >= float(var.min)

@@ -651,6 +651,45 @@ claims:
     ValueError fim_core's Raises section lists for a noise_std it cannot
     answer for; the restriction itself holds.
 
+- id: SYS-042
+  area: fim
+  claim: >-
+    fim performs four host transfers, "specs is static -- reduced to
+    per-column constants on the host, as mask is to indices -- so fim_core
+    traces as before and fim's transfer count stays at four"; reusing its
+    trace costs the same four.
+  sources:
+    - docs/release_notes/v0.4.0.md (System identification)
+    - src/maddening/sysid.py:2345 (fim, specs)
+  conditions: default; reuse_trace; scale="nominal"; a host-side noise model.
+  oracle: a counter on every route from device to host.
+  tests:
+    - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_fim_performs_exactly_four_transfers
+    - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_fim_reusing_its_trace_performs_the_same_four
+    - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_a_nominal_scale_costs_no_extra_transfer
+    - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_a_host_side_noise_model_costs_no_extra_transfer
+  status: verified
+
+- id: SYS-043
+  area: fim_core
+  claim: >-
+    fim and fim_core "are not bit-identical and are not meant to be ...
+    Measured over 40,000 synthetic Fisher matrices spanning six decades of
+    eigenvalue ratio, they reach a different (rank, precision_limited) on
+    0.39% of them, never above five times the rank cutoff".
+  sources:
+    - docs/user_guide/parameters.md (Asking the same question inside a loop)
+  conditions: float32; a deciding eigenvalue from 0.01 to 100 times the cutoff; 3 and 6 parameters, 8 to 4096 rows.
+  oracle: the two verdicts on the same matrix; the factor at which they differ.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff
+  status: verified
+  notes: >-
+    The bound holds; the 0.39% rate is not reproduced here: over 2,600
+    matrices of this population (precision band reached on 15% of them) the
+    two never disagreed.  The rate depends on the population and the
+    backend's Gram product; read it as the measurement it is.
+
 # ---------------------------------------------------------------------------
 # The fitters: FitResult
 # ---------------------------------------------------------------------------
@@ -1326,6 +1365,7 @@ claims:
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
     - src/maddening/core/params.py:767 (constrain)
+    - docs/release_notes/v0.4.0.md (ParamSpec and the optimiser surface)
   conditions: any coordinates, including extreme ones; list leaves.
   oracle: the bounds; the round trip; jax.jit and jax.grad.
   tests:
@@ -1351,7 +1391,9 @@ claims:
     - tests/core/test_param_spec_edge_cases.py::test_check_params_rejects_non_finite
     - tests/core/test_param_spec_edge_cases.py::test_check_rejects_nan_even_without_bounds
     - tests/core/test_param_spec_edge_cases.py::test_check_bounds_refuses_an_out_of_range_list_leaf
+    - tests/core/test_sysid_claims_edges.py::test_a_value_below_a_zero_bound_by_a_normal_amount_is_refused
   status: verified
+  notes: Below a zero bound by less than the smallest normal, see SYS-109.
 
 - id: SYS-106
   area: ParamSpec
@@ -1404,6 +1446,37 @@ claims:
     - tests/core/test_param_spec_edge_cases.py::test_from_dict_refuses_a_bound_that_is_not_a_number
     - tests/core/test_param_spec_edge_cases.py::test_a_saved_graph_with_a_string_trainable_is_refused_on_load
   status: verified
+
+- id: SYS-109
+  area: ParamSpec
+  claim: >-
+    ParamSpec.check: "Raise ValueError if a concrete value is non-finite or
+    violates bounds"; gm.check_params raises "ValueError naming the first
+    leaf out of range".
+  sources:
+    - src/maddening/core/params.py:386 (ParamSpec.check)
+    - docs/user_guide/parameters.md (ParamSpec)
+  conditions: >-
+    unstated: a value outside a bound of 0 by less than the smallest normal
+    (a float32 subnormal), the bound SpringDamperNode's damping and every
+    (0, None) spec has.
+  oracle: the sign of the value against the bound.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_a_value_below_a_zero_bound_is_refused_however_small
+  status: failing
+  finding: >-
+    ParamSpec(bounds=(0.0, None)).check accepts float32 -1e-45, -1e-40 and
+    -1e-38 (and gm.check_params a damping of -1e-40), while
+    -np.finfo(np.float32).tiny is refused.  check compares through jnp, and
+    XLA on CPU flushes subnormal inputs to zero, so v < lo reads -1e-40 < 0
+    as 0 < 0.  The same hole lets a value above an upper bound of 0 by a
+    subnormal through, and it is the check behind the FMU's set and
+    set_state (FMU-039).  Guess: src/maddening/core/params.py:386, the
+    comparisons; compare the concrete value on the host with numpy.
+  notes: >-
+    Numerically harmless inside a step that also flushes it, but a gate
+    that admits a value outside the declared range, which every surface
+    then reports back as is.
 
 # ---------------------------------------------------------------------------
 # node.params and gm.params as fitting and export see them
@@ -1859,8 +1932,9 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Multi-rate graphs, clocks)
     - src/maddening/fmi/model_description.py:683 (build_model_description, multi_clock)
+    - docs/release_notes/v0.4.0.md (Multi-clock export)
   conditions: >-
-    unstated in the guide: timesteps that do not divide each other; the
+    unstated in the guide and the release notes: timesteps that do not divide each other; the
     docstring states it ("the fastest equals it unless the timesteps do not
     divide each other").
   oracle: the clocks against the default step, for 0.01 / 0.05 and for 0.02 / 0.03.
@@ -2402,6 +2476,30 @@ claims:
     - tests/fmi/test_binary_frames.py::test_json_only_client_sees_protocol_one_behaviour_unchanged
   status: verified
 
+- id: FMU-039
+  area: values
+  claim: >-
+    "Setting a parameter is held to the min / max the description
+    advertises, whether or not the sidecar was built with param_specs ...
+    So an importer cannot drive the graph with a constant it declares
+    invalid."
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/sidecar.py:596 (FmuSidecar.set_params)
+  conditions: >-
+    unstated: a value below an advertised min of 0 by less than the
+    smallest normal float32.
+  oracle: the reply, and the value read back against the advertised min.
+  tests:
+    - tests/fmi/test_fmu_claims_edges.py::test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal
+  status: failing
+  finding: >-
+    A set of s0.params.damping (min="0.0") to -1e-40 answers ok and reads
+    back -9.99995e-41; the smallest negative normal is refused.  The
+    sidecar's bounds check is ParamSpec.check, which compares through jnp
+    and so flushes the subnormal to zero (SYS-109).  The same value through
+    set_state takes the same check.  Guess: src/maddening/core/params.py:386.
+
 - id: FMU-040
   area: graph agreement
   claim: >-
@@ -2535,6 +2633,37 @@ claims:
     - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_a_refused_step_after_a_restore_reports_the_restored_time
   status: verified
 
+- id: FMU-046
+  area: transport
+  claim: >-
+    "set and get looked value references up with int(), so 10.9, 10.4 and
+    "10" wrote variable 10 and answered ok ...; anything but an integer is
+    now the usual error reply."
+  sources:
+    - docs/release_notes/v0.4.0.md (What the audits found here)
+  conditions: fractions, strings and booleans as value references, on set and get.
+  oracle: the error reply; integers still served.
+  tests:
+    - tests/fmi/test_bridge_value_references.py::test_set_refuses_a_value_reference_that_is_not_an_integer
+    - tests/fmi/test_bridge_value_references.py::test_get_refuses_a_value_reference_that_is_not_an_integer
+    - tests/fmi/test_bridge_value_references.py::test_integer_value_references_are_still_served
+  status: verified
+
+- id: FMU-047
+  area: FMU state
+  claim: >-
+    "both restore paths now rebuild on the live model's skeleton", so a node
+    with no state fields survives its own get_state / set_state round trip.
+  sources:
+    - docs/release_notes/v0.4.0.md (What the audits found here)
+  conditions: the bridge and the sidecar; a snapshot that omits such a node.
+  oracle: steps after the restore.
+  tests:
+    - tests/fmi/test_fmu_state_nodes_without_fields.py::test_the_bridge_restores_its_own_snapshot_of_a_node_without_fields
+    - tests/fmi/test_fmu_state_nodes_without_fields.py::test_the_sidecar_restores_a_snapshot_of_a_node_without_fields
+    - tests/fmi/test_fmu_state_nodes_without_fields.py::test_a_snapshot_that_omits_a_node_without_fields_still_restores_it
+  status: verified
+
 # ---------------------------------------------------------------------------
 # FMU: the trust boundary
 # ---------------------------------------------------------------------------
@@ -2568,7 +2697,8 @@ claims:
     frame, not when it connects, so a peer that connects and says nothing
     ... claims nothing.  At most sixteen connection threads are live at
     once; further connections are closed on accept"; a second instance is
-    refused, not blocked.
+    refused, not blocked, and a reconnect "polls for the slot for up to two
+    seconds before it is refused".
   sources:
     - docs/user_guide/fmu_export.md (The trust boundary)
   conditions: silent connects; a frame announced and never sent; the thread cap; a second importer; a reconnect.
@@ -2579,6 +2709,7 @@ claims:
     - tests/fmi/test_bridge_connection_lifecycle.py::test_the_number_of_connection_threads_is_capped
     - tests/fmi/test_bridge_connection_lifecycle.py::test_no_sequence_of_silent_connects_can_lock_out_an_honest_client
     - tests/fmi/test_bridge_security_and_stepping.py::test_second_instance_on_one_bridge_is_refused_not_blocked
+    - tests/fmi/test_bridge_security_and_stepping.py::test_a_reconnecting_instance_waits_out_the_previous_ones_hand_over
   status: verified
 
 - id: FMU-052

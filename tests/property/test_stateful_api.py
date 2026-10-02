@@ -46,6 +46,7 @@ from hypothesis import settings
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 
+from tests.conftest import EXAMPLES_FLOOR
 from tests.property.stateful_model import (
     BOUNDARY_INPUTS,
     DT,
@@ -534,6 +535,7 @@ class SimulationServerMachine(RuleBasedStateMachine):
             self._send("GET", "/graph/state").json())
 
 
+# Per push: tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
 @pytest.mark.slow  # a state machine over the REST server: 8-19 s on CI
 def test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step():
     """Any sequence of REST calls: no 5xx, no partial write, model agreement.
@@ -550,6 +552,25 @@ def test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step():
     run_state_machine_as_test(
         SimulationServerMachine,
         settings=settings(stateful_step_count=14),
+    )
+
+
+def test_short_rest_sequences_keep_the_server_and_the_model_in_step():
+    """The machine above at reduced depth, on every push: six calls per
+    sequence instead of fourteen, the same rules and invariants, drawn the
+    same way on every run.  Six calls still build a node, wire and compile
+    it and step or checkpoint it, and every example still pays for the
+    teardown's rebuild-and-replay.
+
+    ``max_examples`` is the house floor (``EXAMPLES_FLOOR``) and is set
+    here rather than left to the profile: this is the per-push sibling of
+    the test above, sized to stay inside the time budget, and under the
+    ``ci`` profile the depth comes from that test instead.
+    """
+    run_state_machine_as_test(
+        SimulationServerMachine,
+        settings=settings(stateful_step_count=6, max_examples=EXAMPLES_FLOOR,
+                          derandomize=True),
     )
 
 

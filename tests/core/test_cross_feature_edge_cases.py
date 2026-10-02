@@ -146,8 +146,9 @@ def test_fit_and_fim_reject_an_all_false_mask():
         fim(lambda p: p["nodes"]["s"]["stiffness"][None], gm.params, mask=mask)
 
 
-@pytest.mark.slow  # an LM fit through an IFT-coupled group: 5 s on CI
-def test_fit_lm_through_ift_coupled_group_recovers_stiffness():
+def _fit_lm_through_ift_coupled_springs(n_steps, n_iter, k0):
+    """The two stiffnesses ``fit_lm`` recovers, from ``k0``, for a pair of
+    springs coupled through an IFT group, observed over ``n_steps``."""
     from maddening.sysid import fit_lm, observations_from_history
     def build(k):
         gm = GraphManager()
@@ -160,7 +161,7 @@ def test_fit_lm_through_ift_coupled_group_recovers_stiffness():
         return gm
     truth = build(30.0)
     init = {n: truth.get_node_state(n) for n in truth.node_names}
-    _, hist = truth.run_scan_with_history(60)
+    _, hist = truth.run_scan_with_history(n_steps)
     obs = observations_from_history(init, hist)
     gm = build(30.0)
     for n in ("a", "b"):
@@ -172,14 +173,30 @@ def test_fit_lm_through_ift_coupled_group_recovers_stiffness():
         def body(s, _):
             s = step(s, ext, p)
             return s, jnp.stack([s["a"]["position"], s["b"]["position"]])
-        return jax.lax.scan(body, start, None, length=60)[1] - jnp.stack(
+        return jax.lax.scan(body, start, None, length=n_steps)[1] - jnp.stack(
             [obs["a"]["position"][1:], obs["b"]["position"][1:]], axis=1)
     p0 = jax.tree.map(lambda x: x, gm.params)
     for n in ("a", "b"):
-        p0["nodes"][n]["stiffness"] = jnp.asarray(45.0, jnp.float32)
-    res = fit_lm(gm, residual, params=p0, n_iter=25)
-    for n in ("a", "b"):
-        assert abs(float(res.params["nodes"][n]["stiffness"]) - 30.0) < 0.6
+        p0["nodes"][n]["stiffness"] = jnp.asarray(k0, jnp.float32)
+    res = fit_lm(gm, residual, params=p0, n_iter=n_iter)
+    return [float(res.params["nodes"][n]["stiffness"]) for n in ("a", "b")]
+
+
+# Per push: tests/core/test_cross_feature_edge_cases.py::test_fit_lm_through_ift_coupled_group_recovers_stiffness_from_nearby
+@pytest.mark.slow  # an LM fit through an IFT-coupled group: 5 s on CI
+def test_fit_lm_through_ift_coupled_group_recovers_stiffness():
+    for k in _fit_lm_through_ift_coupled_springs(n_steps=60, n_iter=25, k0=45.0):
+        assert abs(k - 30.0) < 0.6
+
+
+def test_fit_lm_through_ift_coupled_group_recovers_stiffness_from_nearby():
+    """The fit above over a shorter record, from a nearer start, in fewer
+    iterations (per push): ``fit_lm``'s Jacobian through the IFT rule
+    inside a scan, compiled once.  Held tighter than the slow fit, since
+    one iteration from this start already lands within 0.5 (measured
+    30.48 and 30.41) and six reach 30.000002."""
+    for k in _fit_lm_through_ift_coupled_springs(n_steps=12, n_iter=6, k0=36.0):
+        assert abs(k - 30.0) < 0.05
 
 
 # ---------------------------------------------------------------------------

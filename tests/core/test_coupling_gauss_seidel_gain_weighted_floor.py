@@ -11,11 +11,13 @@ rounded multiply; a ring of them read ``spectral_error_bound`` at 0.20x the
 true distance and ``gradient_relative_error_bound`` at 0.018x the true
 gradient error, both flags set.
 
-With ``diagnostics=True`` the step now measures each same-pass read's
-relative gain at the returned state (one JVP of the reading node's update
-along the source's own state) and counts ``depth(n) = d_n e_n + sum_m g_nm
-depth(m)``, never below the structural count; the report reads that count
-from the step (``coupling_{key}_pass_evaluations``).
+With ``diagnostics=True`` the step now measures every group-internal
+read's relative gain at the returned state (one JVP of the reading node's
+update along the source's own state), scales each member's own count by
+``max(1, sum_m g_nm)`` over its reads (a node whose terms cancel amplifies
+its own rounding too) and counts ``depth(n) = own'(n) + sum_m g_nm
+depth(m)`` along same-pass reads, never below the structural count; the
+report reads that count from the step (``coupling_{key}_pass_evaluations``).
 """
 
 from __future__ import annotations
@@ -122,20 +124,32 @@ def _stepped_chain(n):
     return gm, names, xs, gc
 
 
-def test_each_same_pass_read_is_weighted_by_its_measured_gain():
-    """Eight squares: depth ``2**(k+1) - 1`` at the k-th, 511 at the last.
+def test_each_read_is_weighted_by_its_measured_gain():
+    """Eight squares: 766 evaluations where the structural count is 9.
 
-    The structural count of the same chain is 9.  Each square's read of
-    its predecessor measures a relative gain of exactly 2 (the JVP of
-    ``u * u`` along ``u`` is ``2 u**2``), so the count is exact.
+    Each square's read of its predecessor measures a relative gain of
+    exactly 2 (the JVP of ``u * u`` along ``u`` is ``2 u**2``).  A member's
+    own count is scaled by the sum of its reads' gains when that exceeds
+    one (2 here: conservative for a product, exact for a sum whose terms
+    cancel), and the chain composes ``depth = own + 2 * depth(previous)``:
+    1 at the head (its read of the last square has gain far below one),
+    then 4, 10, 22, ..., 766.  Every product is exact in float32.
     """
     gm, names, _xs, _gc = _stepped_chain(8)
     assert gm._committed_floor_inputs["+".join(sorted(names))][0] == 9.0
-    assert _slot(gm, names) == 511.0
+    depth = 1.0
+    for _ in range(8):
+        depth = 2.0 + 2.0 * depth
+    assert depth == 766.0
+    assert _slot(gm, names) == depth
 
 
 def test_reads_of_gain_below_one_keep_the_structural_count():
-    """An affine ring of gain below one: the weighted depth is smaller; 6 stands."""
+    """An affine ring of gain below one: the weighted count is smaller; 6 stands.
+
+    Each relay ``g u + (1 - g)`` near ``x = 1`` reads a gain of ``g < 1``,
+    so no own count grows and the chain's weighted depth stays below 6.
+    """
     gm, names = _affine_ring(6)
     gm.step()
     assert _slot(gm, names) == 6.0
@@ -158,7 +172,7 @@ def test_the_spectral_bound_holds_on_a_stalled_squaring_chain():
 # Slow: the gradient compiles the twelve-node step twice more (~20 s on a
 # six-core slice).  Per push the weighting and the spectral bound it feeds
 # are pinned above; the gradient bound shares the count.
-# Per push: tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_each_same_pass_read_is_weighted_by_its_measured_gain
+# Per push: tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_each_read_is_weighted_by_its_measured_gain
 @pytest.mark.slow
 @pytest.mark.parametrize("n", [8, 12])
 def test_the_gradient_bound_holds_on_a_stalled_squaring_chain(n):

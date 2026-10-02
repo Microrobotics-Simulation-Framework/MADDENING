@@ -1022,11 +1022,28 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: ``coupling_diagnostics`` withholds ``spectral_usable`` wherever the
 #: residual is at the floor, where that count carries the bound.
 #:
-#: It is a model of the map's rounding, not a proof of it: a node whose
-#: update cancels catastrophically -- a small output computed as the
-#: difference of two large intermediates -- can exceed any fixed number
-#: of ulps of its *output's* magnitude, and nothing outside the node can
-#: see that.
+#: **Gains.**  "The sum along the chain" assumes a read passes a relative
+#: rounding on at most unchanged.  A squaring relay doubles it with no
+#: cancellation at all, and a node whose terms cancel (``3u - 2v`` at
+#: ``u ~ v``) amplifies its own rounding as well as its inputs': a
+#: Gauss-Seidel ring of twelve squares read the bound at 0.20x its true
+#: distance, and its gradient bound at 0.018x, with the flags set.  So
+#: with ``diagnostics=True`` the step measures every group-internal
+#: read's relative gain ``g`` at the returned state (one JVP of the
+#: reading node's update along the source's own state), scales each
+#: node's own count by ``max(1, sum g)`` over its reads, weights each
+#: same-pass read by its gain along the chain, and never goes below the
+#: structural count; the report reads that count from the step
+#: (``coupling_<key>_pass_evaluations``).  Without diagnostics the
+#: structural count stands (``precision_limited`` only, no bound).
+#:
+#: It is a model of the map's rounding, not a proof of it: the measured
+#: gains are first-order and taken along one direction per read (the
+#: source's own state), and a node whose update cancels *inside* itself
+#: -- a small output computed as the difference of two large
+#: intermediates it computes, not reads -- can exceed any fixed number
+#: of ulps of its output's magnitude where nothing outside the node can
+#: see it.
 PRECISION_FLOOR_ULPS = 4.0
 
 

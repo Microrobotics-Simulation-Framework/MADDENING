@@ -1278,6 +1278,15 @@ def _group_pass_structure(group, nodes, schedule, edges):
     return order, own, same_pass, declared
 
 
+def _group_reads(group, edges):
+    """``{member: members it reads through a group-internal edge}``, itself included."""
+    reads: dict[str, set] = {nn: set() for nn in group.nodes}
+    for edge in edges:
+        if edge.source_node in group.nodes and edge.target_node in group.nodes:
+            reads[edge.target_node].add(edge.source_node)
+    return reads
+
+
 def _group_residual_dtype(state, node_names):
     """The dtype a group's residual and its ``_meta`` slots are held in.
 
@@ -2861,11 +2870,14 @@ def _run_coupled_block_impl(
         group, nodes, group_node_names, group_internal_list)
     gs_order, gs_own, gs_same_pass, _ = _group_pass_structure(
         group, nodes, group_node_names, group_internal_list)
+    gs_reads = _group_reads(group, group_internal_list)
 
-    def _same_pass_gain(s_star, src, dst):
-        """Measured relative gain of ``dst``'s update in its same-pass read of ``src``.
+    def _read_gain(s_star, src, dst):
+        """Measured relative gain of ``dst``'s update in its read of ``src``.
 
-        One JVP of ``dst``'s update, at ``s_star``, along ``src``'s own
+        Measured for every group-internal read (from the same pass, the
+        previous iterate, or ``dst`` itself): at the fixed point both read
+        the same value.  One JVP of ``dst``'s update, at ``s_star``, along ``src``'s own
         state (a relative perturbation of every floating field of
         ``src`` by one), the response measured per floating field of
         ``dst`` relative to that field's magnitude, worst field taken:
@@ -3473,27 +3485,44 @@ def _run_coupled_block_impl(
             consts = tuple(consts_list)
 
             def _measured_pass_evaluations(x_full):
-                """The pass's evaluation count with every same-pass read gain-weighted.
+                """The pass's evaluation count with every read weighted by its measured gain.
 
-                ``max(structural, max_n depth(n))`` with ``depth(n) =
-                d_n e_n + sum_m g_nm depth(m)`` over the members ``m``
-                ``n`` reads from the same Gauss-Seidel pass, ``g_nm`` the
-                measured relative gain of that read
-                (``_same_pass_gain``).  In its own ``lax.cond`` branch so
-                its products cannot share subexpressions with the forward.
+                Each member's own count ``d_n e_n`` is scaled by
+                ``max(1, sum_m g_nm)`` over the members it reads -- the
+                amplification its own rounding suffers where its terms
+                cancel (``3u - 2v`` at ``u ~ v`` reads 5) -- and under
+                Gauss-Seidel the count is ``max_n depth(n)``, ``depth(n) =
+                own'(n) + sum_m g_nm depth(m)`` over the members ``n``
+                reads from the same pass; under Jacobi, ``max_n own'(n)``.
+                ``g_nm`` is the measured relative gain of the read
+                (``_read_gain``).  Never below the structural count.  In
+                its own ``lax.cond`` branch so its products cannot share
+                subexpressions with the forward.
                 """
                 def measure(xx):
                     s_star = _embed_live(xx)
-                    depth = {}
+                    gains = {(mm, nn): _read_gain(s_star, mm, nn)
+                             for nn in gs_order for mm in sorted(gs_reads[nn])}
+                    own_w = {}
                     for nn in gs_order:
-                        acc = jnp.asarray(gs_own[nn], jnp.float32)
-                        for mm in sorted(gs_same_pass[nn]):
-                            acc = acc + _same_pass_gain(s_star, mm, nn) * depth[mm]
-                        depth[nn] = acc
-                    weighted = functools.reduce(jnp.maximum, depth.values())
+                        total = functools.reduce(
+                            jnp.add, [gains[(mm, nn)] for mm in sorted(gs_reads[nn])],
+                            jnp.float32(0.0))
+                        own_w[nn] = jnp.float32(gs_own[nn]) * jnp.maximum(
+                            jnp.float32(1.0), total)
+                    if use_jacobi:
+                        weighted = functools.reduce(jnp.maximum, own_w.values())
+                    else:
+                        depth = {}
+                        for nn in gs_order:
+                            acc = own_w[nn]
+                            for mm in sorted(gs_same_pass[nn]):
+                                acc = acc + gains[(mm, nn)] * depth[mm]
+                            depth[nn] = acc
+                        weighted = functools.reduce(jnp.maximum, depth.values())
                     return jnp.maximum(jnp.float32(pass_evaluations), weighted)
 
-                if use_jacobi or not any(gs_same_pass.values()):
+                if not any(gs_reads.values()):
                     return jnp.asarray(pass_evaluations, jnp.float32)
                 return jax.lax.cond(
                     jnp.all(jnp.isfinite(x_full)), measure,
@@ -8165,7 +8194,17 @@ class GraphManager:
               the worst node's under Jacobi and, under Gauss-Seidel, the
               sum along the longest chain of same-pass reads (a node
               reading a member scheduled before it reads that member's
-              already-rounded output; ``_group_evaluations``) -- measured
+              already-rounded output; ``_group_evaluations``); with
+              ``diagnostics=True`` every read weighted by its relative
+              gain measured at the returned state, so a link that
+              amplifies a rounding (``u**2``) or a node whose terms cancel
+              counts for what it does, never below that structural count
+              (see :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`).
+              The count is the one the step was built with and measured,
+              not re-derived from the graph at report time: an edit made
+              since -- a node rebuilt with another declared count -- does
+              not move the report of a step that already ran, and a group
+              a member of which was removed since has no entry -- measured
               in that norm), times the larger of
               ``||(I - H)^{-1}||_2`` (the resolvent norm of the
               Krylov-compressed Jacobian, in the group's own norm) and

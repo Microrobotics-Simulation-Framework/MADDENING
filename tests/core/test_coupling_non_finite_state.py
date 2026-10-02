@@ -520,12 +520,14 @@ def test_an_accelerated_verdict_does_not_change_below_the_change_underflow(accel
     units reproduces the control to the bit.
     """
     cap = 400
+    # ``fori`` reports only with diagnostics; ``ift`` always, so it skips them.
+    diag = solver == "fori"
     ref = _tiny_graph("l2", _C_NORMAL, solver=solver, max_iterations=cap,
-                      acceleration=acceleration, diagnostics=False)
+                      acceleration=acceleration, diagnostics=diag)
     ref.step()
     want = ref.coupling_diagnostics()["a+b"]
     gm = _tiny_graph("l2", _C_NORMAL * 2.0 ** -shift, solver=solver, max_iterations=cap,
-                     acceleration=acceleration, diagnostics=False)
+                     acceleration=acceleration, diagnostics=diag)
     gm.step()
     got = gm.coupling_diagnostics()["a+b"]
     assert want["converged"] is True and want["iterations"] < cap, (

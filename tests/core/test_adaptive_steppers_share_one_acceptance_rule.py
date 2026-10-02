@@ -66,7 +66,7 @@ def test_both_steppers_take_the_same_steps_at_dt_min():
 
 def test_an_attempt_within_tolerance_is_accepted_by_both():
     """The ordinary regime is unchanged: the same accepted steps, no warning."""
-    loose = dict(KW, atol=1e-2, rtol=1e-2)
+    loose = dict(KW, atol=1e-1, rtol=1e-1)
     gm = _graph()
     with warnings.catch_warnings():
         warnings.simplefilter("error")

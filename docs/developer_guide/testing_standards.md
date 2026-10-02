@@ -793,10 +793,17 @@ does.
 | adaptive at a pinned dt == run_scan | `run_adaptive`/`run_adaptive_scan` with `dt_min = dt_max`, against `run_scan` at half the timestep; replaying `dt_history` through the dt step | Round-off per pass. The replay is bitwise. Every node's clock equals the stepper's time (MADD-ANO-061), within the rounding of its float32 sum | The dt-parameterised step itself |
 | vmap == per-member, jit == eager | `run_sweep` against `run_scan` per member; `jax.vmap` of the step against the step; `vmap(grad)` against `grad`; `jax.disable_jit()` against `jit` | States to round-off per pass; `iterations` equal; the residual to the norm's float32 floor; `rho_spectral` to its Arnoldi residual + `sqrt(8 eps)` (a nearly defective non-normal Jacobian moves its eigenvalue by the square root of a perturbation); `gradient_relative_error_bound` within 25% (its ~8% is documented); gradients within 1e-4 relative | Every fault in the step, which is the same batched and unbatched |
 | int/uint32/bool leaves survive | each non-float leaf after `k` updates, against its closed form, in every configuration above and under sub-cycling, waveform sweeps, multi-rate, adaptive stepping and `vmap` | Bitwise, dtype included | A leaf that reads a coupled input (the solver oracle covers that) |
+| units-invariance | the same equivariant group (no `beta * dt`, no leaves, linear) with every bias and initial state times `2**k`, `k` in -53..66, against the unscaled run (`test_differential_coupling_units.py`), every acceleration, norm, mode and solver | Bitwise: passes, verdict, residual, amplification, state / `2**k`. Powers of two only: a decimal scale changes the inputs' rounding, which Aitken is sensitive to | A constant that happens to be a power of two |
+| long Gauss-Seidel chains at the floor | a stalled ring of 8 (per push, both modes) or 24-32 relays (slow) against its float64 fixed point; drawn rank-one gains **and** the worst-case uniform ring (every link `rho**(1/m)`, no cancellation), which is what fails a floor that undercounts the chain | A usable `spectral_error_bound` >= the distance, no slack | Chains shorter than the floor's headroom (per push) |
+| adversarial chains | Gauss-Seidel rings closed by an affine head: links with relative gain above one and no cancellation (`u**2`, `u**4`, `u0 * u1`), and signed affine links whose terms cancel, kept as separate cases; the exact fixed point by float64 Newton on the head's loop map | A usable `spectral_error_bound` >= the distance; a usable `gradient_relative_error_bound` >= the true relative error of the gradient in the head's bias (slow) | Cancellation inside a node's own update, which nothing outside it can see |
+| IFT derivatives at every scale | `jax.jacfwd` and `jax.grad` of a step under `linear_solver="gmres"` against `"dense"` (an LU solve, no tolerance) and against `solver="fori"` (unrolled), the group at `2**k`, `k` in -100..60 (`test_differential_ift_derivatives.py`), jitted once through `gm._compiled_step` | Relative 1e-3 | A defect all three solves share (the one-pass map's JVP) |
 
 Each oracle was mutation-tested against a scratch copy of `src/` with at
 least one seeded fault, and each fault was caught. The PR that added the
-harness lists them.
+harness lists them. Random draws have twice let a floor defect through
+(rank-one gains are below one per link almost surely): an oracle whose
+claim rests on a model's premise needs a generator that attacks the
+premise, not only one that samples around it.
 
 ### Sharding wrappers
 

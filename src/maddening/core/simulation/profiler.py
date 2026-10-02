@@ -578,6 +578,16 @@ def _meta_group_keys(gm) -> list[tuple[str, str, str, str, float, float, int]]:
     return out
 
 
+def _declared_inputs(node) -> dict:
+    """Each input ``boundary_input_spec()`` declares, at its default (zeros if none)."""
+    out = {}
+    for name, bspec in (node.boundary_input_spec() or {}).items():
+        default = getattr(bspec, "default", None)
+        out[name] = (jnp.asarray(default) if default is not None
+                     else jnp.zeros(tuple(bspec.shape), dtype=bspec.dtype or jnp.float32))
+    return out
+
+
 def _group_sweeps(gm) -> dict[str, int]:
     """``{group_key: waveform sweeps}``: how many fixed-point solves a step runs per group.
 
@@ -1033,7 +1043,11 @@ def profile_graph(
     # Per-node cost estimation: run each node's update in isolation
     for name, spec in gm._nodes.items():
         node_state = gm._state.get(name, spec.node.initial_state())
-        bi = {}  # empty boundary inputs
+        # Every input the node declares, at its declared default (zeros where
+        # it gives none): timed with no inputs at all, a node that indexes a
+        # declared input -- ``boundary_inputs["u"]``, as the graph always
+        # supplies it -- raised ``KeyError`` and took the profile with it.
+        bi = _declared_inputs(spec.node)
         update_fn = jax.jit(spec.update_fn)
         # Warmup
         _ = update_fn(node_state, bi, spec.timestep)

@@ -192,19 +192,22 @@ def test_low_level_fmi3_api_two_instances_state_and_reset(tmp_path):
         vr = {v.name: v.valueReference for v in insts[0][1].modelVariables}
         k, pos, anchor = vr["spring.params.stiffness"], vr["spring.position"], vr["spring.anchor_position"]
         (ia, _), (ib, _) = insts
-        ia.setFloat64([k], [45.0])                          # before initialisation
-        ib.setFloat64([k], [30.0])
+        # all three are Float32 variables, so they are set and read with the
+        # Float32 functions: FMI 3.0 accesses a variable only through the
+        # getter / setter of its own type, and the bridge refuses any other
+        ia.setFloat32([k], [45.0])                          # before initialisation
+        ib.setFloat32([k], [30.0])
         for inst in (ia, ib):
             inst.enterInitializationMode(startTime=0.0)
             inst.exitInitializationMode()
-        ia.setFloat64([anchor], [0.25])
+        ia.setFloat32([anchor], [0.25])
         t = 0.0
         for _ in range(5):
             ia.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
             ib.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
             t += DT
-        assert ia.getFloat64([k])[0] == 45.0 and ib.getFloat64([k])[0] == 30.0
-        pa, pb = ia.getFloat64([pos])[0], ib.getFloat64([pos])[0]
+        assert ia.getFloat32([k])[0] == 45.0 and ib.getFloat32([k])[0] == 30.0
+        pa, pb = ia.getFloat32([pos])[0], ib.getFloat32([pos])[0]
         assert pa != pb                                     # instances are independent
         # state round trip, both in memory and serialized
         st = ia.getFMUState()
@@ -212,17 +215,17 @@ def test_low_level_fmi3_api_two_instances_state_and_reset(tmp_path):
         for _ in range(5):
             ia.doStep(currentCommunicationPoint=t, communicationStepSize=DT)
             t += DT
-        assert ia.getFloat64([pos])[0] != pa
+        assert ia.getFloat32([pos])[0] != pa
         ia.setFMUState(st)
-        assert ia.getFloat64([pos])[0] == pa
+        assert ia.getFloat32([pos])[0] == pa
         st2 = ia.deserializeFMUState(blob)
         ia.setFMUState(st2)
-        assert ia.getFloat64([pos])[0] == pa
+        assert ia.getFloat32([pos])[0] == pa
         ia.freeFMUState(st)
         ia.freeFMUState(st2)
         # reset returns to the initial state and constructor params
         ia.reset()
-        assert ia.getFloat64([pos])[0] == 0.5 and ia.getFloat64([k])[0] == 30.0
+        assert ia.getFloat32([pos])[0] == 0.5 and ia.getFloat32([k])[0] == 30.0
         for inst in (ia, ib):
             inst.terminate()
             inst.freeInstance()
@@ -288,9 +291,9 @@ def test_an_array_variable_is_read_with_its_full_count(tmp_path):
         inst.instantiate()
         try:
             vr = _vr(md, "rod.temperature")
-            assert inst.getFloat64([vr], nValues=5) == pytest.approx([1.0, 1.25, 1.5, 1.75, 2.0])
+            assert inst.getFloat32([vr], nValues=5) == pytest.approx([1.0, 1.25, 1.5, 1.75, 2.0])
             with pytest.raises(FMICallException):
-                inst.getFloat64([vr])                        # nValues = 1: not what it holds
+                inst.getFloat32([vr])                        # nValues = 1: not what it holds
             inst.terminate()
         finally:
             inst.freeInstance()

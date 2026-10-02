@@ -398,8 +398,9 @@ def op_set(paths: Paths, names: list[str], values: list[float]) -> None:
 
     The request is split the way the bridge splits it -- every value
     reference resolved and sized first, then each variable's slice checked in
-    order -- so a request naming one variable twice is judged slice by
-    slice, and the last slice of a parameter is the one written.
+    order.  A request naming one variable twice is refused when the second
+    name is reached (it used to be judged slice by slice, the last slice
+    written and the first dropped in silence).
     """
     md = paths.m.md
     by_name = {v.name: v for v in md.variables}
@@ -410,11 +411,16 @@ def op_set(paths: Paths, names: list[str], values: list[float]) -> None:
     staged: list[tuple[Any, np.ndarray]] = []
     expected_error: Optional[str] = None
     pos = 0
+    named: set[str] = set()
     for name in names:
         var = by_name.get(name)
         if var is None:
             expected_error = "unknown value reference"
             break
+        if name in named:
+            expected_error = "is named more than once in one set"
+            break
+        named.add(name)
         n = int(np.prod(var.shape)) if var.shape else 1
         chunk = np.asarray(values[pos:pos + n], np.float64).reshape(-1)
         pos += n

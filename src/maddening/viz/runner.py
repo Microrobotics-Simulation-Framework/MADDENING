@@ -207,7 +207,6 @@ class RealtimeRunner:
 
     def _loop(self) -> None:
         """Main loop executed on the daemon thread."""
-        dt = self._gm.timestep
         wall_start = time.perf_counter()
         sim_start = self._sim_time
 
@@ -233,7 +232,13 @@ class RealtimeRunner:
                 if self._stop.is_set() or not self._paused.is_set():
                     break
                 self._gm.step(external_inputs=ext_inputs)
-                self._sim_time += dt
+                # What that step advanced, read after it: ``step()``
+                # recompiles a graph edited since the last frame (a node
+                # added over the REST API mid-run), so a value read once
+                # at start-up would go stale.  ``gm.timestep`` is the
+                # step compile() schedules -- a sub-cycling group at its
+                # largest member timestep -- and costs microseconds.
+                self._sim_time += self._gm.timestep
 
             # Pace to wall clock
             target_wall = wall_start + (self._sim_time - sim_start) / self._time_scale

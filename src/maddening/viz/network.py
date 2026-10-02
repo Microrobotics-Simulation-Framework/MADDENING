@@ -59,6 +59,7 @@ from maddening.transport_auth import (
     TransportAuth,
     resolve_security,
 )
+from maddening.viz.relay import _step_advance
 
 try:
     import zmq
@@ -240,6 +241,10 @@ class NetworkRelay:
         self._socket.bind(address)
         self._step_count = 0
         self._timestep = 0.0
+        # Simulated time of the published steps, summed step by step (see
+        # ``StateRelay``): each adds what that step advanced.
+        self._elapsed = 0.0
+        self._gm: Optional[GraphManager] = None
         self._fields = fields
 
     @property
@@ -271,15 +276,25 @@ class NetworkRelay:
         return out
 
     def attach(self, graph_manager: GraphManager) -> None:
-        """Register as an observer on *graph_manager*."""
+        """Register as an observer on *graph_manager*.
+
+        Each published message's ``t`` is the simulated time of the steps
+        observed, each step adding the graph's
+        :attr:`~maddening.core.graph_manager.GraphManager.timestep` as it
+        stands at that step (a sub-cycling group counts at its largest
+        member timestep).
+        """
         self._timestep = graph_manager.timestep
+        self._gm = graph_manager
         graph_manager.add_observer(self._on_event)
 
     def _on_event(self, event: str, data) -> None:
         if event != "step":
             return
         self._step_count += 1
-        sim_time = self._step_count * self._timestep
+        self._timestep = _step_advance(self._gm, self._timestep)
+        self._elapsed += self._timestep
+        sim_time = self._elapsed
 
         state = self._filter_state(data)
         payload = json.dumps({"t": sim_time, "state": state}).encode()

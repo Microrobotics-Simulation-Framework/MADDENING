@@ -13,7 +13,7 @@ Typical use::
     binary = build_fmu_binary(out_dir)                  # needs a C compiler once
     write_fmu(md, "plant.fmu", binary=binary, endpoint="127.0.0.1:5555")
 
-    bridge = FmuTcpBridge(sidecar, md, master_dt=gm_base_dt, port=5555).start()
+    bridge = FmuTcpBridge(sidecar, md, master_dt=gm.timestep, port=5555).start()
     # ... the importer loads plant.fmu and drives it through the bridge ...
 """
 

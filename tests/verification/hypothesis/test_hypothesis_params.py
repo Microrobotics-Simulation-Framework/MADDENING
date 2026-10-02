@@ -316,16 +316,8 @@ class TestRunPathsAgree:
         assert abs(float(scanned["b"]["velocity"])) < 0.5      # the cancellation case
         _assert_close(stepped, scanned, "step vs run_scan", **_ulp_tol(n_steps))
 
-    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
-    @given(
-        seed=st.integers(min_value=0, max_value=2**31),
-        n_steps=st.integers(min_value=1, max_value=15),
-    )
-    # Costly tier: each example traces step, run_scan and run_sweep
-    # through a coupling group at a freshly drawn ``n_steps``, i.e. three
-    # compiles per example.
-    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
-    def test_coupled_step_scan_sweep(self, coupled, seed, n_steps):
+    @staticmethod
+    def _check_coupled(coupled, seed, n_steps):
         """Same through the coupling group; ``_meta`` is batched too."""
         rng = np.random.default_rng(seed)
         p = _random_spring_params(rng, coupled, ("sa", "sb"))
@@ -342,6 +334,26 @@ class TestRunPathsAgree:
         _assert_close(stepped, scanned, "step vs run_scan", **_ulp_tol(n_steps))
         _assert_close(scanned, row, "run_scan vs run_sweep", **_ulp_tol(n_steps))
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_params.py::TestRunPathsAgree::test_coupled_step_scan_sweep_at_one_length
+    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
+    @given(
+        seed=st.integers(min_value=0, max_value=2**31),
+        n_steps=st.integers(min_value=1, max_value=15),
+    )
+    # Costly tier: each example traces step, run_scan and run_sweep
+    # through a coupling group at a freshly drawn ``n_steps``, i.e. three
+    # compiles per example.
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    def test_coupled_step_scan_sweep(self, coupled, seed, n_steps):
+        """Same through the coupling group; ``_meta`` is batched too."""
+        self._check_coupled(coupled, seed, n_steps)
+
+    # The property above at one rollout length (one compile of each path)
+    # and three drawn parameter sets, on every push and both JAX lanes.
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_coupled_step_scan_sweep_at_one_length(self, coupled, seed):
+        self._check_coupled(coupled, seed, 4)
+
 
 # ---------------------------------------------------------------------------
 # (c) params gradient vs float64 finite differences
@@ -357,14 +369,10 @@ class TestGradientMatchesFiniteDifferences:
         traj = _rollout(step_fn, ext, state0, params, n_steps, ("s",))
         return jnp.mean(traj ** 2)
 
-    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
-    @given(
-        seed=st.integers(min_value=0, max_value=2**31),
-        n_steps=st.integers(min_value=5, max_value=40),
-        which=st.sampled_from(["stiffness", "damping"]),
-    )
-    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
-    def test_spring_params_gradient(self, seed, n_steps, which):
+    @classmethod
+    def _gradients(cls, seed, n_steps, which):
+        """``(g32, g64, g_fd)``: the float32 and float64 params gradients of a
+        rollout loss on a drawn spring, and a float64 central difference."""
         rng = np.random.default_rng(seed)
         k = float(rng.uniform(1.0, 200.0))
         c = float(rng.uniform(0.0, 10.0))
@@ -380,7 +388,7 @@ class TestGradientMatchesFiniteDifferences:
         def loss_of(gm, theta, dtype, state):
             params = jax.tree.map(lambda x: jnp.asarray(x, dtype), gm.params)
             params["nodes"]["s"][which] = jnp.asarray(theta, dtype)
-            return self._loss(gm, params, state, n_steps)
+            return cls._loss(gm, params, state, n_steps)
 
         theta0 = float(gm32.params["nodes"]["s"][which])
         g32 = float(jax.grad(lambda t: loss_of(gm32, t, jnp.float32, state32))(
@@ -402,10 +410,34 @@ class TestGradientMatchesFiniteDifferences:
                 jnp.asarray(theta0, jnp.float64)))
         finally:
             jax.config.update("jax_enable_x64", prev)
+        return g32, g64, g_fd
 
-        assume(abs(g64) > 1e-6)
+    @staticmethod
+    def _assert_gradients_agree(g32, g64, g_fd):
         assert abs(g64 - g_fd) / abs(g64) < 1e-4, (g64, g_fd)
         assert abs(g32 - g64) / abs(g64) < 1e-3, (g32, g64, g_fd)
+
+    # Per push: tests/verification/hypothesis/test_hypothesis_params.py::TestGradientMatchesFiniteDifferences::test_spring_params_gradient_on_one_spring
+    @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
+    @given(
+        seed=st.integers(min_value=0, max_value=2**31),
+        n_steps=st.integers(min_value=5, max_value=40),
+        which=st.sampled_from(["stiffness", "damping"]),
+    )
+    @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
+    def test_spring_params_gradient(self, seed, n_steps, which):
+        g32, g64, g_fd = self._gradients(seed, n_steps, which)
+        assume(abs(g64) > 1e-6)
+        self._assert_gradients_agree(g32, g64, g_fd)
+
+    # The property above on one drawn spring, for both parameters, on
+    # every push and both JAX lanes.  The spring is informative (its
+    # float64 gradient is far from zero), so nothing is assumed away.
+    @pytest.mark.parametrize("which", ["stiffness", "damping"])
+    def test_spring_params_gradient_on_one_spring(self, which):
+        g32, g64, g_fd = self._gradients(3, 12, which)
+        assert abs(g64) > 1e-6, g64
+        self._assert_gradients_agree(g32, g64, g_fd)
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +448,10 @@ class TestGradientMatchesFiniteDifferences:
 class TestAdjointIdentity:
 
     @staticmethod
-    def _check(gm, nodes, rng, n_steps):
+    def _check(gm, nodes, rng, n_steps, jit=False):
+        """``jit=True`` differentiates ``jax.jit(f)``: the same rules, one
+        compile instead of an op-by-op trace (measured on the coupled pair,
+        one step, 3 cores: 2.9 s against 7.4 s eager)."""
         ext = gm._default_external_inputs()  # noqa: SLF001
         step_fn = gm._build_step_fn()  # noqa: SLF001
         state = _random_spring_state(rng, gm, nodes)
@@ -428,6 +463,9 @@ class TestAdjointIdentity:
             for _ in range(n_steps):
                 s = step_fn(s, ext, params)
             return {n: s[n] for n in nodes}
+
+        if jit:
+            f = jax.jit(f)
 
         v = jax.tree.map(lambda x: jnp.asarray(rng.standard_normal(x.shape), x.dtype), p0)
         out, jv = jax.jvp(f, (p0,), (v,))
@@ -472,6 +510,7 @@ class TestAdjointIdentity:
     def test_single_spring(self, spring, seed, n_steps):
         self._check(spring, ("s",), np.random.default_rng(seed), n_steps)
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_params.py::TestAdjointIdentity::test_coupled_pair_at_one_example
     @pytest.mark.slow  # rollouts and their gradients compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(
         seed=st.integers(min_value=0, max_value=2**31),
@@ -487,6 +526,12 @@ class TestAdjointIdentity:
         """The IFT rule is a ``custom_jvp``; its transpose (via
         ``custom_linear_solve``) must be the true adjoint."""
         self._check(coupled, ("sa", "sb"), np.random.default_rng(seed), n_steps)
+
+    # The property above at one drawn example, one step: a jvp and a vjp
+    # through the IFT rule on every push and both JAX lanes, jitted so the
+    # two transforms compile once each rather than tracing op by op.
+    def test_coupled_pair_at_one_example(self, coupled):
+        self._check(coupled, ("sa", "sb"), np.random.default_rng(5), 1, jit=True)
 
 
 # ---------------------------------------------------------------------------

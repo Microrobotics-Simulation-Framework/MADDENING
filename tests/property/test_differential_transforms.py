@@ -346,19 +346,34 @@ def test_a_vmapped_coupled_step_is_the_step_per_member(case, data):
 
 
 # Slow: the batched and unbatched backward programs compile in 11 s on CI.
-# Per push: tests/property/test_differential_transforms.py::test_a_vmapped_coupled_step_is_the_step_per_member[ift-iqn-predictor]
-# (the forward under vmap; the batched gradient is checked in the slow lane only).
+# Per push: tests/property/test_differential_transforms.py::test_a_vmapped_gradient_through_an_ift_step_is_the_gradient_per_member
+# (one fixed draw through the smallest IFT group, one step).
 @pytest.mark.slow
 @pytest.mark.parametrize("case", ["ift-iqn-predictor", "fori-fixed-mixed"])
 # Costly tier: per example, a batched gradient and three unbatched ones.
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
 def test_a_vmapped_gradient_is_the_gradient_per_member(case, data):
-    """``vmap(grad)`` == ``grad`` per member (per push)."""
+    """``vmap(grad)`` == ``grad`` per member, over drawn values (slow lane)."""
     structure, group = _VMAP_CASES[case]
     gdef, gm = _graph(structure, _key(group))
     values = data.draw(cg.drawn_values(gdef, rhos=(0.3, 0.9)))
     assert_vmapped_gradient_matches(gdef, gm, values, data.draw(st.integers(0, 2**31 - 1)))
+
+
+def test_a_vmapped_gradient_through_an_ift_step_is_the_gradient_per_member():
+    """``vmap(grad)`` == ``grad`` per member through an IFT-coupled step,
+    at one fixed draw (per push).
+
+    The same oracle as the property above, on the flux pair under Aitken
+    (``ift-aitken-jacobi``), the smallest IFT group of the vmap cases,
+    over one step: the batched and unbatched backward programs compile
+    once each (about 4.5 s on three local cores).  Without it no push
+    batches a gradient through the IFT rule's ``custom_linear_solve``."""
+    structure, group = _VMAP_CASES["ift-aitken-jacobi"]
+    gdef, gm = _graph(structure, _key(group))
+    values = cg.draw_values(np.random.default_rng(7), gdef, 0.9, nonnormal=True)
+    assert_vmapped_gradient_matches(gdef, gm, values, 3, steps=1)
 
 
 # ---------------------------------------------------------------------------

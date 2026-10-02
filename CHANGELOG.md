@@ -20,6 +20,9 @@ guidance; the itemized changes follow.
 - **Read-only graph inspection** (experimental): `gm.print_graph()` / `format_graph()`, `to_mermaid()` / `to_dot()`, and tables
   `state_summary()`, `params_table()`, `coupling_report()` (caveats flagged), `memory_estimate()` with `print_*` forms; none writes or
   compiles anything.  `maddening.show_versions()` / `python -m maddening info` for bug reports; `print()` of `FitResult` / `FIMReport`
+- **The slow-only rule is checked** (`tests/compliance/test_slow_only_rule.py`): a slow-marked framework test names a cheaper
+  test the default lane runs (`# Per push: <node id>`) or is in the slow-only table; six framework properties that had neither
+  now have one, and each slow hypothesis property a sibling on both JAX lanes.  A slow mark you add needs one (testing_standards)
 - **Differential tests for coupling and numerics** (`tests/property/test_differential_*.py`): two paths that must agree, over
   generated graphs of synthetic nodes -- fori/ift, diagnostics on/off, the exact fixed point, multi-rate, sub-cycling, adaptive,
   `vmap`/`jit`, non-float leaves; each disagreement found is a strict xfail (`testing_standards.md`, "Differential tests")

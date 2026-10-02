@@ -366,7 +366,10 @@ jobs:
     # slowest tests and files, and allowlist entries that may be
     # removable -- which only a view of the whole lane can say, since an
     # entry absent from one shard is simply on another.  Report only; the
-    # shards gate themselves.
+    # shards gate themselves.  The one failure: no shard report at all.
+    # This job runs only when the change needs the test lanes, so no report
+    # means no shard ran -- and GitHub reports a job skipped by `if:` as a
+    # success, even to a required check.
     name: Test durations
     needs: [changes, test]
     if: ${{ !cancelled() && needs.changes.outputs.code == 'true' }}
@@ -385,12 +388,15 @@ jobs:
       - name: Summarise the lane
         run: |
           n=$(ls results/test-results-shard*.xml 2>/dev/null | wc -l)
+          if [ "$n" -eq 0 ]; then
+            echo "::error title=Test durations::no shard report for JAX ${{ matrix.jax-version }}: no test shard of this lane ran, and this job runs only when the change needs the test lanes"
+            exit 1
+          fi
           extra=""
           if [ "$n" -ne 4 ]; then
             echo "::warning title=Test durations::only $n of 4 shard reports for JAX ${{ matrix.jax-version }}; the summary covers those shards and lists no removable allowlist entries"
             extra="--no-removable"
           fi
-          [ "$n" -gt 0 ] || exit 0
           # warm, cold, or mixed when the shards differ (a shard whose CPU
           # model had no cache yet runs cold) -- or when a shard's mode file
           # is missing, since that shard's mode is then unknown.

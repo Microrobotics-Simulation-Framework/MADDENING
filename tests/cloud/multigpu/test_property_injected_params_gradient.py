@@ -87,6 +87,7 @@ def _loss_fn(node, boundary_inputs, steps: int):
     return loss
 
 
+# Per push: tests/cloud/multigpu/test_sharded_params.py::test_a_var_keyword_update_padded_is_calibratable_under_both_sharded_wrappers
 @pytest.mark.slow  # a sharded vjp compiled per example: 6-10 s on CI
 @given(style=st.sampled_from(sorted(SIGNATURE_STYLES)),
        n_devices=device_counts(), rate=param_values())

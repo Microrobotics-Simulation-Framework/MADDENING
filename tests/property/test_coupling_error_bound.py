@@ -512,6 +512,8 @@ def test_converged_implies_the_state_is_within_tolerance_of_the_fixed_point(
 # every example builds and compiles a different graph -- 42-48 s on the CI
 # runner, and no fixed-shape rewrite applies.  The same algebra is pinned
 # on every push by example in ``tests/core/test_coupling_error_bound.py``.
+# Per push: tests/core/test_coupling_error_bound.py::test_converged_means_the_state_is_within_tolerance_of_the_fixed_point
+# and tests/core/test_coupling_error_bound.py::test_the_bound_is_what_costs_the_extra_iterations
 @pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(recipe=_RECIPES)
@@ -566,6 +568,8 @@ def test_the_new_criterion_is_never_looser_than_the_residual_test(recipe):
 # per drawn recipe, 63-73 s on the CI runner.  Solver parity is pinned on
 # every push by ``tests/core/test_coupling_solver_equivalence.py``, including
 # this property's own shrunk counterexample.
+# Per push: tests/core/test_coupling_error_bound.py::test_both_solvers_report_the_same_bound and
+# tests/core/test_coupling_solver_equivalence.py::test_both_solvers_report_the_same_verdict_about_the_same_state
 @pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(recipe=_RECIPES, solver=st.sampled_from(["ift", "fori"]))
@@ -799,6 +803,7 @@ _TWO_MODE_GROUP = dict(max_iterations=60, tolerance=_ANALYTIC_TOLERANCE)
 # ``test_the_estimate_is_invariant_to_the_relaxation_factor`` in
 # ``tests/core/test_coupling_error_bound.py`` pins the same statement at
 # fixed factors on every push.
+# Per push: tests/core/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor
 @pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(
@@ -1073,6 +1078,8 @@ def _normal_contractions(draw):
 # spectral bound is held on every push by the two-mode property above, which
 # compiles once, and by the example tests in
 # ``tests/core/test_coupling_error_bound.py``, relaxation included.
+# Per push: tests/property/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds and
+# tests/core/test_coupling_error_bound.py::test_the_spectral_bound_does_not_depend_on_the_relaxation_factor
 @pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
 @given(case=_normal_contractions())

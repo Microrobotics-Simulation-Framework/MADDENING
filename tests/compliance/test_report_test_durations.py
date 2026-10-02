@@ -125,6 +125,38 @@ def test_an_unlisted_test_over_the_policy_line_warns_without_failing(gate, tmp_p
     assert "tests/a/test_x.py::TestA::test_middling" in out
 
 
+@pytest.mark.parametrize("seconds, code, warned", [(20.4, 1, False), (5.4, 0, True), (4.9, 0, False)])
+def test_a_test_is_judged_on_its_fractional_seconds(gate, tmp_path, capsys, seconds, code, warned):
+    """JUnit records milliseconds; truncated to whole seconds, an unlisted
+    20.4 s test would pass the 20 s line and a 5.4 s one would escape the
+    5 s warning."""
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_t", seconds))
+    got, out = _run(gate, capsys, report)
+    assert got == code, out
+    assert ("title=Test over 5 s::" in out) is warned, out
+    assert ("::error" in out) is (code == 1), out
+
+
+def test_a_kept_test_over_the_policy_line_is_not_called_removable(gate, tmp_path, capsys):
+    """An allowlisted test that passed at 8 s still needs its entry.
+
+    Removable means it passed under the policy line (5 s) -- not under the
+    hard line (20 s), which would offer every kept test between them for
+    removal.  The 4 s entry beside it is listed, so the fixture can show
+    the difference.
+    """
+    report = _report(tmp_path, _case("tests/a/test_x.py", "test_kept", 8.0),
+                     _case("tests/a/test_x.py", "test_now_fast", 4.0))
+    allow = tmp_path / "allow.txt"
+    allow.write_text("tests/a/test_x.py::test_kept # kept: x\n"
+                     "tests/a/test_x.py::test_now_fast # kept: y\n")
+    code, _ = _run(gate, capsys, report, "--allowlist", allow, "--cache-mode", "cold")
+    assert code == 0
+    removable = Path(str(report) + ".md").read_text().split("may be removable")[1]
+    assert "`tests/a/test_x.py::test_now_fast`" in removable
+    assert "test_kept" not in removable, removable
+
+
 def test_fail_over_zero_reports_without_gating(gate, tmp_path, capsys):
     report = _report(tmp_path, _case("tests/a/test_x.py", "test_slow", 900.0))
     code, out = _run(gate, capsys, report, "--fail-over", "0")

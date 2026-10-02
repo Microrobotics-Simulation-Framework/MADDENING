@@ -8961,8 +8961,13 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      A client that subscribes to part of the state has its frames encoded
-      for it alone.
+      Encoding a frame runs long C calls (`tolist`, `json.dumps`) that hold
+      the interpreter lock, so a very large state still delays the event
+      loop while it is encoded, though no longer per client: re-measured on
+      the fixed tree, `GET /healthz` beside one client of the 256 x 256
+      lattice took up to 0.30 s (0.62 s before).  Stream a large state with
+      `/ws/state/binary`, or subscribe to the fields shown.  A client that
+      subscribes to part of the state has its frames encoded for it alone.
     verification:
       - "tests/api/test_state_stream_encodes_off_the_event_loop.py::test_state_frames_are_encoded_off_the_event_loop"
       - "tests/api/test_state_stream_encodes_off_the_event_loop.py::test_a_frame_of_the_whole_state_is_encoded_once_for_every_client"

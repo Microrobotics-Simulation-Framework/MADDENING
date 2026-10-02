@@ -414,3 +414,30 @@ def test_the_graph_lock_is_re_entrant_and_only_its_holder_releases_it():
     other.join(5)
     assert errors == [False]
     lock.release()
+
+
+def test_a_stop_that_arrives_as_the_runner_is_granted_the_lock_costs_no_step():
+    """The runner reads its stop flag again once it holds the lock: a stop
+    asked for while it waited -- here, at the very moment the lock is
+    granted -- must not cost one more step over a state a reset is about to
+    write."""
+    from maddening.viz.relay import StateRelay
+    from maddening.viz.runner import RealtimeRunner
+
+    gm = _graph()
+    relay = StateRelay()
+    relay.attach(gm)
+
+    class GrantedAsTheStopArrives:
+        def acquire_unless(self, event):
+            event.set()
+            return True
+
+        def release(self):
+            pass
+
+    runner = RealtimeRunner(gm, relay, lock=GrantedAsTheStopArrives())
+    runner.start()
+    runner._thread.join(10)
+    assert not runner.is_alive
+    assert relay.step_count == 0

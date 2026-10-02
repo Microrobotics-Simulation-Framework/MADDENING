@@ -131,7 +131,10 @@ def test_each_request_behind_a_long_holder_answers_within_about_one_timeout(serv
     finally:
         server._graph_lock.release()
     assert set(log) == {"start", "reset 1", "reset 2", "reset 3", "stride", "stop"}, log
+    # Within one timeout of arrival, and a margin for the request itself:
+    # behind a start waiting for the graph, a request that then waited a
+    # whole timeout of its own answered after nearly two.
     for label, (waited, status) in log.items():
-        assert waited < 2 * TIMEOUT, (label, waited, status, log)
+        assert waited < 1.6 * TIMEOUT, (label, waited, status, log)
     assert log["stride"][1] == 200 and log["stride"][0] < TIMEOUT / 2, log
     assert server._steps_per_frame == 2

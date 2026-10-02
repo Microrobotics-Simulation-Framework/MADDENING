@@ -50,7 +50,13 @@ def _client(start: float = 0.0):
     return server, TestClient(server.create_app(), raise_server_exceptions=False)
 
 
-def test_a_run_that_fails_part_way_reports_the_steps_it_took():
+def test_a_run_that_fails_part_way_reports_the_steps_it_took(monkeypatch):
+    # Slices that always double (1, 2, 4, 8, 16, 32 ...): the 33rd step is
+    # the second of the sixth slice, so the count must include the steps a
+    # failing slice took, not only the slices that finished.
+    from maddening.api import server as server_module
+
+    monkeypatch.setattr(server_module, "_RUN_SLICE_SECONDS", 1e9)
     server, client = _client()
     resp = client.post("/sim/run", params={"n_steps": 100})
     assert resp.status_code == 400, resp.text

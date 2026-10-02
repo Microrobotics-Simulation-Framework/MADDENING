@@ -9809,7 +9809,7 @@ class GraphManager:
         return inspection.format_graph(self, width=width)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def print_graph(self, *, file: Optional["TextIO"] = None, width: int = 100,
+    def print_graph(self, *, file: Optional[TextIO] = None, width: int = 100,
                     rich: bool = False) -> None:
         """Print :meth:`format_graph` to ``file`` (default ``sys.stdout``).
 
@@ -9866,7 +9866,7 @@ class GraphManager:
         return inspection.to_dot(self, rankdir=rankdir)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def state_summary(self, *, include_meta: bool = False) -> "InspectionTable":
+    def state_summary(self, *, include_meta: bool = False) -> InspectionTable:
         """Per-field statistics of the state the graph holds now.
 
         One row per state field, sorted by node then field, with keys
@@ -9901,14 +9901,14 @@ class GraphManager:
         return inspection.state_summary(self, include_meta=include_meta)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def print_state_summary(self, *, file: Optional["TextIO"] = None,
+    def print_state_summary(self, *, file: Optional[TextIO] = None,
                             include_meta: bool = False, width: int = 100,
                             rich: bool = False) -> None:
         """Print :meth:`state_summary` (see :meth:`InspectionTable.print`)."""
         self.state_summary(include_meta=include_meta).print(file, width=width, rich=rich)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def params_table(self) -> "InspectionTable":
+    def params_table(self) -> InspectionTable:
         """One row per leaf of the graph's parameters, with its ParamSpec.
 
         Keys: ``section`` (``"nodes"`` or ``"mappings"``), ``owner`` (the
@@ -9938,13 +9938,13 @@ class GraphManager:
         return inspection.params_table(self)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def print_params_table(self, *, file: Optional["TextIO"] = None, width: int = 100,
+    def print_params_table(self, *, file: Optional[TextIO] = None, width: int = 100,
                            rich: bool = False) -> None:
         """Print :meth:`params_table` (see :meth:`InspectionTable.print`)."""
         self.params_table().print(file, width=width, rich=rich)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def coupling_report(self) -> "InspectionTable":
+    def coupling_report(self) -> InspectionTable:
         """:meth:`coupling_diagnostics` as one row per coupling group, with its caveats flagged.
 
         Keys: ``group``, ``solver``, ``max_iterations`` and the report's
@@ -9983,13 +9983,13 @@ class GraphManager:
         return inspection.coupling_report(self)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def print_coupling_report(self, *, file: Optional["TextIO"] = None, width: int = 100,
+    def print_coupling_report(self, *, file: Optional[TextIO] = None, width: int = 100,
                               rich: bool = False) -> None:
         """Print :meth:`coupling_report` (see :meth:`InspectionTable.print`)."""
         self.coupling_report().print(file, width=width, rich=rich)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def memory_estimate(self) -> "InspectionTable":
+    def memory_estimate(self) -> InspectionTable:
         """State memory per node, and in total, from shapes and dtypes.
 
         One row per node and one for ``_meta`` when the graph has it,
@@ -10015,7 +10015,7 @@ class GraphManager:
         return inspection.memory_estimate(self)
 
     @stability(StabilityLevel.EXPERIMENTAL)
-    def print_memory_estimate(self, *, file: Optional["TextIO"] = None, width: int = 100,
+    def print_memory_estimate(self, *, file: Optional[TextIO] = None, width: int = 100,
                               rich: bool = False) -> None:
         """Print :meth:`memory_estimate` (see :meth:`InspectionTable.print`)."""
         self.memory_estimate().print(file, width=width, rich=rich)

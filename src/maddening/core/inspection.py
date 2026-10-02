@@ -522,7 +522,7 @@ def _stats(leaf: Any) -> Optional[dict[str, Any]]:
     if _is_tracer(leaf):
         return None
     dtype = getattr(leaf, "dtype", None)
-    if dtype is not None and jax.dtypes.issubdtype(dtype, jax.dtypes.extended):
+    if dtype is not None and jnp.issubdtype(dtype, jax.dtypes.extended):
         return None
     arr = np.asarray(leaf)
     if dtype is not None and jnp.issubdtype(dtype, jnp.floating) and arr.dtype.kind != "f":
@@ -1142,7 +1142,7 @@ def params_table(gm: "GraphManager") -> InspectionTable:
             flags.append("traced: a tracer has no value to read")
         else:
             if info.size == 1 and getattr(leaf, "dtype", None) is not None and not \
-                    jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.extended):
+                    jnp.issubdtype(leaf.dtype, jax.dtypes.extended):
                 scalar = np.asarray(leaf).reshape(())
                 value = bool(scalar) if scalar.dtype.kind == "b" else (
                     int(scalar) if scalar.dtype.kind in "iu" else float(scalar))

@@ -6542,7 +6542,7 @@ anomalies:
       - "tests/core/test_adaptive_error_norm_reads_floating_leaves_only.py::test_a_non_floating_leaf_adds_neither_a_term_nor_an_element"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-075"
+  - anomaly_id: "MADD-ANO-083"
     title: "A REST request could make the server allocate without bound: before 0.4.0 POST /graph/nodes built any size, and 0.4.0's size checks ran only after the node was built"
     description: >
       From v0.1.0 to v0.3.1 `POST /graph/nodes` called the node's
@@ -6628,7 +6628,7 @@ anomalies:
       - "tests/usd/test_usd_node_size_refused_before_construction.py::test_a_stage_naming_an_impossible_node_is_refused_unbuilt"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-076"
+  - anomaly_id: "MADD-ANO-084"
     title: "PUT /graph/params answered 200 to a value the running node could not step with, and every POST /sim/step after it was a 500"
     description: >
       From v0.1.0 to v0.3.1 `PUT /graph/params` wrote any value into
@@ -6671,7 +6671,7 @@ anomalies:
       - "tests/api/test_params_writes_the_step_cannot_run_with.py::test_a_graph_configured_so_it_cannot_step_is_a_400_naming_why"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-077"
+  - anomaly_id: "MADD-ANO-085"
     title: "POST /sim/stop answered \"stopped\" while the runner's thread kept stepping, and a reset after it was overwritten"
     description: >
       `RealtimeRunner` read its stop flag only between frames, `stop()`
@@ -6728,7 +6728,7 @@ anomalies:
       - "tests/api/test_runner_stop_and_stride.py::test_the_runner_stops_within_a_step_of_a_long_frame"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-078"
+  - anomaly_id: "MADD-ANO-086"
     title: "A checkpoint path that resolved to the checkpoint root itself wrote, and loaded, <root>.npz in the root's parent"
     description: >
       0.4.0 confines `/checkpoint/save` and `/checkpoint/load` to
@@ -6769,7 +6769,7 @@ anomalies:
       - "tests/api/test_checkpoint_paths_stay_inside_the_root.py::test_a_symlink_inside_the_root_does_not_lead_out_of_it"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-079"
+  - anomaly_id: "MADD-ANO-087"
     title: "PUT /sim/stride echoed values it did not apply, and DELETE /graph/edges answered 200 for an edge the graph did not have"
     description: >
       Three replies that described something the server had not done.
@@ -6808,7 +6808,7 @@ anomalies:
       - "tests/api/test_runner_stop_and_stride.py::test_deleting_an_edge_that_does_not_exist_is_a_404"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-080"
+  - anomaly_id: "MADD-ANO-088"
     title: "A state or render WebSocket stream never noticed a client that left after the simulation stopped, so the server could not shut down; an ordinary disconnect was logged as an error"
     description: >
       `/ws/state`, `/ws/state/binary` and `/ws/render` learned that a

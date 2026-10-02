@@ -2285,6 +2285,24 @@ EVENT_EDGE_ADDED = "edge_added"
 EVENT_EDGE_REMOVED = "edge_removed"
 EVENT_COMPILED = "compiled"
 EVENT_STEP = "step"
+
+
+class _StepState(dict):
+    """The user state an ``EVENT_STEP`` observer is handed, carrying
+    ``advance``: the simulated time that step covered, or ``None`` for a
+    step of the graph's own :attr:`GraphManager.timestep`.
+
+    A ``dict`` in every other respect, so an observer that reads the state
+    is unaffected.  :meth:`GraphManager.run_adaptive` steps by a varying
+    ``dt``, and the relays added ``timestep`` for each of its steps: twelve
+    adaptive steps to t = 1 s of a 1/64 s graph were streamed as 0.1875 s.
+    """
+
+    __slots__ = ("advance",)
+
+    def __init__(self, state: dict, advance: Optional[float] = None) -> None:
+        super().__init__(state)
+        self.advance = advance
 # Emitted by maddening.sysid.fit / fit_lm / fit_multiple_shooting.
 EVENT_FIT_PROGRESS = "fit_progress"
 
@@ -9918,7 +9936,9 @@ class GraphManager:
 
                 if callback is not None:
                     callback(t, dt, self._user_state(state))
-                self._notify(EVENT_STEP, self._user_state(state))
+                # With the step's dt: a relay adds it to its clock, not the
+                # graph's fixed step (MADD-ANO-096's adaptive residual).
+                self._notify(EVENT_STEP, _StepState(self._user_state(state), float(dt)))
             else:
                 n_rejected += 1
             dt = float(dt_next)

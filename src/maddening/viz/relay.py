@@ -15,17 +15,24 @@ if TYPE_CHECKING:
     from maddening.core.graph_manager import GraphManager
 
 
-def _step_advance(graph_manager: Optional[GraphManager], last: float) -> float:
+def _step_advance(graph_manager: Optional[GraphManager], last: float,
+                  data: object = None) -> float:
     """The simulated time the step a relay just observed advanced.
 
-    The graph's :attr:`~maddening.core.graph_manager.GraphManager.timestep`
-    read at the step -- the step ``compile()`` schedules, a sub-cycling
-    group at its largest member timestep -- or *last* when there is no
-    graph to ask.  Read per step rather than once at attach time, because a
-    graph edited between runs (a node of another timestep added over the
-    REST API) is recompiled by its next step and steps by a different
-    amount from then on.
+    The step's own ``advance`` when the event carries one (*data*, the
+    state an ``EVENT_STEP`` observer is handed: ``GraphManager.run_adaptive``
+    steps by a varying ``dt`` and says so); otherwise the graph's
+    :attr:`~maddening.core.graph_manager.GraphManager.timestep` read at the
+    step -- the step ``compile()`` schedules, a sub-cycling group at its
+    largest member timestep -- or *last* when there is no graph to ask.
+    Read per step rather than once at attach time, because a graph edited
+    between runs (a node of another timestep added over the REST API) is
+    recompiled by its next step and steps by a different amount from then
+    on.
     """
+    advance = getattr(data, "advance", None)
+    if advance is not None:
+        return float(advance)
     if graph_manager is None:
         return last
     try:
@@ -143,7 +150,7 @@ class StateRelay:
         """Observer callback -- invoked on the simulation thread."""
         if event == "step":
             self._step_count += 1
-            self._timestep = _step_advance(self._gm, self._timestep)
+            self._timestep = _step_advance(self._gm, self._timestep, data)
             self._elapsed += self._timestep
             if self._step_count % self._stride != 0:
                 return

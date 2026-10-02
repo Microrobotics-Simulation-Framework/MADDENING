@@ -227,7 +227,8 @@ def test_the_network_relay_stamps_each_message_with_the_real_advance():
 def test_a_server_reset_restarts_the_frames_clock():
     """The REST server's WebSocket frames carry the relay's ``sim_time``:
     after ``POST /sim/run`` it is the run's simulated time, and ``POST
-    /sim/reset`` sets it back to zero with the state."""
+    /sim/reset`` sets it back to zero with the state -- and publishes the
+    reset state at that time, so the streams show it at once."""
     gm = _subcycled()
     gm.compile()
     server = SimulationServer({}, graph_manager=gm)
@@ -235,8 +236,14 @@ def test_a_server_reset_restarts_the_frames_clock():
     resp = client.post("/sim/run", params={"n_steps": 5})
     assert resp.status_code == 200, resp.text
     assert server.relay.latest_snapshot()[0] == pytest.approx(5 * 0.02, rel=1e-9)
-    assert client.post("/sim/reset").status_code == 200
-    assert server.relay.latest_snapshot() == (0.0, None)
+    reset = client.post("/sim/reset")
+    assert reset.status_code == 200
+    sim_time, snapshot = server.relay.latest_snapshot()
+    assert sim_time == 0.0 and server.relay.step_count == 0
+    assert {node: {f: float(v) for f, v in fields.items()}
+            for node, fields in snapshot.items()} == {
+        node: {f: float(v) for f, v in fields.items()}
+        for node, fields in reset.json()["state"].items() if node != "_meta"}
     assert client.post("/sim/run", params={"n_steps": 2}).status_code == 200
     assert server.relay.latest_snapshot()[0] == pytest.approx(2 * 0.02, rel=1e-9)
 

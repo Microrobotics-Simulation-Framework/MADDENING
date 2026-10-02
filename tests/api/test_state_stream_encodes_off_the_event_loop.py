@@ -92,9 +92,12 @@ def test_streams_past_the_cap_are_refused_with_1013(monkeypatch, third):
     with client.websocket_connect("/ws/state") as a, \
             client.websocket_connect("/ws/state/binary") as b:
         b.receive_json()
+        # Accepted, then closed with 1013: a real client sees the close
+        # code (closed before the accept it saw HTTP 403, the answer to an
+        # Origin or token refusal).
         with pytest.raises(WebSocketDisconnect) as refused:
-            with client.websocket_connect(third):
-                pass
+            with client.websocket_connect(third) as c:
+                c.receive_json()
         assert refused.value.code == 1013
     # Closing a stream frees its place.
     with client.websocket_connect(third) as c:

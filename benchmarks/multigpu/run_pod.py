@@ -155,12 +155,15 @@ partition must use exactly ``--n-devices`` non-empty parts.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
+import io
 import json
 import math
 from collections import Counter
 import os
 import platform
+import re
 import socket
 import statistics
 import subprocess
@@ -356,14 +359,27 @@ def _load_backend() -> None:
 # ---------------------------------------------------------------------------
 
 
+#: A commit as git names it: a full SHA-1, or a full SHA-256 in a
+#: repository of that object format.
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
 def _git_commit() -> str | None:
+    """The commit ``git rev-parse HEAD`` names, or ``None`` when git fails
+    or prints anything but a full SHA.  Git's exit status used to be
+    ignored: in a repository with no commit yet (``git init`` in a tree
+    synced without its ``.git``) git prints ``HEAD`` and exits 128, and
+    every file recorded the commit ``"HEAD"``, which the commit gate took
+    as one session's commit."""
     try:
-        return subprocess.run(
+        proc = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=Path(__file__).resolve().parent,
             capture_output=True, text=True, timeout=10, check=False,
-        ).stdout.strip() or None
+        )
     except (OSError, subprocess.SubprocessError):
         return None
+    sha = proc.stdout.strip()
+    return sha if proc.returncode == 0 and _COMMIT_SHA.fullmatch(sha) else None
 
 
 def _nvidia_smi() -> list[str]:
@@ -2972,10 +2988,12 @@ def record_problems(doc: dict) -> list[str]:
 
 
 def _commit_of(doc: dict) -> str | None:
-    """The git commit a file records, or ``None`` when it records none."""
+    """The git commit a file records, or ``None`` when it records none --
+    or records something that is not a full SHA (``"HEAD"``, which a runner
+    before 0.4.0 wrote in a repository with no commit)."""
     env = doc.get("environment")
     commit = env.get("git_commit") if isinstance(env, dict) else None
-    return commit if isinstance(commit, str) and commit else None
+    return commit if isinstance(commit, str) and _COMMIT_SHA.fullmatch(commit) else None
 
 
 def _short_commit(commit: str | None) -> str:
@@ -3387,25 +3405,8 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
                       f"{r['unsharded']['value_and_grad']['median_ms']:.2f} ms")
 
 
-def summarise(directory: Path) -> int:
-    """Print the verdicts and tables; 0 = no check failed and every file
-    records one commit (checks recorded as not run are listed and keep
-    their items open, but are not failures), 1 = no goal JSON under
-    ``directory``, 3 = at least one check failed, a recorded pass/fail
-    disagrees with its value and limit, or a file is not evidence this
-    runner would have written (:func:`record_problems`), 4 = nothing
-    failed, but the files come from more than one commit, or a file
-    records none (every file recording none included -- that used to exit
-    0): the items they decide may each have closed on a different commit,
-    and the summary prints a ``MIXED COMMITS`` warning naming each
-    commit's items and files."""
-    docs_by_goal = {goal: _load_results(directory, goal) for goal in ALL_GOALS}
-    if not any(docs_by_goal.values()):
-        print(f"no goal JSON ({'/'.join(ALL_GOALS)}) under {directory}")
-        return 1
-    n_failed = _print_runs_and_checklist(docs_by_goal)
-    mixed = _print_mixed_commits(docs_by_goal)
-    _print_checklist_goal_tables(docs_by_goal)
+def _print_timing_tables(docs_by_goal: dict) -> None:
+    """The exchange ranking and the forward and gradient tables."""
     exchange_docs = docs_by_goal["exchange"]
     forward_docs = docs_by_goal["forward"]
     gradient_docs = docs_by_goal["gradient"]
@@ -3451,6 +3452,63 @@ def summarise(directory: Path) -> int:
                 print(f"{cg['dof']:>9} dof   sharded_cg grad     {cg['grad_parity']['max_abs']:.2e} / "
                       f"{cg['grad_parity']['max_rel']:.2e}  jvp {cg['jvp_parity']['max_abs']:.2e} / "
                       f"{cg['jvp_parity']['max_rel']:.2e}")
+
+
+#: What reading a record of another runner's shape raises.
+_UNREADABLE = (KeyError, TypeError, ValueError, IndexError, AttributeError,
+               ZeroDivisionError)
+
+
+def _readable_for_tables(docs_by_goal: dict) -> tuple[dict, list[str]]:
+    """``(docs, left out)``: per goal, the files whose tables this runner
+    can print, and a line for each it cannot (a file of an older runner
+    lacks keys the tables read)."""
+    readable: dict = {}
+    left_out: list[str] = []
+    for goal, docs in docs_by_goal.items():
+        readable[goal] = []
+        for doc in docs:
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    _print_checklist_goal_tables({goal: [doc]})
+                    _print_timing_tables({g: ([doc] if g == goal else [])
+                                          for g in ("exchange", "forward", "gradient")})
+            except _UNREADABLE as exc:
+                left_out.append(f"{_file_of(doc)}: {type(exc).__name__}: {exc}")
+            else:
+                readable[goal].append(doc)
+    return readable, left_out
+
+
+def summarise(directory: Path) -> int:
+    """Print the verdicts and tables; 0 = no check failed and every file
+    records one commit (checks recorded as not run are listed and keep
+    their items open, but are not failures), 1 = no goal JSON under
+    ``directory``, 3 = at least one check failed, a recorded pass/fail
+    disagrees with its value and limit, or a file is not evidence this
+    runner would have written (:func:`record_problems`), 4 = nothing
+    failed, but the files come from more than one commit, or a file
+    records none (every file recording none included -- that used to exit
+    0): the items they decide may each have closed on a different commit,
+    and the summary prints a ``MIXED COMMITS`` warning naming each
+    commit's items and files."""
+    docs_by_goal = {goal: _load_results(directory, goal) for goal in ALL_GOALS}
+    if not any(docs_by_goal.values()):
+        print(f"no goal JSON ({'/'.join(ALL_GOALS)}) under {directory}")
+        return 1
+    n_failed = _print_runs_and_checklist(docs_by_goal)
+    mixed = _print_mixed_commits(docs_by_goal)
+    readable, left_out = _readable_for_tables(docs_by_goal)
+    _print_checklist_goal_tables(readable)
+    _print_timing_tables(readable)
+    if left_out:
+        # Their verdict lines above read INVALID (the runner cannot read
+        # them), so this summary already exits 3; their tables used to stop
+        # it with a traceback instead.
+        print(f"\nTables leave out {len(left_out)} file(s) whose results this runner "
+              "cannot read:")
+        for line in left_out:
+            print(f"  {line}")
     if mixed and not n_failed:
         # Repeated last, so that it is the line a reader sees.
         print("\nWARNING: MIXED COMMITS -- see above; exit 4")

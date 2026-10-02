@@ -1012,6 +1012,8 @@ def test_deleting_rows_from_a_pinned_guide_fails_the_gate(
     monkeypatch.setattr(mapping_gate, "_REPO_ROOT", str(tmp_path))
     monkeypatch.setattr(mapping_gate, "MIN_MAPPINGS",
                         {rel: mapping_gate.MIN_MAPPINGS[rel]})
+    monkeypatch.setattr(mapping_gate, "NODE_GUIDES",
+                        {rel: mapping_gate.NODE_GUIDES[rel]})
 
     target.write_text(text, encoding="utf-8")
     assert mapping_gate.main([str(target.parent)]) == 0
@@ -1198,6 +1200,98 @@ class TestNodeAlgorithmIds:
                         ["**Algorithm ID**: `MADD-ALG-TEST-001`\n"], name=name)
         assert mapping_gate.main([str(tmp_path)]) == 1
         assert "is stated by 2 guides" in capsys.readouterr().err
+
+
+class TestNodeGuidesArePinned:
+    """audit_040_p4_4, L6: ``lbm_node.md`` with its ``**Module**`` and
+    ``**Algorithm ID**`` lines both removed matched no node, so the guide-ID
+    check had nothing to compare and passed with 7 IDs where there were 8.
+    Each case runs the gate over a copy of the guides whose repository root
+    is the copy, as the auditor's ``git archive`` run did."""
+
+    _LBM = os.path.join("docs", "algorithm_guide", "nodes", "lbm_node.md")
+
+    @staticmethod
+    def _copy(tmp_path, monkeypatch, mapping_gate):
+        import shutil
+
+        root = tmp_path / "repo"
+        shutil.copytree(REPO_ROOT / "docs" / "algorithm_guide",
+                        root / "docs" / "algorithm_guide")
+        monkeypatch.setattr(mapping_gate, "_REPO_ROOT", str(root))
+        return root
+
+    @staticmethod
+    def _drop(path, *prefixes):
+        lines = path.read_text().splitlines(keepends=True)
+        kept = [ln for ln in lines if not ln.startswith(prefixes)]
+        assert len(kept) == len(lines) - len(prefixes), prefixes
+        path.write_text("".join(kept))
+
+    def test_the_pins_hold_on_the_repository(self, mapping_gate):
+        assert mapping_gate.check_node_guides(
+            mapping_gate.NODE_GUIDES, str(REPO_ROOT)) == []
+        assert len(mapping_gate.NODE_GUIDES) == 8
+
+    def test_an_unmodified_copy_passes(self, mapping_gate, tmp_path, monkeypatch,
+                                       capsys):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        assert mapping_gate.main([str(root / "docs" / "algorithm_guide")]) == 0
+        assert "8 guide algorithm ID(s) match" in capsys.readouterr().out
+
+    def test_a_guide_losing_its_module_and_id_lines_together_fails(
+            self, mapping_gate, tmp_path, monkeypatch, capsys):
+        """The auditor's mutant."""
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        self._drop(root / self._LBM, "**Algorithm ID**", "**Module**")
+        assert mapping_gate.main([str(root / "docs" / "algorithm_guide")]) == 1
+        err = capsys.readouterr().err
+        assert "lbm_node.md: is pinned in NODE_GUIDES as MADD-NODE-011" in err
+        assert "name no node" in err
+
+    def test_the_pin_is_checked_whatever_directory_was_scanned(
+            self, mapping_gate, tmp_path, monkeypatch, capsys):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        self._drop(root / self._LBM, "**Algorithm ID**", "**Module**")
+        assert mapping_gate.main(
+            [str(root / "docs" / "algorithm_guide" / "solvers")]) == 1
+        assert "lbm_node.md: is pinned in NODE_GUIDES" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("edit, fragment", [
+        (lambda t: t.replace("`MADD-NODE-011`", "`MADD-NODE-012`"),
+         "pinned in NODE_GUIDES as MADD-NODE-011, but states"),
+        (lambda t: t.replace("# LBMNode", "# LBMPipeNode", 1),
+         "as the guide to maddening.nodes.lbm.LBMNode, but"),
+        (lambda t: t.replace("**Algorithm ID**", "**Algorithm Id**"),
+         "but states no **Algorithm ID** line"),
+    ], ids=["another-id", "another-node", "misspelt-id-line"])
+    def test_a_pinned_guide_that_moves_off_its_pin_fails(
+            self, mapping_gate, tmp_path, monkeypatch, capsys, edit, fragment):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        path = root / self._LBM
+        text = path.read_text()
+        assert edit(text) != text
+        path.write_text(edit(text))
+        errors = mapping_gate.check_node_guides(mapping_gate.NODE_GUIDES, str(root))
+        assert any(fragment in e for e in errors), errors
+
+    def test_a_deleted_node_guide_fails(self, mapping_gate, tmp_path, monkeypatch):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        (root / self._LBM).unlink()
+        errors = mapping_gate.check_node_guides(mapping_gate.NODE_GUIDES, str(root))
+        assert any("lbm_node.md: pinned in NODE_GUIDES but the file does not exist"
+                   in e for e in errors), errors
+
+    def test_a_new_node_guide_in_the_repository_must_be_pinned(
+            self, mapping_gate, tmp_path, monkeypatch, capsys):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        _node_guide(root / "docs" / "algorithm_guide" / "nodes", "RigidBodyNode",
+                    "maddening.nodes.rigid_body",
+                    ["**Algorithm ID**: `MADD-NODE-007`\n"],
+                    name="rigid_body_node.md")
+        assert mapping_gate.main([str(root / "docs" / "algorithm_guide")]) == 1
+        assert "rigid_body_node.md: documents a node (MADD-NODE-007) but is not " \
+               "pinned in NODE_GUIDES" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------
@@ -1829,7 +1923,7 @@ class TestAnomalyGateFailsClosedOnEvidence:
         data = yaml.safe_load(registry.read_text())
         mutate(data)
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        path.write_text(_canonical_registry_dump(data))
         return path
 
     def test_stripping_a_shipped_resolved_entrys_evidence_fails(self, tmp_path):
@@ -2013,6 +2107,188 @@ class TestARetirementOfAReachableEntryIsRefused:
         assert "which leaves the defect reachable" in result.stderr
         assert "missing from the contiguous range" not in result.stderr
 
+    # -- no YAML spelling of the ID hides the entry from its history --
+    #
+    # audit_040_p4_4, M2: the removal was found with ``git log -S`` on the
+    # double-quoted spelling only, so an open entry committed single-quoted
+    # or unquoted was "a number no commit recorded" and its retirement was
+    # excused.  Every spelling below is the same YAML string.
+
+    @pytest.mark.parametrize("spelling", [
+        '"MADD-ANO-002"', "'MADD-ANO-002'", "MADD-ANO-002",
+        r'"MADD-ANO-00\x32"', "!!str MADD-ANO-002",
+    ], ids=["double-quoted", "single-quoted", "plain", "escaped", "tagged"])
+    def test_no_spelling_of_the_id_hides_an_open_entry_from_its_history(
+            self, anomalies_gate, tmp_path, spelling):
+        opened = _THREE_ANOMALIES.format(status="open").replace(
+            '- anomaly_id: "MADD-ANO-002"', f"- anomaly_id: {spelling}")
+        assert f"- anomaly_id: {spelling}\n" in opened
+        path = _commit_registry(tmp_path / "repo", opened,
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
+        entry, where, problem = anomalies_gate.last_committed_entry(
+            path, "MADD-ANO-002")
+        assert problem is None, problem
+        assert entry is not None and entry["resolution_status"] == "open", (
+            where, entry)
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1 and "is 'open', which leaves" in errors[0], errors
+
+    def test_the_audits_single_quoted_retirement_fails_end_to_end(self, tmp_path):
+        """M2 through the gate as CI runs it: no gap error to fall back on."""
+        opened = _THREE_ANOMALIES.format(status="open").replace(
+            '- anomaly_id: "MADD-ANO-002"', "- anomaly_id: 'MADD-ANO-002'")
+        path = _commit_registry(tmp_path / "repo", opened,
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
+        root = tmp_path / "root"
+        (root / "tests" / "compliance").mkdir(parents=True)
+        (root / "tests" / "compliance" / "test_soup_evidence.py").write_text(
+            '_RETIRED_ANOMALY_IDS = {"MADD-ANO-002": "duplicate of 001"}\n')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "is 'open', which leaves the defect reachable" in result.stderr
+
+    def test_an_entry_opened_and_deleted_on_a_merged_branch_is_found(
+            self, anomalies_gate, tmp_path):
+        """The merge leaves the registry as it was, so git's default history
+        simplification follows the first parent and never visits the side
+        branch's two commits; the walk must not depend on it."""
+        repo = tmp_path / "repo"
+        path = _commit_registry(repo, _TWO_ANOMALIES_WITH_A_GAP,
+                                rel=_NESTED_REGISTRY)
+        trunk = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        _git(repo, "checkout", "-q", "-b", "side")
+        path.write_text(_THREE_ANOMALIES.format(status="open"))
+        _git(repo, "commit", "-q", "-am", "open 002")
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        _git(repo, "commit", "-q", "-am", "delete 002")
+        _git(repo, "checkout", "-q", trunk)
+        (repo / "unrelated.txt").write_text("x\n")
+        _git(repo, "add", "unrelated.txt")
+        _git(repo, "commit", "-q", "-m", "unrelated")
+        _git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        # The premise: simplified history does not visit the side branch.
+        simplified = _git(repo, "log", "--format=%s", "--", _NESTED_REGISTRY)
+        assert "open 002" not in simplified, simplified
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1 and "is 'open', which leaves" in errors[0], errors
+
+    def test_a_merge_that_drops_its_second_parents_entry_removes_it(
+            self, anomalies_gate, tmp_path):
+        repo = tmp_path / "repo"
+        path = _commit_registry(repo, _TWO_ANOMALIES_WITH_A_GAP,
+                                rel=_NESTED_REGISTRY)
+        trunk = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        _git(repo, "checkout", "-q", "-b", "side")
+        path.write_text(_THREE_ANOMALIES.format(status="open"))
+        _git(repo, "commit", "-q", "-am", "open 002")
+        _git(repo, "checkout", "-q", trunk)
+        (repo / "unrelated.txt").write_text("x\n")
+        _git(repo, "add", "unrelated.txt")
+        _git(repo, "commit", "-q", "-m", "unrelated")
+        _git(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        _git(repo, "add", _NESTED_REGISTRY)
+        _git(repo, "commit", "-q", "-m", "merge side, dropping 002")
+        entry, where, problem = anomalies_gate.last_committed_entry(
+            path, "MADD-ANO-002")
+        assert problem is None, problem
+        assert entry["resolution_status"] == "open" and where.endswith("^2"), where
+
+    def test_one_walk_answers_every_retired_id(self, anomalies_gate, tmp_path):
+        """Two retirements, one closed and one open, in one history."""
+        four = _THREE_ANOMALIES.format(status="resolved").replace(
+            '  - anomaly_id: "MADD-ANO-003"',
+            '  - anomaly_id: "MADD-ANO-004"\n    title: "T"\n'
+            '    resolution_status: "open"\n  - anomaly_id: "MADD-ANO-003"')
+        path = _commit_registry(tmp_path / "repo", four,
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
+        found = anomalies_gate.last_committed_entries(
+            path, ["MADD-ANO-002", "MADD-ANO-004", "MADD-ANO-009"])
+        assert found["MADD-ANO-002"][0]["resolution_status"] == "resolved"
+        assert found["MADD-ANO-004"][0]["resolution_status"] == "open"
+        assert found["MADD-ANO-009"] == (None, None, None)
+
+
+def _canonical_registry_dump(data):
+    """``yaml.safe_dump`` of a registry, with each ID in the gate's spelling.
+
+    ``safe_dump`` writes the IDs plain (``- anomaly_id: MADD-ANO-001``),
+    which the gate refuses as non-canonical; a test seeding some other
+    fault re-quotes them so that the fault it seeds is the only one.
+    """
+    import re
+
+    import yaml
+
+    text = yaml.safe_dump(data, sort_keys=False)
+    return re.sub(r"^(\s*- anomaly_id: )(\S+)$", r'\1"\2"', text, flags=re.M)
+
+
+class TestTheIdLineHasOneSpelling:
+    """audit_040_p4_4, M2's second half: the registry's ID lines are
+    written one way, so a reader looking for an ID as text finds it."""
+
+    @staticmethod
+    def _gate(tmp_path, text):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(text)
+        return _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+
+    def test_the_canonical_spelling_passes(self, tmp_path):
+        result = self._gate(tmp_path, _minimal_anomaly(status="open"))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    @pytest.mark.parametrize("line", [
+        "  - anomaly_id: 'MADD-ANO-001'",
+        "  - anomaly_id: MADD-ANO-001",
+        '  - anomaly_id:  "MADD-ANO-001"',
+        '  - anomaly_id: "MADD-ANO-001"  # a comment',
+        '  - "anomaly_id": "MADD-ANO-001"',
+        r'  - anomaly_id: "MADD-ANO-00\x31"',
+        '  - anomaly_id: !!str "MADD-ANO-001"',
+        '  - anomaly_id: &first "MADD-ANO-001"',
+    ], ids=["single-quoted", "plain", "two-spaces", "trailing-comment",
+            "quoted-key", "escaped", "tagged", "anchored"])
+    def test_any_other_spelling_of_the_id_line_fails(self, tmp_path, line):
+        text = _minimal_anomaly(status="open")
+        assert '  - anomaly_id: "MADD-ANO-001"' in text
+        result = self._gate(tmp_path, text.replace(
+            '  - anomaly_id: "MADD-ANO-001"', line))
+        assert result.returncode == 1, result.stdout
+        assert "is not the canonical ID line" in result.stderr
+
+    def test_an_id_key_that_is_not_the_first_key_fails(self, tmp_path):
+        text = _minimal_anomaly(status="open").replace(
+            '  - anomaly_id: "MADD-ANO-001"\n    title: "Test"',
+            '  - title: "Test"\n    anomaly_id: "MADD-ANO-001"')
+        assert "  - title:" in text
+        result = self._gate(tmp_path, text)
+        assert result.returncode == 1, result.stdout
+        assert "is not the canonical ID line" in result.stderr
+
+    def test_an_id_no_line_spells_fails(self, tmp_path):
+        """YAML's explicit-key form sets ``anomaly_id`` on no ``key:`` line,
+        so only the comparison with the parsed IDs can see it."""
+        text = _minimal_anomaly(status="open").replace(
+            '  - anomaly_id: "MADD-ANO-001"\n',
+            '  - ? anomaly_id\n    : "MADD-ANO-001"\n')
+        assert "? anomaly_id" in text
+        result = self._gate(tmp_path, text)
+        assert result.returncode == 1, result.stdout
+        assert "not spelled canonically: ['MADD-ANO-001']" in result.stderr
+
+    def test_a_comment_mentioning_the_key_is_not_an_id_line(self, tmp_path):
+        text = _minimal_anomaly(status="open").replace(
+            "anomalies:\n", "anomalies:\n  # anomaly_id: 'like this' is refused\n")
+        result = self._gate(tmp_path, text)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_the_shipped_registry_is_canonical(self, anomalies_gate):
+        path = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
+        _, _, anomalies, _ = anomalies_gate._census(str(path))
+        assert anomalies
+        assert anomalies_gate.anomaly_id_spelling_errors(str(path), anomalies) == []
+
 
 class TestAnomalyGateVerifiesSomething:
     """The two guards check_heat_stability.py has and this gate claimed to.
@@ -2123,7 +2399,7 @@ def _shipped_registry_with(tmp_path, mutate):
     data = yaml.safe_load(registry.read_text())
     mutate(data)
     path = tmp_path / "known_anomalies.yaml"
-    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    path.write_text(_canonical_registry_dump(data))
     return path
 
 
@@ -3594,19 +3870,36 @@ class TestHeatStabilityCounts:
                          unstable, unchecked, seen)
         return unstable, unchecked, seen
 
-    def test_a_non_positive_argument_is_not_counted_as_verified(
+    def test_a_non_positive_argument_is_refused_not_verified(
         self, heat_stability_gate
     ):
+        """A zero timestep has no Fourier number; the constructor refuses
+        it, and the gate says so rather than "not evaluated" (audit_040_p4_4,
+        L5).  A refused rod is in ``seen`` as an unstable one always was:
+        ``main`` fails on it before any count is printed."""
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("a", timestep=0.0, n_cells=10, length=1.0,'
+            " thermal_diffusivity=100.0)\n",
+        )
+        assert unchecked == []
+        assert len(unstable) == 1 and len(seen) == 1
+        assert "HeatNode.__init__ refuses it" in unstable[0][2]
+        assert "timestep must be a finite number > 0" in unstable[0][2]
+
+    def test_a_zero_diffusivity_is_a_rod_the_constructor_builds(
+        self, heat_stability_gate
+    ):
+        """Fourier number 0: evaluated, and verified -- it used to be
+        reported with the negative values as not evaluated."""
         unstable, unchecked, seen = self._scan(
             heat_stability_gate,
             'HeatNode("a", timestep=1.0, n_cells=10, length=1.0,'
             " thermal_diffusivity=0.0)\n",
         )
-        assert seen == []
-        assert len(unchecked) == 1
-        assert "non-positive" in unchecked[0][2]
+        assert unstable == [] and unchecked == [] and len(seen) == 1
 
-    def test_an_unknown_stencil_order_is_not_counted_as_verified(
+    def test_an_unknown_stencil_order_is_refused_not_verified(
         self, heat_stability_gate
     ):
         unstable, unchecked, seen = self._scan(
@@ -3614,9 +3907,9 @@ class TestHeatStabilityCounts:
             'HeatNode("c", timestep=1.0, n_cells=10, length=1.0,'
             " thermal_diffusivity=100.0, stencil_order=3)\n",
         )
-        assert seen == []
-        assert len(unchecked) == 1
-        assert "MAX_FOURIER_NUMBER" in unchecked[0][2]
+        assert unchecked == []
+        assert len(unstable) == 1
+        assert "stencil_order must be 2 or 4, got 3" in unstable[0][2]
 
     def test_an_evaluated_rod_is_counted_as_verified(
         self, heat_stability_gate
@@ -3859,8 +4152,10 @@ class TestHeatStabilityAllowlist:
             "FIXTURE = 'HeatNode(\"h\", 0.51, n_cells=10, length=1.0, "
             "thermal_diffusivity=1.0)'\n"
         )
-        monkeypatch.setitem(gate._ALLOWED_UNSTABLE, str(planted),
-                            ("the fixture for this test", gate.EMBEDDED_ONLY))
+        # The planted file alone: the shipped entries would put the
+        # allowlist over its ceiling, which is not what this replays.
+        monkeypatch.setattr(gate, "_ALLOWED_UNSTABLE", {
+            str(planted): ("the fixture for this test", gate.EMBEDDED_ONLY)})
         assert gate.main([str(tmp_path)]) == 0, capsys.readouterr().out
         assert "1 deliberately unstable construction(s) exempt" in (
             capsys.readouterr().out)
@@ -3872,13 +4167,169 @@ class TestHeatStabilityAllowlist:
         assert "planted.py:9: Fourier number" in capsys.readouterr().out
 
     def test_the_allowlist_stays_small(self, heat_stability_gate):
-        allowlist = heat_stability_gate._ALLOWED_UNSTABLE
-        cap = heat_stability_gate._MAX_ALLOWED_UNSTABLE
-        assert len(allowlist) <= cap, (
-            f"{len(allowlist)} allowlisted files (cap {cap}).  Each one is a "
-            f"file whose planted rods this gate stops refusing; fix the rod "
-            f"instead of raising the cap."
-        )
+        assert heat_stability_gate.allowlist_ceiling_error() is None, (
+            "fix the rod instead of raising the cap")
+
+    # -- the ceiling is enforced by the gate, not only by this test --------
+    #
+    # audit_040_p4_4, L5: _MAX_ALLOWED_UNSTABLE was declared and never read,
+    # so the gate passed with fourteen entries.
+
+    def test_the_gate_fails_on_an_allowlist_over_its_ceiling(
+            self, heat_stability_gate, tmp_path, monkeypatch, capsys):
+        gate = heat_stability_gate
+        root = _rod(tmp_path, 'HeatNode("ok", timestep=1e-3)')
+        assert gate.main([str(root)]) == 0
+        padded = dict(gate._ALLOWED_UNSTABLE)
+        for i in range(10):
+            padded[f"probe_{i}.py"] = ("an audit probe", frozenset({2}))
+        monkeypatch.setattr(gate, "_ALLOWED_UNSTABLE", padded)
+        capsys.readouterr()
+        assert gate.main([str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "over the ceiling of" in out and "_MAX_ALLOWED_UNSTABLE" in out
+
+    def test_lines_count_towards_the_ceiling_not_only_files(
+            self, heat_stability_gate, monkeypatch):
+        """One entry pinning eight lines exempts eight rods."""
+        gate = heat_stability_gate
+        monkeypatch.setattr(gate, "_ALLOWED_UNSTABLE", {
+            "probe.py": ("an audit probe", frozenset(range(1, 9)))})
+        assert "names 8 exempt construction(s) across 1 file(s)" in (
+            gate.allowlist_ceiling_error())
+        monkeypatch.setattr(gate, "_ALLOWED_UNSTABLE", {
+            "probe.py": ("an audit probe", frozenset(range(1, 8)))})
+        assert gate.allowlist_ceiling_error() is None
+
+
+class TestHeatStabilityAsksTheConstructor:
+    """audit_040_p4_4, L5: the gate mirrored only the Fourier test, so it
+    counted as verified rods the constructor refuses on its other checks,
+    and reported literal values the constructor refuses outright as merely
+    not evaluated.  It now asks ``HeatNode.__init__`` itself."""
+
+    @pytest.mark.parametrize("call, refusal", [
+        ('HeatNode("r", timestep=1e-3, n_cells=4, stencil_order=4)',
+         "4th-order stencil requires at least 5 cells"),
+        ('HeatNode("r", timestep=1e-3, grid_points=[0.0, 0.1, 0.2])',
+         "grid_points length (3) must match n_cells (10)"),
+        ('HeatNode("r", timestep=-1e-3)', "timestep must be a finite number > 0"),
+        ('HeatNode("r", timestep=1e-3, length=0.0)',
+         "length must be a finite number > 0"),
+        ('HeatNode("r", timestep=1e-3, stencil_order=3)',
+         "stencil_order must be 2 or 4, got 3"),
+        ('HeatNode("r", timestep=1e-3, thermal_diffusivity=-0.01)',
+         "thermal_diffusivity must be a finite number >= 0"),
+        ('HeatNode("r", timestep=1e-3, n_cells=0)', "HeatNode.__init__ refuses it"),
+        ('HeatNode("r", 1e-3, grid_points=4)', "must match n_cells"),
+    ], ids=["order4-four-cells", "grid-length", "negative-dt", "zero-length",
+            "order3", "negative-alpha", "zero-cells", "scalar-grid"])
+    def test_a_literal_rod_the_constructor_refuses_fails_the_gate(
+            self, heat_stability_gate, tmp_path, capsys, call, refusal):
+        root = _rod(tmp_path, f'HeatNode("ok", timestep=1e-3)\n{call}')
+        assert heat_stability_gate.main([str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "mod.py:3:" in out and refusal in out, out
+
+    @pytest.mark.parametrize("call, refusal", [
+        ('HeatNode("r", timestep=1e-3, n_cell=10)', "no parameter 'n_cell'"),
+        ('HeatNode("r", 1e-3, 10, 1.0, 0.01, 0.0, 2, None, None, "x")',
+         "10 positional arguments"),
+        ('HeatNode("r", n_cells=10)', "no 'timestep' argument"),
+    ], ids=["unknown-keyword", "too-many-positional", "missing-timestep"])
+    def test_a_call_that_raises_type_error_fails_the_gate(
+            self, heat_stability_gate, tmp_path, capsys, call, refusal):
+        root = _rod(tmp_path, f'HeatNode("ok", timestep=1e-3)\n{call}')
+        assert heat_stability_gate.main([str(root)]) == 1
+        assert refusal in capsys.readouterr().out
+
+    def test_what_the_constructor_refuses_matches_what_it_raises(
+            self, heat_stability_gate):
+        """The probe is the constructor: the two cannot disagree."""
+        from maddening.nodes.heat import HeatNode
+        import ast as _ast
+
+        call = 'HeatNode("r", timestep=1e-3, n_cells=4, stencil_order=4)'
+        node = _ast.parse(call).body[0].value
+        args, _ = heat_stability_gate._call_arguments(node)
+        verdict, why = heat_stability_gate.constructor_probe(args)
+        with pytest.raises(ValueError) as raised:
+            HeatNode("r", timestep=1e-3, n_cells=4, stencil_order=4)
+        assert verdict == "refused" and str(raised.value) in why
+
+    def test_a_refusal_inside_pytest_raises_is_what_its_test_expects(
+            self, heat_stability_gate, tmp_path, capsys):
+        root = _rod(tmp_path,
+                    "import pytest\n"
+                    'HeatNode("ok", timestep=1e-3)\n'
+                    "with pytest.raises(ValueError):\n"
+                    '    HeatNode("r", 0.001, n_cells=4, stencil_order=4)\n'
+                    "with pytest.raises(ValueError, match='unstable'):\n"
+                    '    HeatNode("r", timestep=10.0)\n')
+        assert heat_stability_gate.main([str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "OK: 1 HeatNode construction(s) verified" in out
+        assert "2 construction(s) refused inside pytest.raises" in out
+
+    def test_the_same_refusal_outside_pytest_raises_still_fails(
+            self, heat_stability_gate, tmp_path, capsys):
+        # A verified rod too, so that the empty-scope guard cannot be what
+        # fails the run.
+        root = _rod(tmp_path,
+                    "import pytest\n"
+                    'HeatNode("ok", timestep=1e-3)\n'
+                    "with pytest.raises(ValueError):\n"
+                    '    HeatNode("r", 0.001, n_cells=4, stencil_order=4)\n'
+                    'HeatNode("r", 0.001, n_cells=4, stencil_order=4)\n')
+        assert heat_stability_gate.main([str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "FAIL: 1 HeatNode construction(s) the constructor refuses" in out
+        assert "mod.py:6:" in out and "mod.py:5:" not in out
+
+    def test_a_rod_inside_pytest_raises_the_constructor_builds_is_verified(
+            self, heat_stability_gate, tmp_path, capsys):
+        """The raise comes from elsewhere (a duplicate name, say): the rod
+        is an ordinary one and counts as verified."""
+        root = _rod(tmp_path,
+                    "import pytest\n"
+                    "with pytest.raises(ValueError):\n"
+                    '    gm.add_node(HeatNode("r", timestep=1e-3))\n')
+        assert heat_stability_gate.main([str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "OK: 1 HeatNode construction(s) verified" in out
+        assert "pytest.raises" not in out
+
+    def test_a_grid_rod_whose_cell_count_is_computed_is_not_evaluated(
+            self, heat_stability_gate, tmp_path, capsys):
+        """The grid's length must match n_cells, so a computed n_cells
+        decides whether the constructor accepts it; this rod used to be
+        verified on its Fourier number alone."""
+        root = _rod(tmp_path,
+                    'HeatNode("ok", timestep=1e-3)\n'
+                    'HeatNode("g", timestep=1e-4, n_cells=n,'
+                    ' grid_points=[0.0, 0.1, 0.3])\n')
+        assert heat_stability_gate.main(["--list-unevaluated", str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "OK: 1 HeatNode construction(s) verified" in out
+        assert "mod.py:3: n_cells is computed" in out
+
+    def test_a_rod_too_large_to_build_is_not_evaluated_rather_than_built(
+            self, heat_stability_gate, tmp_path, capsys):
+        root = _rod(tmp_path,
+                    'HeatNode("ok", timestep=1e-3)\n'
+                    'HeatNode("big", timestep=1e-30, n_cells=2000000)\n')
+        assert heat_stability_gate.main(["--list-unevaluated", str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "mod.py:3:" in out and "not built to ask the constructor" in out
+
+    def test_the_repository_holds_refusals_only_where_expected(
+            self, heat_stability_gate, capsys):
+        """The shipped tree: every refusal is allowlisted or inside a
+        ``pytest.raises``; ``tests/core/test_spatial_accuracy.py`` asserts
+        two of them."""
+        assert heat_stability_gate.main([]) == 0
+        out = capsys.readouterr().out
+        assert "refused inside pytest.raises, as their test expects" in out
 
 
 # ---------------------------------------------------------------------------

@@ -212,8 +212,14 @@ def test_the_network_relay_stamps_each_message_with_the_real_advance():
         gm = _subcycled()
         relay.attach(gm)
         gm.run(4)
+        # a node at 0.005 joins: the next two steps advance 0.005 each
+        gm.add_node(_Counter("fast", 0.005))
+        gm.add_edge("coarse", "fast", "x", "u")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            gm.run(2)
         times = [m["t"] for m in relay._socket.sent]  # noqa: SLF001
-        assert times == pytest.approx([0.02, 0.04, 0.06, 0.08], rel=1e-9)
+        assert times == pytest.approx([0.02, 0.04, 0.06, 0.08, 0.085, 0.09], rel=1e-9)
     finally:
         relay.close()
 

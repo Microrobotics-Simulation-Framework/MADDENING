@@ -128,3 +128,32 @@ def test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance(dtyp
     assert dist > 0, "fixture premise: stopped short of the fixed point"
     if d["spectral_usable"]:
         assert d["spectral_error_bound"] >= dist, (d["spectral_error_bound"], dist, dict(d))
+
+
+def _contracting(dtype, **group):
+    return _pair(dtype, np.eye(2) * 0.6, [1.0, 2.0], np.eye(2) * 0.9, [0.0, 0.0], [0.0, 0.0],
+                 max_iterations=60, tolerance=1e-2, **group)
+
+
+@pytest.mark.parametrize("acceleration", ["aitken", "iqn-ils", "iqn-imvj"])
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16])
+def test_fori_and_ift_take_the_same_passes_on_an_accelerated_sixteen_bit_group(dtype, acceleration):
+    """``solver="fori"`` with an accelerator runs on a 16-bit group, and agrees with ``"ift"``.
+
+    The fori loop's carries were seeded in at least float32 (Aitken's
+    ``omega`` and residual, IQN's ``V``/``W`` and secant state) while the
+    accelerator returned them in the group's dtype, and ``lax.fori_loop``
+    raised ``TypeError`` ("carry input and carry output must have equal
+    types") at trace time -- in 0.3.x as well.  The returned values are now
+    cast to their carries' dtypes.  ``CouplingGroup.solver`` documents that
+    the two solvers run the same passes; two steps exercise the IMVJ warm
+    start read back from ``_meta``.
+    """
+    reports = {}
+    for solver in ("fori", "ift"):
+        gm = _contracting(dtype, acceleration=acceleration, solver=solver, diagnostics=True)
+        gm.step()
+        gm.step()
+        reports[solver] = gm.coupling_diagnostics()[KEY]
+    assert reports["fori"]["iterations"] == reports["ift"]["iterations"], reports
+    assert reports["fori"]["converged"] == reports["ift"]["converged"], reports

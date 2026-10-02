@@ -277,3 +277,16 @@ def test_the_fmu_export_reads_a_pending_node_write():
         initial_state=gm._state, params=gm.params, param_specs=gm.param_specs(),  # noqa: SLF001
         fixed_params=md.fixed_parameters, input_resolver=gm._resolve_external_inputs))  # noqa: SLF001
     assert float(sidecar.params["nodes"]["s"]["stiffness"]) == 45.0
+
+
+def test_assigning_gm_params_is_later_than_a_node_write_before_it():
+    """``gm.params = tree`` is a write of every leaf, later than any
+    ``node.params`` write before it -- the profiler restores the caller's
+    tree this way after its own recompiles.  The tree was taken before the
+    node write, so it holds the old value, and that value must stay."""
+    gm = _spring()
+    saved = jax.tree.map(lambda x: x, gm.params)
+    gm.get_node("s").params["stiffness"] = 50.0
+    gm.params = saved
+    assert _k(gm) == 30.0
+    assert _k_stepped(gm) == pytest.approx(30.0, rel=1e-3)

@@ -97,17 +97,11 @@ def pow2_frame(*arrays, mode: str = "common"):
     -------
     jnp.ndarray
         The factor, an exact power of two in the arrays' (promoted) dtype;
-        ``1`` where the input is zero or non-finite.
-
-    Examples
-    --------
-    >>> import jax.numpy as jnp
-    >>> float(pow2_frame(jnp.array([3.0, -0.1], jnp.float32)))
-    0.25
-    >>> [float(k) for k in pow2_frame(jnp.array([3.0, 0.0, 1e-3], jnp.float32), mode="entrywise")]
-    [0.25, 1.0, 512.0]
-    >>> float(pow2_frame(jnp.array([1e-3], jnp.float32), mode="lift"))
-    1.0
+        ``1`` where the input is zero or non-finite.  For example, in
+        float32: ``[3.0, -0.1]`` is framed by ``0.25`` (common);
+        ``[3.0, 0.0, 1e-3]`` by ``[0.25, 1.0, 512.0]`` (entrywise); and
+        ``[1e-3]`` by ``1.0`` (lift: it is far above ``tiny / eps``).
+        ``tests/core/test_pow2_frame.py`` pins each mode.
     """
     if mode == "common":
         dtype = jnp.result_type(*arrays)
@@ -145,10 +139,7 @@ def pow2_rescue(dtype):
 
     The convergence norm multiplies a field's pair by it, under a ``where``,
     where the field's scale or a one-ulp change of it is below the normal
-    range; ``float()`` of it is the same number as a Python float.
-
-    >>> import jax.numpy as jnp
-    >>> float(pow2_rescue(jnp.float32)) == 2.0 ** 126
-    True
+    range; ``float()`` of it is the same number as a Python float
+    (``2**126`` for float32).
     """
     return 1.0 / jnp.finfo(dtype).tiny

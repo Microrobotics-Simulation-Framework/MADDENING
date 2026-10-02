@@ -111,6 +111,7 @@ def demo_step_by_step():
     print()
     print("  Every step converged well inside the 15-pass budget.")
     print()
+    return gm
 
 
 def demo_insufficient_iterations(n_steps=20):
@@ -123,9 +124,10 @@ def demo_insufficient_iterations(n_steps=20):
     print(f"  {'max_iterations':>14} {'Avg iters':>10} {'Converged':>10} "
           f"{'Final A':>9} {'Final B':>9}  Status")
     print(f"  {'-' * 66}")
-    results = {}
+    results, graphs = {}, {}
     for max_it in (2, 3, 4, 15):
-        infos, final = run(build(max_iterations=max_it, tolerance=1e-6), n_steps)
+        graphs[max_it] = build(max_iterations=max_it, tolerance=1e-6)
+        infos, final = run(graphs[max_it], n_steps)
         n_conv = sum(bool(i["converged"]) for i in infos)
         avg_it = sum(i["iterations"] for i in infos) / n_steps
         capped = all(i["iterations"] >= max_it for i in infos)
@@ -151,6 +153,7 @@ def demo_insufficient_iterations(n_steps=20):
     print("  Rule of thumb: iterations == max_iterations with converged=False")
     print("  means raise max_iterations or add acceleration.")
     print()
+    return graphs[2]
 
 
 def demo_norms(n_steps=20):
@@ -201,15 +204,16 @@ def demo_spectral_keys():
     print()
 
 
-def demo_report_and_strict():
+def demo_report_and_strict(converged_gm, capped_gm):
+    """*converged_gm* is Part 1's graph and *capped_gm* Part 2's
+    ``max_iterations=2`` one, each as its last step left it."""
     print("=" * 65)
     print("Part 5: print_coupling_report() and strict_convergence")
     print("=" * 65)
     print()
-    print("  A converged group (max_iterations=15), after one step:")
+    print("  Part 1's group (max_iterations=15), after its last step:")
     print()
-    gm = build(max_iterations=15, tolerance=1e-6)
-    gm.step()
+    gm = converged_gm
     gm.print_coupling_report()
     (row,) = gm.coupling_report()
     assert row["converged"] and row["iterations"] < row["max_iterations"]
@@ -221,10 +225,9 @@ def demo_report_and_strict():
         print("  Its precision_limited flag says the residual is at its float floor:")
         print("  the solve went as far as float32 can measure, which is not a failure.")
     print()
-    print("  The same graph capped at max_iterations=2:")
+    print("  Part 2's group capped at max_iterations=2, after its last step:")
     print()
-    gm = build(max_iterations=2, tolerance=1e-6)
-    gm.step()
+    gm = capped_gm
     gm.print_coupling_report()
     (row,) = gm.coupling_report()
     assert not row["converged"] and row["iterations"] == row["max_iterations"] == 2
@@ -234,7 +237,8 @@ def demo_report_and_strict():
     print("  Both caveats are flagged.  Nothing stopped the run: the step was")
     print("  taken with the unconverged state, which is what a report can do.")
     print()
-    print("  With strict_convergence=True the same step raises instead:")
+    print("  Built with strict_convergence=True, the capped group's first step")
+    print("  raises instead:")
     gm = build(max_iterations=2, tolerance=1e-6, strict_convergence=True)
     before = {n: gm.get_node_state(n) for n in ("A", "B")}
     # The check runs inside the compiled step (equinox.error_if); JAX also
@@ -266,11 +270,11 @@ def main(argv=None) -> None:
     parser.add_argument("--steps", type=int, default=20,
                         help="Steps per configuration in Parts 2 and 3 (default: 20)")
     args = parser.parse_args(argv)
-    demo_step_by_step()
-    demo_insufficient_iterations(args.steps)
+    converged_gm = demo_step_by_step()
+    capped_gm = demo_insufficient_iterations(args.steps)
     demo_norms(args.steps)
     demo_spectral_keys()
-    demo_report_and_strict()
+    demo_report_and_strict(converged_gm, capped_gm)
     print("All demos complete.")
 
 

@@ -316,3 +316,16 @@ def test_the_shutdown_signals_are_chained_only_from_the_main_thread_over_a_pytho
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
+
+
+def test_the_checkpoint_root_defaults_to_a_checkpoints_directory_under_the_working_one(
+        tmp_path, monkeypatch):
+    """The release notes: paths are relative to
+    ``SimulationServer(checkpoint_root=)`` (default ``./checkpoints``)."""
+    monkeypatch.chdir(tmp_path)
+    server, client = _ball_server()
+    assert server.checkpoint_root == (tmp_path / "checkpoints").resolve()
+    resp = client.post("/checkpoint/save", params={"path": "c.npz"})
+    assert resp.status_code == 200, resp.text
+    assert (tmp_path / "checkpoints" / "c.npz").is_file()
+    assert (tmp_path / "checkpoints" / "c.npz.manifest.json").is_file()

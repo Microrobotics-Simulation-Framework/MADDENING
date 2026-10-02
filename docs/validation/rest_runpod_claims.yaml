@@ -170,7 +170,7 @@ claims:
     - src/maddening/api/README.md:43 (Security)
     - src/maddening/api/auth.py:16 (module docstring, rule 2)
     - src/maddening/api/auth.py:156 (is_routable_peer)
-    - docs/release_notes/v0.4.0.md:4060 (The API authenticates when it is not bound to loopback)
+    - docs/release_notes/v0.4.0.md:4063 (The API authenticates when it is not bound to loopback)
   conditions: >-
     loopback bind; peers: public and private IPv4, IPv6, IPv4-mapped IPv6
     (::ffff:203.0.113.5), scoped link-local (fe80::1%eth0); loopback and
@@ -359,7 +359,7 @@ claims:
     - src/maddening/api/README.md:55 (The token)
     - src/maddening/api/auth.py:41 (module docstring)
     - src/maddening/api/auth.py:499 (APIAuth._write_token_file)
-    - docs/release_notes/v0.4.0.md:4052 (The API authenticates when it is not bound to loopback)
+    - docs/release_notes/v0.4.0.md:4056 (The API authenticates when it is not bound to loopback)
   conditions: >-
     a generated token on a non-loopback bind; the path absent (passes) or a
     file that already exists with another mode, e.g. 0644 (fails).
@@ -434,6 +434,49 @@ claims:
   tests:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_an_anonymous_oversized_body_is_refused_for_its_credential_first
   status: verified
+
+- id: REST-097
+  area: auth
+  claim: >-
+    Bundled UI: "Open /viz/app#token=<token> -- a fragment, which the
+    browser never sends ... The page removes it from the address bar
+    immediately and keeps it in sessionStorage.  ?token= also works";
+    the pages load the token helper and add the header to their own
+    calls.
+  sources:
+    - src/maddening/api/README.md:70 (Presenting it)
+    - docs/release_notes/v0.4.0.md:4069 (The API authenticates when it is not bound to loopback)
+  conditions: >-
+    the shipped static pages and auth.js; the helper executed by node
+    (skipif when node is not on PATH; the GitHub runners have it), the
+    constant-level checks everywhere.
+  oracle: the helper's token from a fragment, from a query, the fragment winning; history.replaceState and sessionStorage only; the wrapped fetch's header.
+  tests:
+    - tests/api/test_bundled_ui_auth.py::test_the_helper_takes_the_token_from_a_url_fragment
+    - tests/api/test_bundled_ui_auth.py::test_the_helper_still_takes_a_query_string_token
+    - tests/api/test_bundled_ui_auth.py::test_a_fragment_token_wins_over_a_query_token
+    - tests/api/test_bundled_ui_auth.py::test_the_helper_scrubs_the_token_out_of_the_url
+    - tests/api/test_bundled_ui_auth.py::test_the_wrapped_fetch_adds_the_header_to_same_origin_calls
+    - tests/api/test_bundled_ui_auth.py::test_a_bundled_page_loads_the_token_helper_before_its_own_script
+  status: verified
+
+- id: REST-098
+  area: auth
+  claim: >-
+    "There is still no TLS.  The token and every state snapshot cross the
+    network in cleartext."
+  sources:
+    - src/maddening/api/README.md:79 (What the token does not do)
+    - src/maddening/api/server.py:42 (module docstring, Security)
+  conditions: any bind.
+  oracle: none -- a statement that a feature is absent.
+  tests: []
+  status: untested
+  reason: >-
+    It states what the server does not do; a test that the app serves
+    plain HTTP would pin the absence of TLS, not a promise a user relies
+    on.  The rows that matter for it are REST-002 (the token is demanded)
+    and REST-011 (the token never travels in a URL).
 
 # ---------------------------------------------------------------------------
 # The Origin and Host rules
@@ -521,7 +564,7 @@ claims:
     names in SimulationServer(allowed_hosts=).  Any other Host is a 403 on
     every route and a refused WebSocket handshake."
   sources:
-    - docs/release_notes/v0.4.0.md:4180 (DNS rebinding is refused by the Host)
+    - docs/release_notes/v0.4.0.md:4176 (A web page is not an authorised caller, DNS rebinding)
     - src/maddening/api/server.py:1583 (_rebinding_refusal)
     - src/maddening/api/server.py:1922 (SimulationServer, allowed_hosts)
   conditions: >-
@@ -563,7 +606,7 @@ claims:
     and is served".
   sources:
     - src/maddening/api/server.py:1598 (_rebinding_refusal)
-    - docs/release_notes/v0.4.0.md:4185 (DNS rebinding is refused by the Host)
+    - docs/release_notes/v0.4.0.md:4176 (A web page is not an authorised caller, DNS rebinding)
   conditions: >-
     a non-loopback bind with a rebound Host; peer "testclient"; Host absent
     (asked of the function: an HTTP/1.1 client always sends one).
@@ -603,7 +646,7 @@ claims:
     - src/maddening/api/README.md:198 (Concurrency, limits and shutdown)
     - src/maddening/api/server.py:313 (MAX_REQUEST_BODY_BYTES)
     - src/maddening/api/server.py:906 (_RequestBodyLimitMiddleware)
-    - docs/release_notes/v0.4.0.md:4495 (What a request can make the server allocate is bounded as a whole)
+    - docs/release_notes/v0.4.0.md:4505 (What a request can make the server allocate is bounded as a whole)
   conditions: >-
     the limit patched to 1000 bytes: a body of exactly the limit (read: the
     route's 422) and one byte more (413), declared and streamed; a declared
@@ -625,7 +668,7 @@ claims:
     numbers at most 26 bytes each.
   sources:
     - src/maddening/api/server.py:317 (MAX_REQUEST_BODY_BYTES)
-    - docs/release_notes/v0.4.0.md:4497 (What a request can make the server allocate is bounded as a whole)
+    - docs/release_notes/v0.4.0.md:4505 (What a request can make the server allocate is bounded as a whole)
   conditions: the shipped constants.
   oracle: arithmetic on the constants.
   tests:
@@ -642,7 +685,7 @@ claims:
     - src/maddening/api/README.md:155 (Simulation Control)
     - src/maddening/api/server.py:215 (MAX_RUN_STEPS)
     - src/maddening/api/server.py:3383 (sim_run, Query)
-    - docs/release_notes/v0.4.0.md:4121 (One unauthenticated request can no longer name unbounded work)
+    - docs/release_notes/v0.4.0.md:4117 (One unauthenticated request can no longer name unbounded work)
   conditions: >-
     the shipped bound in the schema; the boundary exercised at a patched
     bound of 12 (the Query bound is read when the app is built): 12 runs 12
@@ -695,7 +738,7 @@ claims:
     /openapi.json and a violation is a 422 naming the field".
   sources:
     - src/maddening/api/README.md:88 (What the token does not do)
-    - docs/release_notes/v0.4.0.md:4121 (One unauthenticated request can no longer name unbounded work)
+    - docs/release_notes/v0.4.0.md:4117 (One unauthenticated request can no longer name unbounded work)
     - src/maddening/api/server.py:1037 (_allocation_refusal)
     - src/maddening/api/server.py:2684 (add_node, state cap)
   conditions: >-
@@ -948,7 +991,7 @@ claims:
     runner waits for it in slices that watch its stop flag, so POST /sim/stop
     is answered at once even while a long request holds the graph."
   sources:
-    - docs/release_notes/v0.4.0.md:4459 (Concurrent requests use the graph one at a time)
+    - docs/release_notes/v0.4.0.md:4461 (Concurrent requests use the graph one at a time)
     - src/maddening/api/server.py:1956 (SimulationServer, Notes)
     - src/maddening/viz/runner.py:47 (RealtimeRunner, lock)
   conditions: >-
@@ -1109,7 +1152,7 @@ claims:
   sources:
     - src/maddening/api/README.md:204 (Concurrency, limits and shutdown)
     - src/maddening/api/server.py:2366 (SimulationServer._chain_shutdown_signals)
-    - docs/release_notes/v0.4.0.md:4499 (POST /sim/run stops when the server shuts down)
+    - docs/release_notes/v0.4.0.md:4510 (What a request can make the server allocate, POST /sim/run stops when the server shuts down)
   conditions: the lifespan run in-process; a Python SIGINT handler and an ignored SIGTERM; a call from another thread.
   oracle: the stop event set and the runner stopped; the previous handler still called; SIG_IGN untouched; nothing installed from another thread.
   tests:
@@ -1256,7 +1299,7 @@ claims:
   sources:
     - src/maddening/viz/runner.py:59 (RealtimeRunner, max_catch_up)
     - src/maddening/viz/runner.py:277 (RealtimeRunner._loop)
-    - docs/release_notes/v0.4.0.md:4497 (The runner says what it is doing, and keeps time after a pause)
+    - docs/release_notes/v0.4.0.md:4494 (The runner says what it is doing, and keeps time after a pause)
   conditions: a real-time runner paused, stalled past 0.25 s, and behind by less.
   oracle: simulated against wall-clock time after each.
   tests:
@@ -1351,7 +1394,7 @@ claims:
   sources:
     - src/maddening/api/README.md:112 (Graph Structure)
     - src/maddening/api/server.py:2606 (add_node)
-    - docs/release_notes/v0.4.0.md:4152 (POST /graph/nodes status codes)
+    - docs/release_notes/v0.4.0.md:4149 (Hardening from the audit rounds)
   conditions: an empty graph; a registered and an unregistered type; bad constructor constants.
   oracle: status codes and the graph's nodes.
   tests:
@@ -1591,7 +1634,7 @@ claims:
     on this ground".
   sources:
     - src/maddening/api/README.md:141 (Parameters)
-    - docs/user_guide/parameters.md:153 (Writing parameters over REST)
+    - docs/user_guide/parameters.md:155 (Writing parameters over REST)
     - docs/validation/known_anomalies.yaml (MADD-ANO-047)
   conditions: LBMPipeNode G across zero; HeatNode grid_points; an array the constructor derives; a node that draws random numbers at construction.
   oracle: 400 with nothing written, the reload matching; the random node not blamed.
@@ -1671,7 +1714,7 @@ claims:
   sources:
     - src/maddening/api/server.py:2915 (set_node_params)
     - src/maddening/api/server.py:533 (_coerced_to_param_type)
-    - docs/user_guide/parameters.md:170 (Writing parameters over REST)
+    - docs/user_guide/parameters.md:176 (Writing parameters over REST)
   conditions: integer, float and list parameters; JSON 4.0, 4.5, 4 and lists of them.
   oracle: the stored Python type and value; 400.
   tests:
@@ -1712,7 +1755,7 @@ claims:
   sources:
     - src/maddening/api/server.py:2921 (set_node_params)
     - src/maddening/api/server.py:1202 (_state_write_reason_before_building)
-    - docs/user_guide/parameters.md:164 (Writing parameters over REST)
+    - docs/user_guide/parameters.md:168 (Writing parameters over REST)
   conditions: HeatNode n_cells, a grid shape, a pipe length; the constructor spied.
   oracle: 400 with no constructor call of the new size; nothing written.
   tests:
@@ -1780,7 +1823,7 @@ claims:
     node holding a method bound to itself) or the code raises, nothing is
     refused."
   sources:
-    - docs/user_guide/parameters.md:212 (Writing parameters over REST)
+    - docs/user_guide/parameters.md:203 (Writing parameters over REST)
     - src/maddening/api/server.py:1019 (_probe_pair_with)
   conditions: a node no copy can be made of; a write whose new trace raises where the current one does not.
   oracle: the route's status code.
@@ -1819,22 +1862,24 @@ claims:
 - id: REST-090
   area: params
   claim: >-
-    Any sequence of REST requests keeps the server and a reference model of
-    the graph in step (the stateful model of the REST surface).
+    "The server never answers 5xx"; "a valid call succeeds and leaves the
+    server holding exactly what an in-process GraphManager driven with the
+    same operations holds"; "an invalid call is a 4xx with a message and
+    changes nothing"; "the graph the server reports is a faithful recipe".
   sources:
-    - docs/release_notes/v0.4.0.md:3643 (The HTTP API's replies use the same encoding)
-    - tests/property/stateful_model.py (module docstring)
-  conditions: generated sequences of graph, state, params, sim and checkpoint requests; short ones per push, long ones in the slow lane.
-  oracle: the model's prediction of every status and reply.
+    - tests/property/test_stateful_api.py:1 (module docstring, what the surface promises)
+    - CHANGELOG.md:191 (Property-test coverage for the REST surface, stateful machines)
+  conditions: >-
+    generated sequences of graph, state, params, sim and checkpoint requests
+    over a small scalar node vocabulary; short sequences per push, long
+    ones in the slow lane.
+  oracle: an in-process GraphManager driven with the same operations; byte-identity of the state across a refused call.
   tests:
     - tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
     - tests/property/test_stateful_api.py::test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step
     - tests/property/test_stateful_api.py::test_params_written_before_the_first_compile_survive_a_reset
   status: verified
-
-# ---------------------------------------------------------------------------
-# Checkpoints
-# ---------------------------------------------------------------------------
+  notes: The promise is stated in the test module, not in a user document; the row is here so the next audit attacks it with the rest.
 
 - id: REST-091
   area: checkpoint
@@ -1878,6 +1923,7 @@ claims:
     - tests/api/test_checkpoint_paths_stay_inside_the_root.py::test_a_file_inside_the_root_still_saves_and_loads
     - tests/api/test_checkpoint_paths_stay_inside_the_root.py::test_a_name_that_is_a_directory_loads_the_file_saved_under_it
     - tests/api/test_graph_endpoint_validation.py::test_checkpoint_endpoints_stay_under_the_root
+    - tests/api/test_routes_answer_what_they_did.py::test_the_checkpoint_root_defaults_to_a_checkpoints_directory_under_the_working_one
   status: verified
 
 - id: REST-093
@@ -1890,7 +1936,7 @@ claims:
   sources:
     - src/maddening/api/README.md:148 (Checkpoints)
     - src/maddening/api/server.py:3303 (checkpoint_load)
-    - docs/user_guide/parameters.md:217 (Writing parameters over REST)
+    - docs/user_guide/parameters.md:208 (Writing parameters over REST)
   conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a missing path.
   oracle: 400 or 404, and the state and params unchanged.
   tests:
@@ -2095,7 +2141,7 @@ claims:
     - benchmarks/multigpu/run_pod.py:79 (module docstring)
     - benchmarks/multigpu/README.md:350 (3. Stop condition)
     - benchmarks/multigpu/README.md:268 (2b)
-    - docs/release_notes/v0.4.0.md:2910 (Session tooling for the hardware run)
+    - docs/release_notes/v0.4.0.md:2905 (Session tooling for the hardware run)
   conditions: a seeded failing goal first in a --goal checklist --dry-run.
   oracle: exit 1, the failed goal's JSON with passed false, no later goal run.
   tests:
@@ -2596,7 +2642,7 @@ claims:
     - benchmarks/multigpu/README.md:21 (The sharding checklist)
     - benchmarks/multigpu/run_pod.py:228 (CHECKLIST)
     - benchmarks/multigpu/run_pod.py:2738 (GOAL_CHECKS)
-    - docs/release_notes/v0.4.0.md:2942 (Session tooling for the hardware run)
+    - docs/release_notes/v0.4.0.md:2941 (Session tooling for the hardware run)
   conditions: the constants; the committed record's checks derived again from its results.
   oracle: equality; record_problems empty on the record.
   tests:

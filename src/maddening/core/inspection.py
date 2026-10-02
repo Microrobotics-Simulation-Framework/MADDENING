@@ -1095,7 +1095,7 @@ def _bound_violation(spec: Any, leaf: Any) -> Optional[str]:
     if arr.dtype.kind == "c":
         if not np.all(np.isfinite(arr)):
             return "not finite"
-        arr = arr.real
+        arr = np.real(arr)
     if jnp.issubdtype(arr.dtype, jnp.floating) and not np.all(np.isfinite(arr.astype(np.float64))):
         return "not finite"
     lo, hi = spec.bounds

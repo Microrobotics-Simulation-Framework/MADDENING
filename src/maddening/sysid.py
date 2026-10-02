@@ -3236,9 +3236,9 @@ def _gauss_newton_flatness(J, candidates, dtype, method: str = "fit_lm",
     if scale is not None:
         Jd = Jd / np.asarray(scale, dtype=np.float64)[None, :]
     W, s = _rotation_by_singular_values(Jd @ candidates, k)
-    scale = float(np.linalg.norm(Jd, 2)) ** 2
+    curvature = float(np.linalg.norm(Jd, 2)) ** 2
     rtol = _resolve_rank_rtol(dtype, n, None, n_residual=m)
-    return W, s * s <= rtol * scale, scale
+    return W, s * s <= rtol * curvature, curvature
 
 
 def _hessian_flatness(hvp, candidates, excited, dtype, method: str,
@@ -3294,10 +3294,10 @@ def _hessian_flatness(hvp, candidates, excited, dtype, method: str,
         return _no_curvature(method, k, "its Hessian-vector product is not finite")
     if inv is not None:
         HV = HV * inv
-    scale = float(np.linalg.norm(HV, 2))
+    curvature = float(np.linalg.norm(HV, 2))
     W, s = _rotation_by_singular_values(HV[:, :k], k)
-    cutoff = math.sqrt(float(np.finfo(dtype).eps)) * scale
-    return W, s <= cutoff, scale
+    cutoff = math.sqrt(float(np.finfo(dtype).eps)) * curvature
+    return W, s <= cutoff, curvature
 
 
 def _hvp_columns(grad_fn, theta, extra, V):

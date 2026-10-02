@@ -1829,7 +1829,7 @@ class TestAnomalyGateFailsClosedOnEvidence:
         data = yaml.safe_load(registry.read_text())
         mutate(data)
         path = tmp_path / "known_anomalies.yaml"
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        path.write_text(_canonical_registry_dump(data))
         return path
 
     def test_stripping_a_shipped_resolved_entrys_evidence_fails(self, tmp_path):
@@ -2013,6 +2013,188 @@ class TestARetirementOfAReachableEntryIsRefused:
         assert "which leaves the defect reachable" in result.stderr
         assert "missing from the contiguous range" not in result.stderr
 
+    # -- no YAML spelling of the ID hides the entry from its history --
+    #
+    # audit_040_p4_4, M2: the removal was found with ``git log -S`` on the
+    # double-quoted spelling only, so an open entry committed single-quoted
+    # or unquoted was "a number no commit recorded" and its retirement was
+    # excused.  Every spelling below is the same YAML string.
+
+    @pytest.mark.parametrize("spelling", [
+        '"MADD-ANO-002"', "'MADD-ANO-002'", "MADD-ANO-002",
+        r'"MADD-ANO-00\x32"', "!!str MADD-ANO-002",
+    ], ids=["double-quoted", "single-quoted", "plain", "escaped", "tagged"])
+    def test_no_spelling_of_the_id_hides_an_open_entry_from_its_history(
+            self, anomalies_gate, tmp_path, spelling):
+        opened = _THREE_ANOMALIES.format(status="open").replace(
+            '- anomaly_id: "MADD-ANO-002"', f"- anomaly_id: {spelling}")
+        assert f"- anomaly_id: {spelling}\n" in opened
+        path = _commit_registry(tmp_path / "repo", opened,
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
+        entry, where, problem = anomalies_gate.last_committed_entry(
+            path, "MADD-ANO-002")
+        assert problem is None, problem
+        assert entry is not None and entry["resolution_status"] == "open", (
+            where, entry)
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1 and "is 'open', which leaves" in errors[0], errors
+
+    def test_the_audits_single_quoted_retirement_fails_end_to_end(self, tmp_path):
+        """M2 through the gate as CI runs it: no gap error to fall back on."""
+        opened = _THREE_ANOMALIES.format(status="open").replace(
+            '- anomaly_id: "MADD-ANO-002"', "- anomaly_id: 'MADD-ANO-002'")
+        path = _commit_registry(tmp_path / "repo", opened,
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
+        root = tmp_path / "root"
+        (root / "tests" / "compliance").mkdir(parents=True)
+        (root / "tests" / "compliance" / "test_soup_evidence.py").write_text(
+            '_RETIRED_ANOMALY_IDS = {"MADD-ANO-002": "duplicate of 001"}\n')
+        result = _run("check_anomalies", str(path), "--repo-root", str(root))
+        assert result.returncode == 1, result.stdout
+        assert "is 'open', which leaves the defect reachable" in result.stderr
+
+    def test_an_entry_opened_and_deleted_on_a_merged_branch_is_found(
+            self, anomalies_gate, tmp_path):
+        """The merge leaves the registry as it was, so git's default history
+        simplification follows the first parent and never visits the side
+        branch's two commits; the walk must not depend on it."""
+        repo = tmp_path / "repo"
+        path = _commit_registry(repo, _TWO_ANOMALIES_WITH_A_GAP,
+                                rel=_NESTED_REGISTRY)
+        trunk = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        _git(repo, "checkout", "-q", "-b", "side")
+        path.write_text(_THREE_ANOMALIES.format(status="open"))
+        _git(repo, "commit", "-q", "-am", "open 002")
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        _git(repo, "commit", "-q", "-am", "delete 002")
+        _git(repo, "checkout", "-q", trunk)
+        (repo / "unrelated.txt").write_text("x\n")
+        _git(repo, "add", "unrelated.txt")
+        _git(repo, "commit", "-q", "-m", "unrelated")
+        _git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+        # The premise: simplified history does not visit the side branch.
+        simplified = _git(repo, "log", "--format=%s", "--", _NESTED_REGISTRY)
+        assert "open 002" not in simplified, simplified
+        errors = anomalies_gate.retirement_errors({"MADD-ANO-002": "why"}, path)
+        assert len(errors) == 1 and "is 'open', which leaves" in errors[0], errors
+
+    def test_a_merge_that_drops_its_second_parents_entry_removes_it(
+            self, anomalies_gate, tmp_path):
+        repo = tmp_path / "repo"
+        path = _commit_registry(repo, _TWO_ANOMALIES_WITH_A_GAP,
+                                rel=_NESTED_REGISTRY)
+        trunk = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        _git(repo, "checkout", "-q", "-b", "side")
+        path.write_text(_THREE_ANOMALIES.format(status="open"))
+        _git(repo, "commit", "-q", "-am", "open 002")
+        _git(repo, "checkout", "-q", trunk)
+        (repo / "unrelated.txt").write_text("x\n")
+        _git(repo, "add", "unrelated.txt")
+        _git(repo, "commit", "-q", "-m", "unrelated")
+        _git(repo, "merge", "-q", "--no-ff", "--no-commit", "side")
+        path.write_text(_TWO_ANOMALIES_WITH_A_GAP)
+        _git(repo, "add", _NESTED_REGISTRY)
+        _git(repo, "commit", "-q", "-m", "merge side, dropping 002")
+        entry, where, problem = anomalies_gate.last_committed_entry(
+            path, "MADD-ANO-002")
+        assert problem is None, problem
+        assert entry["resolution_status"] == "open" and where.endswith("^2"), where
+
+    def test_one_walk_answers_every_retired_id(self, anomalies_gate, tmp_path):
+        """Two retirements, one closed and one open, in one history."""
+        four = _THREE_ANOMALIES.format(status="resolved").replace(
+            '  - anomaly_id: "MADD-ANO-003"',
+            '  - anomaly_id: "MADD-ANO-004"\n    title: "T"\n'
+            '    resolution_status: "open"\n  - anomaly_id: "MADD-ANO-003"')
+        path = _commit_registry(tmp_path / "repo", four,
+                                _TWO_ANOMALIES_WITH_A_GAP, rel=_NESTED_REGISTRY)
+        found = anomalies_gate.last_committed_entries(
+            path, ["MADD-ANO-002", "MADD-ANO-004", "MADD-ANO-009"])
+        assert found["MADD-ANO-002"][0]["resolution_status"] == "resolved"
+        assert found["MADD-ANO-004"][0]["resolution_status"] == "open"
+        assert found["MADD-ANO-009"] == (None, None, None)
+
+
+def _canonical_registry_dump(data):
+    """``yaml.safe_dump`` of a registry, with each ID in the gate's spelling.
+
+    ``safe_dump`` writes the IDs plain (``- anomaly_id: MADD-ANO-001``),
+    which the gate refuses as non-canonical; a test seeding some other
+    fault re-quotes them so that the fault it seeds is the only one.
+    """
+    import re
+
+    import yaml
+
+    text = yaml.safe_dump(data, sort_keys=False)
+    return re.sub(r"^(\s*- anomaly_id: )(\S+)$", r'\1"\2"', text, flags=re.M)
+
+
+class TestTheIdLineHasOneSpelling:
+    """audit_040_p4_4, M2's second half: the registry's ID lines are
+    written one way, so a reader looking for an ID as text finds it."""
+
+    @staticmethod
+    def _gate(tmp_path, text):
+        path = tmp_path / "known_anomalies.yaml"
+        path.write_text(text)
+        return _run("check_anomalies", str(path), "--repo-root", str(REPO_ROOT))
+
+    def test_the_canonical_spelling_passes(self, tmp_path):
+        result = self._gate(tmp_path, _minimal_anomaly(status="open"))
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    @pytest.mark.parametrize("line", [
+        "  - anomaly_id: 'MADD-ANO-001'",
+        "  - anomaly_id: MADD-ANO-001",
+        '  - anomaly_id:  "MADD-ANO-001"',
+        '  - anomaly_id: "MADD-ANO-001"  # a comment',
+        '  - "anomaly_id": "MADD-ANO-001"',
+        r'  - anomaly_id: "MADD-ANO-00\x31"',
+        '  - anomaly_id: !!str "MADD-ANO-001"',
+        '  - anomaly_id: &first "MADD-ANO-001"',
+    ], ids=["single-quoted", "plain", "two-spaces", "trailing-comment",
+            "quoted-key", "escaped", "tagged", "anchored"])
+    def test_any_other_spelling_of_the_id_line_fails(self, tmp_path, line):
+        text = _minimal_anomaly(status="open")
+        assert '  - anomaly_id: "MADD-ANO-001"' in text
+        result = self._gate(tmp_path, text.replace(
+            '  - anomaly_id: "MADD-ANO-001"', line))
+        assert result.returncode == 1, result.stdout
+        assert "is not the canonical ID line" in result.stderr
+
+    def test_an_id_key_that_is_not_the_first_key_fails(self, tmp_path):
+        text = _minimal_anomaly(status="open").replace(
+            '  - anomaly_id: "MADD-ANO-001"\n    title: "Test"',
+            '  - title: "Test"\n    anomaly_id: "MADD-ANO-001"')
+        assert "  - title:" in text
+        result = self._gate(tmp_path, text)
+        assert result.returncode == 1, result.stdout
+        assert "is not the canonical ID line" in result.stderr
+
+    def test_an_id_no_line_spells_fails(self, tmp_path):
+        """YAML's explicit-key form sets ``anomaly_id`` on no ``key:`` line,
+        so only the comparison with the parsed IDs can see it."""
+        text = _minimal_anomaly(status="open").replace(
+            '  - anomaly_id: "MADD-ANO-001"\n',
+            '  - ? anomaly_id\n    : "MADD-ANO-001"\n')
+        assert "? anomaly_id" in text
+        result = self._gate(tmp_path, text)
+        assert result.returncode == 1, result.stdout
+        assert "not spelled canonically: ['MADD-ANO-001']" in result.stderr
+
+    def test_a_comment_mentioning_the_key_is_not_an_id_line(self, tmp_path):
+        text = _minimal_anomaly(status="open").replace(
+            "anomalies:\n", "anomalies:\n  # anomaly_id: 'like this' is refused\n")
+        result = self._gate(tmp_path, text)
+        assert result.returncode == 0, result.stdout + result.stderr
+
+    def test_the_shipped_registry_is_canonical(self, anomalies_gate):
+        path = REPO_ROOT / "docs" / "validation" / "known_anomalies.yaml"
+        _, _, anomalies, _ = anomalies_gate._census(str(path))
+        assert anomalies
+        assert anomalies_gate.anomaly_id_spelling_errors(str(path), anomalies) == []
+
 
 class TestAnomalyGateVerifiesSomething:
     """The two guards check_heat_stability.py has and this gate claimed to.
@@ -2123,7 +2305,7 @@ def _shipped_registry_with(tmp_path, mutate):
     data = yaml.safe_load(registry.read_text())
     mutate(data)
     path = tmp_path / "known_anomalies.yaml"
-    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    path.write_text(_canonical_registry_dump(data))
     return path
 
 

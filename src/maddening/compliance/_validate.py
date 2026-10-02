@@ -520,16 +520,18 @@ def validate_anomaly_registry(
             errors.append(f"{aid}: unknown field '{key}'")
 
         # Valid enums
+        # ``isinstance(str)`` first: a YAML list or mapping is unhashable,
+        # and ``in`` on a set raised ``TypeError`` instead of reporting it.
         sev = a.get("severity")
-        if sev is not None and sev not in _VALID_SEVERITIES:
+        if sev is not None and not (isinstance(sev, str) and sev in _VALID_SEVERITIES):
             errors.append(f"{aid}: invalid severity '{sev}'")
 
         sr = a.get("safety_relevance")
-        if sr is not None and sr not in _VALID_SAFETY_RELEVANCES:
+        if sr is not None and not (isinstance(sr, str) and sr in _VALID_SAFETY_RELEVANCES):
             errors.append(f"{aid}: invalid safety_relevance '{sr}'")
 
         rs = a.get("resolution_status")
-        if rs is not None and rs not in _VALID_RESOLUTION_STATUSES:
+        if rs is not None and not (isinstance(rs, str) and rs in _VALID_RESOLUTION_STATUSES):
             errors.append(f"{aid}: invalid resolution_status '{rs}'")
 
         if not resolve_references:

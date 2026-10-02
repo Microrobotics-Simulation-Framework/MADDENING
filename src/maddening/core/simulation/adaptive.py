@@ -131,7 +131,15 @@ def _tree_error_norm(state_fine, state_coarse, atol, rtol):
             return
         diff = jnp.abs(fine - coarse)
         scale = atol + rtol * jnp.maximum(jnp.abs(fine), jnp.abs(coarse))
-        scaled = jnp.where(scale > 0, diff / jnp.maximum(scale, 1e-300), 0.0)
+        # A zero scale (``atol=0`` on an entry at zero in both estimates)
+        # contributes nothing; every other entry is divided by its own
+        # scale.  The guard used to be ``max(scale, 1e-300)``, an absolute
+        # floor in the state's units: in float64 an entry below about
+        # ``1e-297`` (``1e-300 / rtol``) was divided by ``1e-300`` instead of
+        # its scale, its error read up to ``rtol * |x| / 1e-300`` times too
+        # small, and steps that should have been rejected were accepted.
+        live = scale > 0
+        scaled = jnp.where(live, diff / jnp.where(live, scale, 1.0), 0.0)
         sum_sq += jnp.sum(scaled ** 2)
         count += scaled.size
 

@@ -1200,6 +1200,98 @@ class TestNodeAlgorithmIds:
         assert "is stated by 2 guides" in capsys.readouterr().err
 
 
+class TestNodeGuidesArePinned:
+    """audit_040_p4_4, L6: ``lbm_node.md`` with its ``**Module**`` and
+    ``**Algorithm ID**`` lines both removed matched no node, so the guide-ID
+    check had nothing to compare and passed with 7 IDs where there were 8.
+    Each case runs the gate over a copy of the guides whose repository root
+    is the copy, as the auditor's ``git archive`` run did."""
+
+    _LBM = os.path.join("docs", "algorithm_guide", "nodes", "lbm_node.md")
+
+    @staticmethod
+    def _copy(tmp_path, monkeypatch, mapping_gate):
+        import shutil
+
+        root = tmp_path / "repo"
+        shutil.copytree(REPO_ROOT / "docs" / "algorithm_guide",
+                        root / "docs" / "algorithm_guide")
+        monkeypatch.setattr(mapping_gate, "_REPO_ROOT", str(root))
+        return root
+
+    @staticmethod
+    def _drop(path, *prefixes):
+        lines = path.read_text().splitlines(keepends=True)
+        kept = [ln for ln in lines if not ln.startswith(prefixes)]
+        assert len(kept) == len(lines) - len(prefixes), prefixes
+        path.write_text("".join(kept))
+
+    def test_the_pins_hold_on_the_repository(self, mapping_gate):
+        assert mapping_gate.check_node_guides(
+            mapping_gate.NODE_GUIDES, str(REPO_ROOT)) == []
+        assert len(mapping_gate.NODE_GUIDES) == 8
+
+    def test_an_unmodified_copy_passes(self, mapping_gate, tmp_path, monkeypatch,
+                                       capsys):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        assert mapping_gate.main([str(root / "docs" / "algorithm_guide")]) == 0
+        assert "8 guide algorithm ID(s) match" in capsys.readouterr().out
+
+    def test_a_guide_losing_its_module_and_id_lines_together_fails(
+            self, mapping_gate, tmp_path, monkeypatch, capsys):
+        """The auditor's mutant."""
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        self._drop(root / self._LBM, "**Algorithm ID**", "**Module**")
+        assert mapping_gate.main([str(root / "docs" / "algorithm_guide")]) == 1
+        err = capsys.readouterr().err
+        assert "lbm_node.md: is pinned in NODE_GUIDES as MADD-NODE-011" in err
+        assert "name no node" in err
+
+    def test_the_pin_is_checked_whatever_directory_was_scanned(
+            self, mapping_gate, tmp_path, monkeypatch, capsys):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        self._drop(root / self._LBM, "**Algorithm ID**", "**Module**")
+        assert mapping_gate.main(
+            [str(root / "docs" / "algorithm_guide" / "solvers")]) == 1
+        assert "lbm_node.md: is pinned in NODE_GUIDES" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("edit, fragment", [
+        (lambda t: t.replace("`MADD-NODE-011`", "`MADD-NODE-012`"),
+         "pinned in NODE_GUIDES as MADD-NODE-011, but states"),
+        (lambda t: t.replace("# LBMNode", "# LBMPipeNode", 1),
+         "as the guide to maddening.nodes.lbm.LBMNode, but"),
+        (lambda t: t.replace("**Algorithm ID**", "**Algorithm Id**"),
+         "but states no **Algorithm ID** line"),
+    ], ids=["another-id", "another-node", "misspelt-id-line"])
+    def test_a_pinned_guide_that_moves_off_its_pin_fails(
+            self, mapping_gate, tmp_path, monkeypatch, capsys, edit, fragment):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        path = root / self._LBM
+        text = path.read_text()
+        assert edit(text) != text
+        path.write_text(edit(text))
+        errors = mapping_gate.check_node_guides(mapping_gate.NODE_GUIDES, str(root))
+        assert any(fragment in e for e in errors), errors
+
+    def test_a_deleted_node_guide_fails(self, mapping_gate, tmp_path, monkeypatch):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        (root / self._LBM).unlink()
+        errors = mapping_gate.check_node_guides(mapping_gate.NODE_GUIDES, str(root))
+        assert any("lbm_node.md: pinned in NODE_GUIDES but the file does not exist"
+                   in e for e in errors), errors
+
+    def test_a_new_node_guide_in_the_repository_must_be_pinned(
+            self, mapping_gate, tmp_path, monkeypatch, capsys):
+        root = self._copy(tmp_path, monkeypatch, mapping_gate)
+        _node_guide(root / "docs" / "algorithm_guide" / "nodes", "RigidBodyNode",
+                    "maddening.nodes.rigid_body",
+                    ["**Algorithm ID**: `MADD-NODE-007`\n"],
+                    name="rigid_body_node.md")
+        assert mapping_gate.main([str(root / "docs" / "algorithm_guide")]) == 1
+        assert "rigid_body_node.md: documents a node (MADD-NODE-007) but is not " \
+               "pinned in NODE_GUIDES" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # check_citations.py
 # ---------------------------------------------------------------------------

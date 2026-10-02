@@ -7803,7 +7803,7 @@ anomalies:
       supersedes every earlier write to a constant it restores; and every
       entry point recompiles for a write the compiled step has not taken
       (MADD-ANO-105).  Refined again (1fa529b, 2026-10-02) after the round-6
-      audit found the readers of `gm.params` left out (MADD-ANO-121): the
+      audit found the readers of `gm.params` left out (MADD-ANO-122): the
       write now reaches `gm.params` through one sync point that every read
       of it runs, and the rule is simply that the later write wins -- a
       `gm.params` write reads `gm.params` first, so the two are always
@@ -9399,6 +9399,82 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-120"
+    title: "A node downstream of a cycle that was added to the graph before the cycle's nodes was scheduled ahead of them and read their previous-step output: an edge on no cycle, staggered silently"
+    description: >
+      `topological_sort` orders the nodes Kahn's algorithm can reach, each
+      after its sources, and appended the rest -- the members of every
+      cycle and every node downstream of one -- in the order they had been
+      added to the graph.  `identify_back_edges` then treats any edge whose
+      source is not scheduled before its target as a back edge, read from
+      the previous step.  So a node that reads a coupling group (or any
+      cycle) through an edge on no cycle, and was added before the group's
+      members, was scheduled ahead of them, and its input was the group's
+      output one step late.  Nothing said so: `compile()` and `validate()`
+      report cycles, not this edge.  On two relays coupled both ways with a
+      sink reading one of them through a gain, the sink read 0.409 after one
+      step where the same graph built with the sink added last read 0.821.  The same
+      happened between two cycles (a group reading another group, its
+      members added first) and for a staggered cycle with no coupling
+      group.  A graph whose every reader was added after the cycle it
+      reads was scheduled correctly, which is why the examples and the
+      tests never showed it.
+      Reproduced identically at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0; `topological_sort`
+      is unchanged across them): two relays coupled both ways and a sink
+      reading one of them, the sink added first, read 0.0 after one step --
+      its input still the previous step's -- where the same graph with the
+      sink added last read 0.667, and `gm.schedule` listed the sink first.
+      Found by the coupling claims inventory (#200), whose build-order
+      invariance test reordered the `add_node` calls.
+      Resolved in 0.4.0: the unreached nodes are ordered by their strongly
+      connected components -- each component whole, after the components it
+      reads, its members in the order they were added (the order a
+      Gauss-Seidel sweep follows) -- so the only edges a schedule reads from
+      the previous step are a cycle's own, whatever order the graph was
+      built in.  A graph built with every reader after its cycle is
+      scheduled exactly as before.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, never `minor` under the 0.4.0 severity
+      definition: a coupled subsystem's output reached its reader one step
+      late, an O(dt) error in every quantity computed from it, with a
+      plausible trajectory and no warning.  Not `critical`: it needs a
+      reader of a cycle added to the graph before the cycle's nodes, and the
+      cycle's own states were right.  `context_dependent` because whether
+      the lagged quantity feeds a decision is the program's choice.
+    affected_components:
+      - "maddening.core.schedule.topological_sort"
+      - "maddening.core.graph_manager.GraphManager.compile"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: add every node that reads a cycle (a coupling group's
+      members, or a staggered loop) to the graph after that cycle's nodes,
+      and a cycle that reads another after the other's nodes.  A graph is
+      affected when `gm.schedule` lists a node ahead of a member of a cycle
+      it reads, directly or through other nodes.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A cycle's members are still swept in the order they were added, by
+      design: under Gauss-Seidel that order is part of the method (a ring
+      has no natural first node; coupling guide, "What the way a graph is
+      built can change").  Two components that do not read each other keep
+      their relative order of addition, which changes no result.  Three or
+      more additive edges into one input still sum in the order they were
+      added, which can move the input in its last bit; documented in the
+      same section.
+    verification:
+      - "tests/core/test_coupling_claims_graphs.py::test_a_node_downstream_of_a_group_reads_it_in_the_same_step"
+      - "tests/core/test_coupling_claims_graphs.py::test_a_downstream_node_added_first_reads_the_cycle_in_the_same_step_on_every_path"
+      - "tests/core/test_coupling_claims_graphs.py::test_a_reader_of_one_group_runs_after_it_whatever_the_build_order"
+      - "tests/core/test_schedule.py::test_only_a_cycles_own_edges_point_backward"
+      - "tests/core/test_schedule.py::test_every_component_is_contiguous_and_keeps_its_build_order"
+      - "tests/core/test_schedule.py::test_a_schedule_rebuilt_in_its_own_order_is_itself"
+      - "tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-121"
     title: "fit_lm's Marquardt floor, scaled to the mean curvature, crushed the step of a parameter measured in small units, and fit_lm reported converged=True away from the truth"
     description: >
       MADD-ANO-104's fix made `fit_lm`'s regularising floor `eps` times the
@@ -9453,7 +9529,7 @@ anomalies:
       - "tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-121"
+  - anomaly_id: "MADD-ANO-122"
     title: "A pending node.params write reached the entry points that run the graph but not the code that reads gm.params: a jitted or differentiated sysid loss, the FMU export, save_state and GET /graph/params used the old value"
     description: >
       MADD-ANO-105's fix synced a `node.params` write at every entry point

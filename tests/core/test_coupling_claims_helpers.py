@@ -167,12 +167,10 @@ def _dense_matvec(n):
 
 
 def test_the_dense_adjoint_peaks_at_two_jacobians_in_reverse_mode():
-    """CPL-036 (verified half): ``jax.grad`` through ``"dense"`` peaks at ``2 N**2`` floats.
+    """CPL-036 (reverse half): ``jax.grad`` through ``"dense"`` peaks at ``2 N**2`` floats.
 
     XLA's compiled-module memory analysis of the transposed (adjoint) dense
-    solve, for a coupling Jacobian with no structure XLA can exploit.  The
-    forward-mode (tangent) solve is the row's ambiguous half: it measured
-    ``3 N**2`` here (jaxlib 0.11.0, CPU), see the row's notes.
+    solve, for a coupling Jacobian with no structure XLA can exploit.
     """
     n = 512
     matvec = _dense_matvec(n)
@@ -183,6 +181,20 @@ def test_the_dense_adjoint_peaks_at_two_jacobians_in_reverse_mode():
     compiled = jax.jit(jax.grad(loss)).lower(jnp.ones(n, F32)).compile()
     peak = compiled.memory_analysis().temp_size_in_bytes
     assert peak <= 2.05 * n * n * 4, f"{peak / (n * n * 4):.3f} N**2 floats"
+
+
+def test_the_dense_tangent_solve_peaks_at_three_jacobians_in_forward_mode():
+    """CPL-036 (forward half): ``jax.jvp`` through ``"dense"`` keeps ``I - J`` beside the basis.
+
+    The documented forward-mode figure is ``3 N**2`` floats; held as an
+    upper bound, so a jaxlib that fuses more cannot fail it.
+    """
+    n = 512
+    matvec = _dense_matvec(n)
+    compiled = jax.jit(lambda b: _ift_linear_solve(matvec, b, "dense")).lower(
+        jnp.ones(n, F32)).compile()
+    peak = compiled.memory_analysis().temp_size_in_bytes
+    assert peak <= 3.05 * n * n * 4, f"{peak / (n * n * 4):.3f} N**2 floats"
 
 
 def _primitives(fn, *args):

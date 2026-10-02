@@ -4335,7 +4335,7 @@ def _build_adaptive_scan(
     Callable
         ``(state, ext, params, knobs) -> ((state, t, dt, n), history)``.
     """
-    from maddening.core.simulation.adaptive import _tree_error_norm
+    from maddening.core.simulation.adaptive import _tree_error_norm, step_decision
 
     strict_messages = dict(getattr(dt_step_fn, "strict_messages", {}))
     fold_kept_halves = getattr(dt_step_fn, "fold_kept_halves",
@@ -4368,13 +4368,11 @@ def _build_adaptive_scan(
             user_half = {k: v for k, v in state_half.items() if k != _META_KEY}
             error_norm = _tree_error_norm(user_half, user_full, atol, rtol)
 
-            accepted = (error_norm <= 1.0) | (dt <= dt_min)
-
-            # PI controller
-            safe_error = jnp.maximum(error_norm, 1e-10)
-            factor = safety * jnp.power(1.0 / safe_error, 1.0 / (order + 1))
-            factor = jnp.clip(factor, min_factor, max_factor)
-            dt_next = jnp.clip(dt * factor, dt_min, dt_max)
+            # The one acceptance rule and PI controller ``run_adaptive``
+            # uses too (``adaptive.step_decision``).
+            accepted, _forced, dt_next, _factor = step_decision(
+                error_norm, dt, dt_min, dt_max, safety=safety, order=order,
+                min_factor=min_factor, max_factor=max_factor, xp=jnp)
 
             # If done, keep state unchanged; if accepted, use half-step result
             new_state = jax.tree.map(
@@ -8585,11 +8583,9 @@ class GraphManager:
                 # that is the count.
                 committed = self._committed_floor_inputs.get(key)
                 if committed is None:
-                    committed = (*_group_evaluations(
-                        group, self._nodes, self._schedule, self._edges),
-                        tuple(e for e in self._edges
-                              if e.source_node in group.nodes
-                              and e.target_node in group.nodes))
+                    # Slots without a snapshot: not written by a step this
+                    # graph's ``compile()`` built.  Nothing to judge them by.
+                    continue
                 evaluations, declared, internal_edges = committed
                 measured = float(meta.get(f"coupling_{key}_pass_evaluations", float("nan")))
                 if math.isfinite(measured):
@@ -9550,7 +9546,11 @@ class GraphManager:
 
         external_inputs = self._resolve_external_inputs(external_inputs)
 
-        from maddening.core.simulation.adaptive import AdaptiveConfig, _tree_error_norm
+        from maddening.core.simulation.adaptive import (
+            AdaptiveConfig,
+            _tree_error_norm,
+            step_decision,
+        )
 
         config = AdaptiveConfig(
             dt_initial=dt_initial,
@@ -9603,9 +9603,30 @@ class GraphManager:
                 user_half, user_full, config.atol, config.rtol
             ))
 
-            if error_norm <= 1.0:
-                # Accept step -- use the more accurate (half-step) result
+            # The acceptance rule and the next timestep are
+            # ``run_adaptive_scan``'s, from one function
+            # (``adaptive.step_decision``): accepted within tolerance, or
+            # when the attempt was already made at ``dt_min``.  This loop
+            # used to accept a *rejected* attempt larger than ``dt_min``
+            # whenever shrinking it would reach ``dt_min``, and so took a
+            # different, larger step than the scan -- overshooting
+            # ``t_end`` on a decay held at ``dt_min``.
+            accepted, forced, dt_next, _factor = step_decision(
+                error_norm, dt, dt_min, dt_max, safety=config.safety,
+                order=config.order, min_factor=config.min_factor,
+                max_factor=config.max_factor, xp=np)
+            if accepted:
+                # Use the more accurate (half-step) result -- unless a
+                # solve the step keeps did not converge.
                 _raise_if_a_kept_solve_failed(strict_messages, (verdicts_1, verdicts_2))
+                if forced:
+                    warnings.warn(
+                        f"Adaptive stepper hit dt_min={dt_min} at t={t:.6g} "
+                        f"(error={error_norm:.3e}). Accepting step.",
+                        stacklevel=2,
+                    )
+                # The clock advances by the step the two half steps covered
+                # (MADD-ANO-061).
                 state = state_half
                 t += dt
                 n_steps += 1
@@ -9615,45 +9636,9 @@ class GraphManager:
                 if callback is not None:
                     callback(t, dt, self._user_state(state))
                 self._notify(EVENT_STEP, self._user_state(state))
-
-                # Grow dt
-                if error_norm > 0:
-                    factor = config.safety * (1.0 / error_norm) ** (1.0 / (config.order + 1))
-                else:
-                    factor = config.max_factor
-                factor = min(max(factor, config.min_factor), config.max_factor)
-                dt = min(dt * factor, dt_max)
             else:
-                # Reject step -- shrink dt and retry
                 n_rejected += 1
-                attempted = dt
-                factor = config.safety * (1.0 / error_norm) ** (1.0 / (config.order + 1))
-                factor = min(max(factor, config.min_factor), config.max_factor)
-                dt = max(dt * factor, dt_min)
-
-                if dt <= dt_min:
-                    # Cannot shrink further; accept with warning -- unless
-                    # a solve the step would keep did not converge.
-                    _raise_if_a_kept_solve_failed(
-                        strict_messages, (verdicts_1, verdicts_2))
-                    warnings.warn(
-                        f"Adaptive stepper hit dt_min={dt_min} at t={t:.6g} "
-                        f"(error={error_norm:.3e}). Accepting step.",
-                        stacklevel=2,
-                    )
-                    # The step accepted is the attempt just made, whose two
-                    # half steps covered ``attempted`` -- up to
-                    # ``dt_min / min_factor``, not ``dt_min``.  Advancing
-                    # the clock by ``dt_min`` left it behind the state
-                    # (MADD-ANO-061).
-                    state = state_half
-                    t += attempted
-                    n_steps += 1
-                    dt_history.append(attempted)
-                    t_history.append(t)
-                    if callback is not None:
-                        callback(t, attempted, self._user_state(state))
-                    self._notify(EVENT_STEP, self._user_state(state))
+            dt = float(dt_next)
 
         self._store_state(state)
         info = {

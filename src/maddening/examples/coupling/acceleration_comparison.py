@@ -37,7 +37,10 @@ scales the error by ``r**2``: the coupling strength is set by ``r``.
   a property of the node's integrator, not of the coupling solver -- but
   a single step's fixed point is well defined, and it is all the solver
   sees.  At ``r = 1.5`` a Gauss-Seidel pass *amplifies* the error by
-  ``r**2 = 2.25``.
+  ``r**2 = 2.25``.  The library says so too: ``compile()`` warns that the
+  undamped ``r = 0.5`` pair grows by a factor ``g`` every step
+  (MADD-ANO-098).  The demo records that warning, prints it and asserts
+  it was raised.
 
 Every iteration count printed is measured, and the conclusions the demo
 prints are asserted.
@@ -50,6 +53,8 @@ Usage
 
 import argparse
 import os
+import re
+import warnings
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 from maddening.core.graph_manager import GraphManager
@@ -59,6 +64,8 @@ DT = 0.005
 MASS = 0.5
 TOLERANCE = 1e-6
 GROUP = "spring_a+spring_b"
+#: The anomaly the anchored-pair warning names (``compile()``, see Part 2).
+PAIR_ANOMALY = "MADD-ANO-098"
 
 METHODS = [
     ("Plain fixed-point", "none", 1.0),
@@ -69,8 +76,14 @@ METHODS = [
 
 
 def build_graph(stiffness, damping, acceleration="none", relaxation=1.0,
-                max_iterations=50):
-    """Two masses on one spring, iterated as a coupling group."""
+                max_iterations=50, flagged=None):
+    """Two masses on one spring, iterated as a coupling group.
+
+    With a ``flagged`` list, a warning from ``compile()`` that names
+    MADD-ANO-098 is appended to it instead of being shown, so the demo
+    can print and assert it.  Every other warning, and that one when no
+    list is given, goes on to the caller as usual.
+    """
     gm = GraphManager()
     gm.add_node(SpringDamperNode(
         name="spring_a", timestep=DT,
@@ -90,7 +103,14 @@ def build_graph(stiffness, damping, acceleration="none", relaxation=1.0,
     if acceleration == "fixed":
         kwargs["relaxation"] = relaxation
     gm.add_coupling_group(["spring_a", "spring_b"], **kwargs)
-    gm.compile()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        gm.compile()
+    for w in caught:
+        if flagged is not None and PAIR_ANOMALY in str(w.message):
+            flagged.append(str(w.message))
+        else:
+            warnings.warn_explicit(w.message, w.category, w.filename, w.lineno)
     return gm
 
 
@@ -154,9 +174,10 @@ def part1_weak_coupling(n_steps=60):
     print()
 
 
-def solve_one_step(stiffness, accel, omega):
+def solve_one_step(stiffness, accel, omega, flagged):
     """Iterate a single step's coupling solve and report it."""
-    gm = build_graph(stiffness, 0.0, acceleration=accel, relaxation=omega)
+    gm = build_graph(stiffness, 0.0, acceleration=accel, relaxation=omega,
+                     flagged=flagged)
     gm.step()
     return gm.coupling_diagnostics()[GROUP]
 
@@ -166,13 +187,15 @@ def part2_strong_coupling():
     print("Part 2: one step at strong coupling (max_iterations=50)")
     print("-" * 72)
     summary = {}
+    flagged = {}
     for r in (0.5, 1.5):
         k = r * MASS / DT ** 2
+        flagged[r] = []
         print(f"  r = {r} (k = {k:g}): a Gauss-Seidel pass scales the error "
               f"by r^2 = {r * r:g}")
         print(f"    {'Method':<20} {'Iters':>6} {'Converged':>10} {'Residual':>10}")
         for label, accel, omega in METHODS:
-            info = solve_one_step(k, accel, omega)
+            info = solve_one_step(k, accel, omega, flagged[r])
             summary[(r, label)] = info
             print(f"    {label:<20} {info['iterations']:6d} "
                   f"{str(bool(info['converged'])):>10} {info['residual']:10.2e}")
@@ -198,6 +221,28 @@ def part2_strong_coupling():
     print("  growth factor above 1 still leaves it above 1.  IQN-ILS, which")
     print("  solves for the fixed point from the iteration history instead")
     print("  of waiting for the iteration to contract, converges.")
+    print()
+
+    # The pair is past its stable range on purpose: one step is all the
+    # solvers are compared on.  compile() knows it and says so.
+    assert len(flagged[0.5]) == len(METHODS), (
+        f"compile() was expected to flag the undamped r = 0.5 pair "
+        f"({PAIR_ANOMALY}) once per method, and flagged it "
+        f"{len(flagged[0.5])} times"
+    )
+    growth = re.search(r"= (-?[0-9.e+-]+) every step", flagged[0.5][0])
+    assert growth is not None, flagged[0.5][0]
+    g = float(growth.group(1))
+    k = 0.5 * MASS / DT ** 2
+    assert abs(g - MASS / (MASS - k * DT ** 2)) < 1e-6 * g, g
+    print(f"  compile() warned about the r = 0.5 pair ({PAIR_ANOMALY}): the "
+          f"library flags it")
+    print(f"  as growing by g = {g:g} per step over many steps, as the "
+          f"docstring says --")
+    print("  not a solver problem, and harmless for the one step compared here.")
+    if not flagged[1.5]:
+        print("  (At r = 1.5 it does not judge the pair: plain iteration cannot")
+        print("  converge there, which the table above already shows.)")
     print()
 
 

@@ -3703,6 +3703,11 @@ class FitResult:
         objective has no curvature along it at the selected iterate
         (``JᵀJ`` for :func:`fit_lm`, by :func:`fim`'s rank rule; the
         loss's Hessian for :func:`fit` and :func:`fit_multiple_shooting`).
+        Both are asked with each identity-transform parameter measured
+        relative to its own size, as :func:`fim`'s default
+        ``scale="relative"`` measures it, so the count is the same in any
+        units (in the optimiser's own coordinates a damping in units 1e-4
+        read as undetermined, 2 of 3).
         Earlier 0.4.0 development builds counted the first test alone,
         which on a short or fast-converging run names directions the data
         determines perfectly well: ``fit_lm`` on a four-parameter bowl

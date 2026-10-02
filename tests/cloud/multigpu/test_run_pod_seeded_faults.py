@@ -4,15 +4,19 @@ A goal that compares a sharded run with an unsharded one proves the
 wrapper right only if a wrong wrapper makes it fail.  Until 0.4.0 the
 ``stencil``, ``hybrid`` and ``coupled`` goals passed -- and a dry run
 relabelled as four real GPUs closed checklist items 1, 3, 4 and 6 -- with
-``ShardedStencilNode`` broken in each of the four ways below, every one of
-which its unit tests catch: the goals read a static only in the interior,
-fed no grid-shaped input, declared no domain integral and ran on a 1-D
-mesh only.  Each seed here is that fault, applied to a scratch copy of the
-library (never to the tree under test), and the goals that run the
-wrapper must fail on it.
+``ShardedStencilNode`` broken in each of the first four ways below, every
+one of which its unit tests catch: the goals read a static only in the
+interior, fed no grid-shaped input, declared no domain integral and ran on
+a 1-D mesh only.  Then, on four devices, they passed every goal with each
+of the last three -- faults confined to the second sharded axis: the
+pencil was 2 x 2, so both of its axes had two devices (a shard's left and
+right neighbour the same device), and every grid was square.  Each seed
+here is one such fault, applied to a scratch copy of the library (never to
+the tree under test), and the goals it names must fail on it while the
+other checklist goals pass.
 
-The seeds are exact text of ``sharded_node.py``.  When that code changes
-the per-push test below fails, naming the seed: update the seed to the new
+The seeds are exact text of the library.  When that code changes the
+per-push test below fails, naming the seed: update the seed to the new
 code rather than dropping it.
 """
 
@@ -38,10 +42,12 @@ _PKG = Path(maddening.__file__).resolve().parent
 _RUNNER = _PKG.parents[1] / "benchmarks" / "multigpu" / "run_pod.py"
 _N_DEV = 4
 _WRAPPER = "cloud/multigpu/sharded_node.py"
+_HALO = "cloud/multigpu/halo.py"
 
 #: The checklist goals that run ``ShardedStencilNode``; every seed must fail
 #: each of them.  ``indivisible`` builds the wrapper only to see it refuse,
-#: and ``halo`` calls ``halo_exchange`` directly: both must still pass.
+#: and ``halo`` calls ``halo_exchange`` directly: a seed of the wrapper must
+#: leave both passing, and a seed of ``halo_exchange`` fails ``halo`` too.
 _WRAPPER_GOALS = ("stencil", "hybrid", "coupled")
 _OTHER_GOALS = ("indivisible", "halo")
 
@@ -49,9 +55,16 @@ _OTHER_GOALS = ("indivisible", "halo")
 class Seed(NamedTuple):
     old: str
     new: str
-    #: A word every failed check of the ``stencil`` goal must contain, when
-    #: the fault is confined to some cases (``" 2d "``: the pencil mesh).
-    only_in: str = ""
+    #: The mesh labels (``run_pod.STENCIL_MESHES``) the fault is confined to
+    #: on four devices: every failed check of the ``stencil`` goal must name
+    #: one of them.  Empty: any mesh.
+    only_in: tuple = ()
+    #: The library file the seed is applied to, under ``maddening/``.
+    file: str = _WRAPPER
+    #: The checklist goals it must fail; every other one must pass.
+    fails: tuple = _WRAPPER_GOALS
+    #: The mesh the per-push one-step test looks for the fault on.
+    mesh: str = "1d"
 
 
 _SEEDS = {
@@ -78,6 +91,7 @@ _SEEDS = {
         "                    red = lax.psum(v, axis_name=reduce_axes) if reduce_axes else v\n",
         "                    red = (lax.psum(v, axis_name=reduce_axes) if reduce_axes else v) * 0.5"
         "  # SEEDED FAULT\n"),
+    # Two exchanged axes: the pencil, and the 1 x D two-axis mesh.
     "later_axes_are_zero_at_the_global_edges": Seed(
         "                arr2 = halo_exchange(\n"
         "                    arr2, mesh=mesh, axes=exchange_axes, boundary=boundary,\n"
@@ -87,7 +101,31 @@ _SEEDS = {
         "                    boundary={**{a[0]: 'zero' for a in exchange_axes[1:]},\n"
         "                              exchange_axes[0][0]: boundary},\n"
         "                )\n",
-        only_in=" 2d "),
+        only_in=("2d", "2d-flat"), mesh="2d"),
+    # The three below passed every goal on four devices until schema 6.
+    # Along spatial axis 1 each halo comes from the wrong neighbour: on a
+    # mesh axis of two devices (both of the 2 x 2 pencil's) left and right
+    # are one device, so only a mesh with all four on axis 1 shows it.
+    "wrong_neighbour_along_spatial_axis_1": Seed(
+        "    perm_backward = [(s, (s - 1) % p_size) for s in range(p_size)]\n",
+        "    perm_backward = [(s, (s - 1) % p_size) for s in range(p_size)]\n"
+        "    if spatial_axis == 1:  # SEEDED FAULT: each halo from the wrong neighbour\n"
+        "        perm_forward, perm_backward = perm_backward, perm_forward\n",
+        only_in=("1d-axis1", "2d-flat"), file=_HALO,
+        fails=("halo", *_WRAPPER_GOALS), mesh="1d-axis1"),
+    # shard_info's block extent divided by the first mesh axis's size: the
+    # two axes of the 2 x 2 pencil have the same size, the 1 x D mesh's not.
+    "shard_info_extent_from_the_first_mesh_axis": Seed(
+        "            out[spatial_axis] = global_extent // int(self._mesh.shape[mesh_axis])\n",
+        "            out[spatial_axis] = global_extent // int(  # SEEDED FAULT: first mesh axis\n"
+        "                self._mesh.shape[next(iter(self._axis_map))])\n",
+        only_in=("2d-flat",), mesh="2d-flat"),
+    # shard_info's global extent read off spatial axis 0 for every axis:
+    # invisible on a square grid, on any device count.
+    "shard_info_extent_from_spatial_axis_0": Seed(
+        "                f\"state field {f!r}\": int(jnp.shape(arr)[spatial_axis])\n",
+        "                f\"state field {f!r}\": int(jnp.shape(arr)[0])  # SEEDED FAULT: axis 0\n",
+        only_in=("1d-axis1", "2d-flat", "2d"), mesh="2d"),
 }
 
 
@@ -99,10 +137,10 @@ def _runner():
 
 
 def _seeded_source(seed: Seed) -> str:
-    text = (_PKG / _WRAPPER).read_text(encoding="utf-8")
+    text = (_PKG / seed.file).read_text(encoding="utf-8")
     assert text.count(seed.old) == 1, (
-        f"the seed no longer matches {_WRAPPER} exactly once ({text.count(seed.old)} "
-        "matches): the wrapper changed; update the seed to the new code")
+        f"the seed no longer matches {seed.file} exactly once ({text.count(seed.old)} "
+        "matches): the library changed; update the seed to the new code")
     return text.replace(seed.old, seed.new)
 
 
@@ -114,9 +152,23 @@ def test_every_seed_applies_once_to_the_wrapper_as_it_stands(name):
     """A seed that matches nothing seeds nothing: the slow test would still
     pass its control and fail its seeded run for another reason -- or, run
     against an older wrapper, test code that no longer exists."""
-    seeded = _seeded_source(_SEEDS[name])
+    seed = _SEEDS[name]
+    seeded = _seeded_source(seed)
     assert "SEEDED FAULT" in seeded
-    compile(seeded, _WRAPPER, "exec")
+    compile(seeded, seed.file, "exec")
+
+
+def test_every_seed_names_goals_meshes_and_a_mesh_the_runner_has():
+    """A seed's expectations are about the runner as it stands: its goals
+    are checklist goals, it fails every wrapper goal, and its meshes are
+    meshes the runner builds on four devices."""
+    rp = _runner()
+    meshes = set(rp.meshes_that_fit(_N_DEV))
+    for name, seed in _SEEDS.items():
+        assert set(seed.fails) <= set(rp.CHECKLIST_GOALS), name
+        assert set(_WRAPPER_GOALS) <= set(seed.fails), name
+        assert set(seed.only_in) <= meshes and seed.mesh in meshes, name
+        assert not seed.only_in or seed.mesh in seed.only_in, name
 
 
 @pytest.mark.parametrize("argv", [
@@ -151,11 +203,20 @@ def test_the_seeds_must_fail_every_item_the_wrapper_decides():
     assert decided == {1, 3, 4, 6}
 
 
+def _exec_module(name: str, source: str) -> types.ModuleType:
+    module = types.ModuleType(name)
+    exec(compile(source, f"<{name}>", "exec"), module.__dict__)  # noqa: S102
+    return module
+
+
 @pytest.fixture(scope="module")
 def seeded_wrapper_classes():
     """``{seed: ShardedStencilNode}`` built from each seeded source, in-process.
 
-    Executed with ``@stability`` made a no-op, under a module name outside
+    A seed of the wrapper is the wrapper's seeded source; a seed of
+    ``halo.py`` is the wrapper's own source with the seeded module's
+    ``halo_exchange`` and ``_global_edge_halos`` in place of the real ones.
+    Executed with ``@stability`` made a no-op, under module names outside
     the package: a seeded copy registered as a STABLE surface of the
     library is still in the process-wide registry when the stable-signature
     tests run later in the same process (it failed twelve of them on CI).
@@ -170,9 +231,15 @@ def seeded_wrapper_classes():
     out = {}
     try:
         for name, seed in _SEEDS.items():
-            module = types.ModuleType(f"run_pod_seeded_wrapper_{name}")
-            exec(compile(_seeded_source(seed), f"<seeded {name}>", "exec"),  # noqa: S102
-                 module.__dict__)
+            if seed.file == _WRAPPER:
+                module = _exec_module(f"run_pod_seeded_wrapper_{name}", _seeded_source(seed))
+            else:
+                assert seed.file == _HALO, seed.file
+                halo = _exec_module(f"run_pod_seeded_halo_{name}", _seeded_source(seed))
+                module = _exec_module(f"run_pod_wrapper_for_{name}",
+                                      (_PKG / _WRAPPER).read_text(encoding="utf-8"))
+                module.halo_exchange = halo.halo_exchange
+                module._global_edge_halos = halo._global_edge_halos
             out[name] = module.ShardedStencilNode
     finally:
         stab.stability = real
@@ -195,7 +262,7 @@ def rp_backend():
 
 def _one_step_forward(rp, wrapper_class, mesh_label: str) -> dict:
     """``{field: max_rel}`` of one step of the ``stencil`` goal's periodic
-    ``Field2D`` case (8 x 8, its source fed), sharded by ``wrapper_class``
+    ``Field2D`` case (8 x 12, its source fed), sharded by ``wrapper_class``
     on ``mesh_label``, against the unsharded node."""
     ny, nx = rp.field_shape(64, _N_DEV)
     mesh, axis_map, _ = rp.stencil_mesh(mesh_label, _N_DEV)
@@ -220,18 +287,16 @@ def test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault(
     """The per-push half of the slow test below: one step of the
     ``stencil`` goal's own node and inputs, sharded by the seeded wrapper,
     is off the unsharded step by more than the goal's forward limit -- and
-    by the real wrapper, within it.  The pencil-mesh fault is looked for
-    on the pencil mesh, the only one it can touch."""
+    by the real wrapper, within it on every mesh.  A fault confined to some
+    meshes is looked for on one of them (``Seed.mesh``)."""
     rp = rp_backend
-    seed = _SEEDS.get(name)
-    mesh_label = "2d" if seed is not None and seed.only_in == " 2d " else "1d"
-    wrapper = rp.ShardedStencilNode if name is None else seeded_wrapper_classes[name]
-    rel = _one_step_forward(rp, wrapper, mesh_label)
     limit = rp.LIMITS["forward"]
     if name is None:
-        assert all(v <= limit for v in rel.values()), rel
-        assert all(v <= limit for v in _one_step_forward(rp, wrapper, "2d").values())
+        for mesh_label in rp.meshes_that_fit(_N_DEV):
+            rel = _one_step_forward(rp, rp.ShardedStencilNode, mesh_label)
+            assert all(v <= limit for v in rel.values()), (mesh_label, rel)
     else:
+        rel = _one_step_forward(rp, seeded_wrapper_classes[name], _SEEDS[name].mesh)
         assert any(not v <= limit for v in rel.values()), rel
 
 
@@ -242,7 +307,7 @@ def _scratch_library(tmp: Path, seed: Seed | None) -> Path:
     src = tmp / "src"
     shutil.copytree(_PKG, src / "maddening", ignore=shutil.ignore_patterns("__pycache__"))
     if seed is not None:
-        (src / "maddening" / _WRAPPER).write_text(_seeded_source(seed), encoding="utf-8")
+        (src / "maddening" / seed.file).write_text(_seeded_source(seed), encoding="utf-8")
     found = subprocess.run(
         [sys.executable, "-c",
          "import importlib.util; print(importlib.util.find_spec('maddening').origin)"],
@@ -291,18 +356,19 @@ def test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper(name, tmp
     rp = _runner()
     verdicts = {g: rp.goal_verdict(d) for g, d in docs.items()}
     assert rc == 1, log
-    assert verdicts == {**{g: "FAIL" for g in _WRAPPER_GOALS},
-                        **{g: "PASS" for g in _OTHER_GOALS}}, (verdicts, log)
-    for goal in _WRAPPER_GOALS:
+    assert verdicts == {g: "FAIL" if g in seed.fails else "PASS"
+                        for g in rp.CHECKLIST_GOALS}, (verdicts, log)
+    for goal in seed.fails:
         (doc,) = docs[goal]
         assert rp.record_problems(doc) == [], (goal, rp.record_problems(doc))
     if seed.only_in:
         (stencil,) = docs["stencil"]
         failed = [c["name"] for c in stencil["checks"] if rp.check_status(c) == "failed"]
-        assert failed and all(seed.only_in in c for c in failed), failed
+        assert failed and all(any(f" {m} " in c for m in seed.only_in) for c in failed), failed
     # What --summarise would say had the same checks failed the same way on
-    # four GPUs: every item a wrapper goal decides has FAILED.
+    # four GPUs: every item a failing goal decides has FAILED, the rest closed.
     status = {i: s for i, (s, _) in rp.checklist_status(_as_four_gpus(docs)).items()}
-    assert {i: status[i] for i in (1, 3, 4, 6)} == {i: "FAILED" for i in (1, 3, 4, 6)}, status
-    assert status[2] == status[5] == "CLOSED", status
+    failing = {i for i, (_c, goals) in rp.CHECKLIST.items() if set(goals) & set(seed.fails)}
+    assert {1, 3, 4, 6} <= failing
+    assert status == {i: "FAILED" if i in failing else "CLOSED" for i in rp.CHECKLIST}, status
     json.dumps(status)                                # (the verdicts are plain data)

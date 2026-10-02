@@ -13,41 +13,43 @@ unsharded node, NumPy, or the refusal the library promises); the last
 three are the timing goals::
 
     indivisible  checklist 5: a grid the mesh cannot split is refused by
-                 the stencil and pointwise wrappers with both numbers
-                 named (the stencil refusal saying the unstructured
-                 wrapper is not a way out for a stencil node), and the
-                 unstructured wrapper takes an uneven split of a node
-                 written for it and matches the unsharded node.
-                                                    -> indivisible.json
-    halo         checklist 2: ``halo_exchange`` on a 1-D and a 2-D device
-                 mesh for every boundary mode and halo widths 1 and 2, and
-                 ``exchange_unstructured`` under both transports, forward
-                 and adjoint, against a NumPy reference -- bit for bit.
-                                                    -> halo.json
+                 the stencil wrapper (along spatial axis 0 and along axis
+                 1, on the 1-D mesh, and on the pencil) and the pointwise
+                 wrapper with both numbers named (the stencil refusal
+                 saying the unstructured wrapper is not a way out for a
+                 stencil node), and the unstructured wrapper takes an
+                 uneven split of a node written for it and matches the
+                 unsharded node.                    -> indivisible.json
+    halo         checklist 2: ``halo_exchange`` on every mesh of
+                 ``STENCIL_MESHES`` for every boundary mode and halo
+                 widths 1 and 2, and ``exchange_unstructured`` under both
+                 transports, forward and adjoint, against a NumPy
+                 reference -- bit for bit.          -> halo.json
     coupled      checklist 6: one ``ShardedStencilNode`` member and one
-                 replicated member in a single coupling group, on the
-                 pencil mesh, coupled through the field's domain integral
-                 and a grid-shaped input; forward rollout and ``jax.grad``
-                 with respect to trained parameters of both, under the
-                 default solver and ``"fori"``, against the same group
-                 with the sharded member replaced by the node it wraps and
-                 against a float64 model.           -> coupled.json
+                 replicated member in a single coupling group, coupled
+                 through the field's domain integral and a non-uniform
+                 grid-shaped input; forward rollout and ``jax.grad`` with
+                 respect to trained parameters of both, under the default
+                 solver and ``"fori"``, against the same group with the
+                 sharded member replaced by the node it wraps and against
+                 a float64 model.  Every mesh at the smallest size, the
+                 pencil at the others.              -> coupled.json
     stencil      checklist 1 and 3 for ``ShardedStencilNode``: a 2-D field
                  that reads its sharded ``StaticArray`` in the halo, takes
                  a grid-shaped source and carries a domain integral, and a
                  D2Q9 lattice with a grid-shaped body force (its streaming
                  reads the halo corners); forward rollout and the adjoint
                  (initial state and a parameter) against the unsharded
-                 node.  Periodic ends at every size on the pencil mesh;
-                 at the smallest, the field under periodic, ``"edge"``
-                 (the wrapper's default) and Dirichlet ends and the
-                 lattice, each on the 1-D and the pencil mesh.
-                                                    -> stencil.json
+                 node.  At the smallest size, the field under periodic,
+                 ``"edge"`` (the wrapper's default) and Dirichlet ends and
+                 the lattice, each on every mesh; periodic ends on the
+                 pencil at the others.              -> stencil.json
     hybrid       checklist 4: ``HybridNode(ShardedStencilNode(inner))`` in
-                 a graph on the pencil mesh, with a non-local correction
-                 and a grid-shaped source, forward (the field and its
-                 domain integral) and adjoint against
-                 ``HybridNode(inner)``.             -> hybrid.json
+                 a graph, with a non-local correction and a grid-shaped
+                 source, forward (the field and its domain integral) and
+                 adjoint against ``HybridNode(inner)``; every mesh at the
+                 smallest size, the pencil at the others.
+                                                    -> hybrid.json
     exchange     NCCL ranking of the two unstructured halo-exchange
                  transports, ``all_to_all`` vs ``ppermute``, at 1e5-1e6
                  cells -- the measurement that decides whether ``ppermute``
@@ -64,17 +66,30 @@ three are the timing goals::
     checklist    the five checklist goals, in the order above.
     all          all eight, in the order above.
 
+The meshes (``STENCIL_MESHES``, as devices along spatial axes 0 and 1 over
+``D``): ``"1d"`` (D x 1) and ``"1d-axis1"`` (1 x D), a 1-D mesh sharding
+one spatial axis each; ``"2d-flat"`` (1 x D), a 2-D mesh whose two axes
+have different sizes; and ``"2d"`` (2 x D/2), the pencil, which exchanges
+two axes.  On four devices the pencil is 2 x 2, and on a mesh axis of two
+devices a shard's left and right neighbour are one device: the 1-D meshes
+give each spatial axis all four.  Every grid is non-square
+(``field_shape``: ``nx = ny + D``), and every grid-shaped input differs on
+every block of every mesh.
+
 Every goal records ``checks`` (name, measured value, limit, the sense of
 the comparison, passed) and ``passed`` in its JSON, prints a failed check
 as ``CHECK FAILED``, and the runner exits 1 when any check failed.  A case
 the device count cannot express (the 2-D pencil mesh below 4 or on an odd
-count; a neighbour-direction swap on 2) is recorded as a check *not run*
-and printed as ``CHECK NOT RUN``: not a failure, but the goal does not
-read complete; the stencil, hybrid and coupled goals record their
-pencil-mesh cases that way on such a count.  Each of those three must fail
-on a stencil wrapper broken in any of four ways (a static's halos NaN,
+count; a spatial axis no case splits over three or more devices, where a
+halo from the wrong neighbour cannot show) is recorded as a check *not
+run* and printed as ``CHECK NOT RUN``: not a failure, but the goal does
+not read complete; the halo, stencil, hybrid and coupled goals record
+those cases that way on such a count.  Each of the wrapper goals must fail
+on a stencil wrapper broken in any of seven ways (a static's halos NaN,
 grid-shaped inputs zeroed, domain integrals halved, sharded axes after the
-first zero-filled at the global edges):
+first zero-filled at the global edges, halos taken from the wrong
+neighbour along spatial axis 1, ``shard_info``'s extent divided by the
+first mesh axis's size or read off spatial axis 0):
 ``tests/cloud/multigpu/test_run_pod_seeded_faults.py`` seeds each into a
 scratch copy of the library and requires it.  ``--summarise DIR`` reads
 the JSON files back and prints
@@ -90,8 +105,11 @@ the ones this runner derives from its results (``GOAL_CHECKS``), limits
 from ``LIMITS`` included.  A checklist item reads ``CLOSED`` only when
 every goal deciding it passed with every check run and every file valid,
 on real GPUs, not a dry run, on at least ``MIN_DECIDING_DEVICES`` (4)
-devices, and every deciding file records the same git commit.  It does
-not import JAX, so it works on a laptop without a usable jaxlib.
+devices, and every deciding file records the same git commit.  Each item's
+line names the commit its files record, and a directory whose files come
+from more than one commit prints a ``MIXED COMMITS`` warning naming each
+commit's items and files, and exits 4.  It does not import JAX, so it
+works on a laptop without a usable jaxlib.
 
 Every timed callable receives inputs that were placed on the device mesh
 once, with the ``NamedSharding`` the compiled executable expects, outside
@@ -170,7 +188,7 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 METHODS = ("all_to_all", "ppermute")
 MESH_AXIS = "devices"
 GPU_CELLS = (100_000, 300_000, 1_000_000)
@@ -179,7 +197,13 @@ DRY_RUN_CELLS = (256, 1024)
 #: on fewer with ``--allow-fewer-devices``; a checklist item never closes on
 #: fewer, whatever that flag says: on 2 devices a shard's left and right
 #: neighbour are the same device, so a halo that swaps directions passes
-#: every halo and stencil check, and the 2-D pencil cases do not run.
+#: every halo and stencil check, and the 2-D pencil cases do not run.  Four
+#: devices are not enough by themselves either: their pencil is 2 x 2, and
+#: both of its axes have that two-device property.  So every goal that runs
+#: the stencil wrapper or the halo exchange also runs a 1-D mesh along each
+#: spatial axis (``STENCIL_MESHES``), where that axis has all four, and
+#: records a spatial axis no case split over three or more devices as a
+#: check not run (:func:`_neighbour_direction_not_run`).
 MIN_DECIDING_DEVICES = 4
 MIN_DEVICES_WITH_ESCAPE = 2     # --allow-fewer-devices: still needs a real exchange
 
@@ -668,11 +692,13 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
         * the conductance ``k`` of a face is the mean of the ``mask`` of
           the two cells it joins, so every step reads ``mask`` one cell
           into its halo.  ``mask`` is a ``StaticArray(replication="shard")``
-          along axis 0: the wrapper halo-exchanges it along that axis
+          along ``mask_axis`` (0, or 1 where the wrapper shards axis 1
+          only): the wrapper halo-exchanges it along that axis
           (periodically under ``"periodic"``, the edge cell repeated
-          otherwise), and the node fills axis 1 itself by the same rule,
-          taking its own columns out of the full-width static by
-          ``shard_info`` when axis 1 is sharded too (a pencil mesh);
+          otherwise), and the node fills the other axis itself by the same
+          rule, taking its own slice out of the whole static by
+          ``shard_info`` when that axis is sharded too (a 2-D mesh) --
+          so a wrong offset or extent in ``shard_info`` moves the answer;
         * ``source``, a grid-shaped boundary input, is read through a
           5-point smoothing, so its halo counts as well as its interior;
         * ``ambient`` is a scalar or a grid-shaped boundary input;
@@ -699,18 +725,22 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
 
         def __init__(self, name: str, ny: int, nx: int, *, diffusivity: float = 0.2,
                      exchange: float = 0.0, timestep: float = 0.1,
-                     boundary: str = "periodic") -> None:
+                     boundary: str = "periodic", mask_axis: int = 0) -> None:
             super().__init__(name=name, timestep=timestep, diffusivity=diffusivity,
                              exchange=exchange)
             if boundary not in STENCIL_BOUNDARIES:
                 raise ValueError(f"boundary {boundary!r} is not one of {STENCIL_BOUNDARIES}")
+            if mask_axis not in (0, 1):
+                raise ValueError(f"mask_axis {mask_axis!r} is not 0 or 1")
             self.boundary = boundary
+            self._mask_axis = int(mask_axis)
             self._shape = (int(ny), int(nx))
             j = np.arange(ny, dtype=np.float32)[:, None]
             i = np.arange(nx, dtype=np.float32)[None, :]
             mask = (0.75 + 0.25 * np.sin(0.37 * j) * np.cos(0.11 * i)).astype(np.float32)
             # Built once: the wrapper snapshots static_data at construction.
-            self._static = {"mask": StaticArray(value=mask, replication="shard", shard_axis=0)}
+            self._static = {"mask": StaticArray(value=mask, replication="shard",
+                                                shard_axis=self._mask_axis)}
 
         def halo_width(self) -> dict:
             return {0: 1, 1: 1}
@@ -821,13 +851,17 @@ def _make_checklist_classes(SimulationNode, StaticArray, BoundaryInputSpec,  # n
             if self.boundary == "dirichlet":
                 wall = jnp.asarray(boundary_inputs.get("wall", 0.0), jnp.float32)
                 f_pad = self._hold_walls(f_pad, wall, shard_info)
-            # The wrapper halo-exchanges the static along axis 0 only; it is
-            # whole along axis 1 on every device, so fill that axis here and
-            # take this block's columns (all of them unless axis 1 is sharded).
-            mask_pad = jnp.pad(static_padded["mask"], ((0, 0), (1, 1)), mode=self._static_mode)
-            width = f_pad.shape[1]
-            offset = (shard_info or {}).get(1, (0, width - 2))[0]
-            mask_pad = lax.dynamic_slice_in_dim(mask_pad, offset, width, axis=1)
+            # The wrapper halo-exchanges the static along mask_axis only; it
+            # is whole along the other axis on every device, so fill that
+            # axis here and take this block's slice of it (all of it unless
+            # that axis is sharded too).
+            other = 1 - self._mask_axis
+            pad = [(0, 0), (0, 0)]
+            pad[other] = (1, 1)
+            mask_pad = jnp.pad(static_padded["mask"], pad, mode=self._static_mode)
+            width = f_pad.shape[other]
+            offset = (shard_info or {}).get(other, (0, width - 2))[0]
+            mask_pad = lax.dynamic_slice_in_dim(mask_pad, offset, width, axis=other)
             new = self._new(f_pad, mask_pad, ambient, source_pad, p, dt)
             return {"f": f_pad.at[1:-1, 1:-1].set(new), "averages": self._averages(new)}
 
@@ -1078,47 +1112,111 @@ def _is_partitioned(arr, n_devices: int) -> bool:
 
 def field_shape(cells: int, n_devices: int) -> tuple:
     """``(ny, nx)`` of about ``cells`` cells, both a multiple of the devices,
-    so that one shape splits on the 1-D mesh (``ny``) and on the
-    ``2 x (D/2)`` pencil mesh (``ny`` and ``nx``) alike."""
+    so that one shape splits on every mesh of :data:`STENCIL_MESHES`.
+
+    Never square: ``nx = ny + D``.  On a square grid every per-axis
+    quantity of the wrapper is the same number for both spatial axes, so a
+    wrapper that reads one axis's extent for the other's (a ``shard_info``
+    taken off spatial axis 0 for every axis, say) passes every goal.  Until
+    schema 6 the grids were square, and that fault passed even on 8
+    devices.
+    """
     side = max(int(round(math.sqrt(cells))), 2 * n_devices)
-    up = -(-side // n_devices) * n_devices
-    return up, up
+    ny = -(-side // n_devices) * n_devices
+    return ny, ny + n_devices
 
 
-#: The meshes the stencil wrapper runs on: the 1-D mesh shards axis 0 and
-#: fills axis 1 on each device; the ``2 x (D/2)`` pencil mesh shards both,
-#: so the wrapper exchanges two axes (and a node reading a corner reads one
-#: that crossed two).
-STENCIL_MESHES = ("1d", "2d")
+#: The meshes the stencil wrapper runs on, each named for what it shards.
+#: Over ``D`` devices, as (devices along spatial axis 0, along axis 1):
+#:
+#: * ``"1d"``, ``(D, 1)``: a 1-D mesh sharding spatial axis 0; axis 1 is
+#:   whole on each device and filled by the wrapper as unsharded;
+#: * ``"1d-axis1"``, ``(1, D)``: the same 1-D mesh sharding spatial axis 1
+#:   (``axis_map={MESH_AXIS: 1}``); axis 0 is the unsharded one;
+#: * ``"2d-flat"``, ``(1, D)``: a 2-D mesh whose first axis has one device,
+#:   both spatial axes in its ``axis_map`` -- two mesh axes of different
+#:   sizes (the wrapper's one-device exchange on axis 0, all ``D`` on axis
+#:   1), which the pencil on four devices cannot give;
+#: * ``"2d"``, ``(2, D/2)``: the pencil mesh, sharding both, so the wrapper
+#:   exchanges two axes and a node reading a corner reads one that crossed
+#:   two.
+#:
+#: On four devices the pencil is 2 x 2: both of its axes have two devices,
+#: where a shard's left and right neighbour are the same device and a halo
+#: taken from the wrong neighbour cannot show.  The two 1-D meshes give
+#: each spatial axis a four-device axis of its own (see
+#: :func:`_neighbour_direction_not_run`).
+STENCIL_MESHES = ("1d", "1d-axis1", "2d-flat", "2d")
 
 
 def stencil_mesh(label: str, n_devices: int) -> tuple:
     """``(mesh, axis_map, mesh_shape)`` of mesh ``label`` over ``n_devices``."""
     _load_backend()
+    shape = _mesh_shape_of(label, n_devices)
     if label == "1d":
-        return create_device_mesh(shape=(n_devices,)), {MESH_AXIS: 0}, (n_devices, 1)
-    if label == "2d":
-        if not _pencil_mesh_fits(n_devices):
-            raise ValueError(_pencil_mesh_needs(n_devices))
-        shape = (2, n_devices // 2)
-        return create_device_mesh(shape=shape), {"spatial_y": 0, "spatial_z": 1}, shape
-    raise ValueError(f"unknown mesh {label!r} (one of {STENCIL_MESHES})")
+        return create_device_mesh(shape=(n_devices,)), {MESH_AXIS: 0}, shape
+    if label == "1d-axis1":
+        return create_device_mesh(shape=(n_devices,)), {MESH_AXIS: 1}, shape
+    if label == "2d" and not _pencil_mesh_fits(n_devices):
+        raise ValueError(_pencil_mesh_needs(n_devices))
+    return create_device_mesh(shape=shape), {"spatial_y": 0, "spatial_z": 1}, shape
 
 
 def meshes_that_fit(n_devices: int) -> tuple:
-    """The ``STENCIL_MESHES`` this device count can build."""
-    return ("1d", "2d") if _pencil_mesh_fits(n_devices) else ("1d",)
+    """The ``STENCIL_MESHES`` this device count can build: every one but the
+    pencil, which needs an even count of at least 4."""
+    return STENCIL_MESHES if _pencil_mesh_fits(n_devices) else STENCIL_MESHES[:-1]
 
 
 def graph_mesh(n_devices: int) -> str:
-    """The mesh the graph goals (``hybrid``, ``coupled``) run on: the pencil
-    mesh where it fits -- it is the one that exercises every exchange path
-    -- and the 1-D mesh otherwise, with the pencil recorded as not run."""
-    return meshes_that_fit(n_devices)[-1]
+    """The one mesh the larger sizes of the ``stencil``, ``hybrid`` and
+    ``coupled`` goals run on: the pencil where it fits -- it exchanges
+    two axes -- and the 1-D mesh otherwise, with the pencil recorded as not
+    run.  The smallest size runs every mesh (:func:`graph_cases`)."""
+    return "2d" if _pencil_mesh_fits(n_devices) else "1d"
+
+
+def graph_cases(cells, n_devices: int) -> list:
+    """``(cells, mesh)`` cases of the ``hybrid`` and ``coupled`` goals: every
+    mesh this device count can build at the smallest size, so that each
+    spatial axis is sharded on all ``D`` devices somewhere, and the
+    :func:`graph_mesh` at the others."""
+    smallest = min(cells)
+    return [(n, mesh) for n in cells
+            for mesh in (meshes_that_fit(n_devices) if n == smallest
+                         else (graph_mesh(n_devices),))]
 
 
 def _mesh_shape_of(label: str, n_devices: int) -> tuple:
-    return (n_devices, 1) if label == "1d" else (2, n_devices // 2)
+    """Devices along (spatial axis 0, spatial axis 1) on mesh ``label``."""
+    shapes = {"1d": (n_devices, 1), "1d-axis1": (1, n_devices), "2d-flat": (1, n_devices),
+              "2d": (2, n_devices // 2)}
+    if label not in shapes:
+        raise ValueError(f"unknown mesh {label!r} (one of {STENCIL_MESHES})")
+    return shapes[label]
+
+
+def _neighbour_direction_not_run(mesh_shapes, claim: str) -> list:
+    """A check not run for each spatial axis that no case split over at
+    least three devices.
+
+    On a mesh axis of one or two devices a shard's left and right neighbour
+    are the same device (the two ring permutations are the same pair), so
+    a wrapper or exchange that takes a halo from the wrong neighbour along
+    that spatial axis passes every comparison.  ``mesh_shapes`` are the
+    cases' ``(devices along axis 0, devices along axis 1)``.
+    """
+    shapes = [tuple(s) for s in mesh_shapes]
+    out = []
+    for axis in (0, 1):
+        most = max((s[axis] for s in shapes), default=0)
+        if most < 3:
+            out.append(check_not_run(
+                f"spatial axis {axis} split over >= 3 devices: {claim} with left and right "
+                "neighbours on different devices, so a halo taken from the wrong one shows",
+                f"needs a mesh axis of >= 3 devices on spatial axis {axis}; this run's cases "
+                f"split it over at most {most}"))
+    return out
 
 
 def _host(tree):
@@ -1512,15 +1610,23 @@ def run_indivisible(args, out: dict) -> dict:
     ny_bad = ny_ok + 1                              # D >= 2: never a multiple of D
     entry: dict = {"n_devices": D}
 
-    def stencil(ny):
-        return ShardedStencilNode(Field2D("field", ny, nx), mesh, axis_map={MESH_AXIS: 0},
-                                  boundary="periodic")
+    def stencil(ny, nx_, axis=0):
+        return ShardedStencilNode(Field2D("field", ny, nx_, mask_axis=axis), mesh,
+                                  axis_map={MESH_AXIS: axis}, boundary="periodic")
 
-    kind, msg = _refusal(lambda: stencil(ny_bad))
-    kind_ok, msg_ok = _refusal(lambda: stencil(ny_ok))
+    kind, msg = _refusal(lambda: stencil(ny_bad, nx))
+    kind_ok, msg_ok = _refusal(lambda: stencil(ny_ok, nx))
     entry["stencil"] = {"shape": [ny_bad, nx], "raised": kind, "message": msg,
                         "divisible_shape": [ny_ok, nx], "divisible_raised": kind_ok,
                         "divisible_message": msg_ok}
+    # The same 1-D mesh sharding spatial axis 1 (axis_map={MESH_AXIS: 1}),
+    # as the stencil goals now run it: an axis-1 extent it cannot split.
+    nx_bad = nx + 1
+    kind, msg = _refusal(lambda: stencil(ny_ok, nx_bad, axis=1))
+    kind_ok, msg_ok = _refusal(lambda: stencil(ny_ok, nx, axis=1))
+    entry["stencil_axis1"] = {"shape": [ny_ok, nx_bad], "raised": kind, "message": msg,
+                              "divisible_shape": [ny_ok, nx], "divisible_raised": kind_ok,
+                              "divisible_message": msg_ok}
 
     kind, msg = _refusal(lambda: ShardedPointwiseNode(Pointwise2D(ny_bad, nx), mesh,
                                                       shard_axes=(0,)))
@@ -1553,7 +1659,8 @@ def run_indivisible(args, out: dict) -> dict:
     parity = _diff(got["x"], np.asarray(jax.device_get(ref_state["x"])))
     entry["unstructured"] = {"cells": n, "partition": how, "cells_per_device": counts.tolist(),
                              "steps": args.steps, "parity_x": parity}
-    print(f"[indivisible] stencil {ny_bad}x{nx}: {entry['stencil']['raised']}  pointwise: "
+    print(f"[indivisible] stencil {ny_bad}x{nx}: {entry['stencil']['raised']}  stencil axis 1 "
+          f"{ny_ok}x{nx_bad}: {entry['stencil_axis1']['raised']}  pointwise: "
           f"{entry['pointwise']['raised']}  unstructured {n} cells {counts.tolist()}: "
           f"max|dx|={parity['max_abs']:.2e}")
     out["results"] = [entry]
@@ -1583,6 +1690,19 @@ def indivisible_checks(results: list, n_devices: int) -> list:
                    and "or use ShardedUnstructuredNode" not in msg),
         check_that(f"stencil {ny_ok}x{nx} (divisible) is accepted",
                    st["divisible_raised"] is None, st.get("divisible_message", "")[:300]),
+    ]
+    ax1 = entry["stencil_axis1"]
+    rows, nx_bad = ax1["shape"]
+    nx_ok = ax1["divisible_shape"][1]
+    kind, msg = ax1["raised"], ax1["message"]
+    checks += [
+        check_that(f"stencil {rows}x{nx_bad} sharded along spatial axis 1 on {D} devices: "
+                   "ValueError at construction", kind == "ValueError", msg[:300]),
+        check_that("axis-1 stencil refusal names spatial axis 1, the cell count and the "
+                   "device count", "spatial axis 1" in msg and _names_both(msg, nx_bad, D)),
+        check_that(f"stencil {rows}x{nx_ok} sharded along spatial axis 1 (divisible) is "
+                   "accepted", ax1["divisible_raised"] is None,
+                   ax1.get("divisible_message", "")[:300]),
     ]
     pw = entry["pointwise"]
     kind, msg = pw["raised"], pw["message"]
@@ -1686,25 +1806,25 @@ def run_halo(args, out: dict) -> dict:
     _load_backend()
     D = args.n_devices
     ny, nx = field_shape(max(args.cells), D)
-    meshes = [("1d", create_device_mesh(shape=(D,)), (D, 1), P(MESH_AXIS, None))]
-    if _pencil_mesh_fits(D):
-        meshes.append(("2d", create_device_mesh(shape=(2, D // 2)), (2, D // 2),
-                       P("spatial_y", "spatial_z")))
+    meshes = meshes_that_fit(D)
     cases = []
-    for label, mesh, (py, pz), spec in meshes:
-        nx_m = -(-nx // pz) * pz
-        a = _integer_field((ny, nx_m), 9973)
+    for label in meshes:
+        mesh, axis_map, (py, pz) = stencil_mesh(label, D)
+        # An axis in axis_map is exchanged (on one device too, "2d-flat"'s
+        # axis 0: its halos are the global-edge fill); one not in it has
+        # no halo slots at all.
+        mesh_axis_of = {sax: ma for ma, sax in axis_map.items()}
+        spec = P(*(mesh_axis_of.get(sax) for sax in (0, 1)))
+        a = _integer_field((ny, nx), 9973)
         placed = NamedSharding(mesh, spec)
         fns, cotangents, refs = [], [], []
         for boundary in HALO_BOUNDARIES:
             for h in HALO_WIDTHS:
-                if label == "1d":
-                    axes = [(MESH_AXIS, 0, h)]
-                    col_map = np.arange(nx_m)[None, :]
-                else:
-                    axes = [("spatial_y", 0, h), ("spatial_z", 1, h)]
-                    col_map = halo_index_map(nx_m, pz, h, boundary)
-                row_map = halo_index_map(ny, py, h, boundary)
+                axes = [(ma, sax, h) for ma, sax in axis_map.items()]
+                row_map, col_map = (
+                    halo_index_map(n, k, h, boundary) if sax in mesh_axis_of
+                    else np.arange(n)[None, :]
+                    for sax, n, k in ((0, ny, py), (1, nx, pz)))
 
                 def local(x, _axes=axes, _b=boundary, _mesh=mesh):
                     return halo_exchange(x, mesh=_mesh, axes=_axes, boundary=_b)
@@ -1722,7 +1842,7 @@ def run_halo(args, out: dict) -> dict:
         for (boundary, h, want, want_grad), (got, got_grad) in zip(refs, outs):
             fwd_err = _max_abs(np.asarray(jax.device_get(got)), want)
             adj_err = _max_abs(np.asarray(jax.device_get(got_grad)), want_grad)
-            cases.append({"mesh": label, "mesh_shape": [py, pz], "shape": [ny, nx_m],
+            cases.append({"mesh": label, "mesh_shape": [py, pz], "shape": [ny, nx],
                           "halo": h, "boundary": boundary,
                           "forward_max_abs": fwd_err, "adjoint_max_abs": adj_err})
 
@@ -1772,7 +1892,7 @@ def run_halo(args, out: dict) -> dict:
                       for d in range(D))
         unstructured["methods"][method] = {"forward_max_abs": fwd_err, "adjoint_max_abs": adj_err}
     worst = max([c["forward_max_abs"] for c in cases] + [c["adjoint_max_abs"] for c in cases])
-    print(f"[halo] {len(cases)} stencil cases on {'+'.join(m[0] for m in meshes)} meshes, "
+    print(f"[halo] {len(cases)} stencil cases on {'+'.join(meshes)} meshes, "
           f"worst |diff| {worst:.1e}; unstructured {n} cells: "
           + "  ".join(f"{m} fwd {v['forward_max_abs']:.1e} adj {v['adjoint_max_abs']:.1e}"
                       for m, v in unstructured["methods"].items()))
@@ -1789,15 +1909,14 @@ def halo_checks(results: list, n_devices: int) -> list:
     if not _pencil_mesh_fits(D):
         checks.append(check_not_run("2d pencil mesh: every boundary mode and width, forward "
                                     "and adjoint vs NumPy", _pencil_mesh_needs(D)))
-    if D < 3:
-        # The forward and backward ring permutations are the same pair on
-        # two devices, so no case on this mesh can tell a correct exchange
-        # from one that takes each halo from the wrong neighbour.
-        checks.append(check_not_run(
-            "1d mesh: left and right neighbours are different devices, so a halo taken "
-            "from the wrong neighbour shows",
-            f"needs >= 3 devices on the axis; on {D} both neighbours of a shard are the "
-            "same device"))
+    # The forward and backward ring permutations are the same pair on a
+    # mesh axis of two devices, so no case there can tell a correct
+    # exchange from one that takes each halo from the wrong neighbour --
+    # on four devices that is both axes of the pencil.  Until schema 6 this
+    # asked only for D >= 3, and an exchange wrong along spatial axis 1
+    # passed on four devices: only the pencil sharded that axis.
+    checks += _neighbour_direction_not_run(
+        (c["mesh_shape"] for c in entry["stencil_cases"]), "halo_exchange")
     for c in entry["stencil_cases"]:
         (py, pz), (ny, nx_m) = c["mesh_shape"], c["shape"]
         name = f"{c['mesh']} mesh {py}x{pz}, {ny}x{nx_m}, halo {c['halo']}, {c['boundary']}"
@@ -1821,18 +1940,42 @@ def halo_checks(results: list, n_devices: int) -> list:
 # ---------------------------------------------------------------------------
 
 
+def _no_block_symmetry(ny: int, nx: int, phase: float) -> np.ndarray:
+    """A smooth periodic ``(ny, nx)`` pattern no block translation leaves alone.
+
+    It carries a frequency-one mode along each axis, so shifting it by any
+    fraction of the grid short of the whole -- one block of any mesh --
+    changes it: every shard's block differs from every other's.  A
+    grid-shaped input with a block period (until schema 6 the source was
+    periodic with period 1/2 in x, exactly one block on the 2 x 2 pencil)
+    lets a wrapper that hands a shard another shard's block pass.
+    ``phase`` makes two patterns unlike each other.
+    """
+    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float64)[:, None]
+    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float64)[None, :]
+    two_pi = 2 * np.pi
+    return (np.cos(two_pi * x + phase) + 0.6 * np.sin(two_pi * y + 1.7 * phase + 0.5)
+            + 0.4 * np.cos(two_pi * (x - 2 * y) + 2.3 * phase + 1.0)).astype(np.float32)
+
+
 def _loss_weight(ny: int, nx: int) -> np.ndarray:
-    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float32)[:, None]
-    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :]
-    return (1.0 + 0.5 * np.cos(2 * np.pi * (x - 2 * y))).astype(np.float32)
+    return (1.0 + 0.3 * _no_block_symmetry(ny, nx, 0.9)).astype(np.float32)
 
 
 def _source_field(ny: int, nx: int) -> np.ndarray:
     """The ``source`` the stencil goals feed ``Field2D``: smooth, of the
-    field's own size, and unlike the field (so it cannot hide in it)."""
-    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float32)[:, None]
-    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :]
-    return (0.5 * np.cos(2 * np.pi * (2 * x - y)) + 0.2 * np.sin(6 * np.pi * y)).astype(np.float32)
+    field's own size, unlike the field (so it cannot hide in it), and
+    different on every block of every mesh (:func:`_no_block_symmetry`)."""
+    return (0.5 * _no_block_symmetry(ny, nx, 0.4)).astype(np.float32)
+
+
+def coupled_profile(ny: int, nx: int) -> np.ndarray:
+    """How the ``coupled`` goal spreads the far field over the grid: the
+    field's ``ambient`` is ``u * coupled_profile``, positive and different
+    on every block of every mesh.  Until schema 6 it was ``u`` broadcast to
+    every cell, so a wrapper that handed each shard another shard's block
+    of a grid-shaped input passed the goal."""
+    return (1.0 + 0.4 * _no_block_symmetry(ny, nx, 2.1)).astype(np.float32)
 
 
 #: The lattice case of the ``stencil`` goal: ``LBMNode`` on D2Q9, whose
@@ -1854,21 +1997,22 @@ def _lbm_start(ny: int, nx: int, node) -> dict:
     a single-ulp difference in ``f``.
     """
     state = dict(node.initial_state())
-    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float32)[:, None, None]
-    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :, None]
-    q = np.arange(9, dtype=np.float32)[None, None, :]
-    pert = 0.2 * np.sin(2 * np.pi * (x + 2 * y) + 0.7 * q) * np.asarray(state["f"])
+    # One pattern per population, none with a block period (until schema 6
+    # the perturbation had period 1/2 along y, one block on the pencil).
+    shape = np.asarray(state["f"]).shape
+    pattern = np.stack([_no_block_symmetry(ny, nx, 0.7 * q) for q in range(shape[-1])],
+                       axis=-1)
+    pert = 0.1 * pattern * np.asarray(state["f"])
     state["f"] = state["f"] + jnp.asarray(pert.astype(np.float32))
     return state
 
 
 def _lbm_force(ny: int, nx: int) -> np.ndarray:
-    """A grid-shaped ``body_force``, ``(ny, nx, 2)``, varying across the grid."""
-    y = np.linspace(0.0, 1.0, ny, endpoint=False, dtype=np.float32)[:, None]
-    x = np.linspace(0.0, 1.0, nx, endpoint=False, dtype=np.float32)[None, :]
-    fx = np.sin(2 * np.pi * y) * np.ones_like(x)
-    fy = np.cos(2 * np.pi * x) * np.ones_like(y)
-    return (LBM_FORCE * np.stack([fx, fy], axis=-1)).astype(np.float32)
+    """A grid-shaped ``body_force``, ``(ny, nx, 2)``, different on every block
+    of every mesh, in both components (until schema 6 its x component was
+    uniform along x and its y component along y)."""
+    fx, fy = _no_block_symmetry(ny, nx, 1.3), _no_block_symmetry(ny, nx, 3.7)
+    return (0.5 * LBM_FORCE * np.stack([fx, fy], axis=-1)).astype(np.float32)
 
 
 #: What each node kind of the ``stencil`` goal compares forward (besides the
@@ -1939,6 +2083,13 @@ def _stencil_prefix(entry: dict) -> str:
     return f"{entry['node']} {entry['mesh']} {py}x{pz} {ny}x{nx} {entry['boundary']}"
 
 
+def mask_axis_for(axis_map: dict) -> int:
+    """The spatial axis ``Field2D`` shards its static ``mask`` along under
+    ``axis_map``: one the wrapper shards (it refuses any other), axis 0
+    where it can."""
+    return min(axis_map.values())
+
+
 def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
     """``(unsharded node, sharded node, boundary inputs, parameter value)``."""
     if kind == "lbm":
@@ -1949,7 +2100,8 @@ def _stencil_pair(kind: str, ny: int, nx: int, boundary: str, mesh, axis_map):
                 {"body_force": jnp.asarray(_lbm_force(ny, nx))}, jnp.float32(LBM_VISCOSITY))
 
     def make():
-        return Field2D("field", ny, nx, exchange=0.3, boundary=boundary)
+        return Field2D("field", ny, nx, exchange=0.3, boundary=boundary,
+                       mask_axis=mask_axis_for(axis_map))
     # "dirichlet" is the node's own condition over the wrapper's default
     # "edge" fill; the other two are the wrapper's fill of that name.
     sharded = ShardedStencilNode(make(), mesh, axis_map=axis_map,
@@ -1969,9 +2121,35 @@ def _placed_like(sharded, state: dict) -> dict:
             for k, v in state.items()}
 
 
-def run_stencil_case(case, args) -> dict:
+def _stencil_side(node, s0, p, *, dt, weight, bi, spec, args) -> tuple:
+    """One side (sharded or not) of a stencil case: ``(got, forward record,
+    gradient record)``, ``got`` = (final state, loss, d loss / d initial f,
+    d loss / d parameter)."""
+    rollout, vg = _stencil_fns(node, args.steps, args.grad_steps, dt, weight, bi,
+                               spec["parameter"], spec["loss_of"])
+    f0, rest = s0["f"], {k: v for k, v in s0.items() if k != "f"}
+    fwd_compile_s, _ = compile_seconds(rollout, s0, p)
+    final = _host(rollout(s0, p))
+    t_fwd = timed(lambda: rollout(s0, p), warmup=args.warmup, repeats=args.repeats)
+    grad_compile_s, _ = compile_seconds(vg, f0, rest, p)
+    value, (g_f0, g_p) = vg(f0, rest, p)
+    t_grad = timed(lambda: vg(f0, rest, p), warmup=args.warmup, repeats=args.repeats)
+    got = (final, float(value), np.asarray(jax.device_get(g_f0)), float(g_p))
+    return (got,
+            {"compile_s": fwd_compile_s,
+             "rollout": {**t_fwd, "ms_per_step": t_fwd["median_ms"] / args.steps}},
+            {"compile_s": grad_compile_s, "grad": t_grad, "loss": float(value),
+             "grad_parameter": float(g_p)})
+
+
+def run_stencil_case(case, args, unsharded_cache: dict | None = None) -> dict:
     """One :func:`stencil_cases` case: forward rollout and adjoint of the
-    sharded node against the unsharded one, timed on both sides."""
+    sharded node against the unsharded one, timed on both sides.
+
+    The unsharded side does not depend on the mesh: with
+    ``unsharded_cache`` (a dict, one per goal) it is run once per node,
+    ends and grid, and every mesh's case is compared with that one run.
+    """
     _load_backend()
     D = args.n_devices
     n_hint, kind, boundary, mesh_label = case
@@ -1980,32 +2158,26 @@ def run_stencil_case(case, args) -> dict:
     spec = STENCIL_NODES[kind]
     ref, sharded, bi, p = _stencil_pair(kind, ny, nx, boundary, mesh, axis_map)
     start = _lbm_start(ny, nx, ref) if kind == "lbm" else dict(ref.initial_state())
-    states = {"unsharded": start, "sharded": _placed_like(sharded, start)}
+    sharded_start = _placed_like(sharded, start)
     dt = ref.delta_t
     weight = jnp.asarray(_loss_weight(ny, nx))
     entry = {"node": kind, "mesh": mesh_label, "mesh_shape": [py, pz], "cells": ny * nx,
              "shape": [ny, nx], "boundary": boundary, "n_devices": D, "steps": args.steps,
              "grad_steps": args.grad_steps, "parameter": spec["parameter"],
-             "input_partitioned": _is_partitioned(states["sharded"]["f"], D),
+             "input_partitioned": _is_partitioned(sharded_start["f"], D),
              "forward": {}, "gradient": {}}
-    got = {}
-    for label, node in (("unsharded", ref), ("sharded", sharded)):
-        rollout, vg = _stencil_fns(node, args.steps, args.grad_steps, dt, weight, bi,
-                                   spec["parameter"], spec["loss_of"])
-        s0 = states[label]
-        f0, rest = s0["f"], {k: v for k, v in s0.items() if k != "f"}
-        fwd_compile_s, _ = compile_seconds(rollout, s0, p)
-        final = _host(rollout(s0, p))
-        t_fwd = timed(lambda: rollout(s0, p), warmup=args.warmup, repeats=args.repeats)
-        grad_compile_s, _ = compile_seconds(vg, f0, rest, p)
-        value, (g_f0, g_p) = vg(f0, rest, p)
-        t_grad = timed(lambda: vg(f0, rest, p), warmup=args.warmup, repeats=args.repeats)
-        got[label] = (final, float(value), np.asarray(jax.device_get(g_f0)), float(g_p))
-        entry["forward"][label] = {"compile_s": fwd_compile_s,
-                                   "rollout": {**t_fwd,
-                                               "ms_per_step": t_fwd["median_ms"] / args.steps}}
-        entry["gradient"][label] = {"compile_s": grad_compile_s, "grad": t_grad,
-                                    "loss": float(value), "grad_parameter": float(g_p)}
+    side = functools.partial(_stencil_side, dt=dt, weight=weight, bi=bi, spec=spec, args=args)
+    key = (kind, boundary, ny, nx)
+    if unsharded_cache is None or key not in unsharded_cache:
+        unsharded = side(ref, start, p)
+        if unsharded_cache is not None:
+            unsharded_cache[key] = unsharded
+    else:
+        unsharded = unsharded_cache[key]
+    got = {"unsharded": unsharded[0]}
+    entry["forward"]["unsharded"], entry["gradient"]["unsharded"] = unsharded[1:]
+    got["sharded"], entry["forward"]["sharded"], entry["gradient"]["sharded"] = side(
+        sharded, sharded_start, p)
     (s_s, l_s, gf_s, gp_s), (s_u, l_u, gf_u, gp_u) = got["sharded"], got["unsharded"]
     entry["forward"]["parity"] = {field: _diff(s_s[field], s_u[field])
                                   for field in spec["fields"]}
@@ -2026,7 +2198,8 @@ def run_stencil(args, out: dict) -> dict:
     """``Field2D`` and a D2Q9 lattice sharded on the 1-D and the pencil mesh
     against the unsharded node, in every case of :func:`stencil_cases`."""
     _load_backend()
-    results = [run_stencil_case(case, args)
+    unsharded: dict = {}
+    results = [run_stencil_case(case, args, unsharded)
                for case in stencil_cases(args.cells, args.n_devices)]
     out["results"] = results
     return finish_checks(out, stencil_checks(results, args.n_devices))
@@ -2040,6 +2213,8 @@ def stencil_checks(results: list, n_devices: int) -> list:
         checks.append(check_not_run(
             "2d pencil mesh: Field2D under every boundary and the D2Q9 lattice, forward "
             "and adjoint vs unsharded", _pencil_mesh_needs(n_devices)))
+    checks += _neighbour_direction_not_run((r["mesh_shape"] for r in results),
+                                           "ShardedStencilNode")
     for entry in results:
         fwd, grad = entry["forward"], entry["gradient"]
         prefix, param = _stencil_prefix(entry), entry["parameter"]
@@ -2093,21 +2268,17 @@ def graph_value_and_grad(gm, steps: int, writes, loss_of_state, external_inputs=
     return jax.jit(jax.value_and_grad(loss, has_aux=True))
 
 
-def make_hybrid_correction(shift: int):
+def make_hybrid_correction(shift: tuple):
     """An additive correction on the *global* field, outside any ``shard_map``:
-    a nonlinear term and a shift by ``shift`` rows along the sharded axis,
-    which on a partitioned field is a cross-device permutation."""
+    a nonlinear term and a shift by ``shift = (rows, columns)`` along both
+    spatial axes, which on a field partitioned along either is a
+    cross-device permutation (until schema 6 it shifted rows only, local on
+    a mesh that shards axis 1 alone)."""
     def correction(state, boundary_inputs, dt):
         f = state["f"]
-        return {"f": dt * (0.05 * jnp.tanh(f - 1.0) + 0.1 * (jnp.roll(f, shift, axis=0) - f))}
+        moved = jnp.roll(f, tuple(shift), axis=(0, 1))
+        return {"f": dt * (0.05 * jnp.tanh(f - 1.0) + 0.1 * (moved - f))}
     return correction
-
-
-def _graph_mesh_entry(n_devices: int) -> tuple:
-    """``(label, mesh, axis_map, mesh_shape)`` of the graph goals' mesh."""
-    label = graph_mesh(n_devices)
-    mesh, axis_map, mesh_shape = stencil_mesh(label, n_devices)
-    return label, mesh, axis_map, mesh_shape
 
 
 def _pencil_not_run(goal_claim: str, n_devices: int) -> list:
@@ -2122,25 +2293,35 @@ def _graph_prefix(entry: dict) -> str:
     return f"{entry['mesh']} {py}x{pz} {ny}x{nx}"
 
 
+def _cached(cache: dict, key, compute):
+    """``cache[key]``, computed once."""
+    if key not in cache:
+        cache[key] = compute()
+    return cache[key]
+
+
 def run_hybrid(args, out: dict) -> dict:
     """``HybridNode(ShardedStencilNode(inner))`` against ``HybridNode(inner)``,
-    on the pencil mesh where it fits, with a grid-shaped ``source`` held
-    through an external input and ``Field2D``'s domain integral compared."""
+    on every mesh at the smallest size and the pencil at the others
+    (:func:`graph_cases`), with a grid-shaped ``source`` held through an
+    external input and ``Field2D``'s domain integral compared."""
     _load_backend()
     D = args.n_devices
-    mesh_label, mesh, axis_map, (py, pz) = _graph_mesh_entry(D)
     results = []
     writes = list(HYBRID_WRITES)
     theta = jnp.asarray([0.2, 0.3], jnp.float32)
-    for n_hint in args.cells:
+    unsharded: dict = {}
+    for n_hint, mesh_label in graph_cases(args.cells, D):
+        mesh, axis_map, (py, pz) = stencil_mesh(mesh_label, D)
         ny, nx = field_shape(n_hint, D)
-        shift = max(1, ny // (2 * D))
+        shift = (max(1, ny // (2 * D)), max(1, nx // (2 * D)))
         correction = make_hybrid_correction(shift)
         ext = {"field": {"source": jnp.asarray(_source_field(ny, nx))}}
 
-        def graph(sharded: bool, _ny=ny, _nx=nx, _correction=correction):
-            inner = Field2D("field", _ny, _nx, exchange=0.3)
-            physics = (ShardedStencilNode(inner, mesh, axis_map=axis_map,
+        def graph(sharded: bool, _ny=ny, _nx=nx, _correction=correction, _mesh=mesh,
+                  _axis_map=axis_map):
+            inner = Field2D("field", _ny, _nx, exchange=0.3, mask_axis=mask_axis_for(_axis_map))
+            physics = (ShardedStencilNode(inner, _mesh, axis_map=_axis_map,
                                           boundary="periodic") if sharded else inner)
             gm = GraphManager()
             gm.add_node(HybridNode(physics, _correction))
@@ -2148,30 +2329,34 @@ def run_hybrid(args, out: dict) -> dict:
             gm.compile()
             return gm
 
-        entry = {"mesh": mesh_label, "mesh_shape": [py, pz], "cells": ny * nx,
-                 "shape": [ny, nx], "n_devices": D, "steps": args.steps,
-                 "grad_steps": args.grad_steps, "correction_shift_rows": shift}
-        got = {}
-        for label, sharded in (("unsharded", False), ("sharded", True)):
-            gm = graph(sharded)
+        def side(sharded: bool, _graph=graph, _ext=ext):
+            gm = _graph(sharded)
             t0 = time.perf_counter()
-            final_state = gm.run_scan(args.steps, external_inputs=ext)["field"]
+            final_state = gm.run_scan(args.steps, external_inputs=_ext)["field"]
             f, averages = final_state["f"], final_state["averages"]
             jax.block_until_ready(f)
             scan_s = time.perf_counter() - t0
             # run_scan advanced that graph's state: the adjoint gets a fresh graph.
-            vg = graph_value_and_grad(graph(sharded), args.grad_steps, writes,
+            vg = graph_value_and_grad(_graph(sharded), args.grad_steps, writes,
                                       lambda st: jnp.mean(st["field"]["f"] ** 2),
-                                      external_inputs=ext)
+                                      external_inputs=_ext)
             compile_s, _ = compile_seconds(vg, theta)
             (value, _final), grad = vg(theta)
             t_grad = timed(lambda: vg(theta), warmup=args.warmup, repeats=args.repeats)
-            got[label] = (np.asarray(jax.device_get(f)), np.asarray(jax.device_get(averages)),
-                          float(value), np.asarray(grad))
-            entry[label] = {"run_scan_first_call_s": scan_s, "partitioned": _is_partitioned(f, D),
-                            "compile_s": compile_s, "value_and_grad": t_grad,
-                            "loss": float(value), "grad": np.asarray(grad).tolist()}
-        (f_s, a_s, l_s, g_s), (f_u, a_u, l_u, g_u) = got["sharded"], got["unsharded"]
+            got = (np.asarray(jax.device_get(f)), np.asarray(jax.device_get(averages)),
+                   float(value), np.asarray(grad))
+            record = {"run_scan_first_call_s": scan_s, "partitioned": _is_partitioned(f, D),
+                      "compile_s": compile_s, "value_and_grad": t_grad,
+                      "loss": float(value), "grad": np.asarray(grad).tolist()}
+            return got, record
+
+        entry = {"mesh": mesh_label, "mesh_shape": [py, pz], "cells": ny * nx,
+                 "shape": [ny, nx], "n_devices": D, "steps": args.steps,
+                 "grad_steps": args.grad_steps, "correction_shift": list(shift)}
+        # The unsharded graph does not depend on the mesh: once per grid.
+        got_u, entry["unsharded"] = _cached(unsharded, (ny, nx), lambda _s=side: _s(False))
+        got_s, entry["sharded"] = side(True)
+        (f_s, a_s, l_s, g_s), (f_u, a_u, l_u, g_u) = got_s, got_u
         corr = np.asarray(correction({"f": jnp.asarray(f_u)}, {}, 0.1)["f"])
         entry["correction_rel"] = float(np.max(np.abs(corr)) / np.max(np.abs(f_u)))
         entry["parity_f"] = _diff(f_s, f_u)
@@ -2179,7 +2364,7 @@ def run_hybrid(args, out: dict) -> dict:
         entry["parity_loss"] = _rel_each(l_s, l_u)
         entry["parity_grad"] = _rel_each(g_s, g_u)
         results.append(entry)
-        print(f"[hybrid] {_graph_prefix(entry):>17} max_rel f {entry['parity_f']['max_rel']:.1e}"
+        print(f"[hybrid] {_graph_prefix(entry):>22} max_rel f {entry['parity_f']['max_rel']:.1e}"
               f"  averages {entry['parity_averages']['max_rel']:.1e}  grad "
               f"{entry['parity_grad']:.1e}  value+grad "
               f"{entry['sharded']['value_and_grad']['median_ms']:8.2f} ms (unsharded "
@@ -2194,6 +2379,8 @@ def hybrid_checks(results: list, n_devices: int) -> list:
     params = ", ".join(key for _node, key in HYBRID_WRITES)
     checks = _pencil_not_run("HybridNode(ShardedStencilNode(inner)) forward and adjoint vs "
                              "HybridNode(inner)", n_devices)
+    checks += _neighbour_direction_not_run((r["mesh_shape"] for r in results),
+                                           "HybridNode(ShardedStencilNode(inner))")
     for entry in results:
         g_u = entry["unsharded"]["grad"]
         prefix = _graph_prefix(entry)
@@ -2222,24 +2409,31 @@ def _first(averages):
     return averages[0]
 
 
+def _spread(u, *, profile):
+    """The far field's value spread over the grid (an edge transform)."""
+    return u * profile
+
+
 def coupled_graph(ny: int, nx: int, mesh, solver: str, axis_map=None):
     """A ``Field2D`` member (sharded when ``mesh`` is given) and a replicated
     ``FarField`` member in one coupling group.
 
     The field reaches the far field through its domain integral (the mean
     in ``averages``), and the far field reaches the field as a grid-shaped
-    ``ambient`` (its value broadcast to every cell), so both of the
-    wrapper's paths for them are inside the group's fixed point and its
-    adjoint.
+    ``ambient``, ``u * coupled_profile`` -- different on every block of
+    every mesh -- so both of the wrapper's paths for them are inside the
+    group's fixed point and its adjoint.
     """
-    field = Field2D("field", ny, nx, exchange=0.8)
+    axis_map = axis_map or {MESH_AXIS: 0}
+    field = Field2D("field", ny, nx, exchange=0.8, mask_axis=mask_axis_for(axis_map))
     gm = GraphManager()
     gm.add_node(field if mesh is None else ShardedStencilNode(
-        field, mesh, axis_map=axis_map or {MESH_AXIS: 0}, boundary="periodic"))
+        field, mesh, axis_map=axis_map, boundary="periodic"))
     gm.add_node(FarField("far"))
     gm.add_edge("field", "far", "averages", "field_mean", transform=_first)
     gm.add_edge("far", "field", "u", "ambient",
-                transform=functools.partial(jnp.broadcast_to, shape=(ny, nx)))
+                transform=functools.partial(_spread,
+                                            profile=jnp.asarray(coupled_profile(ny, nx))))
     kwargs = {} if solver == "ift" else {"solver": solver}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)      # solver="fori"
@@ -2263,17 +2457,21 @@ def coupled_model(field, theta, steps: int, u0: float) -> tuple:
 
     Independent of the graph machinery: at convergence each step solves
     both members' updates at once, each reading the other's *new* value --
-    ``f' = f + dt (D div(k grad f) + h (u' - f))`` and
+    ``f' = f + dt (D div(k grad f) + h (u' p - f))`` and
     ``u' = u + dt c (mean f' - u)``, ``k`` the face-averaged mask of
-    ``Field2D`` on a periodic grid.  ``mean f'`` and ``u'`` satisfy a 2x2
-    linear system (``mean(div(k grad f))`` is known from ``f``), and
-    ``f'`` follows.  ``theta = (D, c, h)``; the field's own float32
-    initial state and mask are widened exactly.
+    ``Field2D`` on a periodic grid and ``p`` the :func:`coupled_profile`
+    the far field is spread by.  ``mean f'`` and ``u'`` satisfy a 2x2
+    linear system (``mean(div(k grad f))`` is known from ``f``, and
+    ``mean(u' p) = u' mean(p)``), and ``f'`` follows.  ``theta = (D, c,
+    h)``; the field's own float32 initial state, mask and profile are
+    widened exactly.
     """
     d, c, h = (float(t) for t in theta)
     dt = float(np.float32(field.delta_t))
     f = np.asarray(field.initial_state()["f"], np.float64)
     mask = np.asarray(field.static_data["mask"].value, np.float64)
+    profile = np.asarray(coupled_profile(*f.shape), np.float64)
+    p_mean = profile.mean()
     u = float(np.float32(u0))
     # (shift, axis) of each neighbour and the conductance of the face to it
     faces = [((s, a), 0.5 * (mask + np.roll(mask, s, a))) for a in (0, 1) for s in (1, -1)]
@@ -2281,9 +2479,9 @@ def coupled_model(field, theta, steps: int, u0: float) -> tuple:
         div = sum(k * (np.roll(f, s, a) - f) for (s, a), k in faces)
         m, mean_div = f.mean(), div.mean()
         m_new, u_new = np.linalg.solve(
-            np.array([[1.0, -dt * h], [-dt * c, 1.0]]),
+            np.array([[1.0, -dt * h * p_mean], [-dt * c, 1.0]]),
             np.array([m + dt * d * mean_div - dt * h * m, u - dt * c * u]))
-        f = f + dt * (d * div + h * (u_new - f))
+        f = f + dt * (d * div + h * (u_new * profile - f))
         u = float(u_new)
     return f, u, float(np.mean(f ** 2) + u ** 2)
 
@@ -2302,26 +2500,21 @@ def coupled_model_gradient(field, theta, steps: int, u0: float) -> np.ndarray:
 
 def run_coupled(args, out: dict) -> dict:
     """Checklist 6: forward and adjoint of the group, sharded vs unsharded,
-    and both against the float64 model of the coupled step."""
+    and both against the float64 model of the coupled step, on every mesh
+    at the smallest size and the pencil at the others (:func:`graph_cases`)."""
     _load_backend()
     D = args.n_devices
-    mesh_label, mesh, axis_map, (py, pz) = _graph_mesh_entry(D)
     writes = list(COUPLED_WRITES)
     theta = jnp.asarray([0.2, 2.0, 0.8], jnp.float32)
     iterations_key = "coupling_far+field_iterations"
     results = []
+    models: dict = {}
+    unsharded: dict = {}
 
     def loss_of(state):
         return jnp.mean(state["field"]["f"] ** 2) + state["far"]["u"] ** 2
 
-    for n_hint in args.cells:
-        ny, nx = field_shape(n_hint, D)
-        # The field, its two averages (a domain integral in its state) and u.
-        entry = {"mesh": mesh_label, "mesh_shape": [py, pz], "cells": ny * nx,
-                 "shape": [ny, nx], "n_devices": D, "steps": args.grad_steps,
-                 "coupled_dof": ny * nx + 2 + 1, "max_iterations": COUPLED_MAX_ITERATIONS,
-                 "tolerance": COUPLED_TOLERANCE, "parameters": [f"{n}.{k}" for n, k in writes],
-                 "solvers": {}}
+    def model(ny, nx):
         t0 = time.perf_counter()
         model_field = Field2D("field", ny, nx, exchange=0.8)
         u0 = float(FarField("far").initial_state()["u"])
@@ -2329,31 +2522,51 @@ def run_coupled(args, out: dict) -> dict:
         f_model, u_model, loss_model = coupled_model(model_field, theta64, args.grad_steps, u0)
         averages_model = np.array([np.mean(f_model), np.mean(f_model ** 2)])
         grad_model = coupled_model_gradient(model_field, theta64, args.grad_steps, u0)
-        entry["model"] = {"loss": loss_model, "grad": grad_model.tolist(),
-                          "wall_s": time.perf_counter() - t0}
+        return (f_model, u_model, loss_model, averages_model, grad_model,
+                {"loss": loss_model, "grad": grad_model.tolist(),
+                 "wall_s": time.perf_counter() - t0})
+
+    def side(ny, nx, mesh, solver, axis_map):
+        vg = graph_value_and_grad(coupled_graph(ny, nx, mesh, solver, axis_map),
+                                  args.grad_steps, writes, loss_of)
+        t0 = time.perf_counter()
+        lowered = vg.lower(theta)
+        lowered.compile()
+        compile_s = time.perf_counter() - t0
+        (value, final), grad = vg(theta)
+        t = timed(lambda: vg(theta), warmup=args.warmup, repeats=args.repeats)
+        f = final["field"]["f"]
+        meta = final.get("_meta", {})
+        iterations = int(meta[iterations_key]) if iterations_key in meta else None
+        got = (np.asarray(jax.device_get(f)), float(final["far"]["u"]),
+               float(value), np.asarray(grad),
+               np.asarray(jax.device_get(final["field"]["averages"])))
+        record = {"compile_s": compile_s,
+                  "value_and_grad": {**t, "ms_per_step": t["median_ms"] / args.grad_steps},
+                  "loss": float(value), "grad": np.asarray(grad).tolist(),
+                  "last_step_iterations": iterations,
+                  "partitioned": _is_partitioned(f, D),
+                  "device0_pinned_ops": _device0_pins(lowered)}
+        return got, record
+
+    for n_hint, mesh_label in graph_cases(args.cells, D):
+        mesh, axis_map, (py, pz) = stencil_mesh(mesh_label, D)
+        ny, nx = field_shape(n_hint, D)
+        # The field, its two averages (a domain integral in its state) and u.
+        entry = {"mesh": mesh_label, "mesh_shape": [py, pz], "cells": ny * nx,
+                 "shape": [ny, nx], "n_devices": D, "steps": args.grad_steps,
+                 "coupled_dof": ny * nx + 2 + 1, "max_iterations": COUPLED_MAX_ITERATIONS,
+                 "tolerance": COUPLED_TOLERANCE, "parameters": [f"{n}.{k}" for n, k in writes],
+                 "solvers": {}}
+        # Neither the model nor the unsharded group depends on the mesh.
+        (f_model, u_model, loss_model, averages_model, grad_model,
+         entry["model"]) = _cached(models, (ny, nx), lambda _ny=ny, _nx=nx: model(_ny, _nx))
         for solver in COUPLED_SOLVERS:
             got, sol = {}, {}
-            for label, m in (("unsharded", None), ("sharded", mesh)):
-                vg = graph_value_and_grad(coupled_graph(ny, nx, m, solver, axis_map),
-                                          args.grad_steps, writes, loss_of)
-                t0 = time.perf_counter()
-                lowered = vg.lower(theta)
-                lowered.compile()
-                compile_s = time.perf_counter() - t0
-                (value, final), grad = vg(theta)
-                t = timed(lambda: vg(theta), warmup=args.warmup, repeats=args.repeats)
-                f = final["field"]["f"]
-                meta = final.get("_meta", {})
-                iterations = int(meta[iterations_key]) if iterations_key in meta else None
-                got[label] = (np.asarray(jax.device_get(f)), float(final["far"]["u"]),
-                              float(value), np.asarray(grad),
-                              np.asarray(jax.device_get(final["field"]["averages"])))
-                sol[label] = {"compile_s": compile_s,
-                              "value_and_grad": {**t, "ms_per_step": t["median_ms"] / args.grad_steps},
-                              "loss": float(value), "grad": np.asarray(grad).tolist(),
-                              "last_step_iterations": iterations,
-                              "partitioned": _is_partitioned(f, D),
-                              "device0_pinned_ops": _device0_pins(lowered)}
+            got["unsharded"], sol["unsharded"] = _cached(
+                unsharded, (ny, nx, solver),
+                lambda _ny=ny, _nx=nx, _s=solver: side(_ny, _nx, None, _s, None))
+            got["sharded"], sol["sharded"] = side(ny, nx, mesh, solver, axis_map)
             (f_s, u_s, l_s, g_s, a_s), (f_u, u_u, l_u, g_u, a_u) = (got["sharded"],
                                                                    got["unsharded"])
             sol["parity_f"] = _diff(f_s, f_u)
@@ -2370,7 +2583,7 @@ def run_coupled(args, out: dict) -> dict:
                 for label in ("sharded", "unsharded")}
             entry["solvers"][solver] = sol
             prefix = f"{_graph_prefix(entry)} {solver}"
-            print(f"[coupled] {prefix:>22} max_rel f {sol['parity_f']['max_rel']:.1e}  u "
+            print(f"[coupled] {prefix:>27} max_rel f {sol['parity_f']['max_rel']:.1e}  u "
                   f"{sol['parity_u']:.1e}  grad {sol['parity_grad']:.1e}  vs model grad "
                   f"{max(v['grad'] for v in sol['model'].values()):.1e}  value+grad "
                   f"{sol['sharded']['value_and_grad']['median_ms']:8.2f} ms (unsharded "
@@ -2388,6 +2601,8 @@ def coupled_checks(results: list, n_devices: int) -> list:
     params = ", ".join(f"{node}.{key}" for node, key in COUPLED_WRITES)
     checks = _pencil_not_run("a sharded and a replicated member in one coupling group, "
                              "forward and adjoint", n_devices)
+    checks += _neighbour_direction_not_run((r["mesh_shape"] for r in results),
+                                           "the coupled group's sharded member")
     for entry in results:
         for solver in COUPLED_SOLVERS:
             sol = entry["solvers"][solver]
@@ -2539,22 +2754,18 @@ def case_keys(goal: str, doc: dict) -> tuple[Counter, Counter]:
         if _pencil_mesh_fits(n_dev):
             nz = n_dev // 2
             pencil = ((2, nz), (16, 8 * nz + 1))
-        want[((ny_bad, nx), pencil, n_un)] += 1
+        want[((ny_bad, nx), (ny_ok, nx + 1), pencil, n_un)] += 1
         for r in results:
             p = r.get("pencil")
-            got[(_shape(r["stencil"]["shape"]),
+            got[(_shape(r["stencil"]["shape"]), _shape(r["stencil_axis1"]["shape"]),
                  None if p is None else (_shape(p["mesh"]), _shape(p["shape"])),
                  r["unstructured"]["cells"])] += 1
             if r.get("pointwise") is None:
                 got[("pointwise", "missing")] += 1
     elif goal == "halo":
         ny, nx = field_shape(max(cells), n_dev)
-        meshes = [("1d", (n_dev, 1))]
-        if _pencil_mesh_fits(n_dev):
-            meshes.append(("2d", (2, n_dev // 2)))
-        for label, (py, pz) in meshes:
-            nx_m = -(-nx // pz) * pz
-            want.update((label, (py, pz), (ny, nx_m), h, b)
+        for label in meshes_that_fit(n_dev):
+            want.update((label, _mesh_shape_of(label, n_dev), (ny, nx), h, b)
                         for b in HALO_BOUNDARIES for h in HALO_WIDTHS)
         want[("unstructured", synthetic_cells(cfg["synthetic"], max(cells)), methods)] += 1
         for r in results:
@@ -2568,14 +2779,13 @@ def case_keys(goal: str, doc: dict) -> tuple[Counter, Counter]:
         got.update((r["node"], r["mesh"], _shape(r["mesh_shape"]), _shape(r["shape"]),
                     r["boundary"]) for r in results)
     elif goal == "hybrid":
-        mesh = graph_mesh(n_dev)
-        want.update((mesh, _mesh_shape_of(mesh, n_dev), field_shape(n, n_dev)) for n in cells)
+        want.update((mesh, _mesh_shape_of(mesh, n_dev), field_shape(n, n_dev))
+                    for n, mesh in graph_cases(cells, n_dev))
         got.update((r["mesh"], _shape(r["mesh_shape"]), _shape(r["shape"])) for r in results)
     elif goal == "coupled":
         solvers = tuple(sorted(COUPLED_SOLVERS))
-        mesh = graph_mesh(n_dev)
         want.update((mesh, _mesh_shape_of(mesh, n_dev), field_shape(n, n_dev), solvers)
-                    for n in cells)
+                    for n, mesh in graph_cases(cells, n_dev))
         got.update((r["mesh"], _shape(r["mesh_shape"]), _shape(r["shape"]),
                     tuple(sorted(r["solvers"]))) for r in results)
     else:
@@ -2711,14 +2921,29 @@ def record_problems(doc: dict) -> list[str]:
     return problems + _check_differences(checks, derived)
 
 
+def _commit_of(doc: dict) -> str | None:
+    """The git commit a file records, or ``None`` when it records none."""
+    env = doc.get("environment")
+    commit = env.get("git_commit") if isinstance(env, dict) else None
+    return commit if isinstance(commit, str) and commit else None
+
+
+def _short_commit(commit: str | None) -> str:
+    return commit[:12] if commit else "(none)"
+
+
+def files_by_commit(docs: list) -> dict:
+    """``{commit or None: [file, ...]}`` over ``docs``, in their order."""
+    by_commit: dict = {}
+    for d in docs:
+        by_commit.setdefault(_commit_of(d), []).append(_file_of(d))
+    return by_commit
+
+
 def item_problems(docs: list) -> list[str]:
     """Why the files deciding one checklist item cannot decide it together:
     each must record a commit, and it must be the same one."""
-    by_commit: dict = {}
-    for d in docs:
-        commit = d.get("environment", {}).get("git_commit")
-        by_commit.setdefault(commit if isinstance(commit, str) and commit else None,
-                             []).append(_file_of(d))
+    by_commit = files_by_commit(docs)
     problems = []
     if None in by_commit:
         problems.append(f"no git commit recorded in {', '.join(by_commit.pop(None))}")
@@ -2929,6 +3154,43 @@ def _why_failed(c: dict) -> str:
     return line
 
 
+def _item_commits(docs: list) -> str:
+    """The commit(s) an item's files record, for its checklist line: one
+    commit, or each commit with the files that record it."""
+    by_commit = files_by_commit(docs)
+    if not by_commit:
+        return ""
+    if len(by_commit) == 1:
+        return f"commit {_short_commit(next(iter(by_commit)))}"
+    return "commits " + "; ".join(f"{_short_commit(c)} ({', '.join(files)})"
+                                  for c, files in by_commit.items())
+
+
+def _print_mixed_commits(docs_by_goal: dict) -> bool:
+    """A prominent warning when the directory's files record more than one
+    commit (or some record none), naming each commit's items and files.
+    Returns whether it printed one.
+
+    An item is decided only by files of one commit (:func:`item_problems`),
+    but the rule is per item: items decided by different goals can each
+    close on a different commit, and the checklist then reads as one
+    session when it was not.  So the summary says so, and exits 4.
+    """
+    docs = [d for goal in ALL_GOALS for d in docs_by_goal.get(goal, [])]
+    by_commit = files_by_commit(docs)
+    if len(by_commit) < 2:
+        return False
+    print(f"\nWARNING: MIXED COMMITS -- this directory's files come from {len(by_commit)} "
+          "commits, so its checklist is not one session's verdict (exit 4)")
+    for commit, files in by_commit.items():
+        items = [str(item) for item, (_claim, goals) in CHECKLIST.items()
+                 if any(_commit_of(d) == commit for g in goals for d in docs_by_goal.get(g, []))]
+        print(f"  commit {_short_commit(commit)}: items {', '.join(items) or '-'}; "
+              f"{', '.join(files)}")
+    print("  Re-run every goal on one commit, or summarise each commit's files apart.")
+    return True
+
+
 def _print_runs_and_checklist(docs_by_goal: dict) -> int:
     """The per-file run table, the checklist verdict, every record that
     cannot decide, every failed check and every check not run.  Returns the
@@ -2937,7 +3199,7 @@ def _print_runs_and_checklist(docs_by_goal: dict) -> int:
     evidence this runner would have written (:func:`record_problems`)."""
     print("Runs (one line per JSON file)")
     print(f"{'goal':<12} {'platform':<8} {'dev':>3}  {'device kind':<26} {'jax / jaxlib':<17} "
-          f"{'dry run':<7} {'checks':>7}  verdict")
+          f"{'dry run':<7} {'checks':>7}  {'commit':<12}  verdict")
     failed, not_run, bad_files = [], [], []
     for goal in ALL_GOALS:
         for doc in docs_by_goal.get(goal, []):
@@ -2950,7 +3212,7 @@ def _print_runs_and_checklist(docs_by_goal: dict) -> int:
             print(f"{goal:<12} {env.get('platform', '?'):<8} {n_dev:>3}  {kinds[:26]:<26} "
                   f"{env.get('jax', '?') + ' / ' + env.get('jaxlib', '?'):<17} "
                   f"{'yes' if doc.get('dry_run') else 'no':<7} {n_ok:>7}  "
-                  f"{goal_verdict([doc])}")
+                  f"{_short_commit(_commit_of(doc)):<12}  {goal_verdict([doc])}")
             for c, s in zip(checks or [], statuses):
                 if s in ("failed", "inconsistent"):
                     failed.append((goal, c))
@@ -2962,7 +3224,10 @@ def _print_runs_and_checklist(docs_by_goal: dict) -> int:
           f"{MIN_DECIDING_DEVICES} devices, with every check run, every file valid and "
           "one commit)")
     for item, (status, detail) in checklist_status(docs_by_goal).items():
-        print(f"{item}  {CHECKLIST[item][0]:<74} {status}  [{detail}]")
+        deciding = [d for g in CHECKLIST[item][1] for d in docs_by_goal.get(g, [])]
+        commits = _item_commits(deciding)
+        print(f"{item}  {CHECKLIST[item][0]:<74} {status}  [{detail}]"
+              + (f"  {commits}" if commits else ""))
     invalid = [(goal, doc, record_problems(doc)) for goal in ALL_GOALS
                for doc in docs_by_goal.get(goal, []) if "checks" in doc]
     invalid = [(goal, doc, problems) for goal, doc, problems in invalid if problems]
@@ -2997,7 +3262,9 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
             un = r["unstructured"]
             pencil = r.get("pencil") or {}
             print(f"\nIndivisible grid: stencil {r['stencil']['shape']} -> "
-                  f"{r['stencil']['raised']}, pointwise -> {r['pointwise']['raised']}, pencil "
+                  f"{r['stencil']['raised']}, along spatial axis 1 "
+                  f"{r['stencil_axis1']['shape']} -> {r['stencil_axis1']['raised']}, "
+                  f"pointwise -> {r['pointwise']['raised']}, pencil "
                   f"{pencil.get('shape', '-')} -> {pencil.get('raised', '-')}; unstructured "
                   f"{un['cells']} cells {un['cells_per_device']} max_rel "
                   f"{un['parity_x']['max_rel']:.1e}")
@@ -3006,7 +3273,8 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
             cases = r["stencil_cases"]
             worst_f = max(c["forward_max_abs"] for c in cases)
             worst_a = max(c["adjoint_max_abs"] for c in cases)
-            meshes = sorted({f"{c['mesh_shape'][0]}x{c['mesh_shape'][1]}" for c in cases})
+            meshes = sorted({f"{c['mesh']} {c['mesh_shape'][0]}x{c['mesh_shape'][1]}"
+                             for c in cases})
             un = r["unstructured"]
             print(f"\nHalo exchange vs NumPy (max |diff|; must be 0): {len(cases)} stencil cases "
                   f"on {', '.join(meshes)} meshes, forward {worst_f:.1e}, adjoint {worst_a:.1e}; "
@@ -3016,7 +3284,7 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
     if docs_by_goal.get("coupled"):
         print("\nCoupled group, sharded vs unsharded (max-rel; model = worst gradient against "
               "the float64 model; value+grad = one differentiated rollout)")
-        print(f"{'mesh, shape':>17} {'solver':<6} {'field':>8} {'avgs':>8} {'far':>8} "
+        print(f"{'mesh, shape':>22} {'solver':<6} {'field':>8} {'avgs':>8} {'far':>8} "
               f"{'grad':>8} {'limit':>8} {'model':>8} {'sh ms':>9} {'unsh ms':>9} "
               f"{'compile':>8} {'passes':>7} {'pinned':>6}")
         for doc in docs_by_goal["coupled"]:
@@ -3026,7 +3294,7 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
                     its = "/".join("-" if sol[k]["last_step_iterations"] is None
                                    else str(sol[k]["last_step_iterations"])
                                    for k in ("unsharded", "sharded"))
-                    print(f"{shape:>17} {solver:<6} {sol['parity_f']['max_rel']:8.1e} "
+                    print(f"{shape:>22} {solver:<6} {sol['parity_f']['max_rel']:8.1e} "
                           f"{sol['parity_averages']['max_rel']:8.1e} "
                           f"{sol['parity_u']:8.1e} {sol['parity_grad']:8.1e} "
                           f"{LIMITS['coupled_gradient_' + solver]:8.0e} "
@@ -3054,7 +3322,7 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
         print("\nHybridNode(ShardedStencilNode(inner)) vs HybridNode(inner) (max-rel)")
         for doc in docs_by_goal["hybrid"]:
             for r in doc["results"]:
-                print(f"{_graph_prefix(r):<17} f {r['parity_f']['max_rel']:.1e}  averages "
+                print(f"{_graph_prefix(r):<22} f {r['parity_f']['max_rel']:.1e}  averages "
                       f"{r['parity_averages']['max_rel']:.1e}  "
                       f"loss {r['parity_loss']:.1e}  grad {r['parity_grad']:.1e}  correction "
                       f"{r['correction_rel']:.1e} of |f|  value+grad "
@@ -3063,17 +3331,22 @@ def _print_checklist_goal_tables(docs_by_goal: dict) -> None:
 
 
 def summarise(directory: Path) -> int:
-    """Print the verdicts and tables; 0 = no check failed (checks recorded
-    as not run are listed and keep their items open, but are not
-    failures; so do files from different commits), 1 = no goal JSON under
+    """Print the verdicts and tables; 0 = no check failed and every file
+    records one commit (checks recorded as not run are listed and keep
+    their items open, but are not failures), 1 = no goal JSON under
     ``directory``, 3 = at least one check failed, a recorded pass/fail
     disagrees with its value and limit, or a file is not evidence this
-    runner would have written (:func:`record_problems`)."""
+    runner would have written (:func:`record_problems`), 4 = nothing
+    failed, but the files come from more than one commit (or some record
+    none and others do): the items they decide may each have closed on a
+    different commit, and the summary prints a ``MIXED COMMITS`` warning
+    naming each commit's items and files."""
     docs_by_goal = {goal: _load_results(directory, goal) for goal in ALL_GOALS}
     if not any(docs_by_goal.values()):
         print(f"no goal JSON ({'/'.join(ALL_GOALS)}) under {directory}")
         return 1
     n_failed = _print_runs_and_checklist(docs_by_goal)
+    mixed = _print_mixed_commits(docs_by_goal)
     _print_checklist_goal_tables(docs_by_goal)
     exchange_docs = docs_by_goal["exchange"]
     forward_docs = docs_by_goal["forward"]
@@ -3120,7 +3393,10 @@ def summarise(directory: Path) -> int:
                 print(f"{cg['dof']:>9} dof   sharded_cg grad     {cg['grad_parity']['max_abs']:.2e} / "
                       f"{cg['grad_parity']['max_rel']:.2e}  jvp {cg['jvp_parity']['max_abs']:.2e} / "
                       f"{cg['jvp_parity']['max_rel']:.2e}")
-    return 3 if n_failed else 0
+    if mixed and not n_failed:
+        # Repeated last, so that it is the line a reader sees.
+        print("\nWARNING: MIXED COMMITS -- see above; exit 4")
+    return 3 if n_failed else 4 if mixed else 0
 
 
 # ---------------------------------------------------------------------------

@@ -164,14 +164,21 @@ def test_fit_lm_on_the_spring_one_percent_off_stays_at_its_minimum():
     quantisation term (4.4e-10 here), so held; 2.0e-9 on 0.11.2, outside
     it, so declined with a warning.  Both outcomes are the contract; what
     is asserted is the loss, which either way stays at the rounding level
-    the fit reached, four decades below what 0.4.0-dev returned."""
+    the fit reached, four decades below what 0.4.0-dev returned.  The
+    rounding level itself is platform-dependent too: the run stops on the
+    first proposal within ``step_tol`` (16 ulps), which lands at 0.0 on
+    jaxlib 0.11.0 here and at 1.9e-12 on CI's 0.11.2 runner, one ulp-sized
+    step short of it."""
     gm = _spring()
     residual = _trajectory_residual(gm, 200)
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("always")
         res = fit_lm(gm, residual, params=_with(gm, {"stiffness": 1.01 * 30.0}),
                      n_iter=50)
-    assert res.best_loss == 0.0
+    assert res.converged
+    # Seven decades below the start (1.0e-3); 0.4.0-dev returned parameters
+    # at 1.2e-4.
+    assert res.best_loss <= 1e-7 * res.losses[0], res.best_loss
     assert _half_sse(residual, res.params) <= 1e-9, _half_sse(residual, res.params)
     assert res.excited_rank in (3, 4)
     declines = [w for w in record if "would raise the loss" in str(w.message)]
@@ -602,7 +609,13 @@ def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, 
         n_iter, step_tol, ends_rejected, converged = {
             "fit_lm": (20, 0.0, True, True),
             "fit_lm-accepted-last": (3, None, False, False),
-            "fit_lm-converged-on-an-accepted-proposal": (20, None, False, True),
+            # ``step_tol=2e-4``: the fourth proposal (8.3e-5 relative) is
+            # within it and takes the loss from 7e-10 to 4e-14, so it is
+            # accepted however the platform rounds; at the default the
+            # stopping proposal is a few ulps at the floor, and whether that
+            # one lowers the loss is decided by rounding (accepted on
+            # jaxlib 0.11.0 here, rejected on CI's 0.11.2 runner).
+            "fit_lm-converged-on-an-accepted-proposal": (20, 2e-4, False, True),
         }[fitter]
         res = fit_lm(gm, residual, params=start, n_iter=n_iter, step_tol=step_tol,
                      notify_every=0)

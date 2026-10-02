@@ -100,13 +100,16 @@ def test_the_bound_is_rounded_to_the_values_dtype_as_jax_rounds_it():
         ParamSpec(bounds=(0.0, 5.0)).check(jnp.asarray(np.nan, jnp.float32), name="x")
 
 
-@pytest.mark.parametrize("value, flagged", [(-1e-40, True), (1e-40, False), (2.0, False)])
-def test_the_params_table_flags_what_check_refuses(value, flagged):
+@pytest.mark.parametrize("param, value, flagged", [
+    ("damping", -1e-40, True), ("damping", 1e-40, False), ("damping", 2.0, False),
+    ("stiffness", 1e-40, True), ("stiffness", TINY32, False)])
+def test_the_params_table_flags_what_check_refuses(param, value, flagged):
     """``params_table``'s ``out_of_bounds`` applies ``check``'s rule, on the
-    host, so it agrees with it about a subnormal too."""
+    host, so it agrees with it about a subnormal too: below the identity
+    damping's 0, and within the smallest normal of the ``log`` stiffness's."""
     gm = _spring()
-    gm.params["nodes"]["s"]["damping"] = jnp.float32(value)
-    row = next(r for r in gm.params_table() if r["param"] == "damping")
+    gm.params["nodes"]["s"][param] = jnp.float32(value)
+    row = next(r for r in gm.params_table() if r["param"] == param)
     assert row["out_of_bounds"] is flagged
     refused = False
     try:

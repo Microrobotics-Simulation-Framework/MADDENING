@@ -3412,18 +3412,22 @@ class SimulationServer:
         def sim_pause() -> dict[str, str]:
             with self._runner_lock:
                 detail = _not_running_detail()
-                if detail is not None:
-                    raise HTTPException(status_code=409, detail=detail)
-                self.runner.pause()
+                runner = self.runner
+                if detail is not None or runner is None:
+                    raise HTTPException(status_code=409,
+                                        detail=detail or "Runner is not started.")
+                runner.pause()
             return {"status": "paused"}
 
         @app.post("/sim/resume", tags=["sim"], response_model=None)
         def sim_resume() -> dict[str, str]:
             with self._runner_lock:
                 detail = _not_running_detail()
-                if detail is not None:
-                    raise HTTPException(status_code=409, detail=detail)
-                self.runner.resume()
+                runner = self.runner
+                if detail is not None or runner is None:
+                    raise HTTPException(status_code=409,
+                                        detail=detail or "Runner is not started.")
+                runner.resume()
             return {"status": "resumed"}
 
         @app.post("/sim/stop", tags=["sim"], response_model=None)
@@ -4036,7 +4040,7 @@ class SimulationServer:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._ensure_relay_attached_locked)
 
-                sub_fields = [None]   # mutable: {node: [fields]} or None
+                sub_fields: list[Optional[dict]] = [None]   # {node: [fields]} or None
                 target_fps = [30.0]
                 disconnected = asyncio.Event()
 

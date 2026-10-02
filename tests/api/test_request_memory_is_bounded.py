@@ -208,3 +208,32 @@ def test_concurrent_node_builds_run_one_at_a_time():
         t.join(60)
     assert sorted(codes) == [201] * 6
     assert _SlowBuild.most == 1, f"{_SlowBuild.most} nodes were built at once"
+
+
+def test_a_declared_length_over_the_limit_is_refused_without_reading_the_body(monkeypatch):
+    """The middleware alone, as uvicorn calls it: with a ``Content-Length``
+    over the limit it answers 413 without asking for one byte of the body,
+    and never calls the application."""
+    import asyncio
+
+    from maddening.api.server import _RequestBodyLimitMiddleware
+
+    monkeypatch.setattr(server_module, "MAX_REQUEST_BODY_BYTES", 1000)
+    received, sent, called = [], [], []
+
+    async def app(scope, receive, send):
+        called.append(scope)
+
+    async def receive():
+        received.append(1)
+        return {"type": "http.request", "body": b"x" * 2000, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/graph/nodes",
+             "headers": [(b"content-length", b"2000"), (b"content-type", b"application/json")]}
+    asyncio.run(_RequestBodyLimitMiddleware(app)(scope, receive, send))
+    assert received == [] and called == []
+    assert sent[0]["type"] == "http.response.start" and sent[0]["status"] == 413
+    assert b"MAX_REQUEST_BODY_BYTES" in sent[1]["body"]

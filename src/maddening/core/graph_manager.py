@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     # inside them (see "Read-only inspection" at the end of the class).
     from maddening.core.inspection import InspectionTable
 
+from maddening.core._pow2_frame import pow2_frame
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     _field_reference,
@@ -533,12 +534,12 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         live = ww > 0
         w_inv = jnp.where(live, 1.0 / jnp.where(live, ww, 1.0), 0.0)
         # The tangent lifted out of the underflow range where the group is
-        # that small (``_tangent_lift``; 1 elsewhere) and the residual's
+        # that small (``pow2_frame(..., mode="lift")``; 1 elsewhere) and the residual's
         # difference taken entry by entry in a power-of-two frame
         # (``_framed_difference``): in state units a group of magnitude
         # ~1e-34 handed the JVP tangents below the normal range, and its
         # residual ``F(x) - x`` flushed to zero.
-        lift = _tangent_lift(w_inv)
+        lift = pow2_frame(w_inv, mode="lift")
 
         def matvec(v):
             _, Jv = jax.jvp(
@@ -606,42 +607,8 @@ def _framed_difference(a, b, weight):
     a change of an ulp is subnormal and the bare difference flushed to
     zero.
     """
-    from maddening.core.coupling.acceleration import _pow2_entrywise  # noqa: PLC0415
-
-    k = _pow2_entrywise(a, b)
+    k = pow2_frame(a, b, mode="entrywise")
     return (a * k - b * k) * (weight / k)
-
-
-def _tangent_lift(scale):
-    """The least power of two ``>= 1`` that keeps a JVP tangent of size ``max|scale|`` normal.
-
-    The report's Jacobian-vector products take their tangent in state
-    units (``v * max|field|`` for a unit vector ``v``: a relative
-    perturbation of order one), which keeps every intermediate a node's
-    derivative forms at its natural size.  Below ``tiny / eps`` (``2**-102``
-    in float32) the small components of such a tangent are subnormal and
-    flush to zero, and the products read a different Jacobian.  There, and
-    only there, the tangent is multiplied by the least power of two that
-    brings its largest entry to ``tiny / eps`` -- every component down to
-    one ``eps`` of it normal -- and the product is divided by it again,
-    exactly (``J`` is linear).  It is 1 at every other magnitude, so the
-    program is the one it was.  Lifting to order one instead was tried and
-    is wrong both ways: at a large state a tangent of order one is a
-    relative perturbation of ``1/|x|``, and a nonlinear node's derivative
-    intermediates (``d(1/u) = -du/u**2``) underflowed -- a gradient bound
-    0.79x its control at ``|x| ~ 1e18``, usable -- and at a tiny state its
-    ``1/u`` times an order-one tangent overflowed.  A node whose derivative
-    intermediates are within ``2**24`` of overflow at a near-subnormal
-    state can still overflow under the lift, which reads as a non-finite
-    report (``spectral_usable=False``), not a wrong number.
-    """
-    dtype = jnp.asarray(scale).dtype
-    info = jnp.finfo(dtype)
-    biggest = jnp.max(jnp.abs(scale))
-    usable = jnp.logical_and(jnp.isfinite(biggest), biggest > 0)
-    _, have = jnp.frexp(jnp.where(usable, biggest, jnp.ones_like(biggest)))
-    _, want = np.frexp(float(info.tiny) / float(info.eps))
-    return jnp.ldexp(jnp.ones((), dtype), jnp.maximum(int(want) - have, 0))
 
 
 def _framed_shift(x, step, scale):
@@ -651,19 +618,8 @@ def _framed_shift(x, step, scale):
     near 1e-34 the increment ``step * scale`` is below the normal range
     and the bare product flushed to zero before it was added.
     """
-    from maddening.core.coupling.acceleration import _pow2_entrywise  # noqa: PLC0415
-
-    k = _pow2_entrywise(x)
+    k = pow2_frame(x, mode="entrywise")
     return (x * k + step * (scale * k)) / k
-
-
-def _pow2_normaliser(*vectors):
-    """See :func:`maddening.core.coupling.acceleration._pow2_normaliser`."""
-    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        _pow2_normaliser as normaliser,
-    )
-
-    return normaliser(*vectors)
 
 
 def _default_resolution(x):
@@ -870,8 +826,8 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         return tuple(out)
 
     # The state tangent lifted out of the underflow range where the group
-    # is that small, as ``_spectral_rate_at`` takes it (``_tangent_lift``).
-    lift = _tangent_lift(s_inv)
+    # is that small, as ``_spectral_rate_at`` takes it (``pow2_frame``'s lift).
+    lift = pow2_frame(s_inv, mode="lift")
 
     def matvec(z):
         """``J(x_k)`` in the scaled coordinates."""
@@ -1665,7 +1621,6 @@ def _fixed_point_while(
       the while_loop with the same column convention as the fori path.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        _pow2_normaliser,
         aitken_relaxation,
         fixed_relaxation,
         iqn_ils_update,
@@ -1696,7 +1651,7 @@ def _fixed_point_while(
     # residual test reported ``converged=True`` up to 7x the threshold
     # away; MADD-ANO-115).  Not formed without an accelerator, so the
     # plain loop's program is the one it was.
-    frame = _pow2_normaliser(x0_acc) if acceleration != "none" else None
+    frame = pow2_frame(x0_acc) if acceleration != "none" else None
 
     if acceleration in ("none", "fixed"):
         # Annotated: the three branches below build tuples of different
@@ -2150,10 +2105,6 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # ``solver='ift'`` pay this import cost.
         import lineax as lx  # noqa: PLC0415  (lazy by design)
 
-        from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-            _pow2_normaliser,
-        )
-
         # The solve is posed on ``b`` rescaled by one exact power of two
         # (largest entry in ``[0.5, 1)``), and its answer scaled back by
         # the reciprocal: ``A`` is linear, so that is the same solution,
@@ -2168,7 +2119,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # to its minimum -- and above the dense fallback's size a
         # moderately small ``b`` raised the "ill-conditioned" error
         # instead.  A zero rhs is answered with exact zeros.
-        scale = _pow2_normaliser(b)
+        scale = pow2_frame(b)
         b_hat = b * scale
         # lineax declares `atol: float`, but it only ever compares against
         # it, and under `jit` this is a traced scalar that must stay one.
@@ -2458,24 +2409,77 @@ def _outside_jax_trace() -> bool:
         return False
 
 
+def _underflow_range_fields(groups, state) -> dict[str, list]:
+    """``{group key: [(node, field, magnitude, dtype), ...]}``, smallest first.
+
+    The floating fields of each coupled group whose magnitude ``max|field|``
+    is nonzero, finite and below ``finfo(dtype).tiny / finfo(dtype).eps``:
+    the range where a change of one ulp of the field is subnormal.  An
+    exactly zero field (or an empty one) is never listed -- zero is not a
+    small unit -- nor is a non-finite one, which the coupling verdict
+    already reports.  Read on the host (``numpy``), so it compiles nothing.
+    """
+    out: dict[str, list] = {}
+    for group in groups:
+        key = "+".join(sorted(group.nodes))
+        hits = []
+        for nn in sorted(group.nodes):
+            for fld, value in sorted((state.get(nn) or {}).items()):
+                # The dtype first: a typed PRNG key (or any other extended
+                # dtype) cannot be converted to a numpy array at all.
+                # ``jnp``'s predicates and ``finfo``, because numpy's do not
+                # know bfloat16; neither traces anything.
+                dtype = getattr(value, "dtype", None)
+                if dtype is None or not jnp.issubdtype(dtype, jnp.floating):
+                    continue
+                arr = np.asarray(jax.device_get(value))
+                if arr.size == 0:
+                    continue
+                mag = float(np.max(np.abs(arr.astype(np.float64))))
+                info = jnp.finfo(arr.dtype)
+                if 0.0 < mag < float(info.tiny) / float(info.eps):
+                    hits.append((nn, fld, mag, arr.dtype))
+        if hits:
+            out[key] = sorted(hits, key=lambda h: h[2])
+    return out
+
+
 # ------------------------------------------------------------------
 # Floating-point-tolerant GCD
 # ------------------------------------------------------------------
 
-def _float_gcd(a: float, b: float, tol: float = 1e-9) -> float:
-    """GCD of two positive floats using Euclidean algorithm with tolerance."""
+#: Relative tolerance of the timestep GCD: a Euclidean remainder at or below
+#: this fraction of the largest timestep is representation noise, not a
+#: smaller common step.  Decimal timesteps carry a few float64 ulps of noise
+#: (``0.3 % 0.1`` is ``0.0999...98``, then ``2.8e-17``), far below it, and a
+#: genuine common step is a decimal digit away from the noise, far above it.
+#: Until 0.4.0 the tolerance was an *absolute* ``1e-9`` (seconds, in effect),
+#: so a graph whose timesteps were themselves near a nanosecond stopped the
+#: algorithm before its first step: nodes at ``1e-9`` and ``2e-9`` got a base
+#: step of ``2e-9``, the fast node advanced ``1e-9`` per base step while the
+#: slow one advanced ``2e-9``, and their clocks drifted apart with no error.
+#: Relative to the largest timestep it is the old ``1e-9`` exactly for a
+#: graph whose largest timestep is one second.
+_GCD_RTOL = 1e-9  # units: dimensionless, a fraction of the largest timestep
+
+
+def _float_gcd(a: float, b: float, rtol: float = _GCD_RTOL, scale: Optional[float] = None) -> float:
+    """GCD of two positive floats: Euclid's algorithm, stopping on a remainder
+    at or below ``rtol * scale`` (``scale`` defaults to ``max(a, b)``)."""
     if a < b:
         a, b = b, a
+    tol = rtol * (a if scale is None else scale)
     while b > tol:
         a, b = b, a % b
     return a
 
 
-def _multi_gcd(values: Sequence[float], tol: float = 1e-9) -> float:
-    """GCD of multiple positive floats."""
+def _multi_gcd(values: Sequence[float], rtol: float = _GCD_RTOL) -> float:
+    """GCD of multiple positive floats, to ``rtol`` of the largest of them."""
+    scale = max(values)
     result = values[0]
     for v in values[1:]:
-        result = _float_gcd(result, v, tol)
+        result = _float_gcd(result, v, rtol, scale)
     return result
 
 
@@ -3418,10 +3422,7 @@ def _run_coupled_block_impl(
             # power-of-two rescaling the ift path applies
             # (``_fixed_point_while``), so a group in small units forms its
             # relaxed step from normal numbers and the two solvers agree.
-            from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-                _pow2_normaliser,
-            )
-            accel_frame = _pow2_normaliser(n_dof_flat)
+            accel_frame = pow2_frame(n_dof_flat)
 
         track_diag = group.diagnostics
         first_r = _compute_residual(state_after_first, new_state_inner)
@@ -4999,6 +5000,11 @@ class GraphManager:
         # boundary input supplied, keyed by compile generation and by the
         # node object (a node replaced under the same name is asked again).
         self._node_reads: dict[str, tuple[int, Any, set]] = {}
+        # The underflow-range check (``_warn_underflow_range``): pending
+        # until the first untraced step after each compile, and the groups
+        # already warned about, which are never warned about again.
+        self._underflow_check_pending = False
+        self._underflow_warned: set[str] = set()
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
@@ -7463,6 +7469,7 @@ class GraphManager:
         self._static_data_hashes = static_data_hashes
 
         self._dirty = False
+        self._underflow_check_pending = bool(self._coupling_groups)
         # A rebuilt step invalidates every scan built against the old
         # one.  Bumping the generation as well as clearing means a scan
         # a caller still holds can never be re-entered into the cache.
@@ -8068,6 +8075,44 @@ class GraphManager:
             self._state_traced = False
             self._state_before_trace = None
         self._state = new_state
+        if self._underflow_check_pending and not self._state_traced:
+            self._underflow_check_pending = False
+            self._warn_underflow_range(new_state)
+
+    def _warn_underflow_range(self, state: dict) -> None:
+        """Warn once per coupled group whose fields are in the subnormal range.
+
+        Runs on the host, once per compile, on the first state a stepper
+        stores outside a transform (:meth:`_store_state`): the remedy --
+        rescaling the field's units -- is a decision about the model's
+        configuration, and the first step is where every caller passes,
+        whether or not they ever read :meth:`coupling_diagnostics`.  It reads
+        each group field once (one device-to-host copy per compile) and
+        nothing inside the compiled step changes, so stepping and its
+        results are untouched.  A state that decays into the range after the
+        first step is not re-checked.  See
+        :class:`~maddening.warnings.UnderflowRangeWarning`.
+        """
+        from maddening.warnings import UnderflowRangeWarning  # noqa: PLC0415
+
+        for key, hits in _underflow_range_fields(self._coupling_groups, state).items():
+            if key in self._underflow_warned or not hits:
+                continue
+            self._underflow_warned.add(key)
+            (nn, fld, mag, dtype), more = hits[0], len(hits) - 1
+            info = jnp.finfo(dtype)
+            threshold = float(info.tiny) / float(info.eps)
+            warnings.warn(
+                f"coupling group {key!r}: field {nn}.{fld} has magnitude {mag:.3g}, "
+                f"inside the {dtype} subnormal range (below tiny/eps = {threshold:.3g}): "
+                f"a change of one ulp of it is smaller than the smallest normal number, "
+                f"which XLA's CPU backend flushes to zero, so the nodes' arithmetic on it "
+                f"loses resolution, and below tiny = {float(info.tiny):.3g} the group's "
+                f"convergence norm reads it as exactly zero.  Rescale the field's units "
+                f"so that it is of order one."
+                + (f"  {more} more field(s) of this group are in the range too." if more else ""),
+                UnderflowRangeWarning, stacklevel=4,
+            )
 
     def _recover_from_escaped_tracers(self, *, warn: bool = True) -> None:
         """Put the graph back to the last untraced state, if it needs it.
@@ -8449,6 +8494,20 @@ class GraphManager:
               pass's longest chain of same-pass reads, without which a
               stalled 32-relay ring read 0.51x its true distance with the
               flag set (MADD-ANO-094).
+              **The flag assumes the counted floor is honest, which
+              nothing here can check.**  The count trusts each node to
+              declare ``update_evaluations()`` truthfully and not to
+              cancel inside itself.  Measured on 154 fixture
+              configurations (float32 and float64, CPU, the 0.4.0 floor
+              study): a node taking 2000 sub-steps per update but
+              declaring one evaluation read 0.26-0.60x the true distance
+              with this flag set, and a node forming its output as the
+              difference of two terms about 1000x its size read
+              0.02-0.65x, flag set.  In the other direction the count
+              adds gain magnitudes, so mixed-sign Gauss-Seidel chains read
+              very conservatively (up to 1e7x the true distance) and
+              sub-cycled groups 1e3-1e5x.  A measured, opt-in
+              ``diagnostics="rounding"`` level is planned for 0.5.0.
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked

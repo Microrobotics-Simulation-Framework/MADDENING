@@ -50,6 +50,7 @@ from maddening.core.coupling.acceleration import (
     convergence_criterion,
     estimated_error,
 )
+from maddening.core._pow2_frame import pow2_frame
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 # ``_resolve_specs`` is the one walk that decides which ParamSpec governs
@@ -2757,6 +2758,27 @@ def _check_count(name: str, value, *, minimum: int = 0) -> int:
     return int(value)
 
 
+def _adam_frame(g0):
+    """The power of two Adam's gradients are multiplied by for a whole run.
+
+    Adam's step ``m_hat / (sqrt(v_hat) + eps)`` is invariant to the scale of
+    the gradient except through ``eps``, which is absolute: a loss written in
+    small units (squared micrometres in metres, say: ``1e-12``) has
+    gradients far below the default ``eps = 1e-8``, the denominator is
+    ``eps``, and the step shrinks by the same factor -- a spring's damping
+    fitted on such a loss did not move from its starting value in 60
+    iterations, where the same loss at scale one recovered it.  The run's
+    gradients are therefore taken in the frame of the *first* gradient
+    (:func:`~maddening.core._pow2_frame.pow2_frame`: its largest entry
+    brought into ``[0.5, 1)``), fixed for the run so ``m`` and ``v``
+    accumulate in one unit, and ``eps`` is relative to that.  An exact power
+    of two leaves the step bit-identical wherever ``eps`` was negligible and
+    makes the iterates the same, to the bit, for the loss scaled by any
+    power of two.  A first gradient of exact zeros is framed by ``1``.
+    """
+    return pow2_frame(g0)
+
+
 def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
     """The hyper-parameters :func:`fit` and :func:`fit_multiple_shooting`
     share."""
@@ -3679,7 +3701,13 @@ def fit(
         zero, so the fit could only hand it back unchanged.
     n_iter, lr, tol, betas, eps
         Adam hyper-parameters; ``tol > 0`` stops early once the loss is
-        at or below it.
+        at or below it.  ``eps`` is *relative*: it floors Adam's
+        denominator in units of the run's first gradient (its largest entry,
+        rounded to a power of two), so the iterates do not depend on the
+        units the loss is written in.  Earlier 0.4.0 development builds
+        applied it in the loss's own units, and a loss near ``1e-12`` (a
+        position residual in metres at micrometre scale, squared) did not
+        move its parameters at all.
     callback : callable, optional
         ``callback(i, loss, params)`` after each evaluation.
     notify_every : int
@@ -3800,7 +3828,10 @@ def fit(
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
-    def adam_step(theta, m, v, g, i):
+    def adam_step(theta, m, v, g, frame, i):
+        # The gradient in the run's frame (``_adam_frame``): ``eps`` below is
+        # then relative to the first gradient, not absolute in the loss's units.
+        g = g * frame
         m = b1 * m + (1 - b1) * g
         v = b2 * v + (1 - b2) * g * g
         m_hat = m / (1 - b1 ** i)
@@ -3812,6 +3843,7 @@ def fit(
     theta = theta0
     m = jnp.zeros_like(theta)
     v = jnp.zeros_like(theta)
+    frame = None
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
     best = _BestIterate(theta0)
     losses: list[float] = []
@@ -3841,7 +3873,9 @@ def fit(
         if tol > 0.0 and loss_f <= tol:
             converged = True
             break
-        theta, m, v = adam_step(theta, m, v, g, jnp.asarray(i, theta.dtype))
+        if frame is None:
+            frame = _adam_frame(g)
+        theta, m, v = adam_step(theta, m, v, g, frame, jnp.asarray(i, theta.dtype))
 
     if i > 0 and not converged:
         # The budget ran out, so the last thing the loop did was an update
@@ -4486,7 +4520,8 @@ def fit_multiple_shooting(
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
-    def adam(x, m, v, g, i, rate):
+    def adam(x, m, v, g, frame, i, rate):
+        g = g * frame          # in the block's frame (``_adam_frame``), as in ``fit``
         m = b1 * m + (1 - b1) * g
         v = b2 * v + (1 - b2) * g * g
         return x - rate * (m / (1 - b1 ** i)) / (jnp.sqrt(v / (1 - b2 ** i)) + eps), m, v
@@ -4494,6 +4529,7 @@ def fit_multiple_shooting(
     theta, ws = theta0, ws_flat0
     m_t = jnp.zeros_like(theta); v_t = jnp.zeros_like(theta)
     m_s = jnp.zeros_like(ws); v_s = jnp.zeros_like(ws)
+    frames = None
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
     best = _BestIterate((theta0, ws_flat0))
     losses: list[float] = []
@@ -4522,10 +4558,14 @@ def fit_multiple_shooting(
             converged = True
             break
         it = jnp.asarray(i, theta.dtype)
-        theta, m_t, v_t = adam(theta, m_t, v_t, g_t, it, lr)
+        if frames is None:
+            # One frame per block: the parameters' and the window states'
+            # gradients are in different units.
+            frames = (_adam_frame(g_t), _adam_frame(g_s))
+        theta, m_t, v_t = adam(theta, m_t, v_t, g_t, frames[0], it, lr)
         # As in ``fit``: a clipped coordinate is put back on its bound.
         theta = bounds.project(theta)
-        ws, m_s, v_s = adam(ws, m_s, v_s, g_s, it, lr_s)
+        ws, m_s, v_s = adam(ws, m_s, v_s, g_s, frames[1], it, lr_s)
 
     if i > 0 and not converged:
         # As in ``fit``: the last update's result was never evaluated.

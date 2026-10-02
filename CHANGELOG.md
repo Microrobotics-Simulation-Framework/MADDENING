@@ -192,6 +192,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **No absolute constant hides in a relative computation** (MADD-ANO-123 to 130; gate `scripts/check_numeric_constants.py`): `sharded_cg`/`sharded_gmres`/`ift_linear_solve` default `atol=None` (relative; a right-hand side near 1e-9 came back 40-100% wrong with `converged=True`), and the multi-rate GCD, Adam's `eps` and the adaptive error norm no longer depend on units.
+  Coupled fields below `finfo.tiny/eps` warn once (`UnderflowRangeWarning`); the power-of-two frames are one helper (bit-identical, 125 configs x 3 jaxlibs).  `run_adaptive`'s `atol`/`dt_min` stay absolute (MADD-ANO-128).
+  Action: pass `atol` only as a noise floor in `b`'s units; re-run small-unit solves, `fit` runs and nanosecond multi-rate graphs; give adaptive steppers `atol` in your state's units.
 - **`compile()` warns about two `SpringDamperNode`s anchored on each other in a coupling group whose converged step grows** (MADD-ANO-098, still open; a `UserWarning` naming both nodes and the growth factor `g`, never a refusal, judged from the live `gm.params`). Action: use a smaller timestep, or keep `k*dt <= c <= (2*m - k*dt**2)/dt`.
 - **`LBMPipeNode` refuses a `propeller_radius` above 1** (MADD-ANO-058): the disc reached past the pipe wall and pushed on wall cells (64 of 140 disc cells at 1.5 on a 12x12 cross-section; mean `u_x` 1.9% off), with no error.
   Action: pass a radius in `(0, 1]` (1 is the whole cross-section); a config saved with a larger one no longer reloads.

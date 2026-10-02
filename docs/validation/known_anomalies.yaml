@@ -9185,7 +9185,7 @@ anomalies:
       one moves too; the report's residuals, curvature step and secant are
       formed entry by entry in power-of-two frames, and its JVP tangent,
       in state units, is lifted by the least power of two that keeps its
-      components normal, only below `tiny / eps` (`_tangent_lift`).  A
+      components normal, only below `tiny / eps` (`pow2_frame`'s lift).  A
       group scaled by `2**-14` or `2**-24` reproduces its control's
       passes, verdict and residual to the bit under every acceleration;
       a ring at `2**-118` and `2**-122` its spectral rate and both bounds.
@@ -9584,4 +9584,341 @@ anomalies:
       - "tests/core/test_node_params_writes_are_observed.py::test_the_fmu_export_reads_a_pending_node_write"
       - "tests/core/test_node_params_write_after_compile.py::test_the_later_of_two_disagreeing_writes_wins"
       - "tests/core/test_node_params_writes_are_observed.py::test_assigning_gm_params_is_later_than_a_node_write_before_it"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-123"
+    title: "sharded_cg, sharded_gmres and ift_linear_solve defaulted to an absolute atol=1e-8: a right-hand side near 1e-9 came back wrong (relative error 0.4-1.0) with converged=True"
+    description: >
+      The public Krylov solvers stopped on `||r|| <= max(atol, rtol * ||b||)`
+      (lineax's entrywise form on its backends) with a default `atol=1e-8`
+      in `b`'s own units.  A right-hand side below about `1e-2`
+      (`1e-8 / rtol`) was solved only to that absolute floor -- a relative
+      accuracy of `1e-8 / ||b||` instead of `rtol` -- and one below about
+      `1e-8` passed the test with the zero initial guess before a single
+      step.  Measured at v0.3.0 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0) on a 12-unknown SPD system in float32: at `||b||` about
+      `1e-9` (`b * 2**-30`) `sharded_cg` (lineax and loop backends),
+      `sharded_gmres` and, at v0.3.1 where it first shipped,
+      `ift_linear_solve` returned relative errors of 0.4-1.0 against the
+      exact solution, every one reporting `converged=True` (or, for
+      `ift_linear_solve`, no error), where the same system at its own scale
+      (`max|b|` about 1.9) was right to 1e-7.  On the 0.4.0 development
+      tree the same absolute floor also made lineax GMRES raise "iterative
+      breakdown" at some scales of an ordinary `b` (here at `max|b|` about
+      0.95, though not at 1.9 or 0.475), because entries of `b` near zero
+      had to reach `1e-8` below float32 rounding of the large ones; and the
+      gradient through `ift_linear_solve` went through lineax's own
+      autodiff, whose adjoint solve reused the forward's absolute `atol`, so
+      a small cotangent gave an exactly zero gradient -- the defect
+      MADD-ANO-113 recorded for the coupling layer's IFT solve.  Found by the 0.4.0 numeric-constants gate
+      (`scripts/check_numeric_constants.py`).  Resolved in 0.4.0: every
+      solve runs on `b` rescaled by an exact power of two
+      (`maddening.core._pow2_frame`) and scales its answer back; `atol`
+      defaults to `None`, a purely relative test (`rtol * ||b||` on the loop
+      backends, `rtol * max|b|` on lineax's entrywise test); an explicit
+      `atol` keeps its documented absolute meaning; and `ift_linear_solve`'s
+      tangent and adjoint go through `jax.lax.custom_linear_solve`, each
+      solve framed on its own right-hand side.  The solution and the
+      gradient are now the same, to the bit, at every power-of-two scale
+      from `2**-100` to `2**40`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result -- a solution off by up to 100% with
+      `converged=True`, and a zero gradient reported as a successful solve
+      -- which is never `minor`.  Not `critical`: it needs a right-hand side
+      below about `1e-2` in its own units at the default `rtol`, and an
+      explicit `atol` in `b`'s units avoided it.  `context_dependent`
+      because what a wrong linear solve does depends on the node that calls
+      it (a pressure correction, an implicit step).
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+      - "maddening.core.solver_utils.ift_linear_solve"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass `atol` in the right-hand side's own units (for
+      example `atol=1e-8 * max|b|`), or write the system in units where `b`
+      is of order one.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      An explicit `atol` is still an absolute floor, by design.  The
+      sharded solvers' non-differentiable path, if differentiated anyway
+      through lineax's autodiff, reuses the forward solve's tolerance;
+      `differentiable=True` is the supported path and frames each solve.
+    verification:
+      - "tests/core/test_linear_solvers_in_any_units.py::test_every_krylov_solve_gives_the_same_answer_at_every_power_of_two_scale"
+      - "tests/core/test_linear_solvers_in_any_units.py::test_the_derivative_through_a_solve_is_the_same_at_every_power_of_two_scale"
+      - "tests/core/test_linear_solvers_in_any_units.py::test_a_right_hand_side_gmres_broke_down_on_now_solves"
+      - "tests/core/test_linear_solvers_in_any_units.py::test_an_explicit_atol_is_still_an_absolute_floor_in_b_units"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-124"
+    title: "sharded_gmres's loop backend returned NaN with converged=False whenever restart exceeded the system size, the default 50 against any system of fewer than 50 unknowns"
+    description: >
+      `sharded_gmres(..., backend="loop")` (also chosen by `"auto"` when a
+      preconditioner is given) ran `restart` Arnoldi steps per cycle
+      whatever the system size.  Past `n` steps the Krylov space is
+      exhausted, the next basis vector is a normalised rounding vector, and
+      the cycle's least squares returned NaN: on a 12-unknown SPD system at
+      the default `restart=50` the solution was all NaN with
+      `converged=False`, at every scale.  The lineax backend clamped
+      `restart` to `n`; the loop backend did not.  Measured at v0.3.0 and
+      v0.3.1 (`git archive`, CPU, jaxlib 0.11.0).  Found by the 0.4.0
+      numeric-constants work.  Resolved in 0.4.0: the loop backend clamps
+      `restart` to `n` too.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the solution was NaN and `converged=False`, and a workaround
+      (`restart <= n`, or the lineax backend) kept the feature usable, so
+      `minor` under the 0.4.0 definition.
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass `restart` no larger than the number of unknowns,
+      or use `backend="lineax"`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/core/test_linear_solvers_in_any_units.py::test_the_loop_gmres_clamps_restart_to_the_system_size"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-125"
+    title: "The multi-rate base timestep's GCD stopped on an absolute 1e-9: nodes at 1e-9 and 2e-9 got a base step of 2e-9 and their clocks drifted apart"
+    description: >
+      `compile()` takes the base step of a multi-rate graph as the GCD of the
+      scheduled timesteps, by Euclid's algorithm with a tolerance for float
+      noise.  The tolerance was an absolute `1e-9`, so for timesteps near a
+      nanosecond the algorithm stopped before its first step and returned
+      the larger timestep: nodes at `1e-9` and `2e-9` got a base step of
+      `2e-9` and rate dividers of 0 and 1, the fast node was stepped once per
+      base step with its own `1e-9`, and after four steps its clock read
+      `4e-9` against the slow node's `8e-9`, with no warning.  Below about
+      `1e-9` every multi-rate graph was affected.  Measured identically at
+      v0.1.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0) on two accumulating nodes, where the same pair at
+      `1e-3` and `2e-3` kept its clocks together.  Found by the 0.4.0
+      numeric-constants gate.  Resolved in 0.4.0: the tolerance is relative
+      to the largest timestep (`_GCD_RTOL = 1e-9`), the old absolute `1e-9`
+      for a graph whose largest timestep is one second; over 12,124 ordinary
+      timestep sets (1e-6 s to 7.5 s) the base step is unchanged.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: two nodes' clocks ran at different rates with no warning,
+      which is never `minor`.  Not `critical`: it needs a multi-rate graph
+      with timesteps near or below a nanosecond, and timesteps written in
+      larger units avoided it.  `context_dependent` because what a
+      desynchronised node does depends on the model.
+    affected_components:
+      - "maddening.core.graph_manager._multi_gcd"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: write the timesteps in units where they are above about
+      `1e-6` (nanoseconds as `1.0`, say), or give every node the same
+      timestep.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Two timesteps that differ by less than `1e-9` of the larger are still
+      taken as equal, by design (float noise in decimal timesteps is a few
+      `1e-16`).
+    verification:
+      - "tests/core/test_multirate_in_any_units.py::test_a_nanosecond_graph_keeps_its_nodes_clocks_together"
+      - "tests/core/test_multirate_in_any_units.py::test_the_base_timestep_is_the_gcd_in_any_unit"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-126"
+    title: "fit and fit_multiple_shooting applied Adam's eps=1e-8 in the loss's own units: a loss near 1e-12 left its parameters where they started"
+    description: >
+      Adam's step `m_hat / (sqrt(v_hat) + eps)` does not depend on the
+      gradient's scale except through `eps`, which `sysid.fit` and
+      `sysid.fit_multiple_shooting` applied in the loss's own units.  A loss
+      whose gradients are far below `1e-8` -- a position residual in metres
+      at micrometre scale, squared, is about `1e-12` -- had `eps` as its
+      denominator and its steps shrank by the same factor: a spring's damping
+      fitted from 2.0 towards a truth of 0.5 on such a loss was still at
+      1.999993 after 60 iterations, where the same loss at scale one reached
+      0.502, with nothing to say the fit had not moved.  Introduced with
+      `maddening.sysid` in this development cycle; no tagged release carried
+      it.  Found by the 0.4.0 numeric-constants gate.  Resolved in 0.4.0:
+      both fitters take their gradients in the frame of the run's first
+      gradient (an exact power of two, `_adam_frame`), so `eps` is relative
+      to it and the iterates, losses and selected iterate are bit-identical
+      for the loss scaled by any power of two.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result -- parameters returned unfitted, with a loss
+      history that looks like a slow fit -- which is never `minor`;
+      registered although no release carried it, because it is major.  Not
+      `critical`: it needs a loss whose gradients are below about `1e-8`,
+      and `fit_lm` or a rescaled loss avoided it.  `context_dependent`
+      because what an unfitted parameter does depends on its use.
+    affected_components:
+      - "maddening.sysid.fit"
+      - "maddening.sysid.fit_multiple_shooting"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: scale the loss to order one, or pass `eps` in the gradient's
+      units.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `eps` is relative to the *first* gradient: a run whose first gradient
+      is exactly zero keeps `eps` absolute, and one whose gradients shrink
+      by many decades as it converges sees `eps` grow relative to them,
+      which is the damping Adam has at scale one.
+    verification:
+      - "tests/core/test_sysid_adam_in_any_units.py::test_fit_takes_the_same_steps_for_a_loss_in_any_units"
+      - "tests/core/test_sysid_adam_in_any_units.py::test_fit_multiple_shooting_takes_the_same_steps_for_a_loss_in_any_units"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-127"
+    title: "The adaptive error norm guarded its division with max(scale, 1e-300): in float64 an entry below about 1e-297 read its error up to 1e297 times too small"
+    description: >
+      `_tree_error_norm`, the step-doubling error both adaptive steppers
+      accept or reject on, divided each entry's `|fine - coarse|` by
+      `max(atol + rtol * max(|fine|, |coarse|), 1e-300)`, an absolute floor
+      in the state's units.  In float32 it was inert (`1e-300` rounds to 0),
+      but in float64 an entry below about `1e-297` (`1e-300 / rtol`) with
+      `atol=0` was divided by `1e-300` instead of its own scale: a pair at
+      `2e-302` and `1e-302` read an error of `0.01` where the formula gives
+      `500`, and the controller accepted steps it should have rejected.
+      Introduced in this development cycle by the guard against `atol=0`;
+      no tagged release carried it (v0.3.1 divided by the scale, unguarded).
+      Found by the 0.4.0 numeric-constants gate.  Resolved in 0.4.0: a zero
+      scale contributes nothing and every other entry is divided by its own
+      scale; in float32 the norm is unchanged at every magnitude.
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Silent, so never `minor` under the 0.4.0 definition, and registered
+      although no release carried it because it is major.  It needs a
+      float64 state below about `1e-297` with `atol=0`, which no model
+      reaches on purpose; `not_safety_relevant` for that reason.
+    affected_components:
+      - "maddening.core.simulation.adaptive._tree_error_norm"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: a nonzero `atol`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/core/test_adaptive_error_norm_has_no_absolute_floor.py::test_the_error_of_an_entry_does_not_depend_on_its_magnitude"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-128"
+    title: "The adaptive steppers' default atol=1e-6 and dt_min=1e-8 are absolute, in state units and seconds: a state near 1e-9 is accepted at any step size"
+    description: >
+      `run_adaptive`, `run_adaptive_scan` and `AdaptiveConfig` measure the
+      step-doubling error as `|fine - coarse| / (atol + rtol * max(|fine|,
+      |coarse|))` with `atol=1e-6` in the state's own units and clamp the
+      step at `dt_min=1e-8` seconds -- scipy `solve_ivp`'s defaults.  For a
+      state far below `atol` the criterion is absolute: an explicit-Euler
+      decay started at `2**-30` (about `9e-10`) accepts every attempt and
+      grows its step by `max_factor` to `t_end` in 4 steps, where the same
+      decay at scale one takes the steps `rtol=1e-3` asks for (more than
+      twice as many), with no warning.  A model whose natural timestep is
+      below `1e-8` s is held at `dt_min`, where an attempt is accepted
+      whatever its error (`run_adaptive` warns).  Kept by design in 0.4.0:
+      these are user-facing tolerances, their defaults match scipy, and
+      changing them would move every adaptive run.  Classified by the 0.4.0
+      numeric-constants gate and recorded here so the units are explicit.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A state in small units is integrated far less accurately than `rtol`
+      says, with no warning: silent, so never `minor`.  Not `critical`: the
+      parameters are the caller's to set, and documented as absolute.
+      `context_dependent` because the accuracy an integration needs depends
+      on the model.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+      - "maddening.core.simulation.adaptive.AdaptiveConfig"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Pass `atol` in the state's own units (for example `atol=1e-6 * x_typ`,
+      or `atol=0` for a purely relative test on a state with no zeros) and
+      `dt_min` below the smallest step the model needs.  With `atol` scaled
+      by the state's scale, a decay at `2**-30` takes exactly the steps of
+      the same decay at scale one.
+    resolution_status: "open"
+    verification:
+      - "tests/core/test_absolute_default_tolerances_are_documented.py::test_the_adaptive_default_atol_is_absolute_in_state_units"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-129"
+    title: "The deprecated calibrate and tune_coupling_params default to absolute thresholds: a loss already below 1e-6 is converged=True before a single step"
+    description: >
+      `maddening.core.simulation.calibration.calibrate` stops when the loss
+      is below `tolerance=1e-6` in the loss's own units, and
+      `tune_coupling_params` passes a configuration whose maximum error is
+      below `accuracy_threshold=1e-3` in the metric's own units.  A loss that
+      starts below `1e-6` -- a quantity in small units -- returns
+      `converged=True` with the parameters unchanged after one evaluation,
+      and every configuration of a small-unit metric passes, so the cheapest
+      is chosen.  Both functions are deprecated (a `DeprecationWarning` on
+      every call) and removed in 0.5.0; `maddening.sysid.fit` replaces them,
+      with a relative `eps` (MADD-ANO-126) and an explicit `tol`.  Kept in
+      0.4.0 rather than changed: changing a deprecated API's defaults in its
+      last release would move every result it gives for no lasting gain.
+      Classified by the 0.4.0 numeric-constants gate.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      `converged=True` on unfitted parameters is a wrong result; the
+      deprecation warning says the function is going away, not that this
+      result is wrong, so it counts as silent and is never `minor`.  Not
+      `critical`: the thresholds are the caller's, and the functions are
+      deprecated in favour of `sysid.fit`.  `context_dependent` because what
+      an unfitted parameter does depends on its use.
+    affected_components:
+      - "maddening.core.simulation.calibration.calibrate"
+      - "maddening.core.simulation.calibration.tune_coupling_params"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Use `maddening.sysid.fit`.  Until then pass `tolerance` and
+      `accuracy_threshold` in the loss's and the metric's own units.
+    resolution_status: "open"
+    verification:
+      - "tests/core/test_absolute_default_tolerances_are_documented.py::test_calibrate_stops_on_an_absolute_loss_threshold"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-130"
+    title: "The anomaly-registry validator raised TypeError on a list-valued severity, safety_relevance or resolution_status instead of reporting the entry"
+    description: >
+      `maddening.compliance._validate.validate_anomaly_registry` -- the
+      `maddening compliance` validator, and the schema half of
+      `scripts/check_anomalies.py` -- tested the three enum fields with `in`
+      against a set, which raises `TypeError: unhashable type` for a YAML
+      list or mapping.  A registry with `safety_relevance:
+      ["context_dependent"]` therefore stopped the validator with a
+      traceback instead of naming the entry.  Measured at v0.1.0 and v0.3.1
+      (`git archive`, the same validator call).  The gate also read the field
+      only against the validator's spelled-out copy of the enum, which a
+      unit test pinned and nothing in the gate itself did.  Found while
+      closing the gate gap the 0.4.0 coupling round-4 work reported.
+      Resolved in 0.4.0: the validator reports an unhashable value as
+      invalid, and `scripts/check_anomalies.py` checks every entry's
+      `safety_relevance` against `SafetyRelevance` itself.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud -- a traceback, and a failing gate -- in a tool that checks the
+      registry, not in a simulation result: `minor`.
+    affected_components:
+      - "maddening.compliance._validate.validate_anomaly_registry"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: write every enum field as a plain string.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/compliance/test_anomaly_gate_reads_safety_relevance.py::test_the_validator_reports_an_unhashable_enum_value_instead_of_raising"
+      - "tests/compliance/test_anomaly_gate_reads_safety_relevance.py::test_the_gate_fails_on_a_planted_value_and_says_which_entry"
     github_issue: null

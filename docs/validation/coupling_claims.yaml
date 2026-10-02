@@ -258,7 +258,7 @@ claims:
     every acceleration, norm and solver."
   sources:
     - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
-    - src/maddening/core/coupling/acceleration.py:1639 (_pow2_normaliser)
+    - src/maddening/core/_pow2_frame.py (pow2_frame)
     - src/maddening/core/coupling/acceleration.py:1702 (aitken_relaxation)
   conditions: >-
     "any power-of-two scale", every acceleration, norm and solver; the
@@ -1754,7 +1754,17 @@ claims:
   sources:
     - src/maddening/core/graph_manager.py:7994 (coupling_diagnostics, spectral_usable)
     - src/maddening/core/coupling/acceleration.py:1249 (spectral_rate_settled)
-  conditions: as stated.
+    - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
+  conditions: >-
+    as stated, and only where the counted floor is honest: every node
+    declares update_evaluations() truthfully and none cancels inside itself,
+    neither of which anything outside the node can check.  Measured on 154
+    configurations of the 0.4.0 floor study (float32 and float64, CPU): a
+    2000-sub-step node declaring one evaluation read 0.26-0.60x the true
+    distance with the flag set, and internal cancellation 0.02-0.65x.  In
+    the other direction mixed-sign chains read up to 1e7x and sub-cycled
+    groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
+    diagnostics="rounding" level is planned for 0.5.0.
   oracle: the flag against each condition.
   tests:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_spectral_usable_is_false_where_the_krylov_space_did_not_settle
@@ -1913,7 +1923,15 @@ claims:
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
     - src/maddening/core/graph_manager.py:1168 (_group_evaluations)
-  conditions: any group.
+  conditions: >-
+    any group.  The count is the declared evaluations, so it assumes every
+    node declares update_evaluations() truthfully and none cancels inside
+    itself: a 2000-sub-step node declaring one evaluation read its bound at
+    0.26-0.60x the true distance, and internal cancellation at 0.02-0.65x,
+    both with spectral_usable=True (0.4.0 floor study, 154 configurations);
+    mixed-sign chains and sub-cycled groups read up to 1e7x and 1e3-1e5x
+    over.  diagnostics="rounding", which measures instead of counting, is
+    planned for 0.5.0.
   oracle: the count against hand-derived chains; the step and the report count the same.
   tests:
     - tests/core/test_coupling_gauss_seidel_chain_floor.py::test_a_gauss_seidel_ring_rounds_like_its_length

@@ -60,7 +60,10 @@ evidence for the node the guide is *about*:
   no node class fails, and so does a node guide with no ID line, a second
   ID line, or one not written ``**Algorithm ID**: `ID```.  Every stated ID
   is also unique among the guides, which is the only check a non-node ID
-  (``MADD-ALG-...``) gets.
+  (``MADD-ALG-...``) gets.  The node guides themselves are pinned
+  (:data:`NODE_GUIDES`, path to ID and node), so a guide that loses its
+  ``**Module**`` and ``**Algorithm ID**`` lines together fails instead of
+  dropping out of the comparison, and a new node guide must be pinned.
 
 Usage:
     python scripts/check_impl_mapping.py [docs/algorithm_guide/]
@@ -130,6 +133,34 @@ MIN_MAPPINGS = {
     os.path.join("docs", "algorithm_guide", "nodes", "rigid_body_2d_node.md"): 7,
     os.path.join("docs", "algorithm_guide", "nodes", "heart_pump_node.md"): 9,
     os.path.join("docs", "algorithm_guide", "nodes", "lbm_node.md"): 24,
+}
+
+#: Every node guide, with the algorithm ID it states and the node class
+#: its ``# Title`` and ``**Module**`` lines name.  A guide that lost both
+#: its ``**Module**`` and its ``**Algorithm ID**`` lines matched no node,
+#: so the guide-ID check had nothing to compare and dropped it: exit 0, "7
+#: guide algorithm ID(s) match" where there had been 8 (audit_040_p4_4, L6).
+#: The pin lives outside the guides, so it cannot be edited away with them;
+#: :func:`check_node_guides` holds each pinned guide to it whatever
+#: directory the gate scanned, and every node guide in the repository must
+#: be pinned.
+NODE_GUIDES = {
+    os.path.join("docs", "algorithm_guide", "nodes", "adaptive_node.md"):
+        ("MADD-NODE-009", "maddening.nodes.adaptive.AdaptiveNode"),
+    os.path.join("docs", "algorithm_guide", "nodes", "ball_node.md"):
+        ("MADD-NODE-001", "maddening.nodes.ball.BallNode"),
+    os.path.join("docs", "algorithm_guide", "nodes", "heart_pump_node.md"):
+        ("MADD-NODE-008", "maddening.nodes.heart_pump.HeartPumpNode"),
+    os.path.join("docs", "algorithm_guide", "nodes", "heat_node.md"):
+        ("MADD-NODE-005", "maddening.nodes.heat.HeatNode"),
+    os.path.join("docs", "algorithm_guide", "nodes", "lbm_node.md"):
+        ("MADD-NODE-011", "maddening.nodes.lbm.LBMNode"),
+    os.path.join("docs", "algorithm_guide", "nodes", "rigid_body_2d_node.md"):
+        ("MADD-NODE-004", "maddening.nodes.rigid_body_2d.RigidBody2DNode"),
+    os.path.join("docs", "algorithm_guide", "nodes", "spring_node.md"):
+        ("MADD-NODE-003", "maddening.nodes.spring.SpringDamperNode"),
+    os.path.join("docs", "algorithm_guide", "nodes", "wavelet_adaptive_node.md"):
+        ("MADD-NODE-010", "maddening.nodes.adaptive.wavelet.WaveletAdaptiveNode"),
 }
 
 _QNAME = re.compile(r"`(maddening\.[^`]+)`")
@@ -542,6 +573,39 @@ def guide_id_errors(md_path: str, relpath: str):
     return stated, True, [], []
 
 
+def check_node_guides(node_guides: dict, repo_root: str) -> list[str]:
+    """Hold each pinned node guide to its pinned ID and node, as text.
+
+    Runs whatever directory was scanned, like :func:`check_pinned`, and
+    reads the file rather than importing its node, so a guide whose node
+    needs an optional extra is still held to its pin.  The comparison of
+    the ID with the node's ``NodeMeta`` is :func:`guide_id_errors`'s; this
+    is what keeps a guide from dropping out of it.
+    """
+    errors: list[str] = []
+    for pinned, (aid, qname) in sorted(node_guides.items()):
+        abspath = os.path.join(repo_root, pinned)
+        if not os.path.isfile(abspath):
+            errors.append(f"{pinned}: pinned in NODE_GUIDES but the file does "
+                          f"not exist; a node guide is removed together with "
+                          f"its pin")
+            continue
+        with open(abspath, encoding="utf-8") as fh:
+            content = fh.read()
+        stated = [m.group(0).strip() for m in _ID_LINE_ANY.finditer(content)]
+        ids = [m.group(1) for m in (_ID_LINE.match(line) for line in stated) if m]
+        if ids != [aid]:
+            errors.append(f"{pinned}: is pinned in NODE_GUIDES as {aid}, but "
+                          f"states {stated or 'no **Algorithm ID** line'}")
+        title, module = _TITLE_LINE.search(content), _MODULE_LINE.search(content)
+        named = f"{module.group(1)}.{title.group(1)}" if title and module else None
+        if named != qname:
+            errors.append(f"{pinned}: is pinned in NODE_GUIDES as the guide to "
+                          f"{qname}, but its '# Title' and '**Module**' lines "
+                          f"name {named or 'no node'}")
+    return errors
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     guide_dir = argv[0] if argv else os.path.join(_REPO_ROOT, DEFAULT_GUIDE_DIR)
@@ -580,6 +644,17 @@ def main(argv=None) -> int:
             ids_matched += matched
             if stated is not None:
                 stated_ids.setdefault(stated, []).append(relpath)
+            # A node guide in this repository is pinned, so that losing its
+            # header later fails rather than dropping it from the check.  A
+            # guide outside the repository (a scratch scope) is nobody's pin.
+            in_repo = not relpath.startswith(os.pardir + os.sep)
+            if (in_repo and relpath not in NODE_GUIDES
+                    and (matched or (stated or "").startswith(NODE_ID_PREFIX))):
+                errors.append(f"{relpath}: documents a node ({stated}) but is "
+                              f"not pinned in NODE_GUIDES in "
+                              f"{os.path.basename(__file__)}; add it, with its "
+                              f"ID and node, so that the guide cannot drop out "
+                              f"of the guide-ID check")
 
     for aid, guides in sorted(stated_ids.items()):
         if len(guides) > 1:
@@ -588,6 +663,7 @@ def main(argv=None) -> int:
                           f"algorithm")
 
     errors.extend(check_pinned(per_file, MIN_MAPPINGS, _REPO_ROOT))
+    errors.extend(check_node_guides(NODE_GUIDES, _REPO_ROOT))
     n_node_ids, id_errors = algorithm_id_errors(SRC_PACKAGE)
     errors.extend(id_errors)
 

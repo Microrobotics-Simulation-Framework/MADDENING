@@ -458,57 +458,116 @@ def retired_anomaly_ids(repo_root):
     return {}, None
 
 
-def _git(cwd, *args):
-    """``(returncode, stdout)`` of one git command, or ``(None, why)``."""
+def _git(cwd, *args, stdin=None):
+    """``(returncode, stdout)`` of one git command, or ``(None, why)``.
+
+    ``stdin`` (bytes) switches to binary mode: stdout comes back as bytes,
+    for ``git cat-file --batch``, whose blob sizes are byte counts.
+    """
     import subprocess
 
+    binary = stdin is not None
     try:
         done = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
-                              text=True, timeout=60)
+                              text=not binary, input=stdin, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         return None, str(exc)
-    return done.returncode, done.stdout if done.returncode == 0 else done.stderr
+    if done.returncode == 0:
+        return 0, done.stdout
+    err = done.stderr.decode(errors="replace") if binary else done.stderr
+    return done.returncode, err
 
 
-def _entry_in(text, aid):
-    """The registry entry ``aid`` in the YAML ``text``, or ``None``."""
+def _entries_in(text, aids):
+    """``{aid: entry}`` for each of ``aids`` the YAML ``text`` holds.
+
+    Parsed, never searched for as text: YAML spells one string many ways
+    (``"MADD-ANO-075"``, ``'MADD-ANO-075'``, ``MADD-ANO-075``, an escape),
+    and only the parser knows they are the same ID.  A document that does
+    not parse holds nothing.
+    """
     import yaml
 
     loader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
     try:
         data = yaml.load(text, Loader=loader) or {}
     except yaml.YAMLError:
-        return None
+        return {}
+    found = {}
     for a in (data.get("anomalies") or []) if isinstance(data, dict) else []:
-        if isinstance(a, dict) and str(a.get("anomaly_id")) == aid:
-            return a
-    return None
+        if isinstance(a, dict) and str(a.get("anomaly_id")) in aids:
+            found.setdefault(str(a.get("anomaly_id")), a)
+    return found
 
 
-def last_committed_entry(registry_path, aid):
-    """``(entry, where, error)``: ``aid`` as the registry's history last records it.
+def _entry_in(text, aid):
+    """The registry entry ``aid`` in the YAML ``text``, or ``None``."""
+    return _entries_in(text, {aid}).get(aid)
+
+
+def _blobs(cwd, specs):
+    """``{spec: (blob id, bytes) or None}`` for ``<rev>:<path>`` specs, in one
+    ``git cat-file --batch`` call.  ``None`` is a spec naming no blob (the
+    parent of a root commit, a revision the file did not exist in)."""
+    rc, out = _git(cwd, "cat-file", "--batch",
+                   stdin="".join(f"{s}\n" for s in specs).encode())
+    if rc != 0:
+        return None
+    found, pos = {}, 0
+    for spec in specs:
+        nl = out.index(b"\n", pos)
+        header = out[pos:nl].split()
+        if len(header) != 3 or header[1] != b"blob":
+            found[spec] = None
+            pos = nl + 1
+            continue
+        size = int(header[2])
+        found[spec] = (header[0].decode(), out[nl + 1:nl + 1 + size])
+        pos = nl + 1 + size + 1
+    return found
+
+
+def last_committed_entries(registry_path, aids):
+    """``{aid: (entry, where, error)}``: each ID as the registry's history last records it.
 
     A retired entry is gone from the tree, so the only record of what it
     said is git.  ``entry`` is the entry as the newest commit that holds
     it records it: ``HEAD``'s own copy when the deletion is not committed
     yet, otherwise the copy in the parent of the commit that removed it.
-    ``entry`` is ``None`` with no error when the registry's history never
-    held the ID at all -- a number allocated and withdrawn before any
-    commit recorded it.  ``where`` names the commit the entry was read
-    from.
+    ``entry`` is ``None`` with no error when no revision of the registry
+    ever held the ID -- a number allocated and withdrawn before any commit
+    recorded it.  ``where`` names the commit the entry was read from.
+
+    Every revision of the registry is *parsed*; nothing is found by
+    searching the history for a spelling.  The lookup this replaces asked
+    ``git log -S 'anomaly_id: "MADD-ANO-075"'``, so an entry written
+    ``anomaly_id: 'MADD-ANO-075'`` or unquoted -- the same YAML -- was
+    found in no commit, read as a number nobody had recorded, and its
+    retirement excused while it was still open (audit_040_p4_4, M2).  The
+    walk covers every commit that changed the file on any branch
+    (``--full-history``), so an entry opened and deleted on a side branch
+    whose merge left the file as it was is still found.  Parsing all 165
+    revisions of the shipped registry takes about a second.
 
     Fails closed: a registry outside a git work tree, one git does not
     track, a shallow clone (whose history may stop before the removal) and
-    a history that names the ID but shows no commit removing it are each
+    a history that holds the ID but shows no commit removing it are each
     an ``error``, never "no such entry".
     """
+    aids = frozenset(aids)
     path = os.path.abspath(registry_path)
     cwd = os.path.dirname(path)
+
+    def everyone(problem):
+        return {aid: (None, None, problem) for aid in aids}
+
+    if not aids:
+        return {}
     rc, top = _git(cwd, "rev-parse", "--show-toplevel")
     if rc != 0:
-        return None, None, (f"{registry_path} is not in a git work tree "
-                            f"({str(top).strip()}), so what the retired entry "
-                            f"last said cannot be read from its history")
+        return everyone(f"{registry_path} is not in a git work tree "
+                        f"({str(top).strip()}), so what the retired entry "
+                        f"last said cannot be read from its history")
     # Every command below runs at the top of the work tree: a pathspec is
     # read relative to the working directory, so from docs/validation the
     # registry's own repository-relative path named nothing, and every
@@ -518,38 +577,66 @@ def last_committed_entry(registry_path, aid):
     rel = os.path.relpath(path, cwd).replace(os.sep, "/")
     rc, shallow = _git(cwd, "rev-parse", "--is-shallow-repository")
     if rc != 0 or shallow.strip() != "false":
-        return None, None, ("this is a shallow clone, so the commit that "
-                            "removed the retired entry may be outside the "
-                            "history it holds; run the gate in a full clone "
-                            "(actions/checkout with fetch-depth: 0)")
+        return everyone("this is a shallow clone, so the commit that "
+                        "removed the retired entry may be outside the "
+                        "history it holds; run the gate in a full clone "
+                        "(actions/checkout with fetch-depth: 0)")
     rc, out = _git(cwd, "ls-files", "--error-unmatch", "--", rel)
     if rc != 0:
-        return None, None, (f"{rel} is not tracked by git, so its history "
-                            f"cannot say what the retired entry last said")
-    rc, head = _git(cwd, "show", f"HEAD:{rel}")
-    if rc == 0:
-        entry = _entry_in(head, aid)
-        if entry is not None:
-            return entry, "HEAD", None
-    rc, log = _git(cwd, "log", "--format=%H", "-S", f'anomaly_id: "{aid}"',
-                   "--", rel)
+        return everyone(f"{rel} is not tracked by git, so its history "
+                        f"cannot say what the retired entry last said")
+    rc, log = _git(cwd, "log", "--full-history", "--format=%H %P", "--", rel)
     if rc != 0:
-        return None, None, f"git log over {rel} failed: {str(log).strip()}"
-    commits = log.split()
-    if not commits:
-        return None, None, None
-    for commit in commits:
-        rc, before = _git(cwd, "show", f"{commit}^:{rel}")
-        if rc != 0:
-            continue
-        rc, after = _git(cwd, "show", f"{commit}:{rel}")
-        after_entry = _entry_in(after, aid) if rc == 0 else None
-        before_entry = _entry_in(before, aid)
-        if before_entry is not None and after_entry is None:
-            return before_entry, f"{commit[:12]}^", None
-    return None, None, (f"the history of {rel} names {aid} "
-                        f"({len(commits)} commit(s)) but no commit removing "
-                        f"its entry could be found")
+        return everyone(f"git log over {rel} failed: {str(log).strip()}")
+    commits = [line.split() for line in log.splitlines() if line.strip()]
+    specs = ["HEAD:" + rel]
+    for commit, *parents in commits:
+        specs += [f"{commit}:{rel}"] + [f"{p}:{rel}" for p in parents]
+    blobs = _blobs(cwd, specs)
+    if blobs is None:
+        return everyone(f"git cat-file could not read the revisions of {rel}")
+
+    parsed: dict = {}
+
+    def held(spec):
+        """The retired IDs' entries in revision ``spec``; parsed once per blob."""
+        blob = blobs.get(spec)
+        if blob is None:
+            return {}
+        if blob[0] not in parsed:
+            parsed[blob[0]] = _entries_in(blob[1], aids)
+        return parsed[blob[0]]
+
+    result = {}
+    for aid, entry in held("HEAD:" + rel).items():
+        result[aid] = (entry, "HEAD", None)
+    ever_held = set(result)
+    for commit, *parents in commits:
+        if len(result) == len(aids):
+            break
+        after = held(f"{commit}:{rel}")
+        ever_held |= set(after)
+        # Every parent, not only the first: a merge that drops an entry
+        # its second parent carried removes it as surely as a commit does.
+        for n, parent in enumerate(parents, start=1):
+            before = held(f"{parent}:{rel}")
+            ever_held |= set(before)
+            where = f"{commit[:12]}^" + (str(n) if n > 1 else "")
+            for aid in set(before) - set(after) - set(result):
+                result[aid] = (before[aid], where, None)
+    for aid in sorted(aids - set(result)):
+        if aid in ever_held:
+            result[aid] = (None, None, (
+                f"the history of {rel} holds {aid} but no commit removing its "
+                f"entry could be found ({len(commits)} commit(s) walked)"))
+        else:
+            result[aid] = (None, None, None)
+    return result
+
+
+def last_committed_entry(registry_path, aid):
+    """``(entry, where, error)`` for one ID; see :func:`last_committed_entries`."""
+    return last_committed_entries(registry_path, {aid})[aid]
 
 
 def retirement_errors(retired, registry_path, present=()):
@@ -565,15 +652,18 @@ def retirement_errors(retired, registry_path, present=()):
     evidence; it is never retired.  Deleting MADD-ANO-035 (open) and
     recording it retired passed until this rule (audit_040_p4_2, A2).
 
-    The status is read from git (:func:`last_committed_entry`), because the
-    tree no longer holds the entry; where git cannot answer, the
-    retirement is refused rather than trusted.  An ID still in the
-    registry (``present``) is skipped: :func:`_evidence_errors` already
-    refuses it, as a retirement that never happened.
+    The status is read from git (:func:`last_committed_entries`, one walk
+    of the registry's history for every retired ID), because the tree no
+    longer holds the entry; where git cannot answer, the retirement is
+    refused rather than trusted.  An ID still in the registry
+    (``present``) is skipped: :func:`_evidence_errors` already refuses it,
+    as a retirement that never happened.
     """
     errors = []
-    for aid in sorted(set(retired) - set(present)):
-        entry, where, problem = last_committed_entry(registry_path, aid)
+    pending = sorted(set(retired) - set(present))
+    history = last_committed_entries(registry_path, pending)
+    for aid in pending:
+        entry, where, problem = history[aid]
         if problem:
             errors.append(
                 f"{aid} is recorded as retired in {_RETIRED_IDS_FILE}, but "
@@ -592,6 +682,69 @@ def retirement_errors(retired, registry_path, present=()):
                 f"retired: close it -- 'resolved' with its evidence, or "
                 f"'duplicate' of the entry that carries it -- and keep it in "
                 f"the registry.")
+    return errors
+
+
+#: The one spelling of an entry's ID line: a sequence item whose first key
+#: is ``anomaly_id``, the value double-quoted with no escapes.  Every
+#: entry in the shipped registry is written so.
+_CANONICAL_ID_LINE = re.compile(r'[ ]*- anomaly_id: "([^"\\\s]+)"')
+
+#: Any line that could be setting an ``anomaly_id`` key: a block mapping
+#: key (optionally a sequence item's first key, optionally quoted) or a
+#: flow-style key.  Matched against every line that is not a comment.
+_ANY_ID_KEY = re.compile(
+    r"""(^\s*(-\s+)?|[{,]\s*)(["']?)anomaly_id\3\s*:""")
+
+
+def anomaly_id_spelling_errors(path, anomalies):
+    """Refuse an ``anomaly_id`` not written in the registry's one spelling.
+
+    YAML gives one string many spellings -- double-quoted, single-quoted,
+    plain, escaped, an alias, a flow mapping -- and a tool that looks for
+    an ID as *text* sees only one of them.  The retirement rule once did:
+    it searched the history for ``anomaly_id: "MADD-ANO-075"``, so an open
+    entry written ``'MADD-ANO-075'`` could be deleted and recorded retired
+    (audit_040_p4_4, M2).  That lookup now parses every revision
+    (:func:`last_committed_entries`), so it no longer depends on this rule;
+    the rule keeps the registry greppable for every other reader, and
+    makes a hand-written oddity fail here rather than in someone's script.
+
+    Two checks, both on the raw text: every non-comment line that sets an
+    ``anomaly_id`` key must match :data:`_CANONICAL_ID_LINE`; and the IDs
+    those lines spell, in order, must be exactly the IDs the parser
+    reads -- so an ID the canonical lines do not spell (a merge key, an
+    explicit ``? anomaly_id`` key, anything the line pattern misses) still
+    fails.
+    """
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()
+    except OSError as exc:
+        return [f"{path} could not be read for its anomaly_id lines: {exc}"]
+    errors, spelled = [], []
+    for n, line in enumerate(lines, start=1):
+        if line.lstrip().startswith("#"):
+            continue
+        m = _CANONICAL_ID_LINE.fullmatch(line)
+        if m:
+            spelled.append(m.group(1))
+        elif _ANY_ID_KEY.search(line):
+            errors.append(
+                f"{path}:{n}: {line.strip()!r} is not the canonical ID line "
+                f"'  - anomaly_id: \"MADD-ANO-NNN\"' (the entry's first key, "
+                f"the ID double-quoted, nothing after it).  Write every ID "
+                f"the one way, so that every reader of this file finds it.")
+    parsed = [str(a.get("anomaly_id")) for a in anomalies]
+    if not errors and spelled != parsed:
+        missing = [aid for aid in parsed if aid not in spelled]
+        errors.append(
+            f"{path}: the canonical '- anomaly_id: \"...\"' lines spell "
+            f"{len(spelled)} ID(s) but the registry parses to {len(parsed)}"
+            + (f"; not spelled canonically: {missing}" if missing else
+               "; the two lists differ in order or content")
+            + ".  An ID the text does not spell is invisible to anything "
+            f"that reads it as text.")
     return errors
 
 
@@ -1287,6 +1440,7 @@ def main(argv=None):
     errors += retirement_errors(
         retired, args.path,
         present={str(a.get("anomaly_id")) for a in anomalies})
+    errors += anomaly_id_spelling_errors(args.path, anomalies)
     if n_anomalies:
         errors += version_range_errors(data)
     ref_errors, conditional = _reference_errors(

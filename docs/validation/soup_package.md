@@ -176,9 +176,10 @@ installs it into a new, isolated virtual environment, and runs
 the tool is not in the SBOM.  MADDENING is the root component, with its
 version, purl and licence.  Every other installed distribution is a
 component with its name, version, `pkg:pypi` purl and the licence its
-metadata declares.  The dependency graph is included, and the root's edges
-are exactly the direct dependencies `pyproject.toml` declares for that
-install.
+metadata declares, and its own `Requires-Dist` metadata, verbatim
+(`maddening:sbom:requires-dist` properties, with a count).  The dependency
+graph is included, and the root's edges are exactly the direct dependencies
+`pyproject.toml` declares for that install.
 
 | File | Install | What it covers |
 |---|---|---|
@@ -232,11 +233,29 @@ the directory holds any other SBOM.  It fails if a direct dependency
 SBOM, or is at a version outside its declared range.  It fails if a SOUP
 item §1 lists is missing, or is at a version outside the `pyproject.toml`
 range.  It also fails if a component has no purl, or a purl that disagrees
-with it, or no licence; if a component is reached by no path from the root
-in the dependency graph, so that no install brings it in; if the recorded
-Python is one `requires-python` refuses; and if the file was edited after
-generation: the `serialNumber` is derived from the content.  Each failure
-names the discrepancy.
+with it, or no licence or a blank one; if a component is reached by no path
+from the root in the dependency graph, so that no install brings it in; if
+the recorded Python is one `requires-python` refuses; and if a file does not
+record its resolution cutoff.  It follows the install's requirements from
+the declared direct dependencies through each component's recorded
+`Requires-Dist`, with markers evaluated in the recorded environment, and
+fails if a requirement the install turns on names a package the SBOM lacks
+or a version the requirement refuses, if the graph and the requirements
+disagree, or if a component is required by nothing the install turns on.
+It fails if the four files disagree about the cutoff, the index, the
+resolver, the platform or any marker variable: they are one resolution, and
+are regenerated together.  And it fails if a file was changed after
+generation without being re-sealed: the `serialNumber` is derived from the
+content.  Each failure names the discrepancy.
+
+These checks prove that the files are consistent with `pyproject.toml`, with
+§1 and with themselves.  They do not prove that the content is what a
+resolver produced: the sealing function is public, so an edit can be
+re-sealed, and one that breaks none of the rules above (a package moved to
+another version that its range and its dependants all admit) passes.  Only
+regeneration proves the content.  `python scripts/generate_sbom.py
+--exclude-newer <the recorded cutoff> --output-dir <dir>` resolves each
+install again, and its output must be byte-identical to the committed file.
 
 **Determinism.**  Components and the dependency graph are sorted, keys are
 written sorted, `metadata.timestamp` is the resolution cutoff (or

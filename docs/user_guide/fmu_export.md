@@ -34,13 +34,17 @@ sidecar = FmuSidecar(SidecarConfig(
     fixed_params=md.fixed_parameters,   # the bridge applies it anyway
     input_resolver=gm._resolve_external_inputs,   # inputs as GraphManager.step takes them
 ))
-bridge = FmuTcpBridge(sidecar, md, master_dt=gm_base_dt, port=5555).start()
+bridge = FmuTcpBridge(sidecar, md, master_dt=gm.timestep, port=5555).start()
 write_fmu(md, "plant.fmu", binary=binary, endpoint=bridge.endpoint)
 ```
 
 The importer then loads `plant.fmu` as usual; the wrapper reads
 `resources/endpoint.txt` (or `MADDENING_FMU_ENDPOINT`) and connects.  A
-communication step of `h` runs `round(h / master_dt)` graph steps.
+communication step of `h` runs `round(h / master_dt)` graph steps.  Pass
+`master_dt=gm.timestep`, the simulated time one graph step advances; it is
+also the description's default `stepSize`.  On a graph with a sub-cycling
+coupling group it is the group's largest member timestep, not the smallest
+node timestep.
 `fmi3GetFMUState` / `fmi3SetFMUState` / serialization round-trip the
 sidecar's state.  Model exchange and scheduled execution are refused at
 instantiation.

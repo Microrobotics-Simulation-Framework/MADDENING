@@ -308,15 +308,9 @@ def save_graph_to_usd(
     # Phase 2: set attributes (can use ChangeBlock for efficiency)
     with Sdf.ChangeBlock():
         # Root attributes
-        base_dt = getattr(gm, "_base_dt", None)
-        if base_dt is None and gm._nodes:
-            base_dt = min(s.timestep for s in gm._nodes.values())
-        root_prim.GetAttribute("maddening:baseDt").Set(
-            float(base_dt or 0.01)
-        )
-        root_prim.GetAttribute("maddening:isMultirate").Set(
-            bool(gm._is_multirate)
-        )
+        base_dt, is_multirate = _graph_timing(gm)
+        root_prim.GetAttribute("maddening:baseDt").Set(base_dt)
+        root_prim.GetAttribute("maddening:isMultirate").Set(is_multirate)
 
         # Node attributes
         for node_name, spec in gm._nodes.items():
@@ -697,6 +691,30 @@ def load_graph_from_usd(
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+def _graph_timing(gm: "GraphManager") -> tuple[float, bool]:
+    """``(maddening:baseDt, maddening:isMultirate)`` for the root prim.
+
+    ``baseDt`` is one step of the graph, ``gm.timestep``: the GCD of the
+    node timesteps as ``compile()`` schedules them, a sub-cycling coupling
+    group at its largest member timestep.  ``isMultirate`` says whether
+    those scheduled timesteps differ.  Both are read from the graph as it
+    stands, so a graph saved before its first compile is described as the
+    compile will run it.  A graph with no nodes takes no step and keeps
+    the schema defaults (0.01, ``False``).
+
+    ``baseDt`` used to come from a ``_base_dt`` attribute nothing set: the
+    serialiser fell back to the smallest node timestep and
+    :class:`~maddening.usd.writer.USDWriter` wrote 0.01 for every graph
+    (MADD-ANO-097).
+    """
+    from maddening.core.graph_manager import _scheduled_timesteps  # noqa: PLC0415
+
+    if not gm._nodes:
+        return 0.01, False
+    scheduled = _scheduled_timesteps(gm._nodes, gm._coupling_groups)
+    return float(gm.timestep), len(set(scheduled.values())) > 1
+
 
 def _safe_prim_name(name: str) -> str:
     """A node name as a **valid** ``SdfPath`` element.

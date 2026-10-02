@@ -20,7 +20,6 @@ never-compiled graph (through each node's ``params_pytree()``).  Their
 
 from __future__ import annotations
 
-import io
 import os
 import warnings
 
@@ -32,46 +31,20 @@ import pytest
 
 from maddening.core import inspection
 from tests.core.inspection_graphs import BUILDERS, UNCOMPILED, build, graph
-from tests.core.inspection_guard_support import assert_read_only, compile_events
-
-_HAS_RICH = True
-try:
-    import rich  # noqa: F401
-except ImportError:      # pragma: no cover - CI installs rich through the ci extra
-    _HAS_RICH = False
-
-
-def _sink() -> io.StringIO:
-    return io.StringIO()
+from tests.core.inspection_guard_support import (
+    HAS_RICH as _HAS_RICH,
+    INSPECTION_CALLS,
+    assert_read_only,
+    compile_events,
+    eager_first_call,
+)
 
 
-METHODS = {
-    "format_graph": lambda gm: gm.format_graph(),
-    "format_graph_narrow": lambda gm: gm.format_graph(width=40),
-    "print_graph": lambda gm: gm.print_graph(file=_sink()),
-    "print_graph_rich": lambda gm: gm.print_graph(file=_sink(), rich=True),
-    "to_mermaid": lambda gm: gm.to_mermaid(),
-    "to_dot": lambda gm: gm.to_dot(),
-    "state_summary": lambda gm: gm.state_summary(include_meta=True),
-    "print_state_summary": lambda gm: gm.print_state_summary(file=_sink(), include_meta=True),
-    "print_state_summary_rich": lambda gm: gm.print_state_summary(file=_sink(), rich=True),
-    "params_table": lambda gm: gm.params_table(),
-    "print_params_table": lambda gm: gm.print_params_table(file=_sink()),
-    "coupling_report": lambda gm: gm.coupling_report(),
-    "print_coupling_report": lambda gm: gm.print_coupling_report(file=_sink()),
-    "print_coupling_report_rich": lambda gm: gm.print_coupling_report(file=_sink(), rich=True),
-    "memory_estimate": lambda gm: gm.memory_estimate(),
-    "print_memory_estimate": lambda gm: gm.print_memory_estimate(file=_sink(), width=60),
-    "table_text": lambda gm: [t.to_text(width=50) for t in
-                              (gm.state_summary(), gm.memory_estimate())],
-}
+METHODS = INSPECTION_CALLS
 
 
 def _eager_first_call(method: str, kind: str) -> bool:
-    """The documented exceptions: may compile eager ops on the first call."""
-    if "coupling_report" in method:
-        return True
-    return "params_table" in method and kind in UNCOMPILED
+    return eager_first_call(method, uncompiled=kind in UNCOMPILED)
 
 
 @pytest.mark.parametrize("method", sorted(METHODS))

@@ -39,8 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m maddening",
         description="MADDENING command-line tools.",
     )
-    commands = parser.add_subparsers(dest="command", metavar="<command>")
-    commands.required = True
+    commands = parser.add_subparsers(dest="command", metavar="<command>", title="commands")
     info = commands.add_parser(
         "info", help="print version and environment information for bug reports",
         description="Print MADDENING's version and environment report "
@@ -55,7 +54,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Run the command line; returns the process exit code."""
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        # No command: the full help (which lists the commands) on stderr,
+        # and argparse's own usage-error exit status.
+        parser.print_help(sys.stderr)
+        return 2
     return int(args.func(args))
 
 

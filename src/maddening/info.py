@@ -49,7 +49,7 @@ ENV_ALLOWLIST: tuple[str, ...] = (
 #: one installs.  An extra is "installed" when every module is found.
 #: Bundles (``server``, ``client``, ``all``), the per-provider cloud
 #: extras, the empty ``ift`` alias and the developer extras (``ci``,
-#: ``sbom``) are not listed: they install nothing these do not.
+#: ``dev``, ``sbom``) are not listed: they install nothing these do not.
 #: ``tests/core/test_show_versions.py`` holds this table to pyproject.
 EXTRAS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("api", ("fastapi", "uvicorn", "websockets")),
@@ -63,6 +63,7 @@ EXTRAS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("terminal", ("rich",)),
     ("tpu", ("libtpu",)),
     ("usd", ("pxr",)),
+    ("verify", ("hypothesis",)),
     ("viz", ("matplotlib",)),
     ("viz3d", ("pyvista", "PIL")),
 )

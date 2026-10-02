@@ -183,7 +183,7 @@ def test_an_fmu_state_with_boolean_and_integer_fields_round_trips():
                    "count": jnp.asarray(3, jnp.int32)}}
     md = ModelDescription(model_name="m", instantiation_token="tok", variables=[FMIVariable(
         name="time", value_reference=1, dtype="float64", causality="independent",
-        variability="continuous")])
+        variability="continuous")], default_step_size=DT)
     sidecar = FmuSidecar(SidecarConfig(schema_token="tok", step_fn=lambda s, e: s,
                                        initial_state=state))
     bridge = FmuTcpBridge(sidecar, md, master_dt=DT)

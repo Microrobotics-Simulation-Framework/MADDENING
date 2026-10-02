@@ -138,7 +138,11 @@ import numpy as np
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.params import ParamSpec
-from maddening.fmi.model_description import FMIVariable, ModelDescription
+from maddening.fmi.model_description import (
+    _DTYPE_TO_FMI_TYPE,
+    FMIVariable,
+    ModelDescription,
+)
 from maddening.fmi.sidecar import (
     FmuSidecar,
     _checked_value,
@@ -242,8 +246,20 @@ later, instead of hanging on a lock for ever."""
 _HANDOVER_POLL = 0.05
 """Granularity of that wait, so ``stop()`` is not held up by the grace."""
 _COMM_POINT_TOLERANCE = 1e-6
-"""How far a ``step``'s communication point may sit from the FMU's own time,
-as a fraction of the master timestep (plus a few ulps of the time itself).
+"""The bridge's one tolerance on time, as a fraction of the master timestep:
+how far a ``step``'s communication point may sit from the FMU's own time,
+and how far its step size may sit from a whole number of master steps
+(each plus a few ulps of the times involved, for rounding).
+
+The two used to differ -- the step size was allowed a millionth of a
+master step *per master step it covered*, the communication point a
+millionth of one -- so a step of ``3 * master_dt * (1 + 5e-7)`` was
+accepted, the bridge's clock advanced ``3 * master_dt``, and the next
+``doStep`` at ``t + h``, the point FMI requires, was refused.  With one
+absolute tolerance, every step the bridge accepts leaves the next legal
+communication point inside it: the ulp slack on the step (4 ulps) is
+smaller than the communication point's (16), which covers the rounding of
+both sums.
 
 FMI 3.0 has each ``fmi3DoStep`` start where the previous one ended -- the
 previous communication point plus the previous step size -- or, first, at
@@ -257,6 +273,34 @@ far below any real discontinuity, which the physics could not honour anyway
 *adopted* -- the step ends at ``t + n * master_dt`` on the importer's clock,
 so the two clocks never drift apart -- and one outside it is refused with
 nothing advanced."""
+_STEP_SIZE_ULPS = 4
+"""Rounding slack, in ulps of the larger of ``h`` and ``n * master_dt``, on
+a step size's distance from a whole number of master steps."""
+_COMM_POINT_ULPS = 16
+"""Rounding slack, in ulps of the largest time involved, on a communication
+point's distance from the FMU's time.  Larger than :data:`_STEP_SIZE_ULPS`
+so that the rounding of ``t + h`` and of ``t + n * master_dt`` cannot carry
+an accepted step's error outside it."""
+_MASTER_DT_RTOL = 1e-9
+"""How far ``master_dt`` may sit from the graph step the model description
+records, relatively: a different spelling of the same step (``0.01``
+against a GCD that came out as ``0.009999999999999998``), never a different
+step."""
+MAX_STEPS_PER_REQUEST = 100_000
+"""Default cap on the graph steps one ``step`` request may ask for.
+
+A request names its work as ``h / master_dt``, and the bridge used to run
+whatever that came to: ``dt = 1e9 * master_dt`` held the connection's
+worker -- and the FMU's only instance -- for as long as a billion graph
+steps take, with no way to stop it.  A hundred thousand steps is a
+communication step far coarser than any coupling interval a master uses
+(the default ``stepSize`` is one), and a few seconds of dispatch on a
+small graph; it is per request, so a longer run is several ``doStep``
+calls.  A bridge that must take larger steps raises it with
+``FmuTcpBridge(max_steps_per_request=...)``.  A step's graph steps also
+stop at the first one after :meth:`FmuTcpBridge.stop`, committing nothing.
+The C wrapper's reply deadline (``MADDENING_FMU_TIMEOUT``, ten minutes by
+default) must cover the longest step the bridge accepts."""
 _STOP_JOIN_TIMEOUT = 5.0
 """Seconds :meth:`FmuTcpBridge.stop` waits, in total, for its threads.
 
@@ -552,6 +596,49 @@ def _size(var: FMIVariable) -> int:
     return int(np.prod(var.shape)) if var.shape else 1
 
 
+_CLOCK_TYPE = "Clock"
+_FMI_TYPES = frozenset(_DTYPE_TO_FMI_TYPE.values()) | {_CLOCK_TYPE}
+"""The FMI 3.0 variable types a request's ``type`` may name."""
+
+
+def _fmi_type_of(var: FMIVariable) -> str:
+    """The FMI 3.0 type of ``var`` as its ``modelDescription.xml`` declares it."""
+    return _CLOCK_TYPE if var.is_clock else _DTYPE_TO_FMI_TYPE[var.dtype]
+
+
+def _requested_type(fmi_type: Any) -> Optional[str]:
+    """A request's ``type`` (the ``{VariableType}`` of the ``fmi3Get`` /
+    ``fmi3Set`` call it carries), ``None`` when it names none."""
+    if fmi_type is None:
+        return None
+    if not isinstance(fmi_type, str) or fmi_type not in _FMI_TYPES:
+        raise ValueError(f"type must be one of {sorted(_FMI_TYPES)}, got {fmi_type!r}")
+    return fmi_type
+
+
+def _check_access_type(var: FMIVariable, fmi_type: Optional[str], access: str) -> None:
+    """Refuse an ``fmi3{access}{fmi_type}`` call on a variable of another type.
+
+    FMI 3.0 ("Getting and Setting Variable Values"): the variable's type in
+    ``modelDescription.xml`` "determines the function
+    ``fmi3Get/Set{VariableType}`` that must be used for accessing the
+    respective variable values".  The C wrapper used to send every width
+    as a float64 and cast the reply, so ``fmi3SetBoolean`` on a Float32
+    parameter stored 1.0 and ``fmi3GetInt32`` on a Float32 output
+    truncated 0.5 to 0, both answered ``fmi3OK``.  It now names the type
+    of every call; a request that names none is not checked.
+    """
+    if fmi_type is None:
+        return
+    declared = _fmi_type_of(var)
+    if fmi_type != declared:
+        raise ValueError(
+            f"variable {var.name!r} is {declared}, so fmi3{access}{fmi_type} cannot "
+            f"address it: FMI 3.0 accesses a variable only through the fmi3Get / "
+            f"fmi3Set function of its own type (fmi3{access}{declared}); nothing "
+            "was read or written")
+
+
 def _start_leaf(var: FMIVariable, live: Any) -> np.ndarray:
     """A parameter variable's advertised ``start`` in its live leaf's dtype
     and shape (``ValueError`` if the description cannot describe the leaf)."""
@@ -615,9 +702,30 @@ class FmuTcpBridge:
         The description the FMU was built from; value references are
         resolved against its variables.
     master_dt : float
-        The graph's base timestep (one sidecar ``step``).
+        The simulated time one sidecar ``step`` advances: one step of the
+        graph, ``GraphManager.timestep``.  It must equal the step the
+        model description records (:attr:`ModelDescription.graph_timestep
+        <maddening.fmi.model_description.ModelDescription.graph_timestep>`,
+        or ``default_step_size`` for a description built by hand), and the
+        description's ``default_step_size`` must be a whole number of
+        them.  A ``master_dt`` of half the graph's step used to be
+        accepted: each ``doStep`` ran twice the graph steps it should
+        have, and reported a time that was half the state's.
     host, port : str, int
         Bind address; ``port=0`` picks a free port (see :attr:`endpoint`).
+    max_steps_per_request : int, default MAX_STEPS_PER_REQUEST
+        The most graph steps one ``step`` request may ask for
+        (``h / master_dt``); a larger request is refused with nothing
+        advanced.  See :data:`MAX_STEPS_PER_REQUEST`.
+
+    Raises
+    ------
+    ValueError
+        If ``master_dt`` is not a positive finite number, differs from the
+        graph step the description records, or does not divide the
+        description's ``default_step_size`` into a whole number of steps
+        no larger than ``max_steps_per_request``; or if
+        ``max_steps_per_request`` is not a positive integer.
     """
 
     def __init__(
@@ -628,10 +736,19 @@ class FmuTcpBridge:
         master_dt: float,
         host: str = "127.0.0.1",
         port: int = 0,
+        max_steps_per_request: int = MAX_STEPS_PER_REQUEST,
     ) -> None:
         self._sidecar = sidecar
         self._md = model_description
-        self._dt = float(master_dt)
+        if isinstance(max_steps_per_request, (bool, np.bool_)) or not isinstance(
+                max_steps_per_request, (int, np.integer)) or max_steps_per_request < 1:
+            raise ValueError(f"max_steps_per_request must be a positive integer, got "
+                             f"{max_steps_per_request!r}")
+        self._max_steps = int(max_steps_per_request)
+        self._dt = _real_number(master_dt, "master_dt")
+        if self._dt <= 0:
+            raise ValueError(f"master_dt must be positive, got {master_dt!r}")
+        self._check_master_dt(model_description)
         self._vars: dict[int, FMIVariable] = {
             v.value_reference: v for v in model_description.variables
         }
@@ -1156,7 +1273,10 @@ class FmuTcpBridge:
             if len(raw) != 8 * n:
                 raise ValueError(f"binary set announces {n} float64 but carries {len(raw)} bytes")
             values = np.frombuffer(raw, dtype="<f8").astype(np.float64)
-            return {"op": "set", "vr": header.get("vr"), "values": values}
+            req: dict[str, Any] = {"op": "set", "vr": header.get("vr"), "values": values}
+            if "type" in header:
+                req["type"] = header["type"]
+            return req
         if op == "set_state":
             if len(raw) != n:
                 raise ValueError(f"binary set_state announces {n} bytes but carries {len(raw)}")
@@ -1207,25 +1327,19 @@ class FmuTcpBridge:
                         "model": self._md.model_name, "master_dt": self._dt,
                         "protocol": PROTOCOL_VERSION, "binary": binary}
             if op == "set":
-                self._set(req["vr"], req["values"])
+                self._set(req["vr"], req["values"], req.get("type"))
                 return {"ok": True}
             if op == "get":
-                return {"ok": True, "values": self._get(req["vr"])}
+                return {"ok": True, "values": self._get(req["vr"], req.get("type"))}
             if op == "step":
                 h = _real_number(req["dt"], "communication step")
                 if h <= 0:
                     raise ValueError(f"communication step must be positive, got {h!r}")
-                ratio = h / self._dt
-                n = int(round(ratio))
-                if n < 1 or abs(ratio - n) > 1e-6 * max(1.0, n):
-                    # The FMU advertises a fixed communication step: the
-                    # physics can only advance whole master steps, and
-                    # reporting t + h for a different advance would desync
-                    # the importer's time from the state.
-                    raise ValueError(
-                        f"communication step {h!r} is not a whole multiple of the "
-                        f"master timestep {self._dt!r}"
-                    )
+                # The FMU advertises a fixed communication step: the physics
+                # can only advance whole master steps, and reporting t + h
+                # for a different advance would desync the importer's time
+                # from the state.
+                n = self._master_steps(h, "communication step")
                 # The communication point is parsed *before* anything moves.
                 # It used to be parsed after the loop, so a request carrying a
                 # ``t`` that is not a number was answered "not ok" with the
@@ -1238,8 +1352,7 @@ class FmuTcpBridge:
                 # point that jumped -- 0.01 to 100, say -- used to be
                 # accepted: the physics advanced one master step and ``time``
                 # read 100.01, a state labelled with a time it never reached.
-                tolerance = (_COMM_POINT_TOLERANCE * self._dt
-                             + 16 * float(np.spacing(max(abs(t0), abs(self._time), 1.0))))
+                tolerance = self._time_tolerance(t0, self._time, ulps=_COMM_POINT_ULPS)
                 if abs(t0 - self._time) > tolerance:
                     raise ValueError(
                         f"communication point {t0!r} is not the FMU's current time "
@@ -1257,7 +1370,17 @@ class FmuTcpBridge:
                 # outlast stop()'s bounded join -- is refused at its commit
                 # instead of replacing the state of a stopped bridge.
                 state = self._sidecar._state                        # noqa: SLF001
-                for _ in range(n):
+                for done in range(n):
+                    # A long step stops at the first graph step after
+                    # stop(), instead of running to its end in a worker
+                    # nobody is waiting for (the commit below would refuse
+                    # it anyway).  One graph step -- the first, which
+                    # compiles -- still cannot be interrupted.
+                    if self._stop.is_set():
+                        raise RuntimeError(
+                            f"FmuTcpBridge on {self.endpoint} has been stopped; the "
+                            f"'step' request was not committed (it stopped after "
+                            f"{done} of its {n} graph steps)")
                     state = self._sidecar._advanced(state, self._inputs)  # noqa: SLF001
                 with self._committing("step"):
                     self._sidecar._state = state                    # noqa: SLF001
@@ -1307,6 +1430,69 @@ class FmuTcpBridge:
                 node, field = var.node_field()
                 out.setdefault(node, {})[field] = jnp.zeros(var.shape or (), dtype=var.dtype)
         return out
+
+    # ------------------------------------------------------------------- time
+    def _time_tolerance(self, *times: float, ulps: int) -> float:
+        """The bridge's one tolerance on time (:data:`_COMM_POINT_TOLERANCE`
+        of a master step), plus ``ulps`` ulps of the largest of ``times``."""
+        biggest = max([abs(t) for t in times] + [1.0])
+        return _COMM_POINT_TOLERANCE * self._dt + ulps * float(np.spacing(biggest))
+
+    def _master_steps(self, h: float, what: str) -> int:
+        """The number of master steps ``h`` is, refused unless it is a whole
+        number of them (to :meth:`_time_tolerance`), at least one, and no
+        more than ``max_steps_per_request``."""
+        ratio = h / self._dt
+        if not ratio <= self._max_steps + 0.5:
+            raise ValueError(
+                f"{what} {h!r} is {ratio:.6g} master steps of {self._dt!r}, more than "
+                f"the {self._max_steps} one request may take "
+                "(FmuTcpBridge(max_steps_per_request=...)); split it into several "
+                "steps")
+        n = int(round(ratio))
+        if n < 1 or abs(h - n * self._dt) > self._time_tolerance(
+                h, n * self._dt, ulps=_STEP_SIZE_ULPS):
+            raise ValueError(
+                f"{what} {h!r} is not a whole multiple of the master timestep "
+                f"{self._dt!r} (to within {_COMM_POINT_TOLERANCE:g} of a master step)")
+        return n
+
+    def _check_master_dt(self, md: ModelDescription) -> None:
+        """Refuse a ``master_dt`` the model description contradicts.
+
+        One sidecar step is one graph step, and the description records
+        what that is (``graph_timestep``; a hand-built description has
+        only ``default_step_size``).  The bridge used to store whatever
+        ``master_dt`` it was given, so a uniform 0.01 s graph served with
+        ``master_dt=0.005`` ran two graph steps per 0.01 s ``doStep`` and
+        reported t = 0.05 s for a state at 0.10 s.  And the step the
+        description advertises must be one the bridge will take, or every
+        ``doStep`` at it is refused.
+        """
+        graph_step = getattr(md, "graph_timestep", None)
+        recorded = "graph_timestep"
+        if graph_step is None:
+            graph_step, recorded = md.default_step_size, "default_step_size"
+        graph_step = _real_number(graph_step, f"the model description's {recorded}")
+        if graph_step <= 0 or abs(self._dt - graph_step) > _MASTER_DT_RTOL * graph_step:
+            raise ValueError(
+                f"master_dt={self._dt!r} is not the step of the graph this model "
+                f"description describes ({recorded} = {graph_step!r}).  One sidecar "
+                "step is one graph step, so each doStep would run a different number "
+                "of graph steps than the time it reports; pass "
+                "master_dt=graph_manager.timestep")
+        advertised = _real_number(md.default_step_size,
+                                  "the model description's default_step_size")
+        if advertised <= 0:
+            raise ValueError(f"the model description's default_step_size must be "
+                             f"positive, got {advertised!r}")
+        try:
+            self._master_steps(advertised, "the model description's default_step_size")
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc}; an importer steps at the advertised size "
+                "(canHandleVariableCommunicationStepSize is false), and every doStep "
+                "would be refused") from None
 
     # ------------------------------------------------- the description's contract
     @staticmethod
@@ -1461,7 +1647,7 @@ class FmuTcpBridge:
                 for k, v in leaves.items():
                     caps[f"p/{section}/{owner}/{k}"] = int(np.asarray(v).nbytes)
         for var in self._md.variables:
-            if var.causality == "input":
+            if var.causality == "input" and not var.is_clock:
                 node, field = var.node_field()
                 caps[f"i/{node}/{field}"] = int(np.zeros(var.shape or (), var.dtype).nbytes)
         return {k: v + _NPY_SLACK for k, v in caps.items()}
@@ -1484,7 +1670,7 @@ class FmuTcpBridge:
             # the same snapshot (both sets in full), still from the
             # directory alone.
             listed = {info.filename[:-4] for info in infos if info.filename.endswith(".npy")}
-            for prefix, what in (("s/", "fields"), ("p/", "parameters")):
+            for prefix, what in (("s/", "fields"), ("p/", "parameters"), ("i/", "inputs")):
                 got = {k for k in listed if k.startswith(prefix)}
                 expected = {k for k in caps if k.startswith(prefix)}
                 refusal = _key_set_error(what, expected, got) if got - expected else None
@@ -1571,7 +1757,16 @@ class FmuTcpBridge:
                             key = f"p/{section}/{owner}/{k}"
                             new_params[section][owner][k] = jnp.asarray(_restored_leaf(
                                 data[key], v, what=f"FMU state param {owner}.params.{k}"))
+            # The pending inputs are part of the state too, and held to the
+            # same key-set rule: the bridge's own snapshot always carries
+            # every one, so an archive missing one is partial.  It used to
+            # restore with that input silently back at zero.
             inputs: dict[str, dict[str, Any]] = self._zero_inputs()
+            refusal = _key_set_error(
+                "inputs", {f"i/{n}/{f}" for n, fields in inputs.items() for f in fields},
+                {k for k in keys if k.startswith("i/")})
+            if refusal is not None:
+                raise refusal
             for k in keys:
                 if k.startswith("i/"):
                     _, node, field = k.split("/", 2)
@@ -1619,16 +1814,41 @@ class FmuTcpBridge:
             self._inputs, self._time = inputs, t
 
     # ----------------------------------------------------------- vr mapping
-    def _set(self, vrs: list[int], values) -> None:
+    def _set(self, vrs: list[int], values, fmi_type: Any = None) -> None:
+        """Stage and commit one ``set``; nothing is written unless every
+        value reference and value in it is valid.
+
+        Refused: a value reference named twice (which value would win is
+        not defined, and the first was dropped in silence), a ``<Clock>``
+        variable (its ticks are implied by time; ``fmi3SetClock`` handles
+        it and there is no number to store -- a numeric set used to be
+        answered ok and dropped), and, when the request carries a
+        ``type``, a variable of another FMI type (:func:`_check_access_type`).
+        """
         if not isinstance(vrs, (list, tuple)):
             raise ValueError("vr must be a list of value references")
+        fmi_type = _requested_type(fmi_type)
         values = _flat_numbers(values)
         pos = 0
         staged: list[tuple[FMIVariable, np.ndarray]] = []
+        named: set[int] = set()
         for vr in vrs:
-            var = self._vars.get(_value_reference(vr))
+            ref = _value_reference(vr)
+            var = self._vars.get(ref)
             if var is None:
                 raise KeyError(f"unknown value reference {vr}")
+            if ref in named:
+                raise ValueError(
+                    f"value reference {ref} ({var.name}) is named more than once in "
+                    "one set; which value should win is not defined, so nothing was "
+                    "written")
+            named.add(ref)
+            _check_access_type(var, fmi_type, "Set")
+            if var.is_clock:
+                raise ValueError(
+                    f"variable {var.name!r} is a Clock: its ticks are implied by time "
+                    "and it holds no value a set could store (fmi3SetClock); nothing "
+                    "was written")
             n = _size(var)
             chunk = values[pos:pos + n]
             if chunk.size != n:
@@ -1642,8 +1862,6 @@ class FmuTcpBridge:
         for var, arr in staged:
             if not np.all(np.isfinite(arr)):
                 raise ValueError(f"variable {var.name!r}: value must be finite")
-            if var.is_clock:
-                continue                              # clock ticks are informational
             if var.causality == "parameter":
                 param_updates[var.name] = self._in_dtype(var, arr)
             elif var.causality == "input":
@@ -1666,15 +1884,20 @@ class FmuTcpBridge:
         FMI variable; ``set_state`` applies the same one."""
         return checked_value(arr, var.dtype, what=f"variable {var.name!r}")
 
-    def _get(self, vrs: list[int]) -> np.ndarray:
+    def _get(self, vrs: list[int], fmi_type: Any = None) -> np.ndarray:
+        """The values of ``vrs``, flat, as float64; a request carrying a
+        ``type`` may only name variables of that FMI type
+        (:func:`_check_access_type`)."""
         if not isinstance(vrs, (list, tuple)):
             raise ValueError("vr must be a list of value references")
+        fmi_type = _requested_type(fmi_type)
         parts: list[np.ndarray] = []
         params = self._sidecar.get_params()
         for vr in vrs:
             var = self._vars.get(_value_reference(vr))
             if var is None:
                 raise KeyError(f"unknown value reference {vr}")
+            _check_access_type(var, fmi_type, "Get")
             if var.causality == "independent":
                 parts.append(np.asarray([self._time], dtype=np.float64))
             elif var.causality == "parameter":

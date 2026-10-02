@@ -32,6 +32,7 @@ sidecar = FmuSidecar(SidecarConfig(
     schema_token=md.instantiation_token, step_fn=gm._compiled_step,
     initial_state=gm._state, params=gm.params, param_specs=gm.param_specs(),
     fixed_params=md.fixed_parameters,   # the bridge applies it anyway
+    input_resolver=gm._resolve_external_inputs,   # inputs as GraphManager.step takes them
 ))
 bridge = FmuTcpBridge(sidecar, md, master_dt=gm_base_dt, port=5555).start()
 write_fmu(md, "plant.fmu", binary=binary, endpoint=bridge.endpoint)
@@ -41,16 +42,59 @@ The importer then loads `plant.fmu` as usual; the wrapper reads
 `resources/endpoint.txt` (or `MADDENING_FMU_ENDPOINT`) and connects.  A
 communication step of `h` runs `round(h / master_dt)` graph steps.
 `fmi3GetFMUState` / `fmi3SetFMUState` / serialization round-trip the
-sidecar's state, and `fmi3Reset` returns to the initial state and
-parameters.  Model exchange and scheduled execution are refused at
+sidecar's state.  Model exchange and scheduled execution are refused at
 instantiation.
 
-**Variables.**  Outputs are `<node>.<field>`; external inputs are
+**Instances and time.**  One bridge serves one FMU instance at a time, and
+every instance starts where FMI 3.0 starts one.  When a new connection
+claims the bridge (`fmi3InstantiateCoSimulation`), the bridge resets to
+the state it was built over.  Every parameter goes back to the `start` value
+the model description advertises, every input to zero, and the time to
+zero.  `fmi3Reset` goes to the same point.  So a master that frees an
+instance and instantiates another between runs, as FMPy's `simulate_fmu`
+does on every call, gets the same answer for the same arguments.  Until
+0.4.0 shipped, the new instance inherited the previous one's state, tuned
+parameters, pending inputs and time.  A sidecar built with other parameter
+values than the description advertises is brought into line, with a
+`UserWarning` naming them.
+
+`fmi3EnterInitializationMode(startTime)` sets the FMU's time, which is
+what the `time` variable reads from then on.  It is accepted until the
+instance's first step.  Each `fmi3DoStep` must start at the FMU's current
+time: the previous communication point plus the previous step size, or
+first the start time.  The tolerance is a millionth of a master step, which
+absorbs any importer's floating-point accumulation.  A point inside it is
+adopted, so the importer's clock and the FMU's never drift apart.  A point
+outside it is `fmi3Error` with nothing advanced: an importer that jumped
+from 0.01 to 100 used to get one master step of physics labelled 100.01.
+To go back in time, restore an FMU state; the clock moves with it.
+
+**Variables.**  Outputs are `<node>.<field>`.  External inputs are
 `<node>.<field>` of the target boundary field (start value 0, description
-and unit from the target node's `boundary_input_spec`); parameters are
-`<node>.params.<key>` with `ParamSpec` bounds as `min` / `max`.  Setting a
-parameter goes through the sidecar's bounds check, so an importer cannot
-drive the graph with a constant it declares invalid.  Only parameters the
+and unit from the target node's `boundary_input_spec`).  Parameters are
+`<node>.params.<key>`, with the `ParamSpec` bounds as `min` / `max`.
+
+`build_model_description(..., selected_inputs=[...])` exports a subset of
+the inputs.  A declared input left out is not an FMU variable, but the
+graph still reads it, so the bridge holds it at zero on every step, as
+`GraphManager.step` does for an input its caller omits.  It is listed in
+`md.held_inputs`, and the builder warns.  Until 0.4.0 shipped, the bridge
+passed only the exported inputs, and a node whose input was left out took
+its own "input missing" branch instead: a ball with no table fell through
+the floor.  A name the graph does not declare is a `ValueError`.
+
+The in-process sidecar applies the same rule when it is given the graph's
+resolver (`input_resolver=gm._resolve_external_inputs`).
+`FmuSidecar.step` then completes a partial `external_inputs` with zeros and
+refuses a misspelt name, as `GraphManager.step` does.  A sidecar behind a
+bridge gets a resolver built from the model description if it was given
+none.
+
+Setting a parameter is held to the `min` / `max` the description
+advertises, whether or not the sidecar was built with `param_specs`.  The
+bridge adds a bounds-only spec for every exported parameter its sidecar has
+no spec for.  So an importer cannot drive the graph with a constant it
+declares invalid.  Only parameters the
 compiled step reads are exported, all `variability="tunable"`: an
 `initial_*` condition (the initial state is already built), a value a node
 consumed when it was constructed (`LBMPipeNode.pipe_radius`) or declares in
@@ -158,7 +202,16 @@ total as well.  The C side checks the header count against the raw length
 and against the caller's array before any `memcpy`, refuses a reply
 length over the limit (binary or JSON) before allocating for it, drops
 the connection on such a reply or on one cut short by the peer, and never
-sends a `set` whose frame, header included, would exceed the limit.  The
+sends a `set` whose frame, header included, would exceed the limit.  A
+`get` reply must carry exactly the `nValues` the importer asked for:
+a longer one is `fmi3Error`, as a shorter one always was, rather than
+`fmi3OK` with the rest dropped.  A send interrupted by a signal is
+retried, and any other failed send closes the connection, because part of
+the frame may already be on the wire.  An empty instantiation token is a
+mismatch.  The wrapper's socket has `TCP_NODELAY` set: a frame goes out as
+two writes, and with Nagle's algorithm the second waited for the bridge's
+delayed ACK, so until 0.4.0 shipped every FMI call took at least 40 ms on
+Linux.  The
 serialized FMU state is opaque to the importer; its encoding (raw `npz`
 on protocol 2, base64 text on protocol 1) is that of the connection it
 came from, so a state serialized under one protocol must be restored
@@ -195,14 +248,19 @@ build a new `FmuTcpBridge` to serve again.
 
 **A value that `set` refuses, `set_state` refuses too.**  Both doors
 into the state and parameter tree apply the same checks: every value
-must be finite and representable in the dtype of the array it replaces,
-and every parameter must lie inside its declared `ParamSpec` bounds —
-the `min` / `max` the model description advertises.  An importer
-therefore cannot use an FMU-state archive to install a constant the
-graph declares invalid.  The sidecar's own in-process doors apply the
-same checks with the same messages: `FmuSidecar.set_params` refuses what
-`set` refuses, and `FmuSidecar.set_fmu_state` refuses what `set_state`
-refuses (the bounds only when the sidecar was given `param_specs`).
+must be a number (a string such as `"45"` or a boolean is refused, not
+parsed), finite, and representable in the dtype of the array it
+replaces, and every parameter must lie inside its declared `ParamSpec`
+bounds — the `min` / `max` the model description advertises, which the
+bridge enforces however its sidecar was built.  An importer therefore
+cannot use an FMU-state archive to install a constant the graph declares
+invalid.  An archive must carry its time.  The sidecar's own in-process
+doors apply the same checks with the same messages: `FmuSidecar.set_params`
+refuses what `set` refuses, and `FmuSidecar.set_fmu_state` refuses what
+`set_state` refuses, including parameters in a snapshot for a model with
+no parameter tree.  A sidecar behind a bridge enforces the advertised
+bounds; a stand-alone one enforces the bounds of the `param_specs` it was
+given.  A `step`'s `dt` and `t` must be numbers too.
 
 A restore holds to the bounds the values it would *install*: a parameter
 the snapshot carries at the value it holds now, or held when the FMU was

@@ -152,51 +152,84 @@ def test_fmpy_drives_the_sanitized_binary(tmp_path):
     md, bridge = _bridge(gm)
 
     class Hostile:
-        """Answers hello correctly, then garbage / truncated / huge frames."""
+        """Answers hello correctly, then one kind of hostile reply per
+        connection -- garbage bytes, a frame cut off mid-body, a JSON frame
+        of the wrong shape -- to every later request.  Records, per
+        connection, which ops it was sent after the hello, so the test can
+        prove the wrapper was driven into each kind of reply rather than
+        failing before it (the assertion on this half used to be
+        ``got["hostile"] != "returned" or True``, which nothing could
+        fail: a hostile bridge that never answered at all passed)."""
+
+        KINDS = ("garbage", "truncated", "wrong_shape")
 
         def __init__(self):
             self.srv = socket.socket()
             self.srv.bind(("127.0.0.1", 0))
             self.srv.listen(1)
+            self.srv.settimeout(120)
             self.endpoint = "127.0.0.1:%d" % self.srv.getsockname()[1]
-            threading.Thread(target=self.run, daemon=True).start()
+            self.seen: list[tuple[str, list]] = []
+            self.thread = threading.Thread(target=self.run, daemon=True)
+            self.thread.start()
 
         def run(self):
-            conn, _ = self.srv.accept()
-            with conn:
-                n = 0
-                while True:
-                    try:
-                        req = recv_message(conn)
-                    except Exception:
-                        return
-                    if req is None:
-                        return
-                    n += 1
-                    if req.get("op") == "hello":
-                        send_message(conn, {"ok": True, "token": md.instantiation_token})
-                    elif n % 3 == 0:
-                        conn.sendall(struct.pack(">I", 70000) + b'{"ok":true' + b"x" * 100)
-                        return                                     # truncated frame, hang up
-                    elif n % 3 == 1:
-                        conn.sendall(struct.pack(">I", 12) + b"\xff\x00garbage!!!!")
-                    else:
-                        send_message(conn, {"ok": True, "values": "notalist", "state": 5})
+            for kind in self.KINDS:
+                try:
+                    conn, _ = self.srv.accept()
+                except OSError:
+                    return
+                ops: list = []
+                with conn:
+                    conn.settimeout(120)
+                    while True:
+                        try:
+                            req = recv_message(conn)
+                        except Exception:
+                            break
+                        if req is None:
+                            break
+                        if req.get("op") == "hello" and not ops:
+                            send_message(conn, {"ok": True, "token": md.instantiation_token})
+                            continue
+                        ops.append(req.get("op"))
+                        if kind == "truncated":
+                            conn.sendall(struct.pack(">I", 70000) + b'{"ok":true' + b"x" * 100)
+                            break                                 # hang up mid-frame
+                        if kind == "garbage":
+                            conn.sendall(struct.pack(">I", 12) + b"\xff\x00garbage!!!!")
+                        else:
+                            send_message(conn, {"ok": True, "values": "notalist", "state": 5})
+                self.seen.append((kind, ops))
 
     script = tmp_path / "drive.py"
     script.write_text('''
 import json, sys
-from fmpy import simulate_fmu
-fmu, hostile, dt = sys.argv[1], sys.argv[2], float(sys.argv[3])
+from fmpy import extract, read_model_description, simulate_fmu
+from fmpy.simulation import instantiate_fmu
+fmu, hostile, dt, n_hostile = sys.argv[1], sys.argv[2], float(sys.argv[3]), int(sys.argv[4])
 res = simulate_fmu(fmu, start_time=0.0, stop_time=0.2, step_size=dt, output_interval=dt,
                    start_values={"spring.params.stiffness": 45.0},
                    output=["ball.position", "spring.position"])
-out = {"spring": float(res["spring.position"][-1]), "ball": float(res["ball.position"][-1])}
-try:
-    simulate_fmu(hostile, start_time=0.0, stop_time=0.05, step_size=dt, output=["ball.position"])
-    out["hostile"] = "returned"
-except Exception as exc:
-    out["hostile"] = type(exc).__name__
+out = {"spring": float(res["spring.position"][-1]), "ball": float(res["ball.position"][-1]),
+       "hostile": []}
+# One importer session per hostile connection.  The instance is made here
+# and freed in ``finally``, because simulate_fmu frees nothing when a call
+# raises, and a leaked instance would keep its connection open.
+unz = extract(hostile)
+desc = read_model_description(unz)
+for _ in range(n_hostile):
+    inst = None
+    try:
+        inst = instantiate_fmu(unz, desc, fmi_type="CoSimulation")
+        simulate_fmu(unz, start_time=0.0, stop_time=0.05, step_size=dt, output=["ball.position"],
+                     fmu_instance=inst)
+        out["hostile"].append("returned")
+    except Exception as exc:
+        out["hostile"].append(type(exc).__name__)
+    finally:
+        if inst is not None:
+            inst.freeInstance()
 print("RESULT " + json.dumps(out))
 ''')
     env = {**os.environ, "LD_PRELOAD": libasan, "ASAN_OPTIONS": "detect_leaks=0:halt_on_error=1",
@@ -205,7 +238,8 @@ print("RESULT " + json.dumps(out))
         fmu = write_fmu(md, tmp_path / "plant.fmu", binary=so, endpoint=bridge.endpoint)
         h = Hostile()
         fmu2 = write_fmu(md, tmp_path / "hostile.fmu", binary=so, endpoint=h.endpoint)
-        proc = subprocess.run([sys.executable, str(script), str(fmu), str(fmu2), str(DT)],
+        proc = subprocess.run([sys.executable, str(script), str(fmu), str(fmu2), str(DT),
+                               str(len(Hostile.KINDS))],
                               capture_output=True, text=True, env=env, timeout=600)
     assert proc.returncode == 0, f"exit {proc.returncode}\nstdout:\n{proc.stdout[-3000:]}\nstderr:\n{proc.stderr[-6000:]}"
     assert "AddressSanitizer" not in proc.stderr and "runtime error" not in proc.stderr, proc.stderr[-6000:]
@@ -219,7 +253,16 @@ print("RESULT " + json.dumps(out))
     out = ref.run_scan(int(round(0.2 / DT)), params=p)
     assert got["spring"] == pytest.approx(float(out["spring"]["position"]), rel=1e-5)
     assert got["ball"] == pytest.approx(float(out["ball"]["position"]), rel=1e-5)
-    assert got["hostile"] != "returned" or True     # the importer must not crash; erroring is fine
+    h.thread.join(timeout=30)       # it records the last connection at its EOF
+    # The hostile half: every kind of reply was actually served to the
+    # wrapper -- a request after the hello, before the instance was freed --
+    # and each session ended in an FMI error the importer could catch, not
+    # in a crash (the sanitizers and the exit code) and not in a success
+    # built from a reply the wrapper should not have trusted.
+    assert [kind for kind, _ in h.seen] == list(Hostile.KINDS), h.seen
+    for kind, ops in h.seen:
+        assert [op for op in ops if op != "terminate"], (kind, ops)
+    assert got["hostile"] == ["FMICallException"] * len(Hostile.KINDS), (got["hostile"], h.seen)
 
 
 VALGRIND = shutil.which("valgrind")

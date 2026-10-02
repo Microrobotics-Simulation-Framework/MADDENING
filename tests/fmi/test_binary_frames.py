@@ -149,7 +149,7 @@ def test_binary_state_round_trip_carries_raw_npz():
             send_message(conn, {"op": "get", "vr": [pos]})
             assert values_of(recv_message(conn)) != before
             send_binary(conn, {"op": "set_state", "n": len(blob)}, blob)
-            assert recv_message(conn) == {"ok": True}
+            assert recv_message(conn)["ok"] is True
             send_message(conn, {"op": "get", "vr": [pos]})
             np.testing.assert_array_equal(values_of(recv_message(conn)), before)
             # the blob is validated exactly like the base64 form
@@ -321,7 +321,7 @@ def test_json_only_client_sees_protocol_one_behaviour_unchanged():
             send_message(conn, {"op": "step", "t": DT, "dt": DT})
             recv_message(conn)
             send_message(conn, {"op": "set_state", "state": snap})
-            assert recv_message(conn) == {"ok": True}
+            assert recv_message(conn)["ok"] is True
             send_message(conn, {"op": "get", "vr": [pos]})
             assert recv_message(conn)["values"] == r["values"][:1]
     assert bridge.binary_frames_served == 0 and bridge.binary_frames_received == 0
@@ -335,8 +335,8 @@ def test_socketless_handle_keeps_the_json_forms():
     assert got == {"ok": True, "values": [0.5]} and type(got["values"][0]) is float
     snap = bridge.handle({"op": "get_state"})["state"]
     assert isinstance(snap, str)
-    assert bridge.handle({"op": "set_state", "state": snap}) == {"ok": True}
-    assert bridge.handle({"op": "set_state", "state": base64.b64decode(snap)}) == {"ok": True}
+    assert bridge.handle({"op": "set_state", "state": snap})["ok"] is True
+    assert bridge.handle({"op": "set_state", "state": base64.b64decode(snap)})["ok"] is True
     assert state_of({"state": snap}) == base64.b64decode(snap)
     assert values_of({"values": [1, 2]}).dtype == np.float64
     # values of any JSON shape that is not a flat list are refused, not mis-read
@@ -518,5 +518,5 @@ def test_handle_accepts_the_dict_recv_message_returns_for_a_binary_frame():
         snap = state_of(bridge.handle({"op": "get_state"}))
         bridge.handle({"op": "set", "vr": [anchor], "values": [0.75]})
         send_binary(a, {"op": "set_state", "n": len(snap)}, snap)
-        assert bridge.handle(recv_message(b)) == {"ok": True}
+        assert bridge.handle(recv_message(b))["ok"] is True
         assert bridge.handle({"op": "get", "vr": [anchor]})["values"] == [0.25]

@@ -140,7 +140,7 @@ def test_set_state_refuses_an_archive_the_bridge_never_writes(served, edit):
     assert _snapshot(bridge, md) == before
     # the unedited archive still restores
     members = _archive_members(bridge)
-    assert _restore(bridge, members) == {"ok": True}
+    assert _restore(bridge, members)["ok"] is True
 
 
 # --------------------------------------------------- the sidecar's door
@@ -189,7 +189,7 @@ def test_an_fmu_state_with_boolean_and_integer_fields_round_trips():
     bridge = FmuTcpBridge(sidecar, md, master_dt=DT)
     try:
         blob = bridge.handle({"op": "get_state"})["state"]
-        assert bridge.handle({"op": "set_state", "state": blob}) == {"ok": True}
+        assert bridge.handle({"op": "set_state", "state": blob})["ok"] is True
     finally:
         bridge.stop()
     sidecar.set_fmu_state(sidecar.get_fmu_state())
@@ -224,7 +224,7 @@ def test_both_restore_doors_refuse_parameters_into_a_model_with_none(gm):
                                                 schema_token=md.instantiation_token,
                                                 params={"nodes": {}, "mappings": {}}))
         own = bridge.handle({"op": "get_state"})["state"]
-        assert bridge.handle({"op": "set_state", "state": own}) == {"ok": True}
+        assert bridge.handle({"op": "set_state", "state": own})["ok"] is True
     finally:
         carrying.stop()
         bridge.stop()

@@ -50,6 +50,25 @@
  * on silence, not on a whole reply: a sidecar that keeps sending is never
  * cut off.
  *
+ * Numbers on the JSON path are written and read in the C locale's
+ * LC_NUMERIC, whatever locale the importer runs under: %.17g and strtod
+ * follow the process's LC_NUMERIC, so under a locale whose decimal
+ * separator is ',' (any GUI tool that calls setlocale(LC_ALL, "") on a
+ * Dutch or German desktop) every doStep sent "dt":0,01, which is not JSON,
+ * and failed.  Each instance holds a C LC_NUMERIC locale (newlocale on
+ * POSIX, _create_locale on Windows) and formats and parses through it
+ * (uselocale around the call on POSIX, the _l functions on Windows).
+ *
+ * State machine.  fmi3GetClock / fmi3SetClock are refused: FMI 3.0 allows
+ * them only in Event Mode, which this FMU does not have
+ * (hasEventMode="false"), and its clocks are constant-interval, their
+ * ticks implied by time.  The bridge holds the rest of the state machine
+ * (after fmi3Terminate it refuses doStep, set and initialize until
+ * fmi3Reset).  The wrapper's own clock, which fmi3DoStep reports as
+ * lastSuccessfulTime when it fails, follows fmi3SetFMUState (the bridge's
+ * reply carries the restored time) and fmi3Reset (only once the reset
+ * succeeded).
+ *
  * Only libc and the FMI 3.0 headers are needed to build:
  *   cc -shared -fPIC -O2 -I<fmi3 headers> maddening_fmu.c -o maddening_fmu.so
  * (see maddening.fmi.package.build_fmu_binary).
@@ -63,10 +82,15 @@
 
 #include <errno.h>
 #include <float.h>
+#include <locale.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#if defined(__APPLE__)
+#  include <xlocale.h>
+#endif
 
 #ifdef _WIN32
 #  include <winsock2.h>
@@ -131,7 +155,83 @@ typedef struct {
     const char *raw;       /* its raw part (points into resp) */
     size_t raw_len;
     double timeout_s;      /* MADDENING_FMU_TIMEOUT; 0 = no deadline */
+    int c_numeric_ready;   /* c_numeric holds a C LC_NUMERIC locale */
+#ifdef _WIN32
+    _locale_t c_numeric;
+#else
+    locale_t c_numeric;
+#endif
 } Instance;
+
+/* ---------------------------------------------------- C-locale numbers */
+
+/* The instance's C LC_NUMERIC locale, made on first use (so an Instance
+ * built by calloc -- the unit tests' -- gets one too).  0 if the system
+ * cannot make one, which instantiation refuses. */
+static int c_numeric_ready(Instance *in) {
+    if (in->c_numeric_ready) return 1;
+#ifdef _WIN32
+    in->c_numeric = _create_locale(LC_NUMERIC, "C");
+    if (!in->c_numeric) return 0;
+#else
+    in->c_numeric = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+    if (in->c_numeric == (locale_t)0) return 0;
+#endif
+    in->c_numeric_ready = 1;
+    return 1;
+}
+
+/* snprintf in the C locale's LC_NUMERIC ("%.17g" writes '.' whatever the
+ * importer's locale).  Falls back to the process locale only if no C
+ * locale could be made, which instantiation has already refused. */
+static int c_snprintf(Instance *in, char *buf, size_t cap, const char *fmt, ...) {
+    va_list ap;
+    int n;
+    va_start(ap, fmt);
+    if (!c_numeric_ready(in)) {
+        n = vsnprintf(buf, cap, fmt, ap);
+    } else {
+#ifdef _WIN32
+        n = _vsnprintf_l(buf, cap, fmt, in->c_numeric, ap);
+        if (cap > 0) buf[cap - 1] = '\0';
+#else
+        locale_t prev = uselocale(in->c_numeric);
+        n = vsnprintf(buf, cap, fmt, ap);
+        uselocale(prev);
+#endif
+    }
+    va_end(ap);
+    return n;
+}
+
+/* strtod in the C locale's LC_NUMERIC ('.' is the decimal point). */
+static double c_strtod(Instance *in, const char *p, char **end) {
+    if (!c_numeric_ready(in)) return strtod(p, end);
+#ifdef _WIN32
+    return _strtod_l(p, end, in->c_numeric);
+#else
+    locale_t prev = uselocale(in->c_numeric);
+    double v = strtod(p, end);
+    uselocale(prev);
+    return v;
+#endif
+}
+
+/* Everything an instance holds, the instance included.  The socket is
+ * closed if it is still open; nothing is sent. */
+static void instance_release(Instance *in) {
+    if (!in) return;
+    if (in->sock != SOCK_INVALID) sock_close(in->sock);
+    free(in->req); free(in->resp);
+    if (in->c_numeric_ready) {
+#ifdef _WIN32
+        _free_locale(in->c_numeric);
+#else
+        freelocale(in->c_numeric);
+#endif
+    }
+    free(in);
+}
 
 /* ------------------------------------------------------------------ util */
 
@@ -216,13 +316,14 @@ static int set_socket_timeout(sock_t s, double seconds) {
 }
 
 /* MADDENING_FMU_TIMEOUT in seconds (REPLY_TIMEOUT_DEFAULT_S when unset or
- * empty); -1 when it is not a plain number from 0 to REPLY_TIMEOUT_MAX_S. */
-static int read_timeout(double *out) {
+ * empty); -1 when it is not a plain number from 0 to REPLY_TIMEOUT_MAX_S.
+ * Read in the C locale: "2.5" means two and a half seconds everywhere. */
+static int read_timeout(Instance *in, double *out) {
     const char *spec = getenv("MADDENING_FMU_TIMEOUT");
     if (!spec || !*spec) { *out = REPLY_TIMEOUT_DEFAULT_S; return 0; }
     char *end;
     errno = 0;
-    double v = strtod(spec, &end);
+    double v = c_strtod(in, spec, &end);
     while (*end == ' ') ++end;
     if (end == spec || *end != '\0' || errno == ERANGE || !(v >= 0.0) || v > REPLY_TIMEOUT_MAX_S)
         return -1;
@@ -457,7 +558,7 @@ static fmi3Status parse_values(Instance *in, double *out, size_t n) {
          * a reply from a bridge of either vintage. */
         int quoted = (*p == '"');
         if (quoted) ++p;
-        out[i] = strtod(p, &end);
+        out[i] = c_strtod(in, p, &end);
         if (end == p) {
             inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: malformed number in reply");
             return fmi3Error;
@@ -552,7 +653,9 @@ static fmi3Status do_set(Instance *in, const char *type, const fmi3ValueReferenc
     w += sprintf(w, ",\"vr\":[");
     for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
     w += sprintf(w, "],\"values\":[");
-    for (size_t i = 0; i < nvalues; ++i) w += sprintf(w, "%s%.17g", i ? "," : "", values[i]);
+    for (size_t i = 0; i < nvalues; ++i)
+        w += c_snprintf(in, w, in->req_cap - (size_t)(w - in->req), "%s%.17g", i ? "," : "",
+                        values[i]);
     w += sprintf(w, "]}");
     if ((size_t)(w - in->req) > FRAME_MAX) {
         inst_log(in, fmi3Error, "logStatusError", too_big);
@@ -724,18 +827,23 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
     in->sock = SOCK_INVALID;
     in->env = instanceEnvironment; in->log = logMessage; in->logging_on = loggingOn;
     snprintf(in->instance_name, sizeof in->instance_name, "%s", instanceName ? instanceName : "");
+    if (!c_numeric_ready(in)) {
+        inst_log(in, fmi3Error, "logStatusError",
+                 "maddening_fmu: cannot make a C LC_NUMERIC locale to read and write numbers in");
+        instance_release(in); return NULL;
+    }
 
     char host[256]; int port = 0;
     if (read_endpoint(resourcePath, host, sizeof host, &port)) {
         inst_log(in, fmi3Error, "logStatusError",
                  "maddening_fmu: no endpoint (resources/endpoint.txt or MADDENING_FMU_ENDPOINT)");
-        free(in); return NULL;
+        instance_release(in); return NULL;
     }
-    if (read_timeout(&in->timeout_s)) {
+    if (read_timeout(in, &in->timeout_s)) {
         inst_log(in, fmi3Error, "logStatusError",
                  "maddening_fmu: MADDENING_FMU_TIMEOUT must be a number of seconds from 0 "
                  "(no deadline) to 1e6");
-        free(in); return NULL;
+        instance_release(in); return NULL;
     }
     /* the hello is answered at once by a live bridge: a short deadline */
     double handshake = in->timeout_s > 0 && in->timeout_s < HANDSHAKE_TIMEOUT_S
@@ -743,21 +851,21 @@ FMI3_Export fmi3Instance fmi3InstantiateCoSimulation(
     in->sock = connect_endpoint(host, port, handshake);
     if (in->sock == SOCK_INVALID) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: cannot connect to sidecar");
-        free(in); return NULL;
+        instance_release(in); return NULL;
     }
     if (bridge_call(in, "{\"op\":\"hello\",\"protocol\":2,\"binary\":true}") != fmi3OK) {
-        sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
+        instance_release(in); return NULL;
     }
     in->binary = hello_negotiated_binary(in);
     if (!token_matches(in, instantiationToken)) {
         inst_log(in, fmi3Error, "logStatusError",
                  "maddening_fmu: instantiation token does not match the sidecar's graph");
-        sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
+        instance_release(in); return NULL;
     }
     /* from here every call may be a long step: the full deadline */
     if (set_socket_timeout(in->sock, in->timeout_s)) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: cannot set the socket deadline");
-        sock_close(in->sock); free(in->req); free(in->resp); free(in); return NULL;
+        instance_release(in); return NULL;
     }
     return (fmi3Instance)in;
 }
@@ -778,11 +886,8 @@ FMI3_Export fmi3Instance fmi3InstantiateScheduledExecution(
 FMI3_Export void fmi3FreeInstance(fmi3Instance instance) {
     Instance *in = (Instance *)instance;
     if (!in) return;
-    if (in->sock != SOCK_INVALID) {
-        bridge_call(in, "{\"op\":\"terminate\"}");
-        sock_close(in->sock);
-    }
-    free(in->req); free(in->resp); free(in);
+    if (in->sock != SOCK_INVALID) bridge_call(in, "{\"op\":\"terminate\"}");
+    instance_release(in);
 }
 
 /* The start time is the instance's time from here on, so the bridge is
@@ -800,7 +905,7 @@ FMI3_Export fmi3Status fmi3EnterInitializationMode(
         return fmi3Error;
     }
     char req[64];
-    snprintf(req, sizeof req, "{\"op\":\"initialize\",\"t\":%.17g}", startTime);
+    c_snprintf(in, req, sizeof req, "{\"op\":\"initialize\",\"t\":%.17g}", startTime);
     fmi3Status st = bridge_call(in, req);
     if (st != fmi3OK) return st;
     in->time = startTime;
@@ -821,11 +926,14 @@ FMI3_Export fmi3Status fmi3Terminate(fmi3Instance instance) {
     return in ? bridge_call(in, "{\"op\":\"terminate\"}") : fmi3Error;
 }
 
+/* The wrapper's clock goes back to zero only once the bridge has reset:
+ * a failed reset leaves the instance, and its time, where they were. */
 FMI3_Export fmi3Status fmi3Reset(fmi3Instance instance) {
     Instance *in = (Instance *)instance;
     if (!in) return fmi3Error;
-    in->time = 0.0;
-    return bridge_call(in, "{\"op\":\"reset\"}");
+    fmi3Status st = bridge_call(in, "{\"op\":\"reset\"}");
+    if (st == fmi3OK) in->time = 0.0;
+    return st;
 }
 
 /* ---- getters and setters: every numeric width goes through double ----
@@ -959,16 +1067,26 @@ FMI3_Export fmi3Status fmi3SetBinary(fmi3Instance instance, const fmi3ValueRefer
     (void)instance; (void)vr; (void)nvr; (void)valueSizes; (void)values; (void)nValues;
     return fmi3Error;
 }
+/* FMI 3.0 allows fmi3GetClock and fmi3SetClock only in Event Mode, which
+ * this FMU does not have (hasEventMode="false"; fmi3EnterEventMode is
+ * refused): its clocks are constant-interval, their ticks implied by
+ * time.  Both used to answer fmi3OK for any value reference, clock or
+ * not, known or not, and fmi3GetClock reported every one inactive. */
+static const char *const no_event_mode =
+    "maddening_fmu: fmi3GetClock / fmi3SetClock are allowed only in Event Mode, which this "
+    "FMU does not have (hasEventMode=\"false\"); its clocks are constant-interval and tick "
+    "with time";
 FMI3_Export fmi3Status fmi3GetClock(fmi3Instance instance, const fmi3ValueReference vr[],
                                     size_t nvr, fmi3Clock values[]) {
-    (void)instance;
-    for (size_t i = 0; i < nvr; ++i) { (void)vr[i]; values[i] = fmi3ClockInactive; }
-    return fmi3OK;
+    (void)vr; (void)nvr; (void)values;
+    inst_log((Instance *)instance, fmi3Error, "logStatusError", no_event_mode);
+    return fmi3Error;
 }
 FMI3_Export fmi3Status fmi3SetClock(fmi3Instance instance, const fmi3ValueReference vr[],
                                     size_t nvr, const fmi3Clock values[]) {
-    (void)instance; (void)vr; (void)nvr; (void)values;
-    return fmi3OK;   /* constant-interval clocks: ticks are implied by time */
+    (void)vr; (void)nvr; (void)values;
+    inst_log((Instance *)instance, fmi3Error, "logStatusError", no_event_mode);
+    return fmi3Error;
 }
 
 FMI3_Export fmi3Status fmi3GetNumberOfVariableDependencies(fmi3Instance instance,
@@ -989,6 +1107,21 @@ FMI3_Export fmi3Status fmi3GetVariableDependencies(
  * on the binary protocol, base64 text on JSON) ---- */
 
 typedef struct { char *blob; size_t n; } FmuState;
+
+/* After a successful set_state the bridge's reply carries the restored
+ * time ({"ok":true,"t":...}); it becomes the wrapper's clock, which
+ * fmi3DoStep reports as lastSuccessfulTime when it fails (it used to
+ * report the time before the restore).  A reply without "t" -- an older
+ * bridge -- leaves the clock as it was.  Passes `st` through. */
+static fmi3Status adopt_restored_time(Instance *in, fmi3Status st) {
+    if (st != fmi3OK || in->resp == NULL || in->resp_binary) return st;
+    const char *p = strstr(in->resp, "\"t\":");
+    if (p == NULL) return st;
+    char *end;
+    double t = c_strtod(in, p + 4, &end);
+    if (end != p + 4 && isfinite(t)) in->time = t;
+    return st;
+}
 
 FMI3_Export fmi3Status fmi3GetFMUState(fmi3Instance instance, fmi3FMUState *FMUState) {
     Instance *in = (Instance *)instance;
@@ -1048,7 +1181,7 @@ FMI3_Export fmi3Status fmi3SetFMUState(fmi3Instance instance, fmi3FMUState FMUSt
         put_be32((unsigned char *)in->req, (unsigned long)hl);
         memcpy(in->req + 4, hdr, (size_t)hl);
         memcpy(in->req + 4 + hl, st->blob, st->n);
-        return bridge_xfer(in, in->req, 4 + (size_t)hl + st->n, 1);
+        return adopt_restored_time(in, bridge_xfer(in, in->req, 4 + (size_t)hl + st->n, 1));
     }
     /* The same whole-frame limit on the JSON path, checked before the blob
      * is scanned or the request buffer grows. */
@@ -1070,7 +1203,7 @@ FMI3_Export fmi3Status fmi3SetFMUState(fmi3Instance instance, fmi3FMUState FMUSt
     }
     if (req_reserve(in, st->n + 64)) return fmi3Fatal;
     sprintf(in->req, "{\"op\":\"set_state\",\"state\":\"%s\"}", st->blob);
-    return bridge_call(in, in->req);
+    return adopt_restored_time(in, bridge_call(in, in->req));
 }
 FMI3_Export fmi3Status fmi3FreeFMUState(fmi3Instance instance, fmi3FMUState *FMUState) {
     (void)instance;
@@ -1255,8 +1388,8 @@ FMI3_Export fmi3Status fmi3DoStep(
         return fmi3Error;
     }
     if (req_reserve(in, 128)) { *lastSuccessfulTime = in->time; return fmi3Fatal; }
-    sprintf(in->req, "{\"op\":\"step\",\"t\":%.17g,\"dt\":%.17g}",
-            currentCommunicationPoint, communicationStepSize);
+    c_snprintf(in, in->req, in->req_cap, "{\"op\":\"step\",\"t\":%.17g,\"dt\":%.17g}",
+               currentCommunicationPoint, communicationStepSize);
     fmi3Status st = bridge_call(in, in->req);
     if (st != fmi3OK) {
         *lastSuccessfulTime = in->time;

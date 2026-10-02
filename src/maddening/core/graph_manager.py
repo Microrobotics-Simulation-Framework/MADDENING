@@ -220,6 +220,23 @@ class _ResolvedParams(NamedTuple):
     mappings: dict
 
 
+def _interface_edge_order(edges, member_order) -> list:
+    """A coupling group's internal *edges* in the order its interface norm sums them.
+
+    By the source's place in *member_order* (the group's sweep), then the
+    source field, the target's place, the target field and the ordinal:
+    the order the L2 and mixed norms sum the members in, so the interface
+    norm, like them, depends neither on the order of the ``add_edge``
+    calls nor on the nodes' names.  Edges with the same endpoints (an
+    additive pair with different transforms) keep their relative order.
+    """
+    place = {nn: i for i, nn in enumerate(member_order)}
+    last = len(place)
+    return sorted(edges, key=lambda e: (place.get(e.source_node, last), e.source_field,
+                                        place.get(e.target_node, last), e.target_field,
+                                        e.ordinal))
+
+
 def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
     """Per-node state fields to accelerate for a coupling group.
 
@@ -1882,9 +1899,13 @@ def _ift_solve_impl(
     hard-coded to 1.0) if the gradient has to match the forward.
 
     ``acceleration`` / ``relaxation`` / ``n_reuse`` are static and
-    control only the forward iterator; the derivative is identical for
-    all of them because the IFT rule depends on ``F`` at ``x*``, not on
-    the path taken to reach ``x*``.  ``linear_solver`` selects the
+    control only the forward iterator.  The derivative *rule* is the same
+    for all of them -- it is ``F``'s, linearised at the iterate the
+    forward returns, whatever path reached it -- so the gradients agree
+    to the extent the returned iterates do: exactly on a map affine in
+    its state with additive constants, and to about the solve's
+    tolerance times the map's curvature otherwise (each acceleration
+    stops on its own iterate).  ``linear_solver`` selects the
     tangent/adjoint solver — see ``_ift_linear_solve``.
     """
     x_star, n_iters, final_res, final_amp, vw = _fixed_point_while(
@@ -1909,11 +1930,15 @@ def _dense_peak(n: int) -> str:
     """Peak working set of the dense adjoint path at ``n`` coupled DOF.
 
     ``_dense`` materialises the ``n x n`` Jacobian and the identity
-    basis ``jacfwd`` builds it from, so the peak is
-    ``2 * n**2 * itemsize``.  Measured against XLA's compiled-module
-    memory analysis on the exact ``_dense`` body below, which
-    reproduces the figure to within a few tens of kilobytes at every
-    size from 64 to 3.6e5 DOF.  float32; ``jax_enable_x64`` doubles it.
+    basis ``jacfwd`` builds it from, so the peak of the transposed
+    solve ``jax.grad`` runs is ``2 * n**2 * itemsize``.  Measured
+    against XLA's compiled-module memory analysis on the exact
+    ``_dense`` body below, which reproduces the figure to within a few
+    tens of kilobytes at every size from 64 to 3.6e5 DOF.  The tangent
+    solve ``jax.jvp`` runs keeps ``I - J`` beside the basis and the
+    Jacobian-vector products, ``3 * n**2 * itemsize`` for a dense
+    coupling Jacobian; the message says so.  float32;
+    ``jax_enable_x64`` doubles it.
 
     This exists so the message a user gets when the Krylov adjoint
     fails names the price of the alternative *at their own N*, rather
@@ -1950,7 +1975,7 @@ _ADJOINT_SOLVE_FAILED_MSG = (
     "MADDENING_IFT_DENSE_SOLVE=1 to force it globally for triage), but "
     "price it first: that path materialises the full Jacobian, so at "
     "{n} coupled DOF it needs {dense_peak} of device memory in float32 "
-    "and grows as N^2.  On a grid-coupled group it is not an escape "
+    "(for jax.grad; half as much again for jax.jvp) and grows as N^2.  On a grid-coupled group it is not an escape "
     "hatch -- it does not run at all.  Raising GMRES's restart will "
     "NOT help: it is already min(N, 50)."
 )
@@ -1993,8 +2018,9 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
     * ``"gmres"`` (default) — lineax GMRES.  Safe non-symmetric solver.
     * ``"dense"`` — materialise ``A`` with ``jacfwd`` and LU-solve.
       O(N^3) compute, and a peak working set of ``2 * N**2 *
-      itemsize``: the Jacobian plus the identity basis ``jacfwd``
-      builds it from.  In float32 that is 0.48 GiB at N = 8,000, 2 GiB
+      itemsize`` in reverse mode: the Jacobian plus the identity basis
+      ``jacfwd`` builds it from (``3 * N**2 * itemsize`` in forward
+      mode, where ``I - J`` is live beside them).  In float32 that is 0.48 GiB at N = 8,000, 2 GiB
       at N = 16,384, 32 GiB at N = 65,536 and, at N ≈ 3.6e5, a single
       523 GB allocation XLA refuses outright (``Out of memory
       allocating 523186046552 bytes``).  Triage fallback for a small
@@ -2735,6 +2761,10 @@ def _run_coupled_block_impl(
         if edge.source_node in group.nodes and edge.target_node in group.nodes:
             group_internal.add(edge)
             group_internal_list.append(edge)
+    # The interface norm sums over these edges, so it reads them in an
+    # order the group fixes, not the order of the ``add_edge`` calls.
+    interface_edges_in_order = _interface_edge_order(
+        group_internal_list, group_node_names)
 
     # Precompute which boundary inputs come from coupling (intra-group) edges
     # per target node -- only these get interface correction
@@ -3178,7 +3208,7 @@ def _run_coupled_block_impl(
         with jax.named_scope("coupling:residual"):
             if use_interface_norm:
                 return coupling_residual_interface(
-                    s_new, s_old, group_internal_list,
+                    s_new, s_old, interface_edges_in_order,
                     group.atol, group.rtol,
                 )
             if use_mixed_norm:
@@ -8402,7 +8432,10 @@ class GraphManager:
               comparison the loop, ``strict_convergence`` and the sysid
               mask make in-graph
               (:func:`~maddening.core.coupling.acceleration.reported_converged`),
-              so all of them give one verdict; ``"error_estimate"`` is
+              so all of them give one verdict on every solve (with
+              ``waveform_iterations > 1`` this flag is the last sweep's,
+              while ``strict_convergence`` raises about any sweep that
+              stopped unconverged at the cap: see below); ``"error_estimate"`` is
               the float32 estimate of a float32 group, not the float64
               product of its factors.  ``False`` means one of two
               things: the group hit ``max_iterations`` *and* the state
@@ -8663,7 +8696,12 @@ class GraphManager:
               Newton correction (exact for an affine map, leading-order
               otherwise, which ``h`` above measures along ``delta``
               only); and the probes -- a field-valued constant is
-              probed along one random direction, and the bound is
+              probed along one random direction (fixed-seed, drawn in
+              the order the map reads its constants, which follows the
+              build order: the same group built in another order can
+              report another bound, 83.5 to 99.5 over the six orders of
+              one three-member Jacobi group, each still at least the
+              true error), and the bound is
               relative to the tangent's norm in the group's norm, so a
               scalar loss whose gradient nearly cancels across the
               state can carry a larger relative error.  One probe per

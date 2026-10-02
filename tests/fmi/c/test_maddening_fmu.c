@@ -84,8 +84,11 @@ static Instance *fake_instance(sock_t s) {
     return in;
 }
 
+/* The tests close the sockets themselves; this frees the rest (the
+ * instance's C numeric locale included). */
 static void free_instance(Instance *in) {
-    free(in->req); free(in->resp); free(in);
+    in->sock = SOCK_INVALID;
+    instance_release(in);
 }
 
 /* Fake sidecar: reads one framed request from `s` (the flag bit and the
@@ -1083,23 +1086,109 @@ static void test_set_fmu_state_counts_the_frame_header(void) {
 
 static void test_read_timeout(void) {
     double t = -1;
+    Instance *in = fake_instance(SOCK_INVALID);
     unsetenv("MADDENING_FMU_TIMEOUT");
-    CHECK(read_timeout(&t) == 0 && t == REPLY_TIMEOUT_DEFAULT_S && t == 600.0);
+    CHECK(read_timeout(in, &t) == 0 && t == REPLY_TIMEOUT_DEFAULT_S && t == 600.0);
     setenv("MADDENING_FMU_TIMEOUT", "", 1);
-    CHECK(read_timeout(&t) == 0 && t == 600.0);
-    setenv("MADDENING_FMU_TIMEOUT", "2.5", 1);
-    CHECK(read_timeout(&t) == 0 && t == 2.5);
+    CHECK(read_timeout(in, &t) == 0 && t == 600.0);
+    setenv("MADDENING_FMU_TIMEOUT", "2.5", 1);       /* '.' whatever the locale */
+    CHECK(read_timeout(in, &t) == 0 && t == 2.5);
     setenv("MADDENING_FMU_TIMEOUT", "0", 1);
-    CHECK(read_timeout(&t) == 0 && t == 0.0);
+    CHECK(read_timeout(in, &t) == 0 && t == 0.0);
     setenv("MADDENING_FMU_TIMEOUT", "1e6", 1);
-    CHECK(read_timeout(&t) == 0 && t == 1e6);
-    const char *bad[] = { "-1", "abc", "nan", "inf", "1e7", "5x", "0x" };
+    CHECK(read_timeout(in, &t) == 0 && t == 1e6);
+    const char *bad[] = { "-1", "abc", "nan", "inf", "1e7", "5x", "0x", "2,5" };
     for (size_t k = 0; k < sizeof bad / sizeof *bad; ++k) {
         setenv("MADDENING_FMU_TIMEOUT", bad[k], 1);
         t = 123;
-        CHECK(read_timeout(&t) == -1 && t == 123);
+        CHECK(read_timeout(in, &t) == -1 && t == 123);
     }
     unsetenv("MADDENING_FMU_TIMEOUT");
+    free_instance(in);
+}
+
+/* ------------------------------------------ numbers in the C locale */
+
+static void test_numbers_are_written_and_read_in_the_c_locale(void) {
+    /* Whatever LC_NUMERIC the importer runs under, the wire carries '.'
+     * decimals: %.17g and strtod go through the instance's C locale.  This
+     * runs under the process locale main() set from the environment;
+     * tests/fmi/test_c_unit.py runs the whole binary under a ',' locale
+     * too, where every check in this file is a check of it.  Here: a
+     * doStep request, an initialize request, a set request and a reply. */
+    fmi3Boolean ev, term, early; fmi3Float64 last;
+    WITH_SERVER("{\"ok\":true,\"t\":0.51}", 0, {
+        CHECK(fmi3DoStep((fmi3Instance)in, 0.5, 0.01, fmi3False, &ev, &term, &early, &last) == fmi3OK);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"step\",\"t\":0.5,\"dt\":0.01}") == 0);
+    WITH_SERVER("{\"ok\":true,\"t\":0.25}", 0, {
+        CHECK(fmi3EnterInitializationMode((fmi3Instance)in, fmi3False, 0, 0.25, fmi3False, 0) == fmi3OK);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"initialize\",\"t\":0.25}") == 0);
+    fmi3ValueReference vr[1] = { 7 };
+    fmi3Float64 v[1] = { 2.5 };
+    WITH_SERVER("{\"ok\":true}", 0, {
+        CHECK(fmi3SetFloat64((fmi3Instance)in, vr, 1, v, 1) == fmi3OK);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Float64\",\"vr\":[7],\"values\":[2.5]}") == 0);
+    fmi3Float64 got[1] = { 0 };
+    WITH_SERVER("{\"ok\":true,\"values\":[0.125]}", 0, {
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 1, got, 1) == fmi3OK && got[0] == 0.125);
+    });
+    /* and the process locale is left as it was */
+    printf("decimal point after the C-locale calls: %s\n", localeconv()->decimal_point);
+}
+
+/* ------------------------------------- the wrapper's clock (lastSuccessfulTime) */
+
+static void test_the_wrappers_clock_follows_set_fmu_state_and_reset(void) {
+    fmi3FMUState st = NULL;
+    fmi3DeserializeFMUState(NULL, (const fmi3Byte *)"QUJDRA==", 8, &st);
+    fmi3Boolean ev, term, early; fmi3Float64 last = -1;
+    /* a restore moves the clock to the restored time, which a refused
+     * doStep then reports as lastSuccessfulTime (it reported the time
+     * before the restore) */
+    WITH_SERVER("{\"ok\":true,\"t\":0.05}", 0, {
+        in->time = 0.1;
+        CHECK(fmi3SetFMUState((fmi3Instance)in, st) == fmi3OK);
+        CHECK(in->time == 0.05);
+    });
+    WITH_SERVER("{\"ok\":false,\"error\":\"ValueError: not a whole multiple\"}", 0, {
+        in->time = 0.05;
+        CHECK(fmi3DoStep((fmi3Instance)in, 0.05, 0.015, fmi3False, &ev, &term, &early, &last) == fmi3Error);
+        CHECK(last == 0.05);
+    });
+    /* an older bridge's reply has no "t": the clock is left alone */
+    WITH_SERVER("{\"ok\":true}", 0, {
+        in->time = 0.1;
+        CHECK(fmi3SetFMUState((fmi3Instance)in, st) == fmi3OK && in->time == 0.1);
+    });
+    /* nor does a refused restore move it */
+    WITH_SERVER("{\"ok\":false,\"error\":\"ValueError: token\",\"t\":9}", 0, {
+        in->time = 0.1;
+        CHECK(fmi3SetFMUState((fmi3Instance)in, st) == fmi3Error && in->time == 0.1);
+    });
+    /* the binary path: the reply is a JSON frame either way */
+    {
+        unsigned char blob[4] = { 'P', 'K', 3, 4 };
+        fmi3FMUState raw = NULL;
+        fmi3DeserializeFMUState(NULL, blob, 4, &raw);
+        WITH_SERVER("{\"ok\":true,\"t\":0.07}", 0, {
+            in->binary = 1; in->time = 0.0;
+            CHECK(fmi3SetFMUState((fmi3Instance)in, raw) == fmi3OK && in->time == 0.07);
+        });
+        fmi3FreeFMUState(NULL, &raw);
+    }
+    fmi3FreeFMUState(NULL, &st);
+    /* reset: the clock goes to zero only once the bridge has reset */
+    WITH_SERVER("{\"ok\":false,\"error\":\"RuntimeError: stopped\"}", 0, {
+        in->time = 0.3;
+        CHECK(fmi3Reset((fmi3Instance)in) == fmi3Error && in->time == 0.3);
+    });
+    WITH_SERVER("{\"ok\":true}", 0, {
+        in->time = 0.3;
+        CHECK(fmi3Reset((fmi3Instance)in) == fmi3OK && in->time == 0.0);
+    });
 }
 
 static void test_a_silent_sidecar_times_out(void) {
@@ -1361,8 +1450,20 @@ static void test_misc_entry_points(void) {
     CHECK(fmi3GetNumberOfContinuousStates(NULL, &n) == fmi3OK && n == 0);
     fmi3ValueReference vr[2] = { 1, 2 };
     fmi3Clock clk[2] = { fmi3ClockActive, fmi3ClockActive };
-    CHECK(fmi3GetClock(NULL, vr, 2, clk) == fmi3OK && clk[0] == fmi3ClockInactive);
-    CHECK(fmi3SetClock(NULL, vr, 2, clk) == fmi3OK);
+    /* no Event Mode, so no fmi3GetClock / fmi3SetClock (they answered
+     * fmi3OK for any value reference, and reported every clock inactive) */
+    {
+        Instance *dead = fake_instance(SOCK_INVALID);
+        g_log_calls = 0;
+        CHECK(fmi3GetClock((fmi3Instance)dead, vr, 2, clk) == fmi3Error);
+        CHECK(g_log_calls == 1 && strstr(g_last_log, "Event Mode") != NULL);
+        CHECK(clk[0] == fmi3ClockActive);                       /* untouched */
+        CHECK(fmi3SetClock((fmi3Instance)dead, vr, 2, clk) == fmi3Error);
+        CHECK(g_log_calls == 2);
+        free_instance(dead);
+    }
+    CHECK(fmi3GetClock(NULL, vr, 2, clk) == fmi3Error);
+    CHECK(fmi3SetClock(NULL, vr, 2, clk) == fmi3Error);
     fmi3Boolean b1, b2, b3, b4, b5; fmi3Float64 t;
     CHECK(fmi3UpdateDiscreteStates(NULL, &b1, &b2, &b3, &b4, &b5, &t) == fmi3OK && !b1 && !b5);
     CHECK(fmi3EnterContinuousTimeMode(NULL) == fmi3Error);
@@ -1377,6 +1478,11 @@ static void test_misc_entry_points(void) {
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
+    /* The locale the environment names (LC_ALL / LC_NUMERIC): test_c_unit.py
+     * runs this binary once more under a ',' decimal-point locale, where
+     * every check below also checks that the wire's numbers ignore it. */
+    setlocale(LC_ALL, "");
+    printf("decimal point in effect: %s\n", localeconv()->decimal_point);
     test_parse_values();
     test_parse_values_non_finite();
     test_read_endpoint();
@@ -1393,6 +1499,8 @@ int main(int argc, char **argv) {
     test_int64_setters_refuse_values_a_double_cannot_carry();
     test_set_fmu_state_counts_the_frame_header();
     test_read_timeout();
+    test_numbers_are_written_and_read_in_the_c_locale();
+    test_the_wrappers_clock_follows_set_fmu_state_and_reset();
     test_a_silent_sidecar_times_out();
     test_fmu_state();
     test_instantiate("deadbeef-0000-4000-8000-000000000001");

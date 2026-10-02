@@ -121,6 +121,7 @@ class FmuBridgeMachine(RuleBasedStateMachine):
         self.binary = True
         self.time = 0.0
         self.stepped = False      # since instantiation / reset: may still initialize
+        self.terminated = False   # fmi3Terminate since instantiation / reset
         self.vr = {name: vr_of(self.md, name) for name in ALL_VARIABLES}
         self.all_vrs = [self.vr[n] for n in ALL_VARIABLES]
         self.snapshots: list[tuple[bytes, bytes, list[float]]] = []
@@ -211,8 +212,15 @@ class FmuBridgeMachine(RuleBasedStateMachine):
                 f64_bytes(values))
         else:
             reply = self._round_trip({"op": "set", "vr": vrs, "values": values})
+        model_reply = self.model.handle({"op": "set", "vr": vrs, "values": values})
+        if self.terminated:
+            # FMI's Terminated state: no set until reset, on both bridges
+            for r in (reply, model_reply):
+                self._refused(r)
+                assert "terminated" in r["error"], r
+            return
         assert reply == {"ok": True}, reply
-        assert self.model.handle({"op": "set", "vr": vrs, "values": values}) == {"ok": True}
+        assert model_reply == {"ok": True}, model_reply
 
     @rule(data=st.data())
     def get_values(self, data):
@@ -258,8 +266,13 @@ class FmuBridgeMachine(RuleBasedStateMachine):
     def step(self, n):
         request = {"op": "step", "t": self.time, "dt": n * DT}
         reply = self._round_trip(request)
-        assert reply["ok"] is True, reply
         model_reply = self.model.handle(dict(request))
+        if self.terminated:
+            for r in (reply, model_reply):
+                self._refused(r)
+                assert "terminated" in r["error"], r
+            return
+        assert reply["ok"] is True, reply
         assert model_reply["ok"] is True, model_reply
         assert reply["t"] == model_reply["t"]
         self.time = float(reply["t"])
@@ -270,7 +283,8 @@ class FmuBridgeMachine(RuleBasedStateMachine):
         """``fmi3EnterInitializationMode``: accepted until the first step."""
         reply = self._round_trip({"op": "initialize", "t": start})
         model_reply = self.model.handle({"op": "initialize", "t": start})
-        assert reply["ok"] is model_reply["ok"] is (not self.stepped), (reply, model_reply)
+        assert reply["ok"] is model_reply["ok"] is (not self.stepped and not self.terminated), (
+            reply, model_reply)
         if reply["ok"]:
             self.time = start
 
@@ -330,8 +344,10 @@ class FmuBridgeMachine(RuleBasedStateMachine):
         else:
             reply = self._round_trip({
                 "op": "set_state", "state": base64.b64encode(blob).decode("ascii")})
-        assert reply == {"ok": True}, reply
-        assert self.model.handle({"op": "set_state", "state": model_blob}) == {"ok": True}
+        model_reply = self.model.handle({"op": "set_state", "state": model_blob})
+        # both replies carry the restored time, and it is the same time
+        assert reply["ok"] is True and model_reply["ok"] is True, (reply, model_reply)
+        assert reply["t"] == model_reply["t"], (reply, model_reply)
         np.testing.assert_array_equal(self._wire_values(self.all_vrs),
                                       np.asarray(captured, dtype=np.float64))
         self.time = float(self._wire_values([self.vr["time"]])[0])
@@ -362,6 +378,7 @@ class FmuBridgeMachine(RuleBasedStateMachine):
         assert self.model.handle({"op": "reset"}) == {"ok": True}
         self.time = 0.0
         self.stepped = False
+        self.terminated = False
 
     @rule(protocol=st.sampled_from((1, 2)), want_binary=st.booleans())
     def reconnect(self, protocol, want_binary):
@@ -375,13 +392,17 @@ class FmuBridgeMachine(RuleBasedStateMachine):
         assert self.model.handle({"op": "reset"}) == {"ok": True}
         self.time = 0.0
         self.stepped = False
+        self.terminated = False
 
     @rule()
     def terminate(self):
-        """``terminate`` is an acknowledgement, not a close: the FMI importer
-        may still call fmi3FreeInstance (and the C wrapper still reads)."""
+        """``terminate`` is not a close: the FMI importer may still read, save
+        and restore the FMU state, reset, and call fmi3FreeInstance (and the
+        C wrapper still reads).  It puts the instance in FMI's Terminated
+        state, which refuses step, set and initialize until reset."""
         assert self._round_trip({"op": "terminate"}) == {"ok": True}
         assert self.model.handle({"op": "terminate"}) == {"ok": True}
+        self.terminated = True
 
     @rule(op=st.sampled_from(("frobnicate", "", "HELLO", "get_stat", "set_stateX")))
     def unknown_op(self, op):
@@ -515,7 +536,7 @@ def test_state_saved_then_restored_returns_the_captured_values():
                 send_message(conn, {"op": "step", "t": (2 + i) * DT, "dt": DT})
                 assert recv_message(conn)["ok"]
             send_binary(conn, {"op": "set_state", "n": len(blob)}, blob)
-            assert recv_message(conn) == {"ok": True}
+            assert recv_message(conn) == {"ok": True, "t": 2 * DT}
             send_message(conn, {"op": "get", "vr": vrs})
             np.testing.assert_array_equal(values_of(recv_message(conn)), captured)
 

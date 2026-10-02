@@ -460,7 +460,7 @@ class TestSnapshotValues:
                                    "state": _archive_with(bridge, kind, owner, key, value)})
             snap = _snapshot_with(sc, kind, owner, key, value)
             if refusal is None:
-                assert reply == {"ok": True}, reply
+                assert reply["ok"] is True, reply
                 sc.set_fmu_state(snap)
                 got = bridge_sc.get_params()[f"{owner}.params.{key}"]
                 assert float(sc.get_params()[f"{owner}.params.{key}"]) == float(got)

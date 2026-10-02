@@ -104,6 +104,45 @@ def _not_tunable_error(name: str, reason: str, current: Any) -> ValueError:
     )
 
 
+def _mapping_not_tunable_error(owner: str, key: str, current: Any) -> ValueError:
+    """The refusal for a snapshot that would install new interface-mapping
+    weights (``params["mappings"][owner][key]``).
+
+    Mapping weights are built from the graph when it is compiled, and are
+    not FMI variables: no ``set`` can reach them, so an FMU-state archive
+    may not change them either.  One that did made the FMU compute a
+    coupling its model description does not describe.
+    """
+    return ValueError(
+        f"FMU state would change the interface-mapping weights "
+        f"{owner!r} / {key!r}, which are not FMI variables: they are built "
+        f"from the graph when it is compiled, and no set can reach them.  "
+        f"The model computes with "
+        f"{np.array2string(np.asarray(current), threshold=8)}; nothing was "
+        "written"
+    )
+
+
+def _parameter_names(params: Optional[dict]) -> dict[str, tuple[str, str]]:
+    """``{"<node>.params.<key>": (node, key)}`` for every leaf of
+    ``params["nodes"]``, resolved by exact name.
+
+    A name is never split: a node's own name may hold ``.params.``
+    (``rig.params.v2``), and splitting ``rig.params.v2.params.elasticity``
+    at the first one named a node ``rig`` that does not exist, so every
+    set of such a parameter was refused as unknown and its fixed-parameter
+    rule was never applied.  Two leaves that would spell the same name
+    (node ``a.params.b`` key ``c`` and node ``a`` key ``b.params.c``) map
+    to ``None`` and are refused by name as ambiguous.
+    """
+    names: dict[str, Any] = {}
+    for node, leaves in ((params or {}).get("nodes") or {}).items():
+        for key in leaves:
+            name = f"{node}.params.{key}"
+            names[name] = None if name in names else (node, key)
+    return names
+
+
 def _same_leaf(a: Any, b: Any) -> bool:
     x, y = np.asarray(a), np.asarray(b)
     return x.shape == y.shape and bool(np.array_equal(x, y))
@@ -582,13 +621,19 @@ class FmuSidecar:
             )
         nodes = self._params.get("nodes", {})
         spec_nodes = (self._param_specs or {}).get("nodes", {})
+        names = _parameter_names(self._params)
         staged: list[tuple[str, str, Any]] = []
         for name, value in updates.items():
-            node, sep, key = name.partition(".params.")
-            if not sep or node not in nodes or key not in nodes[node]:
+            if name not in names:
                 raise KeyError(
                     f"unknown parameter {name!r}; known: {sorted(self.get_params())}",
                 )
+            owner = names[name]
+            if owner is None:
+                raise KeyError(
+                    f"parameter name {name!r} is ambiguous: two parameters of this "
+                    "model spell it (a node name holding '.params.'); rename a node")
+            node, key = owner
             current = nodes[node][key]
             # Checked before the cast, not after: ``jnp.asarray(1e39,
             # dtype=float32)`` is ``inf``, NaN passes straight through, and
@@ -639,8 +684,9 @@ class FmuSidecar:
         parameter missing and none extra; every state leaf and every
         parameter must be finite and representable in the dtype (and have
         the shape) of the live leaf it replaces; a parameter the step
-        cannot read (``SidecarConfig.fixed_params``) may not change; and a
-        restored parameter must lie inside its declared ``ParamSpec``
+        cannot read (``SidecarConfig.fixed_params``) may not change, nor
+        may an interface-mapping weight (``params["mappings"]``), which no
+        FMI variable reaches; and a restored parameter must lie inside its declared ``ParamSpec``
         bounds when the config carries ``param_specs``, unless it is the
         value the parameter holds now or held when the FMU was
         instantiated (:meth:`_check_restored_params`).  A
@@ -726,9 +772,10 @@ class FmuSidecar:
     def _check_restored_params(self, new_params: dict) -> None:
         """Refuse a restored parameter tree that installs what
         :meth:`set_params` could not: a new value for a parameter the step
-        cannot read (``fixed_params``), or a value outside a leaf's declared
-        ``ParamSpec.bounds`` that the parameter neither holds now nor held
-        when this FMU was instantiated.
+        cannot read (``fixed_params``), new interface-mapping weights
+        (``params["mappings"]``, which no FMI variable reaches), or a value
+        outside a leaf's declared ``ParamSpec.bounds`` that the parameter
+        neither holds now nor held when this FMU was instantiated.
 
         The one check of :meth:`set_fmu_state` and of the TCP bridge's
         ``set_state`` (:meth:`maddening.fmi.tcp_bridge.FmuTcpBridge._decode_state`),
@@ -751,14 +798,22 @@ class FmuSidecar:
         """
         live = self._params or {}
         live_nodes = live.get("nodes", {})
+        names = _parameter_names(live)
         for name, reason in self._fixed.items():
-            node, _, key = name.partition(".params.")
-            if key not in live_nodes.get(node, {}):
+            owner = names.get(name)
+            if owner is None:
                 continue
+            node, key = owner
             current = live_nodes[node][key]
             restored = new_params.get("nodes", {}).get(node, {}).get(key, current)
             if not _same_leaf(restored, current):
                 raise _not_tunable_error(name, reason, current)
+        # Every interface-mapping leaf is fixed: no FMI variable reaches it.
+        for owner_name, leaves in (live.get("mappings") or {}).items():
+            for key, current in leaves.items():
+                restored = (new_params.get("mappings") or {}).get(owner_name, {}).get(key, current)
+                if not _same_leaf(restored, current):
+                    raise _mapping_not_tunable_error(owner_name, key, current)
         held = (live, self._initial_params or {})
         installed: dict = {}
         for section, owners in new_params.items():

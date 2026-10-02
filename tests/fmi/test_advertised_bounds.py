@@ -215,7 +215,7 @@ def test_an_fmu_started_outside_its_advertised_bounds_restores_its_own_snapshot(
         assert bridge.handle({"op": "step", "t": 0.0, "dt": 2e-2})["ok"]
         snap = bridge.handle({"op": "get_state"})["state"]
         assert bridge.handle({"op": "step", "t": 2e-2, "dt": 1e-2})["ok"]
-        assert bridge.handle({"op": "set_state", "state": snap}) == {"ok": True}
+        assert bridge.handle({"op": "set_state", "state": snap})["ok"] is True
         k = _vr(md, "s.params.stiffness")
         refused = bridge.handle({"op": "set", "vr": [k], "values": [30.0]})
         assert refused["ok"] is False and "below bound 50.0" in refused["error"]

@@ -342,6 +342,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **FMU export: schema-valid starts, a locale-proof wrapper, the FMI state machine** (MADD-ANO-119, never released): Boolean/integer `start`/`min`/`max` in their type's form and discrete; the C wrapper writes and reads numbers in the C locale; an archive cannot install mapping weights;
+  the token covers starts and bounds; terminate refuses step/set/initialize until reset; `fmi3GetClock`/`SetClock` are `fmi3Error`; `FmuTcpBridge(idle_timeout=None)` waits for ever; a node named `x.params.y` has settable parameters.
+  Action: rebuild FMUs (their tokens change) and re-package them with their bridge's description.
 - **Coupling round-4 audit fixes** (MADD-ANO-113 to 118, new, resolved; 094 extended): the IFT tangent/adjoint is scale-free (it was exactly 0 for an rhs below ~1e-8, since 0.3.0); the float floor weights every read by its measured gain (a squaring ring read its bounds at 0.02-0.2x the truth, flags set) and the report reads the step's count, not the live graph;
   accelerators and the report's residuals, secant and tangents no longer flush below ~1e-31 (converged=True at 7x the threshold; a usable gradient bound of 0.0); fori+Aitken/IQN on 16-bit groups traces; per-node profiling feeds declared inputs; both adaptive steppers share one acceptance rule (`adaptive.step_decision`).
   Action: recompute IFT gradients of small-unit groups or near-minimum losses; re-read `diagnostics=True` bounds; `run_adaptive` now retries a failed attempt at `dt_min` instead of accepting it.

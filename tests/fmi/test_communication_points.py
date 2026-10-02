@@ -134,7 +134,9 @@ def test_restoring_an_fmu_state_moves_the_clock_to_the_snapshot(served):
     assert bridge.handle({"op": "step", "t": 0.0, "dt": 2 * DT})["ok"]
     snap = bridge.handle({"op": "get_state"})["state"]
     assert bridge.handle({"op": "step", "t": 2 * DT, "dt": 3 * DT})["ok"]
-    assert bridge.handle({"op": "set_state", "state": snap}) == {"ok": True}
+    # the reply carries the restored time, which the C wrapper keeps as its
+    # own clock (it reports it as lastSuccessfulTime when a doStep fails)
+    assert bridge.handle({"op": "set_state", "state": snap}) == {"ok": True, "t": 2 * DT}
     assert _time(md, bridge) == 2 * DT
     assert bridge.handle({"op": "step", "t": 5 * DT, "dt": DT})["ok"] is False
     assert bridge.handle({"op": "step", "t": 2 * DT, "dt": DT})["ok"]

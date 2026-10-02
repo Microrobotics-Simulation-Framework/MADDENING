@@ -17,6 +17,7 @@ the child is killed by its own PID if it outlives the bound.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import signal
 import socket
@@ -142,16 +143,18 @@ def test_streams_whose_clients_left_let_the_server_shut_down(tmp_path):
     server = _Server(tmp_path)
     try:
         server.post("/sim/start")
-        clients = {path: server.connect(path) for path in STREAMS}
-        for client in clients.values():
-            for _ in range(2):
-                client.recv(timeout=30)
-        clients.pop("/ws/render").close()
-        time.sleep(0.3)                     # a few frames' time, still running
-        server.post("/sim/stop")
-        time.sleep(0.3)                     # no snapshot is produced from here
-        for client in clients.values():
-            client.close()
+        # Context managers: websockets >= 17.1 deprecates a bare connect().
+        with contextlib.ExitStack() as stack:
+            clients = {path: stack.enter_context(server.connect(path)) for path in STREAMS}
+            for client in clients.values():
+                for _ in range(2):
+                    client.recv(timeout=30)
+            clients.pop("/ws/render").close()
+            time.sleep(0.3)                     # a few frames' time, still running
+            server.post("/sim/stop")
+            time.sleep(0.3)                     # no snapshot is produced from here
+            for client in clients.values():
+                client.close()
         time.sleep(0.3)
         took = server.interrupt()
     finally:
@@ -169,15 +172,14 @@ def test_streams_with_their_clients_still_open_let_the_server_shut_down(tmp_path
     server = _Server(tmp_path)
     try:
         server.post("/sim/start")
-        clients = [server.connect(path) for path in STREAMS]
-        for client in clients:
-            for _ in range(2):
-                client.recv(timeout=30)
-        server.post("/sim/stop")
-        time.sleep(0.3)
-        took = server.interrupt()
-        for client in clients:
-            client.close()
+        with contextlib.ExitStack() as stack:
+            clients = [stack.enter_context(server.connect(path)) for path in STREAMS]
+            for client in clients:
+                for _ in range(2):
+                    client.recv(timeout=30)
+            server.post("/sim/stop")
+            time.sleep(0.3)
+            took = server.interrupt()
     finally:
         server.close()
     assert took is not None, f"shutdown outlived {SHUTDOWN_BOUND_S} s:\n{server.log()[-3000:]}"

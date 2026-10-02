@@ -41,6 +41,12 @@
         }
       ],
       "name": "annotated-doc",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/annotated-doc@0.0.5",
       "type": "library",
       "version": "0.0.5"
@@ -74,6 +80,12 @@
         }
       ],
       "name": "annotated-types",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/annotated-types@0.8.0",
       "type": "library",
       "version": "0.8.0"
@@ -112,6 +124,28 @@
         }
       ],
       "name": "anyio",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "exceptiongroup>=1.0.2; python_version < \"3.11\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "idna>=2.8"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "trio>=0.32.0; extra == \"trio\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing_extensions>=4.16.0; python_version < \"3.15\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "4"
+        }
+      ],
       "purl": "pkg:pypi/anyio@4.15.1",
       "type": "library",
       "version": "4.15.1"
@@ -155,6 +189,12 @@
         }
       ],
       "name": "click",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/click@8.5.0",
       "type": "library",
       "version": "8.5.0"
@@ -193,6 +233,96 @@
         }
       ],
       "name": "contourpy",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "Pillow; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "bokeh; extra == \"bokeh\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "bokeh; extra == \"mypy\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "contourpy[bokeh,docs]; extra == \"mypy\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "contourpy[test-no-images]; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "docutils-stubs; extra == \"mypy\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "matplotlib; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mypy==2.1.0; extra == \"mypy\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "myst-parser; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pre-commit; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-cov; extra == \"test-no-images\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-rerunfailures<16; extra == \"test-no-images\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-xdist; extra == \"test-no-images\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest; extra == \"test-no-images\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "selenium; extra == \"bokeh\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-book-theme; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-copybutton; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "types-Pillow; extra == \"mypy\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "wurlitzer; extra == \"test-no-images\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "21"
+        }
+      ],
       "purl": "pkg:pypi/contourpy@1.4.0",
       "type": "library",
       "version": "1.4.0"
@@ -221,6 +351,40 @@
         }
       ],
       "name": "cycler",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ipython ; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "matplotlib ; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpydoc ; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest ; extra == 'tests'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-cov ; extra == 'tests'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-xdist ; extra == 'tests'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx ; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "7"
+        }
+      ],
       "purl": "pkg:pypi/cycler@0.12.1",
       "type": "library",
       "version": "0.12.1"
@@ -244,6 +408,28 @@
         }
       ],
       "name": "equinox",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax!=0.7.0,!=0.7.1,>=0.4.38"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxtyping>=0.2.20"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "wadler-lindig>=0.1.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "4"
+        }
+      ],
       "purl": "pkg:pypi/equinox@0.13.8",
       "type": "library",
       "version": "0.13.8"
@@ -287,6 +473,140 @@
         }
       ],
       "name": "fastapi",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "annotated-doc>=0.0.2"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "email-validator>=2.0.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "email-validator>=2.0.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "email-validator>=2.0.0; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "fastapi-cli[standard-no-fastapi-cloud-cli]>=0.0.32; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "fastapi-cli[standard]>=0.0.32; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "fastapi-cli[standard]>=0.0.32; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "fastar>=0.9.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httpx<1.0.0,>=0.23.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httpx<1.0.0,>=0.23.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httpx<1.0.0,>=0.23.0; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "itsdangerous>=1.1.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jinja2>=3.1.5; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jinja2>=3.1.5; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jinja2>=3.1.5; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydantic-extra-types>=2.0.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydantic-extra-types>=2.0.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydantic-extra-types>=2.0.0; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydantic-settings>=2.0.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydantic-settings>=2.0.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydantic-settings>=2.0.0; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydantic>=2.9.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "python-multipart>=0.0.18; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "python-multipart>=0.0.18; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "python-multipart>=0.0.18; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyyaml>=5.3.1; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "starlette>=0.46.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.8.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-inspection>=0.4.2"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "uvicorn[standard]>=0.12.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "uvicorn[standard]>=0.12.0; extra == \"standard\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "uvicorn[standard]>=0.12.0; extra == \"standard-no-fastapi-cloud-cli\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "32"
+        }
+      ],
       "purl": "pkg:pypi/fastapi@0.141.1",
       "type": "library",
       "version": "0.141.1"
@@ -310,6 +630,124 @@
         }
       ],
       "name": "fonttools",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "brotli>=1.0.1; platform_python_implementation == \"CPython\" and extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "brotli>=1.0.1; platform_python_implementation == \"CPython\" and extra == \"woff\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "brotlicffi>=0.8.0; platform_python_implementation != \"CPython\" and extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "brotlicffi>=0.8.0; platform_python_implementation != \"CPython\" and extra == \"woff\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "lxml>=4.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "lxml>=4.0; extra == \"lxml\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "lz4>=1.7.4.2; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "lz4>=1.7.4.2; extra == \"graphite\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "matplotlib; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "matplotlib; extra == \"plot\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "munkres; platform_python_implementation == \"PyPy\" and extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "munkres; platform_python_implementation == \"PyPy\" and extra == \"interpolatable\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pycairo; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pycairo; extra == \"interpolatable\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy; platform_python_implementation != \"PyPy\" and extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy; platform_python_implementation != \"PyPy\" and extra == \"interpolatable\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "skia-pathops>=0.5.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "skia-pathops>=0.5.0; extra == \"pathops\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sympy; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sympy; extra == \"symfont\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "uharfbuzz>=0.45.0; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "uharfbuzz>=0.45.0; extra == \"repacker\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "unicodedata2>=18.0.0; python_version <= \"3.15\" and extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "unicodedata2>=18.0.0; python_version <= \"3.15\" and extra == \"unicode\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "xattr; sys_platform == \"darwin\" and extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "xattr; sys_platform == \"darwin\" and extra == \"type1\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "zopfli>=0.1.4; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "zopfli>=0.1.4; extra == \"woff\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "28"
+        }
+      ],
       "purl": "pkg:pypi/fonttools@4.66.0",
       "type": "library",
       "version": "4.66.0"
@@ -333,6 +771,12 @@
         }
       ],
       "name": "h11",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/h11@0.16.0",
       "type": "library",
       "version": "0.16.0"
@@ -366,6 +810,36 @@
         }
       ],
       "name": "idna",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "coverage >= 7.10.0 ; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "hypothesis >= 6.141.1 ; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mypy >= 1.11.2 ; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest >= 8.3.2 ; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ruff >= 0.16.0 ; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ty >= 0.0.37 ; extra == \"all\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "6"
+        }
+      ],
       "purl": "pkg:pypi/idna@3.20",
       "type": "library",
       "version": "3.20"
@@ -397,6 +871,114 @@
         {
           "name": "cdx:python:package:required-extra",
           "value": "tpu"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda12-plugin<=0.11.2,>=0.11.2; extra == \"cuda12-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda12-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda12-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda12\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda13-plugin<=0.11.2,>=0.11.2; extra == \"cuda13-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-cuda13-plugin[with-cuda]<=0.11.2,>=0.11.2; extra == \"cuda13\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-oneapi-plugin[with-oneapi]<=0.11.2,>=0.11.2; extra == \"oneapi\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax-rocm7-plugin==0.11.2.*; extra == \"rocm7-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda12\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda12-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda13\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"cuda13-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"oneapi\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"rocm7-local\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib<=0.11.2,>=0.11.2; extra == \"tpu\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib==0.11.1; extra == \"ci\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxlib==0.11.2; extra == \"minimum-jaxlib\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "kubernetes; extra == \"k8s\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "libtpu==0.0.48.*; extra == \"tpu\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ml_dtypes>=0.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.1"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opt_einsum"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "requests; extra == \"tpu\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy>=1.15"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "xprof; extra == \"xprof\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "26"
         }
       ],
       "purl": "pkg:pypi/jax@0.11.2",
@@ -422,6 +1004,24 @@
         }
       ],
       "name": "jaxlib",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ml_dtypes>=0.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy>=1.14"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "3"
+        }
+      ],
       "purl": "pkg:pypi/jaxlib@0.11.2",
       "type": "library",
       "version": "0.11.2"
@@ -445,6 +1045,16 @@
         }
       ],
       "name": "jaxtyping",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "wadler-lindig>=0.1.3"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "1"
+        }
+      ],
       "purl": "pkg:pypi/jaxtyping@0.3.11",
       "type": "library",
       "version": "0.3.11"
@@ -483,6 +1093,12 @@
         }
       ],
       "name": "kiwisolver",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/kiwisolver@1.5.1",
       "type": "library",
       "version": "1.5.1"
@@ -506,6 +1122,28 @@
         }
       ],
       "name": "lineax",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "equinox>=0.11.10"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jax>=0.10.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jaxtyping>=0.2.24"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.5.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "4"
+        }
+      ],
       "purl": "pkg:pypi/lineax@0.1.1",
       "type": "library",
       "version": "0.1.1"
@@ -534,6 +1172,124 @@
         }
       ],
       "name": "markdown-it-py",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "commonmark~=0.9 ; extra == \"compare\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "coverage ; extra == \"testing\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "gprof2dot ; extra == \"profiling\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ipykernel ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jupyter_sphinx ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "linkify-it-py>=1,<3 ; extra == \"linkify\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "markdown-it-pyrs ; extra == \"compare\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "markdown~=3.4 ; extra == \"compare\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mdit-py-plugins>=0.5.0 ; extra == \"plugins\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mdit-py-plugins>=0.5.0 ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mdurl~=0.1"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mistletoe~=1.0 ; extra == \"compare\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mistune~=3.0 ; extra == \"compare\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "myst-parser ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "panflute~=2.3 ; extra == \"compare\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "psutil ; extra == \"benchmarking\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest ; extra == \"benchmarking\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest ; extra == \"testing\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-benchmark ; extra == \"benchmarking\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-cov ; extra == \"testing\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-regressions ; extra == \"testing\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-timeout ; extra == \"testing\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyyaml ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "requests ; extra == \"testing\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-book-theme~=1.0 ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-copybutton ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-design ; extra == \"rtd\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "28"
+        }
+      ],
       "purl": "pkg:pypi/markdown-it-py@4.2.0",
       "type": "library",
       "version": "4.2.0"
@@ -587,6 +1343,48 @@
         }
       ],
       "name": "matplotlib",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "contourpy>=1.0.1"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "cycler>=0.10"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "fonttools>=4.28.2"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "kiwisolver>=1.3.1"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=1.25"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "packaging>=20.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pillow>=9"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyparsing>=3"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "python-dateutil>=2.7"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "9"
+        }
+      ],
       "purl": "pkg:pypi/matplotlib@3.11.2",
       "type": "library",
       "version": "3.11.2"
@@ -610,6 +1408,12 @@
         }
       ],
       "name": "mdurl",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/mdurl@0.1.2",
       "type": "library",
       "version": "0.1.2"
@@ -638,6 +1442,44 @@
         }
       ],
       "name": "ml_dtypes",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "absl-py; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.0.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.1.0; python_version >= \"3.13\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy>=2.3.0; python_version >= \"3.14\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyink; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pylint>=2.6.0; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-xdist; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "8"
+        }
+      ],
       "purl": "pkg:pypi/ml-dtypes@0.6.0",
       "type": "library",
       "version": "0.6.0"
@@ -684,6 +1526,12 @@
         }
       ],
       "name": "numpy",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/numpy@2.5.3",
       "type": "library",
       "version": "2.5.3"
@@ -700,6 +1548,12 @@
         }
       ],
       "name": "opt_einsum",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/opt-einsum@3.4.0",
       "type": "library",
       "version": "3.4.0"
@@ -726,6 +1580,12 @@
         }
       ],
       "name": "packaging",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/packaging@26.3",
       "type": "library",
       "version": "26.3"
@@ -779,6 +1639,112 @@
         }
       ],
       "name": "pillow",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "arro3-compute; extra == \"test-arrow\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "arro3-core; extra == \"test-arrow\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "coverage>=7.4.2; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "defusedxml; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "defusedxml; extra == \"xmp\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "furo; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "markdown2; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "nanoarrow; extra == \"test-arrow\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "olefile; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "olefile; extra == \"fpx\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "olefile; extra == \"mic\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "olefile; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "packaging; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyarrow; extra == \"test-arrow\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-cov; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-timeout; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-xdist; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "setuptools; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-autobuild; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-copybutton; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-inline-tabs; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx>=8.2; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinxext-opengraph; extra == \"docs\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "trove-classifiers>=2024.10.12; extra == \"tests\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "25"
+        }
+      ],
       "purl": "pkg:pypi/pillow@12.3.0",
       "type": "library",
       "version": "12.3.0"
@@ -822,6 +1788,36 @@
         }
       ],
       "name": "pydantic",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "annotated-types>=0.6.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "email-validator>=2.0.0; extra == 'email'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydantic-core==2.46.5"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.14.1"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-inspection>=0.4.2"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "tzdata; (python_version >= '3.9' and platform_system == 'Windows') and extra == 'timezone'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "6"
+        }
+      ],
       "purl": "pkg:pypi/pydantic@2.13.5",
       "type": "library",
       "version": "2.13.5"
@@ -860,6 +1856,16 @@
         }
       ],
       "name": "pydantic_core",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.14.1"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "1"
+        }
+      ],
       "purl": "pkg:pypi/pydantic-core@2.46.5",
       "type": "library",
       "version": "2.46.5"
@@ -903,6 +1909,16 @@
         }
       ],
       "name": "Pygments",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "colorama>=0.4.6; extra == 'windows-terminal'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "1"
+        }
+      ],
       "purl": "pkg:pypi/pygments@2.21.0",
       "type": "library",
       "version": "2.21.0"
@@ -936,6 +1952,20 @@
         }
       ],
       "name": "pyparsing",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jinja2 ; extra == \"diagrams\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "railroad-diagrams ; extra == \"diagrams\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "2"
+        }
+      ],
       "purl": "pkg:pypi/pyparsing@3.3.3",
       "type": "library",
       "version": "3.3.3"
@@ -975,6 +2005,16 @@
         }
       ],
       "name": "python-dateutil",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "six >=1.5"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "1"
+        }
+      ],
       "purl": "pkg:pypi/python-dateutil@2.9.0.post0",
       "type": "library",
       "version": "2.9.0.post0"
@@ -1028,6 +2068,12 @@
         }
       ],
       "name": "PyYAML",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/pyyaml@6.0.3",
       "type": "library",
       "version": "6.0.3"
@@ -1066,6 +2112,16 @@
         }
       ],
       "name": "pyzmq",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "cffi; implementation_name == \"pypy\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "1"
+        }
+      ],
       "purl": "pkg:pypi/pyzmq@27.2.0",
       "type": "library",
       "version": "27.2.0"
@@ -1094,6 +2150,24 @@
         }
       ],
       "name": "rich",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ipywidgets (>=7.5.1,<9) ; extra == \"jupyter\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "markdown-it-py (>=2.2.0)"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pygments (>=2.13.0,<3.0.0)"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "3"
+        }
+      ],
       "purl": "pkg:pypi/rich@15.0.0",
       "type": "library",
       "version": "15.0.0"
@@ -1137,6 +2211,172 @@
         }
       ],
       "name": "scipy",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "Cython; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "array-api-strict>=2.3.1; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "asv; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "click<8.3.0; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "cython-lint>=0.12.2; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "gmpy2; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "hypothesis>=6.30; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "intersphinx_registry; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jupyterlite-pyodide-kernel; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jupyterlite-sphinx>=0.19.1; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jupytext; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "linkify-it-py; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "matplotlib>=3.5; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "meson; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mpmath; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mypy==1.19.1; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "myst-nb>=1.2.0; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ninja; sys_platform != \"emscripten\" and extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy<2.8,>=2.0.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpydoc; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pooch; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pooch; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pycodestyle; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pydata-sphinx-theme>=0.15.2; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyrefly==0.63.0; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-cov; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-timeout; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest-xdist; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest>=8.0.0; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "ruff>=0.12.0; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scikit-umfpack; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "scipy-doctest>=2.0.0; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-copybutton; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx-design>=0.4.0; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "sphinx<8.2.0,>=5.0.0; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "spin; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "tabulate; extra == \"doc\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "threadpoolctl; extra == \"test\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "types-psutil; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing_extensions; extra == \"dev\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "40"
+        }
+      ],
       "purl": "pkg:pypi/scipy@1.18.1",
       "type": "library",
       "version": "1.18.1"
@@ -1160,6 +2400,12 @@
         }
       ],
       "name": "six",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/six@1.17.0",
       "type": "library",
       "version": "1.17.0"
@@ -1203,6 +2449,48 @@
         }
       ],
       "name": "starlette",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "anyio<5,>=4.0.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httpx2>=2.0.0; extra == 'full'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httpx<0.29.0,>=0.27.0; extra == 'full'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "itsdangerous; extra == 'full'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "jinja2; extra == 'full'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "opentelemetry-api; extra == 'full'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "python-multipart>=0.0.18; extra == 'full'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyyaml; extra == 'full'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.10.0; python_version < '3.13'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "9"
+        }
+      ],
       "purl": "pkg:pypi/starlette@1.7.0",
       "type": "library",
       "version": "1.7.0"
@@ -1251,6 +2539,12 @@
         }
       ],
       "name": "typing_extensions",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/typing-extensions@4.16.0",
       "type": "library",
       "version": "4.16.0"
@@ -1289,6 +2583,16 @@
         }
       ],
       "name": "typing-inspection",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.15.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "1"
+        }
+      ],
       "purl": "pkg:pypi/typing-inspection@0.4.4",
       "type": "library",
       "version": "0.4.4"
@@ -1331,6 +2635,46 @@
         {
           "name": "cdx:python:package:required-extra",
           "value": "standard"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "click>=7.0"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "h11>=0.8"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "httptools>=0.8.0; extra == 'standard'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "python-dotenv>=0.13; extra == 'standard'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pyyaml>=5.1; extra == 'standard'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "typing-extensions>=4.0; python_version < '3.11'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "uvloop>=0.15.1; (sys_platform != 'win32' and (sys_platform != 'cygwin' and platform_python_implementation != 'PyPy')) and extra == 'standard'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "watchfiles>=0.20; extra == 'standard'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "websockets>=13.0; extra == 'standard'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "9"
         }
       ],
       "purl": "pkg:pypi/uvicorn@0.53.0",
@@ -1356,6 +2700,52 @@
         }
       ],
       "name": "wadler_lindig",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "hippogriffe==0.1.0; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocs-include-exclude-files==0.1.0; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocs-ipynb==0.1.0; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocs-material==9.6.7; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocs==1.6.1; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "mkdocstrings[python]==0.28.3; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "numpy; extra == 'dev'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pre-commit; extra == 'dev'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pymdown-extensions==10.14.3; extra == 'docs'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "pytest; extra == 'dev'"
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "10"
+        }
+      ],
       "purl": "pkg:pypi/wadler-lindig@0.1.7",
       "type": "library",
       "version": "0.1.7"
@@ -1399,6 +2789,12 @@
         }
       ],
       "name": "websockets",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "0"
+        }
+      ],
       "purl": "pkg:pypi/websockets@17.1",
       "type": "library",
       "version": "17.1"
@@ -1427,6 +2823,20 @@
         }
       ],
       "name": "zstandard",
+      "properties": [
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "cffi>=2.0.0b; (platform_python_implementation != \"PyPy\" and python_version >= \"3.14\") and extra == \"cffi\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist",
+          "value": "cffi~=1.17; (platform_python_implementation != \"PyPy\" and python_version < \"3.14\") and extra == \"cffi\""
+        },
+        {
+          "name": "maddening:sbom:requires-dist-count",
+          "value": "2"
+        }
+      ],
       "purl": "pkg:pypi/zstandard@0.25.0",
       "type": "library",
       "version": "0.25.0"
@@ -1900,7 +3310,7 @@
       ]
     }
   },
-  "serialNumber": "urn:uuid:2b2902a6-9e5d-56ee-884e-ca0b8ed490d9",
+  "serialNumber": "urn:uuid:6e467bd1-3e67-558e-93b4-d97377a9a454",
   "specVersion": "1.6",
   "version": 1
 }

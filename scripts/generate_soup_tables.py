@@ -529,11 +529,44 @@ def render_benchmarks(benchmarks: dict) -> str:
     return f"{table}\n\n*{len(rows)} benchmarks registered.*"
 
 
+def never_run(packages: list[str]) -> dict[str, list[str]]:
+    """``{package: [paths no CI lane runs]}`` for the packages they touch.
+
+    Read from ``check_anomalies.PATHS_CI_NEVER_RUNS``, the one record of
+    the paths every CI test command ignores, which
+    ``tests/compliance/test_gate_scripts.py`` derives from
+    ``.github/workflows`` and holds equal.  A package maps to
+    ``["tests/<name>"]`` when no lane runs any of it, and to the sub-paths
+    when a lane runs the rest.  This page listed ``tests/viz/`` as a test
+    package, with nothing to say no lane ever ran it (audit_040_p4_4, L1).
+    """
+    out: dict[str, list[str]] = {}
+    for name in packages:
+        root = f"tests/{name}"
+        hits = sorted(
+            path for path in _anomaly_gate.PATHS_CI_NEVER_RUNS
+            if path == root or path.startswith(root + "/")
+            or root.startswith(path.rstrip("/") + "/"))
+        if hits:
+            whole = any(path == root or root.startswith(path.rstrip("/") + "/")
+                        for path in hits)
+            out[name] = [root] if whole else hits
+    return out
+
+
 def render_test_organization(packages: list[str]) -> str:
-    rows = [
-        [f"`tests/{name}/`", TEST_DIRECTORY_SCOPE.get(name, "—")]
-        for name in packages
-    ]
+    unrun = never_run(packages)
+    rows = []
+    for name in packages:
+        scope = TEST_DIRECTORY_SCOPE.get(name, "—")
+        if unrun.get(name) == [f"tests/{name}"]:
+            scope += (f" — **not run by CI**: every test command in "
+                      f"`.github/workflows` passes `--ignore=tests/{name}`, "
+                      f"so nothing in it is verification evidence")
+        elif name in unrun:
+            scope += " — **not run by CI**: " + ", ".join(
+                f"`{path}/`" for path in unrun[name])
+        rows.append([f"`tests/{name}/`", scope])
     return _table(["Directory", "Scope"], rows)
 
 
@@ -566,9 +599,24 @@ def render_test_suite(pyproject: dict, packages: list[str], ci: dict) -> str:
                                       "differs between runs and **is not "
                                       "recorded**"],
         ["Backend", "CPU (GPU tests are not run in CI — MADD-ANO-001)"],
-        ["Test packages", f"{len(packages)} — listed below"],
+        ["Test packages", _test_packages_row(packages)],
     ]
     return _table(["Field", "Value"], rows)
+
+
+def _test_packages_row(packages: list[str]) -> str:
+    unrun = never_run(packages)
+    whole = [name for name in packages if unrun.get(name) == [f"tests/{name}"]]
+    part = [name for name in packages if name in unrun and name not in whole]
+    text = f"{len(packages)} — listed below"
+    if whole:
+        text += (f"; the CI test lanes collect {len(packages) - len(whole)} "
+                 f"of them, and no lane collects "
+                 + ", ".join(f"`tests/{n}/`" for n in whole))
+    if part:
+        text += ("; no lane collects "
+                 + ", ".join(f"`{p}/`" for n in part for p in unrun[n]))
+    return text
 
 
 # --------------------------------------------------------------------

@@ -164,7 +164,9 @@ def _json_reply(value: Any) -> Any:
 def _unrepresentable(value: Any, dtype: Any) -> Optional[str]:
     """Why a JSON *value* cannot be held by a leaf of float ``dtype``, or
     ``None``: a finite number the dtype overflows to an infinity (``1e39``
-    into ``float32``).
+    into ``float32``), or a non-zero one it underflows to zero (``1e-50``),
+    which loses the value as entirely.  One that rounds to a subnormal
+    keeps its sign and magnitude and is held.
 
     Asked *before* ``jnp.asarray(value, dtype=...)``, because that cast is
     where NumPy says so -- a ``RuntimeWarning`` ("overflow encountered in
@@ -184,7 +186,8 @@ def _unrepresentable(value: Any, dtype: Any) -> Optional[str]:
         return None
     with np.errstate(over="ignore", invalid="ignore"):
         narrow = wide.astype(dt)
-    if bool(np.any(np.isfinite(wide) & ~np.isfinite(narrow))):
+    if bool(np.any(np.isfinite(wide) & ~np.isfinite(narrow))) \
+            or bool(np.any((wide != 0) & (narrow == 0))):
         return f"value does not fit its type {dt}"
     return None
 

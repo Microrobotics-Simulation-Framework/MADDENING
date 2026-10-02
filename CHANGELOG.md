@@ -325,6 +325,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **FMU export, round-4 audit** (MADD-ANO-075, 076, never released): a new instance starts at the description's start values (it inherited the last one's state, parameters and time); inputs `selected_inputs` leaves out are held at zero (`held_inputs`); `SidecarConfig.input_resolver` steps as `GraphManager.step`; advertised min/max hold without `param_specs`.
+  `dt`/`t`/values must be numbers; `doStep` must start at the FMU's time, which `fmi3EnterInitializationMode` sets; the wrapper refuses a reply longer than `nValues` and an empty token, drops a half-sent frame and sets `TCP_NODELAY` (every call took >=40 ms).
+  Action: pass `input_resolver=gm._resolve_external_inputs`; build the sidecar and the description from the same parameters; open one connection per instance.
 - **Coupling harness findings** (MADD-ANO-070 to 074, new, resolved): a group's integer/boolean fields are those the pass gives at the returned state, on both solvers (`ift` returned first-pass flags and froze edge-carried ones); predictor + mixed norm with such a field, Jacobi with a flux-reading producer, `reset_state`/`set_node_state` after `jax.grad`, under-relaxed `fixed` stopping on its first pass (~2x short) and the adaptive norm on integer leaves all fixed.
   `boundary_interpolation`'s "bit-identical under Jacobi" is round-off; a near-1 rate's noise-rejected ratio falls back to the raw test (MADD-ANO-005).  Action: re-run `run_adaptive*` results from graphs holding integer leaves.
 - **`hold_undetermined` no longer returns a fit's parameters above the loss it reached** (MADD-ANO-069, never released): a direction is held only if the

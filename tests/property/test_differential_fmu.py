@@ -10,7 +10,9 @@ bridge's own dispatch, so a defect in that dispatch is on both sides.  Here
 the three paths share nothing but the compiled step.
 
 For generated sequences of ``set`` / ``get`` / ``step`` / ``get_state`` /
-``set_state`` / ``reset``:
+``set_state`` / ``reset`` / ``initialize`` / free-and-re-instantiate (a new
+connection claiming the bridge's instance slot), refused steps and
+misspelt inputs:
 
 * every value -- time, inputs, parameters, outputs -- and the full state
   (``_meta`` included) agree **bit for bit** across the three after every
@@ -24,12 +26,24 @@ For generated sequences of ``set`` / ``get`` / ``step`` / ``get_state`` /
   misshapen, missing or extra member is refused by the bridge's
   ``set_state`` and by ``FmuSidecar.set_fmu_state`` with the **same**
   message, and changes nothing on either;
-* a refusal leaves all three paths where they were.
+* a refusal leaves all three paths where they were;
+* a re-instantiated FMU is a fresh one: the bridge's new instance agrees
+  with a fresh sidecar and a reset graph (it used to carry the previous
+  instance's state, parameters, inputs and time over);
+* a step whose communication point is not the FMU's time, or is not a
+  number, is refused with nothing advanced, and ``initialize`` moves the
+  clock until the first step only;
+* an external input the model description does not export
+  (``selected_inputs``) is held at zero: the bridge (through the resolver it
+  builds from its description), the sidecar (through the graph's own
+  ``_resolve_external_inputs``) and ``GraphManager.step`` (which zero-fills
+  an omitted input) agree, and a misspelt input name is refused by all
+  three.
 
-Inputs are the bridge's alone to check: the sidecar and the graph take
-external inputs as arrays and validate nothing, so a refused input is
-checked against the bridge's documented contract (finite, and representable
-in the input's dtype) and the other two paths simply do not apply it.
+A refused *wire* value is the bridge's alone to check: the sidecar and the
+graph take external inputs as arrays, so a refused input is checked
+against the bridge's documented contract (finite, and representable in the
+input's dtype) and the other two paths simply do not apply it.
 
 Tolerance: none -- the three paths call one compiled computation with the
 same arguments.
@@ -44,7 +58,9 @@ from __future__ import annotations
 import base64
 import io
 import math
+import re
 import socket
+import warnings
 from typing import Any, Optional
 
 import jax.numpy as jnp
@@ -128,7 +144,26 @@ def _coupled():
     return gm
 
 
-GRAPHS = {"plant": _plant, "multirate": _multirate, "coupled": _coupled}
+def _held():
+    """An input the FMU does not export, read by a node whose "input
+    missing" branch differs from zero: a ball's ``table_position``.  The
+    graph zero-fills it (the ball bounces on a table at height 0); a path
+    that leaves it out lets the ball fall through the floor."""
+    gm = GraphManager()
+    gm.add_node(BallNode("ball", 0.01, initial_position=1.2, elasticity=0.7))
+    gm.add_node(SpringDamperNode("spring", 0.01, stiffness=30.0, damping=2.0,
+                                 rest_length=0.4, initial_position=0.5))
+    gm.add_external_input("ball", "table_position")
+    gm.add_external_input("spring", "anchor_position")
+    gm.compile()
+    return gm
+
+
+GRAPHS = {"plant": _plant, "multirate": _multirate, "coupled": _coupled, "held": _held}
+
+#: ``build_model_description`` keyword arguments per family: ``held``
+#: exports the spring's input and holds the ball's at zero.
+DESCRIPTIONS: dict[str, dict] = {"held": {"selected_inputs": ["spring.anchor_position"]}}
 
 
 # ---------------------------------------------------------------------------
@@ -165,10 +200,14 @@ class Model:
         return f"Model({self.label})"
 
     @classmethod
-    def build(cls, factory, label: str = "model") -> "Model":
+    def build(cls, factory, label: str = "model", **md_kw) -> "Model":
         ref = factory()
-        md = build_model_description(ref, model_name="Diff",
-                                     model_identifier=MODEL_IDENTIFIER)
+        with warnings.catch_warnings():
+            # selected_inputs that hold an input at zero say so; expected here
+            warnings.filterwarnings("ignore", message=".*will be held at zero",
+                                    category=UserWarning)
+            md = build_model_description(ref, model_name="Diff",
+                                         model_identifier=MODEL_IDENTIFIER, **md_kw)
         direct = factory()
         return cls(ref, md, direct,
                    {n: dict(f) for n, f in ref._state.items()},  # noqa: SLF001
@@ -181,7 +220,12 @@ class Model:
     def variables(self, causality: str):
         return [v for v in self.md.variables if v.causality == causality and not v.is_clock]
 
-    def sidecar(self) -> FmuSidecar:
+    def sidecar(self, *, resolver: bool = True) -> FmuSidecar:
+        """The in-process path's sidecar: with the graph's own input
+        resolver, as a sidecar built for a graph should be.  The bridge's
+        is built *without* one (``resolver=False``), so the bridge's own
+        description-derived resolver is what holds an unexported input at
+        zero on that path -- an independent implementation of the rule."""
         return FmuSidecar(SidecarConfig(
             schema_token=self.md.instantiation_token,
             step_fn=self.ref._compiled_step,                       # noqa: SLF001
@@ -189,7 +233,13 @@ class Model:
             params=_copy_params(self.initial_params),
             param_specs=self.ref.param_specs(),
             fixed_params=self.md.fixed_parameters,
+            input_resolver=self.ref._resolve_external_inputs if resolver else None,  # noqa: SLF001
         ))
+
+    def declared_inputs(self) -> list[tuple[str, str]]:
+        """Every external input the graph reads: exported and held."""
+        return sorted((ei.target_node, ei.target_field)
+                      for ei in self.ref._external_inputs)          # noqa: SLF001
 
 
 def _nan_canonical(values: np.ndarray) -> np.ndarray:
@@ -219,16 +269,18 @@ class Paths:
             self.bridge, self.conn = model.served
             assert self._wire({"op": "reset"}) == {"ok": True}
         else:
-            self.bridge = FmuTcpBridge(model.sidecar(), model.md, master_dt=model.dt)
+            self.bridge = FmuTcpBridge(model.sidecar(resolver=False), model.md,
+                                       master_dt=model.dt)
             self.bridge.start()
-            host, port = self.bridge.endpoint.split(":")
-            self.conn = socket.create_connection((host, int(port)), timeout=30)
-            assert self._wire({"op": "hello", "protocol": 2, "binary": False})["ok"]
+            self.conn = self._connect()
             if persistent:
                 model.served = (self.bridge, self.conn)
         self.side = model.sidecar()
         self.side_inputs = self._zero_inputs()
         self.side_time = 0.0
+        #: Has the FMU stepped since it was instantiated or reset?  Only
+        #: then does ``initialize`` still move its clock.
+        self.stepped = False
         gm = model.direct
         gm.reset_state()
         gm.params = _copy_params(model.initial_params)
@@ -254,6 +306,15 @@ class Paths:
             node, field = var.node_field()
             out.setdefault(node, {})[field] = jnp.zeros(var.shape or (), dtype=var.dtype)
         return out
+
+    def _connect(self) -> socket.socket:
+        """A new connection past its hello: a new FMU instance."""
+        host, port = self.bridge.endpoint.split(":")
+        conn = socket.create_connection((host, int(port)), timeout=30)
+        send_message(conn, {"op": "hello", "protocol": 2, "binary": False})
+        reply = recv_message(conn)
+        assert reply is not None and reply["ok"], reply
+        return conn
 
     def _wire(self, message: dict) -> dict:
         send_message(self.conn, message)
@@ -451,7 +512,38 @@ def op_step(paths: Paths, n: int) -> None:
         paths.m.direct.step(external_inputs=paths.gm_inputs)
     paths.side_time = paths.side_time + n * paths.m.dt
     paths.gm_time = paths.side_time
+    paths.stepped = True
     assert reply["t"] == paths.side_time, (reply["t"], paths.side_time)
+
+
+def op_bad_step(paths: Paths, kind: str, k: int) -> None:
+    """A step the FMU must refuse, with nothing advanced on any path: a
+    communication point ``k`` master steps away from the FMU's time (FMI:
+    a step starts where the previous one ended), or a time that is not a
+    number.  The other two paths are not stepped at all."""
+    request: dict = {"op": "step", "t": paths.side_time, "dt": paths.m.dt}
+    if kind == "jump":
+        request["t"] = paths.side_time + k * paths.m.dt
+    elif kind == "string_t":
+        request["t"] = str(paths.side_time)
+    elif kind == "bool_dt":
+        request["dt"] = True
+    else:
+        request["dt"] = str(paths.m.dt)
+    reply = paths._wire(request)
+    note(f"bad step {kind} {request} -> {reply}")
+    assert reply["ok"] is False, (kind, reply)
+
+
+def op_initialize(paths: Paths, start: float) -> None:
+    """``fmi3EnterInitializationMode``: the start time is the FMU's time,
+    accepted until its first step since instantiation or reset."""
+    reply = paths._wire({"op": "initialize", "t": start})
+    if paths.stepped:
+        assert reply["ok"] is False and "has stepped" in reply["error"], reply
+        return
+    assert reply == {"ok": True, "t": start}, reply
+    paths.side_time = paths.gm_time = start
 
 
 def op_get_state(paths: Paths) -> None:
@@ -477,13 +569,55 @@ def op_set_state(paths: Paths, index: int) -> None:
     paths.gm_time = t
 
 
-def op_reset(paths: Paths) -> None:
-    assert paths._wire({"op": "reset"}) == {"ok": True}
+def _fresh_oracles(paths: Paths) -> None:
+    """The sidecar and the graph where a freshly instantiated FMU starts."""
     paths.side = paths.m.sidecar()
     paths.side_inputs, paths.side_time = paths._zero_inputs(), 0.0
     paths.m.direct.reset_state()
     paths.m.direct.params = _copy_params(paths.m.initial_params)
     paths.gm_inputs, paths.gm_time = paths._zero_inputs(), 0.0
+    paths.stepped = False
+
+
+def op_reset(paths: Paths) -> None:
+    assert paths._wire({"op": "reset"}) == {"ok": True}
+    _fresh_oracles(paths)
+
+
+def op_reinstantiate(paths: Paths) -> None:
+    """``fmi3FreeInstance`` then ``fmi3InstantiateCoSimulation``: the C
+    wrapper closes its connection and opens a new one, which claims the
+    bridge's instance slot.  FMI starts the new instance at the model
+    description's start values -- which is where a fresh sidecar and a
+    reset graph are -- so the oracle needs nothing but those."""
+    paths.conn.close()
+    paths.conn = paths._connect()
+    if paths.persistent:
+        paths.m.served = (paths.bridge, paths.conn)
+    _fresh_oracles(paths)
+
+
+def op_misspelt_input(paths: Paths, pick: int, how: str) -> None:
+    """An input under a name the graph does not declare: ``GraphManager.step``
+    refuses it, the sidecar refuses it with the graph's own words (it has
+    the graph's resolver), and the bridge's sidecar refuses it through the
+    resolver the bridge built.  Nothing advances anywhere."""
+    declared = paths.m.declared_inputs()
+    node, field = declared[pick % len(declared)]
+    leaf = paths.m.ref._default_external_inputs()[node][field]      # noqa: SLF001
+    if how == "node":
+        node = node + "x"
+    else:
+        field = field + "_"
+    bad = {node: {field: leaf}}
+    with pytest.raises(ValueError, match="does not declare") as graph_refusal:
+        paths.m.direct.step(external_inputs=bad)
+    with pytest.raises(ValueError) as side_refusal:
+        paths.side.step(bad)
+    assert str(side_refusal.value) == str(graph_refusal.value)
+    bridge_side = paths.bridge._sidecar                             # noqa: SLF001
+    with pytest.raises(ValueError, match=re.escape(f"names ['{node}.{field}']")):
+        bridge_side._advanced(bridge_side.state, bad)               # noqa: SLF001
 
 
 # -- edited snapshots ---------------------------------------------------------
@@ -648,8 +782,11 @@ def _set_request(draw, model: Model):
     return ("set", names, values)
 
 
+BAD_STEPS = ("jump", "string_t", "bool_dt", "string_dt")
+
+
 def _ops(model: Model):
-    return st.lists(st.one_of(
+    ops = [
         _set_request(model),
         st.tuples(st.just("step"), st.integers(min_value=1, max_value=3)),
         st.just(("get_state",)),
@@ -657,7 +794,15 @@ def _ops(model: Model):
         st.just(("reset",)),
         st.tuples(st.just("bad_state"), st.sampled_from(BAD_STATES),
                   st.integers(min_value=0, max_value=7)),
-    ), min_size=1, max_size=10)
+        st.just(("reinstantiate",)),
+        st.tuples(st.just("bad_step"), st.sampled_from(BAD_STEPS),
+                  st.sampled_from([-2, -1, 1, 2, 1000])),
+        st.tuples(st.just("initialize"), st.sampled_from([0.0, 0.5, 2.0])),
+    ]
+    if model.declared_inputs():
+        ops.append(st.tuples(st.just("misspelt_input"), st.integers(min_value=0, max_value=7),
+                             st.sampled_from(["node", "field"])))
+    return st.lists(st.one_of(*ops), min_size=1, max_size=10)
 
 
 def run_sequence(model: Model, ops: list, *, persistent: bool = False) -> None:
@@ -666,6 +811,7 @@ def run_sequence(model: Model, ops: list, *, persistent: bool = False) -> None:
         paths.assert_agree("at start")
         for op in ops:
             note(f"op: {op}")
+            event(f"op {op[0]}")
             if op[0] == "set":
                 op_set(paths, op[1], op[2])
             elif op[0] == "step":
@@ -680,6 +826,14 @@ def run_sequence(model: Model, ops: list, *, persistent: bool = False) -> None:
                 op_reset(paths)
             elif op[0] == "bad_state":
                 op_set_bad_state(paths, op[1], op[2])
+            elif op[0] == "reinstantiate":
+                op_reinstantiate(paths)
+            elif op[0] == "bad_step":
+                op_bad_step(paths, op[1], op[2])
+            elif op[0] == "initialize":
+                op_initialize(paths, op[1])
+            elif op[0] == "misspelt_input":
+                op_misspelt_input(paths, op[1], op[2])
             paths.assert_agree(f"after {op[0]}")
     finally:
         paths.close()
@@ -697,7 +851,7 @@ def _stop_served_bridges():
 
 def _model(name: str) -> Model:
     if name not in _MODELS:
-        _MODELS[name] = Model.build(GRAPHS[name], name)
+        _MODELS[name] = Model.build(GRAPHS[name], name, **DESCRIPTIONS.get(name, {}))
     return _MODELS[name]
 
 

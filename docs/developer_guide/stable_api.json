@@ -40,8 +40,8 @@
           "name": "rtol"
         },
         {
-          "annotation": "float",
-          "default": "1e-08",
+          "annotation": "Optional[float]",
+          "default": "None",
           "kind": "KEYWORD_ONLY",
           "name": "atol"
         },
@@ -111,8 +111,8 @@
           "name": "rtol"
         },
         {
-          "annotation": "float",
-          "default": "1e-08",
+          "annotation": "Optional[float]",
+          "default": "None",
           "kind": "KEYWORD_ONLY",
           "name": "atol"
         },

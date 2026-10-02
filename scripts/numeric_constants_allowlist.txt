@@ -38,22 +38,22 @@ src/maddening/core/graph_manager.py _ift_linear_solve finfo.eps  # dimensionless
 src/maddening/core/graph_manager.py GraphManager.add_coupling_group 1e-6  # dimensionless: tolerance, compared with a relative norm
 src/maddening/core/graph_manager.py GraphManager._make_coupling_group 1e-6  # dimensionless: tolerance, compared with a relative norm
 src/maddening/core/graph_manager.py GraphManager.auto_couple 1e-6  # dimensionless: tolerance, compared with a relative norm
-src/maddening/core/graph_manager.py GraphManager.run_adaptive 1e-6  # state units: atol, the caller's absolute error floor (scipy solve_ivp's default); absolute by design, registered as MADD-ANO-122
+src/maddening/core/graph_manager.py GraphManager.run_adaptive 1e-6  # state units: atol, the caller's absolute error floor (scipy solve_ivp's default); absolute by design, registered as MADD-ANO-124
 src/maddening/core/graph_manager.py GraphManager.run_adaptive 1e-3  # dimensionless: rtol, a fraction of max(|fine|, |coarse|)
-src/maddening/core/graph_manager.py GraphManager.run_adaptive 1e-8  # seconds: dt_min, the caller's timestep floor; absolute by design, registered as MADD-ANO-122
-src/maddening/core/graph_manager.py GraphManager.run_adaptive_scan 1e-6  # state units: atol, as run_adaptive; registered as MADD-ANO-122
+src/maddening/core/graph_manager.py GraphManager.run_adaptive 1e-8  # seconds: dt_min, the caller's timestep floor; absolute by design, registered as MADD-ANO-124
+src/maddening/core/graph_manager.py GraphManager.run_adaptive_scan 1e-6  # state units: atol, as run_adaptive; registered as MADD-ANO-124
 src/maddening/core/graph_manager.py GraphManager.run_adaptive_scan 1e-3  # dimensionless: rtol, a fraction of max(|fine|, |coarse|)
-src/maddening/core/graph_manager.py GraphManager.run_adaptive_scan 1e-8  # seconds: dt_min, as run_adaptive; registered as MADD-ANO-122
+src/maddening/core/graph_manager.py GraphManager.run_adaptive_scan 1e-8  # seconds: dt_min, as run_adaptive; registered as MADD-ANO-124
 
 # --- parameters, simulation helpers ------------------------------------------
 src/maddening/core/params.py ParamSpec._log_floor finfo.tiny  # dtype range: the smallest positive normal exp(u) may take when the bound is exactly zero; a nonzero bound uses 2 ulps of itself instead
 src/maddening/core/params.py ParamSpec._optimiser_interval.inward 1e-6  # dimensionless: u is an unconstrained log/logit coordinate, and this is a fraction of max(1, |u|)
-src/maddening/core/simulation/adaptive.py AdaptiveConfig 1e-6  # state units: atol, as GraphManager.run_adaptive; registered as MADD-ANO-122
+src/maddening/core/simulation/adaptive.py AdaptiveConfig 1e-6  # state units: atol, as GraphManager.run_adaptive; registered as MADD-ANO-124
 src/maddening/core/simulation/adaptive.py AdaptiveConfig 1e-3  # dimensionless: rtol, a fraction of max(|fine|, |coarse|)
-src/maddening/core/simulation/adaptive.py AdaptiveConfig 1e-8  # seconds: dt_min, as GraphManager.run_adaptive; registered as MADD-ANO-122
+src/maddening/core/simulation/adaptive.py AdaptiveConfig 1e-8  # seconds: dt_min, as GraphManager.run_adaptive; registered as MADD-ANO-124
 src/maddening/core/simulation/adaptive.py step_decision 1e-10  # dimensionless: error_norm is already divided by atol + rtol|x|; the floor only keeps a zero error's growth factor finite, and the clip makes it max_factor
-src/maddening/core/simulation/calibration.py tune_coupling_params 1e-3  # units of state_metric's output: an absolute accuracy threshold on a deprecated API (removed in 0.5.0); registered as MADD-ANO-123
-src/maddening/core/simulation/calibration.py calibrate 1e-6  # loss units: an absolute stopping threshold on a deprecated API (removed in 0.5.0); registered as MADD-ANO-123
+src/maddening/core/simulation/calibration.py tune_coupling_params 1e-3  # units of state_metric's output: an absolute accuracy threshold on a deprecated API (removed in 0.5.0); registered as MADD-ANO-125
+src/maddening/core/simulation/calibration.py calibrate 1e-6  # loss units: an absolute stopping threshold on a deprecated API (removed in 0.5.0); registered as MADD-ANO-125
 src/maddening/core/simulation/implicit.py implicit_euler_step.newton_step 1e-10  # dimensionless: the residual contract R = x_new - x_old - dt f makes dR/dx = I - dt df/dx, and this is 1e-10 of its identity term
 src/maddening/core/simulation/profiler.py ProfileReport.__str__ 1e-10  # milliseconds, display only: keeps a printed percentage finite for a zero mean step time
 src/maddening/core/solver_utils.py ift_linear_solve 1e-6  # dimensionless: rtol, relative to the framed right-hand side

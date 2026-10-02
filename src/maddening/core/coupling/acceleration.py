@@ -1050,6 +1050,21 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: intermediates it computes, not reads -- can exceed any fixed number
 #: of ulps of its output's magnitude where nothing outside the node can
 #: see it.
+#:
+#: **The counted floor's two assumptions, and what breaking them costs.**
+#: The count is only as good as two things nothing outside a node can
+#: verify: that every node declares ``update_evaluations()`` truthfully,
+#: and that no node cancels internally.  Measured on 154 fixture
+#: configurations of the 0.4.0 floor study (float32 and float64, CPU): a
+#: node taking 2000 sub-steps per update but declaring one evaluation read
+#: its bound at 0.26-0.60x the true distance with ``spectral_usable=True``,
+#: and a node forming its output as the difference of two terms about
+#: 1000x its size read 0.02-0.65x, flag set.  In the other direction,
+#: because the count adds gain magnitudes, mixed-sign chains read very
+#: conservatively (up to 1e7x the true distance) and sub-cycled groups
+#: 1e3-1e5x, as above.  A measured, opt-in ``diagnostics="rounding"``
+#: level, estimating the map's rounding rather than counting it, is
+#: planned for 0.5.0.
 PRECISION_FLOOR_ULPS = 4.0
 
 

@@ -229,6 +229,55 @@ exceed it; declare it.  The floor models the map's rounding; a node
 whose update cancels catastrophically inside itself can exceed it
 whatever it declares.
 
+**What the counted floor assumes, with numbers.**  The count trusts every
+node to declare `update_evaluations()` truthfully and not to cancel inside
+itself; nothing outside the node can check either.  Measured on 154 fixture
+configurations of the 0.4.0 floor study (float32 and float64, CPU):
+
+| what breaks the assumption | bound / true distance | `spectral_usable` |
+|---|---|---|
+| a node taking 2000 sub-steps per update, declaring one evaluation | 0.26-0.60x | `True` |
+| a node forming its output as the difference of two terms ~1000x its size | 0.02-0.65x | `True` |
+| (the other direction) mixed-sign Gauss-Seidel chains | up to 1e7x | `True` |
+| (the other direction) sub-cycled groups | 1e3-1e5x | `True` |
+
+The first two read *under* the true distance with the flag set: the flag
+says the bound is the counted floor's, not that the count is right.  The
+last two are valid and too loose to read.  A measured, opt-in
+`diagnostics="rounding"` level, which estimates the map's rounding instead
+of counting it, is planned for 0.5.0.
+
+### Fields in the subnormal range
+
+The coupling runtime's own arithmetic -- the norms, the accelerators, the
+IFT solve and the report -- works in exact power-of-two frames
+(`maddening.core._pow2_frame`), so a group gives the same passes, verdict
+and bounds at any power-of-two scale down to the subnormal range.  A node's
+`update` is not framed.  Below `finfo(dtype).tiny / finfo(dtype).eps` a
+change of one ulp of a field is smaller than the smallest normal number,
+which XLA's CPU backend flushes to zero: the node's arithmetic on that
+field loses resolution, and a field whose magnitude is below `tiny` itself
+reads as exactly zero in the group's norm.
+
+| dtype | `tiny / eps` (the warning threshold) | `tiny` (reads as zero below) |
+|---|---|---|
+| float32 | 9.9e-32 | 1.2e-38 |
+| bfloat16 | 1.5e-36 | 1.2e-38 |
+| float16 | 0.0625 | 6.1e-5 |
+| float64 | 1.0e-292 | 2.2e-308 |
+
+`GraphManager` checks each coupled group on the first step after every
+`compile()` and issues one `UnderflowRangeWarning` (a
+`PrecisionLimitWarning`) per group, naming the field, its magnitude and the
+remedy: write the field in units where it is of order one.  An exactly zero
+field never warns.  The check runs on the host, once per compile, and does
+not change the compiled step; a state that decays into the range after the
+first step is not re-checked.  It fires at the first step rather than in
+`coupling_diagnostics()` because the remedy is a decision about the model's
+units, every caller steps whether or not it reads the report, and the
+report is read in loops, where a per-call read of every group field would
+cost a device-to-host copy per step.
+
 ### What `ratio_usable` checks, and what it does not
 
 `error_estimate` sums a geometric series of remaining step lengths.

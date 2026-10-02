@@ -15,6 +15,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -582,8 +583,11 @@ class TestFlatteningKeepsEveryRecord:
         )
         # and the number is the real one, not a count of nothing
         n_surfaces = len(json.loads(SNAPSHOT.read_text())["surfaces"])
-        assert written.startswith(f"{n_surfaces} STABLE surface(s), ")
-        assert "0 member(s)" not in written
+        # Parsed, not substring-matched: ``"0 member(s)" not in written`` also
+        # rejected every count ending in 0 (260 is one).
+        counted = re.match(rf"{n_surfaces} STABLE surface\(s\), (\d+) member\(s\)", written)
+        assert counted is not None, written
+        assert int(counted.group(1)) > 0, written
 
 
 # ---------------------------------------------------------------------------

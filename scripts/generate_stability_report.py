@@ -31,6 +31,7 @@ sys.path.insert(0, str(SRC))
 STABILITY_MODULES: tuple[str, ...] = (
     "maddening",
     "maddening.core.graph_manager",
+    "maddening.core.inspection",
     "maddening.core.node",
     "maddening.core.edge",
     "maddening.core.static_data",
@@ -100,6 +101,9 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.nodes.adaptive.wavelets.operator",
     "maddening.nodes.adaptive.wavelets.precond",
     "maddening.nodes.adaptive.wavelets.transform",
+    # ``maddening.show_versions`` resolves lazily, so importing the package
+    # does not reach this module.
+    "maddening.info",
 )
 
 

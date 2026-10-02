@@ -515,15 +515,22 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         xx, cc, dd, ww, rr = operands
         live = ww > 0
         w_inv = jnp.where(live, 1.0 / jnp.where(live, ww, 1.0), 0.0)
+        # The tangent is taken in a power-of-two frame (``_framed_jvp``)
+        # and the residual's difference entry by entry in one
+        # (``_framed_difference``): in state units a group of magnitude
+        # ~1e-34 handed the JVP tangents below the normal range, and its
+        # residual ``F(x) - x`` flushed to zero.
+        frame = _pow2_normaliser(w_inv)
 
         def matvec(v):
             _, Jv = jax.jvp(
                 lambda x_: _F_dispatch(step_pure, x_, cc), (xx,),
-                ((v * w_inv).astype(xx.dtype),)
+                ((v * (w_inv * frame)).astype(xx.dtype),)
             )
-            return ww * Jv.astype(work)
+            return (ww / frame) * Jv.astype(work)
 
-        r_w = ww * (_F_dispatch(step_pure, xx, cc) - xx).astype(work)
+        r_w = _framed_difference(_F_dispatch(step_pure, xx, cc).astype(work),
+                                 xx.astype(work), ww)
         v0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, work)
         rho, resid, amp = arnoldi_spectral_radius(matvec, v0, v_extra=r_w)
         # The share of ``D' r`` the group's residual does not see: the
@@ -569,6 +576,44 @@ def _analysis_dtype(dtype):
     group's dtype is returned unchanged, so its program is the one it was.
     """
     return jnp.promote_types(dtype, jnp.float32)
+
+
+def _framed_difference(a, b, weight):
+    """``weight * (a - b)``, the difference taken entry by entry in a power-of-two frame.
+
+    Each pair is rescaled by its own power of two (``max(|a_i|, |b_i|)``
+    into ``[0.5, 1)``), differenced, and the weight carries the inverse
+    scale.  A power of two scales exactly, so between ordinary numbers
+    this is ``weight * (a - b)`` to the bit; below about 1e-31 in float32
+    a change of an ulp is subnormal and the bare difference flushed to
+    zero.
+    """
+    from maddening.core.coupling.acceleration import _pow2_entrywise  # noqa: PLC0415
+
+    k = _pow2_entrywise(a, b)
+    return (a * k - b * k) * (weight / k)
+
+
+def _framed_shift(x, step, scale):
+    """``x + step * scale``, formed entry by entry in a power-of-two frame of ``x``.
+
+    Between ordinary numbers this is the bare sum to the bit; for a state
+    near 1e-34 the increment ``step * scale`` is below the normal range
+    and the bare product flushed to zero before it was added.
+    """
+    from maddening.core.coupling.acceleration import _pow2_entrywise  # noqa: PLC0415
+
+    k = _pow2_entrywise(x)
+    return (x * k + step * (scale * k)) / k
+
+
+def _pow2_normaliser(*vectors):
+    """See :func:`maddening.core.coupling.acceleration._pow2_normaliser`."""
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        _pow2_normaliser as normaliser,
+    )
+
+    return normaliser(*vectors)
 
 
 def _default_resolution(x):
@@ -774,13 +819,18 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
                 out.append(np.zeros(c.shape, dtype=jax.dtypes.float0))
         return tuple(out)
 
+    # The state tangent in a power-of-two frame, as ``_spectral_rate_at``
+    # takes it: ``J`` is linear, and in state units a tiny group's tangents
+    # fell below the normal range.
+    frame = _pow2_normaliser(s_inv)
+
     def matvec(z):
         """``J(x_k)`` in the scaled coordinates."""
         _, Jv = jax.jvp(
             lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,),
-            ((z * s_inv).astype(x_dtype),)
+            ((z * (s_inv * frame)).astype(x_dtype),)
         )
-        return s * Jv.astype(dtype)
+        return (s / frame) * Jv.astype(dtype)
 
     U, M, captured = jacobian_range_basis(matvec, x_sg.shape[0], dtype=dtype)
 
@@ -792,7 +842,9 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     rows = jnp.arange(len(probed))
     f_k, w = jax.vmap(rhs_for)(rows)          # the primal is unbatched inside
     w = w.astype(dtype)
-    r_s = s * (f_k[0] - x_sg).astype(dtype)
+    # Entry by entry in a power-of-two frame: a raw ``F(x) - x`` of a
+    # group near 1e-34 flushed to zero, and the bound read 0.0, usable.
+    r_s = _framed_difference(f_k[0].astype(dtype), x_sg.astype(dtype), s)
 
     def norm(v):
         return jnp.linalg.norm(live * v, axis=-1)
@@ -847,7 +899,10 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # rounding error -- measured 2.9e-10 on an affine map, which the
     # resolvent then amplified into a bound of 2.5e-4 where the true
     # error is exactly zero.
-    points = jnp.stack([x_sg, (x_sg + delta_s * s_inv).astype(x_dtype)])
+    # The shifted point in a per-entry power-of-two frame: in state units
+    # the step ``delta * s_inv`` of a group near 1e-34 is below the normal
+    # range and was flushed, so ``G`` was evaluated twice at ``x_k``.
+    points = jnp.stack([x_sg, _framed_shift(x_sg.astype(dtype), delta_s, s_inv).astype(x_dtype)])
     # One extra row beside the probes: the tangent ``delta`` itself with
     # no constant moved, so its ``G`` is ``J(x) delta`` and the secant of
     # that row is how much the *Jacobian* changes across the step (see
@@ -859,7 +914,9 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows_ext, ts_ext)
     )(points)
     G = jax.lax.optimization_barrier(G).astype(dtype)
-    secant_ext = s * (G[1] - G[0])
+    # Their difference is a change of a value near the state's own size:
+    # taken entry by entry in a power-of-two frame, so it is not flushed.
+    secant_ext = _framed_difference(G[1], G[0], s)
     secant_s, jac_secant_s = secant_ext[:-1], secant_ext[-1]
 
     amp = spectral_error_bound(jnp.ones((), dtype), rho, arnoldi_residual, amplification)
@@ -1491,6 +1548,7 @@ def _fixed_point_while(
       the while_loop with the same column convention as the fori path.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        _pow2_normaliser,
         aitken_relaxation,
         fixed_relaxation,
         iqn_ils_update,
@@ -1500,9 +1558,27 @@ def _fixed_point_while(
     x0_acc = x0 if idx is None else x0[idx]
     n_dof = x0_acc.shape[0]
     dtype = x0.dtype
-    zeros = jnp.zeros(n_dof, dtype=dtype)
-    one = jnp.array(1.0, dtype=dtype)
+    # The accelerator's scalars and residual carries in at least float32,
+    # as the fori path seeds them (``acc_dtype``), so a 16-bit group takes
+    # the same passes under either solver; a float32 or wider group is
+    # unchanged.
+    acc_dt = jnp.promote_types(dtype, jnp.float32)
+    zeros = jnp.zeros(n_dof, dtype=acc_dt)
+    one = jnp.array(1.0, dtype=acc_dt)
     is_iqn = acceleration in ("iqn-ils", "iqn-imvj")
+    # The accelerators work in a frame: the accelerated vector times one
+    # exact power of two, fixed for the solve (its largest starting entry
+    # in ``[0.5, 1)``), so their carries -- Aitken's previous residual,
+    # IQN's secant columns and previous raw output -- are in one unit from
+    # pass to pass.  A power of two scales every product exactly, so a
+    # group at ordinary magnitudes steps to the bit as before; a group in
+    # small units no longer forms its step from a difference below the
+    # normal range (``x_raw - x_old`` flushed to zero below about 1e-38,
+    # the relaxed iterate stopped moving while the norm still measured the
+    # residual, the stalled ratio read 1 and was rejected, and the raw
+    # residual test reported ``converged=True`` up to 7x the threshold
+    # away).  See ``_accel_frame``.
+    frame = _pow2_normaliser(x0_acc)
 
     if acceleration in ("none", "fixed"):
         # Annotated: the three branches below build tuples of different
@@ -1513,8 +1589,10 @@ def _fixed_point_while(
         acc0 = (one, zeros)  # omega, prev_residual
     elif is_iqn:
         V0, W0 = accel_init
-        # V, W, n_cols, prev_residual, prev_raw, omega, prev_r_aitken
-        acc0 = (V0, W0, jnp.int32(n_reuse), zeros, x0_acc, one, zeros)
+        # V, W, n_cols, prev_residual, prev_raw, omega, prev_r_aitken --
+        # all in the frame (the secant columns arrive in state units).
+        acc0 = (V0 * frame, W0 * frame, jnp.int32(n_reuse), zeros,
+                x0_acc * frame, one, zeros)
     else:
         raise ValueError(
             f"_fixed_point_while: unsupported acceleration="
@@ -1524,23 +1602,30 @@ def _fixed_point_while(
 
     def accelerate(x, x_raw, acc, i):
         with jax.named_scope("coupling:accelerate"):
-            return _accelerate(x, x_raw, acc, i)
+            x_new, new_acc = _accelerate(x, x_raw, acc, i)
+            # The loop carry keeps its types: the step in the iterate's
+            # dtype, each accelerator carry in its seed's.
+            return (x_new.astype(x.dtype),
+                    jax.tree.map(lambda new, old: jnp.asarray(new).astype(jnp.asarray(old).dtype),
+                                 new_acc, acc))
 
     def _accelerate(x, x_raw, acc, i):
         if acceleration == "none":
             return x_raw, acc
+        # In the frame (see above); the step is scaled back on the way out.
+        x, x_raw = x * frame, x_raw * frame
         if acceleration == "fixed":
-            return fixed_relaxation(x, x_raw, relaxation), acc
+            return fixed_relaxation(x, x_raw, relaxation) / frame, acc
         if acceleration == "aitken":
             omega, prev_r = acc
             x_new, omega, cur_r = aitken_relaxation(x, x_raw, prev_r, omega)
-            return x_new, (omega, cur_r)
+            return x_new / frame, (omega, cur_r)
         V, W, n_cols, prev_r, prev_s, omega, prev_ra = acc
         x_new, V, W, n_cols, cur_r, cur_s, omega, cur_ra = iqn_ils_update(
             x_raw, x, prev_r, prev_s, V, W, n_cols, omega, prev_ra,
             have_prev=i > 0,
         )
-        return x_new, (V, W, n_cols, cur_r, cur_s, omega, cur_ra)
+        return x_new / frame, (V, W, n_cols, cur_r, cur_s, omega, cur_ra)
 
     # See the docstring for why this list holds Aitken and not IQN.
     # An empty ``prev`` slot means the carry -- and so the emitted HLO
@@ -1663,7 +1748,8 @@ def _fixed_point_while(
         _measure_at_cap,
         x_star,
     )
-    vw = (acc[0], acc[1]) if is_iqn else ()
+    # The secant matrices leave the frame for the warm start in ``_meta``.
+    vw = (acc[0] / frame, acc[1] / frame) if is_iqn else ()
     # ``iterations`` counts the coupling passes that produced the state
     # being returned, which is what the fori path has always reported
     # and what ``coupling_diagnostics`` promises does not move when a
@@ -3142,6 +3228,14 @@ def _run_coupled_block_impl(
             # iterate through a scatter JAX warns will become an error.
             # Unchanged wherever x64 is off, and for a float64 group.
             acc_dtype = _analysis_dtype(n_dof_flat.dtype)
+            # The accelerators' frame, fixed for the solve: the same
+            # power-of-two rescaling the ift path applies
+            # (``_fixed_point_while``), so a group in small units forms its
+            # relaxed step from normal numbers and the two solvers agree.
+            from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+                _pow2_normaliser,
+            )
+            accel_frame = _pow2_normaliser(n_dof_flat)
 
         track_diag = group.diagnostics
         first_r = _compute_residual(state_after_first, new_state_inner)
@@ -3540,11 +3634,17 @@ def _run_coupled_block_impl(
                     new_converged = converged | (
                         (est <= conv_threshold) & prev_below
                     )
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
+                    x_old = _flatten(s_cur) * accel_frame
+                    x_raw = _flatten(s_raw) * accel_frame
                     x_rel, new_omega, cur_r = aitken_relaxation(
                         x_old, x_raw, prev_r, omega
                     )
+                    # Out of the frame, and the carries in their own dtypes:
+                    # a 16-bit group's residual is 16-bit while its carry is
+                    # float32 (``acc_dtype``), which was a carry TypeError.
+                    x_rel = x_rel / accel_frame
+                    new_omega = new_omega.astype(omega.dtype)
+                    cur_r = cur_r.astype(prev_r.dtype)
                     s_partial = _unflatten(x_rel, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
@@ -3579,11 +3679,17 @@ def _run_coupled_block_impl(
                     new_converged = converged | (
                         (est <= conv_threshold) & prev_below
                     )
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
+                    x_old = _flatten(s_cur) * accel_frame
+                    x_raw = _flatten(s_raw) * accel_frame
                     x_rel, new_omega, cur_r = aitken_relaxation(
                         x_old, x_raw, prev_r, omega
                     )
+                    # Out of the frame, and the carries in their own dtypes:
+                    # a 16-bit group's residual is 16-bit while its carry is
+                    # float32 (``acc_dtype``), which was a carry TypeError.
+                    x_rel = x_rel / accel_frame
+                    new_omega = new_omega.astype(omega.dtype)
+                    cur_r = cur_r.astype(prev_r.dtype)
                     s_partial = _unflatten(x_rel, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
@@ -3602,8 +3708,10 @@ def _run_coupled_block_impl(
 
         elif group.acceleration in ("iqn-ils", "iqn-imvj"):
             init_V, init_W, n_reuse = _iqn_warm_start()
+            # Into the frame (see ``accel_frame``).
+            init_V, init_W = init_V * accel_frame, init_W * accel_frame
             init_ncols = jnp.int32(n_reuse)
-            init_flat = _flatten(state_after_first)
+            init_flat = _flatten(state_after_first) * accel_frame
 
             # The secant columns IQN-IMVJ carries to the next step are
             # the ones the latching pass left, as under ``"ift"``, whose
@@ -3629,14 +3737,19 @@ def _run_coupled_block_impl(
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
                     new_converged = converged | (est <= conv_threshold)
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
+                    x_old = _flatten(s_cur) * accel_frame
+                    x_raw = _flatten(s_raw) * accel_frame
                     (x_new, nV, nW, nnc,
                      cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
                         x_raw, x_old, prev_r, prev_s,
                         V, W, nc, omega, prev_ra,
                         have_prev=_secant_live(i, converged),
                     )
+                    # Out of the frame; the carries keep their dtypes.
+                    x_new = x_new / accel_frame
+                    nV, nW = nV.astype(V.dtype), nW.astype(W.dtype)
+                    cur_r, cur_s = cur_r.astype(prev_r.dtype), cur_s.astype(prev_s.dtype)
+                    n_omega, cur_ra = n_omega.astype(omega.dtype), cur_ra.astype(prev_ra.dtype)
                     s_partial = _unflatten(x_new, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
@@ -3661,7 +3774,7 @@ def _run_coupled_block_impl(
                 final_state = final_carry[0]
                 iter_count, final_res = final_carry[4], final_carry[5]
                 frozen_prev, prev_loop_res = final_carry[6], final_carry[3]
-                final_V, final_W = final_carry[7], final_carry[8]
+                final_V, final_W = final_carry[7] / accel_frame, final_carry[8] / accel_frame
             else:
                 def body_fn(i: Any, carry: tuple) -> tuple:
                     (s_cur, converged, prev_res, prev_res2,
@@ -3670,14 +3783,19 @@ def _run_coupled_block_impl(
                     residual = _compute_residual(s_raw, s_cur)
                     est, _amp = _estimate(residual, prev_res, prev_res2)
                     new_converged = converged | (est <= conv_threshold)
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
+                    x_old = _flatten(s_cur) * accel_frame
+                    x_raw = _flatten(s_raw) * accel_frame
                     (x_new, nV, nW, nnc,
                      cur_r, cur_s, n_omega, cur_ra) = iqn_ils_update(
                         x_raw, x_old, prev_r, prev_s,
                         V, W, nc, omega, prev_ra,
                         have_prev=_secant_live(i, converged),
                     )
+                    # Out of the frame; the carries keep their dtypes.
+                    x_new = x_new / accel_frame
+                    nV, nW = nV.astype(V.dtype), nW.astype(W.dtype)
+                    cur_r, cur_s = cur_r.astype(prev_r.dtype), cur_s.astype(prev_s.dtype)
+                    n_omega, cur_ra = n_omega.astype(omega.dtype), cur_ra.astype(prev_ra.dtype)
                     s_partial = _unflatten(x_new, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
@@ -3694,7 +3812,7 @@ def _run_coupled_block_impl(
                     1, max_iters, body_fn, init_carry
                 )
                 final_state = final_carry[0]
-                final_V, final_W = final_carry[4], final_carry[5]
+                final_V, final_W = final_carry[4] / accel_frame, final_carry[5] / accel_frame
 
         elif group.acceleration == "fixed":
             omega_val = group.relaxation
@@ -3708,9 +3826,9 @@ def _run_coupled_block_impl(
                     est, _amp = _estimate(residual, prev_res, prev_res2,
                                           relax_first and i == 1)
                     new_converged = converged | (est <= conv_threshold)
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
-                    x_rel = fixed_relaxation(x_old, x_raw, omega_val)
+                    x_old = _flatten(s_cur) * accel_frame
+                    x_raw = _flatten(s_raw) * accel_frame
+                    x_rel = fixed_relaxation(x_old, x_raw, omega_val) / accel_frame
                     s_partial = _unflatten(x_rel, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)
@@ -3739,9 +3857,9 @@ def _run_coupled_block_impl(
                     est, _amp = _estimate(residual, prev_res, prev_res2,
                                           relax_first and i == 1)
                     new_converged = converged | (est <= conv_threshold)
-                    x_old = _flatten(s_cur)
-                    x_raw = _flatten(s_raw)
-                    x_rel = fixed_relaxation(x_old, x_raw, omega_val)
+                    x_old = _flatten(s_cur) * accel_frame
+                    x_raw = _flatten(s_raw) * accel_frame
+                    x_rel = fixed_relaxation(x_old, x_raw, omega_val) / accel_frame
                     s_partial = _unflatten(x_rel, s_cur)
                     s_accel = _build_accel_state(s_raw, s_partial)
                     s_merged = _merge(s_cur, s_accel, new_converged)

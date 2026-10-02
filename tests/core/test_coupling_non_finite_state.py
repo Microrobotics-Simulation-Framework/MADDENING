@@ -460,14 +460,19 @@ class _TinyLinear(SimulationNode):
         return {"x": self._g * boundary_inputs["u"] + self._c}
 
 
-def _tiny_graph(norm, c, *, solver="ift", max_iterations=20):
+def _tiny_graph(norm, c, *, solver="ift", max_iterations=20, acceleration="none",
+                diagnostics=True):
     gm = GraphManager()
     gm.add_node(_TinyLinear("a", 0.9, c))
     gm.add_node(_TinyLinear("b", 1.0, 0.0))
     gm.add_edge(source="b", target="a", source_field="x", target_field="u")
     gm.add_edge(source="a", target="b", source_field="x", target_field="u")
     kw = {"tolerance": 1e-6} if norm == "l2" else {}
-    gm.add_coupling_group(["a", "b"], convergence_norm=norm, diagnostics=True,
+    if acceleration.startswith("fixed"):
+        kw.update(acceleration="fixed", relaxation=float(acceleration.split(":")[1]))
+    elif acceleration != "none":
+        kw["acceleration"] = acceleration
+    gm.add_coupling_group(["a", "b"], convergence_norm=norm, diagnostics=diagnostics,
                           max_iterations=max_iterations, solver=solver, **kw)
     gm.compile()
     return gm
@@ -496,6 +501,39 @@ def test_the_verdict_does_not_change_below_the_scale_underflow(norm):
 #: The control's ``c``: ``x* = 10 c`` is about ``1e-29``, where a change
 #: of one ulp of the field (about ``1.2e-36``) is still a normal number.
 _C_NORMAL = float(np.float32(1e-30))
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+@pytest.mark.parametrize("acceleration", ("fixed:0.8", "fixed:1.3", "aitken", "iqn-ils", "iqn-imvj"))
+@pytest.mark.parametrize("shift", (14, 24))
+def test_an_accelerated_verdict_does_not_change_below_the_change_underflow(acceleration, solver, shift):
+    """The same claim under every acceleration: the accelerators' steps are framed too.
+
+    ``fixed``, Aitken and IQN formed their step from the raw difference
+    ``x_raw - x_old``, which flushes to zero below the normal range: the
+    relaxed iterate stopped moving while the norm still measured the
+    residual, the stalled ratio read 1 and was rejected, and the raw
+    residual test reported ``converged=True`` 1.8-7.4x the threshold from
+    the fixed point (``shift=14``: ``x*`` about 6e-34; at ``shift=24``,
+    ``x*`` about 6e-37, IQN stalled at its cap too).  The steps are now
+    formed in a power-of-two frame, so the group at ``2**-shift`` of its
+    units reproduces the control to the bit.
+    """
+    cap = 400
+    ref = _tiny_graph("l2", _C_NORMAL, solver=solver, max_iterations=cap,
+                      acceleration=acceleration, diagnostics=False)
+    ref.step()
+    want = ref.coupling_diagnostics()["a+b"]
+    gm = _tiny_graph("l2", _C_NORMAL * 2.0 ** -shift, solver=solver, max_iterations=cap,
+                     acceleration=acceleration, diagnostics=False)
+    gm.step()
+    got = gm.coupling_diagnostics()["a+b"]
+    assert want["converged"] is True and want["iterations"] < cap, (
+        f"fixture premise: the control converges inside the cap: {want}")
+    assert (got["iterations"], got["converged"], got["residual"]) == (
+        want["iterations"], want["converged"], want["residual"]), (got, want)
+    assert float(gm.get_node_state("a")["x"][0]) == (
+        float(ref.get_node_state("a")["x"][0]) * 2.0 ** -shift), "the state scaled exactly"
 
 
 @pytest.mark.parametrize("solver", SOLVERS)

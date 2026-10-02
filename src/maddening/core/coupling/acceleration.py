@@ -1659,6 +1659,42 @@ def _pow2_normaliser(*vectors):
     return jnp.ldexp(jnp.ones((), dtype), -exponent)
 
 
+def _relaxed_step(x_old, x_raw, omega):
+    """``x_old + omega * (x_raw - x_old)``, formed entry by entry in a power-of-two frame.
+
+    Each entry is computed on the pair rescaled by its own power of two
+    (``max(|x_old_i|, |x_raw_i|)`` brought into ``[0.5, 1)``) and scaled
+    back: the same rounding, so a step between ordinary numbers is the
+    one the bare formula gives, bit for bit -- but the difference is
+    taken between two normal numbers.  Bare, an entry whose one-pass
+    change is below ``finfo.tiny`` (any change of less than an ulp of a
+    field below about 1e-31 in float32) had its difference flushed to
+    zero, the relaxed entry stopped moving while the convergence norm --
+    which rescales the same pair (``_scaled_change``) -- still measured
+    its residual, and the stalled ratio fell back to the raw residual
+    test.  Entries are framed separately so a small field beside a large
+    one in the same vector moves too.
+    """
+    k = _pow2_entrywise(x_old, x_raw)
+    old_k, raw_k = x_old * k, x_raw * k
+    return (old_k + omega * (raw_k - old_k)) / k
+
+
+def _pow2_entrywise(*arrays):
+    """Per entry, a power of two ``k`` with ``max_j |a_j[i]| * k[i]`` in ``[0.5, 1)``.
+
+    The entrywise sibling of :func:`_pow2_normaliser`: the exponent is
+    clamped so every ``k`` is a normal number of the dtype, and a zero or
+    non-finite entry gets ``k = 1``.
+    """
+    dtype = jnp.result_type(*arrays)
+    info = jnp.finfo(dtype)
+    biggest = functools.reduce(jnp.maximum, [jnp.abs(jnp.asarray(a, dtype)) for a in arrays])
+    _, exponent = jnp.frexp(jnp.where(jnp.isfinite(biggest), biggest, jnp.zeros_like(biggest)))
+    exponent = jnp.clip(exponent, 1 - int(info.maxexp), -int(info.minexp))
+    return jnp.ldexp(jnp.ones_like(biggest), -exponent)
+
+
 def aitken_relaxation(
     x_old_flat: jnp.ndarray,
     x_raw_flat: jnp.ndarray,
@@ -1735,7 +1771,7 @@ def aitken_relaxation(
     # overflowed, or when there is no previous residual to extrapolate from.
     new_omega = jnp.where(usable, new_omega, omega)
 
-    x_relaxed = x_old_flat + new_omega * residual
+    x_relaxed = _relaxed_step(x_old_flat, x_raw_flat, new_omega)
     return x_relaxed, new_omega, residual
 
 
@@ -1930,4 +1966,4 @@ def fixed_relaxation(
     jnp.ndarray
         Relaxed state vector.
     """
-    return x_old_flat + omega * (x_raw_flat - x_old_flat)
+    return _relaxed_step(x_old_flat, x_raw_flat, omega)

@@ -1249,7 +1249,7 @@ class _CoordinateBounds:
     def project(self, theta):
         return jnp.clip(theta, self.lo, self.hi) if self.active else theta
 
-    def inward_descent(self, theta, g, physical=None, rel_tol=0.0) -> bool:
+    def inward_descent(self, theta, g, physical=None, rel_tol: Any = 0.0) -> bool:
         """Whether a coordinate on its bound could lower the loss by moving
         into the range: ``g`` (the gradient, with the one-sided derivative on
         the bound) pointing inward.  Such a point is not a constrained

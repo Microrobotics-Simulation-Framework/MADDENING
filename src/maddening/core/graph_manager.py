@@ -1833,7 +1833,14 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
     breakdown" for a solve that is as exact as the dtype allows.  So
     ``atol`` is scaled to the largest rhs entry — the usual "relative
     to ||b||" Krylov criterion — and ``rtol`` is no tighter than ~100
-    ulp of the dtype (1e-6 in float64, 1.2e-5 in float32).  Memory is
+    ulp of the dtype (1e-6 in float64, 1.2e-5 in float32).  **Nothing in
+    the criterion is absolute**: the solve runs on ``b`` rescaled by an
+    exact power of two and scales its answer back, and a zero ``b`` is
+    answered with exact zeros.  Until 0.4.0's round-4 fix ``atol`` also
+    carried an absolute ``1e-8``, below which the zero initial guess
+    passed lineax's test before a single step: the tangent or adjoint of
+    a group in small units, or of a loss near its minimum, came back
+    exactly zero and "successful" (MADD-ANO-096).  Memory is
     O(N) for the matrix-free backends; no Jacobian is ever
     materialised except under ``"dense"``.
 
@@ -1929,9 +1936,29 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # ``solver='ift'`` pay this import cost.
         import lineax as lx  # noqa: PLC0415  (lazy by design)
 
+        from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+            _pow2_normaliser,
+        )
+
+        # The solve is posed on ``b`` rescaled by one exact power of two
+        # (largest entry in ``[0.5, 1)``), and its answer scaled back by
+        # the reciprocal: ``A`` is linear, so that is the same solution,
+        # and a power of two leaves every product of a vector in range as
+        # it was.  The tolerance is then relative to the rescaled rhs and
+        # nothing else.  It used to carry an absolute ``1e-8``: with the
+        # zero initial guess lineax counted a solve "converged" before its
+        # first step whenever ``max|b| <= ~1e-8`` and returned 0, so the
+        # IFT tangent (forward mode) and adjoint (reverse mode) were
+        # *exactly zero*, reported successful, wherever the tangent or the
+        # cotangent was small -- a group in small units, or a loss close
+        # to its minimum -- and above the dense fallback's size a
+        # moderately small ``b`` raised the "ill-conditioned" error
+        # instead.  A zero rhs is answered with exact zeros.
+        scale = _pow2_normaliser(b)
+        b_hat = b * scale
         # lineax declares `atol: float`, but it only ever compares against
         # it, and under `jit` this is a traced scalar that must stay one.
-        atol = cast(float, 1e-8 + rtol * jnp.max(jnp.abs(b)))
+        atol = cast(float, rtol * jnp.max(jnp.abs(b_hat)))
         op = lx.FunctionLinearOperator(mv, jax.eval_shape(lambda: b))
         if effective_solver == "bicgstab":
             # BiCGStab has no ``restart`` parameter (it operates on a
@@ -1980,16 +2007,20 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # lineax's own message recommends raising ``restart``, which is
         # already the full space at small N and is not the mechanism
         # (see the docstring).
-        sol = lx.linear_solve(op, b, solver=solver, throw=False)
-        failed = jnp.logical_not(sol.result == lx.RESULTS.successful)
+        sol = lx.linear_solve(op, b_hat, solver=solver, throw=False)
+        is_zero = jnp.logical_not(jnp.any(b != 0))
+        failed = jnp.logical_and(
+            jnp.logical_not(sol.result == lx.RESULTS.successful),
+            jnp.logical_not(is_zero))
+        value = jnp.where(is_zero, jnp.zeros_like(b), sol.value / scale)
         if n <= _DENSE_ADJOINT_FALLBACK_MAX_DOF:
             return jax.lax.cond(
-                failed, lambda bb: _dense(mv, bb), lambda _bb: sol.value, b,
+                failed, lambda bb: _dense(mv, bb), lambda _bb: value, b,
             )
         import equinox as eqx  # noqa: PLC0415  (lineax transitive dep)
 
         return eqx.error_if(
-            sol.value, failed,
+            value, failed,
             _ADJOINT_SOLVE_FAILED_MSG.format(
                 solver=effective_solver, n=n, dense_peak=_dense_peak(n),
             ),

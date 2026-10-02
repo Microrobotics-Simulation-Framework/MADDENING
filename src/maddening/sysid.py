@@ -67,6 +67,14 @@ from maddening.warnings import PrecisionLimitWarning
 
 _META_KEY = "_meta"
 
+#: Why :func:`windowed_loss` and :func:`fit_multiple_shooting` refuse a
+#: ``continuity_weight`` that is negative or not a finite number -- one
+#: message for both, so the loss and its fitter cannot disagree on it.
+_CONTINUITY_WEIGHT_WHY = (
+    " A negative weight pays the fit to tear the trajectory apart at the "
+    "window joins, and a NaN one compares False against everything, so it "
+    "used to read as no penalty at all.")
+
 #: Factor either side of the rank cutoff within which a float32 rank
 #: verdict is treated as not reproducible.  Measured on this module's
 #: own arithmetic -- ``F = J.T @ J`` and ``eigh`` in float32 -- against a
@@ -352,7 +360,9 @@ def windowed_loss(
         ``diagnostics=True``: a group with no such slots would never be
         masked, so it is refused (``ValueError``) rather than silently
         skipped.  On a multi-rate graph a group's slots hold its most
-        recent applied solve between the base steps it fires on.
+        recent applied solve between the base steps it fires on.  Must be
+        a ``bool``: a truthy non-bool (``"no"``, ``1``, an array) used to
+        turn masking on, so it is refused (``ValueError``).
     window_states : pytree, optional
         Multiple shooting: free initial **user states** per window, a
         pytree whose every leaf has leading axis
@@ -363,7 +373,11 @@ def windowed_loss(
     continuity_weight : float
         Weight of the continuity penalty ``Σ_w ||end_w - window_states[w+1]||²``
         (sum over every user-state leaf) under multiple shooting; ignored
-        when ``window_states`` is ``None``.
+        when ``window_states`` is ``None``.  A finite number ``>= 0``,
+        refused otherwise (``ValueError``) as :func:`fit_multiple_shooting`
+        refuses it: a negative or NaN weight used to read as ``0.0`` -- no
+        penalty and no error -- because the penalty was guarded by
+        ``continuity_weight > 0.0``.
 
     Returns
     -------
@@ -372,6 +386,12 @@ def windowed_loss(
         ``obs_fn`` outputs (plus the continuity penalty under multiple
         shooting).
     """
+    # Before anything is built, as the fitters check theirs.  Both used to be
+    # read as something else: a truthy non-bool turned masking on, and the
+    # penalty's ``> 0.0`` guard read a negative or NaN weight as no penalty.
+    _check_flag("mask_unconverged", mask_unconverged)
+    _check_hyper("continuity_weight", continuity_weight, ge=0.0,
+                 why=_CONTINUITY_WEIGHT_WHY)
     if gm._dirty or gm._compiled_step is None:  # noqa: SLF001
         gm.compile()
     # The windows scan the graph step: a sharded node XLA miscompiles
@@ -778,6 +798,60 @@ def _leaf_paths(tree) -> list[str]:
             for p, _ in jax.tree_util.tree_flatten_with_path(tree)[0]]
 
 
+def _describe_subtree(treedef) -> str:
+    """``a leaf`` / ``None`` / ``an empty dict`` / ``a dict holding 3 leaves``."""
+    data = treedef.node_data()
+    if data is None:
+        return "a leaf"
+    if data[0] is type(None):
+        return "None"
+    kind = data[0].__name__
+    n = treedef.num_leaves
+    if n == 0:
+        return f"an empty {kind}" if not treedef.children() else f"a {kind} holding no leaf"
+    return f"a {kind} holding {n} lea{'f' if n == 1 else 'ves'}"
+
+
+def _structure_difference(params_def, mask_def, path: str = "") -> Optional[str]:
+    """Where two pytree structures first differ, in words, or ``None``.
+
+    Walks the two ``PyTreeDef`` s node by node, so it names a difference
+    the leaf paths cannot show: a container that holds no leaf (the empty
+    ``"mappings": {}`` of a graph with no interface mappings), or a
+    ``tuple`` where the params have a ``list``.  Paths are spelled as
+    ``jax.tree_util.keystr`` spells dict keys and sequence indices.
+    """
+    p_data, m_data = params_def.node_data(), mask_def.node_data()
+    where = f"params{path}" if path else "the root"
+    if p_data is None and m_data is None:
+        return None
+    if p_data is None or m_data is None or p_data[0] is not m_data[0]:
+        return (f"at {where}, params has {_describe_subtree(params_def)} and mask "
+                f"has {_describe_subtree(mask_def)}")
+    p_children, m_children = params_def.children(), mask_def.children()
+    if p_data[0] is dict:
+        p_keys, m_keys = list(p_data[1]), list(m_data[1])
+        for key, child in zip(p_keys, p_children):
+            if key not in m_keys:
+                return (f"params{path}[{key!r}] is {_describe_subtree(child)}, and "
+                        "mask has no such key")
+        for key, child in zip(m_keys, m_children):
+            if key not in p_keys:
+                return (f"mask{path}[{key!r}] is {_describe_subtree(child)}, and "
+                        "params has no such key")
+        labels = [f"[{k!r}]" for k in p_keys]
+    else:
+        if p_data[1] != m_data[1] or len(p_children) != len(m_children):
+            return (f"at {where}, params has {_describe_subtree(params_def)} and mask "
+                    f"has {_describe_subtree(mask_def)}")
+        labels = [f"[{i}]" for i in range(len(p_children))]
+    for label, p_child, m_child in zip(labels, p_children, m_children):
+        found = _structure_difference(p_child, m_child, path + label)
+        if found is not None:
+            return found
+    return None
+
+
 def _mask_flags(params: dict, mask: dict) -> list:
     """Leaves of ``mask``, refusing a mask not shaped like ``params``.
 
@@ -796,23 +870,36 @@ def _mask_flags(params: dict, mask: dict) -> list:
     if mask_def == params_def:
         return jax.tree.leaves(mask)
     p_paths, m_paths = _leaf_paths(params), _leaf_paths(mask)
-    where = ""
-    for i in range(max(len(p_paths), len(m_paths))):
-        if p_paths[i:i + 1] != m_paths[i:i + 1]:
-            where = (
-                f" They first differ at leaf {i}: params has "
-                f"{p_paths[i] if i < len(p_paths) else '<no such leaf>'}, "
-                f"mask has {m_paths[i] if i < len(m_paths) else '<no such leaf>'}."
-            )
-            break
+
+    def _listed(paths):
+        return f"{paths[:6]}{' ...' if len(paths) > 6 else ''}"
+
+    if p_paths != m_paths:
+        where = ""
+        for i in range(max(len(p_paths), len(m_paths))):
+            if p_paths[i:i + 1] != m_paths[i:i + 1]:
+                where = (
+                    f" They first differ at leaf {i}: params has "
+                    f"{p_paths[i] if i < len(p_paths) else '<no such leaf>'}, "
+                    f"mask has {m_paths[i] if i < len(m_paths) else '<no such leaf>'}."
+                )
+                break
+        leaves = (f" params has {len(p_paths)} leaves {_listed(p_paths)}; mask has "
+                  f"{len(m_paths)} leaves {_listed(m_paths)}.")
+    else:
+        # Same leaves, different structure: a container that holds no leaf,
+        # or a container of another type.  Two identical leaf lists and no
+        # "first differ" clause was all this used to say.
+        found = _structure_difference(params_def, mask_def)
+        where = (f" They have the same {len(p_paths)} leaves {_listed(p_paths)}, and "
+                 f"differ where no leaf is: {found}.")
+        leaves = ""
     raise ValueError(
         "mask must have the same tree structure as params, key for key. "
         "The flags are read in flatten order, so a mask with the right "
         "number of leaves and different keys is not refused by a count: it "
         "quietly fits whichever parameter sits at that position."
-        f"{where} params has {len(p_paths)} leaves {p_paths[:6]}"
-        f"{' ...' if len(p_paths) > 6 else ''}; mask has {len(m_paths)} "
-        f"leaves {m_paths[:6]}{' ...' if len(m_paths) > 6 else ''}. Build the "
+        f"{where}{leaves} Build the "
         "mask from the params tree itself -- jax.tree.map over params, or "
         "gm.trainable_mask(params) with the leaves you do not want dropped "
         "to False."
@@ -4063,8 +4150,7 @@ def fit_multiple_shooting(
                      why=" The window starts are decision variables like the "
                          "parameters; a non-positive rate moves them the wrong way.")
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
-                 why=" A negative weight pays the fit to tear the trajectory "
-                     "apart at the window joins.")
+                 why=_CONTINUITY_WEIGHT_WHY)
     _check_count("sample_every", sample_every, minimum=1)
     _check_hold_undetermined(hold_undetermined)
     start = gm._params_or_default(params)  # noqa: SLF001

@@ -180,7 +180,10 @@ def test_fit_lm_on_the_spring_one_percent_off_stays_at_its_minimum():
     # at 1.2e-4.
     assert res.best_loss <= 1e-7 * res.losses[0], res.best_loss
     assert _half_sse(residual, res.params) <= 1e-9, _half_sse(residual, res.params)
-    assert res.excited_rank in (3, 4)
+    # 0.4.0-dev held 2 of 4.  A fit that converges in fewer iterations than
+    # it has coordinates (3, on CI's jaxlib 0.11.2) has too few gradients
+    # for the guard to measure, which ``excited_rank=None`` says.
+    assert res.excited_rank in (3, 4, None)
     declines = [w for w in record if "would raise the loss" in str(w.message)]
     assert len(declines) == (1 if res.hold_declined else 0), (res.hold_declined, declines)
 

@@ -190,6 +190,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **The surrogate-training routes and the state streams are experimental in 0.4.0** (`/surrogate/train`, `/surrogate/status`, `/surrogate/activate`, `/surrogate/deactivate`; `/ws/state`, `/ws/state/binary`, `/ws/render`; `StateRelay`): they are to be hardened in 0.5.0 and may change in any minor release until then.
+  They carried no level before; the routes are listed in the stability report (`register_route_stability`) and tagged `x-maddening-stability` in `/openapi.json`. Action: pin the version if you build on them.
 - **`compile()` warns about two `SpringDamperNode`s anchored on each other in a coupling group whose converged step grows** (MADD-ANO-098, still open; a `UserWarning` naming both nodes and the growth factor `g`, never a refusal, judged from the live `gm.params`). Action: use a smaller timestep, or keep `k*dt <= c <= (2*m - k*dt**2)/dt`.
 - **`LBMPipeNode` refuses a `propeller_radius` above 1** (MADD-ANO-058): the disc reached past the pipe wall and pushed on wall cells (64 of 140 disc cells at 1.5 on a 12x12 cross-section; mean `u_x` 1.9% off), with no error.
   Action: pass a radius in `(0, 1]` (1 is the whole cross-section); a config saved with a larger one no longer reloads.

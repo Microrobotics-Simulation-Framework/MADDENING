@@ -51,6 +51,9 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.cloud.providers",
     "maddening.cloud.resume",
     "maddening.api.binary_encoder",
+    # StateRelay (the streams' snapshot buffer): not imported by a listed
+    # parent outside the server, which imports it lazily for the routes.
+    "maddening.viz.relay",
     # Security surfaces. Neither is reached by importing a listed parent:
     # ``maddening`` does not import ``transport_auth``, so without this line
     # its @stability tags never fire and the report silently omits them.

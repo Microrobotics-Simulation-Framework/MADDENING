@@ -100,7 +100,7 @@ from maddening.core._size_estimate import (
     format_count,
 )
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.compliance.stability import stability
+from maddening.core.compliance.stability import register_route_stability, stability
 from maddening.core.graph_manager import (
     EVENT_COMPILED,
     EVENT_NODE_ADDED,
@@ -356,6 +356,34 @@ MAX_JAX_TRACE_STEPS = 10_000
 #: The longest a JAX trace runs before it stops itself, in seconds: it is
 #: stopped at the first step after this.
 MAX_JAX_TRACE_SECONDS = 600.0
+
+#: The stability of the routes whose level is set apart from the rest of
+#: the API.  The surrogate-training routes and the state streams are
+#: **experimental in 0.4.0**: they are to be hardened in 0.5.0, and may
+#: change in any minor release until then.  None of them carried a level
+#: before (``SimulationServer`` itself has none), so this is their first.
+#: Registered in the stability report as ``maddening.api.server:<route>``;
+#: an HTTP route here also carries ``x-maddening-stability`` in
+#: ``/openapi.json``.
+ROUTE_STABILITY: dict[str, StabilityLevel] = {
+    "POST /surrogate/train": StabilityLevel.EXPERIMENTAL,
+    "GET /surrogate/status/{job_id}": StabilityLevel.EXPERIMENTAL,
+    "POST /surrogate/activate/{job_id}": StabilityLevel.EXPERIMENTAL,
+    "POST /surrogate/deactivate/{node_name}": StabilityLevel.EXPERIMENTAL,
+    "WS /ws/state": StabilityLevel.EXPERIMENTAL,
+    "WS /ws/state/binary": StabilityLevel.EXPERIMENTAL,
+    "WS /ws/render": StabilityLevel.EXPERIMENTAL,
+}
+for _route, _level in ROUTE_STABILITY.items():
+    register_route_stability(__name__, _route, _level)
+del _route, _level
+
+
+def _route_openapi(method: str, path: str) -> Optional[dict]:
+    """``openapi_extra`` for an HTTP route of :data:`ROUTE_STABILITY`."""
+    level = ROUTE_STABILITY.get(f"{method} {path}")
+    return None if level is None else {"x-maddening-stability": level.value}
+
 
 
 def _oversized_param(value: Any, path: str = "") -> Optional[str]:
@@ -2299,8 +2327,8 @@ class SimulationServer:
     def _relay_detached(self):
         """Run a block without the relay observing the graph's steps (the
         profiler's): the streams neither publish nor count them."""
-        callback = getattr(self.relay, "_on_event", None)
-        detached = callback is not None and callback in self.gm._observers
+        callback = self.relay._on_event
+        detached = callback in self.gm._observers
         if detached:
             self.gm._observers.remove(callback)
         try:
@@ -3723,7 +3751,7 @@ class SimulationServer:
             return {"status": "stopped", "error": died} if died else {"status": "stopped"}
 
         @app.post("/sim/reset", tags=["sim"], response_model=None)
-        def sim_reset() -> dict[str, Any]:
+        def sim_reset() -> Any:
             """Stop the runner and reset all nodes to initial state.  A 503,
             with nothing reset, when the runner's thread will not stop in
             time (it would overwrite the reset); a 409 while a
@@ -3802,9 +3830,11 @@ class SimulationServer:
 
         # -- surrogate endpoints --------------------------------------------
 
-        @app.post("/surrogate/train", tags=["surrogate"], response_model=None)
+        @app.post("/surrogate/train", tags=["surrogate"], response_model=None,
+                  openapi_extra=_route_openapi("POST", "/surrogate/train"))
         def surrogate_train(req: TrainSurrogateRequest) -> dict[str, Any]:
             """Start training a surrogate of one node in a background thread.
+            **Experimental in 0.4.0** (to be hardened in 0.5.0).
 
             **One job runs at a time**: a 409 while another one does.  The
             last :data:`MAX_SURROGATE_JOBS_KEPT` finished jobs are kept, the
@@ -3979,8 +4009,11 @@ class SimulationServer:
                 thread.start()
             return {"job_id": job_id, "status": "started", "estimated_bytes": need}
 
-        @app.get("/surrogate/status/{job_id}", tags=["surrogate"], response_model=None)
+        @app.get("/surrogate/status/{job_id}", tags=["surrogate"], response_model=None,
+                  openapi_extra=_route_openapi("GET", "/surrogate/status/{job_id}"))
         def surrogate_status(job_id: str) -> dict[str, Any]:
+            """A training job's progress.  **Experimental in 0.4.0** (to be
+            hardened in 0.5.0)."""
             job = self._surrogate_jobs.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
@@ -3996,10 +4029,12 @@ class SimulationServer:
                 "estimated_bytes": job.get("estimated_bytes"),
             }
 
-        @app.post("/surrogate/activate/{job_id}", tags=["surrogate"], response_model=None)
+        @app.post("/surrogate/activate/{job_id}", tags=["surrogate"], response_model=None,
+                  openapi_extra=_route_openapi("POST", "/surrogate/activate/{job_id}"))
         def surrogate_activate(job_id: str) -> Any:
-            """Replace the physics node with the trained surrogate (the
-            runner is stopped first; a 409 while a ``POST /sim/run`` is in
+            """Replace the physics node with the trained surrogate
+            (**experimental in 0.4.0**, to be hardened in 0.5.0; the runner
+            is stopped first; a 409 while a ``POST /sim/run`` is in
             progress).  The graph is reset, and the streams are sent the
             reset state at step 0.  ``was_running`` says whether a runner
             was running; a refusal after it was stopped says it stays
@@ -4065,10 +4100,11 @@ class SimulationServer:
 
             return {"status": "activated", "node": node_name, "was_running": was_running}
 
-        @app.post("/surrogate/deactivate/{node_name}", tags=["surrogate"], response_model=None)
+        @app.post("/surrogate/deactivate/{node_name}", tags=["surrogate"], response_model=None,
+                  openapi_extra=_route_openapi("POST", "/surrogate/deactivate/{node_name}"))
         def surrogate_deactivate(node_name: str) -> Any:
-            """Restore the original physics node (the runner is stopped
-            first).  The graph is reset, and the streams are sent the reset
+            """Restore the original physics node (**experimental in 0.4.0**,
+            to be hardened in 0.5.0; the runner is stopped first).  The graph is reset, and the streams are sent the reset
             state at step 0; ``was_running`` as for activate."""
             if node_name not in self._original_nodes:
                 raise HTTPException(
@@ -4378,7 +4414,8 @@ class SimulationServer:
 
         @app.websocket("/ws/state")
         async def ws_state(websocket: WebSocket) -> None:
-            """Stream state snapshots as JSON at ~30 Hz.
+            """Stream state snapshots as JSON at ~30 Hz.  **Experimental in
+            0.4.0** (to be hardened in 0.5.0).
 
             Client may send JSON messages to configure the stream:
 
@@ -4448,7 +4485,8 @@ class SimulationServer:
 
         @app.websocket("/ws/state/binary")
         async def ws_state_binary(websocket: WebSocket) -> None:
-            """Stream state snapshots as binary at ~60 Hz.
+            """Stream state snapshots as binary at ~60 Hz.  **Experimental in
+            0.4.0** (to be hardened in 0.5.0).
 
             Protocol:
                 1. Server sends JSON text frame with the binary schema.
@@ -4584,6 +4622,7 @@ class SimulationServer:
         @app.websocket("/ws/render")
         async def ws_render(websocket: WebSocket) -> None:
             """Stream server-side rendered frames as compressed images.
+            **Experimental in 0.4.0** (to be hardened in 0.5.0).
 
             Protocol:
                 1. Server sends a JSON text frame with renderer config

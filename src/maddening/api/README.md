@@ -165,12 +165,21 @@ already been applied.
 
 ### Surrogates
 
+**Experimental in 0.4.0.**  These routes, and the WebSocket streams below,
+are to be hardened in 0.5.0 and may change in any minor release until
+then (`ROUTE_STABILITY` in `server.py`; each HTTP one carries
+`x-maddening-stability` in `/openapi.json`).
+
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/surrogate/train` | Train a surrogate of one node in a background job. One job runs at a time (409 otherwise). The memory the job would take -- the data sweep over the whole graph, its dataset, the network -- is estimated first and refused (400) over `MAX_SURROGATE_TRAIN_BYTES`, and estimated again on the graph the sweep runs over: a graph that grew in between (a node added) ends the job `error`, naming the budget, before anything is swept. `width**2 * depth` of the network is bounded (422). The data come from a batched sweep that leaves the live simulation where it was. Replies `{job_id, status, estimated_bytes}` |
 | GET | `/surrogate/status/{job_id}` | The job's progress. The last `MAX_SURROGATE_JOBS_KEPT` (8) finished jobs are kept; a job stopped by a shutdown reads `cancelled` |
 
 ### WebSocket
+
+**Experimental in 0.4.0**, with `StateRelay`, the snapshot buffer they
+read: to be hardened in 0.5.0.  `BinaryStateEncoder`, the binary frame
+format, stays `evolving`.
 
 | Path | Description |
 |------|-------------|

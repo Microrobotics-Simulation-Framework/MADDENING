@@ -11,6 +11,9 @@ from __future__ import annotations
 import threading
 from typing import TYPE_CHECKING, Optional
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
+
 if TYPE_CHECKING:
     from maddening.core.graph_manager import GraphManager
 
@@ -41,8 +44,13 @@ def _step_advance(graph_manager: Optional[GraphManager], last: float,
         return last
 
 
+@stability(StabilityLevel.EXPERIMENTAL)
 class StateRelay:
     """Thread-safe one-slot buffer for the latest simulation state.
+
+    **Experimental in 0.4.0**, with the REST server's streams that read
+    it: both are to be hardened in 0.5.0, and may change in any minor
+    release until then.
 
     Parameters
     ----------

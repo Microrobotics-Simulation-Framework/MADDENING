@@ -160,6 +160,43 @@ def test_the_structure_error_names_the_first_path_that_differs():
     assert "['nodes']['s']['damping']" in message
 
 
+def test_a_mask_missing_only_an_empty_container_names_it():
+    """``gm.params`` is ``{"nodes": ..., "mappings": {}}``; a hand-written
+    mask of ``{"nodes": ...}`` -- the natural spelling for a graph with no
+    interface mappings -- has every leaf params has.  The refusal is right
+    (the structures differ), but it used to print the same six leaf paths
+    twice and no "first differ" clause, so it did not say what to fix.
+    (audit_040_p4_4/fmu-sysid/repro_mask_refusal_message.py)"""
+    gm = _spring_gm()
+    mask = {"nodes": {"s": {k: (k == "stiffness") for k in gm.params["nodes"]["s"]}}}
+    with pytest.raises(ValueError, match="same tree structure as params") as excinfo:
+        fit_lm(gm, lambda p: p["nodes"]["s"]["stiffness"][None] - 40.0, mask=mask, n_iter=1)
+    message = str(excinfo.value)
+    assert "params['mappings'] is an empty dict, and mask has no such key" in message
+    assert "same 6 leaves" in message
+    # The leaf list is given once, not twice.
+    assert message.count("['nodes']['s']['damping']") == 1
+
+
+@pytest.mark.parametrize("mask, says", [
+    ({"a": True, "b": (True, False), "c": {}},
+     "at params['b'], params has a list holding 2 leaves and mask has a tuple"),
+    ({"a": True, "b": [True, False], "c": {}, "d": None},
+     "mask['d'] is None, and params has no such key"),
+    ({"a": True, "b": [True, False], "c": {"x": {}}},
+     "mask['c']['x'] is an empty dict, and params has no such key"),
+])
+def test_a_structure_that_differs_where_no_leaf_is_is_named(mask, says):
+    params = {"a": jnp.float32(1.0), "b": [jnp.float32(2.0), jnp.float32(3.0)], "c": {}}
+
+    def residual(p):
+        return jnp.stack([p["a"], p["b"][0], p["b"][1]])
+
+    with pytest.raises(ValueError, match="same tree structure as params") as excinfo:
+        fim(residual, params, mask=mask)
+    assert says in str(excinfo.value)
+
+
 def test_a_mask_built_from_the_params_tree_is_still_accepted():
     gm = _spring_gm()
     mask = jax.tree.map(lambda _: False, gm.params)
@@ -253,6 +290,85 @@ def test_the_documented_defaults_are_inside_the_accepted_range():
     gm = _spring_gm()
     fit(gm, lambda p: jnp.asarray(0.0), n_iter=1)
     fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1)
+
+
+# ---------------------------------------------------------------------------
+# windowed_loss refuses what its fitters refuse
+# (audit_040_p4_4/fmu-sysid/repro_windowed_loss_arguments.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def observed_spring():
+    """A spring, its 13-sample record, and window starts torn off it, so the
+    continuity penalty has something to charge."""
+    from maddening.sysid import init_window_states, observations_from_history
+
+    gm = _spring_gm()
+    s0 = gm._user_state(gm._state)  # noqa: SLF001
+    _, hist = gm.run_scan_with_history(12)
+    gm.reset_state()
+    obs = observations_from_history(s0, hist)
+    torn = jax.tree.map(lambda x: x + 0.05, init_window_states(obs, 4))
+    return gm, obs, torn
+
+
+def _shooting_loss(gm, obs, states, **kwargs):
+    from maddening.sysid import windowed_loss
+
+    return float(windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                               window=4, window_states=states, **kwargs))
+
+
+@pytest.mark.parametrize("weight", [-1.0, -1e-30, float("nan"), float("inf")])
+def test_windowed_loss_refuses_a_continuity_weight_its_fitter_refuses(observed_spring, weight):
+    """A negative or NaN weight was guarded by ``continuity_weight > 0.0`` and
+    so read as ``0.0``: no penalty, no error -- while
+    ``fit_multiple_shooting`` refused -1.0.  Both now refuse it, with one
+    message."""
+    from maddening.sysid import fit_multiple_shooting
+
+    gm, obs, torn = observed_spring
+    with pytest.raises(ValueError, match="continuity_weight must be") as loss_error:
+        _shooting_loss(gm, obs, torn, continuity_weight=weight)
+    with pytest.raises(ValueError, match="continuity_weight must be") as fit_error:
+        fit_multiple_shooting(gm, obs, obs_fn=lambda h: h["s"]["position"], window=4,
+                              continuity_weight=weight, n_iter=1)
+    assert str(loss_error.value) == str(fit_error.value)
+
+
+def test_windowed_loss_still_takes_every_weight_its_fitter_takes(observed_spring):
+    """Non-vacuity: ``0.0`` is no penalty, a positive weight charges the torn
+    starts, and the charge doubles with the weight."""
+    gm, obs, torn = observed_spring
+    none, one, two = (_shooting_loss(gm, obs, torn, continuity_weight=w)
+                      for w in (0.0, 1.0, 2.0))
+    assert one > none
+    assert two - none == pytest.approx(2.0 * (one - none), rel=1e-4)
+
+
+@pytest.mark.parametrize("flag", ["no", "False", 1, 0, 0.0, np.True_, None,
+                                  jnp.asarray(False)])
+def test_windowed_loss_refuses_a_mask_unconverged_that_is_not_a_bool(observed_spring, flag):
+    """``mask_unconverged="no"`` turned masking *on* -- it was read as a truth
+    value -- which ``fim``'s ``reuse_trace`` and the fitters'
+    ``hold_undetermined`` already refuse through ``_check_flag``."""
+    from maddening.sysid import windowed_loss
+
+    gm, obs, _ = observed_spring
+    with pytest.raises(ValueError, match="mask_unconverged must be a bool"):
+        windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                      window=4, mask_unconverged=flag)
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_windowed_loss_takes_a_bool_mask_unconverged(observed_spring, flag):
+    from maddening.sysid import windowed_loss
+
+    gm, obs, _ = observed_spring
+    loss = windowed_loss(gm, gm.params, obs, obs_fn=lambda h: h["s"]["position"],
+                         window=4, mask_unconverged=flag)
+    assert np.isfinite(float(loss))
 
 
 # ---------------------------------------------------------------------------

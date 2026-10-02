@@ -139,7 +139,7 @@ SNIPPET_TIMEOUT_S = 120.0
 #: scan that silently collects fewer blocks, or a snippet quietly demoted to
 #: ``no-run``, must show up here.  Change it in the commit that adds or
 #: demotes a snippet; the failure message prints the new count.
-EXPECTED_RUNNABLE = 48
+EXPECTED_RUNNABLE = 49
 
 _FENCE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 _MARKER = re.compile(r"^(?P<indent>[ \t]*)<!--\s*snippet:(?P<body>.*?)-->[ \t]*$")

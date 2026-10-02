@@ -41,6 +41,14 @@ from maddening.core.node import BoundaryInputSpec, SimulationNode
 _EPS = float(np.finfo(np.float32).eps)
 
 
+def _pass_evaluations(gm):
+    """``(evaluations, declared)`` the report counts for the graph's one group."""
+    from maddening.core.graph_manager import _group_evaluations  # noqa: PLC0415
+
+    (group,) = gm._coupling_groups
+    return _group_evaluations(group, gm._nodes, gm._schedule, gm._edges)
+
+
 class _Map(SimulationNode):
     """``x <- a + g * u`` (``"affine"``) or ``x <- a + g * u**2`` (``"square"``).
 
@@ -562,15 +570,18 @@ def test_a_hybrid_node_keeps_its_physics_nodes_evaluation_count():
     assert got["spectral_error_bound"] == want["spectral_error_bound"]
 
 
-@pytest.mark.parametrize("n", (20, 100))
+@pytest.mark.parametrize("n", (50, 100))
 def test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor(n):
     """The same node looping inside ``update`` without saying so: the flag is withheld.
 
     Nothing outside ``update`` can count its sub-steps, so the floor
-    takes it as one evaluation, and the bound built on that reads below
-    the true distance -- the premise asserted here.  Where the residual
-    is at the floor (``precision_limited``) that unverified count is
-    the whole bound, and neither ``spectral_usable`` nor
+    takes it as one evaluation -- two for the pass, since the relay reads
+    it from the same Gauss-Seidel pass (``_group_evaluations``) -- and the
+    bound built on that reads below the true distance, the premise
+    asserted here.  (At 20 sub-steps the pass's chain of two happens to
+    cover the distance, so the premise needs 50 or more.)  Where the
+    residual is at the floor (``precision_limited``) that unverified count
+    is the whole bound, and neither ``spectral_usable`` nor
     ``gradient_bound_usable`` may say otherwise.
     """
     gm, x_star = _stalled_substep_graph(n)
@@ -578,6 +589,7 @@ def test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor(n):
     d = gm.coupling_diagnostics()["a+b"]
     distance = _l2_distance(gm, x_star)
     assert d["residual"] == 0.0, "fixture premise: stalled"
+    assert _pass_evaluations(gm) == (2.0, False), "fixture premise: a chain of two, undeclared"
     assert d["spectral_error_bound"] < distance, (
         "fixture premise: counted as one evaluation, the bound reads low"
     )
@@ -591,15 +603,18 @@ def test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor(n):
     assert dd["spectral_usable"] is True
     assert dd["spectral_error_bound"] >= _l2_distance(declared, x_star)
     # With a zero residual the spectral bound is the floor carried
-    # through, so declaring ``n`` evaluations scales it by exactly ``n``.
-    # The gradient bound's floor, inside the step, scales with it too;
-    # its curvature is taken across a floor-sized step that float32
-    # quantises to a few ulps, so its ratio is ``n`` only to within that
-    # quantisation (measured 21.6 at ``n = 20``, 92.4 at 100) -- but a
+    # through, so declaring ``n`` evaluations scales it by exactly the
+    # ratio of the two passes' counts: ``n + 1`` (the node, then the relay
+    # reading it in the same pass) against ``1 + 1``.  The gradient bound's
+    # floor, inside the step, scales with it too; its curvature is taken
+    # across a floor-sized step that float32 quantises to a few ulps, so
+    # its ratio is the counts' only to within that quantisation -- but a
     # floor left unscaled inside the step would leave it near 1.
-    assert dd["spectral_error_bound"] / d["spectral_error_bound"] == pytest.approx(n, rel=1e-5)
+    want = _pass_evaluations(declared)[0] / _pass_evaluations(gm)[0]
+    assert want == (n + 1) / 2
+    assert dd["spectral_error_bound"] / d["spectral_error_bound"] == pytest.approx(want, rel=1e-5)
     ratio = dd["gradient_relative_error_bound"] / d["gradient_relative_error_bound"]
-    assert n / 2 <= ratio <= 2 * n, ratio
+    assert want / 2 <= ratio <= 2 * want, ratio
 
 
 @pytest.mark.parametrize("n", (1, 4, 10, 20, 50, 100))
@@ -645,8 +660,14 @@ def test_precision_limited_is_the_residual_at_or_below_the_floor():
     """
     gm = _relay_graph("affine", 1.0, 0.25, 0.0, tolerance=1e-2)
     gm.step()
-    floor = float(residual_precision_floor(gm._state, ["a", "b"], "l2"))
-    assert floor == pytest.approx(PRECISION_FLOOR_ULPS * _EPS * math.sqrt(2.0), rel=1e-6)
+    # A Gauss-Seidel pair: the second node reads the first from the same
+    # pass, so the pass rounds like two evaluations (``_group_evaluations``).
+    evaluations, _declared = _pass_evaluations(gm)
+    assert evaluations == 2.0
+    floor = float(residual_precision_floor(gm._state, ["a", "b"], "l2",
+                                           evaluations=evaluations))
+    assert floor == pytest.approx(
+        evaluations * PRECISION_FLOOR_ULPS * _EPS * math.sqrt(2.0), rel=1e-6)
     slot = "coupling_a+b_residual"
     dtype = gm._state["_meta"][slot].dtype
     for value, limited in ((0.75 * floor, True), (floor, True),

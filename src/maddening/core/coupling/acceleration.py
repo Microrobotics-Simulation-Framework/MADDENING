@@ -11,6 +11,7 @@ inside ``jax.lax.fori_loop``.
 
 from __future__ import annotations
 
+import functools
 from typing import Any, Optional
 
 import jax
@@ -999,17 +1000,27 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: its true distance at ``N`` = 15-200 with ``spectral_usable=True``,
 #: whether the node looped inside ``update`` or the framework
 #: sub-cycled it.  So the floor is this constant times the number of
-#: evaluations one coupling pass rounds like: the largest sub-cycling
-#: divider times :meth:`SimulationNode.update_evaluations` in the group
+#: evaluations one coupling pass rounds like
 #: (``maddening.core.graph_manager._group_evaluations``, a module-level
-#: function; a pass evaluates no node more
-#: often than that, so it rounds like at most that many single passes),
-#: which is ``4N`` -- 16, 40, 80, 200 and 400 units against those
-#: figures, the same 2.6x-or-more headroom the single evaluation has
-#: and 14x at ``N = 100``, the price of one constant.  A node that loops
-#: inside ``update`` without declaring it is counted as one evaluation,
-#: and ``coupling_diagnostics`` withholds ``spectral_usable`` wherever
-#: the residual is at the floor, where that count carries the bound.
+#: function).  A node's own update counts its sub-cycling divider times
+#: :meth:`SimulationNode.update_evaluations`, which is ``4N`` for the
+#: sub-stepping node above -- 16, 40, 80, 200 and 400 units against
+#: those figures, the same 2.6x-or-more headroom the single evaluation
+#: has and 14x at ``N = 100``, the price of one constant.  How the
+#: nodes' counts combine depends on the iteration mode.  Under Jacobi
+#: every node reads the stored previous iterate, so the pass rounds like
+#: its worst node.  Under Gauss-Seidel a node reads each member
+#: scheduled before it from the *same* pass, already rounded, so the
+#: rounding at the end of a chain of same-pass reads is the sum along
+#: it, and the count is the longest such chain: on a Gauss-Seidel ring
+#: of ``N`` scalar relays stalled at float32 the exact residual is about
+#: ``N/27`` per-pass floors (0.6x at ``N = 16``, 2.3x at 64), and while
+#: the floor took the worst node's count the bound read 0.51x
+#: (``N = 32``) and 0.30x (``N = 64``) its true distance with
+#: ``spectral_usable=True``.  A node that loops inside ``update`` without
+#: declaring it is counted as one evaluation, and
+#: ``coupling_diagnostics`` withholds ``spectral_usable`` wherever the
+#: residual is at the floor, where that count carries the bound.
 #:
 #: It is a model of the map's rounding, not a proof of it: a node whose
 #: update cancels catastrophically -- a small output computed as the
@@ -1059,9 +1070,12 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     evaluations : float
         How many evaluations of the map one coupling pass rounds like:
         the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
-        ``GraphManager.coupling_diagnostics`` passes the largest
-        ``sub-cycling divider * SimulationNode.update_evaluations()`` in
-        the group; ``1.0`` is a pass that evaluates each node once.
+        ``GraphManager.coupling_diagnostics`` passes the count of
+        ``maddening.core.graph_manager._group_evaluations``: each node
+        counts ``sub-cycling divider * SimulationNode.update_evaluations()``,
+        and the pass the worst node's count under Jacobi or the longest
+        chain of same-pass reads under Gauss-Seidel; ``1.0`` is a pass
+        that evaluates each node once and reads only the previous iterate.
 
     Returns
     -------
@@ -1622,6 +1636,29 @@ def unflatten_coupled_state(
 # Acceleration methods
 # ------------------------------------------------------------------
 
+def _pow2_normaliser(*vectors):
+    """A power of two ``p`` with ``max_i |v_i| * p`` in ``[0.5, 1)``, in their dtype.
+
+    Scale-free arithmetic for the accelerators: a dot product or a norm
+    of ``p * v`` is the one of ``v`` times an exact power of two, so a
+    *ratio* of two of them is bit-identical to the unscaled one wherever
+    the unscaled products neither underflowed nor overflowed -- and
+    unlike the unscaled one it does not underflow at small units (the
+    squares of a float32 residual change near 1e-20 flush to zero).  The
+    exponent is clamped so ``p`` itself is a normal number of the dtype;
+    ``1`` for all-zero or non-finite input, which the callers' own guards
+    then reject.
+    """
+    dtype = jnp.result_type(*vectors)
+    biggest = functools.reduce(
+        jnp.maximum, [jnp.max(jnp.abs(v)) for v in vectors])
+    info = jnp.finfo(dtype)
+    _, exponent = jnp.frexp(jnp.where(jnp.isfinite(biggest), biggest,
+                                      jnp.zeros_like(biggest)))
+    exponent = jnp.clip(exponent, 1 - int(info.maxexp), -int(info.minexp))
+    return jnp.ldexp(jnp.ones((), dtype), -exponent)
+
+
 def aitken_relaxation(
     x_old_flat: jnp.ndarray,
     x_raw_flat: jnp.ndarray,
@@ -1662,11 +1699,28 @@ def aitken_relaxation(
     """
     residual = x_raw_flat - x_old_flat
     delta_r = residual - prev_residual_flat
-    denom = jnp.sum(delta_r ** 2)
-    # Guard against zero/non-finite denominator.  When denom overflows to
-    # inf in float32 (delta_r entries > ~1.84e19), the division produces
-    # nan.  The isfinite check catches this and falls back to input omega.
-    denom_ok = (denom > 1e-30) & jnp.isfinite(denom)
+    # The two dot products, taken on the vectors rescaled by one power of
+    # two (``_pow2_normaliser``), so their ratio does not depend on the
+    # units the group's state is written in.  The ratio itself is
+    # scale-free; what was not was the guard on its denominator, an
+    # absolute ``denom > 1e-30`` on ``sum(delta_r**2)``, which is
+    # ``O(scale**2)``: the same group written at 1e-12 of its units froze
+    # omega part-way through the solve and hit its cap unconverged where
+    # the group at scale 1 converged in 88 passes, and at 1e-16 Aitken was
+    # plain fixed-point iteration from the first pass -- while every
+    # convergence norm divides each field by its own magnitude so that a
+    # verdict does not depend on units.  Squares of a float32 residual
+    # change near 1e-20 also flush to zero (subnormal), which no constant
+    # in the guard can fix.  Multiplying by a power of two is exact, so
+    # wherever nothing underflowed before, the ratio -- and omega -- is
+    # bit-identical to the unscaled formula's.
+    pow2 = _pow2_normaliser(prev_residual_flat, delta_r)
+    p_hat = prev_residual_flat * pow2
+    d_hat = delta_r * pow2
+    denom = jnp.sum(d_hat ** 2)
+    # Guard against a zero or non-finite denominator: a residual that did
+    # not change (``delta_r == 0``), or one too large for its dtype.
+    denom_ok = (denom > 0) & jnp.isfinite(denom)
     # First pass of a timestep: ``prev_residual_flat`` is the zero
     # sentinel, so the numerator is identically 0 and the clip floor
     # (0.01) would silently override the caller's seeded omega -- the
@@ -1674,8 +1728,8 @@ def aitken_relaxation(
     # correction.  Treat the sentinel like the degenerate denominator.
     have_prev = jnp.any(prev_residual_flat != 0)
     usable = denom_ok & have_prev
-    safe_denom = jnp.where(usable, denom, jnp.array(1.0))
-    new_omega = -omega * jnp.sum(prev_residual_flat * delta_r) / safe_denom
+    safe_denom = jnp.where(usable, denom, jnp.ones_like(denom))
+    new_omega = -omega * jnp.sum(p_hat * d_hat) / safe_denom
     new_omega = jnp.clip(new_omega, 0.01, 2.0)
     # Fall back to current omega when the denominator is degenerate or
     # overflowed, or when there is no previous residual to extrapolate from.
@@ -1801,7 +1855,15 @@ def iqn_ils_update(
     # unrolled (fori) gradient came out NaN.  pinv's custom_jvp is
     # well-defined for rank-deficient input; the forward value is the
     # same minimum-norm solution with the same relative cutoff.
-    c = jnp.linalg.pinv(V_masked, rtol=1e-6) @ (-residual)
+    # ``c`` is scale-free (``V`` and ``r`` are both residual-sized), so the
+    # solve is posed on both rescaled by one power of two: LAPACK rescales
+    # a matrix whose norm leaves ``[sqrt(tiny)/eps, eps/sqrt(tiny)]`` by a
+    # factor that is not one, and a group written at 1e-16 of its units
+    # then rounded its secant step differently from the same group at
+    # scale 1.  An exact power of two leaves every product of a matrix in
+    # range as it was.
+    ls_pow2 = _pow2_normaliser(V_masked, residual)
+    c = jnp.linalg.pinv(V_masked * ls_pow2, rtol=1e-6) @ (-(residual * ls_pow2))
 
     # QN correction
     correction = W_masked @ c + residual
@@ -1818,11 +1880,22 @@ def iqn_ils_update(
     # ``rho``, i.e. 50x the residual at rho = 0.98.  A tight cap (this
     # used to be 10x) silently vetoes IQN on exactly the stiff problems
     # it exists for and degrades it to Aitken.
-    correction_norm = jnp.sqrt(jnp.sum(correction ** 2))
-    residual_norm = jnp.sqrt(jnp.sum(residual ** 2))
+    #
+    # Both norms are taken on the vectors rescaled by one power of two,
+    # and the comparison is relative: the floor ``max(residual_norm,
+    # 1e-12)`` this replaces was absolute, so a group written in small
+    # units (every residual below 1e-12) was held to an absolute cap of
+    # 1e-6 instead of 1e6 residuals, and squares of its entries flushed
+    # to zero.  Exact powers of two keep the comparison bit-identical
+    # wherever nothing underflowed; an exactly zero residual still
+    # accepts only a zero correction (and its Aitken fallback is the
+    # same unmoved iterate).
+    pow2 = _pow2_normaliser(correction, residual)
+    correction_norm = jnp.sqrt(jnp.sum((correction * pow2) ** 2))
+    residual_norm = jnp.sqrt(jnp.sum((residual * pow2) ** 2))
     is_valid = (
         jnp.all(jnp.isfinite(x_qn))
-        & (correction_norm < 1e6 * jnp.maximum(residual_norm, 1e-12))
+        & (correction_norm < 1e6 * residual_norm)
         & (new_n_cols > 0)
     )
     x_new = jnp.where(is_valid, x_qn, x_aitken)

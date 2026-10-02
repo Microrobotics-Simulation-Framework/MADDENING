@@ -501,11 +501,15 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
 
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(c) for c in consts)
-    d = jax.lax.stop_gradient(jnp.asarray(weights, x_sg.dtype))
+    # The analysis runs in at least float32 (``_analysis_dtype``); the map
+    # itself is evaluated in the group's own dtype, its tangents and
+    # outputs cast at the boundary -- no-ops for a float32 or wider group.
+    work = _analysis_dtype(x_sg.dtype)
+    d = jax.lax.stop_gradient(jnp.asarray(weights, work))
     dw = d if spectral_weights is None else jax.lax.stop_gradient(
-        jnp.asarray(spectral_weights, x_sg.dtype))
-    res = jax.lax.stop_gradient(_default_resolution(x_sg) if resolution is None
-                                else jnp.asarray(resolution, x_sg.dtype))
+        jnp.asarray(spectral_weights, work))
+    res = jax.lax.stop_gradient(_default_resolution(x_sg).astype(work) if resolution is None
+                                else jnp.asarray(resolution, work))
 
     def spectrum(operands):
         xx, cc, dd, ww, rr = operands
@@ -514,12 +518,13 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
 
         def matvec(v):
             _, Jv = jax.jvp(
-                lambda x_: _F_dispatch(step_pure, x_, cc), (xx,), (v * w_inv,)
+                lambda x_: _F_dispatch(step_pure, x_, cc), (xx,),
+                ((v * w_inv).astype(xx.dtype),)
             )
-            return ww * Jv
+            return ww * Jv.astype(work)
 
-        r_w = ww * (_F_dispatch(step_pure, xx, cc) - xx)
-        v0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, xx.dtype)
+        r_w = ww * (_F_dispatch(step_pure, xx, cc) - xx).astype(work)
+        v0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, work)
         rho, resid, amp = arnoldi_spectral_radius(matvec, v0, v_extra=r_w)
         # The share of ``D' r`` the group's residual does not see: the
         # dead-banded fields (weight 0 in ``dd``, positive in ``ww``).
@@ -538,7 +543,7 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         folded = jnp.maximum(amp, radius) * jnp.sqrt(1.0 + share * share)
         return rho, resid, jnp.where(unread, folded, amp)
 
-    nan = jnp.full((), jnp.nan, x_sg.dtype)
+    nan = jnp.full((), jnp.nan, work)
     # A Jacobian at a state that has left float range describes nothing
     # (a spectral radius of 0.0 read there as "contracts instantly"), so
     # a non-finite state reports the triple as NaN -- "not computed" --
@@ -550,6 +555,20 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan),
         (x_sg, consts_sg, d, dw, res),
     )
+
+
+def _analysis_dtype(dtype):
+    """The dtype the coupling diagnostics' linear algebra runs in: at least float32.
+
+    The spectral bound and the gradient bound orthogonalise Krylov vectors
+    and call LAPACK (an SVD, a QR, a solve), which has no bfloat16 or
+    float16 kernels: ``diagnostics=True`` on a 16-bit group raised
+    ``NotImplementedError`` from inside the step.  The map is still
+    evaluated in the group's own dtype -- its rounding is what the bound
+    is about -- and only the analysis is widened; a float32 or float64
+    group's dtype is returned unchanged, so its program is the one it was.
+    """
+    return jnp.promote_types(dtype, jnp.float32)
 
 
 def _default_resolution(x):
@@ -685,9 +704,10 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     """
     x_sg = jax.lax.stop_gradient(x_star)
     consts_sg = tuple(jax.lax.stop_gradient(jnp.asarray(c)) for c in consts)
-    dtype = x_sg.dtype
+    # In at least float32, as ``_spectral_rate_at`` (``_analysis_dtype``).
+    dtype = _analysis_dtype(x_sg.dtype)
     d = jax.lax.stop_gradient(jnp.asarray(weights, dtype))
-    res = jax.lax.stop_gradient(_default_resolution(x_sg) if resolution is None
+    res = jax.lax.stop_gradient(_default_resolution(x_sg).astype(dtype) if resolution is None
                                 else jnp.asarray(resolution, dtype))
     nan = jnp.full((), jnp.nan, dtype)
 
@@ -729,7 +749,11 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         spectral_error_bound,
     )
 
-    dtype = x_sg.dtype
+    # The analysis dtype (``_analysis_dtype``): ``d`` arrives in it, and the
+    # map's tangents and outputs are cast to and from the group's own dtype
+    # at the boundary -- no-ops for a float32 or wider group.
+    dtype = d.dtype
+    x_dtype = x_sg.dtype
     live = (d > 0).astype(dtype)
     s = jnp.where(d > 0, d, jnp.ones_like(d))
     s_inv = 1.0 / s
@@ -753,9 +777,10 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     def matvec(z):
         """``J(x_k)`` in the scaled coordinates."""
         _, Jv = jax.jvp(
-            lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,), (z * s_inv,)
+            lambda xx: _F_dispatch(step_pure, xx, consts_sg), (x_sg,),
+            ((z * s_inv).astype(x_dtype),)
         )
-        return s * Jv
+        return s * Jv.astype(dtype)
 
     U, M, captured = jacobian_range_basis(matvec, x_sg.shape[0], dtype=dtype)
 
@@ -766,7 +791,8 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
 
     rows = jnp.arange(len(probed))
     f_k, w = jax.vmap(rhs_for)(rows)          # the primal is unbatched inside
-    r_s = s * (f_k[0] - x_sg)
+    w = w.astype(dtype)
+    r_s = s * (f_k[0] - x_sg).astype(dtype)
 
     def norm(v):
         return jnp.linalg.norm(live * v, axis=-1)
@@ -807,7 +833,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         """``G_row(xx)``: the map's JVP at ``xx`` along ``(t_row, c_dot_row)``."""
         _, out = jax.jvp(
             lambda x_, c_: _F_dispatch(step_pure, x_, c_),
-            (xx, consts_sg), (ts * s_inv, tangent_for(row)),
+            (xx, consts_sg), ((ts * s_inv).astype(x_dtype), tangent_for(row)),
         )
         return out
 
@@ -821,7 +847,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # rounding error -- measured 2.9e-10 on an affine map, which the
     # resolvent then amplified into a bound of 2.5e-4 where the true
     # error is exactly zero.
-    points = jnp.stack([x_sg, x_sg + delta_s * s_inv])
+    points = jnp.stack([x_sg, (x_sg + delta_s * s_inv).astype(x_dtype)])
     # One extra row beside the probes: the tangent ``delta`` itself with
     # no constant moved, so its ``G`` is ``J(x) delta`` and the secant of
     # that row is how much the *Jacobian* changes across the step (see
@@ -832,7 +858,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     G = jax.vmap(
         lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows_ext, ts_ext)
     )(points)
-    G = jax.lax.optimization_barrier(G)
+    G = jax.lax.optimization_barrier(G).astype(dtype)
     secant_ext = s * (G[1] - G[0])
     secant_s, jac_secant_s = secant_ext[:-1], secant_ext[-1]
 
@@ -1101,7 +1127,7 @@ def _declared_evaluations(node):
     return float(value)
 
 
-def _group_evaluations(group, nodes):
+def _group_evaluations(group, nodes, schedule, edges):
     """``(evaluations, declared)``: how many evaluations one coupling pass rounds like.
 
     The float floor of the coupling bound
@@ -1111,25 +1137,72 @@ def _group_evaluations(group, nodes):
     that evaluates each node once.  A pass evaluates node ``n`` ``d_n``
     times (its sub-cycling divider, else once), and each evaluation
     rounds like ``e_n`` (:meth:`SimulationNode.update_evaluations`,
-    undeclared counting as one), so no node is evaluated more than
-    ``max_n d_n * e_n`` times and the pass rounds like at most that many
-    single passes.  That maximum is ``evaluations``; ``declared`` is
-    whether every node declared its ``e_n``.  Measured, float32: a node
-    sub-cycled 100 times per pass (or looping 100 explicit Euler
-    sub-steps inside ``update``) is ~29 units off the exact map, against
-    the 4 the floor allowed before it was counted -- and the bound read
-    0.16x the true distance with ``spectral_usable=True``.
+    undeclared counting as one), so node ``n``'s own update rounds like
+    ``d_n * e_n`` single evaluations.  ``declared`` is whether every
+    node declared its ``e_n``.  Measured, float32: a node sub-cycled 100
+    times per pass (or looping 100 explicit Euler sub-steps inside
+    ``update``) is ~29 units off the exact map, against the 4 the floor
+    allowed before it was counted -- and the bound read 0.16x the true
+    distance with ``spectral_usable=True``.
+
+    **How the nodes' counts combine depends on the iteration mode.**
+    Under ``"jacobi"`` every node reads the previous iterate, which is
+    stored and exact, so a node's output carries its own rounding only
+    and the pass rounds like its worst node: ``max_n d_n e_n``.  Under
+    ``"gauss-seidel"`` a node reads the output of every group member
+    scheduled before it *from the same pass*, already rounded, so its
+    output carries that rounding too: the pass is a composition, and
+    the error at the end of a chain of same-pass reads is the sum of
+    the roundings along it.  ``evaluations`` is then the longest such
+    chain, ``depth(n) = d_n e_n + max(depth(m))`` over the members ``m``
+    scheduled before ``n`` that ``n`` reads (an edge from a member
+    scheduled at or after ``n`` reads the previous iterate and starts no
+    chain).  Measured on a Gauss-Seidel ring of ``N`` scalar relays of
+    loop gain 0.99, every node declaring one evaluation: the exact
+    residual at the float32 stall is 0.6, 1.2 and 2.3x the per-pass
+    floor at ``N`` = 16, 32 and 64, and the bound, which took the worst
+    node's count, read 0.51x (``N = 32``) and 0.30x (``N = 64``) the
+    true distance with ``spectral_usable=True`` (MADD-ANO-094); counted
+    along the chain the floor is ``N`` times larger and the bound reads
+    23x and 16x over at ``N`` = 16 and 32 (the gradient bound 36x and
+    17x over its true error; jaxlib 0.11.0, CPU).  The
+    longest chain and not the sum over the members: a rounding reaches
+    a node only along a path of reads, and where several paths meet the
+    node's output is a combination of its inputs whose relative gains
+    -- in the norm's units, each field divided by its own magnitude --
+    sum to at most one unless the node cancels, which the floor's own
+    model already excludes (see
+    :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`).
+    For a chain or a ring the two coincide.
+
+    ``schedule`` is the order the step sweeps the group's members in
+    (the compiled schedule; members not in it are swept last, each
+    starting a chain of its own) and ``edges`` every edge of the graph;
+    only those between two members count.
     """
     dividers = _group_dividers(group, nodes) or {}
-    worst = 1.0
     declared = True
+    own: dict[str, float] = {}
     for nn in sorted(group.nodes):
-        own = _declared_evaluations(nodes[nn].node)
-        if own is None:
+        count = _declared_evaluations(nodes[nn].node)
+        if count is None:
             declared = False
-            own = 1.0
-        worst = max(worst, float(dividers.get(nn, 1)) * own)
-    return worst, declared
+            count = 1.0
+        own[nn] = float(dividers.get(nn, 1)) * count
+    if group.iteration_mode == "jacobi":
+        return max([1.0, *own.values()]), declared
+    order = [nn for nn in schedule if nn in group.nodes]
+    order += sorted(nn for nn in group.nodes if nn not in order)
+    position = {nn: i for i, nn in enumerate(order)}
+    same_pass: dict[str, set] = {nn: set() for nn in order}
+    for edge in edges:
+        src, dst = edge.source_node, edge.target_node
+        if src in position and dst in position and position[src] < position[dst]:
+            same_pass[dst].add(src)
+    depth: dict[str, float] = {}
+    for nn in order:
+        depth[nn] = own[nn] + max((depth[m] for m in same_pass[nn]), default=0.0)
+    return max([1.0, *depth.values()]), declared
 
 
 def _group_residual_dtype(state, node_names):
@@ -1375,7 +1448,7 @@ def _fixed_point_while(
 
     Returns ``(x_star, n_iters, final_res, final_amp, (V, W))``:
     ``n_iters`` is the number of coupling passes that produced
-    ``x_star`` (as a float, for the diagnostics carry) -- the pre-loop
+    ``x_star`` (an int32) -- the pre-loop
     pass plus the bodies whose update it kept, which is the count the
     fori path reports and is ``max_iter`` exactly at the cap, not the
     bare body count -- ``final_amp`` the amplification
@@ -1531,7 +1604,7 @@ def _fixed_point_while(
             x_new, acc = accelerate(x, x_raw, acc, i)
         else:
             x_new_sub, acc = accelerate(x[idx], x_raw[idx], acc, i)
-            x_new = x_raw.at[idx].set(x_new_sub)
+            x_new = x_raw.at[idx].set(x_new_sub.astype(x_raw.dtype))
         # ``x`` is the iterate ``res`` is a measurement of; carrying it
         # is what lets a criterion exit hand back the state its own
         # criterion passed on.  See the docstring.  ``res_prev`` is now
@@ -1604,7 +1677,13 @@ def _fixed_point_while(
     # ``iterations >= max_iterations`` cap check never fired under the
     # default solver.
     n_passes = jnp.where(criterion_met, n_iters, n_iters + jnp.int32(1))
-    return x_star, n_passes.astype(dtype), final_res, final_amp, vw
+    # Returned as the int32 it is counted in.  It used to be cast to the
+    # group's floating dtype for the diagnostics carry, which rounds every
+    # count above 256 in bfloat16 (2048 in float16) to that dtype's grid:
+    # a 16-bit group that ran its whole budget of 257 passes reported 256,
+    # and the documented cap check ``iterations >= max_iterations`` was
+    # false at the cap.  The custom_jvp gives it a ``float0`` tangent.
+    return x_star, n_passes, final_res, final_amp, vw
 
 
 def _ift_solve_impl(
@@ -1953,8 +2032,16 @@ def _ift_solve_jvp(
         return v - Jv
 
     x_dot = _ift_linear_solve(_matvec, rhs, linear_solver)
-    aux_dot = jax.tree.map(jnp.zeros_like, aux)
+    aux_dot = jax.tree.map(_zero_tangent, aux)
     return (x_star, aux), (x_dot, aux_dot)
+
+
+def _zero_tangent(x):
+    """A zero tangent for ``x``: of its own dtype, or ``float0`` for an integer."""
+    x = jnp.asarray(x)
+    if jnp.issubdtype(x.dtype, jnp.inexact):
+        return jnp.zeros_like(x)
+    return np.zeros(x.shape, dtype=jax.dtypes.float0)
 
 
 # nondiff_argnums: 0=step_pure (callable), 5=threshold (static float),
@@ -2264,6 +2351,86 @@ def _raise_if_a_kept_solve_failed(messages: dict, verdicts: Sequence[dict]) -> N
             raise RuntimeError(unconverged_msg)
 
 
+#: The ``_meta`` report slots that describe one solve, beside the pass
+#: counts: the per-solve keys :func:`_fold_kept_half_step_reports` takes
+#: from one half step as a set, so ``coupling_diagnostics()`` derives
+#: every value it reports from one solve.
+_PER_SOLVE_REPORT_SUFFIXES = (
+    "residual", "amplification", "rho_spectral", "spectral_residual",
+    "spectral_amplification", "gradient_relative_error_bound",
+)
+
+
+def _fold_kept_half_step_reports(groups, first_state, second_state):
+    """``second_state`` with each group's report covering both kept half steps.
+
+    An accepted ``run_adaptive*`` attempt keeps two solves per coupling
+    group, its two half steps, and ``strict_convergence`` checks both
+    (see :func:`_raise_if_a_kept_solve_failed`).  The ``_meta`` report
+    slots used to be whatever the second half step wrote, so
+    ``coupling_diagnostics()`` said ``converged=True`` about an accepted
+    step whose first half step had exited at ``max_iterations``
+    unconverged -- the step ``strict_convergence=True`` refuses -- and
+    the report, the strict check and the docs, which promise them one
+    verdict, gave two.  Folded here, per group that has a report:
+
+    * ``iterations`` is the larger half's count, so the cap check
+      ``iterations >= max_iterations`` reads "a kept solve exhausted its
+      budget", as it does across waveform sweeps;
+    * ``total_iterations`` is the sum, where the group owns that slot
+      (``waveform_iterations > 1``; a one-sweep group has no slot to
+      hold it, and reports ``iterations``);
+    * the per-solve slots (residual, amplification, the spectral triple,
+      the gradient bound) are taken together from one half -- the first
+      when it alone did not converge, else the second, which produced
+      the returned state -- so ``converged`` is ``False`` exactly when a
+      kept solve did not converge, and every key is still a statement
+      about one solve.
+
+    Each half's verdict is the criterion the solve, ``strict_convergence``
+    and :func:`~maddening.core.coupling.acceleration.reported_converged`
+    apply: ``estimated_error(residual, amplification, step_scale) <=
+    threshold`` in the residual's dtype.  A non-finite residual is
+    unconverged.  Pure ``jax.numpy`` on scalars, traced into
+    ``run_adaptive_scan``'s program and jitted once per call of
+    ``run_adaptive``; the states are otherwise untouched.
+    """
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        convergence_criterion,
+        estimated_error,
+    )
+
+    if _META_KEY not in second_state or _META_KEY not in first_state:
+        # No report slots to fold (a graph without coupling groups, or a
+        # hand-built state): the state keeps its structure exactly.
+        return second_state
+    first_meta = first_state[_META_KEY]
+    meta = dict(second_state[_META_KEY])
+    for group in groups:
+        key = "+".join(sorted(group.nodes))
+        iter_key = f"coupling_{key}_iterations"
+        if iter_key not in meta or iter_key not in first_meta:
+            continue
+        threshold, scale = convergence_criterion(group)
+
+        def converged(m, key=key, threshold=threshold, scale=scale):
+            res = jnp.asarray(m[f"coupling_{key}_residual"])
+            amp = jnp.asarray(m[f"coupling_{key}_amplification"])
+            return estimated_error(res, amp, scale) <= threshold
+
+        use_first = jnp.logical_and(jnp.logical_not(converged(first_meta)),
+                                    converged(meta))
+        meta[iter_key] = jnp.maximum(first_meta[iter_key], meta[iter_key])
+        total_key = f"coupling_{key}_total_iterations"
+        if total_key in meta and total_key in first_meta:
+            meta[total_key] = first_meta[total_key] + meta[total_key]
+        for suffix in _PER_SOLVE_REPORT_SUFFIXES:
+            slot = f"coupling_{key}_{suffix}"
+            if slot in meta and slot in first_meta:
+                meta[slot] = jnp.where(use_first, first_meta[slot], meta[slot])
+    return {**second_state, _META_KEY: meta}
+
+
 def _run_coupled_block_impl(
     group, group_schedule, new_state, full_state, external_inputs,
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
@@ -2557,7 +2724,8 @@ def _run_coupled_block_impl(
     use_quadratic_interp = group.boundary_interpolation == "quadratic"
     # How many evaluations one pass rounds like, for the float floor the
     # diagnostics compare against (see ``_group_evaluations``).
-    pass_evaluations, _declared = _group_evaluations(group, nodes)
+    pass_evaluations, _declared = _group_evaluations(
+        group, nodes, group_node_names, group_internal_list)
 
     def _resolve_boundary_interpolated(nn, s_prev, s_cur, alpha,
                                         flux_s=None, s_prev_prev=None):
@@ -2931,6 +3099,18 @@ def _run_coupled_block_impl(
         if use_acceleration:
             n_dof_flat = _flatten(state_after_first)
             n_dof = n_dof_flat.shape[0]
+            # The accelerator carries (Aitken's omega and previous
+            # residual, IQN's secant matrices) are seeded in the interface
+            # vector's dtype, widened to at least float32 as the coupling
+            # diagnostics are (``_analysis_dtype``).  They were seeded at
+            # canonical precision, which is float64 under
+            # ``jax_enable_x64``: a float32 group then raised a fori_loop
+            # carry ``TypeError`` under ``solver="fori"`` with
+            # ``"aitken"``, ``"iqn-ils"`` or ``"iqn-imvj"``, and under
+            # ``"ift"`` narrowed a float64 IQN step back into the float32
+            # iterate through a scatter JAX warns will become an error.
+            # Unchanged wherever x64 is off, and for a float64 group.
+            acc_dtype = _analysis_dtype(n_dof_flat.dtype)
 
         track_diag = group.diagnostics
         first_r = _compute_residual(state_after_first, new_state_inner)
@@ -2958,16 +3138,19 @@ def _run_coupled_block_impl(
             """
             max_cols = max(max_iters - 1, 1)
             if group.acceleration != "iqn-imvj":
-                return (jnp.zeros((n_dof, max_cols)),
-                        jnp.zeros((n_dof, max_cols)), 0)
+                return (jnp.zeros((n_dof, max_cols), acc_dtype),
+                        jnp.zeros((n_dof, max_cols), acc_dtype), 0)
             group_key = "+".join(sorted(group.nodes))
             meta = new_state_inner.get(_META_KEY, {})
-            stored_V = meta.get(
-                f"coupling_{group_key}_V", jnp.zeros((n_dof, max_cols)),
-            )
-            stored_W = meta.get(
-                f"coupling_{group_key}_W", jnp.zeros((n_dof, max_cols)),
-            )
+            # ``compile()`` seeds the slots in the same dtype; a state whose
+            # dtype moved since (a node promoting its state on the first
+            # step) is read in the one the step now iterates in.
+            stored_V = jnp.asarray(meta.get(
+                f"coupling_{group_key}_V", jnp.zeros((n_dof, max_cols), acc_dtype),
+            ), acc_dtype)
+            stored_W = jnp.asarray(meta.get(
+                f"coupling_{group_key}_W", jnp.zeros((n_dof, max_cols), acc_dtype),
+            ), acc_dtype)
             n_reuse = min(group.jacobian_reuse, max_cols)
             reuse_mask = jnp.arange(max_cols) < n_reuse
             return (stored_V * reuse_mask[None, :],
@@ -3346,7 +3529,7 @@ def _run_coupled_block_impl(
                     state_after_first, jnp.array(False), first_below,
                     first_r, first_r,
                     jnp.array(1.0), first_r, (first_r, first_r),
-                    jnp.array(1.0), jnp.zeros(n_dof),
+                    jnp.array(1.0, acc_dtype), jnp.zeros(n_dof, acc_dtype),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
@@ -3379,7 +3562,7 @@ def _run_coupled_block_impl(
                 init_carry = (
                     state_after_first, jnp.array(False), first_below,
                     first_r, first_r,
-                    jnp.array(1.0), jnp.zeros(n_dof),
+                    jnp.array(1.0, acc_dtype), jnp.zeros(n_dof, acc_dtype),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
@@ -3438,8 +3621,8 @@ def _run_coupled_block_impl(
                     state_after_first, jnp.array(False), first_r, first_r,
                     jnp.array(1.0), first_r, (first_r, first_r),
                     init_V, init_W, init_ncols,
-                    jnp.zeros(n_dof), init_flat,
-                    jnp.array(1.0), jnp.zeros(n_dof),
+                    jnp.zeros(n_dof, acc_dtype), init_flat,
+                    jnp.array(1.0, acc_dtype), jnp.zeros(n_dof, acc_dtype),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
@@ -3473,8 +3656,8 @@ def _run_coupled_block_impl(
                 init_carry = (
                     state_after_first, jnp.array(False), first_r, first_r,
                     init_V, init_W, init_ncols,
-                    jnp.zeros(n_dof), init_flat,
-                    jnp.array(1.0), jnp.zeros(n_dof),
+                    jnp.zeros(n_dof, acc_dtype), init_flat,
+                    jnp.array(1.0, acc_dtype), jnp.zeros(n_dof, acc_dtype),
                 )
                 final_carry = jax.lax.fori_loop(
                     1, max_iters, body_fn, init_carry
@@ -3901,6 +4084,8 @@ def _build_adaptive_scan(
     from maddening.core.simulation.adaptive import _tree_error_norm
 
     strict_messages = dict(getattr(dt_step_fn, "strict_messages", {}))
+    fold_kept_halves = getattr(dt_step_fn, "fold_kept_halves",
+                               lambda _first, second: second)
 
     def adaptive_scan(init_state, ext, params, knobs):
         on_trace()
@@ -3919,8 +4104,10 @@ def _build_adaptive_scan(
             # Full step + two half-steps
             state_full, _discarded = dt_step_fn(state, ext, dt, params)
             half_dt = dt / 2.0
-            state_half, verdicts_1 = dt_step_fn(state, ext, half_dt, params)
-            state_half, verdicts_2 = dt_step_fn(state_half, ext, half_dt, params)
+            state_half_1, verdicts_1 = dt_step_fn(state, ext, half_dt, params)
+            state_half, verdicts_2 = dt_step_fn(state_half_1, ext, half_dt, params)
+            # The report covers both kept half steps, as the strict check does.
+            state_half = fold_kept_halves(state_half_1, state_half)
 
             # Error estimate
             user_full = {k: v for k, v in state_full.items() if k != _META_KEY}
@@ -6513,15 +6700,21 @@ class GraphManager:
                     # fields only), or the warm start's length would not
                     # match the vector it seeds.
                     af = _group_accel_fields(g, self._edges, self._state)
-                    n_dof = flatten_coupled_state(
+                    flat0 = flatten_coupled_state(
                         self._state, list(g.nodes), fields=af
-                    ).shape[0]
+                    )
+                    n_dof = flat0.shape[0]
                     max_cols = max(g.max_iterations - 1, 1)
+                    # In the dtype the step iterates the secant matrices
+                    # in (``acc_dtype`` in ``_run_coupled_block_impl``),
+                    # not at canonical precision: float64 under x64 beside
+                    # a float32 group was a scan-carry dtype mismatch.
+                    vw_dtype = _analysis_dtype(flat0.dtype)
                     meta[f"coupling_{key}_V"] = jnp.zeros(
-                        (n_dof, max_cols)
+                        (n_dof, max_cols), vw_dtype
                     )
                     meta[f"coupling_{key}_W"] = jnp.zeros(
-                        (n_dof, max_cols)
+                        (n_dof, max_cols), vw_dtype
                     )
                 if g.predictor != "none":
                     # Pre-populate predictor history with flattened
@@ -7628,10 +7821,16 @@ class GraphManager:
               (:func:`~maddening.core.coupling.acceleration.reported_converged`),
               so all of them give one verdict; ``"error_estimate"`` is
               the float32 estimate of a float32 group, not the float64
-              product of its factors.  ``False`` means the
-              group hit ``max_iterations`` *and* the state it returned
-              is still outside the threshold; under ``solver="ift"``
-              the gradient through that step is then unreliable.
+              product of its factors.  ``False`` means one of two
+              things: the group hit ``max_iterations`` *and* the state
+              it returned is still outside the threshold, or the state
+              it returned is not finite (below) -- which can come
+              *before* the cap, so ``iterations < max_iterations`` beside
+              ``converged=False`` is not a contradiction: under
+              ``convergence_norm="interface"`` a field no edge reads can
+              be NaN while the fields the norm reads converge, and the
+              loop stops on its criterion.  Under ``solver="ift"`` the
+              gradient through that step is unreliable either way.
               **A non-finite state is the one exception to reading the
               slots literally, by design** (MADD-ANO-019): when any
               floating field of the group is NaN or inf, or beyond the
@@ -7691,9 +7890,13 @@ class GraphManager:
               (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`:
               four units of ``eps * max|field|`` in every entry the norm
               reads *per evaluation* of the map a coupling pass rounds
-              like -- the largest sub-cycling divider times
-              :meth:`~maddening.core.node.SimulationNode.update_evaluations`
-              in the group -- measured in that norm), times the larger of
+              like -- each node's sub-cycling divider times its
+              :meth:`~maddening.core.node.SimulationNode.update_evaluations`,
+              the worst node's under Jacobi and, under Gauss-Seidel, the
+              sum along the longest chain of same-pass reads (a node
+              reading a member scheduled before it reads that member's
+              already-rounded output; ``_group_evaluations``) -- measured
+              in that norm), times the larger of
               ``||(I - H)^{-1}||_2`` (the resolvent norm of the
               Krylov-compressed Jacobian, in the group's own norm) and
               ``1 / (1 - rho_spectral)`` with a margin for an unresolved
@@ -7773,7 +7976,11 @@ class GraphManager:
               node can see: a relay whose node takes 15-200 explicit
               Euler sub-steps inside ``update`` read 0.07-0.96x its true
               distance with this flag set.  A group whose nodes all
-              declare keeps the flag at float32 convergence.
+              declare keeps the flag at float32 convergence -- its floor
+              counting the declared evaluations along a Gauss-Seidel
+              pass's longest chain of same-pass reads, without which a
+              stalled 32-relay ring read 0.51x its true distance with the
+              flag set (MADD-ANO-094).
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -7940,6 +8147,24 @@ class GraphManager:
             and in particular not on a stalled float32 iterate (see
             ``"converged"`` above and ``"precision_limited"``).
 
+            **After** :meth:`run_adaptive` **or** :meth:`run_adaptive_scan`
+            the report describes the last accepted attempt's two kept
+            half steps, the two solves ``strict_convergence`` checks:
+            ``"iterations"`` is the larger half's count (so the cap check
+            reads "a kept solve exhausted its budget"),
+            ``"total_iterations"`` the sum where the group owns that slot
+            (``waveform_iterations > 1``; a one-sweep group has none and
+            reports ``"iterations"``), and every per-solve key --
+            ``"residual"``, ``"amplification"`` and what is derived from
+            them, the spectral keys, the gradient bound -- comes from one
+            half: the first when it alone did not converge, else the
+            second, which produced the returned state.  ``"converged"`` is
+            therefore ``False`` exactly when a kept solve did not
+            converge, the verdict ``strict_convergence`` acts on.  (It
+            used to be the second half's report alone, which said
+            ``converged=True`` beside a first half stopped at the cap:
+            MADD-ANO-095.)
+
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value
             here by the same rule -- the three spectral keys and the
@@ -8076,7 +8301,8 @@ class GraphManager:
                 # A pass that sub-cycles a node, or whose nodes loop inside
                 # ``update``, rounds like several single ones: the floor is
                 # per evaluation (``_group_evaluations``).
-                evaluations, declared = _group_evaluations(group, self._nodes)
+                evaluations, declared = _group_evaluations(
+                    group, self._nodes, self._schedule, self._edges)
                 floor = float(residual_precision_floor(
                     self._state, sorted(group.nodes), group.convergence_norm,
                     group.atol, group.rtol,
@@ -8908,6 +9134,11 @@ class GraphManager:
             for g in coupling_groups
             if g.strict_convergence and g.solver == "ift"
         }
+        # The report of an accepted attempt covers both kept half steps
+        # (``_fold_kept_half_step_reports``); the steppers apply it to the
+        # second half step's state.
+        cast(Any, dt_step_fn).fold_kept_halves = functools.partial(
+            _fold_kept_half_step_reports, tuple(coupling_groups))
         return dt_step_fn
 
     def _adaptive_multirate_message(self, entry: str) -> str:
@@ -9045,6 +9276,7 @@ class GraphManager:
         strict_messages = cast(Any, dt_step_fn).strict_messages
         # JIT-compile the dt-parameterised step
         dt_step_jit = jax.jit(dt_step_fn)
+        fold_kept_halves = jax.jit(cast(Any, dt_step_fn).fold_kept_halves)
         params = self._params_or_default(params)
 
         t = 0.0
@@ -9066,8 +9298,10 @@ class GraphManager:
             state_full, _discarded = dt_step_jit(state, external_inputs, dt_jax, params)
             # Two half-steps
             half_dt = dt_jax / 2.0
-            state_half, verdicts_1 = dt_step_jit(state, external_inputs, half_dt, params)
-            state_half, verdicts_2 = dt_step_jit(state_half, external_inputs, half_dt, params)
+            state_half_1, verdicts_1 = dt_step_jit(state, external_inputs, half_dt, params)
+            state_half, verdicts_2 = dt_step_jit(state_half_1, external_inputs, half_dt, params)
+            # The report covers both kept half steps, as the strict check does.
+            state_half = fold_kept_halves(state_half_1, state_half)
 
             # Error estimate
             user_full = self._user_state(state_full)

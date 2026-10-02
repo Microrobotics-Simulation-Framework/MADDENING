@@ -1,8 +1,13 @@
 """Property-based tests for Aitken delta-squared relaxation.
 
-Samples from a rich input space,
-including the degenerate regime (denom <= 1e-30) that interval
-analysis cannot verify due to JAX's select_n tracing both branches.
+Samples from a rich input space, including the degenerate regime (a
+residual that did not change, so the denominator is exactly zero) that
+interval analysis cannot verify due to JAX's select_n tracing both
+branches, and the same inputs in other units: the guard used to be an
+absolute ``denom > 1e-30``, which froze omega for any group written in
+small enough units (MEDIUM-2 of the 0.4.0 round-3 audit), and the
+dot products are now taken on the vectors rescaled by an exact power of
+two.
 """
 
 
@@ -23,11 +28,15 @@ float_arrays = arrays(
                        allow_nan=False, allow_infinity=False),
 )
 
-small_arrays = arrays(
+#: Multiples of 1/1024 up to 1024: exact in float32, and so is every
+#: difference of two of them, which never comes near the subnormal range --
+#: so the same arrays times any power of two from 2**-100 to 2**100 are the
+#: same computation in other units, bit for bit, wherever the arithmetic is
+#: units-invariant.
+grid_arrays = arrays(
     dtype=np.float32,
     shape=(8,),
-    elements=st.floats(min_value=-1e-16, max_value=1e-16,
-                       allow_nan=False, allow_infinity=False),
+    elements=st.integers(-2 ** 20, 2 ** 20).map(lambda i: i / 1024.0),
 )
 
 OMEGA_LO = float(np.float32(0.01))
@@ -71,39 +80,46 @@ class TestAitkenOmegaAlwaysBounded:
 
 
 class TestAitkenDivisionGuard:
-    """When residuals are near-zero, omega falls back to input value."""
+    """omega falls back to its input exactly where the formula is degenerate.
 
-    @given(x_old=small_arrays, x_raw=small_arrays,
-           prev_r=small_arrays, omega=omega_st)
+    Degenerate means the residual did not change between the two passes
+    (``delta_r == 0``, a denominator of exactly zero; the zero first-pass
+    sentinel is the other fallback).  Small *values* are not degenerate:
+    the same residual sequence in units ``2**-100`` times smaller is the
+    same Aitken step, and the guard on an absolute ``denom > 1e-30`` that
+    froze it is gone.
+    """
+
+    @given(x_old=float_arrays, x_raw=float_arrays, omega=omega_st)
     @settings(max_examples=EXAMPLES_CHEAP)
-    def test_degenerate_returns_input_omega(self, x_old, x_raw, prev_r, omega):
-        x_old_j = jnp.asarray(x_old)
-        x_raw_j = jnp.asarray(x_raw)
-        prev_r_j = jnp.asarray(prev_r)
-        omega_j = jnp.asarray(omega)
-
-        residual = x_raw_j - x_old_j
-        delta_r = residual - prev_r_j
-        denom = float(jnp.sum(delta_r ** 2))
-        # Asserted, not assumed.  ``small_arrays`` bounds every element by
-        # 1e-16, so ``delta_r`` is bounded by 3e-16 and an 8-entry sum of its
-        # squares by 7.2e-31 -- the degenerate branch is reached by
-        # construction, not by luck, and this measured 0.0% rejection even at
-        # 800 examples.  If the strategy is ever widened, this fails here
-        # rather than quietly turning the test into a measure of how often a
-        # random draw happens to be degenerate.
-        assert denom <= 1e-30, (
-            f"small_arrays must keep the division guard's denominator "
-            f"degenerate; got {denom}"
-        )
-
+    def test_an_unchanged_residual_returns_input_omega(self, x_old, x_raw, omega):
+        # The previous residual *is* this one: ``x_raw - x_old`` rounds the
+        # same in NumPy and in XLA (one IEEE subtraction each).
+        prev_r = (x_raw - x_old).astype(np.float32)
         _, new_omega, _ = aitken_relaxation(
-            x_old_j, x_raw_j, prev_r_j, omega_j
+            jnp.asarray(x_old), jnp.asarray(x_raw), jnp.asarray(prev_r), jnp.asarray(omega)
         )
-        assert float(new_omega) == float(omega_j), (
-            f"Expected omega={float(omega_j)}, got {float(new_omega)} "
-            f"(denom={denom})"
+        assert float(new_omega) == float(np.float32(omega)), (
+            f"Expected omega={omega}, got {float(new_omega)} for an unchanged residual"
         )
+
+    @given(x_old=grid_arrays, x_raw=grid_arrays, prev_r=grid_arrays,
+           omega=omega_st, k=st.integers(-100, 100))
+    @settings(max_examples=EXAMPLES_CHEAP)
+    def test_omega_does_not_depend_on_the_units(self, x_old, x_raw, prev_r, omega, k):
+        """The same inputs times ``2**k``: the same omega, the step times ``2**k``.
+
+        Failed before the fix for any ``k`` that put ``sum(delta_r**2)``
+        below 1e-30 (omega frozen at its input) or its squares outside
+        float32 (flushed to zero, or overflowing to inf).
+        """
+        s = np.float32(2.0 ** k)
+        x1, w1, _ = aitken_relaxation(jnp.asarray(x_old), jnp.asarray(x_raw),
+                                      jnp.asarray(prev_r), jnp.asarray(omega))
+        xs, ws, _ = aitken_relaxation(jnp.asarray(x_old * s), jnp.asarray(x_raw * s),
+                                      jnp.asarray(prev_r * s), jnp.asarray(omega))
+        assert float(ws) == float(w1), (k, float(w1), float(ws))
+        np.testing.assert_array_equal(np.asarray(xs) / s, np.asarray(x1))
 
 
 class TestAitkenRelaxedState:

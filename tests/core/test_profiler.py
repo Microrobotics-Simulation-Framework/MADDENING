@@ -20,6 +20,7 @@ from maddening.core.simulation.profiler import (
     profile_graph,
     profile_report_to_perfetto,
 )
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.nodes.spring import SpringDamperNode
 
 CAP = 25
@@ -410,3 +411,126 @@ def test_the_profiler_reads_converged_as_the_report_does_on_every_step(
         verdicts.append(report)
         assert _meta_converged(gm._state["_meta"], res_key, amp_key, thr, scale) is report
     assert len(set(verdicts)) == 2, verdicts   # both verdicts occur, so both are compared
+
+
+# ---------------------------------------------------------------------------
+# ``coupling_per_iteration_ms`` on a group running several waveform sweeps
+# ---------------------------------------------------------------------------
+
+
+class _Relay(SimulationNode):
+    """``x <- 0.5 x_pre + 0.8 u + bias``: a slow contraction, many passes per sweep."""
+
+    def __init__(self, name, dt, bias):
+        super().__init__(name, dt, bias=jnp.asarray(bias, jnp.float32))
+
+    def initial_state(self):
+        return {"x": jnp.zeros(2, jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(2,), dtype=jnp.float32,
+                                       default=jnp.zeros(2, jnp.float32))}
+
+    def update(self, state, boundary_inputs, dt):
+        # ``profile_graph`` also times each node alone, with no inputs.
+        u = boundary_inputs.get("u", jnp.zeros(2, jnp.float32))
+        return {"x": jnp.float32(0.5) * state["x"] + jnp.float32(0.8) * u + self.params["bias"]}
+
+
+def _waveform_pair(waveform):
+    """Two relays, ``b`` at half ``a``'s timestep, sub-cycled with *waveform* sweeps.
+
+    Contracting slowly enough that every sweep runs to the cap of 30, so a
+    step runs ``30 * waveform`` passes and the capped variant ``waveform``.
+    """
+    gm = GraphManager()
+    gm.add_node(_Relay("a", 1.0, [1.0, 2.0]))
+    gm.add_node(_Relay("b", 0.5, [0.0, 1.0]))
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_coupling_group(["a", "b"], subcycling=True, waveform_iterations=waveform,
+                          max_iterations=30, tolerance=1e-6)
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("waveform", [1, 3])
+def test_the_one_iteration_variant_runs_one_pass_per_waveform_sweep(waveform):
+    """The capped step still runs every sweep: ``total_iterations`` is the sweep count."""
+    gm = _waveform_pair(waveform)
+    gm.step()
+    with _one_iteration_variant(gm):
+        gm.step()
+        d = gm.coupling_diagnostics()["a+b"]
+        assert (d["iterations"], d["total_iterations"]) == (1, waveform), dict(d)
+
+
+def test_coupling_per_iteration_ms_divides_by_the_passes_the_overhead_paid_for():
+    """The divisor is ``total_iterations`` less one pass per sweep, not ``iterations - 1``.
+
+    With three sweeps the capped variant runs three passes, and the real
+    step's passes are summed over its sweeps; dividing by the largest
+    sweep's count less one overstated the cost of a pass by nearly three.
+    """
+    rep = profile_graph(_waveform_pair(3), n_steps=4, n_warmup=1, counts=False)
+    st = rep.coupling_iter_stats["a+b"]
+    assert st["sweeps"] == 3 and st["total_mean"] >= st["mean"], st
+    extra = st["total_mean"] - st["sweeps"]
+    assert extra > st["mean"] - 1.0, "fixture premise: the old divisor differs"
+    assert rep.coupling_per_iteration_ms == pytest.approx(
+        rep.coupling_overhead_ms / extra, rel=1e-12, abs=0.0), (rep.coupling_per_iteration_ms,
+                                                               rep.coupling_overhead_ms, st)
+
+
+def test_a_one_sweep_group_divides_by_iterations_less_one_as_before():
+    """``total_iterations`` is ``iterations`` there, so nothing moves."""
+    rep = profile_graph(_coupled(), n_steps=4, n_warmup=1, counts=False)
+    st = rep.coupling_iter_stats["a+b"]
+    assert st["sweeps"] == 1 and st["total_mean"] == st["mean"], st
+    if st["mean"] > 1.0:
+        assert rep.coupling_per_iteration_ms == pytest.approx(
+            rep.coupling_overhead_ms / (st["mean"] - 1.0), rel=1e-12, abs=0.0)
+
+
+# ---------------------------------------------------------------------------
+# A node.params write pending at profile time survives the profiler's recompiles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("measure_coupling", [True, False])
+def test_a_pending_node_params_write_survives_profiling(measure_coupling):
+    """``node.params`` written after compile, then profiled, then compiled: the write applies.
+
+    A ``node.params`` write made after a compile reaches the step at the
+    next ``compile()``: that compile sees the node's value move since the
+    last committed compile while ``gm.params`` did not (MADD-ANO-093).  The
+    profiler's one-iteration variant recompiles twice and then restores
+    the caller's ``gm.params``, so those compiles recorded the new node
+    value as already taken while the restored ``gm.params`` still held the
+    old one -- and the caller's next compile kept the old value.  The
+    profiler now restores the committed params snapshot as well.
+    """
+    gm = _coupled()
+    gm.step()
+    old = float(gm.params["nodes"]["a"]["stiffness"])
+    gm._nodes["a"].node.params["stiffness"] = 2.0 * old
+    profile_graph(gm, n_steps=2, n_warmup=1, counts=False, measure_coupling=measure_coupling)
+    gm.compile()
+    assert float(gm.params["nodes"]["a"]["stiffness"]) == 2.0 * old
+
+
+def test_a_gm_params_write_survives_profiling_and_the_next_compile():
+    """The neighbouring case: a ``gm.params`` leaf (a calibration) is not discarded.
+
+    Profiling recompiles twice and restores ``gm.params``; the snapshot it
+    restores beside it must not make the caller's next compile take the
+    node's (old) value over the written leaf.
+    """
+    gm = _coupled()
+    gm.step()
+    old = float(gm.params["nodes"]["a"]["stiffness"])
+    gm.params["nodes"]["a"]["stiffness"] = jnp.float32(3.0 * old)
+    profile_graph(gm, n_steps=2, n_warmup=1, counts=False)
+    assert float(gm.params["nodes"]["a"]["stiffness"]) == 3.0 * old
+    gm.compile()
+    assert float(gm.params["nodes"]["a"]["stiffness"]) == 3.0 * old

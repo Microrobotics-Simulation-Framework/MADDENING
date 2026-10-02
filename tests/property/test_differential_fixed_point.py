@@ -380,6 +380,101 @@ def test_a_usable_spectral_bound_holds_on_generated_graphs(data):
 
 
 # ---------------------------------------------------------------------------
+# Long Gauss-Seidel chains at the float32 floor
+# ---------------------------------------------------------------------------
+#
+# The spectral bound adds the residual's float floor, a model of how far a
+# computed residual can sit from the exact map's: ``PRECISION_FLOOR_ULPS``
+# units per evaluation the pass rounds like.  Under Gauss-Seidel a member
+# reads every member scheduled before it from the same pass, already
+# rounded, so the rounding at the end of a chain of such reads is the sum
+# along it; the floor counted the worst *node*, and on a 32-relay ring
+# stalled at float32 the bound read 0.51x the true distance with the flag
+# set (64 relays: 0.30x).  The structures and examples above are too short
+# to see it (the floor carries 2.6x headroom per evaluation, the stall
+# distance grows with the chain), so this draws long rings, at loop gains
+# near one, started a hair from the fixed point with a tolerance only the
+# bitwise stall meets: the residual is the floor, and the floor is the bound.
+
+
+def _long_ring(m):
+    """A pure cycle of *m* scalar relays, swept in its own order; no outside nodes."""
+    return cg._cycle(m, 1, outside=False, leaves=(), alpha=0.0, beta=1.0)
+
+
+@functools.lru_cache(maxsize=None)
+def _long_ring_graph(m, mode):
+    gdef = _long_ring(m)
+    group = dict(tolerance=1e-12, max_iterations=600, iteration_mode=mode, diagnostics=True)
+    gm = cg.build_graph(gdef, group)
+    assert [nm for nm in gm.schedule if nm in gdef.group_nodes] == list(gdef.group_nodes), (
+        "fixture premise: the ring is swept in its own order, a same-pass chain of m")
+    return gdef, gm, group
+
+
+def _uniform_ring_values(gdef, rho, scale):
+    """Every link's gain ``rho ** (1/m)``, biases ``scale * (1 - g)``: the worst case.
+
+    Each relay reads its predecessor with a gain just below one, so a
+    rounding at the start of the chain reaches its end almost undamped,
+    and every fixed-point entry is ``scale`` -- no cancellation anywhere,
+    which is the regime the floor's model claims.  This is the ring the
+    finding measured (0.51x at 32 relays); drawn rank-one gains damp the
+    chain and read 1.0-1.7x on the old floor instead.
+    """
+    m = len(gdef.group_nodes)
+    g = np.float32(rho ** (1.0 / m))
+    return {nm: {"G": [np.array([[g]], np.float32)],
+                 "b": np.array([scale * (1.0 - float(g))], np.float32),
+                 "x0": np.zeros(1, np.float32)}
+            for nm in gdef.group_nodes}
+
+
+@st.composite
+def _long_ring_values(draw, m):
+    """The worst-case uniform ring, or drawn rank-one gains, near one either way."""
+    gdef = _long_ring(m)
+    if draw(st.booleans()):
+        return _uniform_ring_values(gdef, draw(st.sampled_from([0.99, 0.995])),
+                                    draw(st.sampled_from([1.0, 0.75, 1e-3, 3e3])))
+    return draw(cg.drawn_values(gdef, rhos=(0.99, 0.995, 0.999), rank_one=True,
+                                bias_scales=(1.0,)))
+
+
+def assert_the_floor_bound_holds_on_a_long_ring(m, mode, values, near):
+    gdef, gm, group = _long_ring_graph(m, mode)
+    assert_spectral_bound_holds(gdef, gm, group, values, near)
+
+
+@pytest.mark.parametrize("m", [8])
+@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+# Costly tier: one compile per (m, mode); the examples change values only.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_usable_spectral_bound_holds_on_a_stalled_ring(m, mode, data):
+    """Per push, at a length the old floor still covered; slow sibling at 24 and 32."""
+    assert_the_floor_bound_holds_on_a_long_ring(
+        m, mode, data.draw(_long_ring_values(m)), data.draw(st.sampled_from([1e-3, 1e-4])))
+
+
+# Slow: a 24- or 32-relay group with diagnostics=True compiles the spectral
+# and gradient-bound machinery over every relay's constants (~15-30 s each).
+# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_stalled_ring
+@pytest.mark.slow
+@pytest.mark.parametrize("m", [24, 32])
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_usable_spectral_bound_holds_on_a_long_gauss_seidel_chain(m, data):
+    """A usable bound against the exact float64 fixed point on a 24- or 32-deep chain.
+
+    Per-push sibling: :func:`test_a_usable_spectral_bound_holds_on_a_stalled_ring`.
+    """
+    assert_the_floor_bound_holds_on_a_long_ring(
+        m, "gauss-seidel", data.draw(_long_ring_values(m)),
+        data.draw(st.sampled_from([1e-3, 3e-4])))
+
+
+# ---------------------------------------------------------------------------
 # A disagreement: under-relaxation and an exit on the first loop pass
 # ---------------------------------------------------------------------------
 

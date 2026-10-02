@@ -7811,6 +7811,34 @@ anomalies:
       Gauss-Seidel group with a chain of two or more members -- while
       states, iteration counts and `converged` are bit-identical (125
       configurations dumped before and after).
+      The round-4 audit of the merged tree found two more ways the count
+      read low, both in this cycle's code and both fixed in 0.4.0.  (1)
+      Gains: the chain count assumed a read passes a relative rounding on
+      at most unchanged.  A squaring relay doubles it with no cancellation
+      at all, so a stalled Gauss-Seidel ring of eight squares closed by an
+      affine head read `spectral_error_bound` at 0.66x the true distance
+      (0.20x at twelve squares) and `gradient_relative_error_bound` at
+      0.91x the true error (0.018x at twelve), both flags set.  With
+      `diagnostics=True` the step now measures every group-internal read's
+      relative gain at the returned state -- one JVP of the reading node's
+      update along the source's own state per read -- scales each member's
+      own count by `max(1, sum of its reads' gains)`, because a member
+      whose terms cancel amplifies its own rounding as well (this is what
+      a Jacobi group's count rests on), composes same-pass reads along the
+      chain weighted by their gains, never goes below the structural count,
+      and writes the count to `_meta` (`coupling_<key>_pass_evaluations`)
+      for the report.  Conservative by design: the eight- and twelve-square
+      rings now read 56x and 184x over their true distance (1400x at
+      fourteen) and their gradient bounds 50x and 430x over; a sum whose
+      terms cancel is counted exactly, a product counted as a sum.  (2)
+      Live graph: the
+      report re-derived the count from the graph as it stood when
+      `coupling_diagnostics()` was called, so rebuilding a node with
+      another declared count after a step moved the bound of the step that
+      had run (17x measured), and a member removed since raised `KeyError`.
+      The report now reads the count the step measured, else the
+      structural count and internal edges snapshotted at `compile()`, and
+      a group a member of which was removed since has no entry.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -7838,12 +7866,16 @@ anomalies:
     resolution_version: "0.4.0"
     residual_risk: >
       The floor remains a model of the map's rounding, not a proof of it.
-      The longest-chain count assumes that where several same-pass reads
-      meet, the node's output combines them with relative gains (each
-      field divided by its own magnitude) summing to at most one; a node
-      that cancels -- a small output computed as the difference of two
-      large inputs -- can exceed it, as it can exceed the per-evaluation
-      constant, and nothing outside the node can see that.  The count is
+      The measured gains are first-order, taken at the returned state
+      along one direction per read (the source's own state), and only
+      with `diagnostics=True`; without diagnostics there is no bound to
+      floor, and `precision_limited` uses the structural count.  A node
+      that cancels *inside* itself -- a small output computed as the
+      difference of two large intermediates it computes rather than reads
+      -- can exceed any fixed number of ulps of its output, and nothing
+      outside the node can see that.  The measurement costs one JVP of a
+      member's update per group-internal read, every step, in its own
+      `lax.cond` branch.  The count is
       one number for the whole pass, so the floor is conservative for the
       members near the start of a chain: 16x over the true distance on
       the 32-relay ring.
@@ -7853,6 +7885,12 @@ anomalies:
       - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_count_is_the_longest_chain_not_the_sum"
       - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_report_and_the_step_count_the_same_chain"
       - "tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_long_gauss_seidel_chain"
+      - "tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_each_read_is_weighted_by_its_measured_gain"
+      - "tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_the_spectral_bound_holds_on_a_stalled_squaring_chain"
+      - "tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_the_gradient_bound_holds_on_a_stalled_squaring_chain"
+      - "tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_an_adversarial_chain"
+      - "tests/core/test_coupling_report_follows_the_group_that_ran.py::test_rebuilding_a_member_before_the_next_step_leaves_the_report_alone"
+      - "tests/core/test_coupling_report_follows_the_group_that_ran.py::test_a_member_removed_since_the_step_takes_the_report_with_it"
     github_issue: null
   - anomaly_id: "MADD-ANO-095"
     title: "After run_adaptive or run_adaptive_scan the coupling report described only the second kept half step: a first half step stopped at max_iterations was hidden, and converged read True where strict_convergence refused the step"
@@ -8431,4 +8469,322 @@ anomalies:
     verification:
       - "tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing"
       - "tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_with_an_extra_input_member_is_refused"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-104"
+    title: "The IFT adjoint (and in 0.4.0's development the tangent) of a coupled step was exactly zero, reported successful, whenever its right-hand side was below about 1e-8"
+    description: >
+      Under `solver="ift"` the derivative of a coupling group's fixed point
+      goes through one linear solve, `(I - dF/dx) v = b`, whose right-hand
+      side is the cotangent in reverse mode (`jax.grad`) and, since 0.4.0's
+      development added forward mode, the tangent in forward mode
+      (`jax.jacfwd`).  The matrix-free backends (lineax GMRES, and BiCGStab
+      where it is reachable) stopped on `|r| <= 1e-8 + rtol * max|b|`, and
+      with the zero initial guess the absolute `1e-8` passed before a
+      single step whenever `max|b|` was below about `1e-8`: the solve
+      returned zero and reported success, so the derivative was exactly
+      zero.  That is a group written in small units, and in reverse mode
+      any loss near its minimum -- the cotangent of `(x - obs)**2` is
+      `2 (x - obs)`.  Measured at v0.3.0 and v0.3.1 (`git archive` of each
+      tag, CPU, jaxlib 0.11.0) on a Gauss-Seidel pair `a <- 0.9 u + x_pre`,
+      `b <- u`, differentiating a least-squares loss in `a`'s pre-step
+      state with `solver="ift"`: the gradient was right at bias `1e-4` and
+      `1e-6` and exactly `0.0` at `1e-8`, `1e-9` and `1e-12`, where
+      `solver="fori"` gave the exact `-1e-7`, `-1e-8` and `-1e-11`.
+      Forward mode raised at those tags (`custom_vjp`), so only reverse
+      mode was affected there; on the 0.4.0 development tree both were,
+      and above the dense fallback's size (50 coupled DOF) a moderately
+      small `b` raised the "ill-conditioned" adjoint error instead.  Found
+      by the round-4 audit of the merged 0.4.0 tree.  Resolved in 0.4.0:
+      the solve runs on `b` rescaled by an exact power of two
+      (`max|b|` into `[0.5, 1)`) with a purely relative tolerance, and
+      scales the answer back; a zero `b` is answered with exact zeros.
+      The same probe now gives the exact gradient at every bias, and the
+      differential oracle compares `jacfwd` and `grad` against
+      `linear_solver="dense"` and against `solver="fori"` from `2**-100`
+      to `2**60` at 6 and 60 coupled DOF.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result -- an exactly zero gradient reported as a
+      successful solve -- which is never `minor`.  Not `critical`: at the
+      affected tags `solver="ift"` was opt-in (the default was `"fori"`,
+      whose derivative was right), and `linear_solver="dense"`, the `fori`
+      solver or rescaling the problem's units each avoided it.  An
+      optimiser near its minimum stalls on it, or a sensitivity reads
+      zero.  `context_dependent` because what a zero gradient does depends
+      on what is fitted with it.
+    affected_components:
+      - "maddening.core.graph_manager._ift_linear_solve"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass `linear_solver="dense"` to `add_coupling_group()`
+      (or set `MADDENING_IFT_DENSE_SOLVE=1`) for a group small enough to
+      materialise its Jacobian, use `solver="fori"`, or write the group in
+      units where its state and the loss's cotangent are of order one.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The relative tolerance is the only stopping rule now, so a solve
+      that cannot reach it in float32 (an ill-conditioned `I - dF/dx`)
+      raises the documented adjoint error at every scale alike rather
+      than at small ones only.  A right-hand side whose largest entry is
+      itself subnormal is below what the dtype resolves.
+    verification:
+      - "tests/core/test_coupling_ift_gradient_in_any_units.py::test_the_tangent_and_the_adjoint_are_the_same_at_every_scale"
+      - "tests/core/test_coupling_ift_gradient_in_any_units.py::test_the_adjoint_above_the_dense_fallback_is_the_same_at_every_scale"
+      - "tests/core/test_coupling_ift_gradient_in_any_units.py::test_a_zero_cotangent_gives_an_exactly_zero_gradient"
+      - "tests/property/test_differential_ift_derivatives.py::test_the_ift_derivatives_agree_with_dense_and_fori_at_every_scale"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-105"
+    title: "The L2 coupling norm summed squared absolute changes: below about 1e-19 a pass's change squared to zero, and the group read residual=0.0 after one pass at 90% from its fixed point"
+    description: >
+      Until 0.4.0 the default `convergence_norm="l2"` was
+      `sqrt(sum(diff**2))` over the group's fields, in state units, against
+      an absolute `tolerance`.  The squares underflow: once every entry of
+      one pass's change is below about `1e-19` in float32 the sum is zero,
+      so the residual reads `0.0` and the group stops on its first pass
+      whatever `tolerance` asked -- a tolerance set to resolve a group in
+      small units could never be met honestly.  Measured identically at
+      v0.1.0, v0.2.0, v0.3.0 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0) on a Gauss-Seidel pair `a <- 0.9 u + c`, `b <- u` with
+      `c = 2**-100` (fixed point about `7.9e-30`) and `tolerance` one ten-
+      thousandth of it: `iterations=1`, `residual=0.0`, and the state at
+      0.10 of its fixed point; the same pair at `c = 1` with the tolerance
+      scaled with it takes 69 passes to 0.9993.  Found while checking the
+      round-4 audit's accelerator finding (MADD-ANO-106) against the
+      tags: at the magnitudes where the accelerators' steps flush, the
+      tagged norm had already stopped the loop.  Resolved in 0.4.0 by the
+      norms' rework (MADD-ANO-005, MADD-ANO-019): each field's change is
+      measured relative to its own magnitude, on the pair rescaled into
+      the normal range before it is subtracted (`_scaled_change`), so the
+      same pair is iterated to its float32 fixed point (138 passes, `x_a`
+      at 1.0000 of it).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: `residual=0.0` and a stopped loop, with no warning, on a
+      state 90% from its fixed point.  Never `minor`.  Not `critical`: it
+      needs a group whose per-pass changes are all below about `1e-19` in
+      its own units together with a tolerance chosen to resolve them -- a
+      tolerance of ordinary size passes such a group honestly -- and the
+      `mixed` and `interface` norms, relative per entry, did not square
+      absolute changes.  `context_dependent` because what an unconverged
+      coupling does depends on the model.
+    affected_components:
+      - "maddening.core.coupling.acceleration.coupling_residual_l2"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: write the coupled state in units where a pass's change
+      is above about `1e-19`, or use `convergence_norm="mixed"` with an
+      `rtol`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A field whose magnitude is itself subnormal is below what float32
+      resolves and leaves the norm as a field at zero does
+      (MADD-ANO-019's boundary).
+    verification:
+      - "tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_change_underflow"
+      - "tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-106"
+    title: "Below about 1e-33 the accelerators' steps and the report's spectral rate and gradient bound were formed from flushed differences: converged=True up to 7.4x the threshold from the fixed point, a gradient bound of 0.0 with gradient_bound_usable=True"
+    description: >
+      0.4.0's norms measure a group at any power-of-two scale as they do
+      at scale 1 (MADD-ANO-019), but the arithmetic around them still
+      formed differences in state units, and XLA on CPU flushes a
+      subnormal result to zero.  (1) The accelerators: `fixed`, Aitken and
+      IQN formed their step from `x_raw - x_old`; once a pass's change
+      was below `finfo.tiny` (any change of under an ulp of a field below
+      about `1e-31`) the relaxed iterate stopped moving while the norm
+      still measured the residual, the stalled ratio read 1 and was
+      rejected, and the raw residual test reported `converged=True`
+      1.8-7.4x the threshold from the fixed point -- a Gauss-Seidel pair
+      at `x*` about `6e-34`, every acceleration, both solvers; at `6e-37`
+      IQN stalled at its cap too.  (2) The report: `_spectral_rate_at`
+      took the residual `F(x) - x` as a raw difference and its JVP
+      tangents in state units, whose small components flushed, so
+      `rho_spectral` moved at `2**-118`; and `_gradient_error_bound_body`
+      took its residual, its curvature step `x + delta * max|x|` and its
+      secant raw, so on the same pair near `1e-34`
+      `gradient_relative_error_bound` read exactly `0.0` with
+      `gradient_bound_usable=True` against a true relative error of
+      `6.9e-5` (NaN near `2**-122`).  (3) `fori` with Aitken or IQN on a
+      bfloat16 or float16 group raised a carry `TypeError`
+      (MADD-ANO-107, which predates 0.4.0).  Found by the round-4 audit
+      of the merged 0.4.0 tree.  No tagged release carried (1) or (2):
+      the report keys are 0.4.0's, and at those magnitudes the tagged L2
+      norm stopped the loop on its first pass before any accelerator
+      acted (MADD-ANO-105).  Resolved in 0.4.0: the accelerators work in a
+      power-of-two frame fixed for the solve and form each relaxed entry in
+      a frame of its own (`_relaxed_step`), so a small field beside a large
+      one moves too; the report's residuals, curvature step and secant are
+      formed entry by entry in power-of-two frames, and its JVP tangent,
+      in state units, is lifted by the least power of two that keeps its
+      components normal, only below `tiny / eps` (`_tangent_lift`).  A
+      group scaled by `2**-14` or `2**-24` reproduces its control's
+      passes, verdict and residual to the bit under every acceleration;
+      a ring at `2**-118` and `2**-122` its spectral rate and both bounds.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      `converged=True` far outside the threshold, and a usable gradient
+      bound of `0.0`, are silent wrong results, never `minor`; registered
+      although no release carried them, because they are major.  Not
+      `critical`: they need a coupled state below about `1e-31` in its own
+      units, and the forward state, the iteration counts and the norms at
+      ordinary magnitudes were never affected.  `context_dependent`
+      because whether a verdict or a bound gates anything is the program's
+      choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.fixed_relaxation"
+      - "maddening.core.coupling.acceleration.aitken_relaxation"
+      - "maddening.core.graph_manager._fixed_point_while"
+      - "maddening.core.graph_manager._spectral_rate_at"
+      - "maddening.core.graph_manager._gradient_error_bound_body"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: write the coupled state in units where it is above about
+      `1e-30`, or run without acceleration and read the bounds as unusable
+      below that.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Below about `2**-118` the lifted tangent can overflow a nonlinear
+      node's own derivative intermediates (a `1/u` of a near-subnormal
+      state, times the lift); the report then reads non-finite with
+      `spectral_usable=False` and `gradient_bound_usable=False`, not a
+      wrong number.  IQN's least squares weighs every entry in absolute
+      units, so a field many decades smaller than the rest of the group
+      is iterated essentially unaccelerated -- it still converges, and the
+      norm measures it.  A field whose magnitude is itself subnormal is
+      below what float32 resolves.
+    verification:
+      - "tests/core/test_coupling_non_finite_state.py::test_an_accelerated_verdict_does_not_change_below_the_change_underflow"
+      - "tests/core/test_coupling_non_finite_state.py::test_a_tiny_field_beside_a_normal_one_relaxes_like_its_control"
+      - "tests/core/test_coupling_bounds_in_any_units.py::test_the_spectral_rate_and_the_gradient_bound_are_the_same_at_every_scale"
+      - "tests/core/test_coupling_bounds_in_any_units.py::test_a_usable_gradient_bound_is_not_zero_on_a_tiny_group"
+      - "tests/core/test_coupling_bounds_in_any_units.py::test_a_nonlinear_group_never_reports_a_usable_bound_its_control_disowns"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-107"
+    title: "solver=\"fori\" with Aitken or IQN acceleration on a bfloat16 or float16 coupling group raised a carry TypeError at trace time"
+    description: >
+      The `fori` loop seeded its accelerator carries -- Aitken's `omega`
+      and residual, IQN's secant matrices and scalars -- in at least
+      float32, and the accelerators returned the residual in the group's
+      own 16-bit dtype, so `lax.fori_loop` raised `TypeError: scan body
+      function carry input and carry output must have equal types` when
+      the step was traced.  Measured identically at v0.1.0, v0.2.0, v0.3.0
+      and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0) on a
+      bfloat16 pair with `acceleration="aitken"` and `"iqn-ils"` (the
+      only solver at v0.1.0 and v0.2.0, the default at v0.3.x); `"none"`
+      and `"fixed"` ran.  Found by the round-4 audit of the merged 0.4.0
+      tree.  Resolved in 0.4.0: every value the accelerators return is
+      cast to its carry's dtype, and the `"ift"` path seeds its scalars in
+      at least float32 as `fori` does, so the two solvers take the same
+      passes on a 16-bit group (pinned for Aitken, IQN-ILS and IQN-IMVJ on
+      both 16-bit dtypes).
+    severity: "minor"
+    safety_relevance: "none"
+    safety_relevance_rationale: >
+      Loud -- the step could not be traced -- with a workaround that keeps
+      the feature usable (`solver="ift"` from 0.3.0, a float32 group, or
+      `acceleration="none"`/`"fixed"`), which is `minor` under the 0.4.0
+      definition.  No value was ever produced from it.
+    affected_components:
+      - "maddening.core.graph_manager._run_coupled_block_impl"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: use `solver="ift"` (from 0.3.0), keep the coupled state
+      in float32, or couple a 16-bit group without Aitken or IQN.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known: the carries are cast where they are returned, on both
+      iteration modes.
+    verification:
+      - "tests/core/test_coupling_sixteen_bit_groups.py::test_fori_and_ift_take_the_same_passes_on_an_accelerated_sixteen_bit_group"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-108"
+    title: "profile_graph's per-node timing called each node with no boundary inputs, so a node that reads an input raised KeyError"
+    description: >
+      `profile_graph` times each node on its own by calling its update
+      outside the graph.  It passed `{}` as the boundary inputs, so any
+      node that indexes an input it declares -- `boundary_inputs["u"]`,
+      the ordinary way to read one -- raised `KeyError` and the whole
+      profile failed.  Measured identically at v0.1.0, v0.2.0, v0.3.0 and
+      v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0) on a coupled
+      pair of such nodes.  Found by the round-4 audit of the merged 0.4.0
+      tree.  Resolved in 0.4.0: each node is fed the inputs its
+      `boundary_input_spec()` declares, at their defaults (zeros where it
+      declares none).
+    severity: "minor"
+    safety_relevance: "none"
+    safety_relevance_rationale: >
+      Loud, with a workaround that keeps the profiler usable (`.get()` with
+      a default in `update`, or profiling the graph without per-node
+      timing), and it never produced a number: `minor`.
+    affected_components:
+      - "maddening.core.simulation.profiler.profile_graph"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: read inputs with `boundary_inputs.get(name, default)` in
+      `update`, or skip the per-node timing.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Per-node timings are measured at the declared defaults, not at the
+      values the graph feeds, so a node whose cost depends on its inputs'
+      values times differently in isolation.
+    verification:
+      - "tests/core/test_profiler.py::test_per_node_timing_feeds_each_node_its_declared_inputs"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-109"
+    title: "run_adaptive accepted a rejected attempt larger than dt_min whenever shrinking it would reach dt_min, where run_adaptive_scan retried at dt_min"
+    description: >
+      The two adaptive steppers had their own copies of the acceptance
+      rule.  `run_adaptive_scan` accepted an attempt within tolerance or
+      made at `dt_min`, and otherwise retried with the controller's
+      smaller step.  `run_adaptive` instead, when an attempt failed and
+      the shrunk step would reach `dt_min`, accepted the failed attempt
+      itself, up to `dt_min / min_factor` (5x `dt_min` at the default
+      controller), with a warning that it had hit `dt_min`.  On an
+      explicit-Euler decay held at `dt_min=0.005` it took a failed first
+      step of 0.008 and overshot `t_end` to 0.103, where the scan retried
+      at 0.005 and ended at 0.1, the final states 16% apart; the same
+      attempt also advanced the clock by `dt_min` rather than the step
+      taken (MADD-ANO-061, resolved).  The rule is `run_adaptive`'s since
+      0.1.0 (the dt_min branch is in each tag's source).  Found by the
+      round-4 audit of the merged 0.4.0 tree.  Resolved in 0.4.0: both
+      steppers take their decision and next step from one function,
+      `adaptive.step_decision` (NumPy for the Python loop, `jax.numpy`
+      inside the scan), so they accept the same attempts and step the
+      same way.
+    severity: "minor"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Not silent: the stepper warned on every such acceptance, though the
+      warning named `dt_min` where the step taken was larger.  The
+      accepted step's error exceeded the tolerance, which the warning is
+      there to say; `run_adaptive_scan`, or a smaller `dt_min`, avoided
+      it, so `minor` under the 0.4.0 definition.  `context_dependent`
+      because whether a step over tolerance matters depends on the model.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: use `run_adaptive_scan`, or set `dt_min` below the
+      smallest step the problem needs so the branch is never taken; treat
+      the "hit dt_min" warning as an over-tolerance step.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      An attempt made at `dt_min` is still accepted whatever its error,
+      with the warning, by both steppers: that is the documented floor.
+    verification:
+      - "tests/core/test_adaptive_steppers_share_one_acceptance_rule.py::test_both_steppers_take_the_same_steps_at_dt_min"
+      - "tests/core/test_adaptive_dt_min_accept_keeps_the_clock.py::test_the_clock_advances_by_the_attempt_a_dt_min_accept_keeps"
+      - "tests/verification/hypothesis/test_hypothesis_adaptive.py::TestOneRuleOnBothBackends::test_accepted_is_within_tolerance_or_at_dt_min"
+      - "tests/verification/hypothesis/test_hypothesis_adaptive.py::TestOneRuleOnBothBackends::test_the_numpy_and_jax_rules_choose_the_same_next_dt"
     github_issue: null

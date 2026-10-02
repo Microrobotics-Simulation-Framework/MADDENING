@@ -340,6 +340,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling round-4 audit fixes** (MADD-ANO-104 to 109, new, resolved; 094 extended): the IFT tangent/adjoint is scale-free (it was exactly 0 for an rhs below ~1e-8, since 0.3.0); the float floor weights every read by its measured gain (a squaring ring read its bounds at 0.02-0.2x the truth, flags set) and the report reads the step's count, not the live graph;
+  accelerators and the report's residuals, secant and tangents no longer flush below ~1e-31 (converged=True at 7x the threshold; a usable gradient bound of 0.0); fori+Aitken/IQN on 16-bit groups traces; per-node profiling feeds declared inputs; both adaptive steppers share one acceptance rule (`adaptive.step_decision`).
+  Action: recompute IFT gradients of small-unit groups or near-minimum losses; re-read `diagnostics=True` bounds; `run_adaptive` now retries a failed attempt at `dt_min` instead of accepting it.
 - **The FMU bridge and C wrapper refuse what they used to coerce or drop** (MADD-ANO-100 to 103, never released): a `master_dt` other than `md.graph_timestep`, a Boolean other than 0/1, an `fmi3Get`/`Set` of another type than the variable's, a repeated value reference, a numeric set of a Clock,
   an archive missing an input; step size and communication point share one tolerance; a step takes at most `max_steps_per_request` (100000) graph steps and stops at `stop()`; `SetFMUState` checks the whole frame; the wrapper waits at most `MADDENING_FMU_TIMEOUT` (600 s).
   Action: pass `master_dt=gm.timestep`; read and write each FMU variable with the function of its type (`getFloat32` for a Float32).

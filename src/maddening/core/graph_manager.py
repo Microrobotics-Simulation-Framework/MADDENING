@@ -1677,8 +1677,9 @@ def _fixed_point_while(
     # the relaxed iterate stopped moving while the norm still measured the
     # residual, the stalled ratio read 1 and was rejected, and the raw
     # residual test reported ``converged=True`` up to 7x the threshold
-    # away).  See ``_accel_frame``.
-    frame = _pow2_normaliser(x0_acc)
+    # away; MADD-ANO-106).  Not formed without an accelerator, so the
+    # plain loop's program is the one it was.
+    frame = _pow2_normaliser(x0_acc) if acceleration != "none" else None
 
     if acceleration in ("none", "fixed"):
         # Annotated: the three branches below build tuples of different
@@ -2026,7 +2027,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
     carried an absolute ``1e-8``, below which the zero initial guess
     passed lineax's test before a single step: the tangent or adjoint of
     a group in small units, or of a loss near its minimum, came back
-    exactly zero and "successful" (MADD-ANO-096).  Memory is
+    exactly zero and "successful" (MADD-ANO-104).  Memory is
     O(N) for the matrix-free backends; no Jacobian is ever
     materialised except under ``"dense"``.
 

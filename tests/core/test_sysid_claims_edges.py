@@ -306,35 +306,91 @@ def test_fim_core_takes_a_noise_model_closed_over_inside_jit():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "SYS-084: fit_lm's Marquardt floor eps * mean(diag(J^T J)) is shared by every column, so "
-    "a parameter in other units is damped by the others' scale; pending fix"))
-def test_fit_lm_does_not_depend_on_the_units_of_a_parameter():
-    """SYS-084: the same linear problem, with the identity-transform ``damping`` measured
-    in units a thousand times smaller.  Marquardt scaling (``lambda * diag(J^T J)``) is
-    invariant to a parameter's units; a floor shared across columns is not."""
+_RNG_A = np.random.default_rng(0).normal(size=(12, 3))
+
+
+def _units_fit(unit, **kw):
+    """The linear problem ``A x - b`` over (stiffness, damping, rest_length), damping (an
+    identity-transform coordinate, bounds ``(0, None)``) measured in units ``unit``, from
+    the same physical start; ``(result, physical damping, physical stiffness, loss at the
+    returned params)``."""
     gm = _spring(initial_position=0.2)
     mask = _only(gm, "stiffness", "damping", "rest_length")
-    rng = np.random.default_rng(0)
-    A = rng.normal(size=(12, 3))
-    b = A @ np.array([40.0, 3.0, 1.2])
-    answers = {}
-    for unit in (1.0, 1e-3):
-        u = jnp.asarray([1.0, unit, 1.0], jnp.float32)
+    b = _RNG_A @ np.array([40.0, 3.0, 1.2])
+    u = jnp.asarray([1.0, unit, 1.0], jnp.float32)
 
-        def residual(p, u=u):
-            q = p["nodes"]["s"]
-            x = jnp.stack([q["stiffness"], q["damping"], q["rest_length"]]) * u
-            return jnp.asarray(A, jnp.float32) @ x - jnp.asarray(b, jnp.float32)
+    def residual(p):
+        q = p["nodes"]["s"]
+        x = jnp.stack([q["stiffness"], q["damping"], q["rest_length"]]) * u
+        return jnp.asarray(_RNG_A, jnp.float32) @ x - jnp.asarray(b, jnp.float32)
 
-        start = jax.tree.map(lambda x: x, gm.params)
-        start["nodes"]["s"]["damping"] = jnp.asarray(2.0 / unit, jnp.float32)
-        res = fit_lm(gm, residual, params=start, mask=mask, n_iter=50)
-        answers[unit] = (res.converged, float(res.params["nodes"]["s"]["damping"]) * unit,
-                         res.best_loss)
-    assert answers[1.0][0] and answers[1.0][1] == pytest.approx(3.0, rel=1e-5)
-    assert answers[1e-3][0], answers
-    assert answers[1e-3][1] == pytest.approx(3.0, rel=1e-4), answers
+    start = jax.tree.map(lambda x: x, gm.params)
+    start["nodes"]["s"]["damping"] = jnp.asarray(2.0 / unit, jnp.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)       # a declined hold says so
+        res = fit_lm(gm, residual, params=start, mask=mask, n_iter=50, **kw)
+    q = res.params["nodes"]["s"]
+    return (res, float(q["damping"]) * unit, float(q["stiffness"]),
+            0.5 * float(jnp.sum(residual(res.params) ** 2)))
+
+
+@pytest.mark.parametrize("unit", [1e-5, 1e-3, 1e4, 1e6])
+def test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter(unit):
+    """SYS-084: the floor is ``eps`` times each column's own ``diag(JᵀJ)``, "so the step is
+    the same for every scaling of the residual and of each parameter": the same problem,
+    damping in other units, reaches the same answer in about as many iterations (the
+    identifiability guard off -- it is SYS-063's)."""
+    base, damping, stiffness, _ = _units_fit(1.0, hold_undetermined=False)
+    res, damping_u, stiffness_u, _ = _units_fit(unit, hold_undetermined=False)
+    assert base.converged and res.converged, (base, res)
+    assert damping == pytest.approx(3.0, rel=1e-5) and stiffness == pytest.approx(40.0, rel=1e-5)
+    assert damping_u == pytest.approx(3.0, rel=1e-4) and stiffness_u == pytest.approx(40.0, rel=1e-4)
+    assert abs(res.n_iter - base.n_iter) <= 2, (base.n_iter, res.n_iter)
+
+
+_GUARD_UNITS = [pytest.param(1e-3, id="1e-3"),
+                pytest.param(1e-5, id="1e-5", marks=pytest.mark.xfail(
+                    strict=True, raises=AssertionError, reason=(
+                        "SYS-063: the hold's quantisation allowance pairs the largest "
+                        "curvature with the largest coordinate, so a determined direction "
+                        "is held at a loss of 13.9 against 1.6e-11; pending fix"))),
+                pytest.param(1e6, id="1e6", marks=pytest.mark.xfail(
+                    strict=True, raises=AssertionError, reason=(
+                        "SYS-063: at 1e6 units the hold raises the loss from 3.1e-12 to "
+                        "0.1, inside its allowance; pending fix")))]
+
+
+@pytest.mark.parametrize("unit", _GUARD_UNITS)
+def test_the_hold_leaves_the_loss_where_the_fit_left_it_in_any_units(unit):
+    """SYS-063: "So the loss is unaffected, beyond rounding, whatever the guard decides" --
+    with damping in units 1e-5 or 1e6, where the data determines every direction."""
+    res, _, _, returned = _units_fit(unit)
+    assert res.best_loss < 1e-9, res
+    assert returned <= res.best_loss + 1e-9, (returned, res.best_loss, res.excited_rank,
+                                               res.hold_declined, res.undetermined_drift)
+
+
+_ANSWER_UNITS = [pytest.param(1e-3, id="1e-3"),
+                 pytest.param(1e-5, id="1e-5", marks=pytest.mark.xfail(
+                     strict=True, raises=AssertionError, reason=(
+                         "SYS-088: with the guard on (the default) damping in units 1e-5 "
+                         "comes back at its start, 2, against a truth of 3; pending fix"))),
+                 pytest.param(1e6, id="1e6", marks=pytest.mark.xfail(
+                     strict=True, raises=AssertionError, reason=(
+                         "SYS-088: with the guard on, damping in units 1e6 comes back at "
+                         "3.085 against 3; pending fix")))]
+
+
+@pytest.mark.parametrize("unit", _ANSWER_UNITS)
+def test_fit_lm_answers_the_same_in_any_units_with_its_defaults(unit):
+    """SYS-088: "The solve's floor is eps times each column's own curvature, so the answer
+    depends neither on the residual's units nor on any parameter's" -- fit_lm as called by
+    default, guard included."""
+    _, damping, stiffness, _ = _units_fit(1.0)
+    _, damping_u, stiffness_u, _ = _units_fit(unit)
+    assert damping == pytest.approx(3.0, rel=1e-5)
+    assert damping_u == pytest.approx(damping, rel=1e-4), (damping_u, damping)
+    assert stiffness_u == pytest.approx(stiffness, rel=1e-4), (stiffness_u, stiffness)
 
 
 def test_with_the_default_tol_fit_never_reports_converged():

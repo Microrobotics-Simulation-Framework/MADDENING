@@ -44,8 +44,9 @@
 #   reason      required for untested: why no test can fail.
 #   notes       optional.
 #
-# Line numbers are those of release/0.4.0 at a0f12ef (the first edition);
-# the section name beside each makes it findable when they move.
+# Line numbers are those of the tree the row was last verified on
+# (release/0.4.0 at a0f12ef for the first edition, 037d469 for the rows
+# #203 moved); the section name beside each makes it findable.
 
 schema_version: 1
 
@@ -565,7 +566,7 @@ claims:
   sources:
     - src/maddening/sysid.py:640 (FIMReport)
     - src/maddening/sysid.py:1630 (FIMCore)
-    - src/maddening/sysid.py:3399 (FitResult)
+    - src/maddening/sysid.py:3400 (FitResult)
   conditions: positional construction of each.
   oracle: TypeError.
   tests:
@@ -701,8 +702,8 @@ claims:
     updates produced, so losses[0] is the starting point's"; for fit_lm the
     (weighted) 0.5 ||r||².
   sources:
-    - src/maddening/sysid.py:3399 (FitResult)
-    - src/maddening/sysid.py:3916 (fit_lm)
+    - src/maddening/sysid.py:3400 (FitResult)
+    - src/maddening/sysid.py:3942 (fit_lm)
   conditions: a log-transformed leaf, so the start round-trips through the optimiser's coordinates.
   oracle: the loss evaluated at the start, to the last bits the round trip moves it.
   tests:
@@ -717,7 +718,7 @@ claims:
     was evaluated once after the loop, "not appended to losses and not
     passed to callback or the observers"; best_loss is None for n_iter=0.
   sources:
-    - src/maddening/sysid.py:3399 (FitResult, best_iteration / best_loss)
+    - src/maddening/sysid.py:3400 (FitResult, best_iteration / best_loss)
   conditions: a run that used its budget; n_iter=0.
   oracle: the fields against losses and the callback's record.
   tests:
@@ -733,8 +734,8 @@ claims:
     whose loss never rose returns its last iterate bit for bit; a run
     stopped by tol returns the iterate that met it.
   sources:
-    - src/maddening/sysid.py:3399 (FitResult)
-    - src/maddening/sysid.py:3624 (fit, Returns)
+    - src/maddening/sysid.py:3400 (FitResult)
+    - src/maddening/sysid.py:3625 (fit, Returns)
     - docs/user_guide/parameters.md (System identification)
   conditions: Adam walking away from its start; ties; a non-finite final loss; tol; all three fitters.
   oracle: every evaluated iterate's loss.
@@ -756,7 +757,7 @@ claims:
     is the only one -- so with the default tol their converged is always
     False"; tol > 0 "stops early once the loss is at or below it".
   sources:
-    - src/maddening/sysid.py:3399 (FitResult, converged)
+    - src/maddening/sysid.py:3400 (FitResult, converged)
     - docs/user_guide/parameters.md (System identification)
   conditions: a loss of exactly 0.0 under the default tol; a positive tol.
   oracle: the flag and the iteration count.
@@ -772,7 +773,7 @@ claims:
     merely close": the leaves outside the resolved mask, and the masked
     ones a run that stopped before its first update never stepped.
   sources:
-    - src/maddening/sysid.py:3399 (FitResult)
+    - src/maddening/sysid.py:3400 (FitResult)
     - docs/user_guide/parameters.md (System identification)
   conditions: a log leaf, which exp(log(p)) would move by an ulp; a spec-frozen leaf under multiple shooting.
   oracle: bitwise equality.
@@ -794,7 +795,7 @@ claims:
     is a ValueError"; "the flags are read in flatten order, so a mask with
     the right leaf count and different keys ... is refused".
   sources:
-    - src/maddening/sysid.py:3624 (fit, mask)
+    - src/maddening/sysid.py:3625 (fit, mask)
     - docs/user_guide/parameters.md (System identification)
   conditions: narrowing; widening onto a frozen leaf; keys that differ, the first path named.
   oracle: the fit's untouched leaves; the ValueError.
@@ -811,7 +812,7 @@ claims:
     "A trainable set (the default one included) holding an integer or
     boolean leaf is refused the same way: its gradient is identically zero".
   sources:
-    - src/maddening/sysid.py:3624 (fit, mask)
+    - src/maddening/sysid.py:3625 (fit, mask)
   conditions: a spec making an integer trainable; an explicit mask; all three fitters; a frozen integer.
   oracle: the ValueError; a frozen integer not stopping a fit.
   tests:
@@ -829,7 +830,7 @@ claims:
     exp floors or overflows and the sigmoid meets the edge of its
     representable range".
   sources:
-    - src/maddening/sysid.py:3624 (fit)
+    - src/maddening/sysid.py:3625 (fit)
     - docs/user_guide/parameters.md (System identification)
   conditions: a logit leaf pushed hard either way; log and logit coordinates near their clamp.
   oracle: the returned values strictly inside their bounds.
@@ -846,7 +847,7 @@ claims:
     ... A coordinate on its bound whose gradient points out of the range
     is held there"; fit and fit_multiple_shooting bring one back too.
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm)
+    - src/maddening/sysid.py:3942 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
   conditions: float32 and float64; beside a log coordinate; an optimum past the bound; a coupled step.
   oracle: the recovered damping; the bound held where the optimum is past it.
@@ -881,7 +882,7 @@ claims:
     with {method, iteration, n_iter, loss, params} ... 0 disables it";
     all three fitters emit it.
   sources:
-    - src/maddening/sysid.py:3624 (fit, callback / notify_every)
+    - src/maddening/sysid.py:3625 (fit, callback / notify_every)
     - docs/user_guide/parameters.md (System identification)
   conditions: notify_every 2 and 0; fit and fit_lm.
   oracle: the observer's record.
@@ -896,8 +897,8 @@ claims:
     betas, eps, notify_every, lam_up / lam_down) and accept their
     documented defaults.
   sources:
-    - src/maddening/sysid.py:3624 (fit)
-    - src/maddening/sysid.py:3916 (fit_lm)
+    - src/maddening/sysid.py:3625 (fit)
+    - src/maddening/sysid.py:3942 (fit_lm)
   conditions: zero, negative, NaN and wrongly typed values.
   oracle: the ValueError; the defaults inside the accepted range.
   tests:
@@ -919,7 +920,7 @@ claims:
     optimiser's schedule; holding costs neither loss nor the identifiable
     ratios.
   sources:
-    - src/maddening/sysid.py:3624 (fit, hold_undetermined)
+    - src/maddening/sysid.py:3625 (fit, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
   conditions: the spring's (k, c, m) scale degeneracy with log transforms on all three; every budget and lr.
   oracle: the fitted scale against the starting scale; the loss and k/m, c/m.
@@ -937,10 +938,14 @@ claims:
     relative plus the rounding of the held point is declined,
     hold_declined is True and a RuntimeWarning gives both losses.
   sources:
-    - src/maddening/sysid.py:3624 (fit, hold_undetermined)
-    - src/maddening/sysid.py:3399 (FitResult, hold_declined)
-  conditions: a rise just inside and just outside the tolerance; a hold through a bound; a non-finite held loss.
-  oracle: the returned loss; hold_declined; the warning naming the caller's line.
+    - src/maddening/sysid.py:3625 (fit, hold_undetermined)
+    - src/maddening/sysid.py:3400 (FitResult, hold_declined)
+  conditions: >-
+    a rise just inside and just outside the tolerance; a hold through a
+    bound; a non-finite held loss.  Unstated: the units of an
+    identity-transform parameter, against which the rounding allowance is
+    not invariant.
+  oracle: the loss at the returned params against best_loss; hold_declined; the warning naming the caller's line.
   tests:
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_that_would_raise_the_loss_is_declined_and_said_so
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_rise_just_inside_the_tolerance_is_held
@@ -948,7 +953,27 @@ claims:
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_through_a_bound_is_declined
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_non_finite_held_loss_is_declined
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_the_decline_warning_names_the_callers_line
-  status: verified
+    - tests/core/test_sysid_claims_edges.py::test_the_hold_leaves_the_loss_where_the_fit_left_it_in_any_units
+  status: failing
+  finding: >-
+    With a parameter's units far from the others' the guard holds a
+    direction the data determines and raises the loss, silently.  fit_lm
+    on r = A diag(u) x - b (stiffness log, damping identity in units u,
+    rest_length), defaults: at u = 1e-5 it reaches best_loss 1.6e-11, then
+    holds (excited_rank 2, hold_declined False, drift 1e5) and returns
+    damping at its start (2 against 3) at a loss of 13.9; at u = 1e6 the
+    returned loss is 0.1 against best_loss 3.1e-12.  best_loss still reads
+    the pre-hold value and nothing warns.  At u = 1e-2 to 1e-4 and 1e4 the
+    hold is declined with a RuntimeWarning: the curvature test (fim's rank
+    rule on JᵀJ in the optimiser's coordinates) calls the damping column
+    undetermined because its eigenvalue sits below the relative cutoff, so
+    excited_rank reads 2 of 3 for data that determines all three.  The
+    loss check misses it because _hold_tolerance's quantisation term,
+    ||g|| d + scale d**2 / 2, pairs the objective's largest curvature with
+    the rounding length of every coordinate together (the damping
+    coordinate is 3e5 at u = 1e-5).  Guess: src/maddening/sysid.py:3175
+    (_hold_tolerance) and the curvature test's cutoff in the optimiser's
+    coordinates.  Reproducer: the test above, unit 1e-5 and 1e6.
 
 - id: SYS-064
   area: identifiability guard
@@ -959,8 +984,8 @@ claims:
     for fit_lm) -- and "a fit with no direction passing both tests gets its
     iterate back bit for bit".
   sources:
-    - src/maddening/sysid.py:3399 (FitResult, excited_rank)
-    - src/maddening/sysid.py:3916 (fit_lm, hold_undetermined)
+    - src/maddening/sysid.py:3400 (FitResult, excited_rank)
+    - src/maddening/sysid.py:3942 (fit_lm, hold_undetermined)
   conditions: a well-posed four-parameter bowl; a candidate with curvature; the cutoffs.
   oracle: bitwise equality with the unguarded iterate; the cutoff functions.
   tests:
@@ -980,7 +1005,7 @@ claims:
     gradient zero; hold_undetermined must be a bool.
   sources:
     - docs/user_guide/parameters.md (System identification)
-    - src/maddening/sysid.py:3399 (FitResult, excited_rank)
+    - src/maddening/sysid.py:3400 (FitResult, excited_rank)
   conditions: each of the listed cases; all three fitters for the bool check.
   oracle: None; the ValueError.
   tests:
@@ -1000,7 +1025,7 @@ claims:
     direction in the accumulated matrix, and the guard correctly reports
     full excited_rank and does nothing."
   sources:
-    - src/maddening/sysid.py:3624 (fit, hold_undetermined)
+    - src/maddening/sysid.py:3625 (fit, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
   conditions: SpringDamperNode's identity-transform damping; directions just above and below the cutoff.
   oracle: excited_rank and the held displacement.
@@ -1019,7 +1044,7 @@ claims:
     with the guard the returned scale is the starting one for every
     budget.
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm, hold_undetermined)
+    - src/maddening/sysid.py:3942 (fit_lm, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
   conditions: the spring scale degeneracy, noiseless and noisy.
   oracle: the scale across budgets, unguarded and guarded.
@@ -1037,7 +1062,7 @@ claims:
     window_states are nuisance variables of the fit ... from the same
     iterate as params"; its guarded scale does not depend on the schedule.
   sources:
-    - src/maddening/sysid.py:4301 (fit_multiple_shooting, hold_undetermined)
+    - src/maddening/sysid.py:4354 (fit_multiple_shooting, hold_undetermined)
   conditions: the spring scale degeneracy under multiple shooting.
   oracle: the window states against the unguarded run's; the scale across schedules.
   tests:
@@ -1052,7 +1077,7 @@ claims:
     Each fitter hands the guard its selected point: the guard reads the
     iterate the fitter returns, not its last.
   sources:
-    - src/maddening/sysid.py:3399 (FitResult)
+    - src/maddening/sysid.py:3400 (FitResult)
   conditions: all three fitters.
   oracle: the point the guard received.
   tests:
@@ -1071,7 +1096,7 @@ claims:
     point of the joint objective, so they are selected together"; started
     at the truth and walking away, it returns its start and seed states.
   sources:
-    - src/maddening/sysid.py:4301 (fit_multiple_shooting)
+    - src/maddening/sysid.py:4354 (fit_multiple_shooting)
   conditions: a run started at the truth; a run whose loss never rose.
   oracle: the start and seed states; the last iterate.
   tests:
@@ -1084,8 +1109,8 @@ claims:
   claim: >-
     "FitResult.best_loss is the loss of exactly the pair returned."
   sources:
-    - src/maddening/sysid.py:4301 (fit_multiple_shooting)
-    - src/maddening/sysid.py:3399 (FitResult, best_loss)
+    - src/maddening/sysid.py:4354 (fit_multiple_shooting)
+    - src/maddening/sysid.py:3400 (FitResult, best_loss)
   conditions: >-
     unstated: hold_undetermined, which moves params after the selection;
     FitResult says best_loss "is the value before the hold_undetermined
@@ -1112,7 +1137,7 @@ claims:
     Multiple shooting recovers the parameters from noisy window starts,
     where teacher forcing seeds every window with measurement error.
   sources:
-    - src/maddening/sysid.py:4301 (fit_multiple_shooting)
+    - src/maddening/sysid.py:4354 (fit_multiple_shooting)
     - docs/user_guide/parameters.md (System identification)
   conditions: noise at the window starts.
   oracle: the recovered stiffness against the truth.
@@ -1134,10 +1159,14 @@ claims:
     rejected down to one damped within step_tol"; "A run that never
     lowered the loss and rejected every candidate is not converged, and
     neither is one that ran out of n_iter"; a residual reading no
-    trainable parameter converges at its start.
+    trainable parameter converges at its start; "And neither test fires
+    unless the undamped Gauss-Newton step from the iterate ... would also
+    move every parameter by no more than step_tol, or, at the floor, would
+    not lower the loss: a shrunken step cannot read as stationary."
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm)
-    - src/maddening/sysid.py:3399 (FitResult, converged)
+    - src/maddening/sysid.py:3942 (fit_lm)
+    - src/maddening/sysid.py:3400 (FitResult, converged)
+    - docs/user_guide/parameters.md (System identification)
   conditions: a noiseless float32 fit at its optimum; a run of rejected candidates; a residual reading nothing trainable.
   oracle: the flag and the iteration it stopped on.
   tests:
@@ -1145,6 +1174,10 @@ claims:
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_shorter_damped_retry_does_not_make_a_rejected_run_converged
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_residual_that_reads_no_trainable_parameter_is_converged_at_its_start
     - tests/core/test_sysid_noise_model.py::test_fit_lm_never_accepting_a_step_returns_cleanly
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_shrunken_step_never_reads_as_stationary
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_run_of_stalled_candidates_is_not_the_rounding_floor
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_a_run_that_never_lowered_the_loss_is_not_converged_by_the_floor_rule
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_rule_never_fires_while_a_bound_coordinate_could_descend
   status: verified
 
 - id: SYS-081
@@ -1155,7 +1188,7 @@ claims:
     float64"; "0.0 counts only a step that leaves every parameter bit for
     bit where it was"; measured relative to each physical parameter.
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm, step_tol)
+    - src/maddening/sysid.py:3942 (fit_lm, step_tol)
   conditions: float32 and float64; zero; an explicit value; one with no reading.
   oracle: the convergence verdict at proposals either side of the tolerance.
   tests:
@@ -1172,8 +1205,8 @@ claims:
     "No converged test fires while a coordinate on its bound could lower
     the loss by moving into the range."
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm)
-    - src/maddening/sysid.py:3399 (FitResult, converged)
+    - src/maddening/sysid.py:3942 (fit_lm)
+    - src/maddening/sysid.py:3400 (FitResult, converged)
   conditions: a coordinate with a descent direction into the range.
   oracle: the flag; the inward-descent predicate.
   tests:
@@ -1184,55 +1217,49 @@ claims:
 - id: SYS-083
   area: fit_lm
   claim: >-
-    "The Marquardt solve's floor, which keeps it regular, is eps times the
-    mean of diag(JᵀJ): relative, so the step is the same for every scaling
-    of the residual"; "The solve's floor is relative, so the answer does
-    not depend on the residual's units."
+    "The Marquardt solve's floor, which keeps it regular, is eps times each
+    column's own diag(JᵀJ): so the step is the same for every scaling of
+    the residual and of each parameter"; the guide: "The solve's floor is
+    eps times each column's own curvature".
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm)
+    - src/maddening/sysid.py:3942 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
-  conditions: the residual scaled from 1e-10 to 1e10; noise_std 1 and 1e8.
+    - docs/validation/known_anomalies.yaml (MADD-ANO-121)
+  conditions: the residual scaled from 1e-10 to 1e10; noise_std 1 and 1e8; a spring in SI units and in tonnes, float32 and float64.
   oracle: the optimum of the unscaled problem; the iteration count.
   tests:
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_noise_std_is_the_same_scaling
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system
   status: verified
   notes: >-
-    fix/p4-13-sysid-params (#203) replaces the floor with a per-column one
-    and adds a stationarity test; the wording of this row moves with it.
+    Until #203 the floor was eps times the mean of diag(JᵀJ); fit_lm's
+    docstring still said so after #203 changed the code and the guide, and
+    is corrected here.
 
 - id: SYS-084
   area: fit_lm
   claim: >-
-    "The damping λ multiplies diag(JᵀJ) (Marquardt scaling)", and "for the
-    handful of physical constants a model has it converges in a few
-    iterations where Adam needs hundreds".
+    "The damping λ multiplies diag(JᵀJ) (Marquardt scaling)" and the floor
+    is per column, so the Marquardt step is the same in any units of a
+    parameter: "for the handful of physical constants a model has it
+    converges in a few iterations where Adam needs hundreds".
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm)
-    - docs/user_guide/parameters.md (System identification)
-  conditions: >-
-    unstated: the units of a parameter.  Marquardt scaling is invariant to
-    them; the floor of SYS-083 is shared by every column.
-  oracle: the same linear problem with one identity-transform parameter re-expressed in units 1000x smaller, from the same physical start.
+    - src/maddening/sysid.py:3942 (fit_lm)
+    - src/maddening/sysid.py:3883 (_marquardt_step, comment)
+  conditions: one parameter of each transform in units 1e-4 and 1e4; an identity-transform parameter in units 1e-5 to 1e6; the guard off.
+  oracle: the answer and the iteration count at unit 1.
   tests:
-    - tests/core/test_sysid_claims_edges.py::test_fit_lm_does_not_depend_on_the_units_of_a_parameter
-  status: failing
-  finding: >-
-    The answer depends on a parameter's units.  r = A diag(u) x - b over
-    (stiffness, damping, rest_length), damping in units u (identity
-    transform, bounds (0, None)), started at the same physical value:
-    u = 1 converges in 5 iterations to damping 3 (loss 1.6e-11); u = 1e-2
-    takes 45; u = 1e-3 stops unconverged after 50 at damping 2.12 (loss
-    0.92); u = 1e-5 reports converged=True at damping 2.0, never moved
-    (loss 1.2); u = 1e4 and 1e6 do not converge in 50.  log-transformed
-    parameters are unaffected (their column is p * dr/dp).  The floor
-    eps * mean(diag(JᵀJ)) is dominated by the largest column, so a column
-    whose diagonal is many decades smaller is damped by roughly
-    floor / diag(JᵀJ)_jj every iteration.  Guess: src/maddening/sysid.py
-    _marquardt_step (around line 3882), the floor term; #203's per-column
-    floor is the fix.
+    - tests/core/test_sysid_claims_edges.py::test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter
+    - tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system
+  status: verified
   notes: >-
-    Reproducer: the test above (column units 1 and 1e-3).
+    Failing in the first edition of this inventory (unit 1e-3 stopped
+    unconverged at loss 0.92; 1e-5 read converged=True without moving):
+    the floor was shared across columns.  #203 (MADD-ANO-121) made it per
+    column.  With the identifiability guard on, the answer still depends on
+    a parameter's units at the extremes: SYS-063 and SYS-088.
 
 - id: SYS-085
   area: fit_lm
@@ -1243,7 +1270,7 @@ claims:
     on a proposed step within step_tol that did not lower the loss, or on a
     step no damping could make acceptable."
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm)
+    - src/maddening/sysid.py:3942 (fit_lm)
   conditions: each way a run can end.
   oracle: best_iteration and best_loss against losses.
   tests:
@@ -1259,7 +1286,7 @@ claims:
     (recovers k and c of the spring), and noise_std "weights the residual
     as in fim".
   sources:
-    - src/maddening/sysid.py:3916 (fit_lm)
+    - src/maddening/sysid.py:3942 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
   conditions: the spring with mass frozen; a per-leaf noise model.
   oracle: the truth; the iteration count against Adam's at equal budget.
@@ -1277,12 +1304,31 @@ claims:
     "physical, inside bounds").
   sources:
     - docs/user_guide/parameters.md (System identification)
-    - src/maddening/sysid.py:3624 (fit)
+    - src/maddening/sysid.py:3625 (fit)
   conditions: noiseless record, mass frozen.
   oracle: the generating values.
   tests:
     - tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec
   status: verified
+
+- id: SYS-088
+  area: fit_lm
+  claim: >-
+    "The solve's floor is eps times each column's own curvature, so the
+    answer depends neither on the residual's units nor on any parameter's".
+  sources:
+    - docs/user_guide/parameters.md (System identification)
+  conditions: fit_lm as called by default, hold_undetermined=True; one identity-transform parameter in units 1e-3, 1e-5 and 1e6.
+  oracle: the physical answer at unit 1.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults
+  status: failing
+  finding: >-
+    The Marquardt step is unit-invariant (SYS-084), but fit_lm's answer with
+    its defaults is not: the identifiability guard holds the damping
+    direction at u = 1e-5 (damping returned at 2.0 against 3) and at u = 1e6
+    (3.085 against 3), and at 1e-3 declines with a RuntimeWarning.  Root
+    cause and guess: SYS-063.
 
 # ---------------------------------------------------------------------------
 # ParamSpec and the constrained coordinates
@@ -1584,15 +1630,18 @@ claims:
 - id: SYS-115
   area: params pytree
   claim: >-
-    "A node.params write after the graph was compiled takes effect at the
-    next run of any entry point -- step, run, every run_scan*, the sysid
-    fitters and windowed_loss all recompile for it first -- or at the next
-    compile(), whichever comes first, so they all run the same model";
-    writing a constructor value back reverts a calibration.
+    "A node.params write reaches the graph the next time anything reads
+    gm.params -- your code, save_state, to_dict, the FMU export, GET
+    /graph/params, a jax.jit of a sysid loss handed gm.params -- or runs it
+    (step, run, every run_scan*, the fitters, windowed_loss), or compiles
+    it, whichever comes first: one sync point takes it in ... so every
+    entry point runs the same model"; writing a constructor value back
+    reverts a calibration.
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-  conditions: every mutation through the mapping; each entry point; a structural write.
-  oracle: each entry point's result against gm.step's.
+    - docs/validation/known_anomalies.yaml (MADD-ANO-122)
+  conditions: every mutation through the mapping; each reader and entry point; a structural write.
+  oracle: each reader's and entry point's result against gm.step's.
   tests:
     - tests/core/test_node_params_writes_are_observed.py::test_every_mutation_through_the_mapping_counts
     - tests/core/test_node_params_writes_are_observed.py::test_writing_the_nodes_own_value_back_reverts_a_calibration
@@ -1600,39 +1649,44 @@ claims:
     - tests/core/test_node_params_writes_are_observed.py::test_a_structural_write_reaches_gm_step_without_a_compile
     - tests/core/test_node_params_writes_are_observed.py::test_windowed_loss_runs_the_written_model_as_gm_step_does
     - tests/core/test_node_params_writes_are_observed.py::test_a_fitter_starts_from_the_written_value
-    - tests/core/test_node_params_write_after_compile.py::test_a_node_params_write_after_compile_takes_effect_at_the_next_compile
+    - tests/property/test_differential_entry_points_after_a_node_write.py::test_every_reader_reads_the_written_model
   status: verified
   notes: >-
-    The model description and the FMU are not among the entry points the
-    rule lists; FMU-040 records what an FMU exported between the write and
-    the next compile runs.  #203 adds a sync-on-read point for pending
-    writes.
+    Rewritten for #203, which replaced "takes effect at the next run of any
+    entry point ... or at the next compile()" with a sync on every read of
+    gm.params (MADD-ANO-122).
 
 - id: SYS-116
   area: params pytree
   claim: >-
-    "If both were written since the last compile, to different values,
-    gm.params' value -- the one the step was already running -- is kept and
-    compile() warns (RuntimeWarning), naming the leaf and both values";
-    agreeing writes are no conflict; a write gm.params already reflects
-    costs no recompile.
+    "The later of a node.params write and a gm.params write wins ... A
+    gm.params write reads gm.params first, which takes in any pending node
+    write, so the two are always ordered and the later wins; the one
+    exception is a gm.params leaf written through a reference held across a
+    node write, with no read in between, which the node write replaces.
+    gm.params = tree is later than every node write before it"; agreeing
+    writes are no conflict; a constant gm.params carries is copied in with
+    no recompile.
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-  conditions: disagreeing and agreeing writes; a compile that raises; reset_params after a node write.
-  oracle: the kept value; the warning and its text; the compile count.
+  conditions: disagreeing and agreeing writes in both orders; gm.params assigned whole; a compile that raises.
+  oracle: the value the graph runs; the compile count.
   tests:
-    - tests/core/test_node_params_write_after_compile.py::test_two_disagreeing_writes_since_one_compile_keep_the_live_value_and_warn
+    - tests/core/test_node_params_write_after_compile.py::test_the_later_of_two_disagreeing_writes_wins
     - tests/core/test_node_params_write_after_compile.py::test_two_agreeing_writes_are_no_conflict
     - tests/core/test_node_params_write_after_compile.py::test_a_compile_that_raises_does_not_lose_the_write
+    - tests/core/test_node_params_writes_are_observed.py::test_assigning_gm_params_is_later_than_a_node_write_before_it
     - tests/core/test_node_params_writes_are_observed.py::test_a_write_gm_params_already_reflects_costs_no_recompile
   status: verified
+  notes: >-
+    Rewritten for #203: until then, two disagreeing writes since one
+    compile kept gm.params' value and compile() warned.
 
 - id: SYS-117
   area: params pytree
   claim: >-
-    "load_state() restores gm.params and supersedes every earlier
-    node.params write to a constant it carries; a structural value a
-    checkpoint does not hold stays written."
+    "load_state() restores gm.params later than [every node write before
+    it] too"; a structural value a checkpoint does not hold stays written.
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
   conditions: a leaf write and a structural write before a load.
@@ -1710,22 +1764,20 @@ claims:
 - id: SYS-122
   area: params pytree
   claim: >-
-    "GraphManager.params holds the compile-time snapshot"; after a
-    node.params write on a compiled graph, gm.params still holds the
-    compiled value, and "the next compile takes it" (the guide's snippet
-    asserts both).
+    The guide's snippet: a node.params write on a compiled graph, then a
+    later gm.params write of another value, then compile(): "later: it
+    wins", and gm.params reads the later value.
   sources:
-    - docs/user_guide/parameters.md (opening section; Live values, recompiles and partial pytrees)
-  conditions: a write to a constant gm.params carries, before any run or compile.
-  oracle: the snippet's assertions, run by the docs-snippet runner; the value after compile().
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+  conditions: the snippet as written, run by the docs-snippet runner.
+  oracle: the snippet's assertions.
   tests:
     - tests/compliance/test_docs_snippets.py::test_every_runnable_snippet_runs
     - tests/core/test_node_params_write_after_compile.py::test_a_node_params_write_after_compile_takes_effect_at_the_next_compile
   status: verified
   notes: >-
-    #203 adds a sync-on-read point for pending node.params writes; if
-    reading gm.params comes to apply a pending write, this row and the
-    guide's snippet move together (and FMU-040 may flip).
+    Rewritten for #203; the first edition's claim -- gm.params keeps the
+    compiled value until the next compile -- is what MADD-ANO-122 changed.
 
 # ---------------------------------------------------------------------------
 # FMU: the package and the model description
@@ -1976,25 +2028,24 @@ claims:
 - id: FMU-013
   area: model description
   claim: >-
-    "Clocks are off by default, so a single-clock FMU is byte-for-byte what
-    v0.3.0 produced."
+    "Clocks are off by default: a single-clock FMU has no <Clock> variable
+    and no clocks= attribute, and every output is continuous."
   sources:
     - docs/user_guide/fmu_export.md (Multi-rate graphs, clocks)
     - src/maddening/fmi/model_description.py:1 (module docstring)
-  conditions: a default export of a one-spring graph.
-  oracle: the description v0.3.0 wrote for the same graph (git archive v0.3.0), embedded in the test.
+    - src/maddening/fmi/model_description.py:683 (build_model_description, multi_clock)
+  conditions: a multi-rate graph, where multi_clock=True emits two clocks.
+  oracle: the XML and the variables.
   tests:
-    - tests/fmi/test_fmu_claims_edges.py::test_a_single_clock_export_is_byte_for_byte_what_v0_3_0_produced
-  status: failing
-  finding: >-
-    A default 0.4.0 export differs from v0.3.0's in its token, its
-    UnitDefinitions, its stepSize (0.01 against 0.001, the MADD-ANO-078
-    fix) and four parameter variables (include_parameters defaults to
-    True).  What holds is narrower: multi_clock=False emits no <Clock> and
-    no clocks= attribute.  Reproducer: the test above.  Docs fix:
-    docs/user_guide/fmu_export.md, "Multi-rate graphs: clocks", and the
-    model_description module docstring ("the single-clock v0.3.0 surface
-    is unchanged").
+    - tests/fmi/test_fmu_claims_edges.py::test_a_single_clock_export_carries_no_clock
+    - tests/fmi/test_multi_clock.py::test_default_export_has_no_clocks
+  status: verified
+  notes: >-
+    Failing in the first edition: the guide said "a single-clock FMU is
+    byte-for-byte what v0.3.0 produced", which it is not (token, units,
+    stepSize, default-exported parameters); the model_description
+    docstrings and the release notes said the single-clock surface was
+    "unchanged".  Reworded here.
 
 - id: FMU-014
   area: model description
@@ -2315,22 +2366,21 @@ claims:
 - id: FMU-030
   area: sidecar
   claim: >-
-    SidecarConfig.step_fn: "step_fn(state, external_inputs) -> new_state.
-    Typically GraphManager.step bound to a particular graph."
+    SidecarConfig.step_fn: "step_fn(state, external_inputs) -> new_state,
+    or step_fn(state, external_inputs, params) when params is given: the
+    graph's compiled step, GraphManager._compiled_step.
+    GraphManager.step cannot serve -- it takes no state".
   sources:
     - src/maddening/fmi/sidecar.py:364 (SidecarConfig, step_fn)
-  conditions: a sidecar built on gm.step as the docstring suggests.
-  oracle: one step.
+  conditions: a sidecar on gm._compiled_step with params; one on gm.step.
+  oracle: gm.step's state after one step; the TypeError.
   tests:
-    - tests/fmi/test_fmu_claims_edges.py::test_a_sidecar_built_on_gm_step_as_its_docstring_suggests_steps
-  status: failing
-  finding: >-
-    GraphManager.step(external_inputs=None, *, params=None) takes no state,
-    so a sidecar built on it raises TypeError at its first step
-    ("GraphManager.step() takes from 1 to 2 positional arguments but 3 were
-    given").  Every recipe in the guides passes gm._compiled_step, whose
-    contract is step_fn(state, external_inputs, params).  Docs fix:
-    src/maddening/fmi/sidecar.py, SidecarConfig.step_fn.
+    - tests/fmi/test_fmu_claims_edges.py::test_a_sidecar_on_the_compiled_step_steps_as_the_graph_does
+  status: verified
+  notes: >-
+    Failing in the first edition: the docstring said "Typically
+    GraphManager.step bound to a particular graph", which raises TypeError
+    at the first step.  Reworded here.
 
 - id: FMU-031
   area: sidecar
@@ -2524,32 +2574,24 @@ claims:
 - id: FMU-040
   area: graph agreement
   claim: >-
-    An exported FMU reproduces the graph it was exported from ("the outputs
-    reproduce gm.run_scan to float32 round-off"), and a node.params write
-    after compile() "takes effect at the next run of any entry point ... so
-    they all run the same model".
+    An exported FMU reproduces the graph it was exported from, and a
+    node.params write reaches "the FMU export" like every other reader of
+    gm.params, "so every entry point runs the same model".
   sources:
     - docs/user_guide/fmu_export.md (Verification)
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-  conditions: >-
-    unstated: a node.params write pending since the last compile when the
-    description and the sidecar are built (the guide's recipe compiles
-    first).
+    - docs/validation/known_anomalies.yaml (MADD-ANO-122)
+  conditions: a node.params write pending since the last compile when the description and the sidecar are built.
   oracle: gm.run over the same simulated time; the start the description advertises.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs
-  status: failing
-  finding: >-
-    After gm.get_node("s0").params["stiffness"] = 60.0 on a compiled graph,
-    build_model_description advertises start="30.0" and a bridge over
-    gm._compiled_step and gm.params runs 30: s0.position 0.52176 after five
-    graph steps, where gm.run(5) -- which recompiles for the write --
-    reaches 0.54321.  Nothing warns.  build_model_description and the
-    sidecar read gm.params and gm._compiled_step as of the last compile,
-    which a pending node.params write does not update.  Guess:
-    src/maddening/fmi/model_description.py:683 (build_model_description
-    reads graph_manager.params) and the GraphManager.params property;
-    #203's sync-on-read for pending writes may close it.
+    - tests/core/test_node_params_writes_are_observed.py::test_the_fmu_export_reads_a_pending_node_write
+  status: verified
+  notes: >-
+    Failing in the first edition: the description advertised start 30.0 and
+    the bridge ran it (0.52176 after five steps) while gm.run ran the
+    written 60 (0.54321).  #203's sync on reading gm.params (MADD-ANO-122)
+    closed it.
 
 # ---------------------------------------------------------------------------
 # FMU: transport

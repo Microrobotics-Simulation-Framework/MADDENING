@@ -3993,9 +3993,11 @@ def fit_lm(
     range.
 
     The Marquardt solve's floor, which keeps it regular, is ``eps`` times
-    the mean of ``diag(JᵀJ)``: relative, so the step is the same for every
-    scaling of the residual (an absolute ``1e-12`` made a residual of 1e-7
-    in its own units fail to converge in 50 iterations).
+    each column's own ``diag(JᵀJ)``: so the step is the same for every
+    scaling of the residual and of each parameter (an absolute ``1e-12``
+    made a residual of 1e-7 in its own units fail to converge in 50
+    iterations, and a floor of ``eps`` times the *mean* crushed the step of
+    a parameter measured in small units, MADD-ANO-121).
 
     Like :func:`fit`, it returns the **lowest-loss iterate** it evaluated,
     and here that is always the last one: a step is accepted only when it

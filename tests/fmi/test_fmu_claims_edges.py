@@ -68,42 +68,17 @@ def test_the_fastest_clock_is_the_default_step_only_where_the_timesteps_divide(
     assert (intervals[0] == pytest.approx(md.default_step_size)) is fastest_is_the_step
 
 
-#: What ``build_model_description(gm, model_name="m")`` wrote at v0.3.0 for the
-#: one-spring graph below (``git archive v0.3.0``, run on 2026-10-02).
-_V030_XML = """<?xml version='1.0' encoding='utf-8'?>
-<fmiModelDescription fmiVersion="3.0" modelName="m" instantiationToken="f16fda5a-e56e-2e1e-a930-e8486dbb71f5" generationTool="maddening.fmi">
-  <UnitDefinitions>
-    <Unit name="s" />
-  </UnitDefinitions>
-  <DefaultExperiment startTime="0.0" stopTime="1.0" tolerance="1e-06" stepSize="0.001" />
-  <ModelVariables>
-    <Float64 name="time" valueReference="1" causality="independent" variability="continuous" description="Simulation time (independent variable)." unit="s" />
-    <Float32 name="s.position" valueReference="2" causality="output" variability="continuous" description="State field 'position' of node 's'" />
-    <Float32 name="s.velocity" valueReference="3" causality="output" variability="continuous" description="State field 'velocity' of node 's'" />
-  </ModelVariables>
-  <ModelStructure>
-    <Output valueReference="2" />
-    <Output valueReference="3" />
-    <InitialUnknown valueReference="2" />
-    <InitialUnknown valueReference="3" />
-  </ModelStructure>
-</fmiModelDescription>"""
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "FMU-013: a default (single-clock) export is not byte-for-byte what v0.3.0 produced: "
-    "0.4.0 adds parameters, units and the graph's step, and the token covers more; "
-    "pending docs fix"))
-def test_a_single_clock_export_is_byte_for_byte_what_v0_3_0_produced():
-    """FMU-013: "Clocks are off by default, so a single-clock FMU is byte-for-byte what
-    v0.3.0 produced"."""
-    gm = GraphManager()
-    gm.add_node(SpringDamperNode("s", 0.01, stiffness=30.0, damping=2.0, mass=1.0,
-                                 rest_length=1.0, initial_position=0.5))
-    gm.compile()
-    xml = build_model_description(gm, model_name="m").to_xml()
-    assert "<Clock" not in xml and "clocks=" not in xml       # what does hold
-    assert xml.rstrip() == _V030_XML
+def test_a_single_clock_export_carries_no_clock():
+    """FMU-013: "Clocks are off by default: a single-clock FMU has no <Clock> variable and
+    no clocks= attribute, and every output is continuous" -- on a multi-rate graph, where
+    multi_clock=True would emit two."""
+    gm = _springs(0.01, 0.05)
+    md = build_model_description(gm, model_name="m")
+    xml = md.to_xml()
+    assert "<Clock" not in xml and "clocks=" not in xml and not md.clocks()
+    outputs = [v for v in md.variables if v.causality == "output"]
+    assert outputs and all(v.variability == "continuous" for v in outputs)
+    assert len(build_model_description(gm, model_name="m", multi_clock=True).clocks()) == 2
 
 
 def test_the_token_covers_value_references_and_shapes():
@@ -153,22 +128,23 @@ def test_the_description_offers_no_directional_derivative():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=TypeError, reason=(
-    "FMU-030: SidecarConfig.step_fn is documented as 'typically GraphManager.step bound to a "
-    "particular graph', which takes no state argument; pending docs fix"))
-def test_a_sidecar_built_on_gm_step_as_its_docstring_suggests_steps():
-    """FMU-030: ``step_fn(state, external_inputs) -> new_state``, "Typically
-    :meth:`GraphManager.step` bound to a particular graph"."""
+def test_a_sidecar_on_the_compiled_step_steps_as_the_graph_does():
+    """FMU-030: ``step_fn(state, external_inputs, params)`` when ``params`` is given -- "the
+    graph's compiled step, GraphManager._compiled_step"; ``GraphManager.step`` "cannot
+    serve -- it takes no state"."""
     gm = _springs(0.01)
     md = build_model_description(gm, model_name="m")
     sidecar = FmuSidecar(SidecarConfig(schema_token=md.instantiation_token,
-                                       step_fn=gm.step, initial_state=gm._state))
-    sidecar.step({})
+                                       step_fn=gm._compiled_step, initial_state=gm._state,
+                                       params=gm.params))
+    state = sidecar.step({})
+    gm.step()
+    assert float(state["s0"]["position"]) == float(gm.get_node_state("s0")["position"])
+    with pytest.raises(TypeError):
+        FmuSidecar(SidecarConfig(schema_token=md.instantiation_token, step_fn=gm.step,
+                                 initial_state=gm._state)).step({})
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "FMU-040: an FMU exported after a node.params write and before the next compile "
-    "advertises and runs the earlier value, while gm.run runs the written one; pending fix"))
 def test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs():
     """FMU-040: an FMU reproduces the graph it was exported from, and a ``node.params``
     write after ``compile()`` "takes effect at the next run of any entry point ... so they

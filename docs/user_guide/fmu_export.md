@@ -455,8 +455,9 @@ increasing interval, `intervalVariability="constant"`), and tags every
 output and external input of a node with its clock (`clocks=` attribute,
 `variability="discrete"`).  An importer then knows that a node on a five
 times coarser rate only changes on every fifth master step.  The fastest
-clock equals the default experiment step size.  Clocks are off by default,
-so a single-clock FMU is byte-for-byte what v0.3.0 produced.  The clocks
+clock equals the default experiment step size.  Clocks are off by default:
+a single-clock FMU has no `<Clock>` variable and no `clocks=` attribute,
+and every output is continuous.  The clocks
 are constant-interval and tick with time.  `fmi3GetClock` and
 `fmi3SetClock` are `fmi3Error`, because FMI 3.0 allows them only in Event
 Mode, which this FMU does not have (`hasEventMode="false"`).  They used to

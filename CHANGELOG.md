@@ -14,7 +14,7 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
-- **System identification and FMU claims inventory** (`docs/validation/sysid_fmu_claims.yaml`, `SYS-NNN` / `FMU-NNN`): every documented `sysid`, `ParamSpec` and FMU-export claim with its conditions, oracle and a test that can fail -- 146 rows, 136 verified, 6 failing (strict xfails), 4 ambiguous.
+- **System identification and FMU claims inventory** (`docs/validation/sysid_fmu_claims.yaml`, `SYS-NNN` / `FMU-NNN`): every documented `sysid`, `ParamSpec` and FMU-export claim with its conditions, oracle and a test that can fail -- 147 rows, 139 verified, 4 failing (strict xfails), 4 ambiguous.
   `tests/compliance/test_coupling_claims.py` becomes `test_claims_inventories.py`, which checks every `docs/validation/*_claims.yaml` (each declares the id `prefixes` it owns).
 - **Coupling claims inventory** (`docs/validation/coupling_claims.yaml`): every documented coupling claim with its conditions, oracle and a test that can fail -- 130 rows, 114 verified, 6 failing (strict xfails), 10 ambiguous -- checked by `tests/compliance/test_coupling_claims.py`.
   Read the failing and ambiguous rows before relying on those claims; a new coupling claim gets a row in the same change (`testing_standards.md`).

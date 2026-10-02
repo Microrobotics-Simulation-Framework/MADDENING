@@ -1,12 +1,12 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "goal": "halo",
   "dry_run": true,
   "allow_fewer_devices": false,
   "n_devices": 4,
   "environment": {
     "hostname": "dry-run-host",
-    "timestamp_utc": "2026-09-25T11:14:42Z",
+    "timestamp_utc": "2026-10-02T04:32:36Z",
     "python": "3.12.3",
     "jax": "0.11.0",
     "jaxlib": "0.11.0",
@@ -24,7 +24,7 @@
     "nvidia_smi": "skipped (dry run)",
     "xla_flags": "--xla_force_host_platform_device_count=4",
     "jax_platforms": "cpu",
-    "git_commit": "473ca952e299c97d46924e3d02280958cd18f9cb"
+    "git_commit": "f5ff4da79e80cad5b51edcc8bf6e3778b9ab7591"
   },
   "config": {
     "goal": "all",
@@ -60,7 +60,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 1,
           "boundary": "periodic",
@@ -75,7 +75,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 2,
           "boundary": "periodic",
@@ -90,7 +90,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 1,
           "boundary": "edge",
@@ -105,7 +105,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 2,
           "boundary": "edge",
@@ -120,7 +120,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 1,
           "boundary": "zero",
@@ -135,7 +135,187 @@
           ],
           "shape": [
             32,
-            32
+            36
+          ],
+          "halo": 2,
+          "boundary": "zero",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d-axis1",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 1,
+          "boundary": "periodic",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d-axis1",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 2,
+          "boundary": "periodic",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d-axis1",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 1,
+          "boundary": "edge",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d-axis1",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 2,
+          "boundary": "edge",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d-axis1",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 1,
+          "boundary": "zero",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "1d-axis1",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 2,
+          "boundary": "zero",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d-flat",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 1,
+          "boundary": "periodic",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d-flat",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 2,
+          "boundary": "periodic",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d-flat",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 1,
+          "boundary": "edge",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d-flat",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 2,
+          "boundary": "edge",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d-flat",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
+          ],
+          "halo": 1,
+          "boundary": "zero",
+          "forward_max_abs": 0.0,
+          "adjoint_max_abs": 0.0
+        },
+        {
+          "mesh": "2d-flat",
+          "mesh_shape": [
+            1,
+            4
+          ],
+          "shape": [
+            32,
+            36
           ],
           "halo": 2,
           "boundary": "zero",
@@ -150,7 +330,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 1,
           "boundary": "periodic",
@@ -165,7 +345,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 2,
           "boundary": "periodic",
@@ -180,7 +360,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 1,
           "boundary": "edge",
@@ -195,7 +375,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 2,
           "boundary": "edge",
@@ -210,7 +390,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 1,
           "boundary": "zero",
@@ -225,7 +405,7 @@
           ],
           "shape": [
             32,
-            32
+            36
           ],
           "halo": 2,
           "boundary": "zero",
@@ -253,168 +433,336 @@
   ],
   "checks": [
     {
-      "name": "1d mesh 4x1, 32x32, halo 1, periodic: forward vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 1, periodic: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 1, periodic: adjoint vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 1, periodic: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 2, periodic: forward vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 2, periodic: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 2, periodic: adjoint vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 2, periodic: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 1, edge: forward vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 1, edge: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 1, edge: adjoint vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 1, edge: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 2, edge: forward vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 2, edge: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 2, edge: adjoint vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 2, edge: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 1, zero: forward vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 1, zero: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 1, zero: adjoint vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 1, zero: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 2, zero: forward vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 2, zero: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "1d mesh 4x1, 32x32, halo 2, zero: adjoint vs NumPy max_abs",
+      "name": "1d mesh 4x1, 32x36, halo 2, zero: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 1, periodic: forward vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 1, periodic: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 1, periodic: adjoint vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 1, periodic: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 2, periodic: forward vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 2, periodic: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 2, periodic: adjoint vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 2, periodic: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 1, edge: forward vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 1, edge: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 1, edge: adjoint vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 1, edge: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 2, edge: forward vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 2, edge: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 2, edge: adjoint vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 2, edge: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 1, zero: forward vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 1, zero: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 1, zero: adjoint vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 1, zero: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 2, zero: forward vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 2, zero: forward vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
       "passed": true
     },
     {
-      "name": "2d mesh 2x2, 32x32, halo 2, zero: adjoint vs NumPy max_abs",
+      "name": "1d-axis1 mesh 1x4, 32x36, halo 2, zero: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 1, periodic: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 1, periodic: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 2, periodic: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 2, periodic: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 1, edge: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 1, edge: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 2, edge: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 2, edge: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 1, zero: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 1, zero: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 2, zero: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d-flat mesh 1x4, 32x36, halo 2, zero: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 1, periodic: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 1, periodic: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 2, periodic: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 2, periodic: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 1, edge: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 1, edge: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 2, edge: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 2, edge: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 1, zero: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 1, zero: adjoint vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 2, zero: forward vs NumPy max_abs",
+      "value": 0.0,
+      "limit": 0.0,
+      "sense": "<=",
+      "passed": true
+    },
+    {
+      "name": "2d mesh 2x2, 32x36, halo 2, zero: adjoint vs NumPy max_abs",
       "value": 0.0,
       "limit": 0.0,
       "sense": "<=",
@@ -450,5 +798,5 @@
     }
   ],
   "passed": true,
-  "wall_s": 3.6269638999947347
+  "wall_s": 4.538129648999529
 }

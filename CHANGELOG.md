@@ -339,6 +339,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`run_pod.py`'s wrapper goals see a fault confined to one spatial axis on four devices** (schema 6): each axis is split over all four on a
+  1-D mesh of its own, beside a 1 x 4 two-axis mesh and the 2 x 2 pencil, on non-square grids whose inputs differ block to block (three seeded
+  faults closed all six items).  `--summarise` names each item's commit, and exits 4 with `MIXED COMMITS` across commits.  Action: re-run dry runs.
 - **Coupling round-3 audit fixes** (MADD-ANO-094/095, new, resolved): a Gauss-Seidel pass's float floor counts its longest chain of same-pass reads (a stalled 32-relay ring's spectral and gradient bounds read 0.5x the truth, flags set); after `run_adaptive*` the report covers both kept half steps;
   Aitken and IQN are units-invariant (exact power-of-two rescaling); `strict_convergence`'s threshold is pinned; 16-bit groups count passes in int32 and run `diagnostics=True`; x64 float32 groups step with every accelerator; the profiler's per-pass cost divides by `total_iterations` less one per sweep.
   Action: none for states (bit-identical); re-read `spectral_error_bound`/`precision_limited` of Gauss-Seidel groups and post-adaptive reports.

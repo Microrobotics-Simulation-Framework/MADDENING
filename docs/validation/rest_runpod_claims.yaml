@@ -436,49 +436,6 @@ claims:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_an_anonymous_oversized_body_is_refused_for_its_credential_first
   status: verified
 
-- id: REST-097
-  area: auth
-  claim: >-
-    Bundled UI: "Open /viz/app#token=<token> -- a fragment, which the
-    browser never sends ... The page removes it from the address bar
-    immediately and keeps it in sessionStorage.  ?token= also works";
-    the pages load the token helper and add the header to their own
-    calls.
-  sources:
-    - src/maddening/api/README.md:70 (Presenting it)
-    - docs/release_notes/v0.4.0.md:4069 (The API authenticates when it is not bound to loopback)
-  conditions: >-
-    the shipped static pages and auth.js; the helper executed by node
-    (skipif when node is not on PATH; the GitHub runners have it), the
-    constant-level checks everywhere.
-  oracle: the helper's token from a fragment, from a query, the fragment winning; history.replaceState and sessionStorage only; the wrapped fetch's header.
-  tests:
-    - tests/api/test_bundled_ui_auth.py::test_the_helper_takes_the_token_from_a_url_fragment
-    - tests/api/test_bundled_ui_auth.py::test_the_helper_still_takes_a_query_string_token
-    - tests/api/test_bundled_ui_auth.py::test_a_fragment_token_wins_over_a_query_token
-    - tests/api/test_bundled_ui_auth.py::test_the_helper_scrubs_the_token_out_of_the_url
-    - tests/api/test_bundled_ui_auth.py::test_the_wrapped_fetch_adds_the_header_to_same_origin_calls
-    - tests/api/test_bundled_ui_auth.py::test_a_bundled_page_loads_the_token_helper_before_its_own_script
-  status: verified
-
-- id: REST-098
-  area: auth
-  claim: >-
-    "There is still no TLS.  The token and every state snapshot cross the
-    network in cleartext."
-  sources:
-    - src/maddening/api/README.md:79 (What the token does not do)
-    - src/maddening/api/server.py:42 (module docstring, Security)
-  conditions: any bind.
-  oracle: none -- a statement that a feature is absent.
-  tests: []
-  status: untested
-  reason: >-
-    It states what the server does not do; a test that the app serves
-    plain HTTP would pin the absence of TLS, not a promise a user relies
-    on.  The rows that matter for it are REST-002 (the token is demanded)
-    and REST-011 (the token never travels in a URL).
-
 # ---------------------------------------------------------------------------
 # The Origin and Host rules
 # ---------------------------------------------------------------------------
@@ -853,26 +810,6 @@ claims:
     - tests/api/test_runner_stop_and_stride.py::test_the_largest_stride_is_accepted_and_echoed_as_applied
     - tests/api/test_runner_stop_and_stride.py::test_a_stride_set_before_the_runner_exists_is_the_runners_stride
   status: verified
-
-- id: REST-099
-  area: bounds
-  claim: >-
-    PUT /sim/stride: "steps_per_frame: Physics steps batched per wall-clock
-    frame in the runner ... Applied to the running runner, and kept for the
-    one a later POST /sim/start creates"; "relay_stride: Only capture every
-    Nth step in the relay".  What a call that names only one of them does to
-    the other is unstated.
-  sources:
-    - src/maddening/api/server.py:3556 (sim_set_stride, Parameters)
-  conditions: a call naming steps_per_frame alone after both were set.
-  oracle: the reply and relay.stride.
-  tests:
-    - tests/api/test_routes_answer_what_they_did.py::test_a_stride_call_that_names_one_value_sets_the_other_to_one
-  status: ambiguous
-  proposed_wording: >-
-    Each call sets both values: one left out of the query is set to its
-    default, 1 -- send both to change one and keep the other.
-  notes: The bundled app sends both; a script that sends one resets the other without a word.
 
 - id: REST-039
   area: bounds
@@ -2027,6 +1964,73 @@ claims:
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_every_write_is_a_409_while_a_run_is_in_progress
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_every_write_is_a_409_while_the_runner_runs
   status: verified
+
+# ---------------------------------------------------------------------------
+# More REST rows: the bundled UI's token, TLS, a partial PUT /sim/stride
+# ---------------------------------------------------------------------------
+
+- id: REST-097
+  area: auth
+  claim: >-
+    Bundled UI: "Open /viz/app#token=<token> -- a fragment, which the
+    browser never sends ... The page removes it from the address bar
+    immediately and keeps it in sessionStorage.  ?token= also works";
+    the pages load the token helper and add the header to their own
+    calls.
+  sources:
+    - src/maddening/api/README.md:70 (Presenting it)
+    - docs/release_notes/v0.4.0.md:4069 (The API authenticates when it is not bound to loopback)
+  conditions: >-
+    the shipped static pages and auth.js; the helper executed by node
+    (skipif when node is not on PATH; the GitHub runners have it), the
+    constant-level checks everywhere.
+  oracle: the helper's token from a fragment, from a query, the fragment winning; history.replaceState and sessionStorage only; the wrapped fetch's header.
+  tests:
+    - tests/api/test_bundled_ui_auth.py::test_the_helper_takes_the_token_from_a_url_fragment
+    - tests/api/test_bundled_ui_auth.py::test_the_helper_still_takes_a_query_string_token
+    - tests/api/test_bundled_ui_auth.py::test_a_fragment_token_wins_over_a_query_token
+    - tests/api/test_bundled_ui_auth.py::test_the_helper_scrubs_the_token_out_of_the_url
+    - tests/api/test_bundled_ui_auth.py::test_the_wrapped_fetch_adds_the_header_to_same_origin_calls
+    - tests/api/test_bundled_ui_auth.py::test_a_bundled_page_loads_the_token_helper_before_its_own_script
+  status: verified
+
+- id: REST-098
+  area: auth
+  claim: >-
+    "There is still no TLS.  The token and every state snapshot cross the
+    network in cleartext."
+  sources:
+    - src/maddening/api/README.md:79 (What the token does not do)
+    - src/maddening/api/server.py:42 (module docstring, Security)
+  conditions: any bind.
+  oracle: none -- a statement that a feature is absent.
+  tests: []
+  status: untested
+  reason: >-
+    It states what the server does not do; a test that the app serves
+    plain HTTP would pin the absence of TLS, not a promise a user relies
+    on.  The rows that matter for it are REST-002 (the token is demanded)
+    and REST-011 (the token never travels in a URL).
+
+- id: REST-099
+  area: bounds
+  claim: >-
+    PUT /sim/stride: "steps_per_frame: Physics steps batched per wall-clock
+    frame in the runner ... Applied to the running runner, and kept for the
+    one a later POST /sim/start creates"; "relay_stride: Only capture every
+    Nth step in the relay".  What a call that names only one of them does to
+    the other is unstated.
+  sources:
+    - src/maddening/api/server.py:3556 (sim_set_stride, Parameters)
+  conditions: a call naming steps_per_frame alone after both were set.
+  oracle: the reply and relay.stride.
+  tests:
+    - tests/api/test_routes_answer_what_they_did.py::test_a_stride_call_that_names_one_value_sets_the_other_to_one
+  status: ambiguous
+  proposed_wording: >-
+    Each call sets both values: one left out of the query is set to its
+    default, 1 -- send both to change one and keep the other.
+  notes: The bundled app sends both; a script that sends one resets the other without a word.
 
 # ---------------------------------------------------------------------------
 # run_pod.py: what it runs and never runs

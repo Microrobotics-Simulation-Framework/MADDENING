@@ -26,6 +26,9 @@ python -m maddening.examples.servers.remote_viz_client --local
 # Any HTTP example server on a free port (it prints the address)
 python -m maddening.examples.servers.api_server --port 0
 
+# The REST parameter rules, in-process: no port at all
+python -m maddening.examples.servers.rest_params_demo
+
 # The cloud examples' server and rendezvous checks, without a cloud account
 python -m maddening.examples.cloud.server.04_server_test --local
 python -m maddening.examples.cloud.server.05_websocket_test --local
@@ -56,10 +59,11 @@ address: `ssh -L 8000:127.0.0.1:8000 user@host` for HTTP, or
 | `coupling_demo.py` | Staggered vs Gauss-Seidel vs `auto_couple` on two masses joined by a spring; staggering's lag shifts the centre of mass | `... coupling.coupling_demo` |
 | `coupled_spring_ball.py` | A one-way chain table -> ball -> spring with `run_scan_with_history`; saves a plot | `... coupling.coupled_spring_ball` |
 | `acceleration_comparison.py` | Plain vs Aitken vs under-relaxation vs IQN-ILS, weak and strong coupling (IQN-ILS converges where plain diverges) | `... coupling.acceleration_comparison [--steps N]` |
-| `convergence_diagnostics_demo.py` | `coupling_diagnostics()`: iterations, `converged`, starved budgets, the three norms, the spectral keys | `... coupling.convergence_diagnostics_demo [--steps N]` |
+| `convergence_diagnostics_demo.py` | `coupling_diagnostics()`: iterations, `converged`, starved budgets, the three norms, the spectral keys; `print_coupling_report()` on a converged and a capped group, and `strict_convergence` raising | `... coupling.convergence_diagnostics_demo [--steps N]` |
 | `jacobi_vs_gauss_seidel.py` | Iteration modes on a 3-node cycle: same fixed point, different paths when under-converged | `... coupling.jacobi_vs_gauss_seidel [--steps N]` |
 | `subcycling_demo.py` | Mixed-timestep coupling group vs a coarse and a fine reference | `... coupling.subcycling_demo` |
 | `spatial_interpolation_demo.py` | Interface maps (nearest, linear, RBF, conservative) and two coupled rods at different resolutions | `... coupling.spatial_interpolation_demo [--heat-steps N]` |
+| `interface_mapping_demo.py` | `add_edge(mapping=)` between an 8- and a 24-cell rod: weights in `params["mappings"]`, the patch test, a `to_dict` / `from_dict` round trip that steps identically, and the refusal of a write that would move the mapped points (MADD-ANO-063) | `... coupling.interface_mapping_demo [--steps N]` |
 | `flux_coupling_demo.py` | Heat-rod value coupling, flux conservation, additive inputs, IQN-IMVJ, interface norm, sub-cycling options | `... coupling.flux_coupling_demo [--sections 1,3]` |
 | `vessel_bifurcation.py` | Y-junction of three heat rods built from and written back to USD `[usd]` | `... coupling.vessel_bifurcation [--steps N] [--viz]` |
 | `vessel_bifurcation_live.py` | The same, live in a PyVista window with a heat pulse `[usd, viz3d]`, needs a display | `... coupling.vessel_bifurcation_live` |
@@ -77,6 +81,11 @@ address: `ssh -L 8000:127.0.0.1:8000 user@host` for HTTP, or
 | `scan_performance.py` | `run()` vs `run_scan()` vs `run_scan_with_history()` timings (compile included); saves a plot | `... advanced.scan_performance [--steps N]` |
 | `surrogate_demo.py` | Train an MLP surrogate and swap it into the graph `[surrogates]` | `... advanced.surrogate_demo [--epochs N]` |
 | `profile_lbm_step.py` | `profile_graph` on a two-rod graph, saved as Perfetto JSON | `... advanced.profile_lbm_step [--n-steps N]` |
+| `profiling_demo.py` | The whole `ProfileReport` on a coupled pair: measured coupling overhead and cost per iteration, bottleneck, compile counts (checked identical on a fresh graph), a `trace=True` summary, Perfetto JSON; all output in a temporary directory | `... advanced.profiling_demo [--n-cells N] [--out-dir DIR]` |
+| `sysid_demo.py` | Calibration: `fim` finds the spring's scale degeneracy, `fit` holds it (`excited_rank`, `hold_declined`), `fit_lm` recovers k and c under a `ParamSpec` freeze and a mask, Cramér–Rao bounds, `params_table()` before and after | `... advanced.sysid_demo [--samples N] [--n-iter N]` |
+| `sharding_demo.py` | `ShardedStencilNode(HeatNode)` over four emulated CPU devices (sets `XLA_FLAGS` itself): `print_graph()` shows the wrapper, `memory_estimate()` a quarter per device, the result matches the unsharded rod; CPU emulation, not a speed test | `... advanced.sharding_demo [--n-cells N] [--steps N]` |
+| `fmu_export_demo.py` | FMI 3.0 export: `build_model_description` (tunable and fixed parameters), `build_fmu_binary` + `write_fmu` into a temporary directory, FMPy's `validate_fmu`, and the sidecar driven in-process; stages needing a C compiler or FMPy skip with the reason | `... advanced.fmu_export_demo [--steps N]` |
+| `checkpoint_resume_demo.py` | `save_state` / `load_state`: a coupled run resumed in a fresh graph is bitwise identical, `_meta` warm starts and calibrated params included; a cold restart is not | `... advanced.checkpoint_resume_demo [--warmup N] [--steps N]` |
 | `live_stage_bouncing_ball_demo.py` | `LiveStage` writing a time-sampled USD stage `[usd]` | `... advanced.live_stage_bouncing_ball_demo [--steps N]` |
 
 ## servers/
@@ -85,6 +94,7 @@ address: `ssh -L 8000:127.0.0.1:8000 user@host` for HTTP, or
 |---|---|---|
 | `remote_viz_client.py` + `remote_sim_server.py` | A simulation streaming state over ZMQ to a viewer (terminal, plain text or matplotlib) `[network]` | `... servers.remote_viz_client --local` |
 | `api_server.py` | The REST/WebSocket API (`SimulationServer`), docs at `/docs` `[api]` | `... servers.api_server [--port 0]` |
+| `rest_params_demo.py` | `PUT /graph/params/{node}` in-process (FastAPI `TestClient`, no port): a write honoured on the next step without a recompile, refusals with the reason (a `ParamSpec` bound, a value the constructor rejects), an initial condition applied at reset `[api]` | `... servers.rest_params_demo [--steps N]` |
 | `interactive_graph_server.py` | Graph topology page at `/viz/graph` `[api]` | `... servers.interactive_graph_server [--port 0]` |
 | `launch_app.py` | Interactive demo app at `/viz/app`; opens a browser `[api]` | `... servers.launch_app [--port 0] [--no-browser]` |
 | `launch_server_render.py` | Server-side matplotlib frames streamed to `/viz/render` `[api, viz]` | `... servers.launch_server_render [--port 0]` |

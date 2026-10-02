@@ -308,6 +308,9 @@ def test_a_single_phase_pipe_refuses_a_nonzero_interaction_strength():
     _assert_nothing_written(gm, "p", before)
 
 
+# Per push: tests/api/test_params_endpoint_reload_agreement.py::test_switching_a_multiphase_pipe_to_single_phase_is_refused_and_the_reload_matches
+# and tests/api/test_params_endpoint_reload_agreement.py::test_a_uniform_rod_takes_a_new_length_and_the_reload_matches
+# (the refusal on the pipe, and the compiled reload comparison on a cheaper node).
 @pytest.mark.slow  # two multiphase-pipe compiles and scans: ~8 s on 3 cores
 def test_a_compiled_multiphase_pipe_takes_writes_within_its_branch_and_the_reload_matches():
     """On the compiled graph the audit drove: ``G=0`` refused, and each
@@ -531,7 +534,30 @@ def test_a_state_over_the_cap_is_refused_before_it_is_built():
 def test_a_pipe_length_is_refused_before_a_pipe_of_that_length_is_built(monkeypatch):
     """A pipe's ``nx`` multiplies into its whole volume, and its masks are
     built by the constructor: the state it would build with the new ``nx``
-    and the old masks does not broadcast, which is told abstractly."""
+    and the old masks does not broadcast, which is told abstractly.  (A
+    length under the state cap: one over it is refused earlier still, by
+    the class's size estimate -- the next test.)"""
+    built = []
+    real_init = LBMPipeNode.__init__
+
+    def counting_init(self, *args, **kwargs):
+        built.append(kwargs.get("nx"))
+        real_init(self, *args, **kwargs)
+
+    gm = _pipe(G=0.0, fill_fraction=1.0)
+    before = _snapshot(gm, "p")
+    monkeypatch.setattr(LBMPipeNode, "__init__", counting_init)
+    resp = _put(gm, "p", {"nx": 200})
+    assert resp.status_code == 400, resp.text
+    assert "initial_state() raises with it" in resp.json()["detail"]
+    assert built == []
+    _assert_nothing_written(gm, "p", before)
+
+
+def test_a_pipe_length_over_the_state_cap_is_refused_by_its_size_estimate(monkeypatch):
+    """``nx=20000`` takes the pipe past the state cap: refused from
+    ``LBMPipeNode``'s own estimate, before the abstract evaluation and
+    before any pipe is built."""
     built = []
     real_init = LBMPipeNode.__init__
 
@@ -544,7 +570,8 @@ def test_a_pipe_length_is_refused_before_a_pipe_of_that_length_is_built(monkeypa
     monkeypatch.setattr(LBMPipeNode, "__init__", counting_init)
     resp = _put(gm, "p", {"nx": 20_000})
     assert resp.status_code == 400, resp.text
-    assert "initial_state() raises with it" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "state elements" in detail and "before anything of that size" in detail
     assert built == []
     _assert_nothing_written(gm, "p", before)
 

@@ -146,6 +146,7 @@ def _broad_cases():
     ]
 
 
+# Per push: tests/core/test_coupling_diagnostics_leave_the_state_alone.py::test_diagnostics_leave_the_returned_state_bit_identical
 @pytest.mark.slow
 @pytest.mark.parametrize("solver,iteration_mode,acceleration,norm", _broad_cases())
 def test_diagnostics_leave_every_chain_configuration_bit_identical(

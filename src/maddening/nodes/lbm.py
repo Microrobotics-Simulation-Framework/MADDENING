@@ -54,6 +54,7 @@ from maddening.core.compliance.metadata import (
     ValidatedRegime,
 )
 from maddening.core.compliance.stability import stability
+from maddening.core._size_estimate import AllocationEstimate, as_count
 from maddening.core.params import ParamSpec
 
 
@@ -1022,6 +1023,47 @@ class LBMNode(SimulationNode):
             "between two shards would be forced to the face pressure as well, with "
             f"no error.  {instead}; or drive the flow with body_force, which does "
             "not use the pressure faces."
+        )
+
+    #: ``(D, Q)`` of each lattice the constructor accepts, for
+    #: :meth:`_allocation_estimate` (which must not build a descriptor).
+    _LATTICE_SIZES = {"D3Q19": (3, 19), "D2Q9": (2, 9)}
+
+    @classmethod
+    def _allocation_estimate(cls, args: dict) -> Optional[AllocationEstimate]:
+        """What the constructor and :meth:`initial_state` would allocate with
+        constructor arguments *args*, told without building anything.
+
+        Private on purpose (see :mod:`maddening.core._size_estimate`): a
+        convention between the built-in nodes, the REST server and
+        ``GraphManager.from_dict``, not yet part of the node contract.
+
+        Per cell the state holds ``Q`` populations, a density, ``D``
+        velocity components, a pressure and the wall mask: 25 values on
+        D3Q19, 14 on D2Q9.  Building it peaks at about 3.3 to 3.8 times the
+        state's float32 bytes (the equilibrium's temporaries; measured on
+        D3Q19 up to 90^3 and D2Q9 up to 2000 x 1000, jaxlib 0.11.0); four
+        times is counted.  ``None`` for a lattice or a grid rank the
+        constructor refuses.
+        """
+        lattice = args.get("lattice")
+        if not isinstance(lattice, str) or lattice.upper() not in cls._LATTICE_SIZES:
+            return None
+        D, Q = cls._LATTICE_SIZES[lattice.upper()]
+        shape = args.get("grid_shape")
+        if isinstance(shape, (str, bytes)) or not isinstance(shape, (list, tuple)) \
+                or len(shape) != D:
+            return None
+        cells = 1
+        for extent in shape:
+            n = as_count(extent)
+            if n is None:
+                return None
+            cells *= n
+        per_cell = Q + D + 3
+        return AllocationEstimate(
+            state_elements=cells * per_cell,
+            peak_bytes=cells * per_cell * 4 * 4,
         )
 
     def initial_state(self) -> dict:

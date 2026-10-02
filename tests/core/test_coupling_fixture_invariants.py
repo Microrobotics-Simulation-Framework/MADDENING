@@ -422,6 +422,7 @@ def _assert_same_fixed_point(fixture, norms, n_steps=25):
     )
 
 
+# Per push: tests/core/test_coupling_fixture_invariants.py::test_every_l2_configuration_reaches_the_same_fixed_point[heterogeneous-2000]
 @pytest.mark.parametrize("fixture", [
     # Slow-marked: six builds and compiles, 5-7 s on the CI runner, and the
     # slow sweep below covers this fixture under all 24 configurations.
@@ -451,6 +452,8 @@ def test_every_l2_configuration_reaches_the_same_fixed_point(fixture):
     _assert_same_fixed_point(fixture, ("l2",))
 
 
+# Per push: tests/core/test_coupling_fixture_invariants.py::test_every_l2_configuration_reaches_the_same_fixed_point[heterogeneous-2000]
+# (the six L2 configurations, on the fixture with four orders of magnitude between its fields).
 @pytest.mark.slow
 @pytest.mark.parametrize("fixture", ["stiff-pair-0.5", "chain-5", "ring-8"])
 def test_every_configuration_reaches_the_same_fixed_point(fixture):
@@ -811,6 +814,8 @@ _MIXED_UNDERCONVERGED = dict(max_iterations=3, tolerance=1e-30)
 # every push by ``test_mixed_mode_graph_steps_deterministically`` below and
 # ``TestDiagnostics::test_diagnostics_multiple_groups`` in
 # ``tests/core/test_coupling_convergence.py``.
+# Per push: tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_steps_deterministically and
+# tests/core/test_coupling_convergence.py::TestDiagnostics::test_diagnostics_multiple_groups
 @pytest.mark.slow
 def test_mixed_mode_graph_gives_each_group_its_own_schedule():
     """Each group *honours* its declared mode; reading the field back does not.
@@ -876,6 +881,8 @@ def test_mixed_mode_graph_steps_deterministically():
 
 # Slow-marked (still run by slow-tests.yml), with the test above and for the
 # same reason: two two-group graphs, 5-7 s on the CI runner.
+# Per push: tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_steps_deterministically and
+# tests/core/test_coupling_convergence.py::TestDiagnostics::test_diagnostics_multiple_groups
 @pytest.mark.slow
 def test_mixed_mode_groups_keep_independent_iteration_counts():
     """Changing one group's problem must not move the other's schedule.
@@ -1257,30 +1264,37 @@ def test_every_recorded_fixture_still_measures_its_baseline_row(name, fixture):
 
 #: The non-baseline rows ``docs/developer_guide/coupling_algorithm_guide.md``
 #: quotes in its "Start here" table (IQN, Aitken, ``jac/fixed0.8``, the
-#: interface norm), as ``(file, fixture, label)``.  The baseline check
+#: interface norm), as ``(file, fixture, label, slow)``.  The baseline check
 #: above re-measures ``gs/none/l2`` only, so a quoted row could go stale
 #: with nothing failing: the guide's 4.0 iterations for ``gs/iqn-ils/l2``
-#: on ``stiff-pair-0.95`` survived being changed to 9.0 in the file.  All
-#: slow: each is a compile and up to a hundred steps.
+#: on ``stiff-pair-0.95`` survived being changed to 9.0 in the file.  Each
+#: row is a compile and up to a hundred steps.  The seven small-fixture rows
+#: run on every push (0.4-1.4 s each on three local cores, the first paying
+#: the shared warm-up); the ``star-16``, ``chain-20`` and IQN-IMVJ rows,
+#: 1.5-2.9 s each, run in the slow lane.
 _GUIDE_QUOTED_ROWS = (
-    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/iqn-ils/l2"),
-    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/none/interface"),
-    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/iqn-ils/interface"),
-    ("coupling_sweep_cpu.json", "star-16", "jac/fixed0.8/l2"),
-    ("coupling_sweep_cpu.json", "star-16", "gs/aitken/interface"),
-    ("coupling_sweep_cpu.json", "star-16", "gs/iqn-ils/interface"),
-    ("coupling_sweep_cpu.json", "star-2", "gs/aitken/interface"),
-    ("coupling_sweep_cpu.json", "slow-drift", "jac/fixed0.8/l2"),
-    ("coupling_sweep_cpu.json", "slow-drift", "gs/none/interface"),
-    ("coupling_sweep_cpu.json", "slow-drift", "gs/iqn-imvj5/l2"),
-    ("coupling_sweep_cpu.json", "chain-20", "jac/fixed0.8/l2"),
-    ("coupling_sweep_cpu.json", "stiff-pair-0.8", "jac/fixed0.8/l2"),
+    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/iqn-ils/l2", False),
+    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/none/interface", False),
+    ("coupling_sweep_cpu.json", "stiff-pair-0.95", "gs/iqn-ils/interface", False),
+    ("coupling_sweep_cpu.json", "star-16", "jac/fixed0.8/l2", True),
+    ("coupling_sweep_cpu.json", "star-16", "gs/aitken/interface", True),
+    ("coupling_sweep_cpu.json", "star-16", "gs/iqn-ils/interface", True),
+    ("coupling_sweep_cpu.json", "star-2", "gs/aitken/interface", False),
+    ("coupling_sweep_cpu.json", "slow-drift", "jac/fixed0.8/l2", False),
+    ("coupling_sweep_cpu.json", "slow-drift", "gs/none/interface", False),
+    ("coupling_sweep_cpu.json", "slow-drift", "gs/iqn-imvj5/l2", True),
+    ("coupling_sweep_cpu.json", "chain-20", "jac/fixed0.8/l2", True),
+    ("coupling_sweep_cpu.json", "stiff-pair-0.8", "jac/fixed0.8/l2", False),
 )
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize("name,fixture,label", _GUIDE_QUOTED_ROWS,
-                         ids=[f"{f}-{lab}" for _, f, lab in _GUIDE_QUOTED_ROWS])
+# Per push: tests/core/test_coupling_fixture_invariants.py::test_every_row_the_guide_quotes_is_what_the_fixture_measures
+# (its seven rows not marked slow).
+@pytest.mark.parametrize("name,fixture,label", [
+    pytest.param(name, fixture, label, id=f"{fixture}-{label}",
+                 marks=(pytest.mark.slow,) if slow else ())
+    for name, fixture, label, slow in _GUIDE_QUOTED_ROWS
+])
 def test_every_row_the_guide_quotes_is_what_the_fixture_measures(name, fixture, label):
     """Each quoted row, re-measured like the baseline row and held to its bands."""
     _assert_live_row_matches(name, fixture, label)

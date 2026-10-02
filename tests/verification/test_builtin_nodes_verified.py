@@ -154,6 +154,8 @@ _SLOW_BATTERIES = {
 }
 
 
+# Per push: tests/verification/test_builtin_nodes_verified.py::test_builtin_node_passes_battery[table] and [health_check] (the full battery,
+# params checks included).
 @pytest.mark.parametrize("name", [
     pytest.param(n, marks=pytest.mark.slow) if n in _SLOW_BATTERIES else n
     for n in sorted(CASES)
@@ -200,6 +202,7 @@ def test_heat_source_sampled_with_declared_shape(args):
     assert jnp.shape(bi["heat_source"]) == (N_CELLS,)
 
 
+# Per push: tests/verification/test_builtin_nodes_verified.py::test_params_effective_names_the_solver_paths_it_checked (its ball case).
 @pytest.mark.parametrize(
     "name, paths, unused",
     [

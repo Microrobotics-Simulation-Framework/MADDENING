@@ -14,9 +14,44 @@ from maddening.nodes.heat import HeatNode
 from tests.conftest import EXAMPLES_COSTLY
 
 
+def _assert_zero_flux_conserves_total_heat(n_cells, diffusivity):
+    # CFL-safe dt: dt < dx^2 / (2 * alpha).  The node is built with
+    # the dt it is actually stepped with, so its own stability check
+    # sees the real configuration.
+    dx = 1.0 / n_cells
+    dt_safe = 0.4 * dx ** 2 / (2.0 * diffusivity)
+    node = HeatNode(
+        name="h", timestep=dt_safe, n_cells=n_cells,
+        thermal_diffusivity=diffusivity,
+        initial_temperature=0.0,
+    )
+
+    # Random initial temperature profile
+    rng = np.random.default_rng(42)
+    T_init = rng.uniform(10.0, 100.0, n_cells).astype(np.float32)
+    state = {"temperature": jnp.asarray(T_init)}
+
+    # Step without boundary inputs (Neumann BCs by default)
+    out = node.update(state, {}, dt_safe)
+    total_before = float(jnp.sum(state["temperature"]))
+    total_after = float(jnp.sum(out["temperature"]))
+
+    # With no boundary data supplied the mirror ghost equals T[0], so
+    # the end faces carry zero gradient and the scheme is exactly
+    # conservative -- round-off only.  Until 0.4.0 the end cells were
+    # instead frozen at their previous values, which leaked O(dt*alpha/dx)
+    # per step and is why this bound used to be 5% (MADD-ANO-007).
+    rel_err = abs(total_after - total_before) / max(abs(total_before), 1e-10)
+    assert rel_err < 1e-5, (
+        f"Heat not conserved: before={total_before}, after={total_after}, "
+        f"rel_err={rel_err}"
+    )
+
+
 class TestHeatConservation:
     """Total heat should be conserved with Neumann (zero-flux) BCs."""
 
+    # Per push: tests/verification/hypothesis/nodes/test_hypothesis_heat.py::TestHeatConservation::test_zero_flux_conserves_total_heat_on_fixed_rods
     @pytest.mark.slow  # a fresh rod size per example: 5-8 s on CI; still in verify-hypothesis
     @given(
         n_cells=st.integers(min_value=10, max_value=50),
@@ -25,37 +60,13 @@ class TestHeatConservation:
     )
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
     def test_zero_flux_conserves_total_heat(self, n_cells, diffusivity):
-        # CFL-safe dt: dt < dx^2 / (2 * alpha).  The node is built with
-        # the dt it is actually stepped with, so its own stability check
-        # sees the real configuration.
-        dx = 1.0 / n_cells
-        dt_safe = 0.4 * dx ** 2 / (2.0 * diffusivity)
-        node = HeatNode(
-            name="h", timestep=dt_safe, n_cells=n_cells,
-            thermal_diffusivity=diffusivity,
-            initial_temperature=0.0,
-        )
+        _assert_zero_flux_conserves_total_heat(n_cells, diffusivity)
 
-        # Random initial temperature profile
-        rng = np.random.default_rng(42)
-        T_init = rng.uniform(10.0, 100.0, n_cells).astype(np.float32)
-        state = {"temperature": jnp.asarray(T_init)}
-
-        # Step without boundary inputs (Neumann BCs by default)
-        out = node.update(state, {}, dt_safe)
-        total_before = float(jnp.sum(state["temperature"]))
-        total_after = float(jnp.sum(out["temperature"]))
-
-        # With no boundary data supplied the mirror ghost equals T[0], so
-        # the end faces carry zero gradient and the scheme is exactly
-        # conservative -- round-off only.  Until 0.4.0 the end cells were
-        # instead frozen at their previous values, which leaked O(dt*alpha/dx)
-        # per step and is why this bound used to be 5% (MADD-ANO-007).
-        rel_err = abs(total_after - total_before) / max(abs(total_before), 1e-10)
-        assert rel_err < 1e-5, (
-            f"Heat not conserved: before={total_before}, after={total_after}, "
-            f"rel_err={rel_err}"
-        )
+    # The property above at three fixed rods: both ends of the size range
+    # and of the diffusivity range, on every push and both JAX lanes.
+    @pytest.mark.parametrize("n_cells, diffusivity", [(10, 0.1), (37, 0.0123), (50, 0.001)])
+    def test_zero_flux_conserves_total_heat_on_fixed_rods(self, n_cells, diffusivity):
+        _assert_zero_flux_conserves_total_heat(n_cells, diffusivity)
 
 
 class TestHeatCFLInstability:

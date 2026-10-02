@@ -50,6 +50,7 @@ from maddening.core.compliance.metadata import (
     ValidatedRegime,
 )
 from maddening.core.compliance.stability import stability
+from maddening.core._size_estimate import AllocationEstimate, as_count
 from maddening.core.params import ParamSpec
 
 
@@ -1023,6 +1024,23 @@ class HeatNode(SimulationNode):
     def _grid_x(self):
         """Grid point coordinates as a JAX array (alias of static_data['grid_x'])."""
         return self._grid_x_array
+
+    @classmethod
+    def _allocation_estimate(cls, args: dict) -> Optional[AllocationEstimate]:
+        """What the constructor and :meth:`initial_state` would allocate with
+        constructor arguments *args*, told without building anything.
+
+        Private on purpose (see :mod:`maddening.core._size_estimate`): a
+        convention between the built-in nodes, the REST server and
+        ``GraphManager.from_dict``, not yet part of the node contract.  The
+        state is ``temperature``, ``n_cells`` values; the constructor builds
+        ``grid_x`` of the same length.  Peak measured at about 12 bytes per
+        cell up to 10^7 cells (jaxlib 0.11.0); 16 are counted.
+        """
+        n_cells = as_count(args.get("n_cells"))
+        if n_cells is None:
+            return None
+        return AllocationEstimate(state_elements=n_cells, peak_bytes=16 * n_cells)
 
     def initial_state(self) -> dict:
         n = self.params["n_cells"]

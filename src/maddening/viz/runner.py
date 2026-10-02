@@ -37,7 +37,9 @@ class RealtimeRunner:
         Number of physics steps to execute in a batch before pacing to
         wall clock.  Default 1.  Increasing this amortises sleep/wake
         overhead for fast-stepping simulations (e.g. dt=0.0001 physics
-        rendered at 60 fps → steps_per_frame≈167).
+        rendered at 60 fps → steps_per_frame≈167).  The stop and pause
+        flags are checked between every step of a batch, so a large value
+        does not delay :meth:`stop` or :meth:`pause` beyond one step.
     command_receiver : optional
         A ``CommandReceiver`` whose ``latest_commands()`` provides
         external inputs each step.  If ``None``, no external inputs
@@ -72,7 +74,20 @@ class RealtimeRunner:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Start (or restart) the background simulation thread."""
+        """Start (or restart) the background simulation thread.
+
+        Raises
+        ------
+        RuntimeError
+            If the previous run's thread is still alive (a :meth:`stop`
+            that timed out): two threads would step one graph.
+        """
+        if self.is_alive:
+            raise RuntimeError(
+                "RealtimeRunner: the previous run's thread is still alive "
+                "(stop() timed out while it finished a step); call stop() "
+                "again before starting"
+            )
         if self._gm._dirty or self._gm._compiled_step is None:
             self._gm.compile()
         self._stop.clear()
@@ -87,12 +102,39 @@ class RealtimeRunner:
         """Resume a paused simulation."""
         self._paused.set()
 
-    def stop(self) -> None:
-        """Signal the background thread to stop and wait for it."""
+    def stop(self, timeout: Optional[float] = 2.0) -> bool:
+        """Signal the background thread to stop and wait for it.
+
+        The thread checks the flag between every step, so it exits within
+        one step of the signal (one step can still be long: the first one
+        after a change compiles the graph).
+
+        Parameters
+        ----------
+        timeout : float or None, optional
+            Seconds to wait for the thread; ``None`` waits for as long as
+            it takes.
+
+        Returns
+        -------
+        bool
+            ``True`` when no thread of this runner is alive any more;
+            ``False`` when it is still finishing a step after *timeout*.
+            The signal stays set, so it will exit; until then the graph is
+            still being stepped, and a caller must not report the run
+            stopped or write the state it steps.
+        """
         self._stop.set()
         self._paused.set()  # unblock if paused so the thread can exit
         if self._thread is not None:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=timeout)
+        return not self.is_alive
+
+    @property
+    def is_alive(self) -> bool:
+        """Whether this runner's thread is alive (running, paused, or still
+        finishing a step after :meth:`stop`)."""
+        return self._thread is not None and self._thread.is_alive()
 
     def reset_time(self) -> None:
         """Reset simulation time to zero (call after resetting graph state)."""
@@ -183,8 +225,13 @@ class RealtimeRunner:
 
             # Batch-step: execute multiple physics steps before sleeping.
             # The relay (observer) still captures every step, but sleep
-            # overhead is amortised.
+            # overhead is amortised.  The stop and pause flags are read
+            # between steps: read only between frames, a batch of 1e8 steps
+            # outlived stop()'s wait and the server reported "stopped"
+            # while this thread kept stepping over the state a reset wrote.
             for _ in range(self._steps_per_frame):
+                if self._stop.is_set() or not self._paused.is_set():
+                    break
                 self._gm.step(external_inputs=ext_inputs)
                 self._sim_time += dt
 

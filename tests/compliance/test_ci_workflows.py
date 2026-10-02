@@ -9,12 +9,16 @@ claims still goes green:
 * a pull request that touches only documentation skips the test lanes,
   so no test outside ``tests/compliance`` (the one job that always runs)
   may read a path the change classifier calls documentation;
-* a push always runs every lane;
+* the classifier says a push needs every lane;
+* every lane's ``if:`` is exactly a read of that verdict (GitHub reports a
+  job skipped by ``if:`` as a success, so a wrong condition is green), and
+  the lane summary fails when no shard of its lane reported;
 * a pull request whose diff can move a compile cost onto another test runs
   cold, as does a push and a ``[cold-ci]`` pull request; any other pull
   request runs warm;
 * the compilation cache is saved only after a passing test step, and only
-  once its unreadable entries are gone;
+  once its unreadable entries are gone; the directory the tests write is
+  the one restored, pruned and saved, under a key that changes per commit;
 * verify-hypothesis runs the slow-marked properties too;
 * the slow lane installs the tools its C tests self-skip without, and
   files an abort as an abort, not as out-of-memory;
@@ -414,6 +418,70 @@ def test_a_pull_request_that_can_move_a_compile_cost_runs_cold(tmp_path, case):
     assert outputs["cold"] == cold, f"{case}: cold={outputs['cold']}"
 
 
+#: Every job gated on the classifier's ``code`` verdict, with its exact
+#: ``needs`` and ``if:``.  GitHub reports a job skipped by ``if:`` as a
+#: success, also to a required check, so a one-token slip here (``'True'``,
+#: a rewired output, a renamed step id) skips the lane on every push and
+#: CI stays green.
+GATED_ON_CODE = {
+    "test": ("changes", "needs.changes.outputs.code == 'true'"),
+    "test-durations": (["changes", "test"],
+                       "${{ !cancelled() && needs.changes.outputs.code == 'true' }}"),
+    "test-usd": ("changes", "needs.changes.outputs.code == 'true'"),
+    "typecheck": ("changes", "needs.changes.outputs.code == 'true'"),
+    "verify-hypothesis": ("changes", "needs.changes.outputs.code == 'true'"),
+}
+#: Jobs with no ``if:``: the classifier itself, and the job a docs-only
+#: pull request still runs.
+UNGATED = {"changes", "compliance"}
+
+
+def test_every_lane_reads_exactly_the_classifiers_code_verdict():
+    """A lane runs when, and only when, the classifier says the change is code.
+
+    The classifier's own verdict is pinned by running it (above); this pins
+    the wiring from it to the lanes: the ``code`` output is the classify
+    step's, that step's id is ``classify``, and each gated job's ``if:`` is
+    exactly the expected expression.  No job may appear without an entry
+    here: a new job is either gated like the others or always runs.
+    """
+    jobs = _workflow("ci.yml")["jobs"]
+    assert set(jobs) == set(GATED_ON_CODE) | UNGATED, (
+        f"ci.yml's jobs are {sorted(jobs)}; add a new one to GATED_ON_CODE or UNGATED")
+    changes = jobs["changes"]
+    assert changes["outputs"]["code"] == "${{ steps.classify.outputs.code }}", changes["outputs"]
+    assert _step(changes, CLASSIFY).get("id") == "classify", (
+        "the classify step's id changed: steps.classify.outputs.code is then empty, and every "
+        "lane gated on it is skipped")
+    for job_id, (needs, condition) in GATED_ON_CODE.items():
+        job = jobs[job_id]
+        assert job.get("needs") == needs, f"{job_id}: needs {job.get('needs')!r}, expected {needs!r}"
+        assert job.get("if") == condition, (
+            f"{job_id} runs if {job.get('if')!r}, expected exactly {condition!r}: a job skipped by "
+            "`if:` reports success, so a wrong condition hides the lane")
+    for job_id in UNGATED:
+        assert "if" not in jobs[job_id], f"{job_id} must always run: if {jobs[job_id]['if']!r}"
+
+
+def test_the_lane_summary_fails_when_no_shard_reported(tmp_path):
+    """The one sign that every shard of a lane was skipped.
+
+    ``test-durations`` runs (``!cancelled()``) even when the ``test`` job was
+    skipped, and only when the change needs the test lanes.  So a lane with
+    no shard report at all means no shard ran.  The step used to exit 0
+    there, and a mis-gated ``test`` job left every check green.
+    """
+    if shutil.which("bash") is None:
+        pytest.fail("bash is needed to run the step; CI runners have it")
+    step = _step(_workflow("ci.yml")["jobs"]["test-durations"], "Summarise the lane")
+    (tmp_path / "results").mkdir()
+    proc, _ = _run_step(step, {"matrix.jax-version": "0.11.2"}, tmp_path)
+    assert proc.returncode != 0, (
+        "the lane summary passed with no shard report at all\n" + proc.stdout + proc.stderr)
+    errors = [ln for ln in proc.stdout.splitlines() if ln.startswith("::error")]
+    assert errors and "no shard report for JAX 0.11.2" in errors[0], proc.stdout
+
+
 def test_the_cold_verdict_reaches_the_test_job():
     ci = _workflow("ci.yml")
     assert ci["jobs"]["changes"]["outputs"]["cold"] == "${{ steps.classify.outputs.cold }}"
@@ -562,6 +630,32 @@ def test_the_cache_is_saved_only_after_a_passing_test_step_and_a_prune():
         assert "||" not in cond, (step["name"], cond)
     assert "steps.prune-cache.outcome == 'success'" in save["if"]
     assert save["with"]["path"] == "${{ runner.temp }}/jax-cache"
+
+
+def test_the_cache_the_tests_write_is_the_one_restored_pruned_and_saved():
+    """One directory, and a save key that changes with every commit.
+
+    The tests write where ``JAX_COMPILATION_CACHE_DIR`` points.  Restored,
+    pruned or saved anywhere else, nothing reaches the next pull request:
+    every run compiles cold while the summary calls the restored cache
+    unused.  And cache keys are immutable, so a save key without the
+    commit would be written once and then kept for good -- pull requests
+    would restore an ever older base.  ``restore-keys`` must be a prefix of
+    the saved key, or the restore never finds a save.
+    """
+    steps = {"steps": _workflow("ci.yml")["jobs"]["test"]["steps"]}
+    cache_dir = _step(steps, "Run tests")["env"]["JAX_COMPILATION_CACHE_DIR"]
+    restore = _step(steps, "Restore compilation cache")
+    prune = _step(steps, "Drop unreadable compilation-cache entries")
+    save = _step(steps, "Save compilation cache")
+    assert restore["with"]["path"] == cache_dir, (restore["with"]["path"], cache_dir)
+    assert save["with"]["path"] == cache_dir, (save["with"]["path"], cache_dir)
+    (prune_line,) = _logical_lines(prune["run"])
+    assert shlex.split(prune_line) == ["python", "scripts/prune_jax_cache.py", cache_dir], prune_line
+    key = save["with"]["key"]
+    assert key == "${{ steps.cc.outputs.key }}-${{ github.sha }}", key
+    assert restore["with"]["key"] == key, restore["with"]["key"]
+    assert key.startswith(restore["with"]["restore-keys"]), restore["with"]["restore-keys"]
 
 
 # ---------------------------------------------------------------------------

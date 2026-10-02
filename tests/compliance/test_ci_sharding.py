@@ -17,6 +17,10 @@ check here still passes:
 * the environment pytest reads more arguments or plugins from
   (``PYTEST_ADDOPTS``, ``PYTEST_PLUGINS``), at workflow, job and step
   level, and in any ``run`` script;
+* the shard itself: ``MADDENING_TEST_SHARD`` is named once per workflow,
+  in the pytest step's env with the matrix value, and nowhere else (an
+  inline ``MADDENING_TEST_SHARD=1/4`` in a ``run`` script would point every
+  shard at one);
 * ``[tool.pytest.ini_options]`` in ``pyproject.toml`` (``addopts`` exactly
   ``-m 'not slow'``, no key this file does not know) and the absence of
   any other pytest configuration file;
@@ -205,6 +209,69 @@ def test_no_workflow_environment_adds_pytest_arguments(workflow):
     assert not offenders, (
         f"{workflow} sets pytest arguments outside the command line, where the selection "
         f"checks do not look: {offenders}")
+
+
+#: The one place each sharded lane may name ``MADDENING_TEST_SHARD``: the
+#: env of its pytest step, set from the matrix.
+SHARD_SETTING = {
+    "ci.yml": ("test", "Run tests"),
+    "slow-tests.yml": ("slow", "Run full suite (slow lane)"),
+}
+
+
+def _mentions(node, path=()):
+    """``(path, text)`` for every mapping key and string in a parsed workflow that names
+    ``MADDENING_TEST_SHARD``."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str) and "MADDENING_TEST_SHARD" in key:
+                yield (*path, key), key
+            yield from _mentions(value, (*path, key))
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            yield from _mentions(value, (*path, i))
+    elif isinstance(node, str) and "MADDENING_TEST_SHARD" in node:
+        yield path, node
+
+
+@pytest.mark.parametrize("workflow", sorted(SHARD_SETTING))
+def test_each_lane_sets_its_shard_once_from_the_matrix(workflow):
+    """``MADDENING_TEST_SHARD=1/4 python -m pytest ...`` points all four shards at one.
+
+    Three quarters of the suite then runs nowhere, and the checks above still
+    pass: they read the step's env, and the pytest arguments after
+    ``pytest``.  So the variable may be named once per workflow -- in the
+    pytest step's env, with the matrix value -- and nowhere else: no
+    ``run:`` script (an inline prefix, an ``export``, a write to
+    ``$GITHUB_ENV``), no other env block, no other input.
+    """
+    wf = _workflow(workflow)
+    job_id, step_name = SHARD_SETTING[workflow]
+    steps = wf["jobs"][job_id]["steps"]
+    (index,) = [i for i, s in enumerate(steps) if s.get("name") == step_name]
+    allowed = ("jobs", job_id, "steps", index, "env", "MADDENING_TEST_SHARD")
+    assert steps[index]["env"]["MADDENING_TEST_SHARD"] == f"${{{{ matrix.shard }}}}/{_sharding.PINS_FOR}"
+    elsewhere = [f"{'.'.join(map(str, where))}: {text.strip()[:120]!r}"
+                 for where, text in _mentions(wf) if where != allowed]
+    assert not elsewhere, (
+        f"{workflow} names MADDENING_TEST_SHARD outside {step_name!r}'s env, where it can override "
+        f"the matrix's shard: {elsewhere}")
+
+
+def test_the_shard_scan_sees_every_place_the_variable_can_be_written():
+    # The scan above is only a guard if it can fire.
+    wf = {"env": {"MADDENING_TEST_SHARD": "1/4"},
+          "jobs": {"j": {"steps": [
+              {"name": "s", "env": {"MADDENING_TEST_SHARD": "${{ matrix.shard }}/4"},
+               "run": "MADDENING_TEST_SHARD=1/4 python -m pytest tests/"},
+              {"run": 'echo "MADDENING_TEST_SHARD=1/4" >> "$GITHUB_ENV"'},
+              {"uses": "x", "with": {"script": "process.env.MADDENING_TEST_SHARD = '1/4'"}}]}}}
+    assert [where for where, _ in _mentions(wf)] == [
+        ("env", "MADDENING_TEST_SHARD"),
+        ("jobs", "j", "steps", 0, "env", "MADDENING_TEST_SHARD"),
+        ("jobs", "j", "steps", 0, "run"),
+        ("jobs", "j", "steps", 1, "run"),
+        ("jobs", "j", "steps", 2, "with", "script")]
 
 
 def test_the_environment_check_sees_every_place_a_variable_can_be_set():

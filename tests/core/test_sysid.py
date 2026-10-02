@@ -383,6 +383,8 @@ def _full_residual(gm, obs):
     return residual
 
 
+# Per push: tests/core/test_sysid.py::test_fit_lm_beats_adam_at_equal_budget and
+# tests/core/test_sysid_hold_never_raises_the_loss.py::test_fit_lm_on_the_spring_one_percent_off_stays_at_its_minimum
 @pytest.mark.slow  # an LM fit over a rollout: 7-10 s on CI
 @given(kf=st.floats(0.5, 2.0), cf=st.floats(0.5, 2.0))
 # Absolute at the house floor, not ``EXAMPLES_COSTLY``: one example is

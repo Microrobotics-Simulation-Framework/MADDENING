@@ -267,3 +267,51 @@ def test_the_mask_drops_the_window_the_report_calls_unconverged(estimate_over_th
     # Window 0 (residual under the threshold, estimate over it) is dropped,
     # window 1 is kept: a mask reading the raw residual keeps both.
     assert masked == pytest.approx(kept, rel=1e-6), (masked, kept, unmasked)
+
+
+# ---------------------------------------------------------------------------
+# The verdict reads every coupling group
+# ---------------------------------------------------------------------------
+
+
+def _two_square_pairs():
+    gm = GraphManager()
+    for a, b in (("a", "b"), ("c", "d")):
+        gm.add_node(Square(a, 0.5, 0.3))
+        gm.add_node(Square(b, 0.4, 0.3))
+        gm.add_edge(a, b, "x", "u")
+        gm.add_edge(b, a, "x", "u")
+        gm.add_coupling_group([a, b], max_iterations=30, tolerance=1e-6)
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("diverging_pair", [("a", "b"), ("c", "d")])
+def test_the_verdict_reads_every_coupling_group(diverging_pair):
+    """Two independent groups, and only one of them diverges in window 2.
+
+    Whichever group it is -- the first registered or the second -- the
+    window is cut: the masked loss is finite and is the loss of windows
+    0-1 plus windows 3-4.  A verdict that read only the first group's slots
+    returned inf when the *second* group diverged, and survived every sysid
+    test (audit_040_p4_4/fmu-sysid/repro_mutation_survivors.py, S11).
+    """
+    gm = _two_square_pairs()
+    assert [sorted(g.nodes) for g in gm._coupling_groups] == [["a", "b"], ["c", "d"]]  # noqa: SLF001
+    gm.step()
+    fixed = {n: float(gm._state[n]["x"]) for n in "abcd"}  # noqa: SLF001
+    gm.reset_state()
+    obs = {n: {"x": jnp.full((6,), fixed[n], jnp.float32)} for n in "abcd"}
+    for n in diverging_pair:
+        obs[n]["x"] = obs[n]["x"].at[2].set(30.0)
+
+    def loss(record, mask):
+        return float(sysid.windowed_loss(gm, gm.params, record,
+                                         obs_fn=lambda s: s["a"]["x"] + s["c"]["x"],
+                                         window=1, mask_unconverged=mask))
+
+    assert not np.isfinite(loss(obs, False))      # the precondition
+    halves = sum(loss(_samples(obs, lo, lo + 3), True) for lo in (0, 3))
+    masked = loss(obs, True)
+    assert np.isfinite(masked)
+    assert masked == pytest.approx(halves, rel=1e-6)

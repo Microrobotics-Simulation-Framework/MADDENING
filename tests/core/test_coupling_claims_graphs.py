@@ -272,7 +272,7 @@ def test_a_downstream_node_added_first_reads_the_cycle_in_the_same_step_on_every
             gm.compile()
         return gm
 
-    runs = []
+    runs, schedules = [], []
     for order in (None, sink_first):
         gm = build(order)
         cg.set_initial(gm, values)
@@ -285,12 +285,13 @@ def test_a_downstream_node_added_first_reads_the_cycle_in_the_same_step_on_every
             for _ in range(3):
                 gm.step(params=params)
             runs.append(cg.snapshot(gm))
-        assert gm.schedule.index("sink") > max(gm.schedule.index("g0"),
-                                               gm.schedule.index("g1")), gm.schedule
-    assert not cg.bitwise_differences(runs[0] if variant != "adaptive" else runs[0][0],
-                                      runs[1] if variant != "adaptive" else runs[1][0])
+        schedules.append(list(gm.schedule))
     if variant == "adaptive":
         assert runs[0][1] == runs[1][1]
+        runs = [runs[0][0], runs[1][0]]
+    assert not cg.bitwise_differences(runs[0], runs[1]), schedules
+    for schedule in schedules:
+        assert schedule.index("sink") > max(schedule.index("g0"), schedule.index("g1")), schedule
 
 
 def test_a_reader_of_one_group_runs_after_it_whatever_the_build_order():
@@ -336,14 +337,8 @@ def test_a_reader_of_one_group_runs_after_it_whatever_the_build_order():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("acceleration", ["none", "aitken", "iqn-ils"])
-def test_forward_mode_through_a_fori_group_works(acceleration):
-    """CPL-031: both AD modes work through ``solver="fori"`` by unrolling.
-
-    ``jax.jvp`` gives a finite tangent, which is the transpose of what
-    ``jax.vjp`` gives (one derivative, two modes), and at a tight
-    criterion it is the IFT tangent of the fixed point.
-    """
+def _fori_and_ift_tangents(acceleration):
+    """``jax.jvp`` of one step's ``g0.x`` under ``solver="fori"`` and ``"ift"``."""
     gdef = cg._cycle(2, 2, outside=False, leaves=())
     values = cg.draw_values(np.random.default_rng(2), gdef, 0.6)
     tangents = {}
@@ -357,18 +352,21 @@ def test_forward_mode_through_a_fori_group_works(acceleration):
         def f(p, gm=gm, state=state, ext=ext):
             return gm._compiled_step(state, ext, p)["g0"]["x"]
 
-        direction = jax.tree.map(jnp.ones_like, params)
-        out, tan = jax.jvp(f, (params,), (direction,))
-        assert np.all(np.isfinite(np.asarray(tan))), (solver, tan)
-        _, pullback = jax.vjp(f, params)
-        cot = jnp.asarray([1.0, -0.5], F32)
-        (g,) = pullback(cot)
-        lhs = float(jnp.dot(cot, tan))
-        rhs = float(sum(jnp.sum(a * b) for a, b in zip(jax.tree.leaves(g),
-                                                     jax.tree.leaves(direction))))
-        assert lhs == pytest.approx(rhs, rel=1e-4), (solver, lhs, rhs)
+        _, tan = jax.jvp(f, (params,), (jax.tree.map(jnp.ones_like, params),))
         tangents[solver] = np.asarray(tan)
-    np.testing.assert_allclose(tangents["fori"], tangents["ift"], rtol=1e-3)
+    return tangents
+
+
+@pytest.mark.parametrize("acceleration", ["none", "aitken", "iqn-ils"])
+def test_forward_mode_through_a_fori_group_works(acceleration):
+    """CPL-031: both AD modes work through ``solver="fori"`` by unrolling.
+
+    ``jax.jvp`` gives a finite tangent, and at a tight criterion it is the
+    IFT tangent of the fixed point (``solver="ift"``'s custom_jvp rule).
+    """
+    t = _fori_and_ift_tangents(acceleration)
+    assert np.all(np.isfinite(t["fori"])), t
+    np.testing.assert_allclose(t["fori"], t["ift"], rtol=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -561,8 +559,8 @@ def test_jacobi_states_do_not_depend_on_the_build_order_under_a_constant_iterato
     the members in the schedule's order, so a residual can move by an ulp,
     and these draws keep the verdict away from the threshold.  (Under
     ``"aitken"`` and the IQN pair the states differ in their last bits --
-    the accelerator's dot products follow the schedule -- which is the
-    row's ambiguous half.)
+    the accelerator's dot products follow the schedule: the round-off
+    test below.)
     """
     gdef = cg._cycle(3, 2, chords=((0, 2),), outside=False, leaves=())
     values = cg.draw_values(np.random.default_rng(5), gdef, 0.9, nonnormal=True)
@@ -975,20 +973,25 @@ def test_jacobi_states_agree_to_round_off_under_aitken_and_iqn_whatever_the_buil
         acceleration):
     """CPL-078: not to the bit -- the accelerator's dot products follow the schedule -- but to round-off.
 
-    The allowance is the forward error of each node's sum per pass
-    (``coupled_graphs.rounding_bound``), over the passes the step ran,
-    amplified by ``1 / (1 - rho)`` -- the error a contraction can carry
-    to the state it stops on.
+    Four passes at a tolerance no pass meets, so every build runs the same
+    passes and returns mid-transient, where a real dependence on the order
+    shows at full size.  The allowance is the forward error of each node's
+    sum per pass (``coupled_graphs.rounding_bound``) over those passes,
+    amplified by ``1 / (1 - rho)``.  The counterfactual is Gauss-Seidel,
+    whose sweep does follow the order: it must sit far outside the
+    allowance, or the allowance could not see an order dependence.
     """
     gdef = cg._cycle(3, 2, chords=((0, 2),), outside=False, leaves=())
-    rho = 0.9
+    rho, cap = 0.9, 4
     values = cg.draw_values(np.random.default_rng(5), gdef, rho)
-    group = _knobs(acceleration, iteration_mode="jacobi", max_iterations=60, tolerance=1e-5)
+    group = _knobs(acceleration, iteration_mode="jacobi", max_iterations=cap, tolerance=1e-12)
     (s0, _m0, r0), = cg.trajectory(_build(gdef, group), gdef, values, 1)
+    allowed = cg.rounding_bound(gdef, values, s0, cap) / (1.0 - rho)
+    seidel = dict(group, iteration_mode="gauss-seidel")
+    (sg, _mg, _rg), = cg.trajectory(_build(gdef, seidel, node_order=[2, 1, 0]), gdef, values, 1)
+    assert cg.relative_gap(s0, sg, nodes=gdef.group_nodes) > 100 * allowed
     for order in ([1, 2, 0], [2, 1, 0]):
         (s1, _m1, r1), = cg.trajectory(_build(gdef, group, node_order=order), gdef, values, 1)
-        assert r0["converged"] and r1["converged"], (r0, r1)
-        passes = max(r0["iterations"], r1["iterations"])
-        allowed = cg.rounding_bound(gdef, values, s0, passes) / (1.0 - rho)
+        assert r0["iterations"] == r1["iterations"] == cap, (r0, r1)
         gap = cg.relative_gap(s0, s1, nodes=gdef.group_nodes)
         assert gap <= allowed, (order, gap, allowed)

@@ -1264,8 +1264,10 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   before the group's members was scheduled ahead of them and read their
   previous-step output, silently.
 * **The edges' order does not reach a norm.**  The interface norm sums
-  its terms in the order of the edges' keys (it summed in insertion
-  order, and a reversed build moved the residual in its last bits).
+  its terms in an order the group fixes -- by each edge's source's place
+  in the sweep, then its target's -- which is the order the L2 and mixed
+  norms sum the members in (it summed in insertion order, and a reversed
+  build moved the residual in its last bits).
 * **Three or more additive edges into one input sum in the order they
   were added.**  Floating-point addition does not associate, so
   `a + b + c` and `a + c + b` can differ in the last bit, and with them

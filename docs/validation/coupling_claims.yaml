@@ -1449,7 +1449,11 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#start-here
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: iteration_mode="jacobi"; the members' build order varied, everything else fixed.
-  oracle: bit-identity of the states (constant iterators); the forward error of each node's sum, amplified by 1 / (1 - rho) (accelerators).
+  oracle: >-
+    bit-identity of the states (constant iterators); for the accelerators,
+    the forward error of each node's sum over the same four passes,
+    amplified by 1 / (1 - rho), with Gauss-Seidel (which does follow the
+    order) as the counterfactual that must fall outside it.
   tests:
     - tests/core/test_coupling_fixture_invariants.py::test_jacobi_on_a_ring_is_order_independent
     - tests/core/test_coupling_claims_graphs.py::test_jacobi_states_do_not_depend_on_the_build_order_under_a_constant_iterator
@@ -2602,14 +2606,15 @@ claims:
 - id: CPL-182
   area: invariance
   claim: >-
-    "The terms are summed over the edges in the order of their
-    EdgeSpec.key, not the order they were added in": the interface norm
-    does not depend on the order of the add_edge calls.
+    "The step builder therefore passes a group's internal edges in an
+    order fixed by the group itself ... So the norm depends neither on the
+    order of the add_edge calls nor on the nodes' names."
   sources:
-    - src/maddening/core/coupling/acceleration.py:351 (coupling_residual_interface, Notes)
+    - src/maddening/core/coupling/acceleration.py:354 (coupling_residual_interface, Notes)
+    - src/maddening/core/graph_manager.py (_interface_edge_order)
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
-  conditions: convergence_norm="interface", any acceleration and solver; two edges with one key keep their relative order.
-  oracle: states and reports against the same graph with its edges added in reverse, bit for bit.
+  conditions: convergence_norm="interface", any acceleration and solver; two edges with the same endpoints keep their relative order.
+  oracle: states and reports against the same graph with its edges added in reverse, and with its nodes renamed, bit for bit.
   tests:
     - tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
@@ -2617,7 +2622,9 @@ claims:
   notes: >-
     Failing in the first edition: the norm summed in insertion order, and a
     reversed build moved the residual in its last bits (228.80760 against
-    228.80762).  Fixed in fix/p4-13.
+    228.80762).  Fixed in fix/p4-13, by the group's sweep order rather
+    than the edges' names, which would have made the renaming invariance
+    (CPL-180) fail under this norm instead.
 
 - id: CPL-183
   area: invariance
@@ -2630,6 +2637,7 @@ claims:
   sources:
     - docs/developer_guide/testing_standards.md#the-coupling-claims-inventory
     - src/maddening/core/coupling/group.py:8 (module docstring)
+    - docs/developer_guide/coupling_algorithm_guide.md#the-finding-that-matters-most
   conditions: >-
     Gauss-Seidel with the relay added straight after its source and a
     constant iterator ("none", "fixed"): the other nodes' iterates are

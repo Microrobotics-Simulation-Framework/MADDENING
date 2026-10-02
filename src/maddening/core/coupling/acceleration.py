@@ -391,19 +391,24 @@ def coupling_residual_interface(
 
     Notes
     -----
-    The terms are summed over the edges in the order of their
-    :attr:`~maddening.core.edge.EdgeSpec.key`, not the order they were
-    added in: floating-point addition does not associate, and summed in
-    insertion order the same group built with its ``add_edge`` calls
-    reversed reported a residual that differed in its last bits -- enough
-    to move a verdict, and with it the pass and the state, wherever the
-    estimate sat within an ulp of the threshold.  Two edges with one key
-    (the same source field into the same input, say an additive pair with
-    different transforms) keep their relative order.
+    The terms are summed in the order of *interface_edges*, and
+    floating-point addition does not associate, so another order can
+    move the result in its last bits -- enough to move a verdict, and with
+    it the pass and the state, wherever the estimate sits within an ulp of
+    the threshold.  The step builder therefore passes a group's internal
+    edges in an order fixed by the group itself: by each edge's source's
+    place in the group's sweep, then its source field, its target's place,
+    its target field and its ordinal (``_interface_edge_order`` in
+    ``core/graph_manager.py``), the order the L2 and mixed norms sum the
+    members in.  So the norm depends neither on the order of the
+    ``add_edge`` calls nor on the nodes' names.  Before 0.4.0 it summed in
+    the order the edges had been added: the same group built with its
+    ``add_edge`` calls reversed reported a residual that differed in its
+    last bits.
     """
     sum_sq = jnp.array(0.0)
     count = jnp.array(0, dtype=jnp.int32)
-    for edge in sorted(interface_edges, key=lambda e: e.key):
+    for edge in interface_edges:
         new_val = s_new[edge.source_node][edge.source_field]
         if not _is_float_leaf(new_val):
             continue            # an integer interface field cannot carry a norm

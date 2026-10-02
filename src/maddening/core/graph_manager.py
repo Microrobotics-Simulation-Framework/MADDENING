@@ -219,6 +219,23 @@ class _ResolvedParams(NamedTuple):
     mappings: dict
 
 
+def _interface_edge_order(edges, member_order) -> list:
+    """A coupling group's internal *edges* in the order its interface norm sums them.
+
+    By the source's place in *member_order* (the group's sweep), then the
+    source field, the target's place, the target field and the ordinal:
+    the order the L2 and mixed norms sum the members in, so the interface
+    norm, like them, depends neither on the order of the ``add_edge``
+    calls nor on the nodes' names.  Edges with the same endpoints (an
+    additive pair with different transforms) keep their relative order.
+    """
+    place = {nn: i for i, nn in enumerate(member_order)}
+    last = len(place)
+    return sorted(edges, key=lambda e: (place.get(e.source_node, last), e.source_field,
+                                        place.get(e.target_node, last), e.target_field,
+                                        e.ordinal))
+
+
 def _interface_state_fields(edges, group_nodes, state) -> Optional[dict]:
     """Per-node state fields to accelerate for a coupling group.
 
@@ -2564,6 +2581,10 @@ def _run_coupled_block_impl(
         if edge.source_node in group.nodes and edge.target_node in group.nodes:
             group_internal.add(edge)
             group_internal_list.append(edge)
+    # The interface norm sums over these edges, so it reads them in an
+    # order the group fixes, not the order of the ``add_edge`` calls.
+    interface_edges_in_order = _interface_edge_order(
+        group_internal_list, group_node_names)
 
     # Precompute which boundary inputs come from coupling (intra-group) edges
     # per target node -- only these get interface correction
@@ -2953,7 +2974,7 @@ def _run_coupled_block_impl(
         with jax.named_scope("coupling:residual"):
             if use_interface_norm:
                 return coupling_residual_interface(
-                    s_new, s_old, group_internal_list,
+                    s_new, s_old, interface_edges_in_order,
                     group.atol, group.rtol,
                 )
             if use_mixed_norm:

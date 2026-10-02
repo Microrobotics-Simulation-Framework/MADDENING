@@ -178,6 +178,9 @@ def test_exits_early_and_reports_convergence():
     assert d["residual"] <= 1e-6
 
 
+# ``_slow_springs`` is past MADD-ANO-098's limit (c < k*dt at dt = 0.05),
+# so its compile warns.  The test is about a group that runs out of passes.
+@pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
 def test_unconverged_is_reported_not_raised_by_default():
     gm = _slow_springs(max_iterations=2, tolerance=1e-12, diagnostics=True)
     gm.step()
@@ -192,6 +195,9 @@ def test_unconverged_is_reported_not_raised_by_default():
     assert d["iterations"] == 2
 
 
+# ``_slow_springs`` is past MADD-ANO-098's limit (c < k*dt at dt = 0.05),
+# so its compile warns.  The test is about a group that runs out of passes.
+@pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
 def test_strict_convergence_raises_at_cap():
     gm = _slow_springs(max_iterations=2, tolerance=1e-12,
                        strict_convergence=True)

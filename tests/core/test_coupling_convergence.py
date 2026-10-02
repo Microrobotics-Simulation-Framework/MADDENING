@@ -538,6 +538,10 @@ class TestFixedRelaxation:
         ))
         assert diff < 1e-6
 
+    # An undamped pair anchored on each other: past MADD-ANO-098's limit
+    # (c < k*dt, its centre of mass grows by 1.02 a step), so compile()
+    # warns.  The test is about the relaxed iteration converging.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_under_relaxation_convergence(self):
         """Under-relaxation (omega<1) should converge for stiff problems."""
         gm = _make_bidirectional_springs(dt=0.01, k=200.0, c=0.0,

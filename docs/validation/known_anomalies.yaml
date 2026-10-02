@@ -8118,10 +8118,25 @@ anomalies:
       had moved some 20 m after 1 s, with every value finite and no
       warning.  The shipped coupled-spring examples used a pair past the
       limit until the 0.4.0 examples work (#183) raised their damping.
-      Nothing checks either bound.  0.4.0 states both in the node's
-      `NodeMeta` (limitations and a hazard hint) and derives them in its
-      algorithm guide.  The numerics are unchanged, so this entry stays
-      open.
+      Above c*dt = m the factor is negative.  The pair is then stable up
+      to c*dt + k*dt**2 = 2*m, and past that its common velocity flips
+      sign and grows every step, though c > k*dt: with k = 6000, c = 150,
+      m = 1 and dt = 0.01 each node sits at 3.6 against its bound of 4 and
+      g = -1.25, measured on the 0.4.0 tree (CPU, jaxlib 0.11.0).  Every
+      equal pair past the single-node bound with k*dt**2 < m is past that
+      upper figure too.  Nothing refuses either bound.  0.4.0 states both
+      in the node's `NodeMeta` (limitations and a hazard hint) and derives
+      them in its algorithm guide, and `compile()` warns.  It emits a
+      UserWarning naming both nodes, their constants, the growth factor
+      and this entry when a coupling group (`max_iterations` of 2 or more)
+      holds two `SpringDamperNode`s of one timestep, each anchored on the
+      other through an edge with no transform (or the built-in
+      `identity`) that is neither additive nor mapped and is the anchor's
+      only writer, and the converged step grows: its spectral radius,
+      from the live `gm.params` values, exceeds 1 by more than one part in
+      a million.  For an equal pair that is g; an unequal pair, which a
+      calibration of one node leaves behind, gets the spectral radius.
+      The numerics are unchanged, so this entry stays open.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -8130,27 +8145,41 @@ anomalies:
       while the spring between the two looks right.  Graded `major`.  Not
       `critical`: it needs two springs anchored on each other in a
       coupling group with stiffness*dt above damping, the drift is in plain
-      view in the positions, and the stated condition avoids it.
-      `context_dependent` because what the drifting positions feed is the
-      program's choice.
+      view in the positions, and the stated condition avoids it.  The
+      warning `compile()` now gives does not refuse the graph, and it sees
+      only the pattern it recognises.  `context_dependent` because what
+      the drifting positions feed is the program's choice.
     affected_components:
       - "maddening.nodes.spring.SpringDamperNode"
     affected_versions: ">=0.1.0"
     workaround: >
       Keep damping >= stiffness*dt on two springs anchored on each other in
       a coupling group: choose dt <= damping/stiffness, or raise the
-      damping.  Keep stiffness*dt**2 < mass so that the coupling iteration
+      damping, but not so far that damping*dt + stiffness*dt**2 exceeds
+      2*mass.  Keep stiffness*dt**2 < mass so that the coupling iteration
       converges.  For an unequal pair, check the spectral radius of the
-      converged step.  Exchanging the positions without a coupling group
-      (lagged by the schedule) is a different scheme with its own limit; it
-      also diverges at the constants above.
+      converged step; `compile()` does, and warns past 1.  It does not
+      judge an edge through any other transform (a lambda that passes the
+      value through included), a wrapped node or a subclass that overrides
+      `update`, two timesteps in a sub-cycled group, stiffness*dt**2 >=
+      mass (the iteration does not converge there, and
+      `coupling_diagnostics()` says so), or a value supplied after
+      compile, so check those yourself.  Exchanging the positions without
+      a coupling group (lagged by the schedule) is a different scheme with
+      its own limit; it also diverges at the constants above, and is not
+      warned about.
     resolution_status: "open"
     verification:
       - "tests/nodes/test_spring_stability_limits.py::test_the_coupled_pairs_centre_of_mass_grows_by_the_stated_factor"
-      - "tests/nodes/test_spring_stability_limits.py::test_the_reproducer_drifts_off_with_finite_values_and_no_warning"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_reproducer_drifts_off_with_finite_values_and_warns_only_at_compile"
       - "tests/nodes/test_spring_stability_limits.py::test_the_relative_motion_is_stable_where_the_pair_is_not"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_heavily_damped_side_flips_sign_and_grows"
       - "tests/nodes/test_spring_stability_limits.py::test_the_single_node_bound_is_exact"
       - "tests/nodes/test_spring_stability_limits.py::test_the_node_metadata_states_both_bounds"
+      # The warning (not a fix: the entry stays open).
+      - "tests/nodes/test_spring_stability_limits.py::test_compile_warns_about_the_reproducer"
+      - "tests/nodes/test_spring_stability_limits.py::test_no_warning_on_the_defaults_which_sit_on_the_limit"
+      - "tests/nodes/test_spring_stability_limits.py::test_the_step_matrix_is_the_nodes_converged_step"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-099"

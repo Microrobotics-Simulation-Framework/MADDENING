@@ -323,6 +323,9 @@ class TestGaussSeidel:
             "Coupled and staggered solutions should differ"
         )
 
+    # Undamped and stiff: past MADD-ANO-098's limit (c < k*dt), so
+    # compile() warns.  The test is about the capped iteration completing.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_max_iterations_reached(self):
         """With very few iterations the solver still completes."""
         gm = _make_bidirectional_springs(dt=0.01, k=1000.0, c=0.0,
@@ -349,6 +352,9 @@ class TestGaussSeidel:
         assert jnp.isfinite(state["spring_a"]["position"])
         assert jnp.isfinite(state["spring_b"]["position"])
 
+    # The ten-pass pair is past MADD-ANO-098's limit (c < k*dt: it grows by
+    # 1.005 a step), so its compile warns.  The test is about the pass cap.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_single_iteration_differs_from_multi(self):
         """max_iterations=1 and max_iterations=10 should give different
         results when convergence needs more than 1 pass.
@@ -605,6 +611,10 @@ class TestCouplingWithJAX:
 class TestCouplingPhysics:
     """Physically meaningful coupled systems."""
 
+    # Undamped, so the iterated pair is past MADD-ANO-098's limit (c < k*dt;
+    # it grows by only 1.000005 a step here) and its compile warns.  The test
+    # is about staying finite.
+    @pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
     def test_coupled_springs_energy_conservation(self):
         """Two coupled springs with damping should remain stable and finite.
 

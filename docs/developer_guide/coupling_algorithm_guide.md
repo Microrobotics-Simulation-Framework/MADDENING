@@ -425,8 +425,13 @@ only); a field-valued constant is probed along one
 random direction -- fixed-seed, but drawn per constant in the order the
 group's map reads its constants, which follows the build order, so the
 same graph built with its members added in another order probes other
-directions and reports another number (83.5 to 99.5 over three build
-orders of one three-member Jacobi group, jaxlib 0.11.0);
+directions and reports another number -- 83.5 to 99.5 over the six
+build orders of one three-member Jacobi group, 1.48 to 1.89 on another
+draw (jaxlib 0.11.0) -- each of them still a bound: over 17
+configurations of that group (four accelerations, three norms, two caps,
+three draws) and all six orders it read 6.9-434x the largest true
+relative error of the tangent with respect to any scalar constant,
+`linear_solver="dense"` the reference;
 and it is relative to the tangent's norm, so a scalar
 loss whose gradient nearly cancels across the state can carry a larger
 relative error.  `gradient_bound_usable` reports a finite bound and a
@@ -1255,8 +1260,10 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
 * **A group's members are swept in the order they were added.**  That is
   Gauss-Seidel's order by design (a ring has no natural first node), so
   under Gauss-Seidel the members' order is part of the method; under
-  Jacobi it reaches the states only through the accelerators' dot
-  products (see the ring row of [Start here](#start-here)).
+  Jacobi it reaches the states only through the order the norm sums the
+  members in (an ulp, which matters only at the threshold) and the
+  accelerators' dot products (see the ring row of [Start
+  here](#start-here)).
 * **Everything that reads a group runs after it in the same step,
   whatever order it was added in.**  Since 0.4.0 the schedule orders a
   cycle and everything downstream of it by their strongly connected
@@ -1276,9 +1283,10 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   additive edges in a fixed order.  (A non-additive edge into the same
   input is not a rounding matter: it replaces whatever the edges before
   it delivered, so an input fed by both kinds depends on their order
-  outright -- make every edge into it additive.)
-* **The gradient bound's probe directions follow the build order**
-  (see [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
+  outright.)
+* **The gradient bound's probe directions follow the build order**, so
+  its number does, while it stays a bound in every order (see
+  [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
 
 ## Invariants
 

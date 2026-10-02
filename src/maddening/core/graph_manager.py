@@ -8290,8 +8290,9 @@ class GraphManager:
               probed along one random direction (fixed-seed, drawn in
               the order the map reads its constants, which follows the
               build order: the same group built in another order can
-              report another bound, 83.5 to 99.5 over three orders of
-              one three-member Jacobi group), and the bound is
+              report another bound, 83.5 to 99.5 over the six orders of
+              one three-member Jacobi group, each still at least the
+              true error), and the bound is
               relative to the tangent's norm in the group's norm, so a
               scalar loss whose gradient nearly cancels across the
               state can carry a larger relative error.  One probe per

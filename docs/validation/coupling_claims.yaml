@@ -1458,15 +1458,20 @@ claims:
     - tests/core/test_coupling_fixture_invariants.py::test_jacobi_on_a_ring_is_order_independent
     - tests/core/test_coupling_claims_graphs.py::test_jacobi_states_do_not_depend_on_the_build_order_under_a_constant_iterator
     - tests/core/test_coupling_claims_graphs.py::test_jacobi_states_agree_to_round_off_under_aitken_and_iqn_whatever_the_build_order
+    - tests/core/test_coupling_claims_graphs.py::test_the_gradient_bound_holds_in_every_build_order
   status: verified
   notes: >-
     Ambiguous in the first edition ("Jacobi is bit-identical under rotation
     and reversal", conditions unstated).  Reworded in fix/p4-13.  The
-    gradient bound's dependence on the build order (83.5 to 99.5 over three
-    orders of one group) was judged a documented approximation -- one fixed-
-    seed random probe per field-valued constant, drawn in the order the map
-    reads its constants -- and is now stated in the guide and the
-    coupling_diagnostics docstring.
+    gradient bound's dependence on the build order (83.5 to 99.5 over the
+    six orders of one group) was judged a documented approximation -- one
+    fixed-seed random probe per field-valued constant, drawn in the order
+    the map reads its constants -- on the condition that it stays valid in
+    every order: over 17 configurations (four accelerations, three norms,
+    two caps, three draws) and all six orders it was usable and 6.9-434x
+    the largest true relative error of the tangent with respect to any
+    scalar constant (linear_solver="dense" reference, fixed point at 3000
+    passes).  Stated in the guide and the coupling_diagnostics docstring.
 
 - id: CPL-079
   area: loop

@@ -330,3 +330,75 @@ def test_the_token_a_non_loopback_bind_demands_refuses_a_rebound_page():
     )
 
     assert response.status_code == 401
+
+
+# ----------------------------------------------------------------------
+# The IPv6 loopback, and a Host that is not one
+# ----------------------------------------------------------------------
+#
+# ``urlsplit`` reads an origin's IPv6 literal without its brackets and the
+# ``Host`` header carries them, so a page served from ``http://[::1]:8000``
+# was refused (403) as cross-origin by its own server.  Both sides are now
+# read as (host, port) the same way; every refusal above still holds.  And
+# a ``Host`` that is not a valid ``host[:port]`` (``[::1]x``) raised inside
+# the authentication middleware, where ``request.url`` is built from it: a
+# 500 where the refusal is a 403 (401 where a token is demanded).
+
+
+def test_a_page_served_from_the_ipv6_loopback_can_change_state(tmp_path):
+    """TestClient cannot carry an IPv6 literal in its URL, so the page's
+    ``Host`` is set directly."""
+    client = _rebound_client(tmp_path, base_url="http://127.0.0.1:8000")
+    for origin in (None, "http://[::1]:8000"):
+        headers = {"Host": "[::1]:8000", **({"Origin": origin} if origin else {})}
+        response = client.post("/sim/reset", headers=headers)
+        assert response.status_code == 200, (origin, response.text)
+
+
+def test_a_page_served_from_the_ipv6_loopback_can_open_the_state_stream(tmp_path):
+    client = _rebound_client(tmp_path, base_url="http://127.0.0.1:8000")
+    with client.websocket_connect("/ws/state", headers={
+            "Host": "[::1]:8000", "Origin": "http://[::1]:8000"}):
+        pass
+
+
+@pytest.mark.parametrize("origin, host, same", [
+    ("http://[::1]:8000", "[::1]:8000", True),
+    ("http://[::1]", "[::1]", True),
+    ("http://[::ffff:127.0.0.1]:8000", "[::ffff:127.0.0.1]:8000", True),
+    ("https://[::1]:8000", "[::1]:8000", True),           # the scheme is ignored, as before
+    ("http://127.0.0.1:08000", "127.0.0.1:8000", True),   # as before
+    ("http://[::1]:8000", "[::1]:8001", False),
+    ("http://[::1]:8000", "127.0.0.1:8000", False),
+    ("http://127.0.0.1:8000", "[::1]:8000", False),
+    ("http://[::1]:8000", "::1:8000", False),              # a bare IPv6 Host is invalid
+    ("http://[::1]:8000", "[::1]x", False),
+    ("http://[::1", "[::1]", False),                       # urlsplit raises on it
+    ("http://127.0.0.1", "127.0.0.1:8000", False),
+    ("http://localhost.:8000", "localhost:8000", False),
+    ("http://evil.example@[::1]:8000", "[::1]:8000", False),
+])
+def test_an_origin_and_a_host_compare_as_host_and_port(origin, host, same):
+    from maddening.api.server import origin_is_same_site
+
+    assert origin_is_same_site(origin, host) is same
+
+
+@pytest.mark.parametrize("host", ["[::1]x", "[::1", "[]:80", "[::1]:http"])
+def test_a_malformed_host_on_a_loopback_bind_is_a_403_not_a_500(tmp_path, host):
+    client = _rebound_client(tmp_path, base_url="http://127.0.0.1:8000")
+    for method, path in [("GET", "/graph"), ("POST", "/sim/reset")]:
+        response = client.request(method, path, headers={"Host": host})
+        assert response.status_code == 403, (host, path, response.text)
+
+
+@pytest.mark.parametrize("host", ["[::1]x", "[::1"])
+def test_a_malformed_host_where_a_token_is_demanded_is_a_401_not_a_500(host):
+    server = SimulationServer(node_registry=REGISTRY, graph_manager=_graph(),
+                              bind_host="0.0.0.0", api_token="s3cret-for-this-test")
+    client = TestClient(server.create_app(), raise_server_exceptions=False)
+    response = client.get("/graph", headers={"Host": host})
+    assert response.status_code == 401, response.text
+    with pytest.raises(Exception):
+        with client.websocket_connect("/ws/state", headers={"Host": host}):
+            pass

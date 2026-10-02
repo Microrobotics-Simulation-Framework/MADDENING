@@ -68,6 +68,7 @@ def test_a_load_does_not_read_the_file_beside_the_root(server_dirs, path):
     gm, client, base, root = server_dirs
     assert client.post("/checkpoint/save", params={"path": "real.npz"}).status_code == 200
     (root / "real.npz").rename(root.parent / "checkpoints.npz")
+    (root / "real.npz.manifest.json").unlink()      # the clock the save records
     root.rmdir()
     gm.step()
     before = float(gm.get_node_state("ball")["position"])
@@ -96,7 +97,10 @@ def test_a_file_inside_the_root_still_saves_and_loads(server_dirs, path, written
     resp = client.post("/checkpoint/save", params={"path": path})
     assert resp.status_code == 200, resp.text
     assert Path(resp.json()["path"]) == (root / written).resolve()
-    assert _files(base) == [f"server_cwd/checkpoints/{written}"]
+    # the checkpoint and, beside it, the manifest recording its hash and
+    # the streams' clock
+    assert _files(base) == [f"server_cwd/checkpoints/{written}",
+                            f"server_cwd/checkpoints/{written}.manifest.json"]
     gm.step()
     resp = client.post("/checkpoint/load", params={"path": path})
     assert resp.status_code == 200, resp.text

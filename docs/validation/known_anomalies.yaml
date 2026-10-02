@@ -7386,6 +7386,22 @@ anomalies:
       `WaveletAdaptiveNode` refuses a basis it cannot build before it
       builds any of it, and builds the labels with `np.repeat` behind a
       bit-length guard.
+
+      Those bounds were per request, and the round-5 REST audit measured
+      what they left on the development tree: nothing bounded the whole
+      graph (eight `HeatNode`s of 5 million cells were each accepted, every
+      one resident), nor a request body (every element cap ran on the
+      parsed request, and a 76 MB body of numbers took 2 to 3 GB to
+      refuse), nor how many builds ran at once (six concurrent half-cap
+      builds peaked at 2.4 times one).  Resolved in 0.4.0 too:
+      `MAX_GRAPH_STATE_ELEMENTS` (10^8, five nodes at the per-node cap)
+      bounds the whole graph's state, checked before the node is built
+      where its class can say what it would build; a request body over
+      `MAX_REQUEST_BODY_BYTES` (32 MiB, the largest body the element caps
+      admit) is a 413 before it is parsed; `PUT /graph/state` counts each
+      field's values against the live field before converting them; and
+      nodes are built one at a time, under the server's graph lock
+      (MADD-ANO-106).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -7414,10 +7430,12 @@ anomalies:
       the state it built, after building it, as before.  The estimates
       bound the peak within a small factor (measured 3 to 4 times the
       state for the lattices, 48 to 76 bytes per operator entry for the
-      wavelet basis), not exactly.  The bounds are per request, so
-      concurrent requests add up.  `from_dict` and `load_graph_from_usd`
-      refuse only what exceeds the machine's physical memory, so a config
-      can still ask for most of it.
+      wavelet basis), not exactly.  A body up to the limit is still parsed
+      whole (about 1.3 GB at the limit); bodies are parsed one at a time,
+      but a node build and a surrogate training job (MADD-ANO-092) can run
+      at once.  `from_dict` and `load_graph_from_usd` refuse only what
+      exceeds the machine's physical memory, so a config can still ask for
+      most of it.
     verification:
       - "tests/api/test_node_size_refused_before_construction.py::test_post_refuses_an_oversized_node_before_constructing_it"
       - "tests/api/test_node_size_refused_before_construction.py::test_put_refuses_a_wavelet_level_count_before_constructing_it"
@@ -7427,6 +7445,13 @@ anomalies:
       - "tests/api/test_node_size_refused_before_construction.py::test_the_estimate_is_the_state_the_node_builds"
       - "tests/api/test_node_size_refused_before_construction.py::test_an_impossible_basis_is_refused_at_once_not_built"
       - "tests/usd/test_usd_node_size_refused_before_construction.py::test_a_stage_naming_an_impossible_node_is_refused_unbuilt"
+      - "tests/api/test_request_memory_is_bounded.py::test_a_body_over_the_limit_is_a_413_before_it_is_parsed"
+      - "tests/api/test_request_memory_is_bounded.py::test_a_streamed_body_without_a_length_is_refused_as_it_passes_the_limit"
+      - "tests/api/test_request_memory_is_bounded.py::test_a_declared_length_over_the_limit_is_refused_without_reading_the_body"
+      - "tests/api/test_request_memory_is_bounded.py::test_a_state_field_with_the_wrong_number_of_values_is_refused_before_conversion"
+      - "tests/api/test_request_memory_is_bounded.py::test_a_node_past_the_graph_wide_budget_is_refused_before_it_is_built"
+      - "tests/api/test_request_memory_is_bounded.py::test_a_node_without_an_estimate_is_held_to_the_budget_on_its_built_state"
+      - "tests/api/test_request_memory_is_bounded.py::test_concurrent_node_builds_run_one_at_a_time"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-087"
@@ -7683,6 +7708,26 @@ anomalies:
       `/openapi.json`.  On the 0.4.0 tree both requests above answer 422.
       Found by the round-4 confirmation audit's check of the CHANGELOG's
       Security claims; registered then.
+
+      Each of those bounds held one number, and the round-5 REST audit
+      measured what that left on the development tree.  One in-cap training
+      request took 2.2 GB (a 25 000-cell rod at the defaults: 16 initial
+      conditions x 200 steps of every node's history, then the dataset and
+      the copies training takes of it) or 5.9 GB and an out-of-memory error
+      (16 layers of 8192).  Any number of jobs ran at once, every one kept
+      for the life of the process, and a job's daemon thread still inside
+      XLA when the interpreter exited aborted it (a core dump; checked at
+      v0.3.1 too).  And SIGINT waited for an in-flight `POST /sim/run`: a
+      100 000-step run of a 256 x 256 lattice was still running 60 s after
+      the signal, the run being one synchronous call (as it was at every
+      tag).  Resolved in 0.4.0 too: a training job's memory is estimated
+      from the graph's shapes before it starts and refused (400) over
+      `MAX_SURROGATE_TRAIN_BYTES` (2 GiB); `width**2 * depth` is at most
+      2^24 (422); one job runs at a time (409) and the last eight finished
+      ones are kept; a job stops at its next epoch when the server shuts
+      down and is joined at interpreter exit; and `POST /sim/run` steps in
+      slices, stopping within one when the server shuts down (503, with the
+      steps it took).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -7705,13 +7750,22 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      The bounds are per request, so concurrent requests add up.  A training
-      job at the maxima (16 layers of 8192, batch 65536) still takes
-      gigabytes; the limits keep it finite, not small.
+      The training estimate counts what grows with the request (it reads
+      2.08 GiB for the audited rod, which took 2.18 GiB); JAX's own fixed
+      cost, a few hundred MB, comes on top.  A job's data sweep is one call
+      and cannot be interrupted, so a shutdown waits for it, as bounded as
+      the job is.  A node build and a training job can run at once.
     verification:
       - "tests/api/test_request_bounds.py::TestSimRunIsBounded::test_step_count_above_the_limit_is_422"
       - "tests/api/test_request_bounds.py::TestTrainSurrogateIsBounded::test_out_of_range_training_arguments_are_422"
       - "tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_an_array_dimension_above_the_limit_is_rejected"
+      - "tests/api/test_surrogate_jobs_are_bounded.py::test_a_job_over_the_memory_budget_is_refused_before_anything_is_built"
+      - "tests/api/test_surrogate_jobs_are_bounded.py::test_the_estimate_is_the_boundary_of_the_refusal"
+      - "tests/api/test_surrogate_jobs_are_bounded.py::test_width_squared_times_depth_is_bounded"
+      - "tests/api/test_surrogate_jobs_are_bounded.py::test_one_job_runs_at_a_time_and_a_cancelled_one_ends_at_its_next_epoch"
+      - "tests/api/test_surrogate_jobs_are_bounded.py::test_finished_jobs_kept_are_bounded"
+      - "tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_a_run_stops_at_its_next_slice_when_shutdown_is_requested"
+      - "tests/api/test_sim_run_stops_when_the_server_shuts_down.py::test_sigint_reaches_an_in_flight_run_before_the_servers_own_handler"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-093"
@@ -7749,7 +7803,7 @@ anomalies:
       supersedes every earlier write to a constant it restores; and every
       entry point recompiles for a write the compiled step has not taken
       (MADD-ANO-105).  Refined again (1fa529b, 2026-10-02) after the round-6
-      audit found the readers of `gm.params` left out (MADD-ANO-107): the
+      audit found the readers of `gm.params` left out (MADD-ANO-114): the
       write now reaches `gm.params` through one sync point that every read
       of it runs, and the rule is simply that the later write wins -- a
       `gm.params` write reads `gm.params` first, so the two are always
@@ -8575,6 +8629,358 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-106"
+    title: "Concurrent REST requests stepped the graph at once and lost steps silently: 200 concurrent POST /sim/step took about 60, every one answered 200, and the streams counted all 200"
+    description: >
+      FastAPI runs the server's routes on a thread pool, and nothing in
+      `SimulationServer` serialised their use of the `GraphManager`.
+      `GraphManager.step` reads the state, runs the compiled step (which
+      releases the GIL) and stores the result, so two steps in flight read
+      the same state and one result overwrote the other.  Checked at each
+      tag, v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1, on 2026-10-02 (`git
+      archive` of each, CPU, jaxlib 0.11.0, FastAPI `TestClient`, eight
+      client threads of 25 `POST /sim/step` each against a `BallNode` graph
+      whose compiled step was slowed to 2 ms): every request answered 200,
+      and the final state was the serial state after 58 to 61 steps, so
+      139 to 142 of the 200 were lost.  On the 0.4.0 development tree the
+      round-5 REST audit measured 93 of 200 lost through uvicorn on loopback
+      with the unslowed step, and 98 on a re-run.  `StateRelay` counted
+      every step's notification, so the streams' `sim_time` said all 200
+      had happened.  The same race let a `PUT /graph/state`, a
+      `PUT /graph/params` or a `POST /checkpoint/load` land in the middle of
+      a step -- the step's result then overwrote the write, or ran with half
+      of a multi-key parameter write -- and the background runner's steps
+      raced every route the same way.  Found by the round-5 REST audit.
+      Resolved in 0.4.0: one re-entrant lock serialises every use of the
+      graph.  Every route that reads or writes its state, parameters or
+      structure takes it, the runner takes it for each step, a surrogate
+      job for its data sweep, and `POST /sim/run` for each slice of its
+      run, refusing writes (409) until it returns.  It is never held while
+      waiting for the runner's thread, and the runner waits for it in
+      slices that watch its stop flag.  N concurrent steps are now N steps,
+      bit-identical to N serial ones, and the relay counts N.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the state was not the state of
+      the steps every reply reported taken, and the streams' clock said they
+      had been.  Not `critical`: it needs requests sent concurrently, which
+      one client stepping in a loop does not do, and sending them one at a
+      time avoids it.  `context_dependent` because what a run that silently
+      skipped steps means depends on the model and on who reads its
+      timeline.
+    affected_components:
+      - "maddening.api.server.SimulationServer"
+      - "maddening.viz.runner.RealtimeRunner"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: send state-changing requests to one server one at a
+      time (wait for each reply), and stop the runner before writing state.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A read waits for the step in flight, and every request waits at most
+      30 s for the lock (then 503), so a step or compile longer than that
+      makes concurrent requests fail loudly.  Code that holds the
+      `GraphManager` outside the server -- a script sharing it with a
+      running server -- is not serialised by the server's lock.
+    verification:
+      - "tests/api/test_concurrent_requests_are_serialised.py::test_concurrent_steps_are_all_taken_bit_identical_to_serial"
+      - "tests/api/test_concurrent_requests_are_serialised.py::test_a_state_write_never_lands_inside_a_step"
+      - "tests/api/test_concurrent_requests_are_serialised.py::test_a_params_write_never_lands_inside_a_step"
+      - "tests/api/test_concurrent_requests_are_serialised.py::test_a_checkpoint_load_never_lands_inside_a_step"
+      - "tests/api/test_concurrent_requests_are_serialised.py::test_a_run_refuses_writes_and_serves_reads_until_it_returns"
+      - "tests/api/test_concurrent_requests_are_serialised.py::test_the_runners_steps_never_see_a_params_write_land_inside_them"
+      - "tests/api/test_concurrent_requests_are_serialised.py::test_stop_is_answered_while_another_request_holds_the_graph"
+      - "tests/api/test_concurrent_requests_are_serialised.py::test_stopping_the_runner_while_holding_the_graph_lock_is_refused"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-107"
+    title: "POST /surrogate/train reset the live simulation to its initial state, and its reply did not say so"
+    description: >
+      The training job's worker stopped the runner and called the server's
+      state reset on the live graph before generating its data, and again
+      after, although the data came from a batched sweep from initial
+      conditions it built itself.  The reply was `{"job_id", "status":
+      "started"}`.  Checked at each tag, v0.1.0, v0.2.0, v0.2.1, v0.3.0 and
+      v0.3.1, on 2026-10-02 (`git archive` of each, CPU, jaxlib 0.11.0,
+      FastAPI `TestClient`): a `BallNode` run for 50 steps to position
+      8.749 read position 10.0, velocity 0.0 -- its initial state -- once a
+      small training job was done.  The streams' clock was reset with it.
+      Found by the round-5 REST audit.  Resolved in 0.4.0: the job generates
+      its data with `GraphManager.run_sweep` alone, which writes nothing
+      back, under the graph lock; it neither resets the graph nor stops a
+      running runner.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: every state the server reported
+      after the job described a simulation restarted from its initial
+      condition, which nothing in the reply or the log said.  Not
+      `critical`: `GET /graph/state` showed the reset, and saving the state
+      before training and restoring it after avoids it.
+      `context_dependent` because what a run silently restarted means
+      depends on what the run was for.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: save a checkpoint before `POST /surrogate/train` and load
+      it once the job is done.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The data sweep holds the graph lock while it runs, so a large sweep
+      delays every other request (each waits at most 30 s); the memory
+      estimate bounds how large it can be.
+    verification:
+      - "tests/api/test_surrogate_jobs_are_bounded.py::test_training_leaves_the_live_simulation_where_it_was"
+      - "tests/api/test_surrogate_jobs_are_bounded.py::test_a_running_runner_keeps_running_through_a_job"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-108"
+    title: "After POST /checkpoint/load the state streams served the state from before the load, at the old step's time, until the next step"
+    description: >
+      `StateRelay` publishes a snapshot, and counts the streams' clock, on
+      each step it observes, and a load is not a step.  So after
+      `POST /checkpoint/load` the streams (`/ws/state`, `/ws/state/binary`,
+      `/ws/render`) went on serving the snapshot from before the load as
+      the current state, and their `sim_time` went on counting from the
+      step before it.  Checked at each tag, v0.1.0, v0.2.0, v0.2.1, v0.3.0
+      and v0.3.1, on 2026-10-02 (`git archive` of each, CPU, jaxlib 0.11.0,
+      FastAPI `TestClient`): a `BallNode` run to t = 1 s (position
+      95.046), saved, run on to t = 2 s and loaded back answered
+      `GET /graph/state` with 95.046 while `/ws/state` sent position 80.282
+      at `sim_time` 2.00, and after one more step `sim_time` 2.01.  The
+      checkpoint did not record the clock, so nothing could have restored
+      it.  Found by the round-5 REST audit (its timestep half was
+      MADD-ANO-096).  Resolved in 0.4.0: `POST /checkpoint/save` writes a
+      manifest beside the checkpoint with its SHA-256 and the streams'
+      clock, and `POST /checkpoint/load` publishes the loaded state at once
+      and sets the clock to the manifest's -- or to zero, counted from the
+      load, for a file without one or whose manifest does not hash to it,
+      which the reply's `sim_time_from_checkpoint` says.  Streams now send
+      every new snapshot by its sequence number, so a time repeated by a
+      load is still sent.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the streams reported a state
+      and a time the graph no longer had.  Not `critical`: `GET
+      /graph/state` returned the loaded state, and one step after the load
+      corrected the state (not the clock).  `context_dependent` because the
+      streams are a view a user may or may not act on.
+    affected_components:
+      - "maddening.viz.relay.StateRelay"
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: take one step after a load before reading the streams,
+      and read the time from your own record of the checkpoint.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A checkpoint without this server's manifest (written by another tool,
+      or a server before 0.4.0) restarts the streams' clock at zero, as the
+      reply says.  `POST /sim/reset` clears the snapshot, as before: the
+      streams send nothing until the next step.
+    verification:
+      - "tests/api/test_streams_after_a_checkpoint_load.py::test_ws_state_serves_the_loaded_state_at_the_checkpoints_time"
+      - "tests/api/test_streams_after_a_checkpoint_load.py::test_ws_state_binary_serves_the_loaded_state_at_the_checkpoints_time"
+      - "tests/api/test_streams_after_a_checkpoint_load.py::test_ws_render_draws_the_loaded_state_at_the_checkpoints_time"
+      - "tests/api/test_streams_after_a_checkpoint_load.py::test_a_checkpoint_without_the_servers_manifest_restarts_the_clock_at_the_load"
+      - "tests/api/test_streams_after_a_checkpoint_load.py::test_a_manifest_that_does_not_hash_to_its_checkpoint_is_not_believed"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-109"
+    title: "/ws/state/binary kept the frame layout of a node that had been replaced over REST: values cut off, or phantom zeros, in frames of the advertised length"
+    description: >
+      The server built its `BinaryStateEncoder` once and dropped it only on
+      a reset.  A node replaced over REST (`DELETE /graph/nodes/a_rod`, then
+      `POST /graph/nodes` with the same name and another `n_cells`) left the
+      cached encoder in place, so a new client was sent a schema the graph
+      no longer had, and `encode` wrote the node's new values into the old
+      slot by `bytearray` slice assignment, which resizes the payload
+      instead of refusing.  Checked at each tag, v0.1.0, v0.2.0, v0.2.1,
+      v0.3.0 and v0.3.1, on 2026-10-02 (`git archive` of each, CPU, jaxlib
+      0.11.0, FastAPI `TestClient`): a 4-cell rod replaced by a 2-cell one
+      was streamed under a schema of 4 cells, and the client decoded
+      [300, 300, 0, 0] from a frame of exactly the schema's `frame_bytes`,
+      so nothing on the wire showed it.  Growing the rod to 6 cells dropped
+      the last two values.  Found by the round-5 REST audit.  Resolved in
+      0.4.0: the cached encoder is dropped when a node is added or removed
+      or the graph is compiled; each stream builds its schema from the
+      snapshot it encodes and sends a new one before the first frame of
+      another layout; and `encode` refuses a field of another size than
+      its schema's.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the decoded values were not the
+      node's state, and the frame was the length the schema promised.  Not
+      `critical`: it needs a node replaced or resized while a client
+      streams, and `GET /graph/state` returned the right values.
+      `context_dependent` because the stream is a view a user may or may
+      not act on.
+    affected_components:
+      - "maddening.api.binary_encoder.BinaryStateEncoder.encode"
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: after replacing a node, `POST /sim/reset` (which dropped
+      the cached encoder) before opening a binary stream, and reconnect any
+      open one.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_binary_stream_follows_the_graph_layout.py::test_a_new_client_after_a_node_is_replaced_decodes_the_graphs_state"
+      - "tests/api/test_binary_stream_follows_the_graph_layout.py::test_a_client_connected_through_a_replacement_gets_the_new_schema_first"
+      - "tests/api/test_binary_stream_follows_the_graph_layout.py::test_a_snapshot_of_another_layout_gets_its_schema_first_whatever_published_it"
+      - "tests/api/test_binary_stream_follows_the_graph_layout.py::test_the_cached_encoder_is_dropped_by_a_structural_change"
+      - "tests/api/test_binary_stream_follows_the_graph_layout.py::test_encode_refuses_a_field_of_another_size"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-110"
+    title: "A runner whose thread had died was reported running: /sim/pause and /sim/resume answered 200, /sim/start 409 \"already started\", and /sim/reset was_running true"
+    description: >
+      The server kept a flag for "the runner is started" and never looked at
+      the runner's thread.  When a step raised on that thread -- an edge
+      whose shapes do not match, which `POST /graph/edges` accepted beside
+      the running runner, is one way -- the thread died and the flag stayed
+      set.  Checked at each tag, v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1,
+      on 2026-10-02 (`git archive` of each, CPU, jaxlib 0.11.0, FastAPI
+      `TestClient`, the runner's fourth step made to raise): with the
+      thread dead, `POST /sim/pause` answered 200 "paused", `POST
+      /sim/resume` 200 "resumed", and `POST /sim/reset` `was_running: true`.
+      The round-5 REST audit found the rest on the 0.4.0 development tree:
+      `POST /sim/start` answered 409 "Runner is already started.", the
+      structural routes did not refuse while the runner ran, and the
+      `ExceptionGroup` edge validation raises made `POST /sim/step` a 500.
+      Resolved in 0.4.0: the runner records why its thread stopped
+      (`RealtimeRunner.error`), the routes read whether it runs from the
+      thread, a dead runner is replaced by `/sim/start` and reported by
+      `/sim/pause`, `/sim/resume` (409, with the error) and `/sim/stop`;
+      adding or removing a node or an edge is a 409 while the runner runs;
+      and an `ExceptionGroup` from compiling the graph is a 400 naming each
+      error on every route that steps or compiles.
+    severity: "major"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A silent wrong result in the reported status of an operation, graded
+      `major` under the rule that a silent wrong result is never minor: the
+      routes said a runner was paused, resumed or running when none was.
+      The simulation's values were not wrong -- it stopped advancing, which
+      any viewer sees, and the thread's exception was logged when it died
+      -- so `not_safety_relevant`.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.viz.runner.RealtimeRunner"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: stop the runner before any structural edit, and after a
+      runner traceback in the log, `POST /sim/stop` before starting again.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_runner_pacing_and_status.py::test_a_runner_whose_thread_died_records_why"
+      - "tests/api/test_runner_pacing_and_status.py::test_pause_and_resume_of_a_dead_runner_are_409s_saying_why"
+      - "tests/api/test_runner_pacing_and_status.py::test_a_dead_runner_is_not_already_started_and_a_new_one_starts"
+      - "tests/api/test_runner_pacing_and_status.py::test_a_reset_after_the_runner_died_says_it_was_not_running"
+      - "tests/api/test_runner_pacing_and_status.py::test_stop_of_a_dead_runner_reports_it_stopped_and_why"
+      - "tests/api/test_runner_pacing_and_status.py::test_a_structural_edit_while_the_runner_runs_is_a_409"
+      - "tests/api/test_runner_pacing_and_status.py::test_an_edge_the_graph_cannot_validate_is_a_400_on_every_route_that_steps"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-111"
+    title: "The real-time runner burst through the time it had been paused: about 1.5 s simulated in the 0.4 s after a 1 s pause of a real-time run"
+    description: >
+      `RealtimeRunner` paced `sim_time - sim_start` against `wall -
+      wall_start`, both fixed when its loop started, so time spent paused
+      counted as time the simulation had fallen behind, and after `resume()`
+      it stepped without sleeping until it had caught up.  Checked at each
+      tag, v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1, on 2026-10-02 (`git
+      archive` of each, CPU, jaxlib 0.11.0, a `BallNode` graph at
+      `time_scale=1`): 1.50 s of simulated time passed in the 0.4 s after a
+      1 s pause.  The same happened after any stall: a first compile, or
+      (since this release's graph lock) a request holding the graph.  Found
+      by the round-5 REST audit.  Resolved in 0.4.0: the runner paces from
+      the resume, and a runner further behind its schedule than
+      `max_catch_up` (0.25 s by default) moves its schedule to the present
+      instead of stepping flat out to catch up.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A defect in pacing: every step computed the same values, at the wrong
+      wall-clock moments.  The live view ran fast for as long as the pause
+      had lasted.
+    affected_components:
+      - "maddening.viz.runner.RealtimeRunner"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: stop and start the runner instead of pausing it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A runner that falls further behind than `max_catch_up` no longer
+      catches up: its simulated time then lags the wall clock by the time it
+      lost, which is the point of the limit.
+    verification:
+      - "tests/api/test_runner_pacing_and_status.py::test_a_resumed_runner_keeps_real_time_instead_of_catching_up_the_pause"
+      - "tests/api/test_runner_pacing_and_status.py::test_a_stall_longer_than_the_catch_up_limit_is_not_burst_through"
+      - "tests/api/test_runner_pacing_and_status.py::test_a_runner_behind_by_less_than_the_limit_still_catches_up"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-112"
+    title: "/ws/state encoded each frame on the event loop, once per client, for any number of clients: a large state stalled every other request"
+    description: >
+      The JSON state stream built each frame (`_jax_to_python` of the whole
+      state, later `_json_reply`) synchronously in its async handler, on the
+      event loop every other request is served from, and each client
+      encoded the same snapshot again; nothing bounded the number of
+      stream clients.  Checked at each tag, v0.1.0, v0.2.0, v0.2.1, v0.3.0
+      and v0.3.1, on 2026-10-02 (`git archive` of each, CPU, jaxlib 0.11.0,
+      FastAPI `TestClient`): the frame was encoded with an event loop
+      running in the encoding thread.  On the 0.4.0 development tree the
+      round-5 REST audit measured `GET /healthz` at up to 0.62 s with one
+      client of a 256 x 256 lattice (15.6 MiB frames) and 2.65 s at 512 x
+      512, against 5 ms without.  Resolved in 0.4.0: frames are encoded in
+      a worker thread, a frame of the whole state is encoded once and sent
+      to every client of it, the binary stream encodes off the loop too,
+      and at most `MAX_STREAM_CONNECTIONS` (16) streams are open at once
+      (1013 past it).  `/healthz` is answered on the event loop rather than
+      by a worker thread.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A defect in performance: every frame and reply carried the right
+      values, late.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: subscribe a stream to the fields it shows
+      (`{"type": "subscribe", ...}`), use `/ws/state/binary` for large
+      states, and keep the number of clients small.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Encoding a frame runs long C calls (`tolist`, `json.dumps`) that hold
+      the interpreter lock, so a very large state still delays the event
+      loop while it is encoded, though no longer per client: re-measured on
+      the fixed tree, `GET /healthz` beside one client of the 256 x 256
+      lattice took up to 0.30 s (0.62 s before).  Stream a large state with
+      `/ws/state/binary`, or subscribe to the fields shown.  A client that
+      subscribes to part of the state has its frames encoded for it alone.
+    verification:
+      - "tests/api/test_state_stream_encodes_off_the_event_loop.py::test_state_frames_are_encoded_off_the_event_loop"
+      - "tests/api/test_state_stream_encodes_off_the_event_loop.py::test_a_frame_of_the_whole_state_is_encoded_once_for_every_client"
+      - "tests/api/test_state_stream_encodes_off_the_event_loop.py::test_streams_past_the_cap_are_refused_with_1013"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-113"
     title: "fit_lm's Marquardt floor, scaled to the mean curvature, crushed the step of a parameter measured in small units, and fit_lm reported converged=True away from the truth"
     description: >
       MADD-ANO-104's fix made `fit_lm`'s regularising floor `eps` times the
@@ -8629,7 +9035,7 @@ anomalies:
       - "tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-107"
+  - anomaly_id: "MADD-ANO-114"
     title: "A pending node.params write reached the entry points that run the graph but not the code that reads gm.params: a jitted or differentiated sysid loss, the FMU export, save_state and GET /graph/params used the old value"
     description: >
       MADD-ANO-105's fix synced a `node.params` write at every entry point

@@ -123,6 +123,9 @@ def test_the_field_scan_lists_exactly_the_nonzero_finite_fields_below_tiny_over_
     assert listed(a=([0.0, 0.0], jnp.float32)) == []
     assert listed(a=([np.nan, 1e-35], jnp.float32), b=([np.inf], jnp.float32)) == []
     assert listed(a=([3], jnp.int32)) == []
+    # A typed PRNG key cannot become a numpy array; it is skipped, not read.
+    state = {"n": {"key": jax.random.key(0), "x": jnp.asarray([0.5 * f32_thr], jnp.float32)}}
+    assert [f for _n, f, _m, _d in _underflow_range_fields([_G()], state)["n"]] == ["x"]
     # Each field at its own dtype's threshold: float16's is 0.0625.
     assert listed(h=([0.01], jnp.float16), g=([0.1], jnp.float16)) == [("h", "float16")]
     bf_thr = float(jnp.finfo(jnp.bfloat16).tiny) / float(jnp.finfo(jnp.bfloat16).eps)

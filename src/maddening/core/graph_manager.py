@@ -2425,10 +2425,15 @@ def _underflow_range_fields(groups, state) -> dict[str, list]:
         hits = []
         for nn in sorted(group.nodes):
             for fld, value in sorted((state.get(nn) or {}).items()):
+                # The dtype first: a typed PRNG key (or any other extended
+                # dtype) cannot be converted to a numpy array at all.
+                # ``jnp``'s predicates and ``finfo``, because numpy's do not
+                # know bfloat16; neither traces anything.
+                dtype = getattr(value, "dtype", None)
+                if dtype is None or not jnp.issubdtype(dtype, jnp.floating):
+                    continue
                 arr = np.asarray(jax.device_get(value))
-                # ``jnp``'s dtype predicates and ``finfo``: numpy's do not
-                # know bfloat16.  Neither traces anything.
-                if arr.size == 0 or not jnp.issubdtype(arr.dtype, jnp.floating):
+                if arr.size == 0:
                     continue
                 mag = float(np.max(np.abs(arr.astype(np.float64))))
                 info = jnp.finfo(arr.dtype)

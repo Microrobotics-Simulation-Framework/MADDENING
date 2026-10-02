@@ -9058,7 +9058,9 @@ anomalies:
       `compile()` and the setter also run, so every reader and serializer
       sees what the next step runs, with no change to any of them.  A
       `gm.params` write reads `gm.params` first, so it is ordered after any
-      node write before it and wins.
+      node write before it and wins.  The REST routes read `gm.params`
+      inside the server's graph lock (MADD-ANO-106), so the sync runs under
+      it, with no change to the server.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >

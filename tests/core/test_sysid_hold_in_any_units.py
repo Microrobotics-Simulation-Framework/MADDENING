@@ -324,3 +324,34 @@ def test_a_coordinate_with_no_size_of_its_own_is_matched_to_the_others():
         c = _relative_scale(theta, theta, transformed, lambda: columns)
         np.testing.assert_allclose(columns[:3] / c[:3], [4.0, 12.0, 12.0])
         assert c[3] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# fim's own rank verdict: invariant under its default scale, not under None
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("unit, raw_rank", [(1.0, 3), (1e-5, 2), (1e6, 1)])
+def test_fims_rank_is_the_same_in_any_units_under_its_default_scale(unit, raw_rank):
+    """``scale="relative"`` (the default) multiplies each column by its
+    parameter's value, which a change of units leaves alone, so ``rank`` and
+    ``cond`` are those of SI.  ``scale=None`` is raw sensitivities, as its
+    documentation says, and its verdicts compare columns in their own units:
+    the damping column in units 1e-5 reads as unresolved, and in units 1e6
+    it drowns the other two."""
+    from maddening.sysid import fim
+
+    A = jnp.asarray(_A, jnp.float32)
+
+    def problem(u):
+        def residual(q):
+            return A @ jnp.stack([q["k"], q["c"] * u, q["r"]])
+        return residual, {"k": jnp.float32(40.0), "c": jnp.float32(3.0 / u),
+                          "r": jnp.float32(1.2)}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")                  # a precision-limited verdict
+        relative, raw = fim(*problem(unit)), fim(*problem(unit), scale=None)
+        si = fim(*problem(1.0))
+    assert int(relative.rank) == 3 and int(raw.rank) == raw_rank
+    assert float(relative.cond) == pytest.approx(float(si.cond), rel=1e-4)

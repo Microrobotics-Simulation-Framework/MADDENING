@@ -2383,7 +2383,17 @@ def fim(
         parameter's value, i.e. sensitivities to *relative* changes, so
         parameters in different units are comparable and the condition
         number is not dominated by units.  ``None`` uses raw
-        sensitivities.  A parameter whose value is exactly ``0.0`` has
+        sensitivities, and with them every verdict that compares one
+        column with another depends on the parameters' units: ``rank``
+        (the cutoff is relative to the largest eigenvalue), the
+        parameters ``crb`` calls ``+inf``, ``cond`` and
+        ``least_identifiable``.  A parameter written in units ``1e-5``
+        has a column ``1e-5`` the size of the others' and reads as
+        unresolved under ``None`` however well the data determine it;
+        under ``"relative"`` or ``"nominal"`` the report is the same in
+        any units.  :func:`fit_lm`'s identifiability guard reads its
+        curvature as ``"relative"`` does, for that reason
+        (:func:`_relative_scale`).  A parameter whose value is exactly ``0.0`` has
         no relative scale: its column vanishes and it reads as
         unidentifiable however well the data determine it.  Those
         parameters are named in :attr:`FIMReport.zero_scaled`; ask

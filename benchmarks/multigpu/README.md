@@ -141,9 +141,10 @@ python benchmarks/multigpu/run_pod.py --summarise /tmp/mg-dry     # needs no JAX
 pytest tests/cloud/multigpu -m "slow or not slow" -q             # includes the runner dry-run test
 ```
 
-The dry run takes about a minute on three cores (a minute and a half
-with `--cells 256 1024`), most of it XLA compiling the `stencil` cases
-and the coupled group's adjoint.  It must print `checks n/n passed` for all eight goals, no
+The dry run takes about 80 s on three shared cores (about 100 s with
+`--cells 256 1024`; 44 s and 65 s before schema 6 added the meshes), most
+of it XLA compiling the `stencil` cases and the coupled group's adjoint on
+each of the four meshes.  It must print `checks n/n passed` for all eight goals, no
 `CHECK NOT RUN` line, and exit 0.  The summary must
 exit 0, show every checklist item as `open: passed on CPU / dry run only`
 (a dry run never closes an item), list nothing under "Records that cannot
@@ -254,9 +255,9 @@ R="python benchmarks/multigpu/run_pod.py --out results/multigpu"
 L=results/multigpu
 timeout 10m $R --goal indivisible 2>&1 | tee $L/indivisible.log      # checklist 5
 timeout 10m $R --goal halo        2>&1 | tee $L/halo.log             # checklist 2
-timeout 20m $R --goal coupled     2>&1 | tee $L/coupled.log          # checklist 6 (and 3)
-timeout 25m $R --goal stencil     2>&1 | tee $L/stencil.log          # checklist 1 and 3
-timeout 15m $R --goal hybrid      2>&1 | tee $L/hybrid.log           # checklist 4
+timeout 25m $R --goal coupled     2>&1 | tee $L/coupled.log          # checklist 6 (and 3)
+timeout 30m $R --goal stencil     2>&1 | tee $L/stencil.log          # checklist 1 and 3
+timeout 20m $R --goal hybrid      2>&1 | tee $L/hybrid.log           # checklist 4
 timeout 10m $R --goal exchange    2>&1 | tee $L/exchange.log         # the transport ranking
 timeout 15m $R --goal forward     2>&1 | tee $L/forward.log   # add --mesh /path/to/mesh.npz for a real mesh
 timeout 20m $R --goal gradient    2>&1 | tee $L/gradient.log         # checklist 1 and 3, unstructured
@@ -312,18 +313,21 @@ dominates; a GPU compile of the coupled group's adjoint is assumed to take
 
 | goal | what runs | estimate | time box |
 |---|---|---|---|
-| `indivisible` | 3 refusals; a 1e5-cell uneven unstructured run, 20 public `update()` calls | ~1 min | 10 min |
-| `halo` | 3 programs at 1e6 cells (1-D mesh, 2×2 mesh, unstructured) and the NumPy reference | 1–2 min | 10 min |
-| `coupled` | per size, 4 programs (2 solvers × sharded/unsharded) on the pencil mesh and the float64 model on the host | 5–10 min | 20 min |
-| `stencil` | 4 programs (rollout and gradient × 2 paths) per case: at 1e5 cells the field under each of the three ends and the D2Q9 lattice, on the 1-D and the pencil mesh (8 cases), and periodic ends on the pencil mesh at 3e5 and 1e6 (10 cases) | 8–14 min | 25 min |
-| `hybrid` | per size, 2 graphs × (`run_scan` and the gradient) on the pencil mesh | 3–6 min | 15 min |
+| `indivisible` | 4 refusals; a 1e5-cell uneven unstructured run, 20 public `update()` calls | ~1 min | 10 min |
+| `halo` | 5 programs at 1e6 cells (the four meshes, unstructured) and the NumPy reference | 1–2 min | 10 min |
+| `coupled` | 2 solvers × (the unsharded group once, and the sharded group on each of the four meshes) at 1e5 cells, and on the pencil at 3e5 and 1e6 -- 18 programs -- and the float64 model on the host | 7–15 min | 25 min |
+| `stencil` | rollout and gradient per side: at 1e5 cells the field under each of the three ends and the D2Q9 lattice on each of the four meshes (16 cases, the unsharded side run once per node and ends: 40 programs), and periodic ends on the pencil mesh at 3e5 and 1e6 (18 cases, 48 programs) | 10–17 min | 30 min |
+| `hybrid` | `run_scan` and the gradient of the unsharded graph once per size, and of the sharded one on each of the four meshes at 1e5 cells and on the pencil at the others (9 graphs) | 4–8 min | 20 min |
 | `exchange` | per size, 2 transports | ~5 min | 10 min |
 | `forward` | per size, 2 transports, public and compiled step | ~10 min | 15 min |
 | `gradient` | per size, 3 rollout gradients and `sharded_cg` (3000-iteration cap) | ~15 min | 20 min |
 
-About 50–65 minutes of goals, 1.25–1.75 h with setup and copy-back.
+About 55–75 minutes of goals, 1.4–1.9 h with setup and copy-back.
 Budget one and three-quarter pod-hours; the whole session is capped at
-**2 hours**.
+**2 hours**.  The extra meshes (schema 6) cost about ten minutes of that
+estimate; if the cap binds, the larger sizes of `stencil`, `hybrid` and
+`coupled` run on the pencil only and are the place to cut (`--cells 100000
+300000`), not the meshes.
 
 ## 3. Stop condition
 

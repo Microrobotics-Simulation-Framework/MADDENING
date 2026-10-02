@@ -427,8 +427,10 @@ class LBMPipeNode(SimulationNode):
         ``nx > 10``; a position outside the grid is refused (until 0.4.0 it
         built no disc, and the pipe ran with no propeller).
     propeller_radius : float
-        Propeller disc radius as fraction of pipe radius (0-1).  A disc
-        that covers no cell of the cross-section is refused.
+        Propeller disc radius as fraction of pipe radius, in ``(0, 1]``.  A
+        value above 1 is refused (until 0.4.0 the disc reached into the
+        wall cells), and so is a disc that covers no cell of the
+        cross-section.
     propeller_strength : float
         Body force magnitude applied at the propeller disc.
     initial_velocity : float
@@ -638,6 +640,21 @@ class LBMPipeNode(SimulationNode):
                 f"a propeller_x in [0, {nx})"
                 + (" (the default, 10, needs nx > 10)." if propeller_x == 10
                    else ".")
+            )
+        # The disc radius is a fraction of the pipe radius.  Above 1 the
+        # disc reaches past the pipe wall and applies its force in wall
+        # cells: propeller_radius=1.5 on a 12x12 cross-section put 64 of its
+        # 140 cells in the wall and moved the mean fluid u_x by 1.9%, with
+        # no error.  At 1 it covers the whole cross-section and no wall
+        # cell.  A radius <= 0 (or nan) builds an empty disc, which the
+        # mask check below refuses.
+        if propeller_radius > 1.0:
+            raise ValueError(
+                f"propeller_radius={propeller_radius} is above 1: it is a "
+                "fraction of the pipe radius, so a disc wider than the pipe "
+                "would apply its force in the wall cells.  Pass a "
+                "propeller_radius in (0, 1]; 1 covers the pipe's whole "
+                "cross-section."
             )
         if initial_rho_liquid is None:
             initial_rho_liquid = rho_liquid

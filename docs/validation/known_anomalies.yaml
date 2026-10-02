@@ -2969,14 +2969,17 @@ anomalies:
       non-uniform grid, a walled `LBMNode` among them), was written through
       the route -- numbers and booleans changed, strings made invalid -- and
       every write the route accepted gave a graph that `to_dict()` /
-      `from_dict()` reproduced (CPU, jaxlib 0.11.0), with one exception
-      that is not a parameter write: an `LBMNode` built with a `wall_mask`
-      does not keep the mask among its params, so its reload has no walls
-      with or without a write (also at v0.3.1).  The sweep changed each
-      number; it did not write one across a branch the constructor
-      chooses from it, and two such writes, found by a later audit and
-      closed before release, are MADD-ANO-047: `grid_points` on a uniform
-      `HeatNode` and `G = 0` on a multiphase `LBMPipeNode`.  The same drive through
+      `from_dict()` reproduced (CPU, jaxlib 0.11.0).  The one exception the
+      sweep met was not a parameter write: an `LBMNode` built with a
+      `wall_mask` did not keep the mask among its params, so its reload had
+      no walls with or without a write (at v0.3.1 too).  That is
+      MADD-ANO-034, resolved in 0.4.0: the mask is a param now, and a walled
+      `LBMNode` reloads with its walls.  The sweep changed each number; it
+      did not write one across a branch the constructor chooses from it,
+      and two such writes, found by a later audit and refused by the route
+      before release, are MADD-ANO-047: `grid_points` on a uniform
+      `HeatNode` and `G = 0` on a multiphase `LBMPipeNode` (a `gm.params`
+      write of the second is still accepted; see that entry).  The same drive through
       `ShardedStencilNode` (`HeatNode` at both orders, `LBMNode`), against an
       unsharded node built with the new value, found no difference either.
       A user-authored node that bakes a
@@ -4688,11 +4691,13 @@ anomalies:
       Two values each acceptable alone but not together (`rho_gas = 1.5`
       with `rho_liquid = 1.0`), and a value refused only against a live
       value a fit had moved, passed as well.
-      Resolved in 0.4.0: the route builds the node from the params a save
-      would carry -- the effective params, every live leaf included --
-      with every changed key of the request applied at once, before
-      anything is written, and a constructor refusal is a 400 naming the
-      key(s) and the constructor's message, with nothing written.
+      Partially resolved in 0.4.0, in the route: it builds the node from
+      the params a save would carry -- the effective params, every live
+      leaf included -- with every changed key of the request applied at
+      once, before anything is written, and a constructor refusal is a 400
+      naming the key(s) and the constructor's message, with nothing
+      written.  A write that does not come through the route is not asked
+      (residual_risk).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -4706,29 +4711,56 @@ anomalies:
       graph computing with a value its own constructor refuses.  It was
       `minor` until the 0.4.0 severity definition, because the failure
       announces itself at the reload.
-      `context_dependent` because it needs a run-time REST write of a value
-      the constructor validates.
+      `context_dependent` because it needs a run-time write of a value the
+      constructor validates: through the REST route before 0.4.0, and
+      through `gm.params` or a fit since.
     affected_components:
       - "maddening.api.server.SimulationServer"
-    affected_versions: ">=0.1.0, <0.4.0"
+      - "maddening.core.graph_manager.GraphManager.to_dict"
+    affected_versions: ">=0.1.0"
     workaround: >
       Before 0.4.0: keep a value written through `PUT /graph/params` within
       what the node's constructor accepts -- construct the node with it
       in-process first if unsure -- and check that a saved config reloads.
-    resolution_status: "resolved"
+      From 0.4.0, the same for a value written into `gm.params` or moved by
+      a fit: bound the parameter's `ParamSpec` inside what the constructor
+      accepts (a `HeatNode`'s `thermal_diffusivity` below its Fourier
+      limit, an `LBMPipeNode`'s `rho_gas` below its `rho_liquid`), and
+      check that the saved config reloads before relying on it.
+    resolution_status: "partially_resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      Asked of a node its class rebuilds from its params; one that is not
-      rebuilt that way (a wrapper, a node whose constructor takes other
-      arguments) is asked through the node it wraps, or not at all.  Writes
-      outside the route (`gm.params`, a fit) are not asked: a calibration
-      can still move `thermal_diffusivity` past the Fourier limit, which
-      MADD-ANO-002 records.
+      Live in 0.4.0, which is why this entry is partially resolved rather
+      than resolved: the check lives in the route, and a write that reaches
+      the params pytree another way -- a direct `gm.params` write, and so a
+      fit -- is not asked the constructor's question.  `to_dict()` saves
+      such a value without a word and `from_dict()` then refuses the saved
+      graph, the defect this entry records, on two built-in nodes (CPU,
+      jaxlib 0.11.0, a fresh graph per case): a `HeatNode` (16 cells,
+      length 1, `dt = 1`) whose `thermal_diffusivity` is written to Fourier
+      number 0.6, past the 0.5 its constructor refuses ("timestep 1.0 is
+      unstable"); an `LBMPipeNode` (multiphase, `rho_liquid = 2.0`) whose
+      `rho_gas` is written to 3.0 ("rho_liquid must be > rho_gas"); and a
+      `HeatNode` whose `length` is written to -1.0.  The running graph
+      steps on, finite, for the steps tried.  A fit can reach the first two,
+      since both specs are bounded below only; the negative length needs a
+      direct write, its spec being log-transformed.  The route's
+      constructor check itself is unchanged: it asks a node its class
+      rebuilds from its params, and one that is not rebuilt that way (a
+      wrapper, a node whose constructor takes other arguments) is asked
+      through the node it wraps, or not at all.  MADD-ANO-002 records the
+      other half of the diffusivity case, the running rod's: past the
+      limit it diverges, with no warning.
+      Pinned by
+      test_a_gm_params_write_the_constructor_refuses_saves_a_graph_that_does_not_load,
+      which fails when these writes are refused.
     verification:
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_live_leaf_above_the_fourier_limit_is_refused_and_the_graph_still_saves"
       - "tests/api/test_params_endpoint_reload_agreement.py::test_a_pipe_gas_density_above_its_liquid_density_is_refused"
       - "tests/api/test_params_endpoint_reload_agreement.py::test_two_values_each_acceptable_alone_are_refused_together"
       - "tests/api/test_params_endpoint_reload_agreement.py::test_the_constructor_is_asked_with_the_live_values_a_save_would_carry"
+      # What stays open, pinned so that closing it fails.
+      - "tests/api/test_params_endpoint_reload_agreement.py::test_a_gm_params_write_the_constructor_refuses_saves_a_graph_that_does_not_load"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-049"
@@ -5427,7 +5459,14 @@ anomalies:
       viscosity, `LBMPipeNode` a non-finite `tau` or `tau_tracer`, a
       `propeller_x` that is not an integer index in `[0, nx)` (naming the
       default when it is the one outside the grid), and a disc that covers
-      no cell of the cross-section.
+      no cell of the cross-section.  A disc wider than the pipe
+      (`propeller_radius` above the documented 0 to 1) was accepted too, at
+      v0.1.0 and v0.3.1 as on the 0.4.0 tree, and put force in wall cells:
+      at 1.5 on a 12x12 cross-section, 64 of its 140 cells, and the mean
+      fluid u_x after 20 steps 1.9% from the disc at 1.  It was left as
+      residual risk here while the entry read resolved, until the round-3
+      confirmation audit; `LBMPipeNode` now refuses a `propeller_radius`
+      above 1.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -5450,15 +5489,18 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      A disc wider than the pipe (`propeller_radius > 1`) still puts force
-      in wall cells; the parameter is documented as a fraction from 0 to 1
-      and is not refused above it.
+      None known.  At `propeller_radius = 1` the disc is the pipe's whole
+      cross-section and touches no wall cell.  A config saved with a radius
+      above 1 by an earlier version is refused by `from_dict()`, naming the
+      value.
     verification:
       - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_node_refuses_a_non_finite_viscosity"
       - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_non_finite_relaxation_time"
       - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_propeller_outside_the_grid"
       - "tests/nodes/test_lbm_constructor_refusals.py::test_the_default_propeller_position_needs_a_pipe_longer_than_ten_planes"
       - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_propeller_disc_that_covers_no_cell"
+      - "tests/nodes/test_lbm_constructor_refusals.py::test_lbm_pipe_refuses_a_propeller_disc_wider_than_the_pipe"
+      - "tests/nodes/test_lbm_constructor_refusals.py::test_a_disc_of_the_whole_pipe_covers_every_fluid_cell_and_no_wall_cell"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-059"
@@ -6540,6 +6582,505 @@ anomalies:
       - "tests/property/test_differential_schedules.py::test_a_non_float_leaf_nothing_reads_does_not_change_the_adaptive_steps"
       - "tests/property/test_differential_schedules.py::test_adaptive_stepping_runs_a_graph_with_a_boolean_leaf"
       - "tests/core/test_adaptive_error_norm_reads_floating_leaves_only.py::test_a_non_floating_leaf_adds_neither_a_term_nor_an_element"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-075"
+    title: "Opening a USD stage imported the Python module the stage named for a node, so load_graph_from_usd ran a stage author's code"
+    description: >
+      From v0.1.0 to v0.3.1 `load_graph_from_usd` resolved each node's class
+      from the stage's own `maddening:nodeType` string.  A class not
+      registered with `register_node_class` -- anything but the built-ins
+      the loader registered itself -- was resolved with
+      `importlib.import_module` on the string's module part and then
+      instantiated.  So opening a `.usda` ran the import-time code of
+      whatever module the stage named, before anything checked what came
+      back, and with `sys.path[0]` the running script's directory a stage
+      shipped beside a `.py` file was code execution in the reader's
+      process.  `GraphManager.from_dict` has always required an explicit
+      node registry; the USD reader did not, and nothing in the
+      documentation called a stage untrusted.  Reproduced at v0.1.0,
+      v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag, CPU,
+      jaxlib 0.11.0): a stage naming a module on `sys.path` that writes a
+      marker file when imported got the module imported and instantiated,
+      and the load failed only afterwards, because the stand-in class is
+      not a node.  Found by the params-io audit of 2026-09-19 and described
+      in the CHANGELOG and release notes at the time, but not registered
+      until the round-3 confirmation audit.
+      Resolved in 0.4.0 (10420bc, 2026-09-19): the loader instantiates only
+      the built-ins, classes registered with `register_node_class`, and
+      classes passed in the new `node_registry=` argument (keyed by
+      qualified or by bare class name, as `from_dict`'s registry is).
+      Anything else is a `KeyError` naming the class and the three ways to
+      allow it.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` under the 0.4.0 severity definition
+      (`AnomalySeverity`), on the ground MADD-ANO-055 is: an API that
+      executes what it is handed while presenting itself as safe for data
+      -- a scene-description file, which is what a reader opens from
+      someone else -- ran the code of whoever wrote the stage.  Not
+      `critical`, because no surface the library opens (no listening
+      socket, no HTTP route) loads a USD stage; a program had to call the
+      loader on the file itself.  Graded `context_dependent`: whether an
+      untrusted party can supply the stage is a property of the program,
+      and where one could, the consequence was code execution in the
+      simulation's process.
+    affected_components:
+      - "maddening.usd.serialization.load_graph_from_usd"
+      - "maddening.usd.serialization._resolve_node_class"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: open only stages you or a party you trust wrote.
+      Otherwise check every `maddening:nodeType` attribute in the stage
+      against the classes you expect before loading it, and register those
+      classes with `register_node_class` first, since a registered class is
+      not imported.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `allow_import=True` restores the import, for the call that passes it
+      only (the imported class is not registered for later loads), and a
+      program that passes it must give the loader only stages it trusts.
+      A class the caller does allow is instantiated with the stage's own
+      parameters, as `from_dict` instantiates one with a config's: the
+      loader decides which classes may be built, not what an allowed class
+      does with its arguments.
+    verification:
+      - "tests/usd/test_usd_node_class_trust.py::test_opening_a_stage_does_not_import_the_module_it_names"
+      - "tests/usd/test_usd_node_class_trust.py::test_the_refusal_says_exactly_what_to_pass"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-076"
+    title: "The HTTP API checked no Origin, so a web page in the user's browser could drive a loopback-bound server and read its state stream"
+    description: >
+      From v0.1.0 to v0.3.1 `SimulationServer` sent no CORS headers and
+      checked no `Origin`.  A browser sends a cross-origin *simple* request
+      -- a `POST` with no body or a `text/plain` one -- without a
+      preflight, so any page the user had open could reach every route of a
+      server on 127.0.0.1 that takes no body: `/sim/reset`, `/sim/start`,
+      `/sim/stop`, `/sim/step`, `/graph/compile`, and `/checkpoint/save` and
+      `/checkpoint/load`, whose `?path=` took any server path at those tags
+      (MADD-ANO-052).  The page could not read the HTTP replies, but a
+      WebSocket handshake is exempt from the same-origin policy, so it could
+      open `/ws/state` and read the full simulation state.  Binding to
+      loopback, which is MADD-ANO-051's workaround for those versions, did
+      not help: the requests come from the user's own browser, so their
+      peer is 127.0.0.1.  Checked at each tag, v0.1.0, v0.2.0, v0.2.1,
+      v0.3.0 and v0.3.1, on 2026-10-02 (CPU, jaxlib 0.11.0; a FastAPI
+      `TestClient` with no credential, an empty `HOME`, and no cloud route
+      called): a `text/plain` `POST /sim/reset` carrying `Origin:
+      https://evil.example` answered 200, `POST /checkpoint/save` with that
+      origin answered 200 and wrote the file, and a `/ws/state` handshake
+      with that origin was accepted; at v0.1.0 and v0.3.1 `/sim/step`,
+      `/graph/compile` and `/checkpoint/load` answered the same request
+      with 200 too.  Found by the second security round of
+      the 0.4.0 audit and described in the CHANGELOG, but not registered
+      until the round-3 confirmation audit.
+      Partially resolved in 0.4.0 (afddbf8, 2026-09-20): a state-changing
+      request or a WebSocket handshake whose `Origin` names neither the
+      server itself (its authority compared with the `Host` header) nor an
+      origin passed in `SimulationServer(allowed_origins=)` is refused with
+      403, failing closed on `null`, on an unparseable origin and on a
+      userinfo-prefixed one.  A request with no `Origin` (curl, a script)
+      and a cross-origin `GET`, whose reply a page cannot read, are served
+      as before.
+    severity: "critical"
+    safety_relevance: "safety_relevant"
+    safety_relevance_rationale: >
+      Graded `critical` under the 0.4.0 severity definition
+      (`AnomalySeverity`): unauthorised access through HTTP routes the
+      library opens -- the author of any web page the user visited changing
+      the simulation, writing and loading checkpoints and reading the state
+      -- on a surface that the shipped configurations exposed to other
+      hosts.  At the tags the cloud container and the server examples bound
+      `0.0.0.0` (MADD-ANO-051), and on a loopback bind the browser carried
+      other hosts' requests to the port itself.  The definition's note that
+      a loopback default is not an exposure to other hosts rests on only
+      local users reaching a loopback socket, which is exactly what this
+      defect made false.  The part still reachable in 0.4.0 (residual_risk)
+      is reached in the shipped default configuration, a loopback bind with
+      no token.
+      Graded `safety_relevant` on the ground MADD-ANO-051 is: the writes
+      change what the simulation computes with nothing in the reply or the
+      state to show it, a checkpoint loaded into the graph or overwritten on
+      disk restores silently, and the state stream discloses everything, on
+      a surface the library itself publishes.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.api.server.origin_is_same_site"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Before 0.4.0: do not leave the API running while a browser on the same
+      machine has pages open that you do not trust, or put it behind a
+      reverse proxy that refuses a request carrying a foreign `Origin`.
+      From 0.4.0, against the DNS rebinding that residual_risk describes:
+      run the API only while it is in use, or front it with a proxy that
+      refuses any `Host` header other than the loopback names you reach it
+      by.
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Live in 0.4.0, which is why this entry is partially resolved rather
+      than resolved: the check compares the `Origin` with the `Host` header,
+      and a DNS-rebinding page sends both naming its own domain.  A page
+      served from `http://attacker.example:8000`, whose name the attacker
+      then re-points at 127.0.0.1, is same-origin in the browser's eyes, so
+      it can send any request, JSON bodies included, and read the replies.
+      Measured on the 0.4.0 tree (CPU, `TestClient`, a loopback bind with
+      no token): with `Host` and `Origin` both naming
+      `attacker.example:8000`, `POST /sim/reset` and `POST /checkpoint/save`
+      answered 200 (the file was written under `checkpoint_root`), `GET
+      /graph` answered 200 and a `/ws/state` handshake was accepted.  The
+      server checks the `Host` against no list of the names it is reached
+      by, which is the defence against rebinding.  Some browsers now block
+      or prompt for a public page's requests to a private address; the
+      library does not rely on that.  Off loopback the bearer token is
+      demanded (MADD-ANO-051) and a rebound page does not hold it.  Pinned
+      by test_a_dns_rebound_page_passes_the_origin_check, which fails when
+      the hole is closed.
+    verification:
+      - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_state_change_is_refused"
+      - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_checkpoint_write_never_reaches_the_filesystem"
+      - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_page_cannot_open_the_state_stream"
+      - "tests/api/test_cross_origin_requests.py::test_the_token_a_non_loopback_bind_demands_refuses_a_rebound_page"
+      # What stays open, pinned so that closing it fails.
+      - "tests/api/test_cross_origin_requests.py::test_a_dns_rebound_page_passes_the_origin_check"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-077"
+    title: "Swapping a surrogate in with replace_node, or out with POST /surrogate/deactivate, re-added each edge without its additive flag and units: an additive coupling became an overwriting one, silently"
+    description: >
+      `replace_node` saves the edges touching the node it replaces, removes
+      the node, adds the surrogate and re-adds the edges, and `POST
+      /surrogate/deactivate` does the same in reverse.  From v0.1.0 to
+      v0.3.1 both re-added each edge with its endpoints, fields and
+      transform only, so `GraphManager.add_edge`'s remaining arguments fell
+      back to their defaults: `additive` to False, and `source_units` and
+      `target_units` to None.  Nothing raised or warned, and the route
+      answered 200.  An additive edge came back overwriting: two
+      `TableNode`s (positions 1.0 and 2.0) feeding one spring's
+      `anchor_position` additively, one of them swapped for an equivalent
+      node, stepped the spring to 2.000e-02 where the unswapped graph
+      reached 4.000e-02 after one step, through `replace_node` and through
+      the route alike, at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git
+      archive` of each tag, CPU, jaxlib 0.11.0; a fresh graph per run), and
+      the swapped edge read `additive=False` with no units.  The units are
+      declarative -- `validate()` compares them with the target's declared
+      units -- so losing them silenced that check rather than changing a
+      value.  During 0.4.0 development the same re-add also dropped an
+      edge's interface `mapping` and its fitted mapping weights (weights
+      fitted to 3x came back as the recipe's), which no release carried.
+      Resolved in 0.4.0 (c211c8b, 2019d42, 2026-09-19): both sites re-add an
+      edge through `EdgeSpec.add_edge_kwargs()`, which is derived from the
+      dataclass's own fields and raises, naming the field, if the class
+      grows one it does not cover; live mapping weights and a mapped edge's
+      `ParamSpec` overrides are saved across the removal and put back.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the swap reported success as if it had kept the wiring, and
+      the graph then computed a different coupling, with no error or
+      warning.  Graded `major` under the 0.4.0 severity definition (a
+      silent wrong result is never `minor`).  Not `critical`: it needs an
+      edge declared `additive`, which is not the default, on a node that is
+      swapped, and the restored edge showed the flag to anyone who looked.
+      `context_dependent` because whether the lost summand matters is a
+      property of the model.
+    affected_components:
+      - "maddening.surrogates.replace.replace_node"
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.core.edge.EdgeSpec.add_edge_kwargs"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: after `replace_node` or a surrogate revert, remove each
+      edge touching the swapped node and add it again with its `additive`,
+      `source_units` and `target_units`, then compare the graph's edges with
+      those before the swap.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known for the edge fields: a field added to `EdgeSpec` without a
+      rule for re-adding it raises at the next swap instead of being reset.
+      A revert that cannot complete (the edge's other endpoint is gone) is
+      a 500 that leaves the graph as it was.
+    verification:
+      - "tests/surrogates/test_replace.py::TestReplaceNodePreservesEdgeAttributes::test_additive_edge_still_adds_after_replace"
+      - "tests/surrogates/test_replace.py::TestReplaceNodePreservesEdgeAttributes::test_transform_and_units_survive_replace"
+      - "tests/api/test_surrogate_revert.py::test_surrogate_deactivate_restores_every_edge_attribute"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-078"
+    title: "build_model_description of a real graph declared no FMU inputs and a default step of 1e-3, whatever the graph's inputs and timestep"
+    description: >
+      v0.3.0 and v0.3.1 shipped `maddening.fmi.build_model_description`,
+      which builds an FMI 3.0 `modelDescription.xml` from a `GraphManager`.
+      It looked for the graph's external inputs in an
+      `_external_input_specs` attribute and for its step in
+      `_master_timestep`, and `GraphManager` defined neither (it keeps its
+      external inputs in `_external_inputs`), so both reads fell back to
+      their defaults.  Every description built from a real graph declared
+      no `input` variable at all, and its `DefaultExperiment` declared
+      `stepSize` 0.001 whatever the graph's timestep; `selected_inputs`
+      could not add an input back, because it filtered the empty set.
+      Nothing raised or warned.  Reproduced at v0.3.0 and v0.3.1 (`git
+      archive` of each tag, CPU, jaxlib 0.11.0): a graph with the external
+      input `spring.anchor_position` and node timesteps 1e-2 and 5e-2
+      exported no inputs and a step of 0.001 where 0.01 is due.  No FMU
+      runtime shipped in those versions read the description (the C
+      wrapper arrived in 0.4.0), so what it misled was an importer or a
+      packager handed the XML.  Fixed during 0.4.0 development and recorded
+      in the CHANGELOG, but not registered until the round-3 confirmation
+      audit.
+      Resolved in 0.4.0 (2efcaea, 2026-09-16): the inputs come from the
+      graph's external-input list as `<node>.<field>`, with the unit and
+      description from the node's `boundary_input_spec()`, and the default
+      step is the fastest node's timestep, the graph's base step.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Graded `major` under the 0.4.0 severity definition
+      (`AnomalySeverity`): the description is the value
+      `build_model_description` returns, it describes the simulated system
+      to whoever imports it, and it was wrong -- an interface with none of
+      the graph's inputs and a step the graph does not take -- with no
+      warning.  The `minor` clause for a wrong statement in declared
+      metadata covers metadata beside computed values that stay right;
+      here the description is the computed result.  Not `critical`: no
+      shipped runtime consumed it, the outputs and parameters it declared
+      were right, and the missing inputs are visible in the XML.
+      `context_dependent` because the effect depends on what the importer
+      does with it: a master cannot drive inputs the description lacks,
+      and one that follows the default experiment steps at a fraction of
+      the graph's timestep.
+    affected_components:
+      - "maddening.fmi.model_description.build_model_description"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      On v0.3.0 and v0.3.1: pass `default_step_size=` explicitly, add the
+      graph's external inputs to the returned description's variables
+      yourself, and check the XML's `ModelVariables` before handing it on.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  The default step is the fastest node's timestep; the
+      slower nodes of a multi-rate graph are declared on their own clocks
+      only when `multi_clock=True` is passed.
+    verification:
+      - "tests/fmi/test_multi_clock.py::test_external_inputs_of_a_real_graph_are_fmu_inputs"
+      - "tests/fmi/test_multi_clock.py::test_default_step_size_is_the_fastest_node_timestep"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-079"
+    title: "compile() restarted a multi-rate graph's sub-step counter, so a recompile in the middle of a run re-phased the sub-steps each slower node fired on"
+    description: >
+      `GraphManager.compile()` carries node state and `params` across a
+      rebuild.  From v0.1.0 to v0.3.1 it threw the graph's `_meta` entry
+      away: the multi-rate branch replaced it with a fresh `step_count = 0`
+      and the uniform-rate branch removed it.  `step_count` decides on which
+      sub-steps a node with a rate divider above 1 fires, so a recompile in
+      the middle of a run -- which a structural edit such as `add_edge` or
+      `add_external_input` triggers on a live graph -- re-phased the
+      schedule, with no warning.  A 0.01 s `TableNode` driving a 0.03 s
+      `BallNode`, run four steps, given one unused external input (which
+      changes no physics), recompiled and run four more, ended at velocity
+      -1.1772 against -0.8829 for an uninterrupted eight-step run of the
+      same graph, 33% off, at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1
+      alike (`git archive` of each tag, CPU, jaxlib 0.11.0; a fresh graph
+      per run).  The same wipe dropped a coupling group's predictor history
+      and IQN warm start, which changes how a group converges but not,
+      beyond its tolerance, where.  Fixed during 0.4.0 development and
+      recorded in the CHANGELOG, but not registered until the round-3
+      confirmation audit checked it against the tags.
+      Resolved in 0.4.0 (8a1a64b, 2026-09-19): `_meta` is rebuilt over the
+      keys the new graph expects and the live values are carried over it --
+      a key whose coupling group is gone is dropped, and a value whose shape
+      no longer fits is reseeded -- and `step_count` restarts only when the
+      rate dividers themselves change.  `reset_state()` remains the way to
+      zero the counters.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a run interrupted by a recompile took a different trajectory
+      from the same run uninterrupted, and nothing was raised.  Graded
+      `major` under the 0.4.0 severity definition (a silent wrong result is
+      never `minor`).  Not `critical`: it needs a node with a rate divider
+      above 1 and a recompile between steps.  `context_dependent` because
+      the size of the shift depends on the rates and the model.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: make every structural edit to a multi-rate graph before
+      its first step, or rebuild the graph and replay the run from the
+      start after one.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A change of the rate dividers restarts the counter, by design: the
+      phase indexes the dividers, so continuing it would fire nodes on
+      sub-steps chosen for the previous schedule.
+    verification:
+      - "tests/core/test_multirate.py::TestMultirateRecompile::test_recompile_preserves_the_sub_step_phase"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-080"
+    title: "The FMU bridge split a variable's name at its first dot to find the node, so every input of a node whose name holds a '.' was filed under a node the graph does not have"
+    description: >
+      `build_model_description` names an FMU input or output
+      `<node>.<field>`, and a node name may contain a dot (`tank.1`,
+      `hx.hot`).  During 0.4.0 development the TCP bridge recovered the
+      node and field from the name with `name.partition(".")`, at the first
+      dot.  For a node `rod.A`, every `fmi3Set` on its input was
+      acknowledged and filed under a node `rod` that the graph does not
+      have, so the importer co-simulated a model whose inputs stayed at
+      their start values, with no error; a get on its output raised
+      `KeyError: 'rod'`, after the run had already been wrong.  Parameters
+      were unaffected, because they are split at `.params.`.  Found by the
+      whole-tree audit of the release branch.  No tagged release carried
+      it: v0.3.0 and v0.3.1 have no bridge and route nothing by name.
+      Resolved in 0.4.0 (4d49a27, 2026-09-18): `FMIVariable` carries the
+      node and field the description was built from, and the bridge's five
+      routing sites ask for that pair; `node_field()` falls back to the old
+      split only for a hand-built variable without one.  Two nodes whose
+      variables would spell the same FMI name (node `a` with field `b.c`,
+      node `a.b` with field `c`) are refused at export, naming both.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent for inputs: the importer's writes were acknowledged and never
+      applied, so the co-simulation ran a model with frozen inputs.  Graded
+      `major` under the 0.4.0 severity definition (a silent wrong result is
+      never `minor`), and registered although no release carried it,
+      because it is major.  Not `critical`: it needs a node name with a
+      dot, and reading that node's output raised.  `context_dependent`
+      because what frozen inputs do to a co-simulation depends on the
+      model.
+    affected_components:
+      - "maddening.fmi.model_description.FMIVariable.node_field"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: export only nodes whose names hold no '.'.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      An `FMIVariable` built by hand without a node and field is still split
+      at the first dot, which is correct whenever the node name holds none.
+    verification:
+      - "tests/fmi/test_dotted_node_names.py::test_a_node_name_containing_a_dot_routes_fmu_inputs_to_that_node"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-081"
+    title: "After a sharded static was rewritten in place, compile() traced the new step against the wrapper's cached copy of the old buffer"
+    description: >
+      During 0.4.0 development the sharded wrappers began to cache the
+      per-device placement of their sharded `StaticArray`s on the node,
+      keyed on each array's identity, so as not to copy them again on every
+      `update` (81531ed).  That key cannot see a buffer rewritten in place,
+      and the cache outlived `GraphManager.compile()`, which rebuilt the
+      step, cleared the scan cache, re-snapshotted the static-data hashes
+      and then traced the new step against the previous buffer: every later
+      step was silently wrong, with no way back short of rebuilding the
+      wrapper.  A one-device `ShardedStencilNode` over a 16-cell diffusion
+      whose mask was zeroed in place went on diffusing after `compile()`.
+      The first fix (5f6f6ff) had `compile()` call `invalidate_static_cache()`
+      on each graph node, which missed a cache one level in, under
+      `HybridNode(ShardedStencilNode(...))` (1fce120).  No tagged release
+      carried it: at v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag,
+      CPU, jaxlib 0.11.0) the placement was redone on every trace and the
+      same probe took the zeroed mask after `compile()`, and v0.1.0 and
+      v0.2.0 hand a wrapped node no sharded statics.
+      Resolved in 0.4.0 (1fce120, 2026-09-18):
+      `SimulationNode.invalidate_static_cache` is a contract method whose
+      default forwards to every node held as an attribute, guarded against
+      a cycle; the sharded wrappers drop their cache and call `super()`,
+      and `compile()` calls it on every node.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: after the framework's explicit "rebuild everything" the step
+      computed with a static the node no longer held, and nothing said so.
+      Graded `major` under the 0.4.0 severity definition (a silent wrong
+      result is never `minor`), and registered although no release carried
+      it, because it is major.  Not `critical`: it needs a sharded static
+      whose buffer is written in place rather than replaced.
+      `context_dependent` because what a stale geometry or coefficient
+      field does depends on the model.
+    affected_components:
+      - "maddening.core.node.SimulationNode.invalidate_static_cache"
+      - "maddening.cloud.multigpu.sharded_node.ShardedStencilNode"
+      - "maddening.core.graph_manager.GraphManager.compile"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: replace a sharded static's array instead of writing into it,
+      or build a new wrapper after the write.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Between compiles the cache is still keyed on identity, by design: a
+      static rewritten in place and stepped with no `compile()` is served
+      from the cache until `invalidate_static_cache()` is called, which is
+      the documented hook for a node that rewrites a buffer in place.
+    verification:
+      - "tests/cloud/multigpu/test_sharded_static_cache.py::test_compile_rematerialises_a_static_rewritten_in_place"
+      - "tests/cloud/multigpu/test_sharded_static_cache.py::test_compile_reaches_a_static_cache_nested_inside_another_node"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-082"
+    title: "The FMU bridge installed an importer's FMU-state archive without the value checks set applies: a parameter outside its declared bounds and non-finite state were accepted"
+    description: >
+      `fmi3SetFMUState` hands the bridge an archive that the importer may
+      have built itself, so it is a second door into the state and
+      parameter tree that `set` writes.  During 0.4.0 development the
+      bridge's `_decode_state` checked the schema token, the member names
+      and the shapes, then wrote every array through, while the check that
+      a value is finite and fits the live dtype, and the `ParamSpec` bounds
+      check, sat on the `set` path only.  The bridge that refuses `set
+      mass=-1.0` against declared bounds (0.1, 10.0) accepted an archive
+      setting it, together with `position = inf` (a float64 1e300 narrowed
+      into a float32 field) and `velocity = NaN`, answered `ok`, and one
+      step later the whole state was NaN.  Found by the params-io audit of
+      2026-09-19.  No tagged release carried it: v0.3.0 and v0.3.1 have no
+      bridge, and their `FmuSidecar.set_fmu_state` unpickled its input
+      (MADD-ANO-055) with no `ParamSpec` to check against.
+      Resolved in 0.4.0 (a46a3ee, 2026-09-19): both doors share one check
+      -- finite, and representable in the live array's dtype -- over every
+      restored state field, parameter and input, and the restored parameter
+      tree passes the restore check `FmuSidecar.set_fmu_state` applies
+      (tunability and declared bounds), all before anything is committed.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent at the write: the bridge answered `ok` to values the model
+      declares invalid and computed with them.  Graded `major` under the
+      0.4.0 severity definition (a silent wrong result is never `minor`):
+      accepting an input the model's own declarations refuse and computing
+      from it, as MADD-ANO-057 records for a sharded node.  Registered
+      although no release carried it, because it is major.  Not
+      `critical`: it needs an importer that hands the bridge an archive it
+      did not get from the bridge, and the non-finite cases turned the
+      whole state visibly NaN within a step.  `context_dependent` because
+      an out-of-bounds parameter is as harmful as the model makes it.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: restore only FMU states that the same FMU produced.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A snapshot of a diverged model, whose state holds inf or NaN, no
+      longer restores; the error names the field.  A parameter instantiated
+      outside its bounds restores to that value from the FMU's own
+      snapshot, as `GraphManager.load_state` restores a checkpoint.
+    verification:
+      - "tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_set_a_parameter_outside_its_declared_bounds"
+      - "tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_install_a_non_finite_state_field"
+      - "tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_narrow_a_value_the_live_dtype_cannot_hold"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-083"

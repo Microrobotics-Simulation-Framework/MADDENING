@@ -583,13 +583,45 @@ def test_the_state_cap_before_building_applies_the_servers_limit(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# What the route's fixes leave open (MADD-ANO-047 and 049, partially resolved)
+# What the route's fixes leave open (MADD-ANO-047 and 048, partially
+# resolved; 049's, closed)
 # ---------------------------------------------------------------------------
-# Both fixes live in the route, so a value that reaches a node's params some
+# The fixes live in the route, so a value that reaches a node's params some
 # other way -- a ``gm.params`` write, a fit, in-process code -- is not asked.
 # These pin that as it stands: the registry cites them for what is still
 # reachable.  When one fails, the route it pins has been closed; update the
 # registry entry and its ``residual_risk`` rather than the expectation here.
+
+
+@pytest.mark.parametrize("make, key, value, refusal", [
+    # 16 cells on length 1 at dt = 1: Fo = 256 alpha.  Built at Fo = 0.1;
+    # a fit with the upper-unbounded spec can carry it to 0.6.
+    (lambda: HeatNode("rod", 1.0, n_cells=16, length=1.0,
+                      thermal_diffusivity=0.1 / 256, initial_temperature=300.0),
+     "thermal_diffusivity", 0.6 / 256, "is unstable"),
+    (lambda: LBMPipeNode("p", 1.0, **PIPE), "rho_gas", 3.0,
+     "rho_liquid must be > rho_gas"),
+    # Not reachable by a fit (the spec is log-transformed), by a write only.
+    (lambda: HeatNode("rod", 0.05, n_cells=10, length=1.0,
+                      thermal_diffusivity=1e-3, initial_temperature=300.0),
+     "length", -1.0, "length must be a finite number > 0"),
+], ids=["heat-fourier", "pipe-rho-gas", "heat-length"])
+def test_a_gm_params_write_the_constructor_refuses_saves_a_graph_that_does_not_load(
+        make, key, value, refusal):
+    """MADD-ANO-048's residual.  The route asks the constructor (above);
+    a ``gm.params`` write, and so a fit, does not, and ``to_dict()`` saves
+    the value without a word.  The saved graph then fails to load, on the
+    constructor's own refusal, after the run it records."""
+    node = make()
+    gm = _graph(node)
+    gm.params["nodes"][node.name][key] = jnp.asarray(value, jnp.float32)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        config = gm.to_dict()
+    saved = next(n for n in config["nodes"] if n["name"] == node.name)
+    assert float(saved["params"][key]) == pytest.approx(value)
+    with pytest.raises(ValueError, match=refusal):
+        GraphManager.from_dict(config, REGISTRY)
 
 
 def test_a_gm_params_write_of_g_through_zero_runs_another_model_than_its_reload():

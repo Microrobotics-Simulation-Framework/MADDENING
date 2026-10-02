@@ -88,20 +88,20 @@ def test_an_unrelated_local_process_reads_writes_and_steps_the_model_with_no_sec
         # The token is not a credential: the bridge gives it to anyone.
         assert out["hello"]["ok"] and out["hello"]["token"] == md.instantiation_token
 
-        # The importer connecting afterwards inherits what the stranger did.
+        # The stranger's write and step were real: they reached the model
+        # while it held the slot.  An importer connecting afterwards is a
+        # new FMU instance, though, and starts from the start values its
+        # model description advertises -- it used to inherit the
+        # stranger's stiffness and time, because claiming the slot reset
+        # nothing.  So what a stranger did before an instance began does
+        # not carry into it; what it does while it holds the slot (and
+        # holding the slot itself, below) is the open part.
         with socket.create_connection((host, int(port)), timeout=30) as importer:
             send_message(importer, {"op": "hello"})
             assert recv_message(importer)["ok"]
             send_message(importer, {"op": "get", "vr": [stiffness, _vr(md, "time")]})
             got = recv_message(importer)
-            # The documented partial workaround: fmi3Reset (the bridge's
-            # ``reset``) undoes what an earlier caller wrote.
-            send_message(importer, {"op": "reset"})
-            assert recv_message(importer)["ok"]
-            send_message(importer, {"op": "get", "vr": [stiffness, _vr(md, "time")]})
-            after_reset = recv_message(importer)
-    assert got == {"ok": True, "values": [77.0, DT]}
-    assert after_reset == {"ok": True, "values": [30.0, 0.0]}
+    assert got == {"ok": True, "values": [30.0, 0.0]}
 
 
 def test_an_unrelated_client_holding_the_slot_locks_the_importer_out():

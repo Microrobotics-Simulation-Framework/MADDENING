@@ -115,8 +115,12 @@ static size_t build_binary_reply(unsigned char *out, size_t cap) {
 /* A well-formed reply for `op` (F10 of the 2026-09-16 audit: the random
  * generator alone almost never makes the count and the raw length agree,
  * so the success paths of the binary parsers were never reached).  A
- * get reply carries at least `nvals` values; every raw double is a random
- * bit pattern (NaN payloads included: the copy must not care). */
+ * get reply carries exactly `nvals` values three times in four -- the
+ * wrapper accepts no other count -- and one to three more otherwise, which
+ * the wrapper must refuse; every raw double is a random bit pattern (NaN
+ * payloads included: the copy must not care). */
+static size_t extra_values(void) { return (rnd() % 4 == 0) ? 1 + rnd() % 3 : 0; }
+
 static size_t build_good_reply(unsigned char *out, size_t cap, int op, size_t nvals, int *flag) {
     char hdr[128];
     size_t n = 0;
@@ -124,7 +128,7 @@ static size_t build_good_reply(unsigned char *out, size_t cap, int op, size_t nv
     switch (op) {
     case OP_GET:
         if (rnd() % 3) {                                     /* binary form */
-            size_t nv = nvals + rnd() % 4;
+            size_t nv = nvals + extra_values();
             size_t hl = (size_t)snprintf(hdr, sizeof hdr, "{\"ok\":true,\"n\":%lu,\"dtype\":\"f64\"}",
                                          (unsigned long)nv);
             put_be32(out, (unsigned long)hl);
@@ -134,7 +138,7 @@ static size_t build_good_reply(unsigned char *out, size_t cap, int op, size_t nv
             return 4 + hl + 8 * nv;
         }
         n = (size_t)snprintf((char *)out, cap, "{\"ok\":true,\"values\":[");
-        for (size_t i = 0; i < nvals + rnd() % 3; ++i)
+        for (size_t i = 0, nv = nvals + extra_values(); i < nv; ++i)
             n += (size_t)snprintf((char *)out + n, cap - n, "%s%.17g", i ? "," : "",
                                   (double)(int64_t)rnd() / 4096.0);
         n += (size_t)snprintf((char *)out + n, cap - n, "]}");

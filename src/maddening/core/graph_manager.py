@@ -1162,7 +1162,7 @@ def _group_evaluations(group, nodes, schedule, edges):
     residual at the float32 stall is 0.6, 1.2 and 2.3x the per-pass
     floor at ``N`` = 16, 32 and 64, and the bound, which took the worst
     node's count, read 0.51x (``N = 32``) and 0.30x (``N = 64``) the
-    true distance with ``spectral_usable=True`` (MADD-ANO-083); counted
+    true distance with ``spectral_usable=True`` (MADD-ANO-086); counted
     along the chain the floor is ``N`` times larger and the bound reads
     23x and 16x over at ``N`` = 16 and 32 (the gradient bound 36x and
     17x over its true error; jaxlib 0.11.0, CPU).  The
@@ -7894,7 +7894,7 @@ class GraphManager:
               counting the declared evaluations along a Gauss-Seidel
               pass's longest chain of same-pass reads, without which a
               stalled 32-relay ring read 0.51x its true distance with the
-              flag set (MADD-ANO-083).
+              flag set (MADD-ANO-086).
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -8077,7 +8077,7 @@ class GraphManager:
             converge, the verdict ``strict_convergence`` acts on.  (It
             used to be the second half's report alone, which said
             ``converged=True`` beside a first half stopped at the cap:
-            MADD-ANO-084.)
+            MADD-ANO-087.)
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value

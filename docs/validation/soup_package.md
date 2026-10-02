@@ -145,10 +145,13 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-080 | The FMU bridge split a variable's name at its first dot to find the node, so every input of a node whose name holds a '.' was filed under a node the graph does not have | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-081 | After a sharded static was rewritten in place, compile() traced the new step against the wrapper's cached copy of the old buffer | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-082 | The FMU bridge installed an importer's FMU-state archive without the value checks set applies: a parameter outside its declared bounds and non-finite state were accepted | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
-| MADD-ANO-083 | Under Gauss-Seidel the coupling bound's float floor counted the worst node's evaluations, not the chain a pass composes: a stalled 32-relay ring read its spectral bound at 0.51x the true distance with spectral_usable=True | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
-| MADD-ANO-084 | After run_adaptive or run_adaptive_scan the coupling report described only the second kept half step: a first half step stopped at max_iterations was hidden, and converged read True where strict_convergence refused the step | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-083 | A second FMU instance on the same bridge started from the previous instance's final state, parameters, inputs and time | `critical` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-084 | An external input the FMU did not export, or that an in-process caller omitted, was not zero-filled: the node took its own "input missing" branch | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-085 | The FMU advertised min / max for its parameters but enforced them only if the sidecar had been given param_specs: a set or an archive outside them was accepted | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-086 | Under Gauss-Seidel the coupling bound's float floor counted the worst node's evaluations, not the chain a pass composes: a stalled 32-relay ring read its spectral bound at 0.51x the true distance with spectral_usable=True | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-087 | After run_adaptive or run_adaptive_scan the coupling report described only the second kept half step: a first half step stopped at max_iterations was hidden, and converged read True where strict_convergence refused the step | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 
-*84 anomalies registered.  23 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 14 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*87 anomalies registered.  23 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 14 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence
@@ -178,9 +181,10 @@ installs it into a new, isolated virtual environment, and runs
 the tool is not in the SBOM.  MADDENING is the root component, with its
 version, purl and licence.  Every other installed distribution is a
 component with its name, version, `pkg:pypi` purl and the licence its
-metadata declares.  The dependency graph is included, and the root's edges
-are exactly the direct dependencies `pyproject.toml` declares for that
-install.
+metadata declares, and its own `Requires-Dist` metadata, verbatim
+(`maddening:sbom:requires-dist` properties, with a count).  The dependency
+graph is included, and the root's edges are exactly the direct dependencies
+`pyproject.toml` declares for that install.
 
 | File | Install | What it covers |
 |---|---|---|
@@ -234,11 +238,29 @@ the directory holds any other SBOM.  It fails if a direct dependency
 SBOM, or is at a version outside its declared range.  It fails if a SOUP
 item §1 lists is missing, or is at a version outside the `pyproject.toml`
 range.  It also fails if a component has no purl, or a purl that disagrees
-with it, or no licence; if a component is reached by no path from the root
-in the dependency graph, so that no install brings it in; if the recorded
-Python is one `requires-python` refuses; and if the file was edited after
-generation: the `serialNumber` is derived from the content.  Each failure
-names the discrepancy.
+with it, or no licence or a blank one; if a component is reached by no path
+from the root in the dependency graph, so that no install brings it in; if
+the recorded Python is one `requires-python` refuses; and if a file does not
+record its resolution cutoff.  It follows the install's requirements from
+the declared direct dependencies through each component's recorded
+`Requires-Dist`, with markers evaluated in the recorded environment, and
+fails if a requirement the install turns on names a package the SBOM lacks
+or a version the requirement refuses, if the graph and the requirements
+disagree, or if a component is required by nothing the install turns on.
+It fails if the four files disagree about the cutoff, the index, the
+resolver, the platform or any marker variable: they are one resolution, and
+are regenerated together.  And it fails if a file was changed after
+generation without being re-sealed: the `serialNumber` is derived from the
+content.  Each failure names the discrepancy.
+
+These checks prove that the files are consistent with `pyproject.toml`, with
+§1 and with themselves.  They do not prove that the content is what a
+resolver produced: the sealing function is public, so an edit can be
+re-sealed, and one that breaks none of the rules above (a package moved to
+another version that its range and its dependants all admit) passes.  Only
+regeneration proves the content.  `python scripts/generate_sbom.py
+--exclude-newer <the recorded cutoff> --output-dir <dir>` resolves each
+install again, and its output must be byte-identical to the committed file.
 
 **Determinism.**  Components and the dependency graph are sorted, keys are
 written sorted, `metadata.timestamp` is the resolution cutoff (or

@@ -20,18 +20,29 @@ Per directory:
 * no other ``*.cdx.json`` (a previous version's file, an install nobody
   covers);
 * ``soup_package.md`` names every SBOM file, so the SOUP document and the
-  directory cannot drift apart.
+  directory cannot drift apart;
+* the SBOMs share one resolution: one cutoff, index, resolver, platform
+  and marker environment (:data:`SHARED_PROPERTIES`), because they are
+  read as one record of one release.
 
 Per SBOM:
 
 * the root component is ``maddening`` at the declared version, with its
   purl and the declared licence;
-* the metadata records which install it is and the environment it was
-  resolved in (the PEP 508 marker variables), since the transitive
-  versions depend on both;
+* the metadata records which install it is, the environment it was
+  resolved in (the PEP 508 marker variables) and the resolution cutoff
+  (``maddening:sbom:exclude-newer``), since the transitive versions
+  depend on all three;
 * every component has a name, a version, a ``pkg:pypi`` purl that agrees
-  with both, and a licence (``soup_package.md`` §6: "the licence its
-  metadata declares"), and no package appears twice;
+  with both, and a non-blank licence (``soup_package.md`` §6: "the
+  licence its metadata declares"), and no package appears twice;
+* the components are closed under their own requirements: following the
+  declared direct dependencies and each component's recorded
+  ``Requires-Dist`` (markers evaluated in the recorded environment, with
+  the extras its dependants ask for), every requirement the install turns
+  on names a component at a version it admits and is an edge of the
+  dependency graph, every edge is a requirement the component declares,
+  and every component is reached;
 * every component is reachable from the root component through the
   dependency graph: an SBOM is what one install resolved to, and a
   package nothing in that install depends on is not part of it;
@@ -48,9 +59,19 @@ Per SBOM:
   admits;
 * every ``dependsOn`` reference resolves;
 * components and dependencies are in canonical order, and the
-  ``serialNumber`` is the one the content implies (:func:`seal`), so a
-  hand edit -- bumping a version in the JSON to make this check pass, say
-  -- is refused rather than trusted.
+  ``serialNumber`` is the one the content implies (:func:`seal`), so an
+  edit that was not re-sealed -- a merge, a careless hand edit -- is
+  refused.
+
+What it cannot prove is that the content is what a resolver produced.
+:func:`seal` is public, so an edit can be re-sealed, and an edit that
+keeps every rule above -- numpy moved to another version both its range
+and its dependants admit, say -- passes.  These rules prove that the
+files are consistent with ``pyproject.toml``, the SOUP package and
+themselves.  Only regeneration proves the content:
+``python scripts/generate_sbom.py --exclude-newer <the recorded cutoff>
+--output-dir <dir>`` resolves each install again, and the result must be
+byte-identical to the committed file.
 
 Usage
 -----
@@ -103,6 +124,10 @@ PROP = "maddening:sbom:"
 PROP_INSTALL = PROP + "install"
 PROP_EXCLUDE_NEWER = PROP + "exclude-newer"
 PROP_MARKER = PROP + "marker:"
+#: Per component: one property per line of the package's own
+#: ``Requires-Dist`` metadata, verbatim, and how many lines there were.
+PROP_REQUIRES_DIST = PROP + "requires-dist"
+PROP_REQUIRES_DIST_COUNT = PROP + "requires-dist-count"
 
 #: The PEP 508 marker variables an SBOM must record: enough to evaluate
 #: any marker ``pyproject.toml`` could put on a dependency, and none of
@@ -152,11 +177,17 @@ def canonical_order(sbom: dict) -> dict:
 
     Components by canonical package name then version, the dependency
     graph by ``ref`` with each ``dependsOn`` sorted, and
-    ``metadata.properties`` by name.  Everything else keeps its order:
+    ``metadata.properties`` and each component's ``properties`` by name
+    then value.  Everything else keeps its order:
     JSON object keys are sorted when the file is written.
     """
     out = copy.deepcopy(sbom)
     out["components"] = sorted(out.get("components", []), key=_component_sort_key)
+    for comp in out["components"]:
+        if isinstance(comp, dict) and "properties" in comp:
+            comp["properties"] = sorted(
+                comp["properties"],
+                key=lambda p: (str(p.get("name")), str(p.get("value"))))
     deps = []
     for dep in out.get("dependencies", []):
         dep = dict(dep)
@@ -183,7 +214,9 @@ def content_serial(sbom: dict) -> str:
     with the same timestamp get the same serial, so the committed file is
     reproducible; any change of content gets a different one, as
     CycloneDX asks of a serial; and a file edited after generation no
-    longer matches its own serial, which :func:`check_sbom` refuses.
+    longer matches its own serial, which :func:`check_sbom` refuses --
+    unless the edit was re-sealed with :func:`seal`, which anyone can
+    call.  The serial detects an accident, not a deliberate edit.
     """
     body = {k: v for k, v in sbom.items() if k != "serialNumber"}
     digest = hashlib.sha256(_canonical_json(body).encode("utf-8")).hexdigest()
@@ -347,14 +380,22 @@ def _purl_parts(purl: str) -> tuple[str, str, str] | None:
 
 
 def _license_values(component: dict) -> set[str]:
+    """The licence identifiers, names and expressions a component carries.
+
+    Blank ones are not licences: ``{"license": {"name": ""}}`` names
+    nothing, and passed as "carries a licence" until audit_040_p4_4 (M4,
+    G4) re-sealed one onto numpy.
+    """
     values = set()
     for entry in component.get("licenses", []) or []:
-        if "expression" in entry:
-            values.add(str(entry["expression"]))
+        if not isinstance(entry, dict):
+            continue
+        candidates = [entry.get("expression")]
         lic = entry.get("license", {})
-        for key in ("id", "name"):
-            if key in lic:
-                values.add(str(lic[key]))
+        if isinstance(lic, dict):
+            candidates += [lic.get("id"), lic.get("name")]
+        values.update(str(v).strip() for v in candidates
+                      if v is not None and str(v).strip())
     return values
 
 
@@ -374,6 +415,166 @@ def _admits(req: Requirement, version: str) -> bool:
         return req.specifier.contains(Version(version), prereleases=True)
     except InvalidVersion:
         return False
+
+
+#: The cutoff's one spelling, as ``generate_sbom.py`` writes it.
+_CUTOFF_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+#: Marker variables an SBOM does not record, because they identify the
+#: host.  A ``Requires-Dist`` marker that reads one cannot be evaluated
+#: from the SBOM alone, so it is reported rather than evaluated against
+#: whatever machine runs this check.
+_UNRECORDED_MARKER_VARIABLES = ("platform_release", "platform_version",
+                                "implementation_version")
+
+
+def recorded_requirements(component: dict) -> tuple[list[str] | None, str | None]:
+    """``(requirement strings, problem)``: the ``Requires-Dist`` a component records.
+
+    ``generate_sbom.py`` writes one ``maddening:sbom:requires-dist``
+    property per line of the package's metadata and a
+    ``maddening:sbom:requires-dist-count``, so that a package that
+    requires nothing (``[]``) is told apart from a record that was
+    removed (``None``, with the problem).
+    """
+    props = [p for p in component.get("properties", []) or [] if isinstance(p, dict)]
+    reqs = [str(p.get("value")) for p in props if p.get("name") == PROP_REQUIRES_DIST]
+    counts = [str(p.get("value")) for p in props
+              if p.get("name") == PROP_REQUIRES_DIST_COUNT]
+    if not counts:
+        return None, (f"does not record its Requires-Dist ({PROP_REQUIRES_DIST_COUNT} "
+                      f"is missing), so whether the install is complete cannot be "
+                      f"checked; regenerate it with scripts/generate_sbom.py")
+    if len(counts) > 1 or counts[0] != str(len(reqs)):
+        return None, (f"records {counts} as its {PROP_REQUIRES_DIST_COUNT} but "
+                      f"carries {len(reqs)} {PROP_REQUIRES_DIST} line(s)")
+    return reqs, None
+
+
+def _requirement_closure_errors(components: list[dict], direct: list[Requirement],
+                                env: dict[str, str], graph: dict[str, set],
+                                root_ref: str | None, install: str) -> list[str]:
+    """What the components' own ``Requires-Dist`` says the SBOM lacks.
+
+    The install's requirements are followed from the root's declared
+    direct dependencies through each component's recorded
+    ``Requires-Dist``, with each marker evaluated in the recorded
+    environment and with the extras its dependants asked for
+    (``uvicorn[standard]`` turns on uvicorn's ``extra == "standard"``
+    lines).  Then:
+
+    * every requirement the install turns on names a component, at a
+      version the requirement admits -- a dropped transitive dependency
+      (scipy, which jax and jaxlib require) and one rewritten to a version
+      its dependants refuse (ml-dtypes 0.0.1 under jax's ``>=0.5.0``)
+      both passed when re-sealed (audit_040_p4_4, M4, G1 and G2);
+    * each such requirement is an edge of the dependency graph, and each
+      edge is a requirement the component records (cyclonedx-py also
+      links the installed packages an unselected extra names, so an edge
+      may be a requirement whose marker is off -- but never one the
+      package does not declare at all);
+    * every component is reached by the requirements the install turns
+      on: one reached only through edges, or not at all, is not part of
+      the install.
+    """
+    errors: list[str] = []
+    by_key = {canonicalize_name(str(c.get("name"))): c for c in components
+              if c.get("name")}
+    parsed: dict[str, list[Requirement]] = {}
+    for key, comp in by_key.items():
+        reqs, problem = recorded_requirements(comp)
+        if problem:
+            errors.append(f"component {comp.get('name')} {problem}")
+            continue
+        parsed[key] = []
+        for text in reqs or []:
+            try:
+                req = Requirement(text)
+            except InvalidRequirement:
+                errors.append(f"component {comp.get('name')} records "
+                              f"{PROP_REQUIRES_DIST} {text!r}, which is not a "
+                              f"requirement")
+                continue
+            if req.marker is not None and any(
+                    v in str(req.marker) for v in _UNRECORDED_MARKER_VARIABLES):
+                errors.append(f"component {comp.get('name')} requires {text!r}, "
+                              f"whose marker reads a variable this SBOM does not "
+                              f"record ({', '.join(_UNRECORDED_MARKER_VARIABLES)})")
+                continue
+            parsed[key].append(req)
+    if errors:
+        return errors
+
+    def on(req: Requirement, extras: set[str]) -> bool:
+        if req.marker is None:
+            return True
+        return any(req.marker.evaluate({**env, "extra": e})
+                   for e in ({""} | extras))
+
+    # Extras each component is asked for, to a fixed point.
+    extras: dict[str, set[str]] = {key: set() for key in by_key}
+    reached: set[str] = set()
+    todo: list[str] = []
+    for req in direct:
+        if not on(req, set()):
+            continue
+        key = canonicalize_name(req.name)
+        if key in by_key:
+            extras[key] |= {canonicalize_name(e) for e in req.extras}
+            todo.append(key)
+    while todo:
+        key = todo.pop()
+        reached.add(key)
+        for req in parsed.get(key, []):
+            if not on(req, extras[key]):
+                continue
+            target = canonicalize_name(req.name)
+            if target not in by_key:
+                continue
+            new = {canonicalize_name(e) for e in req.extras} - extras[target]
+            if new or target not in reached:
+                extras[target] |= new
+                todo.append(target)
+
+    key_of_ref = {c.get("bom-ref"): key for key, c in by_key.items()
+                  if c.get("bom-ref")}
+    for key in sorted(reached):
+        comp = by_key[key]
+        name, ref = comp.get("name"), comp.get("bom-ref")
+        edge_keys = {key_of_ref[r] for r in graph.get(ref, set()) if r in key_of_ref}
+        for req in parsed.get(key, []):
+            if not on(req, extras[key]):
+                continue
+            target = by_key.get(canonicalize_name(req.name))
+            if target is None:
+                errors.append(
+                    f"component {name} requires {req} (its recorded Requires-Dist, "
+                    f"on in this environment), but the SBOM holds no "
+                    f"{req.name}: `pip install {install_requirement(install)}` "
+                    f"cannot have resolved without it")
+                continue
+            if not _admits(req, str(target.get("version", ""))):
+                errors.append(
+                    f"component {name} requires {req}, but the SBOM holds "
+                    f"{target.get('name')} {target.get('version')}, which that "
+                    f"refuses: no resolver installs the two together")
+            if canonicalize_name(req.name) not in edge_keys:
+                errors.append(
+                    f"dependency graph: {ref!r} has no edge to "
+                    f"{target.get('bom-ref')!r}, although {name} requires {req}")
+        named = {canonicalize_name(r.name) for r in parsed.get(key, [])}
+        for target_key in sorted(edge_keys - named):
+            errors.append(
+                f"dependency graph: {ref!r} depends on {by_key[target_key].get('bom-ref')!r}, "
+                f"but {name}'s recorded Requires-Dist names no {target_key}")
+    for key in sorted(set(by_key) - reached):
+        comp = by_key[key]
+        errors.append(
+            f"component {comp.get('name')} is required by nothing "
+            f"`pip install {install_requirement(install)}` turns on (following "
+            f"the declared direct dependencies and each component's recorded "
+            f"Requires-Dist), so it is not part of this install")
+    return errors
 
 
 def check_sbom(sbom: dict, *, pyproject: dict, install: str,
@@ -437,6 +638,17 @@ def check_sbom(sbom: dict, *, pyproject: dict, install: str,
     if recorded_install != install:
         err(f"records install {recorded_install!r} in {PROP_INSTALL}, "
             f"expected {install!r}")
+    # The cutoff is a third of what decides the transitive versions, and
+    # soup_package.md §6 says every file records it.  Removing it passed
+    # when re-sealed (audit_040_p4_4, M4, G3).
+    cutoff = props.get(PROP_EXCLUDE_NEWER)
+    if cutoff is None:
+        err(f"does not record its resolution cutoff ({PROP_EXCLUDE_NEWER}); "
+            f"the transitive versions depend on it, and soup_package.md §6 says "
+            f"every SBOM records it.  Regenerate it with scripts/generate_sbom.py")
+    elif not _CUTOFF_RE.fullmatch(cutoff):
+        err(f"records {PROP_EXCLUDE_NEWER} {cutoff!r}, not a UTC timestamp "
+            f"(YYYY-MM-DDTHH:MM:SSZ) as scripts/generate_sbom.py writes it")
     env = marker_environment(sbom)
     missing_env = [v for v in MARKER_VARIABLES if v not in env]
     if missing_env:
@@ -589,6 +801,16 @@ def check_sbom(sbom: dict, *, pyproject: dict, install: str,
                 err(f"the root component depends on {ref!r}, which pyproject.toml "
                     f"does not declare as a direct dependency of this install")
 
+    # -- the components are closed under their own requirements ----------
+    if not missing_env:
+        graph_edges: dict[str, set] = {}
+        for dep in sbom.get("dependencies", []):
+            graph_edges.setdefault(dep.get("ref"), set()).update(dep.get("dependsOn", []))
+        for e in _requirement_closure_errors(
+                [c for c in components if isinstance(c, dict)],
+                [r for r in direct], env, graph_edges, root_ref, install):
+            err(e)
+
     # -- every component is something the install brings in -------------
     # An orphan -- a component no path from the root reaches -- passed when
     # it was resealed (audit_040_p4_2, S2), although §6 says each SBOM is
@@ -641,6 +863,7 @@ def check_directory(sbom_dir: Path, *, pyproject: dict, soup_text: str,
         errors.append(f"{Path(sbom_dir).name}/{name}: unexpected SBOM ({why}); "
                       f"delete it, or add its install to SBOM_INSTALLS")
     sboms = []
+    recorded: dict[str, dict[str, str]] = {}
     for name, install in expected.items():
         if name not in soup_text:
             errors.append(f"soup_package.md does not name {name}, the {install} "
@@ -661,7 +884,45 @@ def check_directory(sbom_dir: Path, *, pyproject: dict, soup_text: str,
         errors += check_sbom(sbom, pyproject=pyproject, install=install,
                              soup_requirements=soup_reqs,
                              source=f"{Path(sbom_dir).name}/{name}")
+        recorded[name] = _properties(sbom)
+    errors += _shared_resolution_errors(recorded, Path(sbom_dir).name)
     return errors, sboms
+
+
+#: The properties every SBOM in the directory must agree on: one
+#: resolution -- one cutoff, one index, one resolver, one Python and
+#: platform -- of several installs.
+SHARED_PROPERTIES: tuple[str, ...] = (
+    PROP_EXCLUDE_NEWER, PROP + "index", PROP + "resolver", PROP + "platform",
+    PROP + "libc", *(PROP_MARKER + v for v in MARKER_VARIABLES))
+
+
+def _shared_resolution_errors(recorded: dict[str, dict[str, str]],
+                              where: str) -> list[str]:
+    """Refuse a directory whose SBOMs were not resolved together.
+
+    Each file is checked alone by :func:`check_sbom`, so a server SBOM
+    resolved on another day, with another numpy, than the core one passed
+    (audit_040_p4_4, M4, G5) -- and the SOUP package's table, which reads
+    the four as one record of one release, would have described two
+    environments as one.  A property one file records and another does
+    not is a disagreement too (``None`` in the listing): the file without
+    it cannot be shown to share the resolution.
+    """
+    errors = []
+    for prop in SHARED_PROPERTIES:
+        values: dict[str | None, list[str]] = {}
+        for name, props in sorted(recorded.items()):
+            values.setdefault(props.get(prop), []).append(name)
+        if len(values) > 1:
+            listing = "; ".join(f"{v!r} in {', '.join(names)}"
+                                for v, names in sorted(values.items(),
+                                                       key=lambda kv: str(kv[0])))
+            errors.append(
+                f"{where}: the SBOMs disagree about {prop} ({listing}).  They "
+                f"are one record of one release, resolved together: regenerate "
+                f"them all in one run of scripts/generate_sbom.py")
+    return errors
 
 
 def main(argv: list[str] | None = None) -> int:

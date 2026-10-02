@@ -251,13 +251,20 @@ def test_malformed_binary_frames_get_error_replies_and_the_bridge_survives():
         # counted: frames that were well formed at the frame level (the two
         # whose *request* then failed validation) plus the good one
         assert bridge.binary_frames_received == 3
-        # a flagged length over the 64 MiB limit drops that connection only
+        # a flagged length over the 64 MiB limit drops that connection only:
+        # the bridge goes on serving the next one, which is a new FMU
+        # instance and so starts from the input's start value, not from
+        # the 0.5 the instance before it set
         conn, _ = _connect(bridge)
         with conn:
             conn.sendall(struct.pack(">I", _BINARY | (64 * 1024 * 1024 + 1)))
             assert conn.recv(16) == b""
         conn, _ = _connect(bridge)
         with conn:
+            send_message(conn, {"op": "get", "vr": [anchor]})
+            assert values_of(recv_message(conn)).tolist() == [0.0]
+            send_binary(conn, {"op": "set", "vr": [anchor], "n": 1, "dtype": "f64"}, _f64([0.5]))
+            assert recv_message(conn) == {"ok": True}
             send_message(conn, {"op": "get", "vr": [anchor]})
             assert values_of(recv_message(conn)).tolist() == [0.5]
 

@@ -19,8 +19,12 @@ For each install this
    the environment, less MADDENING itself (which is the root component);
 5. finalises the document (:func:`finalise`): the root component gets its
    purl and a dependency edge to each *declared* direct dependency
-   (cyclonedx-py also links the packages an unselected extra names), the
-   resolution environment is recorded, and the result is sorted and sealed;
+   (cyclonedx-py also links the packages an unselected extra names), each
+   component gets its own ``Requires-Dist`` as
+   ``maddening:sbom:requires-dist`` properties (so ``check_sbom.py`` can
+   check, offline, that the components are closed under the install's
+   requirements and at versions their dependants admit), the resolution
+   environment is recorded, and the result is sorted and sealed;
 6. validates it against the CycloneDX schema, writes it, and runs
    ``check_sbom.py`` over the output directory.
 
@@ -115,9 +119,12 @@ libc = " ".join(p for p in platform.libc_ver() if p)
 dists = sorted({(d.metadata["Name"], d.version) for d in metadata.distributions()})
 license_fields = {d.metadata["Name"]: d.metadata["License"]
                   for d in metadata.distributions() if d.metadata["License"]}
+requires_dist = {d.metadata["Name"]: list(d.requires or [])
+                 for d in metadata.distributions()}
 print(json.dumps({"marker": env, "platform": sysconfig.get_platform(),
                   "libc": libc or "unknown", "distributions": dists,
-                  "license_fields": license_fields}))
+                  "license_fields": license_fields,
+                  "requires_dist": requires_dist}))
 """
 
 #: Longest legacy ``License`` field read as a licence *name*.  Longer, or
@@ -177,6 +184,25 @@ def finalise(raw: dict, *, pyproject: dict, install: str, probe: dict,
                 and len(value) <= _LICENSE_NAME_MAX):
             comp["licenses"] = [{"license": {"acknowledgement": "declared",
                                              "name": value}}]
+    # Each component's own ``Requires-Dist``, verbatim, so that
+    # ``check_sbom.py`` can check offline that the components are closed
+    # under the install's requirements and at versions their dependants
+    # admit.  The count is recorded too, so that "requires nothing"
+    # (numpy) and "the record was removed" are told apart.
+    requires = {canonicalize_name(k): v
+                for k, v in probe.get("requires_dist", {}).items()}
+    for key, comp in by_name.items():
+        if key not in requires:
+            raise ValueError(f"the probe recorded no Requires-Dist for "
+                             f"{comp['name']}, so its requirements cannot be "
+                             f"recorded")
+        props = [p for p in comp.get("properties", [])
+                 if not str(p.get("name", "")).startswith(check_sbom.PROP)]
+        props += [{"name": check_sbom.PROP_REQUIRES_DIST, "value": str(r)}
+                  for r in requires[key]]
+        props.append({"name": check_sbom.PROP_REQUIRES_DIST_COUNT,
+                      "value": str(len(requires[key]))})
+        comp["properties"] = props
     edges = []
     for req in check_sbom.declared_requirements(pyproject, install):
         if req.marker is not None and not req.marker.evaluate({**env, "extra": ""}):

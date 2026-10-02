@@ -26,6 +26,14 @@ norm with ``tolerance``; ``"mixed"`` takes a per-field RMS of
 does the same over the coupling-edge fields only.  Part 3 runs all
 three.
 
+**Reading it, and enforcing it**: ``gm.print_coupling_report()`` prints
+the same diagnostics as a table, one row per group, with the documented
+caveats flagged beneath it -- a group that hit ``max_iterations``,
+``converged=False``, a residual at its float floor.  And
+``strict_convergence=True`` turns an unconverged exit into an error
+instead of a report: the step raises, and the graph keeps the state it
+had.  Part 5 shows a converged group, a capped one and a strict one.
+
 Setup: two masses joined by one spring (two ``SpringDamperNode`` nodes
 anchored to each other, ``rest_length`` +1 and -1).  A Gauss-Seidel pass
 scales the error by ``(k * dt**2 / m)**2 = 0.01`` here, so the iteration
@@ -38,6 +46,7 @@ Usage
 """
 
 import argparse
+import logging
 import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -192,6 +201,66 @@ def demo_spectral_keys():
     print()
 
 
+def demo_report_and_strict():
+    print("=" * 65)
+    print("Part 5: print_coupling_report() and strict_convergence")
+    print("=" * 65)
+    print()
+    print("  A converged group (max_iterations=15), after one step:")
+    print()
+    gm = build(max_iterations=15, tolerance=1e-6)
+    gm.step()
+    gm.print_coupling_report()
+    (row,) = gm.coupling_report()
+    assert row["converged"] and row["iterations"] < row["max_iterations"]
+    assert not any(f.startswith("hit max_iterations") for f in row["flags"])
+    print()
+    print(f"  Converged in {row['iterations']} of {row['max_iterations']} passes, "
+          f"with no 'hit max_iterations' flag.")
+    if any(f.startswith("precision_limited=True") for f in row["flags"]):
+        print("  Its precision_limited flag says the residual is at its float floor:")
+        print("  the solve went as far as float32 can measure, which is not a failure.")
+    print()
+    print("  The same graph capped at max_iterations=2:")
+    print()
+    gm = build(max_iterations=2, tolerance=1e-6)
+    gm.step()
+    gm.print_coupling_report()
+    (row,) = gm.coupling_report()
+    assert not row["converged"] and row["iterations"] == row["max_iterations"] == 2
+    assert any(f.startswith("hit max_iterations") for f in row["flags"])
+    assert any(f.startswith("converged=False") for f in row["flags"])
+    print()
+    print("  Both caveats are flagged.  Nothing stopped the run: the step was")
+    print("  taken with the unconverged state, which is what a report can do.")
+    print()
+    print("  With strict_convergence=True the same step raises instead:")
+    gm = build(max_iterations=2, tolerance=1e-6, strict_convergence=True)
+    before = {n: gm.get_node_state(n) for n in ("A", "B")}
+    # The check runs inside the compiled step (equinox.error_if); JAX also
+    # logs the callback's traceback, silenced here to keep the output short.
+    callback_log = logging.getLogger("jax._src.callback")
+    level = callback_log.level
+    callback_log.setLevel(logging.CRITICAL)
+    try:
+        gm.step()
+    except RuntimeError as exc:
+        reason = next(line for line in str(exc).splitlines() if "without converging" in line)
+        print(f"    {type(exc).__name__}: ...{reason.split('Error: ', 1)[-1][:150]}...")
+    else:
+        raise AssertionError("strict_convergence let an unconverged step through")
+    finally:
+        callback_log.setLevel(level)
+    after = {n: gm.get_node_state(n) for n in ("A", "B")}
+    unchanged = all(float(after[n][f]) == float(before[n][f])
+                    for n in before for f in before[n])
+    print(f"  The graph keeps the state it had before the step: {unchanged}")
+    assert unchanged
+    print("  Use it for calibration and training runs, where a gradient through")
+    print("  an unconverged step would be silently wrong.")
+    print()
+
+
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Coupling convergence diagnostics")
     parser.add_argument("--steps", type=int, default=20,
@@ -201,6 +270,7 @@ def main(argv=None) -> None:
     demo_insufficient_iterations(args.steps)
     demo_norms(args.steps)
     demo_spectral_keys()
+    demo_report_and_strict()
     print("All demos complete.")
 
 

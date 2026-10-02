@@ -328,6 +328,13 @@ PER_PUSH = [
         expect=("All checks passed",)),
     Run("advanced.checkpoint_resume_demo", ("--warmup", "20", "--steps", "20"),
         expect=("All checks passed",)),
+    # Pins its own device count (4) before importing JAX, whatever
+    # XLA_FLAGS it inherits.
+    Run("advanced.sharding_demo", ("--n-cells", "64", "--steps", "20"),
+        expect=("All checks passed",)),
+    # Skips its packaging / validation stages, saying why, when the C
+    # compiler or FMPy is missing; CI has both.
+    Run("advanced.fmu_export_demo", ("--steps", "5"), expect=("All checks passed",)),
     Run("advanced.surrogate_demo",
         ("--epochs", "10", "--train-steps", "100", "--compare-steps", "20"),
         needs=("equinox", "optax"), expect=("Done!",)),
@@ -344,6 +351,9 @@ PER_PUSH = [
     Run("coupling.flux_coupling_demo", ("--sections", "1,2,3"),
         expect=("All demos completed successfully",)),
     Run("coupling.interface_mapping_demo", ("--steps", "20"),
+        expect=("All checks passed",)),
+    # In-process TestClient: no port, no server process.
+    Run("servers.rest_params_demo", ("--steps", "5"), needs=("fastapi", "httpx"),
         expect=("All checks passed",)),
     Run("cloud.streaming.08_subscribe_lbm_velocity", ("--n-frames", "5"),
         needs=("fastapi", "uvicorn", "websockets", "zstandard"),

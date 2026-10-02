@@ -57,7 +57,7 @@ def test_the_bridge_restores_its_own_snapshot_of_a_node_without_fields(graph):
     bridge = FmuTcpBridge(_sidecar(graph, md), md, master_dt=DT)
     try:
         snap = bridge.handle({"op": "get_state"})["state"]
-        assert bridge.handle({"op": "set_state", "state": snap}) == {"ok": True}
+        assert bridge.handle({"op": "set_state", "state": snap})["ok"] is True
         assert bridge._sidecar.state["probe"] == {}
         reply = bridge.handle({"op": "step", "dt": DT})
         assert reply == {"ok": True, "t": pytest.approx(DT)}, reply

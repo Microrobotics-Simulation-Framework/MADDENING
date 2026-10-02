@@ -366,7 +366,10 @@ def test_fit_lm_ending_on_an_accepted_step_reports_that_step():
     assert len(res.losses) == 2 and not res.converged
     assert res.best_iteration == 2
     assert res.best_loss < res.losses[-1] < res.losses[0]
-    assert _half_sse(_bowl_residual, res.params) == pytest.approx(res.best_loss, rel=1e-4)
+    # The second step lands at 3.8e-10, eleven decades below the start, where
+    # float32 and this float64 recomputation part in the third digit.
+    assert _half_sse(_bowl_residual, res.params) == pytest.approx(
+        res.best_loss, rel=1e-4, abs=1e-12 * res.losses[0])
 
 
 @jax.custom_jvp

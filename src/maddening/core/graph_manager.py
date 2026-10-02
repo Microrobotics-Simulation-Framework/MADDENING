@@ -4574,6 +4574,49 @@ def _leaf_values_equal(a, b) -> bool:
     return True
 
 
+class _ParamsSnapshot:
+    """What one compile took from the nodes and left in ``gm.params``.
+
+    ``gen`` is the compile generation the snapshot belongs to once that
+    compile commits; ``node_before`` / ``live_before`` are
+    ``{node: {key: leaf}}`` -- the nodes' own values and the merged
+    ``gm.params`` -- and ``writes`` is ``{node: (params object, total
+    writes, {key: writes})}`` read off each node's ``_ParamsDict`` at that
+    moment, so a later write is seen as a write even when it stores the
+    value the node already held.  ``total`` is ``-1`` when a write is known
+    to be pending on a key no snapshot value covers.
+    """
+
+    __slots__ = ("gen", "node_before", "live_before", "writes")
+
+    def __init__(self, gen: int, node_before: dict, live_before: dict, writes: dict) -> None:
+        self.gen = gen
+        self.node_before = node_before
+        self.live_before = live_before
+        self.writes = writes
+
+
+def _params_write_record(params) -> tuple:
+    """``(object, total writes, {key: writes})`` of a node's params mapping;
+    the counts are ``None`` / ``{}`` for a plain dict, which counts nothing."""
+    return (params, getattr(params, "_writes", None),
+            dict(getattr(params, "_key_writes", None) or {}))
+
+
+def _key_written_since(record: Optional[tuple], params, key) -> bool:
+    """Whether ``params[key]`` was written after ``record`` was taken: the
+    mapping replaced, or its count for ``key`` moved."""
+    if record is None:
+        return False
+    obj, _total, counts = record
+    if params is not obj:
+        return True
+    key_writes = getattr(params, "_key_writes", None)
+    if key_writes is None:
+        return False
+    return key_writes.get(key, 0) != counts.get(key, 0)
+
+
 def _short_value(value) -> str:
     """A parameter value for a message: the number(s) if few, else the shape."""
     arr = np.asarray(value)
@@ -4636,8 +4679,8 @@ class GraphManager:
         # What the last *committed* compile took the node leaves from and
         # left in ``gm.params``, and the same pair for a compile still in
         # flight; see ``_merge_live_params``.
-        self._params_snapshot: Optional[tuple] = None
-        self._params_snapshot_pending: Optional[tuple] = None
+        self._params_snapshot: Optional[_ParamsSnapshot] = None
+        self._params_snapshot_pending: Optional[_ParamsSnapshot] = None
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
         # The raw (uncounted, unjitted) step of the last compile, for the
@@ -4715,15 +4758,13 @@ class GraphManager:
         longer fit (owner or key gone, shape changed) are dropped with a
         ``RuntimeWarning``.
         """
-        # Promote the snapshot of the previous compile if it committed:
-        # ``compile`` bumps ``_compile_generation`` at its commit point and
-        # nowhere else, so a pending snapshot stamped with the generation
-        # that compile would have reached is the committed one.
-        pending = self._params_snapshot_pending
-        if pending is not None and pending[0] == self._compile_generation:
-            self._params_snapshot = pending
+        snapshot = self._committed_params_snapshot()
+        # A pending snapshot still here belongs to a compile that raised
+        # after its merge and committed nothing: discarded.
         self._params_snapshot_pending = None
-        _, node_before, live_before = self._params_snapshot or (None, {}, {})
+        node_before = snapshot.node_before if snapshot is not None else {}
+        live_before = snapshot.live_before if snapshot is not None else {}
+        writes_before = snapshot.writes if snapshot is not None else {}
         node_now = {owner: dict(leaves) for owner, leaves in fresh.get("nodes", {}).items()}
 
         def same(a, b) -> bool:
@@ -4752,8 +4793,16 @@ class GraphManager:
                         dropped.append(f"{section}[{owner!r}][{key!r}] (shape changed)")
                         continue
                     was = node_before.get(owner, {}).get(key) if section == "nodes" else None
-                    if was is not None and not same(base, was):
-                        # The node was written since the last compile.
+                    spec = self._nodes.get(owner) if section == "nodes" else None
+                    node_written = was is not None and (
+                        _key_written_since(writes_before.get(owner),
+                                           spec.node.params if spec is not None else None, key)
+                        or not same(base, was))
+                    if node_written:
+                        # The node was written since the last compile: a
+                        # write through ``node.params`` (counted, so one that
+                        # stores the value the node already held counts
+                        # too), or a value changed in place.
                         live_was = live_before.get(owner, {}).get(key)
                         if (live_was is not None and same(value, live_was)) or same(value, base):
                             continue            # keep the node's value (``fresh``)
@@ -4779,12 +4828,121 @@ class GraphManager:
                 "takes effect on the next step, with no recompile).",
                 RuntimeWarning, stacklevel=3,
             )
-        self._params_snapshot_pending = (
+        self._params_snapshot_pending = _ParamsSnapshot(
             self._compile_generation + 1,
             node_now,
             {owner: dict(leaves) for owner, leaves in fresh.get("nodes", {}).items()},
+            {name: _params_write_record(spec.node.params) for name, spec in self._nodes.items()},
         )
         return fresh
+
+    def _committed_params_snapshot(self) -> Optional[_ParamsSnapshot]:
+        """The snapshot of the last compile that committed.
+
+        ``compile`` bumps ``_compile_generation`` at its commit point and
+        nowhere else, so a pending snapshot stamped with the generation that
+        compile would reach is the committed one, and is promoted here.
+        """
+        pending = self._params_snapshot_pending
+        if pending is not None and pending.gen == self._compile_generation:
+            self._params_snapshot = pending
+            self._params_snapshot_pending = None
+        return self._params_snapshot
+
+    def _check_node_param_writes(self) -> bool:
+        """Mark the graph dirty if a ``node.params`` write since the last
+        compile is not yet in the compiled step; return whether it did.
+
+        The value a node reads from ``self.params`` when its step is traced
+        -- a structural constant of any node, every constant of a node on
+        the three-argument contract -- is baked into whichever program is
+        traced next.  ``gm.step`` kept its cached trace while a new
+        ``run_scan`` length, ``run_scan_with_history`` or a sysid loss traced
+        afresh, so after a write with no compile different entry points ran
+        different models.  Every entry point calls this first, so a write
+        makes the next run of any of them recompile -- all of them then run
+        the written value.  A write the running step already reflects -- a
+        constant ``gm.params`` carries, written to the value ``gm.params``
+        holds, as ``PUT /graph/params`` writes both -- costs no recompile:
+        it is absorbed into the snapshot, so the next compile does not read
+        it as a pending node write either.
+        """
+        snapshot = self._committed_params_snapshot()
+        if snapshot is None:
+            return False
+        for name, spec in self._nodes.items():
+            params = spec.node.params
+            record = snapshot.writes.get(name)
+            if record is None:
+                continue                    # added since: the graph is dirty anyway
+            if params is record[0] and getattr(params, "_writes", None) == record[1]:
+                continue
+            key_writes = getattr(params, "_key_writes", None)
+            if params is not record[0] or key_writes is None:
+                written = set(params) | set(record[0])
+            else:
+                counts = record[2]
+                written = {k for k in set(key_writes) | set(counts)
+                           if key_writes.get(k, 0) != counts.get(k, 0)}
+            live = (self.params.get("nodes") or {}).get(name) or {}
+            values = spec.node.params_pytree() if (written and live) else {}
+            reflected = {}
+            for key in written:
+                if key not in live or key not in values:
+                    break
+                try:
+                    if not _leaf_values_equal(values[key], live[key]):
+                        break
+                except TypeError:
+                    break
+                reflected[key] = values[key]
+            else:
+                snapshot.writes[name] = _params_write_record(params)
+                for key, value in reflected.items():
+                    snapshot.node_before.setdefault(name, {})[key] = value
+                    snapshot.live_before.setdefault(name, {})[key] = live[key]
+                continue
+            self._dirty = True
+            return True
+        return False
+
+    def _supersede_node_param_writes(self) -> None:
+        """After ``load_state``: the restored ``gm.params`` supersedes every
+        earlier ``node.params`` write to a constant it carries.
+
+        Without this a node write made before the restore was still read as
+        newer by the next compile, so the restored value was overwritten --
+        or not, depending on whether ``load_state`` had found the graph
+        dirty (it compiles a dirty graph first, taking the write in, before
+        it restores).  A pending write to a value the checkpoint does not
+        hold (a structural constant) stays pending.
+        """
+        snapshot = self._committed_params_snapshot()
+        if snapshot is None:
+            return
+        for name, spec in self._nodes.items():
+            live = (self.params.get("nodes") or {}).get(name)
+            record = snapshot.writes.get(name)
+            if not live or record is None:
+                continue
+            params = spec.node.params
+            key_writes = getattr(params, "_key_writes", None) or {}
+            old_counts = record[2] if params is record[0] else {}
+            counts = dict(old_counts)
+            pending = False
+            for key in set(key_writes) | set(old_counts) | set(params):
+                if key in live:
+                    counts[key] = key_writes.get(key, 0)
+                elif key_writes.get(key, 0) != old_counts.get(key, 0) or params is not record[0]:
+                    counts[key] = -1        # still written: nothing restored it
+                    pending = True
+            total = getattr(params, "_writes", None)
+            snapshot.writes[name] = (params, -1 if pending else total, counts)
+            values = spec.node.params_pytree()
+            for key in live:
+                if key in values:
+                    snapshot.node_before.setdefault(name, {})[key] = values[key]
+                    snapshot.live_before.setdefault(name, {})[key] = live[key]
 
     def _check_param_shapes(self, section: str, owner: str, leaves: dict) -> None:
         """A leaf of the wrong shape would broadcast the node's *state* to
@@ -7063,8 +7221,13 @@ class GraphManager:
 
         Called from each public entry-point (``step``, ``run``, etc.)
         before the standard dirty-check so a stale JIT cache is caught
-        without requiring the caller to mark the graph dirty manually.
+        without requiring the caller to mark the graph dirty manually.  It
+        also catches a ``node.params`` write since the last compile
+        (:meth:`_check_node_param_writes`), so every entry point runs the
+        same model.
         """
+        if self._check_node_param_writes():
+            return True
         for name, spec in self._nodes.items():
             if spec.node.static_data_hash() != self._static_data_hashes.get(name, 0):
                 self._dirty = True
@@ -10060,6 +10223,8 @@ class GraphManager:
         from maddening.core.simulation.checkpoint import load_state
         self._recover_from_escaped_tracers()
         load_state(self, path)
+        # The restore is later than any node.params write made before it.
+        self._supersede_node_param_writes()
 
     # ------------------------------------------------------------------
     # Convenience

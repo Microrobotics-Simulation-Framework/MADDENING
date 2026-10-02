@@ -95,12 +95,95 @@ def test_streams_past_the_cap_are_refused_with_1013(monkeypatch, third):
         # Accepted, then closed with 1013: a real client sees the close
         # code (closed before the accept it saw HTTP 403, the answer to an
         # Origin or token refusal).
+        accepted = False
         with pytest.raises(WebSocketDisconnect) as refused:
             with client.websocket_connect(third) as c:
+                accepted = True
                 c.receive_json()
+        assert accepted, "closed before the accept: a real client is sent HTTP 403"
         assert refused.value.code == 1013
     # Closing a stream frees its place.
     with client.websocket_connect(third) as c:
         if third.endswith("binary"):
             assert c.receive_json()["type"] == "schema"
     assert server._stream_connections == 0
+
+
+_CAPPED_SERVER = """
+import sys, types, warnings
+warnings.simplefilter("ignore")
+stub = types.ModuleType("maddening.cloud.session")
+def _refuse(*a, **k):
+    raise RuntimeError("cloud stubbed out in this test")
+stub.CloudSession = stub.CloudConfig = _refuse
+sys.modules["maddening.cloud.session"] = stub
+import uvicorn
+from maddening.api import server as server_module
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes import BallNode
+server_module.MAX_STREAM_CONNECTIONS = 1
+gm = GraphManager()
+gm.add_node(BallNode("c", timestep=1.0 / 64.0, initial_velocity=1.0, gravity=0.0))
+gm.compile()
+server = server_module.SimulationServer({}, graph_manager=gm, bind_host="127.0.0.1")
+uvicorn.run(server.create_app(), host="127.0.0.1", port=int(sys.argv[1]),
+            log_level="warning")
+"""
+
+
+# Per push: tests/api/test_state_stream_encodes_off_the_event_loop.py::test_streams_past_the_cap_are_refused_with_1013
+@pytest.mark.slow  # starts a uvicorn server process: about 5 s
+def test_a_real_client_past_the_cap_gets_close_code_1013_not_http_403(tmp_path):
+    """Under uvicorn, a handshake closed before it is accepted is answered
+    HTTP 403 -- the answer to an Origin or token refusal -- with no close
+    code; only Starlette's test client reported 1013."""
+    import socket
+    import subprocess
+    import sys
+    import time
+    from pathlib import Path
+
+    import httpx
+    from websockets.exceptions import ConnectionClosed
+    from websockets.sync.client import connect
+
+    import maddening
+
+    script = tmp_path / "serve.py"
+    script.write_text(_CAPPED_SERVER)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items()
+           if not k.upper().startswith(("RUNPOD_", "AWS_", "GOOGLE_", "GCLOUD_", "SKY",
+                                        "LAMBDA_", "AZURE_"))}
+    env.update(HOME=str(home), JAX_PLATFORMS="cpu",
+               PYTHONPATH=str(Path(maddening.__file__).resolve().parents[1])
+               + os.pathsep + env.get("PYTHONPATH", ""))
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen([sys.executable, str(script), str(port)], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                httpx.get(f"http://127.0.0.1:{port}/healthz", timeout=1)
+                break
+            except httpx.HTTPError:
+                assert proc.poll() is None, proc.stdout.read().decode()[-2000:]
+                time.sleep(0.2)
+        url = f"ws://127.0.0.1:{port}/ws/state"
+        with connect(url, open_timeout=30):
+            with connect(url, open_timeout=30) as refused:
+                with pytest.raises(ConnectionClosed) as closed:
+                    refused.recv(timeout=30)
+        assert closed.value.rcvd is not None and closed.value.rcvd.code == 1013, closed.value
+    finally:
+        if proc.poll() is None:              # only the process this test started
+            proc.terminate()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=30)

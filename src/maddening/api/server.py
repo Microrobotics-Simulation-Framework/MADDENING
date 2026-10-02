@@ -3551,6 +3551,8 @@ class SimulationServer:
             """The 400 of a ``POST /sim/run`` whose step raised after
             *steps_run* steps had been stored."""
             detail = _cannot_step_detail(exc)
+            if not steps_run and "nothing was stepped" not in detail:
+                detail += " (nothing was stepped)"     # a RuntimeError's own words
             if steps_run:
                 detail = detail.replace(
                     "; nothing was stepped",

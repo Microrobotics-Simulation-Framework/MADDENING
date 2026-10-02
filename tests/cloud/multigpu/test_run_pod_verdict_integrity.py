@@ -592,3 +592,69 @@ def test_the_transport_ranking_uses_only_a_file_that_passes(rp, recorded):
     split[0]["passed"] = False
     rec = rp.recommend(split, min_cells=0)
     assert rec["decision"] == "undecided" and "its file reads FAIL" in rec["reason"]
+
+
+# --- a goal that raised under --keep-going, and a directory with no commit ----
+
+
+def _raised(rp, recorded, goal="halo") -> dict:
+    doc = copy.deepcopy(recorded[goal][0])
+    return rp.record_goal_raised(doc, ValueError("seeded: shard_map refused the step"))
+
+
+def test_the_record_of_a_goal_that_raised_is_valid_and_fails(rp, recorded):
+    doc = _raised(rp, recorded)
+    assert rp.record_problems(doc) == []
+    assert rp.goal_verdict([doc]) == "FAIL"
+    status = {i: s for i, (s, _) in rp.checklist_status(
+        {**_as_real_gpu_run(recorded), "halo": [doc]}).items()}
+    assert status[2] == "FAILED"
+
+
+@pytest.mark.parametrize("tamper, problem", [
+    (lambda d: d["checks"][0].update(value=True, passed=True), "disagree"),
+    (lambda d: d["checks"].append(dict(d["checks"][0], name="extra")), "does not emit"),
+    (lambda d: d["checks"].clear(), "lacks"),
+    (lambda d: d["results"].append({"cells": 1}), "records results"),
+    (lambda d: d["raised"].pop("type"), "type and message"),
+    (lambda d: d.update(raised="ValueError"), "type and message"),
+])
+def test_a_tampered_record_of_a_goal_that_raised_cannot_decide(rp, recorded, tamper, problem):
+    doc = _raised(rp, recorded)
+    tamper(doc)
+    problems = rp.record_problems(doc)
+    assert problems and any(problem in p for p in problems), problems
+
+
+def test_summarise_lists_a_goal_that_raised_and_exits_3(rp, recorded, tmp_path, capsys):
+    docs = _as_real_gpu_run(recorded)
+    docs["halo"] = [_raised(rp, docs)]
+    _write(tmp_path, docs)
+    assert rp.summarise(tmp_path) == 3
+    out = capsys.readouterr().out
+    assert "goal raised" in out and "seeded: shard_map refused the step" in out
+
+
+def test_summarise_exits_4_when_no_file_records_a_commit(rp, recorded, tmp_path, capsys):
+    """A tree synced without ``.git`` records no commit in any file: every
+    item stays open, and the summary used to exit 0 as if one session at
+    one commit had written them.  It exits 4 and says why."""
+    docs = _as_real_gpu_run(recorded)
+    for goal_docs in docs.values():
+        for doc in goal_docs:
+            doc["environment"]["git_commit"] = None
+    status = {i: s for i, (s, _) in rp.checklist_status(docs).items()}
+    assert all(s.startswith("open: no git commit recorded") for s in status.values()), status
+    _write(tmp_path, docs)
+    assert rp.summarise(tmp_path) == 4
+    out = capsys.readouterr().out
+    assert "no file in this directory records a git commit" in out
+    assert out.rstrip().endswith("WARNING: MIXED COMMITS -- see above; exit 4")
+
+
+def test_summarise_exits_4_when_one_file_records_no_commit(rp, recorded, tmp_path, capsys):
+    docs = _as_real_gpu_run(recorded)
+    docs["halo"][0]["environment"]["git_commit"] = None
+    _write(tmp_path, docs)
+    assert rp.summarise(tmp_path) == 4
+    assert "WARNING: MIXED COMMITS" in capsys.readouterr().out

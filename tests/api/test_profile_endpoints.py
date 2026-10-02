@@ -79,14 +79,16 @@ class TestSimProfile:
 
     def test_runner_running_returns_409(self, loaded_client):
         client, server = loaded_client
-        # Start the runner; profile should refuse
-        server._runner_started = True  # spoof started state
+        # Start the runner; profile should refuse.  A real one: whether the
+        # runner runs is read from its thread, not from a flag a spoof
+        # could set (a dead runner's flag used to read "started").
+        assert client.post("/sim/start").status_code == 200
         try:
             resp = client.post("/sim/profile?n_steps=3")
             assert resp.status_code == 409
             assert "runner" in resp.json()["detail"].lower()
         finally:
-            server._runner_started = False
+            assert client.post("/sim/stop").status_code == 200
 
     def test_includes_node_events(self, loaded_client):
         client, _ = loaded_client

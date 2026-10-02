@@ -65,6 +65,9 @@ class Seed(NamedTuple):
     fails: tuple = _WRAPPER_GOALS
     #: The mesh the per-push one-step test looks for the fault on.
     mesh: str = "1d"
+    #: The fault makes the step raise rather than compute a wrong number
+    #: (``shard_map`` refuses it): the goals must record that as a failure.
+    raises: bool = False
 
 
 _SEEDS = {
@@ -102,6 +105,15 @@ _SEEDS = {
         "                              exchange_axes[0][0]: boundary},\n"
         "                )\n",
         only_in=("2d", "2d-flat"), mesh="2d"),
+    # A domain integral summed over the first mesh axis only: on a 2-D mesh
+    # the result is not replicated over the second, so shard_map refuses
+    # the step and each wrapper goal raises -- which ended a --keep-going
+    # run at the first of them, leaving the rest "not run".
+    "domain_integrals_summed_over_the_first_mesh_axis_only": Seed(
+        "                    red = lax.psum(v, axis_name=reduce_axes) if reduce_axes else v\n",
+        "                    red = lax.psum(v, axis_name=reduce_axes[:1]) if reduce_axes else v"
+        "  # SEEDED FAULT\n",
+        mesh="2d", raises=True),
     # The three below passed every goal on four devices until schema 6.
     # Along spatial axis 1 each halo comes from the wrong neighbour: on a
     # mesh axis of two devices (both of the 2 x 2 pencil's) left and right
@@ -295,6 +307,9 @@ def test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault(
         for mesh_label in rp.meshes_that_fit(_N_DEV):
             rel = _one_step_forward(rp, rp.ShardedStencilNode, mesh_label)
             assert all(v <= limit for v in rel.values()), (mesh_label, rel)
+    elif _SEEDS[name].raises:
+        with pytest.raises(Exception):
+            _one_step_forward(rp, seeded_wrapper_classes[name], _SEEDS[name].mesh)
     else:
         rel = _one_step_forward(rp, seeded_wrapper_classes[name], _SEEDS[name].mesh)
         assert any(not v <= limit for v in rel.values()), rel
@@ -361,6 +376,7 @@ def test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper(name, tmp
     for goal in seed.fails:
         (doc,) = docs[goal]
         assert rp.record_problems(doc) == [], (goal, rp.record_problems(doc))
+        assert ("raised" in doc) == seed.raises, (goal, doc.get("raised"))
     if seed.only_in:
         (stencil,) = docs["stencil"]
         failed = [c["name"] for c in stencil["checks"] if rp.check_status(c) == "failed"]

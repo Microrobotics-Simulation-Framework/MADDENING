@@ -166,13 +166,73 @@ def test_the_wrapper_reports_the_start_time_and_refuses_a_jump(gm, tmp_path):
             assert inst.getFloat64([T])[0] == 5.0
             inst.exitInitializationMode()
             inst.doStep(currentCommunicationPoint=5.0, communicationStepSize=DT)
-            before = inst.getFloat64([T, POS])
+            # time is a Float64, the spring's position a Float32: each is read
+            # through the getter of its own type (FMI 3.0; the bridge refuses
+            # any other)
+            before = inst.getFloat64([T]) + inst.getFloat32([POS])
             with pytest.raises(FMICallException):
                 inst.doStep(currentCommunicationPoint=100.0, communicationStepSize=DT)
-            assert inst.getFloat64([T, POS]) == before
+            assert inst.getFloat64([T]) + inst.getFloat32([POS]) == before
             inst.doStep(currentCommunicationPoint=5.0 + DT, communicationStepSize=DT)
             assert inst.getFloat64([T])[0] == pytest.approx(5.0 + 2 * DT)
             inst.terminate()
         finally:
             inst.freeInstance()
     assert np.isfinite(before).all()
+
+
+# ------------------------------------------- one tolerance for both checks
+#
+# The step size used to be allowed a millionth of a master step *per master
+# step it covered* off a whole number of them, the communication point a
+# millionth of one.  A step of 3 * DT * (1 + 5e-7) was accepted, the
+# bridge's clock advanced 3 * DT, and the next doStep at t + h -- the point
+# FMI requires -- was refused (the audit's C5).  Both now use the same
+# absolute tolerance, a millionth of a master step, so a step the bridge
+# accepts always leaves the next legal point inside it.
+
+TOL = 1e-6 * DT
+
+
+@pytest.mark.parametrize("n", [1, 3, 1000])
+def test_a_step_inside_the_tolerance_leaves_the_next_legal_point_accepted(served, n):
+    md, bridge = served
+    h = n * DT + 0.9 * TOL
+    t = 0.0
+    for _ in range(3):
+        reply = bridge.handle({"op": "step", "t": t, "dt": h})
+        assert reply["ok"], (t, reply)
+        t = t + h                                     # where the importer goes next
+    assert _time(md, bridge) == pytest.approx(3 * h, abs=TOL)
+
+
+@pytest.mark.parametrize("n", [1, 3, 1000])
+@pytest.mark.parametrize("sign", [1, -1])
+def test_a_step_outside_the_tolerance_is_refused_and_advances_nothing(served, n, sign):
+    md, bridge = served
+    before = _state(md, bridge)
+    reply = bridge.handle({"op": "step", "t": 0.0, "dt": n * DT + sign * 1.1 * TOL})
+    assert reply["ok"] is False and "is not a whole multiple" in reply["error"], reply
+    assert _state(md, bridge) == before
+
+
+def test_the_audits_step_size_is_refused_instead_of_breaking_the_next_step(served):
+    md, bridge = served
+    h = 3 * DT * (1 + 5e-7)                           # 1.5e-8 off, TOL is 1e-8
+    reply = bridge.handle({"op": "step", "t": 0.0, "dt": h})
+    assert reply["ok"] is False and "is not a whole multiple" in reply["error"], reply
+    assert bridge.handle({"op": "step", "t": 0.0, "dt": 3 * DT})["ok"]
+    assert bridge.handle({"op": "step", "t": 3 * DT, "dt": 3 * DT})["ok"]
+
+
+def test_an_importer_whose_step_is_off_by_less_than_the_tolerance_never_drifts_out(served):
+    """Two hundred steps of a size 0.9 tolerance off, at the importer's own
+    running sum: every point is adopted, so the discrepancy never builds up
+    past one step's worth."""
+    md, bridge = served
+    h, t = DT + 0.9 * TOL, 0.0
+    for k in range(200):
+        reply = bridge.handle({"op": "step", "t": t, "dt": h})
+        assert reply["ok"], (k, reply)
+        t += h
+    assert abs(_time(md, bridge) - t) <= TOL

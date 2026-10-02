@@ -47,11 +47,21 @@ compiler or FMPy is missing, saying so.
 
 The importer then loads `plant.fmu` as usual; the wrapper reads
 `resources/endpoint.txt` (or `MADDENING_FMU_ENDPOINT`) and connects.  A
-communication step of `h` runs `round(h / master_dt)` graph steps.  Pass
+communication step of `h` runs `h / master_dt` graph steps.  Pass
 `master_dt=gm.timestep`, the simulated time one graph step advances; it is
 also the description's default `stepSize`.  On a graph with a sub-cycling
 coupling group it is the group's largest member timestep, not the smallest
-node timestep.
+node timestep.  The description records it as `md.graph_timestep`, and the
+bridge refuses any other `master_dt`, and a description whose
+`default_step_size` is not a whole number of graph steps.  Until 0.4.0
+shipped it took any `master_dt`, so a 0.01 s graph served with
+`master_dt=0.005` ran two graph steps per 0.01 s `doStep` and reported half
+the time its state was at (MADD-ANO-100).  `default_step_size=` may
+advertise a coarser communication step, such as five graph steps; the
+bridge then runs five per `doStep`, and `master_dt` is still the graph's
+step.  One `doStep` runs at most `max_steps_per_request` graph steps
+(100000 by default, `FmuTcpBridge(..., max_steps_per_request=)`), and a
+long one stops at the first graph step after `stop()`, committing nothing.
 `fmi3GetFMUState` / `fmi3SetFMUState` / serialization round-trip the
 sidecar's state.  Model exchange and scheduled execution are refused at
 instantiation.
@@ -74,7 +84,11 @@ what the `time` variable reads from then on.  It is accepted until the
 instance's first step.  Each `fmi3DoStep` must start at the FMU's current
 time: the previous communication point plus the previous step size, or
 first the start time.  The tolerance is a millionth of a master step, which
-absorbs any importer's floating-point accumulation.  A point inside it is
+absorbs any importer's floating-point accumulation.  A step size is held to
+the same absolute tolerance off a whole number of master steps, so a step
+the FMU accepts never makes the next legal `doStep` fail; until 0.4.0
+shipped, the step size was allowed a millionth per master step it covered.
+A point inside it is
 adopted, so the importer's clock and the FMU's never drift apart.  A point
 outside it is `fmi3Error` with nothing advanced: an importer that jumped
 from 0.01 to 100 used to get one master step of physics labelled 100.01.
@@ -84,6 +98,27 @@ To go back in time, restore an FMU state; the clock moves with it.
 `<node>.<field>` of the target boundary field (start value 0, description
 and unit from the target node's `boundary_input_spec`).  Parameters are
 `<node>.params.<key>`, with the `ParamSpec` bounds as `min` / `max`.
+
+Each variable is read and written only through the `fmi3Get` / `fmi3Set`
+function of its declared type, as FMI 3.0 requires: a Float32 output with
+`fmi3GetFloat32`, the `time` variable with `fmi3GetFloat64`.  Any other is
+`fmi3Error` with nothing read or written (MADD-ANO-102): the wrapper names
+the type of every call, and the bridge checks it.  Until 0.4.0 shipped,
+`fmi3SetBoolean` on a Float32 parameter stored 1.0, and `fmi3GetInt32` on a
+Float32 output returned 0 for 0.5, both `fmi3OK`.  FMPy's `simulate_fmu`
+already uses the right functions; code that called `getFloat64` on a
+Float32 variable must call `getFloat32`.  A Boolean variable takes true or
+false, which travel as 1 and 0; any other number is refused rather than
+read by its truthiness (MADD-ANO-101).  A `set` that names one value
+reference twice is refused, and so is a numeric set of a `<Clock>`, whose
+ticks are implied by time; both used to be answered `ok` and dropped.
+
+A parameter constructed outside its `ParamSpec` bounds is advertised with a
+`start` outside its `min` / `max`, and the FMU starts there, as the graph
+does.  FMI 3.0 does not require `start` to lie in `[min, max]`: `min` and
+`max` "define the region in which the FMU is designed to operate", and the
+standard's section on range violations says the FMU should not rely on
+them being observed.  FMPy's `validate_fmu` accepts such a description.
 
 `build_model_description(..., selected_inputs=[...])` exports a subset of
 the inputs.  A declared input left out is not an FMU variable, but the
@@ -168,7 +203,7 @@ no base64):
 
 | message                | header                                          | raw part                    |
 |------------------------|-------------------------------------------------|-----------------------------|
-| `set` request          | `{"op":"set","vr":[..],"n":N,"dtype":"f64"}`    | N little-endian float64     |
+| `set` request          | `{"op":"set","type":T,"vr":[..],"n":N,"dtype":"f64"}` | N little-endian float64 |
 | `get` reply            | `{"ok":true,"n":N,"dtype":"f64"}`               | N little-endian float64     |
 | `set_state` request    | `{"op":"set_state","n":L}`                      | L bytes of `npz`            |
 | `get_state` reply      | `{"ok":true,"n":L}`                             | L bytes of `npz`            |
@@ -191,10 +226,18 @@ bridge (a hello reply without `protocol`) falls back to JSON for every
 message.  The bridge counts what it did in `binary_frames_served` (binary
 replies) and `binary_frames_received` (well-formed binary requests).
 
-**Float64 only.**  The FMU's variable surface is Float64 (the wrapper
-widens every FMI width, `fmi3GetFloat32` included, to `double`), so the
-wire carries float64 only: a float32 output is widened on the way out and
-a float32 input narrowed by the bridge on the way in.  Wire order is
+**Float64 on the wire, typed calls.**  The wire carries every value as a
+float64: a float32 output is widened on the way out and a float32 input
+narrowed by the bridge on the way in, after the check that the type can
+hold it.  Every `get` and `set` request names the FMI type of the function
+that made it (`"type": "Float32"`, also in a binary `set` header), and the
+bridge refuses a variable of another type.  A JSON client that names no
+type is not checked.  The C wrapper also refuses a reply value its getter's
+C type cannot hold (a fraction, `NaN` or an out-of-range number for an
+integer type, anything but 0 or 1 for a Boolean, a finite number beyond
+`FLT_MAX` for a Float32), so no conversion is undefined behaviour, and an
+`fmi3SetInt64` / `fmi3SetUInt64` value a double cannot carry exactly (above
+2^53 in magnitude) is refused rather than rounded.  Wire order is
 little-endian; the C side converts only on a big-endian host (a `memcpy`
 everywhere else).
 
@@ -213,7 +256,9 @@ total as well.  The C side checks the header count against the raw length
 and against the caller's array before any `memcpy`, refuses a reply
 length over the limit (binary or JSON) before allocating for it, drops
 the connection on such a reply or on one cut short by the peer, and never
-sends a `set` whose frame, header included, would exceed the limit.  A
+sends a `set` or a `set_state` whose frame, header included, would exceed
+the limit.  (`fmi3SetFMUState` used to check the blob alone, so a blob of
+exactly 64 MiB was sent, and the bridge dropped the connection.)  A
 `get` reply must carry exactly the `nValues` the importer asked for:
 a longer one is `fmi3Error`, as a shorter one always was, rather than
 `fmi3OK` with the rest dropped.  A send interrupted by a signal is
@@ -248,7 +293,11 @@ finite budget: ten seconds to begin the first frame, five minutes of
 silence between frames once the peer has spoken, and two minutes to
 finish a frame whose length it has announced -- two minutes in total,
 whether the rest of the frame dribbles in or stops arriving.  Overrunning
-any of them ends the connection exactly as EOF does.  The instance slot is claimed
+any of them ends the connection exactly as EOF does.  One `step` request
+may ask for at most `max_steps_per_request` graph steps, and a step stops at
+the next graph step once `stop()` is called; until 0.4.0 shipped,
+`dt = 1e9 * master_dt` held the worker for as long as a billion steps take.
+The instance slot is claimed
 when a peer sends its first complete frame, not when it connects, so a
 peer that connects and says nothing — a crashed importer, a dropped
 link, a port scan — claims nothing.  At most sixteen connection threads
@@ -265,7 +314,10 @@ replaces, and every parameter must lie inside its declared `ParamSpec`
 bounds — the `min` / `max` the model description advertises, which the
 bridge enforces however its sidecar was built.  An importer therefore
 cannot use an FMU-state archive to install a constant the graph declares
-invalid.  An archive must carry its time.  The sidecar's own in-process
+invalid.  A Boolean takes true / false or exactly 0 / 1 on both doors.  An
+archive must carry its time, and exactly the model's state fields,
+parameters and pending inputs: an archive missing an input used to restore
+with that input at zero (MADD-ANO-103).  The sidecar's own in-process
 doors apply the same checks with the same messages: `FmuSidecar.set_params`
 refuses what `set` refuses, and `FmuSidecar.set_fmu_state` refuses what
 `set_state` refuses, including parameters in a snapshot for a model with
@@ -290,6 +342,19 @@ divergence and restores: a coupling group with `diagnostics=True` seeds
 its spectral `_meta` slots with `NaN` until a solve fills them, and until
 0.4.0's fix a snapshot taken before that was refused by both doors.
 ```
+
+**The C wrapper waits on the bridge for a bounded time.**  Every receive
+and send on its connection times out after `MADDENING_FMU_TIMEOUT` seconds
+of silence (600 by default; `0` waits for ever, as before 0.4.0), and a
+timeout closes the connection, so that call and every later one return
+`fmi3Error`.  Ten minutes covers a first `doStep` that compiles a large
+graph and a step of many graph steps; raise it for a longer one.
+Connecting (on Linux) and the hello get the smaller of that and 30 s: a
+live bridge answers a hello at once, so an endpoint that accepts and never
+answers fails `fmi3InstantiateCoSimulation` instead of blocking it.  A value
+that is not a number of seconds from 0 to 1e6 fails instantiation.  The
+deadline is on silence, not on a whole reply: a bridge that keeps sending
+is not cut off.
 
 **`FmuSidecar.handle` is not part of this.**  It speaks a pickled
 request/response protocol, so unpickling a request runs whatever

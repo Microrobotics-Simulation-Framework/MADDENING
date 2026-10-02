@@ -224,8 +224,12 @@ class ModelDescription:
     default_stop_time : float
         Default experiment stop time.
     default_step_size : float
-        Default fixed timestep.  Derived from the graph's master
-        timestep.
+        Default fixed timestep, the ``DefaultExperiment`` ``stepSize``: the
+        communication step an importer takes.  Derived from the graph's
+        step unless ``build_model_description(default_step_size=...)``
+        chose another; :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge`
+        refuses to serve a description whose step is not a whole number
+        of graph steps.
     default_tolerance : float
         Default tolerance for adaptive solvers.
     fixed_parameters : dict[str, str]
@@ -245,6 +249,17 @@ class ModelDescription:
         inputs, and a node whose input was left out took its own "input
         missing" branch instead (a ball with no table falls through the
         floor).
+    graph_timestep : float or None
+        The simulated time one step of the described graph advances
+        (``GraphManager.timestep``), which is what one sidecar step -- the
+        bridge's ``master_dt`` -- covers.  ``build_model_description``
+        records it whatever ``default_step_size`` was chosen; ``None`` for
+        a description built by hand, which then has only
+        ``default_step_size`` to say what its step is.  Not part of the
+        XML.  :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge` refuses a
+        ``master_dt`` that differs from it: a bridge stepping a 0.01 s
+        graph with ``master_dt=0.005`` ran two graph steps per 0.01 s
+        ``doStep`` and labelled a state at 0.10 s with the time 0.05 s.
     """
     model_name: str
     instantiation_token: str
@@ -268,6 +283,10 @@ class ModelDescription:
     # bridge (not written to the XML).
     held_inputs: dict[str, tuple[str, str, tuple[int, ...], str]] = field(
         default_factory=dict)
+    # One graph step in seconds (``GraphManager.timestep``), whatever
+    # ``default_step_size`` advertises; the bridge's ``master_dt`` must be
+    # it.  ``None`` for a hand-built description (not written to the XML).
+    graph_timestep: Optional[float] = None
 
     def clocks(self) -> list[FMIVariable]:
         """The ``<Clock>`` variables (empty for a single-clock FMU)."""
@@ -592,7 +611,10 @@ def build_model_description(
         node's timestep on a uniform-rate graph, and on a multi-rate graph
         the GCD of the timesteps as scheduled (a sub-cycling coupling
         group at its largest member timestep), which is what one sidecar
-        step advances.
+        step advances.  Another value is advertised as the FMU's
+        communication step; a bridge serves it only if it is a whole
+        number of graph steps.  The graph step itself is recorded as
+        :attr:`ModelDescription.graph_timestep` either way.
     include_parameters : bool, default True
         Expose every leaf of ``graph_manager.params["nodes"]`` that the
         compiled step reads as a ``causality="parameter"``,
@@ -949,8 +971,12 @@ def build_model_description(
         seen[var.name] = var
 
     # ----- Defaults -----
+    # One graph step, recorded separately from the advertised step: a
+    # caller may advertise a coarser communication step, and the bridge
+    # still has to know what one sidecar step covers.
+    graph_timestep = _master_timestep(graph_manager)
     if default_step_size is None:
-        default_step_size = _master_timestep(graph_manager)
+        default_step_size = graph_timestep
 
     # Deterministic instantiationToken — depends on the schema, so
     # the FMU loader refuses mismatched schemas at instantiation.
@@ -968,6 +994,7 @@ def build_model_description(
         co_simulation_model_identifier=model_identifier,
         fixed_parameters=fixed_parameters,
         held_inputs=held_inputs,
+        graph_timestep=graph_timestep,
     )
 
 

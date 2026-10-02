@@ -237,7 +237,8 @@ def test_the_compiled_wrapper_reads_a_diverged_get_over_json(tmp_path):
             inst.enterInitializationMode(startTime=0.0)
             inst.exitInitializationMode()
             vr = {v.name: v.valueReference for v in desc.modelVariables}
-            got = inst.getFloat64([vr["spring.position"], vr["spring.velocity"]])
+            # Float32 outputs, read with the Float32 getter (FMI 3.0)
+            got = inst.getFloat32([vr["spring.position"], vr["spring.velocity"]])
         finally:
             inst.terminate()
             inst.freeInstance()

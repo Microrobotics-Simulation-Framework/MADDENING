@@ -78,6 +78,7 @@ _REPO_ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 from maddening.compliance._validate import validate_anomaly_registry
+from maddening.core.compliance.anomaly import SafetyRelevance
 
 
 #: Reference fields whose entries this gate resolves.  Both count towards
@@ -745,6 +746,34 @@ def anomaly_id_spelling_errors(path, anomalies):
                "; the two lists differ in order or content")
             + ".  An ID the text does not spell is invisible to anything "
             f"that reads it as text.")
+    return errors
+
+
+def safety_relevance_errors(anomalies):
+    """Every entry's ``safety_relevance`` is a member of :class:`SafetyRelevance`.
+
+    The schema validator this gate runs checks the field against a set it
+    spells out for itself (``maddening.compliance._validate``), so the gate
+    used to depend on that copy staying equal to the enum -- which only a
+    unit test of the validator pinned -- and on the value being hashable: a
+    YAML list in the field crashed the gate with a ``TypeError`` traceback
+    instead of naming the entry.  Here the value is read against the enum
+    itself, and anything that is not one of its string values -- another
+    string, a list, a boolean (YAML's ``yes``), a number, a missing key --
+    is a finding with the entry's ID.  A field ``generate_soup_tables.py``
+    tabulates and the release gate's Tier 1 is decided by
+    (``safety-relevant`` entries need an entry before release, CONTRIBUTING)
+    cannot be allowed an unrecognised value.
+    """
+    allowed = sorted(m.value for m in SafetyRelevance)
+    errors = []
+    for a in anomalies:
+        aid = a.get("anomaly_id", "<missing anomaly_id>") if isinstance(a, dict) else "<not a mapping>"
+        value = a.get("safety_relevance") if isinstance(a, dict) else None
+        if not isinstance(value, str) or value not in allowed:
+            errors.append(
+                f"{aid}: safety_relevance {value!r} is not one of the SafetyRelevance "
+                f"values {allowed} (maddening.core.compliance.anomaly)")
     return errors
 
 
@@ -1441,6 +1470,7 @@ def main(argv=None):
         retired, args.path,
         present={str(a.get("anomaly_id")) for a in anomalies})
     errors += anomaly_id_spelling_errors(args.path, anomalies)
+    errors += safety_relevance_errors(anomalies)
     if n_anomalies:
         errors += version_range_errors(data)
     ref_errors, conditional = _reference_errors(

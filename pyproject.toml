@@ -277,6 +277,9 @@ filterwarnings = [
     "ignore:Setting `jax_pmap_shmap_merge`:DeprecationWarning",
     # SelkiesRenderer emits PerformanceWarning on CPU fallback
     "ignore::maddening.warnings.PerformanceWarning",
+    # The coupling tests deliberately run groups at 2**-100 and below; the
+    # warning's own tests record it with pytest.warns / catch_warnings.
+    "ignore::maddening.warnings.UnderflowRangeWarning",
     # SkyPilot deprecation warnings
     "ignore:.*--cloud.*--region.*--zone.*deprecated:UserWarning",
 ]

@@ -224,7 +224,7 @@ def test_a_nonlinear_group_never_reports_a_usable_bound_its_control_disowns(k):
 
     The report's Jacobian-vector products take their tangent in state
     units, lifted out of the underflow range only where the group is that
-    small (``_tangent_lift``).  A tangent framed to order one at every
+    small (``pow2_frame(..., mode="lift")``).  A tangent framed to order one at every
     magnitude was tried first and was wrong both ways on this pair: at
     ``2**60`` the gradient bound read 0.79x its control with
     ``gradient_bound_usable=True`` (the node's derivative intermediates,

@@ -17,7 +17,7 @@ bit for bit.  Each guards one constant that used to be absolute:
   scales by a factor that is not a power of two.
 
 The functions now rescale by an exact power of two
-(``acceleration._pow2_normaliser``), which leaves every result at
+(``maddening.core._pow2_frame.pow2_frame``), which leaves every result at
 ordinary scales as it was.
 """
 

@@ -187,7 +187,7 @@ reading a member scheduled before it reads that member's output from the
 same pass, already rounded, so the roundings along the chain add up.  On
 a Gauss-Seidel ring of 32 scalar relays stalled at float32 the worst
 node's count let the bound read 0.51x the true distance with
-`spectral_usable=True` (0.30x at 64 relays; MADD-ANO-093); counted along
+`spectral_usable=True` (0.30x at 64 relays; MADD-ANO-094); counted along
 the chain it reads 16x over.  A composite map's error grows with its evaluations: explicit
 Euler in `N` sub-steps, each moving its field by less than half an ulp,
 is 5.8 units off the exact map at `N = 20` and 29.4 at `N = 100`, and

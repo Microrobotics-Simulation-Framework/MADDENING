@@ -1162,7 +1162,7 @@ def _group_evaluations(group, nodes, schedule, edges):
     residual at the float32 stall is 0.6, 1.2 and 2.3x the per-pass
     floor at ``N`` = 16, 32 and 64, and the bound, which took the worst
     node's count, read 0.51x (``N = 32``) and 0.30x (``N = 64``) the
-    true distance with ``spectral_usable=True`` (MADD-ANO-093); counted
+    true distance with ``spectral_usable=True`` (MADD-ANO-094); counted
     along the chain the floor is ``N`` times larger and the bound reads
     23x and 16x over at ``N`` = 16 and 32 (the gradient bound 36x and
     17x over its true error; jaxlib 0.11.0, CPU).  The
@@ -4536,6 +4536,14 @@ def _leaf_values_equal(a, b) -> bool:
     return True
 
 
+def _short_value(value) -> str:
+    """A parameter value for a message: the number(s) if few, else the shape."""
+    arr = np.asarray(value)
+    if arr.size > 8:
+        return f"<array of shape {arr.shape}>"
+    return np.array2string(arr, precision=7, separator=", ")
+
+
 @stability(StabilityLevel.STABLE)
 class GraphManager:
     """Build, validate, compile and run a simulation graph.
@@ -4579,12 +4587,19 @@ class GraphManager:
         self._multigpu_mesh = None
         self._multigpu_device_map: Optional[dict[str, int]] = None
         # Differentiable graph parameters — the third pytree of the
-        # compiled step, next to state and external inputs.  Refreshed
-        # from the nodes on every compile; edit in place (or pass
+        # compiled step, next to state and external inputs.  The compiled
+        # step reads it on every call: edit it in place (or pass
         # ``params=`` to step/run_scan) to change constants without a
         # recompile, and differentiate with respect to it for
-        # calibration / system identification.
+        # calibration / system identification.  Each compile takes every
+        # leaf from whichever of ``node.params`` and ``gm.params`` was
+        # written since the previous compile (``_merge_live_params``).
         self.params: dict = {"nodes": {}, "mappings": {}}
+        # What the last *committed* compile took the node leaves from and
+        # left in ``gm.params``, and the same pair for a compile still in
+        # flight; see ``_merge_live_params``.
+        self._params_snapshot: Optional[tuple] = None
+        self._params_snapshot_pending: Optional[tuple] = None
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
         # The raw (uncounted, unjitted) step of the last compile, for the
@@ -4629,16 +4644,62 @@ class GraphManager:
             },
         }
 
-    @staticmethod
-    def _merge_live_params(fresh: dict, live: Optional[dict]) -> dict:
-        """``fresh`` (constructor snapshot) with every leaf of ``live`` that
-        still fits written over it; leaves that no longer fit warn."""
-        if not live:
-            return fresh
-        dropped = []
+    def _merge_live_params(self, fresh: dict, live: Optional[dict]) -> dict:
+        """The params a compile builds its step with: ``fresh`` (the nodes'
+        own values, now) merged with ``live`` (``gm.params``).
+
+        One rule per leaf: **the value written since the previous compile
+        wins.**
+
+        * A leaf only ``gm.params`` changed -- a calibration, an edit, a
+          leaf the node has not touched -- keeps its live value, so adding
+          an edge, replacing a node elsewhere or a profiler's recompile
+          never discards a fit.
+        * A leaf whose node value changed (``node.params[key] = value``
+          after the graph was compiled) while ``gm.params`` did not takes
+          the node's new value.  Until this rule a recompile kept the old
+          ``gm.params`` value instead: ``HeartPumpNode`` set to 144 bpm
+          through ``node.params`` and recompiled went on at 72, with no
+          sign the write had been dropped (0.3.x took such a write at the
+          recompile, and so does this).
+        * Both changed, to different values: the live value is kept -- the
+          one the compiled step was already running -- and a
+          ``RuntimeWarning`` names the leaf and both values.  Both changed
+          to the *same* value (``PUT /graph/params`` writes both) is no
+          conflict.
+
+        "Changed" is measured against the last compile that committed:
+        what it took from each node and what it left in ``gm.params``.  A
+        compile that raises after this merge commits nothing, so its
+        snapshot is discarded and the next compile still sees the write.
+        Only node constants (``"nodes"``) have a node value to change;
+        mapping weights keep their live value as before.  Leaves that no
+        longer fit (owner or key gone, shape changed) are dropped with a
+        ``RuntimeWarning``.
+        """
+        # Promote the snapshot of the previous compile if it committed:
+        # ``compile`` bumps ``_compile_generation`` at its commit point and
+        # nowhere else, so a pending snapshot stamped with the generation
+        # that compile would have reached is the committed one.
+        pending = self._params_snapshot_pending
+        if pending is not None and pending[0] == self._compile_generation:
+            self._params_snapshot = pending
+        self._params_snapshot_pending = None
+        _, node_before, live_before = self._params_snapshot or (None, {}, {})
+        node_now = {owner: dict(leaves) for owner, leaves in fresh.get("nodes", {}).items()}
+
+        def same(a, b) -> bool:
+            if a is b:
+                return True
+            try:
+                return _leaf_values_equal(a, b)
+            except TypeError:           # a leaked tracer has no value to compare
+                return False
+
+        dropped, conflicts = [], []
         for section in ("nodes", "mappings"):
             fresh_sec = fresh.setdefault(section, {})
-            for owner, leaves in (live.get(section) or {}).items():
+            for owner, leaves in ((live or {}).get(section) or {}).items():
                 if owner not in fresh_sec:
                     if leaves:
                         dropped.append(f"{section}[{owner!r}]")
@@ -4652,6 +4713,15 @@ class GraphManager:
                     if jnp.shape(value) != jnp.shape(base):
                         dropped.append(f"{section}[{owner!r}][{key!r}] (shape changed)")
                         continue
+                    was = node_before.get(owner, {}).get(key) if section == "nodes" else None
+                    if was is not None and not same(base, was):
+                        # The node was written since the last compile.
+                        live_was = live_before.get(owner, {}).get(key)
+                        if (live_was is not None and same(value, live_was)) or same(value, base):
+                            continue            # keep the node's value (``fresh``)
+                        conflicts.append(
+                            f"nodes[{owner!r}][{key!r}]: node.params "
+                            f"{_short_value(base)}, gm.params {_short_value(value)}")
                     # A Python float assigned into gm.params is float64
                     # under x64 and weak-typed otherwise: coerce to the
                     # leaf's own dtype (strongly typed) so it is kept and
@@ -4662,6 +4732,20 @@ class GraphManager:
                 "compile() dropped live gm.params leaves that no longer fit "
                 f"the graph: {dropped}", RuntimeWarning, stacklevel=3,
             )
+        if conflicts:
+            warnings.warn(
+                "compile(): node.params and gm.params were both written since the "
+                f"last compile and disagree for {'; '.join(conflicts)}.  Keeping "
+                "gm.params' value, the one the compiled step was already running.  "
+                "Write the value you mean into gm.params['nodes'][node][key] (it "
+                "takes effect on the next step, with no recompile).",
+                RuntimeWarning, stacklevel=3,
+            )
+        self._params_snapshot_pending = (
+            self._compile_generation + 1,
+            node_now,
+            {owner: dict(leaves) for owner, leaves in fresh.get("nodes", {}).items()},
+        )
         return fresh
 
     def _check_param_shapes(self, section: str, owner: str, leaves: dict) -> None:
@@ -6756,9 +6840,11 @@ class GraphManager:
         # step so the closure default (``params=None``) is this snapshot.
         # Live values survive a recompile: a calibrated leaf whose
         # node/key/shape/dtype still exist is carried over (adding an
-        # edge or an external input must not discard a fit); anything
-        # that no longer fits is dropped with a warning.  ``reset_params``
-        # restores the constructor values on purpose.
+        # edge or an external input must not discard a fit), unless only
+        # the node's value was written since the last compile, which then
+        # wins (see ``_merge_live_params``); anything that no longer fits
+        # is dropped with a warning.  ``reset_params`` restores the
+        # constructor values on purpose.
         fresh = self._snapshot_params()
         # Which leaves are still the constructor snapshot after the merge:
         # those need no baked-write check (see _refuse_baked_param_writes).
@@ -7894,7 +7980,7 @@ class GraphManager:
               counting the declared evaluations along a Gauss-Seidel
               pass's longest chain of same-pass reads, without which a
               stalled 32-relay ring read 0.51x its true distance with the
-              flag set (MADD-ANO-093).
+              flag set (MADD-ANO-094).
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -8077,7 +8163,7 @@ class GraphManager:
             converge, the verdict ``strict_convergence`` acts on.  (It
             used to be the second half's report alone, which said
             ``converged=True`` beside a first half stopped at the cap:
-            MADD-ANO-094.)
+            MADD-ANO-095.)
 
             ``"ift"`` (the default) and the legacy ``"fori"`` run the
             same passes, stop on the same pass and derive every value

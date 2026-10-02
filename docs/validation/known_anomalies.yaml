@@ -498,7 +498,7 @@ anomalies:
       along the pass's longest chain of same-pass reads -- a later
       confirmation audit found the worst node's count let a stalled
       32-relay Gauss-Seidel ring read 0.51x its true distance with the
-      flag set (MADD-ANO-093).
+      flag set (MADD-ANO-094).
       Nothing outside update() can see an undeclared loop, so where the
       residual is at the floor -- where that count is the whole bound --
       a group with an undeclared node reports spectral_usable=False and
@@ -7707,7 +7707,67 @@ anomalies:
       - "tests/api/test_request_bounds.py::TestTrainSurrogateIsBounded::test_out_of_range_training_arguments_are_422"
       - "tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_an_array_dimension_above_the_limit_is_rejected"
     github_issue: null
+
   - anomaly_id: "MADD-ANO-093"
+    title: "A node.params write made after compile was dropped by every later compile: compile() kept the stale gm.params leaf over the node's new value"
+    description: >
+      `compile()` builds the step with `gm.params`, and since 0.4.0
+      development (c8f8440, 2026-09-16, which made a recompile keep a
+      calibration) it wrote every live `gm.params` leaf over the value the
+      node now held.  It could not tell a calibrated leaf from one that was
+      merely the previous snapshot, so a write to `node.params` after the
+      first compile never reached the step, even across a recompile, with
+      no warning: a `HeartPumpNode` set to 144 bpm through `node.params`,
+      then `compile()` (or the graph marked dirty), went on beating at 72,
+      and `gm.params` still read 72.  A shipped example
+      (`vessel_flow_server`'s parameter endpoints) did exactly this and
+      reported success.  Found by the examples work of 2026-10-02.  No
+      tagged release carried it: v0.3.1 has no `gm.params`, and there (a
+      `git archive` of the tag, CPU, jaxlib 0.11.0) the same write and
+      recompile ran at 144 bpm, because the step read `self.params` when
+      it was traced.
+      Resolved in 0.4.0 (c183bfb, 2026-10-02): each compile takes every
+      node constant from whichever of `node.params` and `gm.params` was
+      written since the previous committed compile.  A calibration (only
+      `gm.params` changed) still survives a recompile; a node write (only
+      the node changed) is taken; both written to different values keeps
+      `gm.params`' value and `compile()` warns with both values.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the write was accepted, `compile()` succeeded, and the graph
+      went on computing with the old constant while the node reported the
+      new one.  Graded `major` under the 0.4.0 severity definition (a
+      silent wrong result is never `minor`), and registered although no
+      release carried it, because it is major.  Not `critical`: the value
+      `gm.params` holds, which is what the step uses, is the one inspection
+      and `to_dict()` report, so a run is reproducible from its record.
+      `context_dependent` because what a stale constant does depends on the
+      model.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: write the value into `gm.params` instead, which the compiled
+      step reads on every call.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A `node.params` write takes effect at the next compile, not at the
+      next step: a compiled graph does not watch the node between compiles,
+      so `gm.params` is the way to change a constant mid-run.  A tool that
+      undoes its own recompiles by restoring `gm.params` (the profiler
+      restores the caller's after its two) restores the old value of a
+      node write it compiled in, and the next compile then reads that
+      value as a newer calibration; compile before profiling.
+    verification:
+      - "tests/core/test_node_params_write_after_compile.py::test_a_node_params_write_after_compile_takes_effect_at_the_next_compile"
+      - "tests/core/test_node_params_write_after_compile.py::test_two_disagreeing_writes_since_one_compile_keep_the_live_value_and_warn"
+      - "tests/core/test_node_params_write_after_compile.py::test_a_compile_that_raises_does_not_lose_the_write"
+      - "tests/core/test_node_params_write_after_compile.py::test_a_calibrated_leaf_survives_a_recompile_its_node_did_not_change"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-094"
     title: "Under Gauss-Seidel the coupling bound's float floor counted the worst node's evaluations, not the chain a pass composes: a stalled 32-relay ring read its spectral bound at 0.51x the true distance with spectral_usable=True"
     description: >
       `spectral_error_bound` adds the residual's float resolution before
@@ -7788,7 +7848,7 @@ anomalies:
       - "tests/core/test_coupling_gauss_seidel_chain_floor.py::test_the_report_and_the_step_count_the_same_chain"
       - "tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_long_gauss_seidel_chain"
     github_issue: null
-  - anomaly_id: "MADD-ANO-094"
+  - anomaly_id: "MADD-ANO-095"
     title: "After run_adaptive or run_adaptive_scan the coupling report described only the second kept half step: a first half step stopped at max_iterations was hidden, and converged read True where strict_convergence refused the step"
     description: >
       An accepted adaptive attempt keeps two solves per coupling group,

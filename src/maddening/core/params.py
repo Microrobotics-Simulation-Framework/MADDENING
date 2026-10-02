@@ -21,13 +21,15 @@ that only updates the masked leaves never touches the others.
 
 Transforms::
 
-    None      p = u                     (bounds enforced by clipping in constrain)
+    None      p = u                     (bounds enforced by clipping in constrain;
+                                         on a bound, d p / d u is 1, into the range)
     "log"     p = lo + exp(u)           lo = bounds[0] or 0; p > lo strictly
     "logit"   p = lo + (hi - lo) * sigmoid(u)    both bounds required; lo < p < hi
 """
 
 from __future__ import annotations
 
+import functools
 import math
 import numbers
 from dataclasses import dataclass
@@ -41,6 +43,42 @@ from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
 _TRANSFORMS = (None, "log", "logit")
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(1, 2))
+def _clip_into_bounds(u, lo, hi):
+    """``jnp.clip(u, lo, hi)`` whose derivative *at* a bound is the
+    one-sided derivative into the interior.
+
+    The bounded identity transform clips.  ``jnp.clip`` is
+    ``minimum(maximum(u, lo), hi)``, and JAX splits a tie between the two
+    arguments of ``maximum`` evenly, so at ``u == lo`` exactly its
+    derivative was **0.5** -- half of what moving the parameter into its
+    range does, and the direction a parameter sitting on its bound can
+    move.  A spring held at ``damping = 0.0`` (its lower bound) gave a
+    gradient of -2.64e-2 where a one-sided difference into the range gave
+    -5.24e-2, and ``fit_lm``'s Jacobian column there (it differentiates
+    through ``constrain``) was halved, its Gauss-Newton entry quartered.
+    (``fim`` differentiates the physical parameters, where nothing is
+    clipped.)  At a bound the derivative is now 1 (into the range);
+    strictly outside the bounds it is 0 and strictly inside it is 1, as
+    before.  The value, and the derivative everywhere but on a bound, are
+    ``jnp.clip``'s bit for bit: the same expression computes the value, and
+    inside the bounds the tangent is passed through unchanged, as
+    ``jnp.clip``'s selects pass it.
+    """
+    return jnp.clip(u, lo, hi)
+
+
+@_clip_into_bounds.defjvp
+def _clip_into_bounds_jvp(lo, hi, primals, tangents):
+    (u,), (du,) = primals, tangents
+    inside = jnp.ones(jnp.shape(u), dtype=bool)
+    if lo is not None:
+        inside = inside & (u >= lo)
+    if hi is not None:
+        inside = inside & (u <= hi)
+    return _clip_into_bounds(u, lo, hi), jnp.where(inside, du, jnp.zeros_like(du))
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -73,7 +111,11 @@ class ParamSpec:
         Reparametrisation used by :func:`unconstrain` / :func:`constrain`.
         ``"log"`` needs ``hi is None`` and is measured from ``lo``, or from
         0 when ``lo`` is ``None``, so :meth:`check` requires a value above
-        it either way; ``"logit"`` needs both bounds.
+        it either way; ``"logit"`` needs both bounds.  ``None`` with
+        bounds clips in :func:`constrain`: the derivative is 1 inside the
+        bounds, 0 beyond them, and 1 *on* a bound -- the one-sided
+        derivative into the range, the way a parameter sitting there can
+        move (``jnp.clip`` alone splits that tie and gives 0.5).
     description, units : str
         Documentation only (surfaced by FMI ``parameter`` variables).
     """
@@ -271,8 +313,11 @@ class ParamSpec:
         if lo is not None or hi is not None:
             # Python-float bounds would promote an integer leaf (integer
             # matrix-mapping weights made trainable) to float; a leaf's
-            # dtype is part of the pytree contract, so keep it.
-            return jnp.clip(u, lo, hi).astype(u.dtype)
+            # dtype is part of the pytree contract, so keep it.  An integer
+            # leaf has no derivative to take, so it keeps the plain clip.
+            if not floating:
+                return jnp.clip(u, lo, hi).astype(u.dtype)
+            return _clip_into_bounds(u, lo, hi).astype(u.dtype)
         return u
 
     def check(self, p, *, name: str = "param") -> None:

@@ -369,11 +369,58 @@ def test_fit_lm_ending_on_an_accepted_step_reports_that_step():
     assert _half_sse(_bowl_residual, res.params) == pytest.approx(res.best_loss, rel=1e-4)
 
 
+@jax.custom_jvp
+def _reversed_slope(x):
+    return x
+
+
+@_reversed_slope.defjvp
+def _reversed_slope_jvp(primals, tangents):
+    (x,), (t,) = primals, tangents
+    return x, -t
+
+
+def _uphill_residual(params):
+    """A residual whose Jacobian has the wrong sign: every Marquardt
+    candidate climbs the loss however it is damped, and the proposal is a
+    full-sized step (stiffness 30 to 21.5), nowhere near ``step_tol``."""
+    return _reversed_slope(params["nodes"]["s"]["stiffness"])[None] - 40.0
+
+
 def test_fit_lm_ending_on_a_rejected_step_reports_the_iterate_it_kept():
     gm = _spring()
-    res = fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=4)
+    res = fit_lm(gm, _uphill_residual, n_iter=4)
     assert res.n_iter == 1 and not res.converged
+    # 50 from ``exp(log(30))``, one float32 rounding away from 30.
+    assert res.best_iteration == 0 and res.best_loss == res.losses[0]
+    assert res.best_loss == pytest.approx(50.0, rel=1e-5)
+    assert _bits(res.params) == _bits(gm.params)
+
+
+def test_a_shorter_damped_retry_does_not_make_a_rejected_run_converged():
+    """Twelve rejections shrink the candidate by ``lam_up`` each, to far
+    below ``step_tol`` (``lam`` reaches 1e9: a step of ~3e-10 relative),
+    whatever the loss is doing.  Only the proposal is evidence about the
+    iterate, so a run whose proposal was large and every retry rejected is
+    not converged -- here the Jacobian is simply wrong."""
+    gm = _spring()
+    for step_tol in (None, 1e-3):
+        res = fit_lm(gm, _uphill_residual, n_iter=4, step_tol=step_tol)
+        assert not res.converged, step_tol
+        assert res.n_iter == 1 and res.best_iteration == 0
+
+
+def test_a_residual_that_reads_no_trainable_parameter_is_converged_at_its_start():
+    """``J = 0``: every point is stationary, the proposal is exactly zero, and
+    the run stops at its start as converged -- ``converged`` says the
+    iteration stopped moving.  That the data determined nothing is
+    ``excited_rank``'s to say (``None``: every gradient was exactly zero)."""
+    gm = _spring()
+    res = fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=4)
+    assert res.n_iter == 1 and res.converged
     assert res.best_iteration == 0 and res.best_loss == res.losses[0] == 1.5
+    assert res.excited_rank is None
+    assert _bits(res.params) == _bits(gm.params)
 
 
 def test_fit_lm_stopped_by_tol_or_step_tol_reports_the_right_iterate():

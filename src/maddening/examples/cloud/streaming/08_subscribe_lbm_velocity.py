@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
-"""v0.2 #5 demo: subscribe to LBM velocity only over the binary WebSocket.
+"""Subscribe to an LBM-like velocity field only, over the binary WebSocket.
 
 Spawns an in-process SimulationServer with a small Lattice-Boltzmann
 node, opens the /ws/state/binary WebSocket as a client, sends a
 ``subscribe`` message that asks for just the velocity field (skipping
 the 19 f-distribution arrays), and decodes a handful of frames to
-verify the bandwidth math the brief calls out::
+check the bandwidth arithmetic::
 
     full state    ≈ velocity (3·N) + 19·f_i (N)   = 22·N floats
     subscribed    ≈ velocity (3·N)                =  3·N floats
     reduction     ≈ 1 - 3/22                      ≈ 86 % uncompressed
-                                                  ≈ 95-99 % with zstd
 
-Compares uncompressed vs zstd vs zstd+xor wire sizes at the end.
+and reports the wire size it actually observes with the requested
+compression.  The toy node's fields are smooth and nearly constant, so
+zstd squeezes them to a few tens of bytes; a real flow field compresses
+far less, so treat the compressed figure as a property of this toy.
 
 Usage:
-    python 08_subscribe_lbm_velocity.py
-    python 08_subscribe_lbm_velocity.py --n-cells 32 --n-frames 30
-    python 08_subscribe_lbm_velocity.py --compression zstd+xor
+    python -m maddening.examples.cloud.streaming.08_subscribe_lbm_velocity
+    python -m maddening.examples.cloud.streaming.08_subscribe_lbm_velocity --n-cells 32 --n-frames 30
+    python -m maddening.examples.cloud.streaming.08_subscribe_lbm_velocity --compression zstd+xor
 
-No cloud account, no GPU required.  Runs entirely locally as a
-demonstration of the encoder + transport contract.
+No cloud account, no GPU required.  Runs entirely locally, on a free
+loopback port, as a demonstration of the encoder + transport contract.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import socket
 import struct
 import sys
 import threading
@@ -74,22 +77,19 @@ class _ToyLBMNode(SimulationNode):
         return out
 
 
-def _build_server(n_cells: int) -> tuple[SimulationServer, int]:
+def _build_server(n_cells: int) -> tuple[SimulationServer, socket.socket]:
     gm = GraphManager()
     gm.add_node(_ToyLBMNode("lbm", timestep=0.01, n_cells=n_cells))
     gm.compile()
     server = SimulationServer(node_registry={}, graph_manager=gm)
-    port = _pick_free_port()
-    return server, port
-
-
-def _pick_free_port() -> int:
-    import socket
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
+    # Bind *and listen* before the server thread starts: a client that
+    # connects while uvicorn is still starting up then waits in the
+    # backlog instead of being refused, and no other process can take
+    # the port between choosing it and using it.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(16)
+    return server, sock
 
 
 async def _client(port: int, *, compression: str, n_frames: int) -> dict[str, Any]:
@@ -146,14 +146,9 @@ async def _client(port: int, *, compression: str, n_frames: int) -> dict[str, An
     }
 
 
-def _run_server(server: SimulationServer, port: int, stop: threading.Event) -> None:
-    config = uvicorn.Config(
-        server.create_app(), host="127.0.0.1", port=port,
-        log_level="warning",
-    )
-    s = uvicorn.Server(config)
+def _run_server(uv_server: uvicorn.Server, sock: socket.socket) -> None:
     # uvicorn runs an asyncio event loop in this thread.
-    s.run()
+    uv_server.run(sockets=[sock])
 
 
 async def _drive_steps(server: SimulationServer, n: int) -> None:
@@ -177,11 +172,12 @@ def main() -> int:
     args = parser.parse_args()
 
     n_cells = args.n_cells ** 3
-    server, port = _build_server(n_cells)
+    server, sock = _build_server(n_cells)
+    port = sock.getsockname()[1]
 
     # Quick offline reference: what would the encoder emit standalone?
-    sample = server.gm._state.copy()
-    sample.pop("_meta", None)
+    sample = {name: server.gm.get_node_state(name)
+              for name in server.gm.node_names}
     raw_enc = BinaryStateEncoder(sample)
     sub_enc = BinaryStateEncoder(sample, fields={"lbm": ["velocity"]})
     print(f"State size: {n_cells:,} cells (n={args.n_cells}³)")
@@ -189,21 +185,25 @@ def main() -> int:
     print(f"  Velocity-only uncompressed:  {sub_enc.frame_bytes:>10,} B "
           f"({(1 - sub_enc.frame_bytes/raw_enc.frame_bytes) * 100:.1f}% saved)")
 
-    # Spawn the server in a daemon thread; drive the simulation forward
-    # from the main loop so /ws/state/binary has frames to send.
-    stop = threading.Event()
-    t = threading.Thread(target=_run_server, args=(server, port, stop), daemon=True)
+    # Serve from a daemon thread; drive the simulation forward from the
+    # main loop so /ws/state/binary has frames to send.
+    uv_server = uvicorn.Server(uvicorn.Config(server.create_app(),
+                                              log_level="warning"))
+    t = threading.Thread(target=_run_server, args=(uv_server, sock), daemon=True)
     t.start()
 
     async def runner():
-        await asyncio.sleep(0.5)  # give uvicorn time to bind
         # Step in a background task so the WS client gets fresh frames.
         stepper = asyncio.create_task(_drive_steps(server, args.n_frames * 4))
         stats = await _client(port, compression=args.compression, n_frames=args.n_frames)
         await stepper
         return stats
 
-    stats = asyncio.run(runner())
+    try:
+        stats = asyncio.run(runner())
+    finally:
+        uv_server.should_exit = True
+        t.join(timeout=10)
     print()
     print(f"Subscribed to fields={{lbm:[velocity]}} compression={args.compression}")
     print(f"  Schema-reported uncompressed: {stats['subset_uncompressed_bytes']:>10,} B")

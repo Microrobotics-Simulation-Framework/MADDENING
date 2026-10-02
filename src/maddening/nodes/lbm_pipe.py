@@ -61,6 +61,7 @@ import numpy as np
 from maddening.core.node import SimulationNode
 from maddening.core.compliance.metadata import NodeMeta, StabilityLevel, ValidatedRegime
 from maddening.core.compliance.stability import stability
+from maddening.core._size_estimate import AllocationEstimate, as_count
 from maddening.core.params import ParamSpec
 
 # ── D3Q19 lattice constants ─────────────────────────────────────────
@@ -835,6 +836,29 @@ class LBMPipeNode(SimulationNode):
         reads; Shan-Chen multiphase forces also stay within one cell.
         """
         return {0: 1, 1: 1, 2: 1}
+
+    @classmethod
+    def _allocation_estimate(cls, args: dict) -> AllocationEstimate | None:
+        """What the constructor and :meth:`initial_state` would allocate with
+        constructor arguments *args*, told without building anything.
+
+        Private on purpose (see :mod:`maddening.core._size_estimate`): a
+        convention between the built-in nodes, the REST server and
+        ``GraphManager.from_dict``, not yet part of the node contract.
+
+        Per cell the state holds 19 D3Q19 populations, a density, three
+        velocity components, a tracer and 7 D3Q7 tracer populations: 31
+        values.  Building it peaks at about three times the state's float32
+        bytes (measured up to 200 x 50 x 50, single- and multiphase, jaxlib
+        0.11.0); four times is counted.
+        """
+        cells = 1
+        for axis in ("nx", "ny", "nz"):
+            n = as_count(args.get(axis))
+            if n is None:
+                return None
+            cells *= n
+        return AllocationEstimate(state_elements=31 * cells, peak_bytes=31 * cells * 4 * 4)
 
     def initial_state(self) -> dict:
         nx = self.params["nx"]

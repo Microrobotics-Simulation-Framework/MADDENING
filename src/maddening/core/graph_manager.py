@@ -9503,6 +9503,12 @@ class GraphManager:
         unstructured partition layout), which need not exist on the
         machine loading it.  Until 0.4.0 the sharding was dropped with no
         word (MADD-ANO-036).
+
+        A node whose class can estimate what it would allocate (the
+        built-in grid and basis nodes) is checked before its constructor
+        runs: one that would take more memory than this machine has raises
+        ``ValueError`` naming the node, where it used to run the process
+        into the OOM killer.
         """
         from maddening.serialization.json_codec import (  # noqa: PLC0415
             decode_non_finite,
@@ -9541,10 +9547,20 @@ class GraphManager:
                 UserWarning, stacklevel=3,
             )
 
+        from maddening.core._size_estimate import (  # noqa: PLC0415
+            refuse_beyond_memory,
+        )
+
         config = decode_non_finite(config)
         gm = cls()
         for nd in config["nodes"]:
             node_cls = node_registry[nd["type"]]
+            # A config is untrusted input, and its params can name a node no
+            # machine holds (a wavelet basis of n_levels=10_000_000): told
+            # from the class's own size estimate, before its constructor
+            # runs, as a ValueError naming the node.  Only what cannot fit
+            # in this machine's memory is refused.
+            refuse_beyond_memory(node_cls, nd["name"], nd.get("params", {}))
             node = node_cls(name=nd["name"], timestep=nd["timestep"], **nd.get("params", {}))
             gm.add_node(node)
             if nd.get("sharded"):

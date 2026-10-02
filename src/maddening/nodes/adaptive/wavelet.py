@@ -106,6 +106,14 @@ from maddening.core.compliance.metadata import (
     DiscretizationOrder, NodeMeta, Reference, StabilityLevel,
 )
 from maddening.core.compliance.stability import stability
+from maddening.core._size_estimate import (
+    SATURATION_BITS,
+    AllocationEstimate,
+    as_count,
+    format_bytes,
+    format_count,
+    physical_memory_bytes,
+)
 from maddening.core.params import ParamSpec
 from maddening.core.solver_utils import ift_linear_solve
 from maddening.nodes.adaptive.base import AdaptiveNode, _positive_int
@@ -194,6 +202,33 @@ _CG_FAILURE_SIGNATURES: tuple[str, ...] = (
     "breakdown",
     "stagnation",
 )
+
+#: Peak bytes of the constructor per entry of its ``n_max x n_max`` operator.
+#: The operator is assembled dense on the host in float64 (synthesis matrix,
+#: its normalised copy, the Galerkin product and its temporaries, the
+#: symmetry check, the preconditioned copy whose condition number is
+#: estimated): measured 48 to 76 bytes per entry from 2048 to 4096
+#: functions (1-D, 2-D and 3-D, jaxlib 0.11.0) -- about eight float64
+#: copies, which is what this counts.
+_ASSEMBLY_BYTES_PER_ENTRY = 64
+
+#: Largest basis the constructor builds: the sparse operator indexes rows
+#: and columns with ``int32``.
+_MAX_BASIS_FUNCTIONS = 2 ** 31 - 1
+
+
+def _basis_size(dim: int, n_levels: int, n_coarse: int, boundary: str) -> int:
+    """``n_max`` -- basis functions, ``side ** dim`` -- for these settings,
+    without building anything.  Saturates at ``2**SATURATION_BITS``, a
+    lower bound of the true count, so an absurd ``n_levels`` costs no time
+    (``(2 * 2**10**7) ** 3`` would take seconds to form)."""
+    if dim * ((n_coarse + 1).bit_length() + n_levels) > SATURATION_BITS:
+        return 1 << SATURATION_BITS
+    if boundary == "dirichlet":
+        side = ((n_coarse + 1) << n_levels) - 1
+    else:
+        side = n_coarse << n_levels
+    return side ** dim
 
 
 # ---------------------------------------------------------------------------
@@ -511,6 +546,9 @@ class WaveletAdaptiveNode(AdaptiveNode):
         sigma = float(sigma)
         if not np.isfinite(sigma) or sigma <= 0.0:
             raise ValueError(f"sigma must be a positive float, got {sigma!r}")
+        # Before anything of the basis's size exists: the labels below, and
+        # the dense operator after them, are n_max and n_max**2 long.
+        self._refuse_unbuildable_basis(dim, n_levels, n_coarse, str(boundary))
 
         if boundary == "dirichlet":
             side = _dir.dirichlet_side(n_levels, n_coarse)
@@ -617,6 +655,75 @@ class WaveletAdaptiveNode(AdaptiveNode):
             sidx = sidx * self.side + int(np.argmin(dist))
         self._sensor_index = int(sidx)
         self._sensor_row = op.Wn[self._sensor_index]
+
+    @staticmethod
+    def _refuse_unbuildable_basis(dim: int, n_levels: int, n_coarse: int,
+                                  boundary: str) -> None:
+        """Refuse a basis the constructor cannot build, before building any of it.
+
+        The operator is assembled dense, ``n_max x n_max`` in float64 on the
+        host, so the constructor's memory grows like ``n_max**2`` -- about
+        :data:`_ASSEMBLY_BYTES_PER_ENTRY` bytes per entry.  Two limits, both
+        checked from the settings alone:
+
+        * more than :data:`_MAX_BASIS_FUNCTIONS` functions -- the sparse
+          operator's ``int32`` indices cannot address them;
+        * an assembly that would take more memory than this machine has
+          (where the platform reports it).
+
+        Until 0.4.0 neither was checked: the level labels were grown as a
+        Python list, entry by entry, so ``n_levels=10_000_000`` ran a
+        process to 57.7 GB and into the kernel's OOM killer instead of
+        raising, and ``n_levels=22`` to ``26`` took 56 to 655 MB before the
+        operator's allocation failed.  Nothing this refuses could have been
+        built.
+        """
+        n_max = _basis_size(dim, n_levels, n_coarse, boundary)
+        peak = _ASSEMBLY_BYTES_PER_ENTRY * n_max * n_max
+        what = (
+            f"dim={dim}, n_levels={n_levels}, n_coarse={n_coarse} "
+            f"(boundary={boundary!r}) is a basis of {format_count(n_max)} functions"
+        )
+        if n_max > _MAX_BASIS_FUNCTIONS:
+            raise ValueError(
+                f"WaveletAdaptiveNode: {what}, more than the "
+                f"{_MAX_BASIS_FUNCTIONS} its sparse operator can index (int32).  "
+                "Use fewer levels; the node is validated up to 256 points in 1-D, "
+                "64^2 in 2-D and 16^3 in 3-D"
+            )
+        memory = physical_memory_bytes()
+        if memory is not None and peak > memory:
+            raise ValueError(
+                f"WaveletAdaptiveNode: {what}, and the constructor assembles its "
+                f"operator dense ({format_count(n_max)} x {format_count(n_max)}, in "
+                f"float64): that takes about {format_bytes(peak)}, more than the "
+                f"{format_bytes(memory)} of memory this machine has.  Use fewer "
+                "levels; the node is validated up to 256 points in 1-D, 64^2 in "
+                "2-D and 16^3 in 3-D"
+            )
+
+    @classmethod
+    def _allocation_estimate(cls, args: dict) -> Optional[AllocationEstimate]:
+        """What the constructor and ``initial_state()`` would allocate with
+        constructor arguments *args*, told without building anything (see
+        :mod:`maddening.core._size_estimate`; private, like that module).
+
+        The state is ``c`` and ``mask``, ``n_max`` each; the constructor's
+        peak is the dense operator assembly (:meth:`_refuse_unbuildable_basis`).
+        ``None`` for settings the constructor refuses on their own.
+        """
+        dim = as_count(args.get("dim"))
+        n_levels = as_count(args.get("n_levels"))
+        n_coarse = as_count(args.get("n_coarse"))
+        boundary = args.get("boundary")
+        if dim not in (1, 2, 3) or n_levels is None or n_coarse is None \
+                or n_levels < 1 or n_coarse < 1 or boundary not in _op.BOUNDARIES:
+            return None
+        n_max = _basis_size(dim, n_levels, n_coarse, boundary)
+        return AllocationEstimate(
+            state_elements=2 * n_max,
+            peak_bytes=_ASSEMBLY_BYTES_PER_ENTRY * n_max * n_max,
+        )
 
     def _cg_tolerances(self, dtype: Any = None) -> tuple[float, float]:
         """``(rtol, atol)`` the masked-CG frozen solve stops at in ``dtype``."""

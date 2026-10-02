@@ -32,7 +32,12 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
-from maddening.nodes.adaptive.wavelets.transform import _DD_FILTERS, _check_dim, _check_order
+from maddening.nodes.adaptive.wavelets.transform import (
+    _DD_FILTERS,
+    _check_dim,
+    _check_label_count,
+    _check_order,
+)
 
 __all__ = [
     "dirichlet_side",
@@ -99,12 +104,18 @@ def _synthesis_1d(coeffs: np.ndarray, n_levels: int, n_coarse: int, order: int) 
 
 
 def _level_labels_1d(n_levels: int, n_coarse: int) -> np.ndarray:
-    labs = [0] * n_coarse
+    # One count per level and one ``np.repeat``, as the periodic labels: an
+    # entry-by-entry Python list ran an impossible n_levels into the OOM
+    # killer instead of failing.
+    n_levels, n_coarse = int(n_levels), int(n_coarse)
+    _check_label_count(n_levels, n_coarse, 1, bits_per_level=1)
+    counts = [n_coarse]
     cur = n_coarse
-    for lvl in range(n_levels):
-        labs += [lvl] * (cur + 1)
+    for _ in range(n_levels):
+        counts.append(cur + 1)
         cur = 2 * cur + 1
-    return np.asarray(labs, dtype=np.int32)
+    labels = np.asarray([0] + list(range(n_levels)), dtype=np.int32)
+    return np.repeat(labels, np.asarray(counts, dtype=np.int64))
 
 
 def _level_labels_nd(n_levels: int, n_coarse: int, dim: int) -> np.ndarray:
@@ -117,6 +128,7 @@ def _level_labels_nd(n_levels: int, n_coarse: int, dim: int) -> np.ndarray:
     Host ``int32`` NumPy: what the assembly and the node's seed-size
     validation read, concrete inside a trace.
     """
+    _check_label_count(int(n_levels), int(n_coarse), int(dim), bits_per_level=int(dim))
     lev1 = _level_labels_1d(int(n_levels), int(n_coarse))
     lev = lev1
     for _ in range(int(dim) - 1):

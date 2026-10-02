@@ -81,6 +81,12 @@ from maddening.api.auth import (
     bearer_from_subprotocols,
     is_loopback,
 )
+from maddening.core._size_estimate import (
+    AllocationEstimate,
+    estimate_allocation,
+    format_bytes,
+    format_count,
+)
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.graph_manager import (
@@ -205,8 +211,42 @@ MAX_NODE_PARAM_ELEMENTS = 1_000_000
 
 #: Upper bound on the elements of a new node's initial state, summed over
 #: its fields.  Catches dimensions that multiply (each factor small, the
-#: product not).  20e6 float32 elements is 80 MB.
+#: product not).  20e6 float32 elements is 80 MB.  Enforced *before* the
+#: node is constructed for a class that can say what it would build (see
+#: :data:`MAX_NODE_BUILD_BYTES`), and on the built state for any other.
 MAX_NODE_STATE_ELEMENTS = 20_000_000
+
+#: Upper bound on the memory constructing one node and building its initial
+#: state may take, for a node class that can say so before it is built (the
+#: built-in grid and basis nodes: ``HeatNode``, ``LBMNode``,
+#: ``LBMPipeNode``, ``WaveletAdaptiveNode``).  Checked, with
+#: :data:`MAX_NODE_STATE_ELEMENTS`, *before* any constructor call in
+#: ``POST /graph/nodes`` and ``PUT /graph/params``: both used to build the
+#: node first and refuse it afterwards, and one ``PUT
+#: {"n_levels": 10000000}`` to a wavelet node grew the server to 57.7 GB
+#: before the kernel killed it.  2 GiB is several times what the largest
+#: lattice the state cap admits takes to build (about 0.3 GB) and admits
+#: ``WaveletAdaptiveNode``'s validated range (a 4096-function basis --
+#: 64^2, 16^3 -- assembles a dense operator in about 1 GiB).
+MAX_NODE_BUILD_BYTES = 2 * 1024 ** 3
+
+#: Upper bound on ``PUT /sim/stride?steps_per_frame=``: one frame of the
+#: background runner is at most as many steps as one ``POST /sim/run``.
+#: The runner checks its stop and pause flags between every step, so a
+#: large value no longer delays ``POST /sim/stop``; the bound keeps one
+#: frame's work, and the gap between relay snapshots, finite.
+MAX_STEPS_PER_FRAME = MAX_RUN_STEPS
+
+#: Upper bound on ``PUT /sim/stride?relay_stride=``: the relay keeps every
+#: Nth step, and a stride past one run's length would never publish one.
+MAX_RELAY_STRIDE = MAX_RUN_STEPS
+
+#: How long ``POST /sim/stop`` (and every route that stops the runner
+#: first) waits for the runner's thread to finish the step it is in.
+#: Past it the route answers 503 and keeps the runner: the thread is
+#: still alive, and reporting "stopped" -- or dropping the handle -- while
+#: it steps is how a reset used to be overwritten.
+_RUNNER_STOP_TIMEOUT = 10.0
 
 #: Bounds on ``POST /surrogate/train``.
 MAX_SURROGATE_DATA_STEPS = 100_000
@@ -369,9 +409,11 @@ def _non_finite_param(value: Any, path: str = "") -> Optional[str]:
 def _same_param_value(old: Any, new: Any) -> bool:
     """Is a JSON *new* value for a structural parameter the value it has?
 
-    Strict on purpose: ``5`` and ``5.0`` differ (the write would turn an
-    integer constant into a float one), and anything that does not compare
-    cleanly counts as changed.  "Changed" only means the write is checked.
+    Asked of the value :func:`_coerced_to_param_type` returns, so a JSON
+    ``2.0`` for an integer ``2`` is the same value and nothing is written.
+    Strict otherwise: values of different types differ, and anything that
+    does not compare cleanly counts as changed.  "Changed" only means the
+    write is checked.
     """
     if type(old) is not type(new):
         return False
@@ -379,6 +421,66 @@ def _same_param_value(old: Any, new: Any) -> bool:
         return bool(old == new)
     except Exception:  # noqa: BLE001 - an array-valued entry, say
         return False
+
+
+def _is_integer(value: Any) -> bool:
+    return isinstance(value, (int, np.integer)) and not isinstance(value, bool)
+
+
+def _coerced_to_param_type(old: Any, new: Any) -> tuple[Any, Optional[str]]:
+    """``(value, problem)``: a JSON *new* value for a structural parameter
+    whose current value is *old*, in *old*'s numeric type -- or ``problem``,
+    why it cannot be.
+
+    A JSON number does not say whether it is an integer (``4`` and ``4.0``
+    are one number to most clients), and ``node.params`` is what
+    ``params_pytree()``, ``to_dict()`` and every rebuild read.  Writing the
+    raw value used to change the parameter's type: ``PUT`` HeatNode
+    ``stencil_order: 4.0`` stored a float, which ``params_pytree()`` then
+    exposed as a new *trainable* leaf of ``gm.params``; ``length: 2`` on a
+    float parameter stored an ``int``, which drops out of it.  The rule:
+
+    * an integer parameter takes an integer, or a float with no fractional
+      part, stored as ``int`` (the convention the constructors' own count
+      checks follow); any other float is refused;
+    * a float parameter takes a float or an integer, stored as ``float``;
+    * a list of integers (a grid shape) takes integers or integral floats,
+      element by element, stored as ``int``; a list of floats takes
+      numbers, stored as ``float``;
+    * anything else is passed through unchanged for the checks after this
+      one (a constructor refuses what it cannot use).
+
+    Booleans are decided before this is asked.
+    """
+    if old is None or isinstance(old, bool) or isinstance(new, bool):
+        return new, None
+    if _is_integer(old):
+        if _is_integer(new):
+            return int(new), None
+        if isinstance(new, float):
+            if math.isfinite(new) and new.is_integer():
+                return int(new), None
+            return None, f"expected an integer (the parameter is {old!r}), got {new!r}"
+        return new, None
+    if isinstance(old, (float, np.floating)):
+        if _is_integer(new):
+            return float(new), None
+        return new, None
+    if isinstance(old, (list, tuple)) and isinstance(new, list) and old \
+            and not any(isinstance(x, (list, tuple, dict)) for x in old):
+        if all(_is_integer(x) for x in old):
+            out = []
+            for item in new:
+                if isinstance(item, float) and not isinstance(item, bool):
+                    if not (math.isfinite(item) and item.is_integer()):
+                        return None, (f"expected integers (the parameter is {old!r}), "
+                                      f"got {new!r}")
+                    item = int(item)
+                out.append(item)
+            return out, None
+        if all(isinstance(x, (float, np.floating)) for x in old):
+            return [float(x) if _is_integer(x) else x for x in new], None
+    return new, None
 
 
 def _state_elements(state: Any) -> int:
@@ -416,6 +518,26 @@ def _dry_run_node(node, state: Any = None) -> None:
     jax.eval_shape(lambda: node.update(state, bi, node.delta_t))
 
 
+#: What a step raises because of the graph it is asked to run -- a node's
+#: code failing on its params while the step is traced and compiled, a
+#: structure ``compile()`` refuses -- rather than because the server is
+#: broken.  ``POST /sim/step`` and ``POST /sim/run`` answer these 400 with
+#: the message (nothing is stepped); they used to answer every one but
+#: ``RuntimeError`` with an uncaught 500.
+_GRAPH_CONFIGURATION_ERRORS = (
+    RuntimeError, ValueError, TypeError, KeyError, AttributeError, IndexError,
+    ArithmeticError,
+)
+
+
+def _cannot_step_detail(exc: BaseException) -> str:
+    """The 400 body for a step that raised *exc*."""
+    if isinstance(exc, RuntimeError):
+        return str(exc)
+    return (f"the graph cannot step with its current configuration "
+            f"({type(exc).__name__}: {exc}); nothing was stepped")
+
+
 # ------------------------------------------------------------------
 # PUT /graph/params: what a write would do, asked before it is made
 # ------------------------------------------------------------------
@@ -434,11 +556,12 @@ _NEEDS_CONCRETE_VALUES = (
 
 
 def _probe_pair_with(node: Any, changes: dict[str, Any]) -> Optional[tuple]:
-    """``(old, new)``: shallow copies of the node a write of every entry of
-    *changes* into ``node.params`` lands on, reading the current params and
-    the written ones -- the node, or the node a wrapper that cannot be
-    copied wraps (``_param_probe_pair``'s rule, for several keys at once).
-    ``None`` when no faithful copy can be made.  Nothing is constructed."""
+    """``(old, new, descended)``: shallow copies of the node a write of
+    every entry of *changes* into ``node.params`` lands on, reading the
+    current params and the written ones -- the node, or the node a wrapper
+    that cannot be copied wraps (``_param_probe_pair``'s rule, for several
+    keys at once; ``descended`` says it is the wrapped one).  ``None`` when
+    no faithful copy can be made.  Nothing is constructed."""
     shared = getattr(node, "params", None)
     if not isinstance(shared, dict):
         return None
@@ -446,7 +569,132 @@ def _probe_pair_with(node: Any, changes: dict[str, Any]) -> Optional[tuple]:
         old = _node_with_params(candidate, dict(shared))
         new = _node_with_params(candidate, {**shared, **changes})
         if old is not None and new is not None:
-            return old, new
+            return old, new, candidate is not node
+    return None
+
+
+def _allocation_refusal(estimate: AllocationEstimate) -> Optional[str]:
+    """Why a node that would allocate *estimate* is refused over the API
+    (:data:`MAX_NODE_STATE_ELEMENTS`, :data:`MAX_NODE_BUILD_BYTES`), or
+    ``None``.  Phrased to follow "the node" / "node 'x'"."""
+    if estimate.state_elements > MAX_NODE_STATE_ELEMENTS:
+        return (f"would hold {format_count(estimate.state_elements)} state "
+                f"elements; at most {MAX_NODE_STATE_ELEMENTS} are accepted over "
+                "the API (this server is unauthenticated -- build a graph this "
+                "size in-process)")
+    if estimate.peak_bytes > MAX_NODE_BUILD_BYTES:
+        return (f"would take about {format_bytes(estimate.peak_bytes)} to build; "
+                f"at most {format_bytes(MAX_NODE_BUILD_BYTES)} is accepted over "
+                "the API (this server is unauthenticated -- build a graph this "
+                "size in-process)")
+    return None
+
+
+def _allocation_write_reason(gm: GraphManager, owner: str,
+                             changes: dict[str, Any]) -> Optional[tuple[list, str]]:
+    """``(keys, reason)``: why a write of *changes* into node *owner*'s
+    params is refused for the size of what the checks after this one would
+    build, and the keys it is refused for; or ``None``.
+
+    Those checks call the node's constructor with the new values -- one key
+    at a time (:meth:`GraphManager._constructor_write_reason`, the mapping
+    check), every key at once, and every key at once over the params a save
+    would carry (:func:`_saved_graph_write_reason`) -- and build the state
+    it makes.  Each of those calls is estimated here first, for every class
+    a write lands on (the node, or the node a wrapper wraps), by the class's
+    own ``_allocation_estimate``; nothing is constructed.  A class without
+    an estimate is not checked here, and its built state is bounded by the
+    checks that follow, as before.
+    """
+    node = gm._nodes[owner].node
+    shared = getattr(node, "params", None)
+    if not isinstance(shared, dict):
+        return None
+    ctor = {k: v for k, v in changes.items() if k in shared}
+    if not ctor:
+        return None
+    candidates = [([key], {**shared, key: value}) for key, value in ctor.items()]
+    candidates.append((list(ctor), {**shared, **ctor}))
+    try:
+        candidates.append((list(ctor), {**gm.effective_node_params(owner), **ctor}))
+    except Exception:  # noqa: BLE001 - the graph cannot say what it would save
+        pass
+    for holder in _params_holders(node):
+        cls = type(holder)
+        for keys, params in candidates:
+            estimate = estimate_allocation(cls, params)
+            if estimate is None:
+                continue
+            refusal = _allocation_refusal(estimate)
+            if refusal is not None:
+                return keys, (f"with it the {cls.__name__} {refusal}; this is told "
+                              "from the parameters, before anything of that size "
+                              "is built")
+    return None
+
+
+def _trace_hooks(spec, probe: Any, descended: bool, state: Any, leaves: Any) -> None:
+    """Trace *probe*'s hooks the way the graph calls them (``update``, and
+    the flux and interface-correction hooks where it has them) on *state*
+    with a zero for every declared boundary input and *leaves* as the
+    injected params.  Raises whatever the node's code raises."""
+    probe_spec = _NodeSpec(
+        node=probe, update_fn=probe.update, timestep=spec.timestep,
+        accepts_params=(
+            _method_accepts_params(probe, "update") and leaves is not None
+            if descended else spec.accepts_params),
+        flux_accepts_params=(
+            _method_accepts_params(probe, "compute_boundary_fluxes")
+            and leaves is not None
+            if descended else spec.flux_accepts_params),
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        bi = _declared_boundary_zeros(probe)
+        jax.make_jaxpr(
+            lambda st, b, p: _hook_outputs(probe_spec, st, b, p),
+        )(state, bi, leaves)
+
+
+def _step_trace_write_reason(gm: GraphManager, owner: str, changes: dict[str, Any],
+                             leaves_before: Any, leaves_after: Any) -> Optional[str]:
+    """Why the running node could not step with *changes* written into its
+    params, or ``None``: its hooks trace with the current params and raise
+    with the new ones (for a reason other than needing a concrete value).
+
+    The other checks of ``PUT /graph/params`` ask whether a value is used,
+    and a trace that raised counted as "cannot tell" -- so a value the step
+    cannot run with was taken: ``RigidBodyNode`` ``constraints`` of
+    ``null``, ``{"w": 0}``, ``{"y": {"finite": true}}`` or ``{"z": "high"}``
+    each answered 200, after which every ``POST /sim/step`` was a 500.
+    ``POST /graph/nodes`` dry-runs a new node's update for the same reason
+    (:func:`_dry_run_node`).  Traced on shallow copies (the node is never
+    written), abstractly: nothing is computed.  *leaves_before* and
+    *leaves_after* are the injected params the step runs with before and
+    after the write, or ``None`` for a node that takes none.
+    """
+    spec = gm._nodes[owner]
+    pair = _probe_pair_with(spec.node, changes)
+    if pair is None:
+        return None
+    old, new, descended = pair
+    try:
+        state = old.initial_state() if descended else gm._state[owner]
+    except Exception:  # noqa: BLE001 - cannot tell
+        return None
+    try:
+        _trace_hooks(spec, old, descended, state, leaves_before)
+    except Exception:  # noqa: BLE001 - the running node is not traced this way
+        return None
+    try:
+        _trace_hooks(spec, new, descended, state, leaves_after)
+    except _NEEDS_CONCRETE_VALUES:
+        return None
+    except Exception as exc:  # noqa: BLE001 - the node's own failure
+        return (f"{type(spec.node).__name__}'s step cannot run with it: its "
+                f"hooks trace with the current value and raise with the new one "
+                f"({type(exc).__name__}: {exc}), so every step after the write "
+                "would fail")
     return None
 
 
@@ -1031,6 +1279,9 @@ class SimulationServer:
         self.relay = StateRelay()
         self.runner: Optional[RealtimeRunner] = None
         self._runner_started = False
+        # ``PUT /sim/stride``'s value, kept for the runner a later
+        # ``POST /sim/start`` creates (it used to be echoed and dropped).
+        self._steps_per_frame = 1
         self._relay_attached = False
         # Eagerly attach relay when a pre-built graph is provided
         if graph_manager is not None:
@@ -1129,8 +1380,49 @@ class SimulationServer:
     def _ensure_runner(self) -> RealtimeRunner:
         if self.runner is None:
             self._ensure_relay_attached()
-            self.runner = RealtimeRunner(self.gm, self.relay)
+            self.runner = RealtimeRunner(self.gm, self.relay,
+                                         steps_per_frame=self._steps_per_frame)
         return self.runner
+
+    def _runner_stopping(self) -> bool:
+        """Whether a runner thread is still alive after it was told to stop.
+
+        Drops the handle once that thread has exited, so a stop that timed
+        out resolves itself the next time anything asks.
+        """
+        runner = self.runner
+        if runner is None or self._runner_started:
+            return False
+        if runner.is_alive:
+            return True
+        self.runner = None
+        return False
+
+    def _runner_alive(self) -> bool:
+        """Whether a runner thread is stepping the graph (running, paused,
+        or still finishing after a stop)."""
+        return self.runner is not None and self.runner.is_alive
+
+    def _refuse_while_runner_alive(self, action: str) -> None:
+        """Refuse a write of the graph's state while a runner thread can
+        overwrite it: a 409 while the runner runs, a 503 while it is still
+        stopping.  The runner stores each step's state over whatever is
+        there, so a state written beside it used to be answered 200 and
+        then lost -- a reset after a stop that had not finished came back
+        with positions in the hundreds of thousands."""
+        if self._runner_stopping():
+            raise HTTPException(
+                status_code=503,
+                detail=(f"Cannot {action}: the runner was told to stop and its "
+                        "thread is still finishing a step. Retry shortly."),
+                headers={"Retry-After": "1"},
+            )
+        if self._runner_alive():
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Cannot {action} while the runner is started; "
+                        "POST /sim/stop first."),
+            )
 
     def _state_json(self) -> dict:
         """The whole state, ``_meta`` included, as a reply body
@@ -1140,12 +1432,38 @@ class SimulationServer:
     def _node_state_json(self, name: str) -> dict:
         return _json_reply(self.gm.get_node_state(name))
 
-    def _stop_runner(self) -> None:
-        """Stop the runner if it's running. Safe to call multiple times."""
-        if self.runner is not None and self._runner_started:
-            self.runner.stop()
+    def _stop_runner(self) -> bool:
+        """Stop the runner and wait for its thread; ``True`` once no runner
+        thread is alive.  Safe to call multiple times.
+
+        ``False`` when the thread is still alive after
+        :data:`_RUNNER_STOP_TIMEOUT` seconds: the runner is kept, marked as
+        stopping, and the caller must not report it stopped or write the
+        state it steps.  This used to give up after two seconds and drop
+        the handle while the thread kept stepping -- ``POST /sim/stop``
+        answered "stopped", and a reset after it was overwritten.
+        """
+        runner = self.runner
+        if runner is None:
+            return True
+        if self._runner_started or runner.is_alive:
             self._runner_started = False
-            self.runner = None
+            if not runner.stop(timeout=_RUNNER_STOP_TIMEOUT):
+                return False
+        self.runner = None
+        return True
+
+    def _stop_runner_or_refuse(self, action: str) -> None:
+        """:meth:`_stop_runner`, as a 503 when the thread will not stop in
+        time; nothing else is done."""
+        if not self._stop_runner():
+            raise HTTPException(
+                status_code=503,
+                detail=(f"Cannot {action}: the runner's thread is still "
+                        f"finishing a step after {_RUNNER_STOP_TIMEOUT:g} s. "
+                        "Nothing was changed; retry shortly."),
+                headers={"Retry-After": "1"},
+            )
 
     def _reset_state(self) -> None:
         """Reset all nodes to their initial state (normalised, no retrace)."""
@@ -1323,6 +1641,21 @@ class SimulationServer:
                     detail=f"params.{bad}: value must be finite",
                 )
             node_cls = self.registry[req.type]
+            # Before the constructor, for a class that can say what it would
+            # build: the size checks below run on the built node and state,
+            # so they used to refuse a D3Q19 lattice of 140^3 cells after
+            # 1.1 GB had been allocated -- and a wavelet basis of
+            # n_levels=10000000 was never refused at all, the constructor
+            # running into the OOM killer first.
+            estimate = estimate_allocation(node_cls, req.params)
+            if estimate is not None:
+                refusal = _allocation_refusal(estimate)
+                if refusal is not None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"node '{req.name}' {refusal}; this is told from "
+                                "its params, before anything of that size is built"),
+                    )
             try:
                 node = node_cls(name=req.name, timestep=req.timestep, **req.params)
             except Exception as exc:
@@ -1406,6 +1739,19 @@ class SimulationServer:
 
         @app.delete("/graph/edges", tags=["graph"], response_model=None)
         def remove_edge(req: RemoveEdgeRequest) -> dict[str, str]:
+            """Remove every edge with these endpoints and fields; a 404 when
+            the graph has none (it used to answer 200 and change nothing)."""
+            if not any(
+                e.source_node == req.source_node and e.target_node == req.target_node
+                and e.source_field == req.source_field
+                and e.target_field == req.target_field
+                for e in self.gm._edges
+            ):
+                raise HTTPException(
+                    status_code=404,
+                    detail=(f"No edge {req.source_node}.{req.source_field} -> "
+                            f"{req.target_node}.{req.target_field}."),
+                )
             self.gm.remove_edge(
                 source=req.source_node, target=req.target_node,
                 source_field=req.source_field, target_field=req.target_field,
@@ -1445,6 +1791,7 @@ class SimulationServer:
             a 400 names the field and writes nothing."""
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
+            self._refuse_while_runner_alive("write a node's state")
             live = self.gm.get_node_state(node_name)
             if set(req.state) != set(live):
                 raise HTTPException(
@@ -1512,15 +1859,26 @@ class SimulationServer:
             saved graph rebuilds -- a constructor that derives a branch or
             an array from the value (``LBMPipeNode``'s multiphase switch
             from ``G != 0``) leaves the running node computing with what it
-            derived from the old one.
+            derived from the old one.  And so is a value the node's step
+            cannot run with: its hooks are traced with the request's values
+            on a copy of the node, and a trace that raises where the
+            current values' trace does not is a 400 naming the error.
+
+            A structural value is stored in the parameter's own numeric
+            type: a float with no fractional part written for an integer
+            parameter is stored as that integer (``stencil_order: 4.0`` is
+            ``4``), any other float for one is a 400, and an integer for a
+            float parameter is stored as a float.
 
             A non-finite number anywhere in the request is a 400 before
             anything else.  Integers and element counts are bounded as in
-            ``POST /graph/nodes`` (a 422 from the request model), and a
-            value that would take the node's state past
-            :data:`MAX_NODE_STATE_ELEMENTS`, or change its layout, is
-            refused before any node or state is built with it wherever the
-            node's ``initial_state()`` can be evaluated abstractly.
+            ``POST /graph/nodes`` (a 422 from the request model, or from
+            this route for an integral float), and a value that would take
+            the node past :data:`MAX_NODE_STATE_ELEMENTS` or
+            :data:`MAX_NODE_BUILD_BYTES`, or change its state's layout, is
+            refused before any node or state is built with it -- told from
+            the class's own size estimate where it has one, and wherever
+            the node's ``initial_state()`` can be evaluated abstractly.
             """
             if node_name not in self.gm._nodes:
                 raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
@@ -1562,6 +1920,9 @@ class SimulationServer:
             # loop only writes, so a 400 on the third key of a request
             # leaves the first two untouched too.
             staged: dict[str, Any] = {}
+            # What a structural (non-leaf) key would store in node.params:
+            # the JSON value in the parameter's own numeric type.
+            structural: dict[str, Any] = {}
             for key, value in req.params.items():
                 if key not in node.params and key not in live:
                     raise HTTPException(
@@ -1578,8 +1939,22 @@ class SimulationServer:
                             status_code=400,
                             detail=f"{key}: expected a number, got a boolean",
                         )
+                    structural[key] = value
                     continue
                 if key not in live:
+                    # Kept in the parameter's type: a float written for an
+                    # integer used to be stored as a float (HeatNode
+                    # ``stencil_order: 4.0`` became a trainable leaf of
+                    # gm.params), an integer for a float as an int.
+                    coerced, problem = _coerced_to_param_type(node.params.get(key), value)
+                    if problem is not None:
+                        raise HTTPException(status_code=400, detail=f"{key}: {problem}")
+                    # An integral float is an integer from here on, so it is
+                    # bounded as the request model bounds one sent as such.
+                    oversized = _oversized_param(coerced, key)
+                    if oversized is not None:
+                        raise HTTPException(status_code=422, detail=oversized)
+                    structural[key] = coerced
                     continue
                 # Before the cast, which overflows 1e39 into float32's inf
                 # with a RuntimeWarning (a 500 under -W error) and so made
@@ -1623,6 +1998,7 @@ class SimulationServer:
                         continue
                     changes[key] = np.asarray(staged[key]).tolist()
                 else:
+                    value = structural[key]
                     if key in node.params and _same_param_value(node.params[key], value):
                         continue
                     changes[key] = value
@@ -1643,6 +2019,14 @@ class SimulationServer:
                     ),
                 )
 
+            # Before every check that builds the node with the new values
+            # (its constructor, the state it makes): the size of what they
+            # would build, for a class that can say so without building it.
+            # They used to run first, and ``n_levels=10000000`` on a wavelet
+            # node grew the server to 57.7 GB before the kernel killed it.
+            found = _allocation_write_reason(self.gm, node_name, changes)
+            if found is not None:
+                raise refused(*found)
             # A state of another layout -- or over the API's state cap -- is
             # refused whatever else is true of the value, and the checks
             # below that establish it on concrete values build the node and
@@ -1686,6 +2070,21 @@ class SimulationServer:
                 reason = self.gm._mapping_point_write_reason(node_name, {key: node_value})
                 if reason is not None:
                     raise refused([key], reason)
+            # The step must still run with the values: every check above
+            # asks whether a value is *used*, and counted a trace that
+            # raised as "cannot tell", so RigidBodyNode ``constraints:
+            # {"w": 0}`` answered 200 and every later step was a 500.
+            # Asked of the whole request at once, as it is written.
+            accepts = self.gm._nodes[node_name].accepts_params
+            touched = [k for k in changes if k not in staged]
+            if touched:
+                reason = _step_trace_write_reason(
+                    self.gm, node_name, changes,
+                    dict(live) if accepts else None,
+                    {**live, **staged} if accepts else None,
+                )
+                if reason is not None:
+                    raise refused(touched, reason)
             # And the graph a save after the write would reload must load,
             # and run what the running graph runs: the constructor asked
             # with every changed key at once and every other key's live
@@ -1695,7 +2094,6 @@ class SimulationServer:
             # running one does with it.
             saved = {k: v for k, v in changes.items() if k in node.params}
             if saved:
-                accepts = self.gm._nodes[node_name].accepts_params
                 reason = _saved_graph_write_reason(
                     self.gm, node_name, saved,
                     dict(live) if accepts else None,
@@ -1718,28 +2116,56 @@ class SimulationServer:
                         # ``params_pytree`` no longer exposes.
                         node.params[key] = np.asarray(staged[key]).tolist()
                 else:
-                    node.params[key] = value
+                    node.params[key] = structural[key]
                     self.gm._dirty = True
             shown = _json_reply({**_jax_to_python(node.params), **_jax_to_python(live)})
             return {"status": "ok", "params": shown}
 
         # -- checkpoint endpoints -------------------------------------------
 
-        def _checkpoint_path(name: str) -> Path:
+        def _checkpoint_path(name: str, *, loading: bool = False) -> Path:
+            """The file ``/checkpoint/save`` writes (or ``/load`` reads) for
+            *name*, resolved, after checking it is a file strictly inside
+            the checkpoint root.
+
+            The check is made on the file NumPy actually touches, not only
+            on the name: ``numpy.savez`` appends ``.npz``, so a name that
+            resolved to the root itself (``""``, ``"."``, ``"sub/.."``) used
+            to write -- and load -- ``<root>.npz``, in the root's parent.
+            A name with a NUL byte, or one the filesystem cannot represent,
+            is a 400 rather than a 500.
+            """
             root = self.checkpoint_root
-            target = (root / name).resolve()
-            if root != target and root not in target.parents:
+            outside = HTTPException(
+                status_code=400,
+                detail=(f"checkpoint path must stay under {root}, naming a file "
+                        f"inside it (got {name!r})"),
+            )
+            if not name or "\x00" in name:
+                raise outside
+            try:
+                target = (root / name).resolve()
+                if root == target or root not in target.parents:
+                    raise outside
+                if not (loading and target.is_file()) and target.suffix != ".npz":
+                    target = target.with_suffix(target.suffix + ".npz")
+                target = target.resolve()
+            except HTTPException:
+                raise
+            except (OSError, ValueError, RuntimeError) as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"checkpoint path must stay under {root} (got {name!r})",
-                )
+                    detail=f"checkpoint path {name!r} is not usable: {exc}",
+                ) from None
+            if root == target or root not in target.parents:
+                raise outside
             return target
 
         @app.post("/checkpoint/save", tags=["checkpoint"], response_model=None)
         def checkpoint_save(path: str = "checkpoint.npz") -> dict[str, str]:
             target = _checkpoint_path(path)
-            target.parent.mkdir(parents=True, exist_ok=True)
             try:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 saved = self.gm.save_state(str(target))
             except Exception as exc:  # noqa: BLE001
                 raise HTTPException(status_code=400, detail=f"could not save checkpoint: {exc}")
@@ -1747,8 +2173,15 @@ class SimulationServer:
 
         @app.post("/checkpoint/load", tags=["checkpoint"], response_model=None)
         def checkpoint_load(path: str = "checkpoint.npz") -> dict[str, Any]:
-            target = _checkpoint_path(path)
-            if not target.exists() and not target.with_suffix(target.suffix + ".npz").exists():
+            # A load replaces the state a running runner is stepping, and the
+            # runner's next store would overwrite it: stop it first.
+            self._refuse_while_runner_alive("load a checkpoint")
+            target = _checkpoint_path(path, loading=True)
+            try:
+                found = target.is_file()
+            except OSError:
+                found = False
+            if not found:
                 raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
             from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
                 _restore_state_and_params,
@@ -1786,10 +2219,14 @@ class SimulationServer:
 
         @app.post("/sim/step", tags=["sim"], response_model=None)
         def sim_step() -> dict[str, Any]:
+            """Advance the graph one step.  A graph that cannot step is a
+            400 naming why (nothing is stepped); a 409 while the runner is
+            started, whose next step would overwrite this one's."""
+            self._refuse_while_runner_alive("step the graph")
             try:
                 self.gm.step()
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
+            except _GRAPH_CONFIGURATION_ERRORS as exc:
+                raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
             return self._state_json()
 
         @app.post("/sim/run", tags=["sim"], response_model=None)
@@ -1804,14 +2241,23 @@ class SimulationServer:
                             "/sim/start.",
             ),
         ) -> dict[str, Any]:
+            self._refuse_while_runner_alive("run the graph")
             try:
                 self.gm.run(n_steps)
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
+            except _GRAPH_CONFIGURATION_ERRORS as exc:
+                raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
             return self._state_json()
 
         @app.post("/sim/start", tags=["sim"], response_model=None)
         def sim_start() -> dict[str, str]:
+            if self._runner_stopping():
+                raise HTTPException(
+                    status_code=503,
+                    detail=("The previous run's thread is still finishing a step "
+                            "after POST /sim/stop; two runners would step one "
+                            "graph. Retry shortly."),
+                    headers={"Retry-After": "1"},
+                )
             runner = self._ensure_runner()
             if self._runner_started:
                 raise HTTPException(status_code=409, detail="Runner is already started.")
@@ -1839,38 +2285,73 @@ class SimulationServer:
 
         @app.post("/sim/stop", tags=["sim"], response_model=None)
         def sim_stop() -> dict[str, str]:
-            if self.runner is None or not self._runner_started:
+            """Stop the runner and wait for its thread to exit.
+
+            "stopped" means no runner thread is stepping the graph.  When
+            the thread is still in a step after the wait, the answer is a
+            503 and the runner is kept as stopping: retry, and the route
+            waits for it again.
+            """
+            if not self._runner_stopping() and (
+                    self.runner is None or not self._runner_started):
                 raise HTTPException(status_code=409, detail="Runner is not started.")
-            self._stop_runner()
+            self._stop_runner_or_refuse("report the runner stopped")
             return {"status": "stopped"}
 
         @app.post("/sim/reset", tags=["sim"], response_model=None)
         def sim_reset() -> dict[str, Any]:
-            """Stop the runner and reset all nodes to initial state."""
+            """Stop the runner and reset all nodes to initial state.  A 503,
+            with nothing reset, when the runner's thread will not stop in
+            time (it would overwrite the reset)."""
             was_running = self._runner_started
-            self._stop_runner()
+            self._stop_runner_or_refuse("reset the graph")
             self._reset_state()
             self.gm._dirty = True
             return {"status": "ok", "was_running": was_running, "state": self._state_json()}
 
         @app.put("/sim/stride", tags=["sim"], response_model=None)
-        def sim_set_stride(steps_per_frame: int = 1, relay_stride: int = 1) -> dict[str, int]:
+        def sim_set_stride(
+            steps_per_frame: int = Query(
+                1, ge=1, le=MAX_STEPS_PER_FRAME,
+                description="Physics steps batched per wall-clock frame in the "
+                            "runner, at most MAX_STEPS_PER_FRAME (one POST "
+                            "/sim/run's worth).  Kept for a runner started "
+                            "later.",
+            ),
+            relay_stride: int = Query(
+                1, ge=1, le=MAX_RELAY_STRIDE,
+                description="Capture only every Nth step in the relay, at "
+                            "least 1 and at most MAX_RELAY_STRIDE.",
+            ),
+        ) -> dict[str, int]:
             """Adjust physics-to-render rate decoupling.
 
             Parameters
             ----------
             steps_per_frame : int
-                Physics steps batched per wall-clock frame in the runner.
+                Physics steps batched per wall-clock frame in the runner,
+                ``1`` to :data:`MAX_STEPS_PER_FRAME`.  Applied to the
+                running runner, and kept for the one a later ``POST
+                /sim/start`` creates (it used to be echoed and dropped when
+                no runner existed yet).
             relay_stride : int
                 Only capture every Nth step in the relay (reduces observer
-                overhead for very fast physics).
+                overhead for very fast physics), ``1`` to
+                :data:`MAX_RELAY_STRIDE`.  ``0`` used to be echoed as ``0``
+                and applied as ``1``; it is a 422 now.
+
+            Returns
+            -------
+            dict
+                The values in force, as the runner and the relay hold them.
             """
+            self._steps_per_frame = steps_per_frame
             if self.runner is not None:
                 self.runner.steps_per_frame = steps_per_frame
             self.relay.stride = relay_stride
             return {
-                "steps_per_frame": steps_per_frame,
-                "relay_stride": relay_stride,
+                "steps_per_frame": self._steps_per_frame,
+                "relay_stride": self.relay.stride,
             }
 
         # -- surrogate endpoints --------------------------------------------
@@ -1909,7 +2390,10 @@ class SimulationServer:
             def _train_worker():
                 try:
                     # Stop runner if going, generate data from varied ICs
-                    self._stop_runner()
+                    if not self._stop_runner():
+                        raise RuntimeError(
+                            "the runner's thread did not stop in time; nothing "
+                            "was reset or trained -- retry once it has stopped")
                     self._reset_state()
                     self.gm._dirty = True
 
@@ -2033,7 +2517,7 @@ class SimulationServer:
                     initial_values[k] = v
 
             was_running = self._runner_started
-            self._stop_runner()
+            self._stop_runner_or_refuse("activate a surrogate")
 
             surrogate = result.to_node(
                 name=node_name,
@@ -2059,7 +2543,7 @@ class SimulationServer:
                 )
 
             was_running = self._runner_started
-            self._stop_runner()
+            self._stop_runner_or_refuse("deactivate a surrogate")
 
             orig_node, orig_edges, orig_ext = self._original_nodes[node_name]
 

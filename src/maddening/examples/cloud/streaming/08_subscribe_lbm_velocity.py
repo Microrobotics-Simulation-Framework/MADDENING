@@ -197,12 +197,16 @@ def main() -> int:
         stepper = asyncio.create_task(_drive_steps(server, args.n_frames * 4))
         stats = await _client(port, compression=args.compression, n_frames=args.n_frames)
         await stepper
+        # A few more frames after the client has gone: the server's stream
+        # handler only notices a closed connection when it next sends.
+        await _drive_steps(server, 5)
         return stats
 
     try:
         stats = asyncio.run(runner())
     finally:
         uv_server.should_exit = True
+        uv_server.force_exit = True   # do not wait on idle connections
         t.join(timeout=10)
     print()
     print(f"Subscribed to fields={{lbm:[velocity]}} compression={args.compression}")

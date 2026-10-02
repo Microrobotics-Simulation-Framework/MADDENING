@@ -12,9 +12,10 @@ and checks exactly that:
    ``float32[N@devices]``;
 2. ``memory_estimate()`` reports a quarter of the rod per device, against
    the whole rod on one device unsharded;
-3. after the same number of steps the two rods agree (bit for bit here,
-   on the same machine), and the sharded result really is spread over the
-   four devices, ``N/4`` cells on each;
+3. after the same number of steps the two rods agree to float32
+   round-off (the example prints whether they are bitwise identical),
+   and the sharded result really is spread over the four devices,
+   ``N/4`` cells on each;
 4. a grid that does not divide by the device count is refused when the
    wrapper is built, naming both numbers.
 

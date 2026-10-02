@@ -34,9 +34,10 @@ The grid spacing is fixed at 1 mm, so every ``--n-cells`` runs the same
 Fourier number and the group needs a similar number of passes (four to
 seven here); what grows with the size is the work in each pass.  At the
 default size the extra passes are most of the step, and the overhead is
-tens of standard errors from zero.  At ``--n-cells 64`` a pass costs
-about as much as dispatching it, and the overhead is a few standard
-errors from zero at most, or below resolution: the report says which.
+tens of standard errors from zero.  At ``--n-cells 64`` a pass costs a
+fraction of what dispatching the step does, and the overhead is a few
+standard errors from zero at most, or below resolution: the report says
+which.
 
 See also ``profile_lbm_step.py``, which saves the same Perfetto JSON from
 an uncoupled graph and can capture an XLA-level trace for TensorBoard,
@@ -109,8 +110,9 @@ def section(title: str) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--n-cells", type=int, default=32768,
-                        help="Cells per rod (default 32768: the coupling cost is "
-                             "resolved; 64 is dispatch-bound)")
+                        help="Cells per rod (default 32768, where the extra "
+                             "coupling passes dominate the step; at small sizes "
+                             "they are close to the timing noise)")
     parser.add_argument("--n-steps", type=int, default=100,
                         help="Timed steps per window (default 100)")
     parser.add_argument("--trace-steps", type=int, default=10,
@@ -136,8 +138,8 @@ def main(argv=None) -> int:
         if not keep:
             shutil.rmtree(out_dir, ignore_errors=True)
     if not keep:
-        print(f"(Trace and JSON were written to a temporary directory, now "
-              f"removed; pass --out-dir DIR to keep them.)")
+        print("(Trace and JSON were written to a temporary directory, now "
+              "removed; pass --out-dir DIR to keep them.)")
     print()
     print("All checks passed.")
     return 0

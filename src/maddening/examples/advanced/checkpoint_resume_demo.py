@@ -64,7 +64,8 @@ CALIBRATED_DAMPING = 30.0   # written into gm.params; the constructor says 25
 def build() -> GraphManager:
     """Two masses joined by one spring, solved in a coupling group whose
     warm starts live in ``_meta``: a linear predictor and IQN-IMVJ
-    acceleration reusing its secant columns for 3 timesteps."""
+    acceleration keeping 3 secant (V/W) columns from the previous
+    timestep."""
     gm = GraphManager()
     gm.add_node(SpringDamperNode("A", DT, stiffness=K, damping=25.0, mass=1.0,
                                  rest_length=1.0, initial_position=0.0))

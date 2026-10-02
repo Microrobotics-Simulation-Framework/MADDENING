@@ -13,6 +13,10 @@ real time.
 Usage::
 
     python -m maddening.examples.servers.lbm_pipe_interactive
+    python -m maddening.examples.servers.lbm_pipe_interactive --gpu
+
+    # Headless: render 20 frames off-screen and save the last one
+    python -m maddening.examples.servers.lbm_pipe_interactive --frames 20 --screenshot pipe.png
 
 Controls:
     Mouse drag     -- rotate camera
@@ -28,18 +32,28 @@ Requirements::
     pip install maddening[viz3d]
 """
 
+import argparse
 import os
+import sys
+
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+# Decide the JAX backend before anything imports JAX: JAX reads
+# JAX_PLATFORMS once, at import, so setting it later has no effect.
+if "--gpu" in sys.argv:
+    os.environ["JAX_PLATFORMS"] = ""   # let JAX pick CUDA/ROCm if present
+else:
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import warnings
+
+import jax
 import numpy as np
 
 try:
     import pyvista as pv
 except ImportError:
     print("This example requires PyVista. Install with: pip install maddening[viz3d]")
-    import sys; sys.exit(1)
+    sys.exit(1)
 
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.lbm_pipe import LBMPipeNode
@@ -247,10 +261,14 @@ def build_streamlines(vel_field, n_lines=20, source_x_frac=0.08,
 class LBMPipeViewer:
     """Interactive 3D viewer with spinning propeller and live flow."""
 
-    def __init__(self):
+    def __init__(self, off_screen: bool = False):
         # -- simulation state --
         self.gm = build_graph()
-        self.state = self.gm._state
+        self.state = {"fluid": self.gm.get_node_state("fluid")}
+        # The node's update, compiled once.  The viewer steps the node
+        # directly (rather than through the graph) so the propeller
+        # slider can feed ``propeller_force`` in each frame.
+        self._update = jax.jit(self.gm.get_node("fluid").update)
         self.sim_time = 0.0
         self.total_steps = 0
         self.prop_strength = INITIAL_PROP_STRENGTH
@@ -276,6 +294,7 @@ class LBMPipeViewer:
         self.plotter = pv.Plotter(
             window_size=[1400, 800],
             title="MADDENING -- LBM Pipe Flow",
+            off_screen=off_screen,
         )
         self.plotter.set_background("#f0f0f0")
 
@@ -406,7 +425,8 @@ class LBMPipeViewer:
 
     def _reset_sim(self):
         self.gm = build_graph(self.prop_strength)
-        self.state = self.gm._state
+        self.state = {"fluid": self.gm.get_node_state("fluid")}
+        self._update = jax.jit(self.gm.get_node("fluid").update)
         self.sim_time = 0.0
         self.total_steps = 0
         self._prop_angle = 0.0
@@ -441,10 +461,9 @@ class LBMPipeViewer:
             return
 
         # --- step the simulation ---
-        update_fn = self.gm._nodes["fluid"].update_fn
-        bi = {"propeller_force": self.prop_strength}
+        bi = {"propeller_force": np.float32(self.prop_strength)}
         for _ in range(self.steps_per_frame):
-            self.state["fluid"] = update_fn(self.state["fluid"], bi, 0.01)
+            self.state["fluid"] = self._update(self.state["fluid"], bi, 0.01)
             self.sim_time += 0.01
             self.total_steps += 1
 
@@ -509,6 +528,15 @@ class LBMPipeViewer:
 
     # ----- run ----------------------------------------------------
 
+    def run_headless(self, n_frames: int, screenshot: str | None = None):
+        """Advance *n_frames* timer ticks off-screen; optionally save a PNG."""
+        for frame in range(n_frames):
+            self._tick(frame)
+        if screenshot:
+            self.plotter.screenshot(screenshot)
+            print(f"Saved {screenshot}")
+        self.plotter.close()
+
     def run(self):
         """Open the interactive window and start the simulation loop."""
         self.plotter.add_timer_event(
@@ -523,7 +551,17 @@ class LBMPipeViewer:
 # Main
 # ------------------------------------------------------------------
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Interactive 3D LBM pipe flow")
+    parser.add_argument("--gpu", action="store_true",
+                        help="Let JAX use a GPU backend if one is installed")
+    parser.add_argument("--frames", type=int, default=None,
+                        help="Render this many frames off-screen and exit "
+                             "(no window)")
+    parser.add_argument("--screenshot", default=None,
+                        help="With --frames: save the last frame to this PNG")
+    args = parser.parse_args(argv)
+
     print("=" * 62)
     print("  MADDENING -- Interactive LBM Pipe Flow (3D)")
     print("=" * 62)
@@ -541,13 +579,17 @@ def main():
     print("    Sliders      -- propeller strength, steps/frame, slice pos")
     print()
 
+    if args.frames is not None:
+        viewer = LBMPipeViewer(off_screen=True)
+        viewer.run_headless(args.frames, args.screenshot)
+        print(f"Rendered {args.frames} frames, t = {viewer.sim_time:.2f} s, "
+              f"step {viewer.total_steps}")
+        return
     viewer = LBMPipeViewer()
     viewer.run()
 
 
 if __name__ == "__main__":
-    import sys
     if "--gpu" in sys.argv:
-        os.environ["JAX_PLATFORMS"] = ""
         print("GPU mode: JAX auto-detecting backend")
     main()

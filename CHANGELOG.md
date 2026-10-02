@@ -342,6 +342,8 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **`fit_lm` no longer depends on the parameters' units, and a shrunken step cannot read as converged** (MADD-ANO-106, never released): the Marquardt floor is per column, and `converged` also needs the undamped Gauss-Newton step to be stationary;
+  **every reader of `gm.params` sees a pending `node.params` write** (MADD-ANO-107, never released): one sync point, the `gm.params` getter, serves readers and runners alike, and the later write wins.  Action: none.
 - **Fitters keep each parameter where `constrain` is not a clip or a clamp** (MADD-ANO-104, never released: a coordinate past one stayed there and `fit_lm` said converged); `fit_lm`'s floor is relative to the residual; `windowed_loss(start_step=)` (experimental) says where a multi-rate record began;
   `node.params` writes are counted, so every entry point recompiles for one and `load_state` supersedes them (MADD-ANO-105, since 0.1.0: `gm.step` and a new `run_scan` length ran different models).  Action: after writing `node.params` on a 0.3.x graph, `compile()` before running it.
 - **The FMU bridge and C wrapper refuse what they used to coerce or drop** (MADD-ANO-100 to 103, never released): a `master_dt` other than `md.graph_timestep`, a Boolean other than 0/1, an `fmi3Get`/`Set` of another type than the variable's, a repeated value reference, a numeric set of a Clock,

@@ -8352,8 +8352,10 @@ anomalies:
     residual_risk: >
       A client of the bridge's JSON protocol that names no `type` is not
       type-checked; the C wrapper always names one.  The wire carries every
-      value as a float64, so an Int64 or UInt64 variable holding a value
-      above 2^53 in magnitude cannot be set exactly, and is refused.
+      value as a float64, so a value above 2^53 in magnitude cannot pass
+      through it exactly: an Int64 or UInt64 set of one is refused, and a
+      get of one returns the nearest double.  No node in the package holds
+      a 64-bit integer that large.
     verification:
       - "tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_set_of_another_type_is_refused_and_writes_nothing"
       - "tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_get_of_another_type_is_refused"

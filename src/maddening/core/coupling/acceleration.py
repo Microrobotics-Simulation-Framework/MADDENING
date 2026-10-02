@@ -1035,7 +1035,12 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: same-pass read by its gain along the chain, and never goes below the
 #: structural count; the report reads that count from the step
 #: (``coupling_<key>_pass_evaluations``).  Without diagnostics the
-#: structural count stands (``precision_limited`` only, no bound).
+#: structural count stands (``precision_limited`` only, no bound).  The
+#: weighting adds gain *magnitudes*, which keeps it a bound and makes it
+#: loose where signs alternate: a ten-link chain ``3 c_(j-1) - 2 c_(j-2)
+#: + c`` counts 3.6e5 evaluations and its bound reads 1.1e7x the true
+#: distance, usable.  Sub-cycled members are counted as undamped sub-steps
+#: and read 1.5e3x-9.6e4x over.  Valid, and too loose to read there.
 #:
 #: It is a model of the map's rounding, not a proof of it: the measured
 #: gains are first-order and taken along one direction per read (the

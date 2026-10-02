@@ -7887,7 +7887,24 @@ anomalies:
       -- can exceed any fixed number of ulps of its output, and nothing
       outside the node can see that.  The measurement costs one JVP of a
       member's update per group-internal read, every step, in its own
-      `lax.cond` branch.  The count is
+      `lax.cond` branch.  It is valid but can be far too loose to use: it
+      adds gain magnitudes, so on a mixed-sign Gauss-Seidel chain
+      `c_j = 3 c_(j-1) - 2 c_(j-2) + c` of ten links (the coupling-floor
+      spike, 80-digit truth) the count is 3.6e5 evaluations and
+      `spectral_error_bound` reads about 109 in relative distance, 1.1e7x
+      the true distance, with `spectral_usable=True` (4.8e5x at eight
+      links).  Sub-cycled groups read 1.5e3x to 9.6e4x over with or
+      without the weighting: the structural count takes every sub-step's
+      rounding as undamped.  Two tightenings were checked and not taken.
+      Composing the measured gains with their signs along the error
+      direction actually propagated is a bound entry by entry only, so for
+      a vector field it needs the full same-pass Jacobian; mixing signed
+      scalar links with absolute ones is not a bound (a signed path can
+      cancel against one whose sign was dropped); and on that chain it
+      would still read about 3e4x over, because its true floor error is
+      under one ulp.  Capping a link by the downstream node's declared
+      evaluations where its inputs coincide would cancel a squaring
+      relay's real doubling.  The count is
       one number for the whole pass, so the floor is conservative for the
       members near the start of a chain: 16x over the true distance on
       the 32-relay ring.

@@ -119,8 +119,8 @@ def test_an_archive_with_a_fraction_in_a_boolean_member_does_not_restore(served,
     assert bridge.handle({"op": "get_state"})["state"] == before
     # an archive holding the same member as 1.0, 1 or True restores
     for good in (np.asarray(1.0), np.asarray(1, np.int64), np.asarray(True)):
-        assert bridge.handle({"op": "set_state", "state": _archive_with(bridge, **{member: good})}) \
-            == {"ok": True}, good
+        reply = bridge.handle({"op": "set_state", "state": _archive_with(bridge, **{member: good})})
+        assert reply["ok"] is True, (good, reply)
 
 
 def test_the_sidecars_own_restore_door_refuses_it_too(gate_graph):

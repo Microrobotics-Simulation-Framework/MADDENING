@@ -9347,6 +9347,51 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-119"
+    title: "An FMU-state archive installed new interface-mapping weights, which are not FMI variables: the FMU then computed a coupling its model description does not describe"
+    description: >
+      The bridge's contract is that an FMU-state archive may only install
+      what a `set` of the same variables could.  Interface-mapping weights
+      (`params["mappings"]`) are never FMI variables, so no `set` reaches
+      them, but the archive carries them as `p/mappings/<edge>/<key>`, and
+      `set_state` and `FmuSidecar.set_fmu_state` installed any finite array
+      of the right shape.  The step reads them.  On the 0.4.0 development
+      tree on 2026-10-02 (CPU, jaxlib 0.11.0), an edge mapped with the
+      identity carried `b.x = [1, 2]`.  After an archive restore with the
+      weights forged to `[[0, 10], [-3, 0]]`, `set_state` answered `ok` and
+      the next step gave `[20, -3]`.  The description exports no variable
+      that could have produced that.  No release carried it: v0.1.0 to
+      v0.3.1 have no TCP bridge, and their sidecar carried no parameters.
+      Found by the round-6 FMU audit.  Resolved in 0.4.0: every mapping
+      leaf is fixed on both restore doors.  A snapshot that would change one
+      is refused with the same message on both, naming the edge, and
+      nothing is written.  The FMU's own snapshots, which hold the weights
+      it was built with, restore.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: every value the FMU returned
+      after the restore came from a coupling nobody configured, every call
+      `ok`.  Not `critical`: it needs an archive that was edited, never one
+      the FMU handed out.  Registered although no release carried it,
+      because it is major.  `context_dependent` because the error is
+      whatever the forged coupling makes it.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.sidecar.FmuSidecar.set_fmu_state"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: restore only archives the FMU wrote.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_an_archive_with_new_mapping_weights_is_refused"
+      - "tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_the_sidecars_own_restore_door_refuses_the_same_weights"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-120"
     title: "A node downstream of a cycle that was added to the graph before the cycle's nodes was scheduled ahead of them and read their previous-step output: an edge on no cycle, staggered silently"
     description: >
       `topological_sort` orders the nodes Kahn's algorithm can reach, each

@@ -18,9 +18,9 @@ Requests (importer -> sidecar) and responses, JSON form::
     {"op": "initialize", "t": t0}         -> {"ok": true, "t": t0}
     {"op": "step", "t": t, "dt": h}       -> {"ok": true, "t": t + h}
     {"op": "get_state"}                   -> {"ok": true, "state": "<base64>"}
-    {"op": "set_state", "state": ".."}    -> {"ok": true}
+    {"op": "set_state", "state": ".."}    -> {"ok": true, "t": restored time}
     {"op": "reset"}                       -> {"ok": true}
-    {"op": "terminate"}                   -> {"ok": true}
+    {"op": "terminate"}                   -> {"ok": true}   (Terminated until reset)
     any failure                           -> {"ok": false, "error": "..."}
 
 **Instances.**  A connection that claims the bridge's instance slot (its
@@ -100,7 +100,8 @@ longer frame, never sees one from this bridge.
 **Connection lifetime.**  A connection holds the bridge's single FMU
 instance for as long as it lives, so no wait on it is unbounded: a peer
 has ten seconds to begin its first frame, five minutes of silence
-between frames once it has spoken, and two minutes to finish a frame it
+between frames once it has spoken (``FmuTcpBridge(idle_timeout=...)``;
+``None`` lifts this one), and two minutes to finish a frame it
 has announced the length of -- two minutes in total, whether the rest
 of the frame dribbles in or stops arriving.  Overrunning any of them
 ends the connection exactly as EOF does, and the instance slot is free
@@ -157,6 +158,8 @@ from maddening.fmi.model_description import (
     _DTYPE_TO_FMI_TYPE,
     FMIVariable,
     ModelDescription,
+    _fmi_kind,
+    _parse_xs_value,
 )
 from maddening.fmi.sidecar import (
     FmuSidecar,
@@ -211,13 +214,31 @@ three orders of magnitude more than a healthy importer needs, while a
 port scan, a crashed importer or a dropped link is dropped promptly
 instead of owning the instance for ever."""
 _IDLE_TIMEOUT = 300.0
-"""Seconds an established connection may stay silent between frames.
+"""Default seconds an established connection may stay silent between frames
+(``FmuTcpBridge(idle_timeout=...)``).
 
 An importer is idle between ``doStep`` calls, and the master may be
 waiting on a slow co-simulation partner or on a human at a debugger
 prompt, so this one is deliberately generous: five minutes of silence
 from a client that has already completed a handshake is a link that is
-gone, not a slow one."""
+gone, not a slow one.  A master that legitimately pauses longer -- a
+debugging session, a partner model that computes for an hour -- passes a
+larger value, or ``None`` for no limit; the connection, and with it the
+instance, used to be dropped after five minutes whatever the caller
+needed."""
+class _ModuleDefault:
+    """The default of an argument that falls back to a module constant read
+    when the bridge is built (so a test that shrinks the constant shrinks
+    the default)."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+
+    def __repr__(self) -> str:
+        return self._name
+
+
+_IDLE_DEFAULT = _ModuleDefault("_IDLE_TIMEOUT")
 _FRAME_TIMEOUT = 120.0
 """Seconds to finish a frame once its length prefix has arrived.
 
@@ -655,8 +676,14 @@ def _check_access_type(var: FMIVariable, fmi_type: Optional[str], access: str) -
 
 
 def _start_leaf(var: FMIVariable, live: Any) -> np.ndarray:
-    """A parameter variable's advertised ``start`` in its live leaf's dtype
-    and shape (``ValueError`` if the description cannot describe the leaf)."""
+    """A parameter variable's advertised ``start`` in its live leaf's shape
+    (``ValueError`` if the description cannot describe the leaf).
+
+    Read in the lexical form of the variable's type (``true`` / ``false``,
+    an integer literal, an ``xs:double``), into a dtype that holds it
+    exactly: float64 for a float, int64 / uint64 for an integer (an int64
+    past 2**53 is exact), bool for a Boolean.
+    """
     live_arr = np.asarray(live)
     tokens = (var.start or "").split()
     if len(tokens) != live_arr.size:
@@ -664,8 +691,33 @@ def _start_leaf(var: FMIVariable, live: Any) -> np.ndarray:
             f"the model description's start value for {var.name!r} has "
             f"{len(tokens)} entries, but the sidecar's leaf has shape "
             f"{live_arr.shape}; the description does not describe this sidecar")
-    flat = np.asarray([float(tok) for tok in tokens], dtype=np.float64)
+    kind = _fmi_kind(var.dtype)
+    wide = {"float": np.float64, "bool": np.bool_}.get(
+        kind, np.uint64 if np.dtype(var.dtype).kind == "u" else np.int64)
+    try:
+        flat = np.asarray([_parse_xs_value(tok, var.dtype) for tok in tokens], dtype=wide)
+    except (ValueError, OverflowError) as exc:
+        raise ValueError(f"the model description's start value for {var.name!r} "
+                         f"is not a value of its type {var.dtype}: {exc}") from exc
     return flat.reshape(live_arr.shape)
+
+
+def _param_owner(var: FMIVariable) -> tuple[str, str]:
+    """The ``(node, key)`` a parameter variable addresses
+    (``params["nodes"][node][key]``).
+
+    ``build_model_description`` records the pair on the variable
+    (``node`` / ``field``), because ``<node>.params.<key>`` cannot be split
+    back when the node's own name holds ``.params.``: splitting a variable
+    of node ``rig.params.v2`` at the first one found no such node, so the
+    bridge left out its advertised bounds and start value and every set
+    was refused as unknown.  A hand-built variable without the pair is
+    split at the last ``.params.``, as a parameter key holds no dot.
+    """
+    if var.node is not None and var.field:
+        return var.node, var.field
+    node, _, key = var.name.rpartition(".params.")
+    return node, key
 
 
 def checked_value(arr, dtype, *, what: str) -> np.ndarray:
@@ -732,6 +784,12 @@ class FmuTcpBridge:
         The most graph steps one ``step`` request may ask for
         (``h / master_dt``); a larger request is refused with nothing
         advanced.  See :data:`MAX_STEPS_PER_REQUEST`.
+    idle_timeout : float or None, default ``_IDLE_TIMEOUT`` (300)
+        Seconds an established connection may stay silent between frames
+        before the bridge drops it (and with it the FMU instance), and
+        the bound on sending a reply.  ``None`` waits for ever.  See
+        :data:`_IDLE_TIMEOUT`.  The handshake and frame budgets are not
+        affected.
 
     Raises
     ------
@@ -739,8 +797,9 @@ class FmuTcpBridge:
         If ``master_dt`` is not a positive finite number, differs from the
         graph step the description records, or does not divide the
         description's ``default_step_size`` into a whole number of steps
-        no larger than ``max_steps_per_request``; or if
-        ``max_steps_per_request`` is not a positive integer.
+        no larger than ``max_steps_per_request``; if
+        ``max_steps_per_request`` is not a positive integer; or if
+        ``idle_timeout`` is neither ``None`` nor a positive finite number.
     """
 
     def __init__(
@@ -752,9 +811,17 @@ class FmuTcpBridge:
         host: str = "127.0.0.1",
         port: int = 0,
         max_steps_per_request: int = MAX_STEPS_PER_REQUEST,
+        idle_timeout: "Optional[float] | _ModuleDefault" = _IDLE_DEFAULT,
     ) -> None:
         self._sidecar = sidecar
         self._md = model_description
+        if isinstance(idle_timeout, _ModuleDefault):
+            idle_timeout = _IDLE_TIMEOUT
+        if idle_timeout is not None:
+            idle_timeout = _real_number(idle_timeout, "idle_timeout")
+            if idle_timeout <= 0:
+                raise ValueError(f"idle_timeout must be positive or None, got {idle_timeout!r}")
+        self._idle_timeout: Optional[float] = idle_timeout
         if isinstance(max_steps_per_request, (bool, np.bool_)) or not isinstance(
                 max_steps_per_request, (int, np.integer)) or max_steps_per_request < 1:
             raise ValueError(f"max_steps_per_request must be a positive integer, got "
@@ -777,6 +844,10 @@ class FmuTcpBridge:
         # (FMI's "Instantiated" state is the one in which it has not, and
         # the only one in which ``initialize`` is accepted.)
         self._stepped = False
+        # Has the instance been terminated (fmi3Terminate) since it was
+        # instantiated or reset?  FMI's Terminated state allows reading
+        # and the FMU-state functions, and leaves only by fmi3Reset.
+        self._terminated = False
         self._initial_state = _copy_tree(sidecar.state)
         # The description is the FMU's contract: a graph parameter it does
         # not export as a tunable variable is one the step cannot read (see
@@ -1088,7 +1159,7 @@ class FmuTcpBridge:
                     # scan, a crashed importer or a dropped link was enough),
                     # and a peer that was refused the slot used to park a
                     # thread for ever.
-                    conn.settimeout(_IDLE_TIMEOUT if held else _HANDSHAKE_TIMEOUT)
+                    conn.settimeout(self._idle_timeout if held else _HANDSHAKE_TIMEOUT)
                     try:
                         got = recv_raw(conn, frame_timeout=_FRAME_TIMEOUT)
                     except socket.timeout:
@@ -1129,7 +1200,7 @@ class FmuTcpBridge:
                         # From here the generous budget applies to the reply
                         # send as well: a first frame that asks for a 64 MiB
                         # get should not be cut off by the handshake budget.
-                        conn.settimeout(_IDLE_TIMEOUT)
+                        conn.settimeout(self._idle_timeout)
                     is_binary, body = got
                     # Bound before the parse: a malformed *first* frame
                     # leaves the name unset otherwise, and the reply-failure
@@ -1377,6 +1448,7 @@ class FmuTcpBridge:
                         "time given to initialize (fmi3EnterInitializationMode).  "
                         "Restore an FMU state to go back in time; nothing was advanced"
                     )
+                self._refuse_if_terminated("step")
                 # Every sub-step runs on a local state and the result is
                 # committed once, at the end: a failed sub-step leaves no
                 # partial advance behind (the importer is told nothing
@@ -1416,6 +1488,7 @@ class FmuTcpBridge:
                         "initialization mode once, between instantiation (or "
                         "reset) and the first step; reset first to start again"
                     )
+                self._refuse_if_terminated("initialize")
                 with self._committing("initialize"):
                     self._time = t_start
                 return {"ok": True, "t": t_start}
@@ -1426,13 +1499,21 @@ class FmuTcpBridge:
                 if not isinstance(blob, (bytes, bytearray)):
                     blob = base64.b64decode(blob)
                 self._decode_state(bytes(blob))
-                return {"ok": True}
+                # The restored time, for the C wrapper's own clock: it
+                # reports it as lastSuccessfulTime when a later doStep
+                # fails, and used to report the time before the restore.
+                return {"ok": True, "t": self._time}
             if op == "reset":
                 # fmi3Reset: the state a fresh instance starts from, the
                 # same commit a claim of the instance slot makes.
                 self._reset_instance("reset")
                 return {"ok": True}
             if op == "terminate":
+                # fmi3Terminate: the instance is in FMI's Terminated state
+                # until fmi3Reset.  A doStep after it used to advance the
+                # model and answer ok.  Idempotent.
+                with self._committing("terminate"):
+                    self._terminated = True
                 return {"ok": True}
             return {"ok": False, "error": f"unknown op {op!r}"}
         except Exception as exc:  # noqa: BLE001 - reported to the importer
@@ -1533,7 +1614,7 @@ class FmuTcpBridge:
         for var in md.variables:
             if var.causality != "parameter" or (var.min is None and var.max is None):
                 continue
-            node, _, key = var.name.partition(".params.")
+            node, key = _param_owner(var)
             if key not in leaves.get(node, {}):
                 continue
             try:
@@ -1552,10 +1633,9 @@ class FmuTcpBridge:
         """The sidecar's parameter tree with every exported parameter at the
         description's ``start``, or ``None`` when it already is.
 
-        A leaf whose start, read back as float64, equals the sidecar's leaf
-        (``NaN`` equal to ``NaN``) is kept as the sidecar holds it, so a
-        value the XML can only write rounded -- an int64 past 2**53 -- is
-        not "corrected".  Any other difference is warned about, naming the
+        A leaf whose start, read back in its type (:func:`_start_leaf`),
+        equals the sidecar's leaf (``NaN`` equal to ``NaN``) is kept as the
+        sidecar holds it.  Any other difference is warned about, naming the
         parameter, and the description's value wins.
         """
         params = sidecar.params
@@ -1566,12 +1646,12 @@ class FmuTcpBridge:
         for var in md.variables:
             if var.causality != "parameter" or var.start is None:
                 continue
-            node, _, key = var.name.partition(".params.")
+            node, key = _param_owner(var)
             if key not in nodes.get(node, {}):
                 continue
             live = nodes[node][key]
             start = _start_leaf(var, live)
-            if np.array_equal(np.asarray(live, dtype=np.float64), start, equal_nan=True):
+            if np.array_equal(np.asarray(live), start, equal_nan=start.dtype.kind == "f"):
                 continue
             changed[(node, key)] = start
         if not changed:
@@ -1619,6 +1699,24 @@ class FmuTcpBridge:
             if params is not None:
                 self._sidecar._params = params                    # noqa: SLF001
             self._inputs, self._time, self._stepped = inputs, 0.0, False
+            self._terminated = False
+
+    def _refuse_if_terminated(self, op: str) -> None:
+        """Refuse ``op`` (``step``, ``set``, ``initialize``) in FMI 3.0's
+        Terminated state, which allows only ``fmi3Get*``, the FMU-state
+        functions and ``fmi3Reset``.
+
+        Raises
+        ------
+        ValueError
+            If the instance has been terminated; nothing is written.
+        """
+        if self._terminated:
+            raise ValueError(
+                f"the instance has been terminated (fmi3Terminate), so {op!r} is "
+                "refused: FMI 3.0's Terminated state allows reading variables, "
+                "the FMU-state functions and fmi3Reset, which starts the "
+                "instance again; nothing was written")
 
     # -------------------------------------------------------- FMU state blob
     _META = "_meta"
@@ -1884,6 +1982,7 @@ class FmuTcpBridge:
                 input_updates.append((node, field, self._in_dtype(var, arr)))
             else:
                 raise ValueError(f"variable {var.name!r} ({var.causality}) is read-only")
+        self._refuse_if_terminated("set")
         # Atomic: parameters are validated (bounds) by the sidecar first;
         # inputs are only committed once nothing can fail any more.
         with self._committing("set"):

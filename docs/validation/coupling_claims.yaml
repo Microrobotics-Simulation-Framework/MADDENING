@@ -565,7 +565,7 @@ claims:
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
   status: verified
   notes: >-
-    Failing until 0.4.0's claims fix (MADD-ANO-119, since 0.1.0): a node
+    Failing until 0.4.0's claims fix (MADD-ANO-120, since 0.1.0): a node
     downstream of a coupling group added before the group's members read
     the group's previous-step output (sink.x 0.409 against 0.821 after one
     step), silently.  The unreached nodes are now ordered by strongly

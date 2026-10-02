@@ -92,6 +92,18 @@ class SpringDamperNode(SimulationNode):
             "1st-order integration — energy drift over long simulations",
             "No nonlinear spring behaviour (hardening, softening)",
             "No collision detection with other objects",
+            "Conditionally stable, and nothing checks it: against a fixed "
+            "or prescribed anchor the scheme is stable only for "
+            "k*dt**2 + 2*c*dt < 4*m (dt < 2*sqrt(m/k) undamped)",
+            "Two nodes anchored on each other in a converged coupling group "
+            "are each explicit in their own position and implicit in the "
+            "partner's, so the action-reaction pair does not cancel: the "
+            "centre-of-mass velocity of an equal pair (same k, c, m) is "
+            "multiplied by (m - c*dt)/(m - k*dt**2) every step.  Where the "
+            "coupling iteration converges (k*dt**2 < m) and c*dt < m, the "
+            "pair is stable only for c >= k*dt, far inside the single-node "
+            "limit; past it the pair drifts off with growing speed "
+            "(MADD-ANO-098)",
         ),
         validated_regimes=(
             ValidatedRegime("stiffness", 0.01, 1e6, "N/m", "Tested range; very stiff springs need small dt"),
@@ -100,6 +112,10 @@ class SpringDamperNode(SimulationNode):
         hazard_hints=(
             "Very stiff springs (k > 1e4) with large dt can cause numerical instability",
             "Zero mass causes division by zero",
+            "Two springs anchored on each other in a coupling group gain "
+            "momentum without bound, silently, when stiffness*dt > damping "
+            "(equal pair, stiffness*dt**2 < mass): keep damping >= "
+            "stiffness*dt, or the timestep below damping/stiffness",
         ),
     )
 

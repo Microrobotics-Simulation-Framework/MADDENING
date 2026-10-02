@@ -473,19 +473,50 @@ class _ExtView:
     expected_units: str = ""
 
 
-def _master_timestep(graph_manager: Any) -> float:
-    """The graph's base (fastest) timestep: ``_base_dt`` when compile()
-    set it, else the smallest node timestep; 1e-3 for an empty graph."""
-    base = getattr(graph_manager, "_base_dt", None)
-    if base:
-        return float(base)
+def _node_timesteps(graph_manager: Any) -> dict[str, float]:
+    """Each node's timestep as the graph's step schedules it.
+
+    A ``GraphManager``'s scheduled timesteps
+    (``maddening.core.graph_manager._scheduled_timesteps``): every member of
+    a sub-cycling coupling group at the group's largest member timestep,
+    because the group solves once per macro step and an importer sees its
+    members change only then.  A duck-typed graph without coupling groups
+    gives its nodes' own timesteps.
+    """
+    from maddening.core.graph_manager import _scheduled_timesteps  # noqa: PLC0415
+
     nodes = getattr(graph_manager, "_nodes", {}) or {}
-    dts = [
-        float(getattr(spec, "timestep", getattr(getattr(spec, "node", spec), "delta_t", 0.0)))
-        for spec in nodes.values()
-    ]
-    dts = [dt for dt in dts if dt > 0]
-    return min(dts) if dts else 1.0e-3
+    own = {
+        name: float(getattr(spec, "timestep",
+                            getattr(getattr(spec, "node", spec), "delta_t", 0.0)))
+        for name, spec in nodes.items()
+    }
+    groups = getattr(graph_manager, "_coupling_groups", None) or ()
+    if not groups:
+        return own
+    return {name: float(dt) for name, dt in _scheduled_timesteps(nodes, groups).items()}
+
+
+def _master_timestep(graph_manager: Any) -> float:
+    """One step of the graph: the simulated time one sidecar step advances.
+
+    ``GraphManager.timestep`` -- the GCD of the scheduled node timesteps,
+    which is the fastest node's timestep on a uniform-rate graph and on a
+    multi-rate one whose timesteps divide each other (MADD-ANO-078), and
+    shorter or longer than that on the others: 0.001 for nodes at 0.002
+    and 0.003, 0.02 for a sub-cycling group of 0.01 and 0.02.  A duck-typed
+    graph without that property gives the GCD of its node timesteps; an
+    empty graph 1e-3.  (This used to read a ``_base_dt`` attribute nothing
+    set and fall back to the smallest node timestep, MADD-ANO-097.)
+    """
+    from maddening.core.graph_manager import _step_duration  # noqa: PLC0415
+
+    try:
+        return float(graph_manager.timestep)
+    except (AttributeError, RuntimeError):
+        pass
+    dts = {name: dt for name, dt in _node_timesteps(graph_manager).items() if dt > 0}
+    return float(_step_duration(dts)) if dts else 1.0e-3
 
 
 def _deterministic_token(parts: Iterable[str]) -> str:
@@ -556,8 +587,12 @@ def build_model_description(
         the FMU's public surface minimal — only ``STABLE``-tagged
         sources/sinks contribute.
     default_step_size : float, optional
-        Default fixed step size for the FMU's experiment block.
-        Defaults to the graph's master timestep when available.
+        Default fixed step size for the FMU's experiment block.  Defaults
+        to one step of the graph, ``graph_manager.timestep``: the fastest
+        node's timestep on a uniform-rate graph, and on a multi-rate graph
+        the GCD of the timesteps as scheduled (a sub-cycling coupling
+        group at its largest member timestep), which is what one sidecar
+        step advances.
     include_parameters : bool, default True
         Expose every leaf of ``graph_manager.params["nodes"]`` that the
         compiled step reads as a ``causality="parameter"``,
@@ -581,9 +616,13 @@ def build_model_description(
         exported output and external input with the clock of its node
         (``clocks=`` attribute, ``variability="discrete"``): an importer
         then knows that a node on a 10x coarser rate only changes every
-        10th master step.  Clocks are named ``clock_<k>`` in order of
-        increasing interval; the fastest one equals the default step
-        size.  Off by default (single-clock, every output continuous),
+        10th master step.  A member of a sub-cycling coupling group is on
+        its group's largest member timestep, the only rate at which its
+        values change between steps.  Clocks are named ``clock_<k>`` in
+        order of increasing interval; every interval is a whole number of
+        default steps, and the fastest equals it unless the timesteps do
+        not divide each other (nodes at 0.002 and 0.003 run on a 0.001
+        step).  Off by default (single-clock, every output continuous),
         so existing FMUs are unchanged.
     model_identifier : str, optional
         Emit a ``<CoSimulation modelIdentifier=...>`` element naming the
@@ -726,13 +765,16 @@ def build_model_description(
     clock_vr_of_dt: dict[float, int] = {}
     node_clock: dict[str, int] = {}
     if multi_clock:
+        scheduled = _node_timesteps(graph_manager)
         dts: dict[float, list[str]] = {}
         for node_name, node_spec in nodes.items():
             node = getattr(node_spec, "node", node_spec)
             cls_name = f"{type(node).__module__}.{type(node).__name__}"
             if not _ensure_stable_only_or_opt_in(cls_name, include_evolving):
                 continue
-            dt = float(getattr(node_spec, "timestep", getattr(node, "delta_t", 0.0)))
+            # The scheduled timestep, not the node's own: a sub-cycled
+            # member's outputs change once per macro step of its group.
+            dt = scheduled[node_name]
             dts.setdefault(dt, []).append(node_name)
         for k, dt in enumerate(sorted(dts)):
             variables.append(FMIVariable(

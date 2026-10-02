@@ -66,13 +66,34 @@ There is no spatial order — the node integrates an ODE and has no grid. The te
 ## Known Limitations and Failure Modes
 
 1. **1st-order integration**: the error is $O(\Delta t)$ in both position and velocity
-2. **No stability check**: $k \Delta t^2 / m \gtrsim 4$ makes the undamped scheme unstable, and nothing enforces it at runtime
+2. **No stability check**: a single node is stable only for $k\,\Delta t^2 + 2c\,\Delta t < 4m$ (see [Stability Conditions](#stability-conditions)), and nothing enforces it at runtime
 3. **A calibrated constant reaches `derivatives()` and `implicit_residual()` only when it is passed.** Both take the injected `params` by the same `{**self.params, **params}` rule as `update()` (MADD-ANO-018, resolved in 0.4.0), so hand the node's `gm.params` entry to `integrate_node(..., params=)` or `implicit_euler_step(..., params=)`; called without it, they integrate the constructor constants
 4. No nonlinear spring behaviour, and no contact
+5. **Two nodes anchored on each other in a converged coupling group are unstable for $k\,\Delta t > c$**, far inside the single-node limit, and nothing warns (MADD-ANO-098). See [Stability Conditions](#stability-conditions).
 
 ## Stability Conditions
 
-Semi-implicit Euler applied to the undamped oscillator is stable for $\Delta t < 2\sqrt{m/k}$, i.e. $\omega \Delta t < 2$ with $\omega = \sqrt{k/m}$. Damping tightens the bound slightly.
+**One node, fixed or prescribed anchor.** The step maps $(x, v)$ by a matrix with trace $2 - (k\Delta t^2 + c\Delta t)/m$ and determinant $1 - c\Delta t/m$. The Jury conditions give the exact bound
+
+$$
+k\,\Delta t^2 + 2c\,\Delta t < 4m ,
+$$
+
+which is $\Delta t < 2\sqrt{m/k}$ ($\omega \Delta t < 2$) undamped. Damping tightens it.
+
+**Two nodes anchored on each other in a converged coupling group** (each node's `position` is the other's `anchor_position`, with rest lengths $+\ell_0$ and $-\ell_0$ so that they form one spring). At the converged fixed point each node's force reads its own position at the old time and its partner's at the new time. The spring forces therefore do not cancel, and the pair's momentum is not conserved. For an equal pair (the same $k$, $c$ and $m$), the sum $S = v_a + v_b$ decouples exactly:
+
+$$
+S^{n+1} = \frac{m - c\,\Delta t}{m - k\,\Delta t^2}\, S^n .
+$$
+
+The coupling iteration converges for $k\Delta t^2 < m$; Gauss-Seidel contracts by $(k\Delta t^2/m)^2$ per sweep. Where it converges and $c\Delta t < m$, the pair is stable only for
+
+$$
+c \ge k\,\Delta t ,
+$$
+
+and the factor is exactly 1 at equality. The relative motion $x_a - x_b$ is stable whenever $c\,\Delta t < 2m$, so the instability is the pair drifting off together, with a speed that grows every step. The single-node bound does not see it. With $k = 1000$, $c = 2$, $m = 0.5$ and $\Delta t = 0.01$, the single node has $k\Delta t^2 + 2c\Delta t = 0.14$ against $4m = 2$, while the pair's centre-of-mass velocity grows by a factor of 1.2 per step. Without a coupling group the pair exchanges positions lagged by the schedule. That is a different scheme with its own limit, which this bound does not describe; it also diverges at those constants.
 
 ## State Variables
 
@@ -115,6 +136,7 @@ Semi-implicit Euler applied to the undamped oscillator is stable for $\Delta t <
 - Benchmark: `MADD-VER-009` — observed temporal order of accuracy by the Method of Manufactured Solutions. A manufactured displacement is injected through `anchor_position`, which enters the force linearly, so the anchor that makes the trajectory exact is available in closed form. Over a 100/200/400/800 step ladder at fixed final time, in float64, the observed order over the finest pair is **1.029** against the declared 1.0.
 - Test file: `tests/verification/test_mms_order_ode_nodes.py`
 - The same file mutation-tests the study: a mis-scaled timestep, a timestep that drifts with the resolution (a monotone ladder at order 1/2) and a source frozen at $t=0$ are each required to fail the ladder and name this node.
+- Stability: `tests/nodes/test_spring_stability_limits.py` checks both bounds above against the node itself. The single node's step matrix has spectral radius below 1 just inside $k\Delta t^2 + 2c\Delta t = 4m$ and above 1 just outside it. The coupled pair's measured centre-of-mass growth per step equals $(m - c\Delta t)/(m - k\Delta t^2)$ to float32 precision, either side of $c = k\Delta t$ and at it.
 
 ## Changelog
 
@@ -122,3 +144,4 @@ Semi-implicit Euler applied to the undamped oscillator is stable for $\Delta t <
 |---------|------|--------|
 | 1.0.0 | 2025-03-01 | Initial implementation |
 | 1.0.0 | 2026-09-20 | Declared order of accuracy added and measured (MADD-VER-009) |
+| 1.0.0 | 2026-10-02 | Exact single-node stability bound and the coupled-pair limit $c \ge k\Delta t$ stated (MADD-ANO-098); numerics unchanged |

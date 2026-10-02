@@ -196,11 +196,15 @@ def test_a_hand_built_description_is_held_to_its_default_step_size():
         FmuTcpBridge(sidecar(), _hand_built(1e-3), master_dt=0.01)
 
 
-@pytest.mark.parametrize("bad", [0.0, -0.01, math.nan, math.inf, "0.01", True, None])
-def test_master_dt_must_be_a_positive_finite_number(bad):
+@pytest.mark.parametrize("bad, why", [
+    (0.0, "master_dt must be positive"), (-0.01, "master_dt must be positive"),
+    (math.nan, "master_dt must be finite"), (math.inf, "master_dt must be finite"),
+    ("0.01", "master_dt must be a number"), (True, "master_dt must be a number"),
+    (None, "master_dt must be a number")])
+def test_master_dt_must_be_a_positive_finite_number(bad, why):
     gm = _springs(0.01)
     md = build_model_description(gm, model_name="m")
-    with pytest.raises(ValueError, match="master_dt"):
+    with pytest.raises(ValueError, match=why):
         FmuTcpBridge(_sidecar(gm, md), md, master_dt=bad)
 
 
@@ -208,5 +212,5 @@ def test_master_dt_must_be_a_positive_finite_number(bad):
 def test_max_steps_per_request_must_be_a_positive_integer(bad):
     gm = _springs(0.01)
     md = build_model_description(gm, model_name="m")
-    with pytest.raises(ValueError, match="max_steps_per_request"):
+    with pytest.raises(ValueError, match="max_steps_per_request must be a positive integer"):
         FmuTcpBridge(_sidecar(gm, md), md, master_dt=0.01, max_steps_per_request=bad)

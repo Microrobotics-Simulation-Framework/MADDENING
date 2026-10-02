@@ -12,9 +12,9 @@ Requests (importer -> sidecar) and responses, JSON form::
 
     {"op": "hello"}                       -> {"ok": true, "token": ..., "model": ...,
                                               "master_dt": h, "protocol": 2, "binary": b}
-    {"op": "set", "vr": [..], "values": [..]}
+    {"op": "set", "type": T, "vr": [..], "values": [..]}
                                           -> {"ok": true}
-    {"op": "get", "vr": [..]}             -> {"ok": true, "values": [..]}
+    {"op": "get", "type": T, "vr": [..]}  -> {"ok": true, "values": [..]}
     {"op": "initialize", "t": t0}         -> {"ok": true, "t": t0}
     {"op": "step", "t": t, "dt": h}       -> {"ok": true, "t": t + h}
     {"op": "get_state"}                   -> {"ok": true, "state": "<base64>"}
@@ -33,9 +33,23 @@ is accepted until the instance's first step.  A ``step``'s ``t`` must be
 the FMU's current time -- the previous ``t`` plus the previous ``h``, or
 the start time -- to within a millionth of a master step
 (``_COMM_POINT_TOLERANCE``); a point inside it is adopted, one outside it
-is refused with nothing advanced.  ``t``, ``h`` and every entry of
-``values`` must be JSON numbers: a string or a boolean is refused, not
+is refused with nothing advanced.  The step size ``h`` is held to the same
+absolute tolerance off a whole number of master steps, so a step the bridge
+accepts never makes the next legal one fail.  ``t``, ``h`` and every entry
+of ``values`` must be JSON numbers: a string or a boolean is refused, not
 parsed.
+
+**Types.**  ``type`` (optional) is the FMI 3.0 type of the ``fmi3Get`` /
+``fmi3Set`` function the request comes from (``"Float32"``, ``"Boolean"``,
+...); the C wrapper always sends it, and a variable of another type is
+refused with nothing read or written, as FMI 3.0 requires.  A Boolean
+variable takes ``0`` or ``1``.  A ``set`` that names a value reference twice
+is refused, and so is a numeric set of a ``<Clock>`` variable.
+
+**Steps.**  ``master_dt`` is one step of the graph and must equal the step
+the model description records (``ModelDescription.graph_timestep``); one
+``step`` request runs at most ``max_steps_per_request`` graph steps, and
+stops at the first one after :meth:`FmuTcpBridge.stop`.
 
 ``values`` are flat numbers in value-reference order; an array variable
 contributes ``prod(shape)`` entries in row-major order.  A **non-finite**
@@ -110,7 +124,8 @@ time, the pending inputs, the node states and the params; on
 member names, each member's declared size capped by the live array it
 replaces, and a cap on the total), so nothing is decompressed that the
 model could not hold, and then every array is checked against the live
-one (token, key set, shape) before anything is written.  Bind the bridge
+one (token, key set -- state fields, parameters and pending inputs --
+shape, value) before anything is written.  Bind the bridge
 to ``127.0.0.1`` unless the network is trusted.
 
 ZMQ is not required.  A ZMQ transport with the same frame payloads can be

@@ -8197,3 +8197,207 @@ anomalies:
       - "tests/core/test_graph_manager.py::TestExternalInputsAreCompletedAndValidated::test_an_unknown_name_is_refused_and_the_declared_ones_named"
       - "tests/core/test_graph_manager.py::TestExternalInputsAreCompletedAndValidated::test_every_run_method_validates_the_same_way"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-100"
+    title: "The FMU bridge took any master_dt: a doStep ran h / master_dt graph steps and reported t + h, so a 0.01 s graph served with master_dt=0.005 labelled a state at 0.10 s with the time 0.05 s"
+    description: >
+      `FmuTcpBridge` stored the `master_dt` its caller passed and never
+      compared it with the graph it served, which it is not given, or with
+      the model description, which it is.  A `step` of `h` ran
+      `round(h / master_dt)` graph steps and reported `t + h`.  On the
+      0.4.0 development tree on 2026-10-02 (CPU, jaxlib 0.11.0), a
+      uniform-rate `SpringDamperNode` graph at 0.01 s served with
+      `master_dt=0.005` answered five `doStep`s of 0.01 s with t = 0.05 s
+      and a position of 1.420895, which is the graph at 0.10 s; at 0.05 s it
+      is 1.477806.  The same held in reverse for a multi-rate graph whose
+      advertised default step was its smallest node timestep, not its step
+      (MADD-ANO-097): nodes at 0.02 and 0.03 s step by 0.01 s, and a bridge
+      given the advertised 0.02 s as `master_dt` ran one graph step per
+      0.02 s `doStep`, so after 0.12 s of reported time the state was the
+      graph's at 0.06 s.  The user guide's own example passed an undefined
+      `gm_base_dt`.  No release carried it: v0.1.0 to v0.3.1 have no
+      `src/maddening/fmi/tcp_bridge.py`.  Found by the round-5 FMU audit.
+      Resolved in 0.4.0: `build_model_description` records the graph's step
+      as `ModelDescription.graph_timestep` (`GraphManager.timestep`, which
+      MADD-ANO-096 made the step a graph takes), whatever
+      `default_step_size` advertises.  The bridge refuses a `master_dt` more
+      than a relative 1e-9 from it, and a description whose
+      `default_step_size` is not a whole number of graph steps, or more of
+      them than one request may take.  A description built by hand, without
+      `graph_timestep`, is held to its `default_step_size`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`.  Every value the FMU returned
+      was the graph's state at a time other than the one it reported, every
+      call `fmi3OK`, and an importer coupling it to other models would
+      exchange values at the wrong times.  Not `critical`: it needs a
+      `master_dt` other than the graph's step, and the step was then
+      undocumented rather than the default.  Registered although no release
+      carried it, because it is major.  `context_dependent` because the
+      size of the error is whatever the model does over the mislabelled
+      interval.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.model_description.ModelDescription"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: pass `master_dt=gm.timestep`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The bridge holds no graph, so it checks `master_dt` against the step
+      the description records, not against the compiled step the sidecar
+      runs.  A sidecar built over a different graph from its description
+      is not detected; build both from the same `GraphManager`.
+    verification:
+      - "tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_a_master_dt_other_than_the_graph_step_is_refused"
+      - "tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_at_the_graph_step_the_fmu_is_the_graph_at_the_time_it_reports"
+      - "tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_an_advertised_step_of_several_graph_steps_runs_that_many"
+      - "tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_an_advertised_step_the_bridge_would_refuse_is_refused_up_front"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-101"
+    title: "A number for a Boolean FMU variable was stored by its truthiness: set gate.open = 0.5, 2.0 or -3.0 read back as true, and an FMU-state archive holding 0.25 in a Boolean field restored as true"
+    description: >
+      The one value check on every write path into the FMU's state and
+      parameters (`set` and `set_state` on the TCP bridge,
+      `FmuSidecar.set_params` and `FmuSidecar.set_fmu_state`) refused a
+      boolean for a number but let any integer or float through to a
+      Boolean target, and cast it with `astype(bool)`.  On the 0.4.0
+      development tree on 2026-10-02 (CPU, jaxlib 0.11.0), a graph with a
+      Boolean external input answered `set` of 0.5, 2.0 and -3.0 with `ok`
+      and read each back as 1, and an archive whose Boolean state field
+      held the float 0.25 restored with the field `True`.  Every value on
+      the FMU wire is a float64, so this is the path every Boolean
+      variable takes.  No release carried it: the check was added during
+      0.4.0's development (v0.3.1's `set_fmu_state` checked nothing, and its
+      sidecar had no `set_params`), and the TCP bridge is new in 0.4.0.
+      Found by the round-5 FMU audit.  Resolved in 0.4.0: a Boolean target
+      takes a boolean or exactly 0 or 1, through the same check on all four
+      paths; anything else is refused naming the variable, and nothing is
+      written.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the value stored was not the
+      value given, and the reply said `ok`.  Not `critical`: it needs a
+      Boolean variable and a value other than 0 or 1, which a conforming
+      importer's `fmi3SetBoolean` never sends.  Registered although no
+      release carried it, because it is major.  `context_dependent` because
+      what a flag set the wrong way does depends on the model.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.checked_value"
+      - "maddening.fmi.sidecar.FmuSidecar.set_params"
+      - "maddening.fmi.sidecar.FmuSidecar.set_fmu_state"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: send only 0 or 1 to a Boolean variable.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_a_set_of_a_boolean_input_to_a_non_0_1_number_is_refused"
+      - "tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_an_archive_with_a_fraction_in_a_boolean_member_does_not_restore"
+      - "tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_the_sidecars_own_restore_door_refuses_it_too"
+      - "tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_set_params_holds_a_boolean_parameter_to_the_same_rule"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-102"
+    title: "The FMU's C wrapper carried every width as a double and the bridge could not tell the calls apart: fmi3SetBoolean wrote 1.0 into a Float32 parameter and fmi3GetInt32 truncated a Float32 output, both fmi3OK"
+    description: >
+      FMI 3.0 has a variable accessed only through the `fmi3Get` /
+      `fmi3Set` function of its own type ("Getting and Setting Variable
+      Values").  The C wrapper converted every width to a double and sent
+      the bare number, and cast every reply back with `(CTYPE)value`.  On
+      the 0.4.0 development tree on 2026-10-02 (CPU, jaxlib 0.11.0, the
+      compiled wrapper driven through `ctypes` against a live bridge):
+      `fmi3SetBoolean(true)` on the Float32 parameter
+      `ball.params.elasticity` answered `fmi3OK` and stored 1.0, the
+      coercion `FmuSidecar.set_params` refuses in process; and
+      `fmi3GetInt32` on the Float32 output `spring.position`, at 0.5,
+      answered `fmi3OK` with 0.  A NaN or out-of-range reply cast to an
+      integer type is undefined behaviour in C.  No release carried it: the
+      C wrapper is new in 0.4.0.  Found by the round-5 FMU audit.
+      Resolved in 0.4.0: every get and set request names the FMI type of the
+      function that made it, and the bridge refuses a variable of another
+      type with nothing read or written.  A getter also refuses a reply
+      value its C type cannot hold (a fraction, NaN or an out-of-range
+      number for an integer type, anything but 0 or 1 for a Boolean, a
+      finite number beyond `FLT_MAX` for a Float32), and the Int64 and
+      UInt64 setters refuse a value a double cannot carry exactly.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: an importer that used the
+      wrong getter read a truncated value with `fmi3OK`, and one that used
+      the wrong setter wrote a value the library refuses on every other
+      path.  Not `critical`: it needs an importer calling a function of
+      another type than the variable's, which FMI forbids and FMPy's
+      `simulate_fmu` does not do.  Registered although no release carried
+      it, because it is major.
+    affected_components:
+      - "maddening.fmi.package.C_SOURCE"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: access each variable through the function of its declared
+      type.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A client of the bridge's JSON protocol that names no `type` is not
+      type-checked; the C wrapper always names one.  The wire carries every
+      value as a float64, so an Int64 or UInt64 variable holding a value
+      above 2^53 in magnitude cannot be set exactly, and is refused.
+    verification:
+      - "tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_set_of_another_type_is_refused_and_writes_nothing"
+      - "tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_get_of_another_type_is_refused"
+      - "tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_a_boolean_setter_cannot_write_a_float32_parameter"
+      - "tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_each_variable_is_read_only_through_the_getter_of_its_type"
+      - "tests/fmi/test_c_unit.py::test_c_unit_tests"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-103"
+    title: "An FMU-state archive missing its pending-input members restored with those inputs silently at zero"
+    description: >
+      The bridge's `set_state` refused an archive whose state fields or
+      parameters were not exactly the model's, and one without `_time`.
+      The pending inputs (`i/<node>/<field>`) were optional: the restore
+      started from zero inputs and filled in whichever members were there.
+      The bridge's own `get_state` always writes every input, so an archive
+      missing one is partial, the case the key-set rule exists to refuse.
+      On the 0.4.0 development tree on 2026-10-02 (CPU, jaxlib 0.11.0), an
+      archive taken with `spring.anchor_position` at 0.4 and stripped of
+      that member restored with `ok`, and the input read 0.0.  No release
+      carried it: the TCP bridge is new in 0.4.0.  Found by the round-5 FMU
+      audit.  Resolved in 0.4.0: the inputs are held to the same key-set
+      rule as the fields and parameters, from the archive's directory and
+      again on decode, with the same message; a model with no inputs
+      expects none, and a clock, which holds no value, has no member.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: the restored FMU was not the
+      snapshot, the reply said `ok`, and the next step ran with a zero
+      input.  Not `critical`: it needs an archive that was edited or
+      truncated, never one the bridge wrote.  Registered although no
+      release carried it, because it is major.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: restore only archives the bridge wrote.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing"
+      - "tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_with_an_extra_input_member_is_refused"
+    github_issue: null

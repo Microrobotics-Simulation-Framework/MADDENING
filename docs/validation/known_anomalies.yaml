@@ -7401,7 +7401,7 @@ anomalies:
       admit) is a 413 before it is parsed; `PUT /graph/state` counts each
       field's values against the live field before converting them; and
       nodes are built one at a time, under the server's graph lock
-      (MADD-ANO-104).
+      (MADD-ANO-106).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -8487,7 +8487,7 @@ anomalies:
       - "tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_with_an_extra_input_member_is_refused"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-104"
+  - anomaly_id: "MADD-ANO-106"
     title: "Concurrent REST requests stepped the graph at once and lost steps silently: 200 concurrent POST /sim/step took about 60, every one answered 200, and the streams counted all 200"
     description: >
       FastAPI runs the server's routes on a thread pool, and nothing in
@@ -8553,7 +8553,7 @@ anomalies:
       - "tests/api/test_concurrent_requests_are_serialised.py::test_stopping_the_runner_while_holding_the_graph_lock_is_refused"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-105"
+  - anomaly_id: "MADD-ANO-107"
     title: "POST /surrogate/train reset the live simulation to its initial state, and its reply did not say so"
     description: >
       The training job's worker stopped the runner and called the server's
@@ -8596,7 +8596,7 @@ anomalies:
       - "tests/api/test_surrogate_jobs_are_bounded.py::test_a_running_runner_keeps_running_through_a_job"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-106"
+  - anomaly_id: "MADD-ANO-108"
     title: "After POST /checkpoint/load the state streams served the state from before the load, at the old step's time, until the next step"
     description: >
       `StateRelay` publishes a snapshot, and counts the streams' clock, on
@@ -8650,7 +8650,7 @@ anomalies:
       - "tests/api/test_streams_after_a_checkpoint_load.py::test_a_manifest_that_does_not_hash_to_its_checkpoint_is_not_believed"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-107"
+  - anomaly_id: "MADD-ANO-109"
     title: "/ws/state/binary kept the frame layout of a node that had been replaced over REST: values cut off, or phantom zeros, in frames of the advertised length"
     description: >
       The server built its `BinaryStateEncoder` once and dropped it only on
@@ -8700,7 +8700,7 @@ anomalies:
       - "tests/api/test_binary_stream_follows_the_graph_layout.py::test_encode_refuses_a_field_of_another_size"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-108"
+  - anomaly_id: "MADD-ANO-110"
     title: "A runner whose thread had died was reported running: /sim/pause and /sim/resume answered 200, /sim/start 409 \"already started\", and /sim/reset was_running true"
     description: >
       The server kept a flag for "the runner is started" and never looked at
@@ -8753,7 +8753,7 @@ anomalies:
       - "tests/api/test_runner_pacing_and_status.py::test_an_edge_the_graph_cannot_validate_is_a_400_on_every_route_that_steps"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-109"
+  - anomaly_id: "MADD-ANO-111"
     title: "The real-time runner burst through the time it had been paused: about 1.5 s simulated in the 0.4 s after a 1 s pause of a real-time run"
     description: >
       `RealtimeRunner` paced `sim_time - sim_start` against `wall -
@@ -8792,7 +8792,7 @@ anomalies:
       - "tests/api/test_runner_pacing_and_status.py::test_a_runner_behind_by_less_than_the_limit_still_catches_up"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-110"
+  - anomaly_id: "MADD-ANO-112"
     title: "/ws/state encoded each frame on the event loop, once per client, for any number of clients: a large state stalled every other request"
     description: >
       The JSON state stream built each frame (`_jax_to_python` of the whole

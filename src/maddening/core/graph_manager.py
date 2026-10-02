@@ -1227,10 +1227,15 @@ def _group_evaluations(group, nodes, schedule, edges):
     a node only along a path of reads, and where several paths meet the
     node's output is a combination of its inputs whose relative gains
     -- in the norm's units, each field divided by its own magnitude --
-    sum to at most one unless the node cancels, which the floor's own
-    model already excludes (see
+    sum to at most one *if* no read amplifies.  That is the structural
+    count, all this function sees.  A read can amplify (a squaring
+    relay doubles a relative rounding; a node whose terms cancel
+    amplifies its own as well), so with ``diagnostics=True`` the step
+    weights every read by its relative gain measured at the returned
+    state and reports the larger count (``_run_coupled_block_impl``,
+    ``coupling_<key>_pass_evaluations``; see
     :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`).
-    For a chain or a ring the two coincide.
+    For a chain or a ring the longest chain and the sum coincide.
 
     ``schedule`` is the order the step sweeps the group's members in
     (the compiled schedule; members not in it are swept last, each

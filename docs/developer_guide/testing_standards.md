@@ -100,6 +100,7 @@ python -m pytest tests/nodes/test_your_node.py tests/verification/test_your_node
 python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
+python scripts/check_numeric_constants.py
 ```
 
 ## Environment Variables
@@ -770,6 +771,41 @@ by self-tests in the same module:
   Gauss-Seidel follows it on purpose);
 - an identity relay on an internal edge moves the fixed point only by
   rounding.
+
+## Numeric constants carry their units
+
+`scripts/check_numeric_constants.py` (CI's compliance job) scans
+`src/maddening/core/`, `src/maddening/sysid.py` and
+`src/maddening/cloud/multigpu/` for small float literals (`|v| <= 1e-3`, or a
+decimal exponent of `-4` or below) and for `finfo(...).tiny` / `.eps` used
+additively or as a floor (`x + eps`, `max(x, tiny)`).  Each must carry an
+inline `# units: <what it is relative to>` comment or a counted line in
+`scripts/numeric_constants_allowlist.txt`.  A stale or miscounted line fails
+the gate, as does a scope that no longer exists.
+
+Four 0.4.0 defects were one mistake: an absolute constant inside a
+relative computation.  The IFT solve's `atol=1e-8` returned gradients of
+exactly zero for small-unit states, IQN and `fit_lm` had `1e-12` floors, and
+the accelerators' steps flushed at small magnitudes.  The gate found four more
+that had shipped: the public Krylov solvers' `atol=1e-8`, the multi-rate
+GCD's `1e-9`, Adam's `eps`, and the adaptive error norm's `1e-300`.  So when you
+add a small constant to the numerical core:
+
+- **Write the justification as a ratio.**  "Dimensionless, a fraction of
+  `max|b|`" or "dtype range: the smallest normal number" is one; "small" or
+  "avoids division by zero" is not.  If you cannot say what the number is
+  relative to, it is absolute in some quantity's units, and the fix is to
+  make it relative, not to allowlist it.
+- **Pin the fix with a scale test.**  The test that catches this class runs
+  the same computation at two power-of-two scales and asserts bit-identity
+  (`tests/core/test_linear_solvers_in_any_units.py`,
+  `test_sysid_adam_in_any_units.py`, `test_multirate_in_any_units.py`).
+  A decimal scale changes the inputs' rounding; a power of two does not.
+- **Build a power-of-two frame with `maddening.core._pow2_frame`.**  It is
+  the one place the coupling runtime, the solvers and the fitters build
+  their frames.  `tests/core/test_pow2_frame.py` refuses a `frexp` or
+  `ldexp` anywhere else in the scanned scope, and a frame that is not an
+  exact power of two breaks the coupling bit-identity claims.
 
 ## Differential tests
 

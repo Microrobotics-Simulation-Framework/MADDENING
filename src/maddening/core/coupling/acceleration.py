@@ -1000,17 +1000,27 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: its true distance at ``N`` = 15-200 with ``spectral_usable=True``,
 #: whether the node looped inside ``update`` or the framework
 #: sub-cycled it.  So the floor is this constant times the number of
-#: evaluations one coupling pass rounds like: the largest sub-cycling
-#: divider times :meth:`SimulationNode.update_evaluations` in the group
+#: evaluations one coupling pass rounds like
 #: (``maddening.core.graph_manager._group_evaluations``, a module-level
-#: function; a pass evaluates no node more
-#: often than that, so it rounds like at most that many single passes),
-#: which is ``4N`` -- 16, 40, 80, 200 and 400 units against those
-#: figures, the same 2.6x-or-more headroom the single evaluation has
-#: and 14x at ``N = 100``, the price of one constant.  A node that loops
-#: inside ``update`` without declaring it is counted as one evaluation,
-#: and ``coupling_diagnostics`` withholds ``spectral_usable`` wherever
-#: the residual is at the floor, where that count carries the bound.
+#: function).  A node's own update counts its sub-cycling divider times
+#: :meth:`SimulationNode.update_evaluations`, which is ``4N`` for the
+#: sub-stepping node above -- 16, 40, 80, 200 and 400 units against
+#: those figures, the same 2.6x-or-more headroom the single evaluation
+#: has and 14x at ``N = 100``, the price of one constant.  How the
+#: nodes' counts combine depends on the iteration mode.  Under Jacobi
+#: every node reads the stored previous iterate, so the pass rounds like
+#: its worst node.  Under Gauss-Seidel a node reads each member
+#: scheduled before it from the *same* pass, already rounded, so the
+#: rounding at the end of a chain of same-pass reads is the sum along
+#: it, and the count is the longest such chain: on a Gauss-Seidel ring
+#: of ``N`` scalar relays stalled at float32 the exact residual is about
+#: ``N/27`` per-pass floors (0.6x at ``N = 16``, 2.3x at 64), and while
+#: the floor took the worst node's count the bound read 0.51x
+#: (``N = 32``) and 0.30x (``N = 64``) its true distance with
+#: ``spectral_usable=True``.  A node that loops inside ``update`` without
+#: declaring it is counted as one evaluation, and
+#: ``coupling_diagnostics`` withholds ``spectral_usable`` wherever the
+#: residual is at the floor, where that count carries the bound.
 #:
 #: It is a model of the map's rounding, not a proof of it: a node whose
 #: update cancels catastrophically -- a small output computed as the
@@ -1060,9 +1070,12 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     evaluations : float
         How many evaluations of the map one coupling pass rounds like:
         the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
-        ``GraphManager.coupling_diagnostics`` passes the largest
-        ``sub-cycling divider * SimulationNode.update_evaluations()`` in
-        the group; ``1.0`` is a pass that evaluates each node once.
+        ``GraphManager.coupling_diagnostics`` passes the count of
+        ``maddening.core.graph_manager._group_evaluations``: each node
+        counts ``sub-cycling divider * SimulationNode.update_evaluations()``,
+        and the pass the worst node's count under Jacobi or the longest
+        chain of same-pass reads under Gauss-Seidel; ``1.0`` is a pass
+        that evaluates each node once and reads only the previous iterate.
 
     Returns
     -------

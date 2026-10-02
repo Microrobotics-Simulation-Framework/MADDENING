@@ -7798,9 +7798,13 @@ class GraphManager:
               (:func:`~maddening.core.coupling.acceleration.residual_precision_floor`:
               four units of ``eps * max|field|`` in every entry the norm
               reads *per evaluation* of the map a coupling pass rounds
-              like -- the largest sub-cycling divider times
-              :meth:`~maddening.core.node.SimulationNode.update_evaluations`
-              in the group -- measured in that norm), times the larger of
+              like -- each node's sub-cycling divider times its
+              :meth:`~maddening.core.node.SimulationNode.update_evaluations`,
+              the worst node's under Jacobi and, under Gauss-Seidel, the
+              sum along the longest chain of same-pass reads (a node
+              reading a member scheduled before it reads that member's
+              already-rounded output; ``_group_evaluations``) -- measured
+              in that norm), times the larger of
               ``||(I - H)^{-1}||_2`` (the resolvent norm of the
               Krylov-compressed Jacobian, in the group's own norm) and
               ``1 / (1 - rho_spectral)`` with a margin for an unresolved

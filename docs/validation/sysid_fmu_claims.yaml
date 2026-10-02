@@ -1,0 +1,2705 @@
+# System identification, parameters and FMU export: the claims inventory.
+#
+# Every documented statement about maddening.sysid, the parameter pytree
+# and its ParamSpec, and the FMI 3.0 export that a user could rely on,
+# with the domain it was stated for, how its truth is known, and a pytest
+# node id that fails if it stops being true.  An audit attacks this list;
+# a new claim in a docstring, a guide, the release notes or the CHANGELOG
+# gets a row here in the same change (docs/developer_guide/
+# testing_standards.md, "The claims inventories").
+# tests/compliance/test_claims_inventories.py checks every row: its fields,
+# that each cited test is collected and runs on every push (or is
+# slow-marked and names a per-push witness), that a `failing` row cites a
+# strict xfail and that a `verified` row cites none.
+#
+# Scope:
+#   SYS -- src/maddening/sysid.py (windowed_loss, fim, fim_core, fit, fit_lm,
+#          fit_multiple_shooting and their results, truth recovery, units),
+#          src/maddening/core/params.py (ParamSpec, its bounds and
+#          transforms) and node.params / gm.params as fitting and export see
+#          them;
+#   FMU -- src/maddening/fmi/ (model description, TCP bridge, sidecar, FMU
+#          state, the C wrapper and packaging), FMI 3.0 conformance,
+#          refusals, timeouts, tokens and the terminated state.
+# Covered elsewhere, not repeated here: windowed_loss's mask_unconverged
+# beyond its type check (coupling_claims.yaml, CPL-160 to CPL-162); the
+# REST parameter routes (the REST surface's own audit area).
+#
+# Top level: schema_version (1), prefixes (the id prefixes this file owns;
+# no other inventory may use them) and claims.
+#
+# Row fields:
+#   id          SYS-NNN or FMU-NNN, unique.
+#   area        a grouping label, free text.
+#   claim       the documented wording (quoted where it is quoted).
+#   sources     file:line or file (section); the first is where it is stated.
+#   conditions  the domain the documentation states, or "unstated" parts.
+#   oracle      how the truth is known.
+#   tests       pytest node ids (without parameters, or with them).
+#   status      verified | failing | untested | ambiguous
+#   proposed_wording  required for ambiguous: the precise statement the
+#                     tests support.
+#   finding     required for failing: what breaks, the reproducer and a
+#               file:line guess.  Every failing row cites a strict xfail.
+#   reason      required for untested: why no test can fail.
+#   notes       optional.
+#
+# Line numbers are those of release/0.4.0 at a0f12ef (the first edition);
+# the section name beside each makes it findable when they move.
+
+schema_version: 1
+
+prefixes: [SYS, FMU]
+
+claims:
+
+# ---------------------------------------------------------------------------
+# windowed_loss and its helpers
+# ---------------------------------------------------------------------------
+
+- id: SYS-001
+  area: windowed_loss
+  claim: >-
+    observations_from_history "Prepend[s] the initial state to a
+    run_scan_with_history history ... Returns a pytree with leading axis
+    T = 1 + n."
+  sources:
+    - src/maddening/sysid.py:163 (observations_from_history)
+  conditions: any graph and n >= 1 steps.
+  oracle: the history and the initial state, element for element.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_observations_from_history_prepends_the_initial_state
+  status: verified
+
+- id: SYS-002
+  area: windowed_loss
+  claim: >-
+    "Every leaf must have the same leading length T; leaves that disagree
+    are refused, naming them (a shorter leaf would otherwise be read past
+    its end, which JAX clamps to its last sample)."
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, observations)
+  conditions: a shorter leaf first or later in flatten order; a scalar leaf; init_window_states too.
+  oracle: the ValueError and the names it carries.
+  tests:
+    - tests/core/test_sysid.py::test_observation_leaves_of_unequal_length_are_refused
+    - tests/core/test_sysid.py::test_a_scalar_observation_leaf_is_refused_by_name
+  status: verified
+
+- id: SYS-003
+  area: windowed_loss
+  claim: >-
+    "window: Samples per window.  T - 1 must be a multiple of it, and it
+    must lie in [1, T - 1] (T == 1 has nothing to fit)"; "sample_every:
+    Base steps between consecutive observation samples; >= 1."
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, window / sample_every)
+  conditions: window at 0, 1, a non-divisor, T - 1 and T; sample_every 0; a one-sample record.
+  oracle: the loss at the generating parameters (zero) where legal, the ValueError where not.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_a_window_lies_in_one_to_t_minus_one_and_tiles_the_record
+    - tests/core/test_sysid_claims_edges.py::test_sample_every_and_a_one_sample_record_are_refused
+    - tests/core/test_sysid.py::test_windows_must_tile_the_observations
+  status: verified
+
+- id: SYS-004
+  area: windowed_loss
+  claim: >-
+    "gm: Compiled graph.  Only its step function and coupling-group config
+    are used; gm._state is not modified."
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, gm)
+  conditions: a value and a gradient.
+  oracle: every leaf of gm._state before and after, bit for bit.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_windowed_loss_leaves_the_graphs_state_untouched
+  status: verified
+
+- id: SYS-005
+  area: windowed_loss
+  claim: >-
+    "external_inputs: Static external inputs, completed and validated as in
+    gm.step: zeros for every declared input this does not supply, and a
+    ValueError for an undeclared node.field."
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, external_inputs)
+  conditions: a declared input omitted, given as zero and given non-zero; an undeclared field and node.
+  oracle: the loss with the input omitted against the loss with it explicitly zero; the ValueError.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_windowed_loss_completes_and_checks_external_inputs
+  status: verified
+
+- id: SYS-006
+  area: windowed_loss
+  claim: >-
+    Teacher forcing: "every window restarts from the measured state";
+    "Each window is an independent lax.scan, so memory is O(window) and
+    gradients cannot compound across windows."  The loss is zero at the
+    parameters that generated the record and positive elsewhere.
+  sources:
+    - src/maddening/sysid.py:1 (module docstring)
+    - src/maddening/sysid.py:302 (windowed_loss)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: single-rate graph; for multi-rate see SYS-011.
+  oracle: the loss over the record against the sum of the losses over each window's own slice of it; zero at the truth.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows
+    - tests/core/test_sysid.py::test_loss_zero_at_truth_positive_elsewhere
+  status: verified
+  notes: The memory claim (O(window)) is not measured here.
+
+- id: SYS-007
+  area: windowed_loss
+  claim: >-
+    "window_states: Multiple shooting: free initial user states per window,
+    a pytree whose every leaf has leading axis n_windows = (T - 1) //
+    window."
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, window_states)
+  conditions: one window too many, one too few, leaves that disagree with each other.
+  oracle: the ValueError naming the expected count.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_window_states_with_another_window_count_are_refused
+    - tests/core/test_sysid.py::test_window_states_of_unequal_length_are_refused
+  status: verified
+
+- id: SYS-008
+  area: windowed_loss
+  claim: >-
+    Multiple shooting: "a continuity penalty ties each window's end to the
+    next window's start, so the fitted trajectory is a single continuous
+    solution at the optimum"; the penalty is "continuity_weight * Σ_w
+    ||end_w - window_states[w+1]||²" (sum over every user-state leaf).
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, window_states / continuity_weight)
+  conditions: window states seeded from the truth, and one start moved.
+  oracle: zero at the truth; the penalty affine in its weight.
+  tests:
+    - tests/core/test_sysid.py::test_multiple_shooting_loss_zero_at_truth_and_penalises_gaps
+    - tests/core/test_sysid_contract_examples.py::test_the_continuity_penalty_is_affine_in_its_weight_and_charges_a_bumped_start
+  status: verified
+
+- id: SYS-009
+  area: windowed_loss
+  claim: >-
+    "continuity_weight: ... A finite number >= 0, refused otherwise
+    (ValueError) as fit_multiple_shooting refuses it: a negative or NaN
+    weight used to read as 0.0."
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, continuity_weight)
+  conditions: negative, NaN, infinite and non-numeric weights; 0.0 and positive weights.
+  oracle: the ValueError; the accepted weights accepted by both functions.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_refuses_a_continuity_weight_its_fitter_refuses
+    - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_still_takes_every_weight_its_fitter_takes
+  status: verified
+
+- id: SYS-010
+  area: windowed_loss
+  claim: >-
+    mask_unconverged "Must be a bool: a truthy non-bool ("no", 1, an
+    array) used to turn masking on, so it is refused (ValueError)."
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, mask_unconverged)
+  conditions: strings, integers, arrays; True and False.
+  oracle: the ValueError; a bool accepted.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_refuses_a_mask_unconverged_that_is_not_a_bool
+    - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_takes_a_bool_mask_unconverged
+  status: verified
+  notes: What the mask drops, and when it refuses a group, is CPL-160 to CPL-162.
+
+- id: SYS-011
+  area: windowed_loss
+  claim: >-
+    start_step (experimental): "Window w restarts at base step start_step +
+    k * sample_every ... so each node fires on the sub-step it fired on
+    when the record was made"; "None (the default) assumes 0 and, on a
+    multi-rate graph, warns (UserWarning) that it is assuming it.  It has
+    no effect on a single-rate graph."
+  sources:
+    - src/maddening/sysid.py:302 (windowed_loss, start_step)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: multi-rate graph with an odd first sample, even sample_every, a record starting mid-schedule; single-rate graph.
+  oracle: zero loss at the generating parameters on the right phase; non-zero and a warning on the wrong one.
+  tests:
+    - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_window_on_an_odd_base_step_runs_the_slow_node_on_its_own_phase
+    - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_an_even_sample_every_restarts_each_window_at_k_times_sample_every
+    - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_record_that_starts_mid_schedule_is_replayed_on_its_own_phase
+    - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_an_odd_start_read_as_zero_is_off_phase_and_the_default_warns
+    - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_single_rate_graph_needs_no_start_step
+    - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_start_step_that_is_not_a_step_is_refused
+  status: verified
+
+- id: SYS-012
+  area: windowed_loss
+  claim: >-
+    init_window_states: "Seed multiple-shooting window_states from the
+    observations: the measured user state at every window start (leading
+    axis n_windows)."
+  sources:
+    - src/maddening/sysid.py:625 (init_window_states)
+  conditions: any tiling.
+  oracle: the observations at k * window.
+  tests:
+    - tests/core/test_sysid.py::test_init_window_states_shape_and_values
+  status: verified
+
+- id: SYS-013
+  area: windowed_loss
+  claim: >-
+    windowed_loss and fim are "pure JAX so they compose with jax.jit /
+    jax.grad"; the loss's gradient with respect to params is finite and
+    informative.
+  sources:
+    - src/maddening/sysid.py:1 (module docstring)
+  conditions: a jitted loss away from the truth.
+  oracle: the gradient finite and non-zero; the recovered stiffness.
+  tests:
+    - tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
+    - tests/core/test_sysid.py::test_recovers_stiffness_from_20_percent_perturbation
+  status: verified
+
+# ---------------------------------------------------------------------------
+# fim and FIMReport
+# ---------------------------------------------------------------------------
+
+- id: SYS-020
+  area: fim
+  claim: >-
+    "Fisher information matrix J^T J of residual_fn at params.  J = d
+    residual / d params is computed with jax.jacfwd ... This is the
+    Gauss-Newton Hessian of 0.5 * ||residual||^2"; at full rank crb is the
+    diagonal of the inverse.
+  sources:
+    - src/maddening/sysid.py:2345 (fim)
+  conditions: a smooth residual in float64; a spring rollout in float32.
+  oracle: J^T J from central differences; the inverse of the matrix.
+  tests:
+    - tests/core/test_sysid_contract_examples.py::test_fim_matches_a_central_finite_difference_and_its_bound_is_the_inverse
+    - tests/core/test_sysid_contract_examples.py::test_fim_matches_a_finite_difference_of_a_spring_rollout
+  status: verified
+
+- id: SYS-021
+  area: fim
+  claim: >-
+    jacfwd "works through coupled steps because the IFT rule is a
+    custom_jvp".
+  sources:
+    - src/maddening/sysid.py:2345 (fim)
+    - docs/user_guide/parameters.md (opening section)
+  conditions: a coupled spring pair under solver="ift", the observed node the other member.
+  oracle: J^T J from central differences of the same coupled rollout.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_fim_reaches_through_a_coupled_step
+  status: verified
+
+- id: SYS-022
+  area: fim
+  claim: >-
+    rank counts "the eigenvalues strictly above rank_rtol * eigvals[-1],
+    where rank_rtol defaults to max(n, sqrt(m)) * eps"; "Verdicts move only
+    for m > n**2, and only ever toward 'unresolved'".
+  sources:
+    - src/maddening/sysid.py:640 (FIMReport)
+    - src/maddening/sysid.py:2345 (fim, rank_rtol)
+  conditions: short (m <= n**2) and long residuals; a missing direction.
+  oracle: the cutoff recomputed; the verdict for m <= n**2 bit for bit against n * eps.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_the_default_cutoff_is_max_of_n_and_sqrt_m
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_long_residual_does_not_make_a_missing_direction_identifiable
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_short_residual_verdict_is_bit_for_bit_what_it_was
+  status: verified
+
+- id: SYS-023
+  area: fim
+  claim: >-
+    "Unlike cond the verdict does not move when the residual is rescaled
+    (by noise_std, say), because the threshold scales with the matrix".
+  sources:
+    - src/maddening/sysid.py:640 (FIMReport)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: float32; sigma from 1e-15 to 1e15; full-rank and rank-deficient matrices.
+  oracle: rank and the +inf pattern of crb at every sigma.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled
+  status: verified
+
+- id: SYS-024
+  area: fim
+  claim: >-
+    PrecisionLimitWarning "If the eigenvalue ratio deciding rank lands
+    within _PRECISION_WARN_FACTOR of the cutoff ... The message names the
+    ratio, the cutoff and the remedy"; "it does not fire on an exactly
+    singular F"; "Nor does it fire on a close call against a rank_rtol the
+    caller raised"; "0.0 resolves every positive eigenvalue and suppresses
+    the precision warning".
+  sources:
+    - src/maddening/sysid.py:2345 (fim, Warns)
+  conditions: float32 at the floor; well conditioned; exactly singular; raised and zero rank_rtol; under x64.
+  oracle: the warning and its text, or its absence; the x64 re-run's verdict.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_well_conditioned_fim_is_silent
+    - tests/core/test_sysid_degenerate_inputs.py::test_an_exactly_singular_fim_is_silent_about_precision
+    - tests/core/test_sysid_degenerate_inputs.py::test_rank_rtol_zero_leaves_no_threshold_to_sit_near
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit
+    - tests/core/test_sysid_degenerate_inputs.py::test_the_warning_names_the_eigenvalue_nearest_the_cutoff
+  status: verified
+
+- id: SYS-025
+  area: fim
+  claim: >-
+    crb "is +inf for every parameter with support in the null space ...
+    The bound is reported finite only where it was positively established,
+    so a decomposition that resolves nothing reads +inf as well, never
+    0.0".
+  sources:
+    - src/maddening/sysid.py:640 (FIMReport, crb)
+  conditions: the spring's (k, c, m) scale degeneracy; a non-finite and a partly NaN decomposition.
+  oracle: the +inf pattern; never 0.0 or NaN.
+  tests:
+    - tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
+    - tests/core/test_sysid_degenerate_inputs.py::test_an_eigendecomposition_that_is_not_finite_reports_no_finite_bound
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_partly_resolved_decomposition_with_a_nan_direction_fails_safe
+  status: verified
+
+- id: SYS-026
+  area: fim
+  claim: >-
+    noise_std: "Each residual row is divided by its σ, so F = Jᵀ Σ⁻¹ J and
+    crb is the Cramér-Rao bound in the parameters' own units (relative
+    variance under scale="relative") rather than 'per unit noise
+    variance'."
+  sources:
+    - src/maddening/sysid.py:2345 (fim, noise_std)
+  conditions: a scalar sigma; a parameter re-expressed in units 1000x smaller, under scale=None and "relative".
+  oracle: crb scaled by sigma**2; by c**2 for the re-expressed parameter under None, unchanged under relative.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_the_bound_is_in_the_parameters_units
+    - tests/core/test_sysid.py::test_fim_noise_std_scales_information
+  status: verified
+
+- id: SYS-027
+  area: fim
+  claim: >-
+    "zero_scaled names the parameters scale="relative" found sitting at
+    exactly 0.0 ... Empty under scale=None."
+  sources:
+    - src/maddening/sysid.py:640 (FIMReport, zero_scaled)
+  conditions: a zero-valued parameter; none.
+  oracle: the names; the empty tuple.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_fim_names_the_parameters_relative_scaling_zeroed
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_report_with_no_zero_valued_parameter_names_none
+    - tests/core/test_sysid_fim_nominal_scale.py::TestAZeroValuedParameterIsJudgedOnTheData::test_linear_pair_is_zero_scaled_under_relative_and_resolved_under_nominal
+  status: verified
+
+- id: SYS-028
+  area: fim
+  claim: >-
+    scale="nominal" "multiplies each column by ... the width hi - lo of a
+    finite bounds"; the policy table (finite bounds: width; log with lo:
+    p - lo, value_scaled; log without lo and identity without a width: p,
+    value_scaled); "Nothing here falls back to 1.0".
+  sources:
+    - src/maddening/sysid.py:2345 (fim, scale)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: every row of the table; a leaf with no spec entry; a multi-element leaf.
+  oracle: the Jacobian columns against scale=None times the expected scale; value_scaled and zero_scaled names.
+  tests:
+    - tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_finite_bounds_scale_by_the_width_whatever_the_transform
+    - tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_log_with_a_lower_bound_scales_by_the_offset_value_and_is_named
+    - tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_log_at_its_lower_bound_is_a_named_zero
+    - tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_identity_without_a_width_scales_by_the_value_and_is_named
+    - tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_nothing_falls_back_to_one
+    - tests/core/test_sysid_fim_nominal_scale.py::TestColumnScalingIsTheOnlyDifference::test_unit_widths_reproduce_scale_none_bit_for_bit
+  status: verified
+
+- id: SYS-029
+  area: fim
+  claim: >-
+    specs are "Required under scale="nominal" and refused under any other
+    scale"; a width "that would round to zero or overflow at the
+    parameters' precision is refused by name".
+  sources:
+    - src/maddening/sysid.py:2345 (fim, specs / scale)
+  conditions: specs under relative and None; nominal without specs; a width that is not a float32 scale.
+  oracle: the ValueError and its text.
+  tests:
+    - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_specs_under_another_scale_is_refused
+    - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_nominal_without_specs_is_refused
+    - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_a_width_that_is_not_a_float32_scale_is_refused_by_name
+    - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_the_guard_is_applied_at_the_parameters_precision
+  status: verified
+
+- id: SYS-030
+  area: fim
+  claim: >-
+    specs "must mirror params" -- a dict where a leaf needs a ParamSpec, a
+    ParamSpec above a dict or record level, a non-dict specs, or a stray
+    key that could have changed a column is a ValueError naming the key
+    path; "A stray key whose spec gives the default column record is
+    accepted", so gm.param_specs() is accepted for its own graph.
+  sources:
+    - src/maddening/sysid.py:2345 (fim, specs)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: every refused shape; a uniform HeatNode graph; an int-constant node.
+  oracle: the ValueError naming the path; the graph's own specs accepted.
+  tests:
+    - tests/core/test_sysid_fim_nominal_scale.py::TestASpecsTreeMustMirrorParams::test_a_specs_that_is_not_a_dict_is_refused
+    - tests/core/test_sysid_fim_nominal_scale.py::TestASpecsTreeMustMirrorParams::test_a_key_that_matches_no_parameter_is_refused_by_path
+    - tests/core/test_sysid_fim_nominal_scale.py::TestASpecsTreeMustMirrorParams::test_a_stray_key_that_could_change_no_column_is_accepted
+    - tests/core/test_sysid_fim_nominal_scale.py::TestASpecsTreeMustMirrorParams::test_a_paramspec_above_a_dict_level_is_refused
+    - tests/core/test_sysid_fim_nominal_scale.py::TestTheGraphsOwnSpecsAreAccepted::test_a_uniform_heat_node_graph
+  status: verified
+
+- id: SYS-031
+  area: fim
+  claim: >-
+    "integer_excluded names the leaves of integer or boolean dtype that are
+    not in the matrix ... Only mask=None leaves one out; a mask that
+    selects one is refused"; a params with no floating-point leaf is a
+    ValueError.
+  sources:
+    - src/maddening/sysid.py:640 (FIMReport, integer_excluded)
+  conditions: integer and boolean leaves; a selecting mask; no float leaf; fim_core.
+  oracle: the names; the report equal to the float leaves' alone; the ValueError.
+  tests:
+    - tests/core/test_sysid_integer_leaves.py::TestFimLeavesAnIntegerLeafOut::test_it_is_named_and_not_a_column
+    - tests/core/test_sysid_integer_leaves.py::TestFimLeavesAnIntegerLeafOut::test_the_report_is_the_one_for_the_float_leaves_alone
+    - tests/core/test_sysid_integer_leaves.py::TestFimLeavesAnIntegerLeafOut::test_an_explicit_mask_selecting_it_is_refused
+    - tests/core/test_sysid_integer_leaves.py::TestFimLeavesAnIntegerLeafOut::test_params_with_no_float_leaf_is_refused
+    - tests/core/test_sysid_integer_leaves.py::TestFimCoreCarriesTheSameName::test_integer_excluded_is_static_metadata_that_survives_jit
+  status: verified
+
+- id: SYS-032
+  area: fim
+  claim: >-
+    "Every σ must be finite and strictly positive at the residual's own
+    precision, which is where a σ that underflows to 0.0 and a negative σ
+    are caught"; a pytree σ matches the residual per leaf.
+  sources:
+    - src/maddening/sysid.py:2345 (fim, noise_std)
+  conditions: zero, negative, non-finite and underflowing sigma, scalar and inside a pytree; fit_lm on the same path.
+  oracle: the ValueError; the per-leaf scaling.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_fim_rejects_a_noise_std_that_is_not_positive_at_the_residual_precision
+    - tests/core/test_sysid_degenerate_inputs.py::test_fim_rejects_a_non_positive_sigma_inside_a_pytree_noise_model
+    - tests/core/test_sysid_degenerate_inputs.py::test_fit_lm_rejects_a_non_positive_sigma_on_the_same_path
+    - tests/core/test_sysid_noise_model.py::test_fim_noise_std_pytree_dict
+  status: verified
+
+- id: SYS-033
+  area: fim
+  claim: >-
+    fim's mask: "Unlike the fitters' mask this one is free to name a leaf
+    the specs freeze: fim only linearises, it never steps a parameter".
+  sources:
+    - src/maddening/sysid.py:2345 (fim, mask)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: a leaf frozen by set_param_spec(trainable=False).
+  oracle: a one-column report for it; fit refusing the same mask.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_fim_may_linearise_a_frozen_leaf
+    - tests/core/test_sysid.py::test_fim_mask_restricts_to_selected_leaves
+  status: verified
+
+- id: SYS-034
+  area: fim
+  claim: >-
+    "FloatingPointError: If F comes out non-finite -- a diverged rollout,
+    an overflowing Jacobian, a residual holding a NaN."
+  sources:
+    - src/maddening/sysid.py:2345 (fim, Raises)
+  conditions: a residual holding a NaN.
+  oracle: the exception.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_fim_refuses_to_report_on_a_non_finite_fisher_matrix
+    - tests/core/test_sysid_fim_core.py::TestCoreFailsClosed::test_fim_still_raises_on_the_same_matrix
+  status: verified
+
+- id: SYS-035
+  area: fim
+  claim: >-
+    reuse_trace: "Off by default, and only correct for a pure residual";
+    by default every call answers for the residual as it stands then (a
+    residual reading gm.params, a bound method, a module global); with
+    reuse_trace=True such a residual reports the first call's matrix.
+  sources:
+    - src/maddening/sysid.py:2345 (fim, reuse_trace)
+    - docs/user_guide/parameters.md (Asking the same question inside a loop)
+  conditions: each kind of outside read; the cache key's parts.
+  oracle: the matrix against the residual's current state; the stale matrix with reuse.
+  tests:
+    - tests/core/test_sysid_fim_core.py::TestTheDefaultReadsTheResidualsCurrentState::test_a_residual_reading_gm_params_sees_the_new_damping
+    - tests/core/test_sysid_fim_core.py::TestTheDefaultReadsTheResidualsCurrentState::test_reuse_trace_on_this_residual_reports_the_quoted_stale_bounds
+    - tests/core/test_sysid_fim_core.py::TestTheDefaultReadsTheResidualsCurrentState::test_a_bound_method_sees_its_objects_new_state
+    - tests/core/test_sysid_fim_core.py::TestTheDefaultReadsTheResidualsCurrentState::test_a_residual_reading_a_module_global_sees_it_change
+    - tests/core/test_sysid_fim_core.py::TestCacheKeyIsComplete::test_scale_none_and_relative_do_not_share_an_entry
+  status: verified
+
+- id: SYS-036
+  area: fim
+  claim: >-
+    least_identifiable: "Name and weight of the largest component of the
+    weakest direction"; for a spring observed through position the
+    weakest eigenvector is (1, 1, 1)/√3 and rank is 2 of 3.
+  sources:
+    - src/maddening/sysid.py:737 (FIMReport.least_identifiable)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: the spring's scale degeneracy.
+  oracle: the eigenvector and the name.
+  tests:
+    - tests/core/test_sysid.py::test_an_nd_leaf_is_labelled_by_the_index_of_the_element
+    - tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
+    - tests/core/test_sysid_undetermined_directions.py::test_the_held_direction_is_the_one_fim_calls_least_identifiable
+  status: verified
+
+- id: SYS-037
+  area: fim
+  claim: >-
+    FIMReport, FIMCore and FitResult are keyword-only: a field inserted
+    in the middle "would silently re-map every positional argument after
+    it".
+  sources:
+    - src/maddening/sysid.py:640 (FIMReport)
+    - src/maddening/sysid.py:1630 (FIMCore)
+    - src/maddening/sysid.py:3399 (FitResult)
+  conditions: positional construction of each.
+  oracle: TypeError.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_fim_report_cannot_be_built_positionally
+    - tests/core/test_sysid_degenerate_inputs.py::test_fit_result_cannot_be_built_positionally
+    - tests/core/test_sysid_claims_edges.py::test_fim_core_cannot_be_built_positionally
+  status: verified
+
+# ---------------------------------------------------------------------------
+# fim_core and FIMCore
+# ---------------------------------------------------------------------------
+
+- id: SYS-038
+  area: fim_core
+  claim: >-
+    fim_core: "nothing is read back to the host: the result is a FIMCore
+    of device arrays ... and the whole thing traces"; FIMCore is
+    "Registered as a pytree, so it can be returned from a jitted function
+    and carried through jax.lax.scan".
+  sources:
+    - src/maddening/sysid.py:2247 (fim_core)
+    - src/maddening/sysid.py:1630 (FIMCore)
+  conditions: with and without a noise model; jitted; branched on.
+  oracle: a transfer counter on every route to the host; tree flatten / unflatten.
+  tests:
+    - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_fim_core_reads_nothing_back
+    - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_fim_core_reads_nothing_back_with_a_noise_model
+    - tests/core/test_sysid_fim_core.py::TestCoreIsAPytree::test_it_survives_tree_flatten_and_unflatten
+    - tests/core/test_sysid_fim_core.py::TestCoreIsAPytree::test_a_gate_can_branch_on_it_without_a_transfer
+  status: verified
+
+- id: SYS-039
+  area: fim_core
+  claim: >-
+    "cond ... +inf when the smallest eigenvalue is not positive -- including
+    when it is NaN"; "A caller that ignores finite gets a report built on
+    NaN, where rank is 0 and every crb is +inf -- fail-closed, but
+    silent"; deciding_ratio is "0.0 when precision_limited is False".
+  sources:
+    - src/maddening/sysid.py:1630 (FIMCore, cond / deciding_ratio)
+    - src/maddening/sysid.py:2247 (fim_core, Notes)
+  conditions: a NaN matrix; a well-resolved one.
+  oracle: the fields.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_fim_core_fails_closed_on_a_nan_matrix
+    - tests/core/test_sysid_fim_core.py::TestCoreFailsClosed::test_a_nan_matrix_gives_infinite_bounds_not_nan
+    - tests/core/test_sysid_fim_core.py::TestCoreFailsClosed::test_the_core_makes_no_nan_on_a_zero_fisher_matrix
+  status: verified
+
+- id: SYS-040
+  area: fim_core
+  claim: >-
+    fim and fim_core "agree on rank and on which crb entries are +inf over
+    the tested spread; the finite crb values differ in the last bits";
+    fim publishes the numbers it published before the core was jitted, bit
+    for bit.
+  sources:
+    - src/maddening/sysid.py:1630 (FIMCore)
+    - docs/user_guide/parameters.md (Asking the same question inside a loop)
+  conditions: the tested spread of problems, rank deficient and precision limited included.
+  oracle: the two reports compared; a reference pipeline.
+  tests:
+    - tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_rank_and_crb_infinities_match_fim
+    - tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_precision_limited_flag_matches_the_warning
+    - tests/core/test_sysid_fim_core.py::TestFimUnchangedByJitting::test_report_is_bit_identical_to_the_pre_jit_pipeline
+  status: verified
+
+- id: SYS-041
+  area: fim_core
+  claim: >-
+    "noise_std is validated on the host ... so inside jit it has to be a
+    value the trace already holds -- a constant closed over, not an
+    argument of the jitted function."
+  sources:
+    - src/maddening/sysid.py:2247 (fim_core)
+  conditions: sigma closed over; sigma a traced argument.
+  oracle: the closed-over result against fim's; the traced one refused.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_fim_core_takes_a_noise_model_closed_over_inside_jit
+  status: verified
+  notes: >-
+    A traced sigma raises JAX's TracerArrayConversionError, not the
+    ValueError fim_core's Raises section lists for a noise_std it cannot
+    answer for; the restriction itself holds.
+
+# ---------------------------------------------------------------------------
+# The fitters: FitResult
+# ---------------------------------------------------------------------------
+
+- id: SYS-050
+  area: fitters
+  claim: >-
+    "losses[i] is the loss before update i + 1 -- the loss of the iterate i
+    updates produced, so losses[0] is the starting point's"; for fit_lm the
+    (weighted) 0.5 ||r||².
+  sources:
+    - src/maddening/sysid.py:3399 (FitResult)
+    - src/maddening/sysid.py:3916 (fit_lm)
+  conditions: a log-transformed leaf, so the start round-trips through the optimiser's coordinates.
+  oracle: the loss evaluated at the start, to the last bits the round trip moves it.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_losses_zero_is_the_starting_points_loss
+  status: verified
+
+- id: SYS-051
+  area: fitters
+  claim: >-
+    best_iteration "indexes losses, so losses[best_iteration] == best_loss
+    -- except when it equals len(losses)", when the last update's iterate
+    was evaluated once after the loop, "not appended to losses and not
+    passed to callback or the observers"; best_loss is None for n_iter=0.
+  sources:
+    - src/maddening/sysid.py:3399 (FitResult, best_iteration / best_loss)
+  conditions: a run that used its budget; n_iter=0.
+  oracle: the fields against losses and the callback's record.
+  tests:
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_the_final_evaluation_is_invisible_but_for_the_best_fields
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_n_iter_zero_returns_the_start_having_evaluated_nothing
+  status: verified
+
+- id: SYS-052
+  area: fitters
+  claim: >-
+    params "is the lowest-loss iterate the fitter evaluated, not
+    necessarily its last ... a tie goes to the later iterate", so a run
+    whose loss never rose returns its last iterate bit for bit; a run
+    stopped by tol returns the iterate that met it.
+  sources:
+    - src/maddening/sysid.py:3399 (FitResult)
+    - src/maddening/sysid.py:3624 (fit, Returns)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: Adam walking away from its start; ties; a non-finite final loss; tol; all three fitters.
+  oracle: every evaluated iterate's loss.
+  tests:
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_fit_that_walks_away_from_its_start_returns_its_start
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_the_returned_params_are_the_iterate_with_the_lowest_loss
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_run_whose_loss_never_rose_returns_its_last_iterate_bit_for_bit
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_tie_goes_to_the_later_iterate
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_non_finite_final_loss_is_never_returned
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_run_stopped_by_tol_returns_the_iterate_that_met_it
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_every_fitter_returns_an_iterate_no_worse_than_any_it_evaluated
+  status: verified
+
+- id: SYS-053
+  area: fitters
+  claim: >-
+    converged: "the loss reached tol: losses[-1] <= tol ... tol=0.0, the
+    default, turns this test off, and for fit and fit_multiple_shooting it
+    is the only one -- so with the default tol their converged is always
+    False"; tol > 0 "stops early once the loss is at or below it".
+  sources:
+    - src/maddening/sysid.py:3399 (FitResult, converged)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: a loss of exactly 0.0 under the default tol; a positive tol.
+  oracle: the flag and the iteration count.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_with_the_default_tol_fit_never_reports_converged
+    - tests/core/test_sysid.py::test_fit_mask_overrides_specs_and_tol_stops_early
+  status: verified
+
+- id: SYS-054
+  area: fitters
+  claim: >-
+    "Every leaf no step moved is the value that went in, bit for bit -- not
+    merely close": the leaves outside the resolved mask, and the masked
+    ones a run that stopped before its first update never stepped.
+  sources:
+    - src/maddening/sysid.py:3399 (FitResult)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: a log leaf, which exp(log(p)) would move by an ulp; a spec-frozen leaf under multiple shooting.
+  oracle: bitwise equality.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_takes_no_step_returns_its_input_bit_for_bit
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_does_take_a_step_still_reports_the_leaf_as_moved
+    - tests/core/test_sysid_contract_examples.py::test_multiple_shooting_leaves_a_spec_frozen_leaf_bit_identical
+  status: verified
+
+# ---------------------------------------------------------------------------
+# The fitters: masks, coordinates and refusals
+# ---------------------------------------------------------------------------
+
+- id: SYS-055
+  area: fitters
+  claim: >-
+    mask "Narrows gm.trainable_mask()" and "may only narrow the trainable
+    set: a mask that marks a leaf whose ParamSpec declares trainable=False
+    is a ValueError"; "the flags are read in flatten order, so a mask with
+    the right leaf count and different keys ... is refused".
+  sources:
+    - src/maddening/sysid.py:3624 (fit, mask)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: narrowing; widening onto a frozen leaf; keys that differ, the first path named.
+  oracle: the fit's untouched leaves; the ValueError.
+  tests:
+    - tests/core/test_sysid.py::test_fit_mask_overrides_specs_and_tol_stops_early
+    - tests/core/test_sysid_claims_edges.py::test_fim_may_linearise_a_frozen_leaf
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_mask_whose_keys_differ_from_params_is_refused_by_fit
+    - tests/core/test_sysid_degenerate_inputs.py::test_the_structure_error_names_the_first_path_that_differs
+  status: verified
+
+- id: SYS-056
+  area: fitters
+  claim: >-
+    "A trainable set (the default one included) holding an integer or
+    boolean leaf is refused the same way: its gradient is identically zero".
+  sources:
+    - src/maddening/sysid.py:3624 (fit, mask)
+  conditions: a spec making an integer trainable; an explicit mask; all three fitters; a frozen integer.
+  oracle: the ValueError; a frozen integer not stopping a fit.
+  tests:
+    - tests/core/test_sysid_integer_leaves.py::TestTheFittersRefuseATrainableInteger::test_fit_refuses_it_when_the_spec_makes_it_trainable
+    - tests/core/test_sysid_integer_leaves.py::TestTheFittersRefuseATrainableInteger::test_fit_lm_and_multiple_shooting_refuse_it_too
+    - tests/core/test_sysid_integer_leaves.py::TestTheFittersRefuseATrainableInteger::test_a_frozen_integer_leaf_does_not_stop_a_fit
+  status: verified
+
+- id: SYS-057
+  area: fitters
+  claim: >-
+    "The optimiser works in the unconstrained coordinates ... so a positive
+    parameter cannot cross zero and a bounded one cannot leave its
+    interval"; every fitter keeps a log / logit coordinate "short of where
+    exp floors or overflows and the sigmoid meets the edge of its
+    representable range".
+  sources:
+    - src/maddening/sysid.py:3624 (fit)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: a logit leaf pushed hard either way; log and logit coordinates near their clamp.
+  oracle: the returned values strictly inside their bounds.
+  tests:
+    - tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_log_and_a_logit_coordinate_are_kept_where_constrain_is_not_clamped
+  status: verified
+
+- id: SYS-058
+  area: fitters
+  claim: >-
+    A transform=None leaf with bounds: "Every step is projected back onto
+    the bounds, so a coordinate one step carried past its bound sits on it
+    ... A coordinate on its bound whose gradient points out of the range
+    is held there"; fit and fit_multiple_shooting bring one back too.
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: float32 and float64; beside a log coordinate; an optimum past the bound; a coupled step.
+  oracle: the recovered damping; the bound held where the optimum is past it.
+  tests:
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_brings_a_clipped_coordinate_back_into_its_range
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_brings_it_back_beside_a_log_coordinate
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_brings_a_clipped_coordinate_back_into_its_range
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_multiple_shooting_brings_a_clipped_coordinate_back_into_its_range
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_fit_whose_optimum_is_past_the_bound_converges_on_the_bound
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_active_bound_is_held_out_of_the_coupled_step
+  status: verified
+
+- id: SYS-059
+  area: fitters
+  claim: >-
+    "a non-finite gradient raises rather than continuing"; a start outside
+    the declared bounds is refused.
+  sources:
+    - docs/user_guide/parameters.md (System identification)
+  conditions: a loss whose gradient is NaN; a start below a bound.
+  oracle: the exception.
+  tests:
+    - tests/core/test_sysid.py::test_fit_raises_on_non_finite_gradient
+    - tests/core/test_sysid.py::test_fit_rejects_start_outside_bounds
+  status: verified
+
+- id: SYS-060
+  area: fitters
+  claim: >-
+    "callback(i, loss, params) after each evaluation"; "Every notify_every
+    iterations the graph's observers receive a "fit_progress" event ...
+    with {method, iteration, n_iter, loss, params} ... 0 disables it";
+    all three fitters emit it.
+  sources:
+    - src/maddening/sysid.py:3624 (fit, callback / notify_every)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: notify_every 2 and 0; fit and fit_lm.
+  oracle: the observer's record.
+  tests:
+    - tests/core/test_sysid.py::test_fit_progress_events_reach_observers
+  status: verified
+
+- id: SYS-061
+  area: fitters
+  claim: >-
+    The fitters refuse a hyper-parameter with no reading (n_iter, lr, tol,
+    betas, eps, notify_every, lam_up / lam_down) and accept their
+    documented defaults.
+  sources:
+    - src/maddening/sysid.py:3624 (fit)
+    - src/maddening/sysid.py:3916 (fit_lm)
+  conditions: zero, negative, NaN and wrongly typed values.
+  oracle: the ValueError; the defaults inside the accepted range.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_fit_rejects_a_hyper_parameter_with_no_reading
+    - tests/core/test_sysid_degenerate_inputs.py::test_fit_lm_rejects_a_hyper_parameter_with_no_reading
+    - tests/core/test_sysid_degenerate_inputs.py::test_the_documented_defaults_are_inside_the_accepted_range
+  status: verified
+
+# ---------------------------------------------------------------------------
+# The fitters: the identifiability guard (hold_undetermined)
+# ---------------------------------------------------------------------------
+
+- id: SYS-062
+  area: identifiability guard
+  claim: >-
+    hold_undetermined (default True) holds the directions the data does not
+    determine at the values they started at, so the fitted scale of a
+    degenerate combination does not depend on the budget or the
+    optimiser's schedule; holding costs neither loss nor the identifiable
+    ratios.
+  sources:
+    - src/maddening/sysid.py:3624 (fit, hold_undetermined)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: the spring's (k, c, m) scale degeneracy with log transforms on all three; every budget and lr.
+  oracle: the fitted scale against the starting scale; the loss and k/m, c/m.
+  tests:
+    - tests/core/test_sysid_undetermined_directions.py::test_fitted_scale_is_the_starting_scale_for_every_budget
+    - tests/core/test_sysid_undetermined_directions.py::test_the_fitted_scale_does_not_depend_on_the_optimiser_schedule
+    - tests/core/test_sysid_undetermined_directions.py::test_holding_the_scale_does_not_cost_loss_or_the_identifiable_ratios
+  status: verified
+
+- id: SYS-063
+  area: identifiability guard
+  claim: >-
+    "So the loss is unaffected, beyond rounding, whatever the guard
+    decides": a hold that would raise the loss by more than 2**10 * eps
+    relative plus the rounding of the held point is declined,
+    hold_declined is True and a RuntimeWarning gives both losses.
+  sources:
+    - src/maddening/sysid.py:3624 (fit, hold_undetermined)
+    - src/maddening/sysid.py:3399 (FitResult, hold_declined)
+  conditions: a rise just inside and just outside the tolerance; a hold through a bound; a non-finite held loss.
+  oracle: the returned loss; hold_declined; the warning naming the caller's line.
+  tests:
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_that_would_raise_the_loss_is_declined_and_said_so
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_rise_just_inside_the_tolerance_is_held
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_rise_just_outside_the_tolerance_is_declined
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_through_a_bound_is_declined
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_non_finite_held_loss_is_declined
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_the_decline_warning_names_the_callers_line
+  status: verified
+
+- id: SYS-064
+  area: identifiability guard
+  claim: >-
+    A direction is held only if it passes two tests -- no gradient the run
+    evaluated pointed along it, and the objective has no curvature along it
+    at the selected iterate (the Hessian for fit, JᵀJ by fim's rank rule
+    for fit_lm) -- and "a fit with no direction passing both tests gets its
+    iterate back bit for bit".
+  sources:
+    - src/maddening/sysid.py:3399 (FitResult, excited_rank)
+    - src/maddening/sysid.py:3916 (fit_lm, hold_undetermined)
+  conditions: a well-posed four-parameter bowl; a candidate with curvature; the cutoffs.
+  oracle: bitwise equality with the unguarded iterate; the cutoff functions.
+  tests:
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_fit_lm_on_a_well_posed_bowl_returns_the_minimum_it_reached
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_short_adam_run_on_the_bowl_returns_its_selected_iterate
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_candidate_with_curvature_is_neither_held_nor_counted
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_the_gauss_newton_cutoff_is_fims_rank_rule
+    - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_gets_its_iterate_back_bit_for_bit
+  status: verified
+
+- id: SYS-065
+  area: identifiability guard
+  claim: >-
+    "excited_rank is None means the question was not answered, not that the
+    answer was 'full rank'": hold_undetermined=False, more than 512
+    trainable coordinates, fewer iterations than coordinates, or every
+    gradient zero; hold_undetermined must be a bool.
+  sources:
+    - docs/user_guide/parameters.md (System identification)
+    - src/maddening/sysid.py:3399 (FitResult, excited_rank)
+  conditions: each of the listed cases; all three fitters for the bool check.
+  oracle: None; the ValueError.
+  tests:
+    - tests/core/test_sysid_undetermined_directions.py::test_fewer_iterations_than_parameters_answers_none_not_full_rank
+    - tests/core/test_sysid_undetermined_directions.py::test_above_the_parameter_cap_the_guard_declines_and_says_so
+    - tests/core/test_sysid_undetermined_directions.py::test_hold_undetermined_refuses_a_non_bool
+    - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_refuses_a_non_bool_hold_undetermined
+    - tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_refuses_a_non_bool_hold_undetermined
+  status: verified
+
+- id: SYS-066
+  area: identifiability guard
+  claim: >-
+    "Two limits, both fail-open.  The cutoff is numerical, so a merely
+    weakly-identified direction is kept, not held ... a null direction
+    that rotates in the unconstrained coordinates ... leaves no null
+    direction in the accumulated matrix, and the guard correctly reports
+    full excited_rank and does nothing."
+  sources:
+    - src/maddening/sysid.py:3624 (fit, hold_undetermined)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: SpringDamperNode's identity-transform damping; directions just above and below the cutoff.
+  oracle: excited_rank and the held displacement.
+  tests:
+    - tests/core/test_sysid_undetermined_directions.py::test_a_rotating_null_direction_is_reported_as_full_rank
+    - tests/core/test_sysid_undetermined_directions.py::test_a_direction_just_above_the_cutoff_is_kept
+    - tests/core/test_sysid_undetermined_directions.py::test_a_direction_just_below_the_cutoff_is_held
+    - tests/core/test_sysid_undetermined_directions.py::test_the_cutoff_is_numerical_and_keeps_a_weakly_excited_direction
+  status: verified
+
+- id: SYS-067
+  area: identifiability guard
+  claim: >-
+    fit_lm: "LM's step vanishes with the gradient, so the drift converges
+    and stops ... identical to the last bit for n_iter 10 through 200";
+    with the guard the returned scale is the starting one for every
+    budget.
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm, hold_undetermined)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: the spring scale degeneracy, noiseless and noisy.
+  oracle: the scale across budgets, unguarded and guarded.
+  tests:
+    - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_unguarded_moves_along_the_scale_direction_but_converges
+    - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_returns_the_starting_scale_for_every_budget
+    - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_holding_costs_neither_loss_nor_the_identifiable_ratios
+    - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_lm_gets_its_iterate_back_bit_for_bit
+  status: verified
+
+- id: SYS-068
+  area: identifiability guard
+  claim: >-
+    fit_multiple_shooting: "Only theta is guarded.  The returned
+    window_states are nuisance variables of the fit ... from the same
+    iterate as params"; its guarded scale does not depend on the schedule.
+  sources:
+    - src/maddening/sysid.py:4301 (fit_multiple_shooting, hold_undetermined)
+  conditions: the spring scale degeneracy under multiple shooting.
+  oracle: the window states against the unguarded run's; the scale across schedules.
+  tests:
+    - tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_scale_does_not_depend_on_the_schedule
+    - tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_holding_the_scale_leaves_the_window_states_alone
+    - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_multiple_shooting_fit_gets_its_iterate_back_bit_for_bit
+  status: verified
+
+- id: SYS-069
+  area: identifiability guard
+  claim: >-
+    Each fitter hands the guard its selected point: the guard reads the
+    iterate the fitter returns, not its last.
+  sources:
+    - src/maddening/sysid.py:3399 (FitResult)
+  conditions: all three fitters.
+  oracle: the point the guard received.
+  tests:
+    - tests/core/test_sysid_hold_never_raises_the_loss.py::test_each_fitter_hands_the_hold_its_selected_point
+  status: verified
+
+# ---------------------------------------------------------------------------
+# fit_multiple_shooting
+# ---------------------------------------------------------------------------
+
+- id: SYS-070
+  area: fit_multiple_shooting
+  claim: >-
+    "Returns (FitResult, window_states), both from the lowest-loss iterate
+    the run evaluated ... The parameters and the window states are one
+    point of the joint objective, so they are selected together"; started
+    at the truth and walking away, it returns its start and seed states.
+  sources:
+    - src/maddening/sysid.py:4301 (fit_multiple_shooting)
+  conditions: a run started at the truth; a run whose loss never rose.
+  oracle: the start and seed states; the last iterate.
+  tests:
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_multiple_shooting_that_walks_away_returns_its_start_and_seed_states
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_multiple_shooting_run_whose_loss_never_rose_returns_its_last_iterate
+  status: verified
+
+- id: SYS-071
+  area: fit_multiple_shooting
+  claim: >-
+    "FitResult.best_loss is the loss of exactly the pair returned."
+  sources:
+    - src/maddening/sysid.py:4301 (fit_multiple_shooting)
+    - src/maddening/sysid.py:3399 (FitResult, best_loss)
+  conditions: >-
+    unstated: hold_undetermined, which moves params after the selection;
+    FitResult says best_loss "is the value before the hold_undetermined
+    guard".
+  oracle: windowed_loss at the returned params and window states.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
+  status: ambiguous
+  proposed_wording: >-
+    FitResult.best_loss is the loss of the selected iterate's parameters
+    and window states.  The window states are returned as selected; the
+    parameters are too unless the guard held a direction, in which case
+    the returned pair's loss is within the guard's tolerance of best_loss
+    (2**10 * eps relative, plus the rounding of the held point).
+  notes: >-
+    The two docstrings disagree.  Measured on the spring scale degeneracy
+    (60 iterations, lr 0.05): exact without the guard; with it (excited
+    rank 2, drift 0.041) the recomputed loss matched to the last bit,
+    which the guard's tolerance does not promise.
+
+- id: SYS-072
+  area: fit_multiple_shooting
+  claim: >-
+    Multiple shooting recovers the parameters from noisy window starts,
+    where teacher forcing seeds every window with measurement error.
+  sources:
+    - src/maddening/sysid.py:4301 (fit_multiple_shooting)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: noise at the window starts.
+  oracle: the recovered stiffness against the truth.
+  tests:
+    - tests/core/test_sysid.py::test_fit_multiple_shooting_recovers_from_noisy_window_starts
+  status: verified
+
+# ---------------------------------------------------------------------------
+# fit_lm
+# ---------------------------------------------------------------------------
+
+- id: SYS-080
+  area: fit_lm
+  claim: >-
+    converged is True "when the loss reached tol, or when the step an
+    iteration proposed ... moved every trainable parameter by no more than
+    step_tol of its own magnitude ... or -- once the run has lowered the
+    loss at least once -- when every candidate of an iteration was
+    rejected down to one damped within step_tol"; "A run that never
+    lowered the loss and rejected every candidate is not converged, and
+    neither is one that ran out of n_iter"; a residual reading no
+    trainable parameter converges at its start.
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm)
+    - src/maddening/sysid.py:3399 (FitResult, converged)
+  conditions: a noiseless float32 fit at its optimum; a run of rejected candidates; a residual reading nothing trainable.
+  oracle: the flag and the iteration it stopped on.
+  tests:
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_shorter_damped_retry_does_not_make_a_rejected_run_converged
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_residual_that_reads_no_trainable_parameter_is_converged_at_its_start
+    - tests/core/test_sysid_noise_model.py::test_fit_lm_never_accepting_a_step_returns_cleanly
+  status: verified
+
+- id: SYS-081
+  area: fit_lm
+  claim: >-
+    step_tol: "None (the default) is 2**4 units in the last place of each
+    parameter's own dtype -- 2**4 * eps, 1.9e-6 in float32 and 3.6e-15 in
+    float64"; "0.0 counts only a step that leaves every parameter bit for
+    bit where it was"; measured relative to each physical parameter.
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm, step_tol)
+  conditions: float32 and float64; zero; an explicit value; one with no reading.
+  oracle: the convergence verdict at proposals either side of the tolerance.
+  tests:
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_the_default_step_tol_is_sixteen_ulps_of_the_parameter
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_the_default_step_tol_follows_the_working_precision
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_step_tol_zero_counts_only_a_proposal_of_exactly_nothing
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_an_explicit_step_tol_is_relative_to_each_parameter
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_a_step_tol_with_no_reading_is_refused
+  status: verified
+
+- id: SYS-082
+  area: fit_lm
+  claim: >-
+    "No converged test fires while a coordinate on its bound could lower
+    the loss by moving into the range."
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm)
+    - src/maddening/sysid.py:3399 (FitResult, converged)
+  conditions: a coordinate with a descent direction into the range.
+  oracle: the flag; the inward-descent predicate.
+  tests:
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on_the_bound
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_inward_descent_predicate
+  status: verified
+
+- id: SYS-083
+  area: fit_lm
+  claim: >-
+    "The Marquardt solve's floor, which keeps it regular, is eps times the
+    mean of diag(JᵀJ): relative, so the step is the same for every scaling
+    of the residual"; "The solve's floor is relative, so the answer does
+    not depend on the residual's units."
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: the residual scaled from 1e-10 to 1e10; noise_std 1 and 1e8.
+  oracle: the optimum of the unscaled problem; the iteration count.
+  tests:
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_noise_std_is_the_same_scaling
+  status: verified
+  notes: >-
+    fix/p4-13-sysid-params (#203) replaces the floor with a per-column one
+    and adds a stationarity test; the wording of this row moves with it.
+
+- id: SYS-084
+  area: fit_lm
+  claim: >-
+    "The damping λ multiplies diag(JᵀJ) (Marquardt scaling)", and "for the
+    handful of physical constants a model has it converges in a few
+    iterations where Adam needs hundreds".
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: >-
+    unstated: the units of a parameter.  Marquardt scaling is invariant to
+    them; the floor of SYS-083 is shared by every column.
+  oracle: the same linear problem with one identity-transform parameter re-expressed in units 1000x smaller, from the same physical start.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_fit_lm_does_not_depend_on_the_units_of_a_parameter
+  status: failing
+  finding: >-
+    The answer depends on a parameter's units.  r = A diag(u) x - b over
+    (stiffness, damping, rest_length), damping in units u (identity
+    transform, bounds (0, None)), started at the same physical value:
+    u = 1 converges in 5 iterations to damping 3 (loss 1.6e-11); u = 1e-2
+    takes 45; u = 1e-3 stops unconverged after 50 at damping 2.12 (loss
+    0.92); u = 1e-5 reports converged=True at damping 2.0, never moved
+    (loss 1.2); u = 1e4 and 1e6 do not converge in 50.  log-transformed
+    parameters are unaffected (their column is p * dr/dp).  The floor
+    eps * mean(diag(JᵀJ)) is dominated by the largest column, so a column
+    whose diagonal is many decades smaller is damped by roughly
+    floor / diag(JᵀJ)_jj every iteration.  Guess: src/maddening/sysid.py
+    _marquardt_step (around line 3882), the floor term; #203's per-column
+    floor is the fix.
+  notes: >-
+    Reproducer: the test above (column units 1 and 1e-3).
+
+- id: SYS-085
+  area: fit_lm
+  claim: >-
+    fit_lm "returns the lowest-loss iterate it evaluated, and here that is
+    always the last one ... best_iteration is len(losses) when the run
+    ended on an accepted step ... and len(losses) - 1 when it ended on tol,
+    on a proposed step within step_tol that did not lower the loss, or on a
+    step no damping could make acceptable."
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm)
+  conditions: each way a run can end.
+  oracle: best_iteration and best_loss against losses.
+  tests:
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_fit_lm_ending_on_an_accepted_step_reports_that_step
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_fit_lm_ending_on_a_rejected_step_reports_the_iterate_it_kept
+    - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_fit_lm_stopped_by_tol_or_step_tol_reports_the_right_iterate
+  status: verified
+
+- id: SYS-086
+  area: fit_lm
+  claim: >-
+    fit_lm "converges in a few iterations where Adam needs hundreds"
+    (recovers k and c of the spring), and noise_std "weights the residual
+    as in fim".
+  sources:
+    - src/maddening/sysid.py:3916 (fit_lm)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: the spring with mass frozen; a per-leaf noise model.
+  oracle: the truth; the iteration count against Adam's at equal budget.
+  tests:
+    - tests/core/test_sysid.py::test_fit_lm_recovers_k_c_in_few_iterations
+    - tests/core/test_sysid.py::test_fit_lm_beats_adam_at_equal_budget
+    - tests/core/test_sysid_noise_model.py::test_fit_lm_noise_std_pytree_dict
+  status: verified
+
+- id: SYS-087
+  area: fitters
+  claim: >-
+    Truth recovery: fit recovers the spring's stiffness and damping with
+    mass frozen by its ParamSpec (from 45 and 3 to the data's 30 and 2:
+    "physical, inside bounds").
+  sources:
+    - docs/user_guide/parameters.md (System identification)
+    - src/maddening/sysid.py:3624 (fit)
+  conditions: noiseless record, mass frozen.
+  oracle: the generating values.
+  tests:
+    - tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec
+  status: verified
+
+# ---------------------------------------------------------------------------
+# ParamSpec and the constrained coordinates
+# ---------------------------------------------------------------------------
+
+- id: SYS-100
+  area: ParamSpec
+  claim: >-
+    ParamSpec "enforces lo < hi"; a NaN bound, an infinity pointing inward,
+    an infinite bound under a transform and a bound that is not a real
+    number are refused; an outward infinity means exactly None.
+  sources:
+    - src/maddening/core/params.py:86 (ParamSpec)
+    - src/maddening/sysid.py:2345 (fim, scale)
+  conditions: each refused form.
+  oracle: the ValueError; equality with None.
+  tests:
+    - tests/core/test_params_spec.py::test_invalid_specs_rejected
+    - tests/core/test_param_spec_edge_cases.py::test_a_nan_bound_is_refused
+    - tests/core/test_param_spec_edge_cases.py::test_an_infinity_pointing_inward_is_refused
+    - tests/core/test_param_spec_edge_cases.py::test_an_infinite_bound_under_a_transform_is_refused
+    - tests/core/test_param_spec_edge_cases.py::test_a_bound_that_is_not_a_real_number_is_refused
+    - tests/core/test_param_spec_edge_cases.py::test_an_outward_infinity_means_exactly_none
+  status: verified
+
+- id: SYS-101
+  area: ParamSpec
+  claim: >-
+    transform None: "clip to bounds; a leaf exactly on a bound has
+    derivative 1, the one-sided one into its range, where jnp.clip alone
+    gives 0.5"; off its bounds the clip is jnp.clip.
+  sources:
+    - docs/user_guide/parameters.md (ParamSpec)
+  conditions: at, inside and outside each bound; an integer leaf; the Jacobian fit_lm forms there.
+  oracle: the derivative; jnp.clip bit for bit off the bounds.
+  tests:
+    - tests/core/test_params_bounded_identity_derivative.py::test_the_derivative_at_and_around_a_bound
+    - tests/core/test_params_bounded_identity_derivative.py::test_off_its_bounds_the_clip_is_jnp_clip_bit_for_bit
+    - tests/core/test_params_bounded_identity_derivative.py::test_the_gradient_at_the_bound_is_the_derivative_into_the_range
+    - tests/core/test_params_bounded_identity_derivative.py::test_the_jacobian_fit_lm_forms_at_the_bound_is_full_sized
+  status: verified
+
+- id: SYS-102
+  area: ParamSpec
+  claim: >-
+    transform "log": "p = lo + exp(u), strictly above lo, or above 0 when lo
+    is None -- check refuses anything else".
+  sources:
+    - docs/user_guide/parameters.md (ParamSpec)
+    - src/maddening/core/params.py:386 (ParamSpec.check)
+  conditions: a zero and a non-zero lower bound; values at and below it; large negative coordinates.
+  oracle: strict inequality and re-unconstrainability; the ValueError.
+  tests:
+    - tests/core/test_param_spec_edge_cases.py::test_log_constrain_is_strictly_inside_and_re_unconstrainable
+    - tests/core/test_param_spec_edge_cases.py::test_log_constrain_with_nonzero_lower_bound_keeps_fit_continuable
+    - tests/core/test_param_spec_edge_cases.py::test_a_log_spec_without_a_lower_bound_refuses_a_value_at_or_below_zero
+    - tests/core/test_param_spec_edge_cases.py::test_a_log_spec_without_a_lower_bound_accepts_what_it_can_unconstrain
+    - tests/core/test_param_spec_edge_cases.py::test_a_log_or_logit_transform_refuses_a_leaf_it_cannot_return
+  status: verified
+
+- id: SYS-103
+  area: ParamSpec
+  claim: >-
+    transform "logit": lo < p < hi, strictly, for any coordinate.
+  sources:
+    - docs/user_guide/parameters.md (ParamSpec)
+  conditions: large bounds; an interval a few ulps wide.
+  oracle: strict inequality.
+  tests:
+    - tests/core/test_param_spec_edge_cases.py::test_logit_constrain_is_strictly_inside_for_large_bounds
+    - tests/core/test_params_persistence_edge_cases.py::test_logit_clamp_strictly_inside_a_few_ulp_interval
+  status: verified
+
+- id: SYS-104
+  area: ParamSpec
+  claim: >-
+    "gm.constrain(u) # back to physical values, always inside bounds";
+    constrain inverts unconstrain inside bounds; both maps are jittable and
+    differentiable.
+  sources:
+    - docs/user_guide/parameters.md (ParamSpec)
+    - src/maddening/core/params.py:767 (constrain)
+  conditions: any coordinates, including extreme ones; list leaves.
+  oracle: the bounds; the round trip; jax.jit and jax.grad.
+  tests:
+    - tests/core/test_params_spec.py::test_constrain_inverts_unconstrain_inside_bounds
+    - tests/core/test_params_spec.py::test_constrain_lands_inside_bounds_for_any_coordinates
+    - tests/core/test_params_spec.py::test_unconstrain_of_constrain_is_finite_for_any_coordinate
+    - tests/core/test_params_spec.py::test_maps_are_jittable_and_differentiable
+    - tests/core/test_param_spec_edge_cases.py::test_unconstrain_and_constrain_apply_the_transform_to_a_list_leaf
+  status: verified
+
+- id: SYS-105
+  area: ParamSpec
+  claim: >-
+    "gm.check_params(p) # ValueError naming the first leaf out of range";
+    a non-finite value is refused even without bounds.
+  sources:
+    - docs/user_guide/parameters.md (ParamSpec)
+    - src/maddening/core/graph_manager.py:6268 (check_params)
+  conditions: a leaf out of range; NaN with and without bounds; a list leaf.
+  oracle: the ValueError and the leaf it names.
+  tests:
+    - tests/core/test_params_spec.py::test_check_bounds_names_offending_leaf
+    - tests/core/test_param_spec_edge_cases.py::test_check_params_rejects_non_finite
+    - tests/core/test_param_spec_edge_cases.py::test_check_rejects_nan_even_without_bounds
+    - tests/core/test_param_spec_edge_cases.py::test_check_bounds_refuses_an_out_of_range_list_leaf
+  status: verified
+
+- id: SYS-106
+  area: ParamSpec
+  claim: >-
+    trainable defaults to True and initial_* entries to False; nodes
+    declare specs in param_specs() ("SpringDamperNode: stiffness and mass
+    are log-positive, damping is >= 0"); set_param_spec overrides any of
+    them, validated.
+  sources:
+    - docs/user_guide/parameters.md (ParamSpec)
+    - src/maddening/core/graph_manager.py:6202 (set_param_spec)
+  conditions: the spring; an override on an unknown node or key.
+  oracle: the merged specs; the ValueError.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_the_spring_declares_its_parameter_specs
+    - tests/core/test_graph_params_api.py::test_param_specs_merge_node_declarations_and_initial_heuristic
+    - tests/core/test_graph_params_api.py::test_set_param_spec_overrides_and_validates
+  status: verified
+
+- id: SYS-107
+  area: ParamSpec
+  claim: >-
+    trainable_mask, unconstrain, constrain and check_bounds "read specs
+    through the same walk and refuse the same entries" (a ParamSpec above a
+    dict or record level), "where they used to hand the leaf the default
+    (trainable, unbounded) spec".
+  sources:
+    - docs/user_guide/parameters.md (System identification)
+    - src/maddening/core/params.py:745 (trainable_mask)
+  conditions: a spec above a dict level and above a record level.
+  oracle: the ValueError from each map.
+  tests:
+    - tests/core/test_param_spec_edge_cases.py::test_a_spec_above_a_dict_level_is_refused_by_the_maps
+    - tests/core/test_param_spec_edge_cases.py::test_a_spec_above_a_record_level_is_refused_by_the_maps
+  status: verified
+
+- id: SYS-108
+  area: ParamSpec
+  claim: >-
+    ParamSpec.from_dict reads back everything to_dict writes, refuses a
+    trainable that is not a boolean and a bound that is not a number; a
+    saved graph carrying such a spec is refused on load.
+  sources:
+    - src/maddening/core/params.py:86 (ParamSpec)
+  conditions: null bounds, string trainable, string bound.
+  oracle: the round trip; the ValueError.
+  tests:
+    - tests/core/test_param_spec_edge_cases.py::test_from_dict_reads_back_everything_to_dict_writes
+    - tests/core/test_param_spec_edge_cases.py::test_from_dict_refuses_a_trainable_that_is_not_a_boolean
+    - tests/core/test_param_spec_edge_cases.py::test_from_dict_refuses_a_bound_that_is_not_a_number
+    - tests/core/test_param_spec_edge_cases.py::test_a_saved_graph_with_a_string_trainable_is_refused_on_load
+  status: verified
+
+# ---------------------------------------------------------------------------
+# node.params and gm.params as fitting and export see them
+# ---------------------------------------------------------------------------
+
+- id: SYS-110
+  area: params pytree
+  claim: >-
+    params_pytree() takes "every float-valued one by default (Python
+    floats, float arrays, lists of numbers); ints, bools, strings and dicts
+    are structural"; an int spelling of a declared trainable constant is
+    promoted.
+  sources:
+    - docs/user_guide/parameters.md (Which nodes take part)
+  conditions: each kind of entry; an int-spelled trainable constant.
+  oracle: the pytree's keys.
+  tests:
+    - tests/core/test_params_pytree_dtype.py::test_structural_entries_are_still_excluded
+    - tests/core/test_params_pytree_dtype.py::test_an_integer_spelling_of_a_declared_trainable_constant_is_promoted
+    - tests/core/test_params_pytree_dtype.py::test_an_integer_without_a_trainable_spec_stays_structural
+  status: verified
+
+- id: SYS-111
+  area: params pytree
+  claim: >-
+    "A value that carries a floating dtype of its own ... keeps it; a value
+    that carries none ... is placed at JAX's canonical float precision --
+    float32, or float64 under jax_enable_x64.  Nothing is narrowed below
+    that."
+  sources:
+    - docs/user_guide/parameters.md (Which nodes take part)
+  conditions: float32 and float64 (x64); Python floats, numpy scalars and arrays.
+  oracle: the dtype of each leaf.
+  tests:
+    - tests/core/test_params_pytree_dtype.py::test_one_value_reaches_the_pytree_as_one_dtype_however_it_is_spelled
+    - tests/core/test_params_pytree_dtype.py::test_a_parameter_keeps_float64_when_the_user_asked_for_x64
+    - tests/core/test_params_pytree_dtype.py::test_an_array_parameter_keeps_the_floating_dtype_it_was_given
+    - tests/core/test_params_pytree_dtype.py::test_a_compiled_graph_carries_the_working_precision_into_gm_params
+  status: verified
+
+- id: SYS-112
+  area: params pytree
+  claim: >-
+    Nodes on the 3-argument contract "are not in gm.params.
+    gm.nodes_without_params() lists them, and passing an entry for such a
+    node (or a misspelled key) is a ValueError, not a silently ignored
+    leaf."
+  sources:
+    - docs/user_guide/parameters.md (Which nodes take part)
+    - src/maddening/core/graph_manager.py:6275 (nodes_without_params)
+  conditions: a legacy node; an unknown node and key; the adaptive path.
+  oracle: the snapshot; the ValueError.
+  tests:
+    - tests/core/test_graph_params_api.py::test_snapshot_excludes_nodes_without_params
+    - tests/core/test_graph_params_api.py::test_entry_for_node_without_params_is_an_error
+    - tests/core/test_graph_params_api.py::test_unknown_node_and_unknown_key_are_errors
+    - tests/core/test_graph_params_api.py::test_adaptive_path_validates_too
+  status: verified
+
+- id: SYS-113
+  area: params pytree
+  claim: >-
+    A leaf in gm.params the compiled step cannot read (an initial_* entry,
+    a static_data_deps value, construction-consumed geometry): "Changing
+    one in gm.params is a ValueError naming the leaf and why, raised by
+    every run method, check_params, to_dict and save_state"; a traced leaf
+    and an explicit params= pytree are not compared; reset_params drops
+    the edit.
+  sources:
+    - docs/user_guide/parameters.md (Which nodes take part)
+  conditions: a declared baked leaf; an initial condition; a leaf only this graph does not exercise; a REST-style write.
+  oracle: the ValueError at each surface; nothing serialised.
+  tests:
+    - tests/core/test_params_baked_leaf_refusal.py::test_a_declared_baked_leaf_edit_is_refused_by_name
+    - tests/core/test_params_baked_leaf_refusal.py::test_the_refused_edit_is_never_serialised
+    - tests/core/test_params_baked_leaf_refusal.py::test_an_initial_condition_edit_is_refused_as_never_read
+    - tests/core/test_params_baked_leaf_refusal.py::test_a_leaf_only_this_graph_does_not_exercise_is_carried_not_refused
+    - tests/core/test_params_baked_leaf_refusal.py::test_an_explicit_params_argument_is_not_refused_but_the_live_leaves_under_it_are
+    - tests/core/test_params_baked_leaf_refusal.py::test_a_traced_leaf_is_not_compared
+    - tests/core/test_params_baked_leaf_refusal.py::test_reset_params_is_the_way_back
+  status: verified
+
+- id: SYS-114
+  area: params pytree
+  claim: >-
+    "gm.params is populated by compile() and survives a recompile ...
+    Leaves that no longer fit are dropped with a RuntimeWarning.
+    gm.reset_params() is the explicit way back to the constructor snapshot.
+    A checkpoint loaded before the first compile compiles the graph so its
+    params are not lost."
+  sources:
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+    - src/maddening/core/graph_manager.py:5359 (reset_params)
+  conditions: an added edge; a replaced node; the profiler's recompile; a removed node; load before compile.
+  oracle: the live values; the warning.
+  tests:
+    - tests/core/test_params_contract_completeness.py::test_recompile_keeps_live_params
+    - tests/core/test_params_contract_completeness.py::test_recompile_drops_leaves_that_no_longer_fit_with_a_warning
+    - tests/core/test_params_contract_completeness.py::test_reset_params_restores_constructor_snapshot
+    - tests/core/test_params_contract_completeness.py::test_profiler_one_iteration_variant_keeps_live_params
+    - tests/core/test_params_contract_completeness.py::test_load_state_before_compile_keeps_params
+    - tests/core/test_params_contract_completeness.py::test_remove_node_discards_its_params_without_warning
+  status: verified
+
+- id: SYS-115
+  area: params pytree
+  claim: >-
+    "A node.params write after the graph was compiled takes effect at the
+    next run of any entry point -- step, run, every run_scan*, the sysid
+    fitters and windowed_loss all recompile for it first -- or at the next
+    compile(), whichever comes first, so they all run the same model";
+    writing a constructor value back reverts a calibration.
+  sources:
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+  conditions: every mutation through the mapping; each entry point; a structural write.
+  oracle: each entry point's result against gm.step's.
+  tests:
+    - tests/core/test_node_params_writes_are_observed.py::test_every_mutation_through_the_mapping_counts
+    - tests/core/test_node_params_writes_are_observed.py::test_writing_the_nodes_own_value_back_reverts_a_calibration
+    - tests/core/test_node_params_writes_are_observed.py::test_a_leaf_write_reaches_every_entry_point_too
+    - tests/core/test_node_params_writes_are_observed.py::test_a_structural_write_reaches_gm_step_without_a_compile
+    - tests/core/test_node_params_writes_are_observed.py::test_windowed_loss_runs_the_written_model_as_gm_step_does
+    - tests/core/test_node_params_writes_are_observed.py::test_a_fitter_starts_from_the_written_value
+    - tests/core/test_node_params_write_after_compile.py::test_a_node_params_write_after_compile_takes_effect_at_the_next_compile
+  status: verified
+  notes: >-
+    The model description and the FMU are not among the entry points the
+    rule lists; FMU-040 records what an FMU exported between the write and
+    the next compile runs.  #203 adds a sync-on-read point for pending
+    writes.
+
+- id: SYS-116
+  area: params pytree
+  claim: >-
+    "If both were written since the last compile, to different values,
+    gm.params' value -- the one the step was already running -- is kept and
+    compile() warns (RuntimeWarning), naming the leaf and both values";
+    agreeing writes are no conflict; a write gm.params already reflects
+    costs no recompile.
+  sources:
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+  conditions: disagreeing and agreeing writes; a compile that raises; reset_params after a node write.
+  oracle: the kept value; the warning and its text; the compile count.
+  tests:
+    - tests/core/test_node_params_write_after_compile.py::test_two_disagreeing_writes_since_one_compile_keep_the_live_value_and_warn
+    - tests/core/test_node_params_write_after_compile.py::test_two_agreeing_writes_are_no_conflict
+    - tests/core/test_node_params_write_after_compile.py::test_a_compile_that_raises_does_not_lose_the_write
+    - tests/core/test_node_params_writes_are_observed.py::test_a_write_gm_params_already_reflects_costs_no_recompile
+  status: verified
+
+- id: SYS-117
+  area: params pytree
+  claim: >-
+    "load_state() restores gm.params and supersedes every earlier
+    node.params write to a constant it carries; a structural value a
+    checkpoint does not hold stays written."
+  sources:
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+  conditions: a leaf write and a structural write before a load.
+  oracle: the restored value; the pending structural write.
+  tests:
+    - tests/core/test_node_params_writes_are_observed.py::test_load_state_supersedes_an_earlier_node_write
+    - tests/core/test_node_params_writes_are_observed.py::test_load_state_leaves_a_structural_write_it_cannot_restore_pending
+  status: verified
+
+- id: SYS-118
+  area: params pytree
+  claim: >-
+    "A partial pytree passed to gm.step(params=...) / gm.run_scan / gm.run
+    is completed from the live gm.params ... The raw compiled step
+    (gm._compiled_step, what the FMI sidecar calls) refuses an incomplete
+    pytree instead of guessing."
+  sources:
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+  conditions: a calibrated live leaf missing from the partial pytree.
+  oracle: the calibrated value used; the refusal.
+  tests:
+    - tests/core/test_params_contract_completeness.py::test_partial_params_complete_from_live_values_through_step
+    - tests/core/test_params_contract_completeness.py::test_raw_compiled_step_refuses_an_incomplete_pytree
+  status: verified
+
+- id: SYS-119
+  area: params pytree
+  claim: >-
+    An explicit params pytree "is a traced input: a new value takes effect
+    without recompiling, and jax.grad / jax.jvp / jax.jacfwd reach it --
+    through coupling groups too"; injected params reach flux edges.
+  sources:
+    - docs/user_guide/parameters.md (opening section)
+  conditions: Python-float leaves; a flux edge; a flux edge inside a coupling group.
+  oracle: no retrace; finite differences of the flux.
+  tests:
+    - tests/core/test_params_persistence_edge_cases.py::test_python_float_params_leaves_do_not_retrace_and_survive_recompile
+    - tests/core/test_params_contract_completeness.py::test_gradient_through_flux_edge_matches_finite_differences
+    - tests/core/test_params_contract_completeness.py::test_flux_edge_inside_a_coupling_group_uses_injected_stiffness
+  status: verified
+
+- id: SYS-120
+  area: params pytree
+  claim: >-
+    Checkpoints store gm.params, so a calibrated graph resumes calibrated;
+    to_dict writes each node's effective params plus set_param_spec
+    overrides, and reloading gives the calibrated constants and the same
+    trainable mask.
+  sources:
+    - docs/user_guide/parameters.md (Persistence and FMI)
+  conditions: a calibrated leaf and an override; no override.
+  oracle: the reloaded graph's params and mask.
+  tests:
+    - tests/core/test_graph_params_serialization.py::test_effective_params_overlay_live_values
+    - tests/core/test_graph_params_serialization.py::test_to_dict_from_dict_round_trip_calibrated_values_and_overrides
+    - tests/core/test_graph_params_serialization.py::test_no_overrides_means_no_param_specs_key
+    - tests/core/test_params_persistence_edge_cases.py::test_load_state_before_compile_equals_compile_then_load
+  status: verified
+
+- id: SYS-121
+  area: params pytree
+  claim: >-
+    Mapping weights live under gm.params["mappings"][edge key]; "A second
+    mapped edge on the same field pair ... gets its own slot, "...#1"";
+    a checkpoint stores the weights themselves.
+  sources:
+    - docs/user_guide/parameters.md (Mapping weights)
+  conditions: two mapped edges on one field pair; a checkpoint.
+  oracle: separate slots; the restored weights.
+  tests:
+    - tests/core/test_params_contract_completeness.py::test_two_mapped_edges_on_same_field_pair_get_their_own_weights
+    - tests/core/test_params_persistence_edge_cases.py::test_checkpoint_carries_mapping_weights
+  status: verified
+
+# ---------------------------------------------------------------------------
+# FMU: the package and the model description
+# ---------------------------------------------------------------------------
+
+- id: FMU-001
+  area: packaging
+  claim: >-
+    "MADDENING exports a compiled graph as an FMI 3.0 co-simulation FMU.
+    The FMU binary holds no simulation state: it is a thin C wrapper that
+    forwards every FMI call to a Python sidecar"; the binary needs "Only
+    libc and the vendored FMI 3.0 headers".
+  sources:
+    - docs/user_guide/fmu_export.md (opening section)
+    - src/maddening/fmi/package.py:63 (build_fmu_binary)
+  conditions: a C compiler on the host.
+  oracle: the exported fmi3 symbols; a clean build under strict warnings.
+  tests:
+    - tests/fmi/test_c_wrapper.py::test_binary_builds_and_exports_the_fmi3_symbols
+    - tests/fmi/test_c_unit.py::test_wrapper_compiles_clean_with_strict_warnings
+  status: verified
+
+- id: FMU-002
+  area: packaging
+  claim: >-
+    "tests/fmi/test_c_wrapper.py builds the binary, packages an FMU, and
+    has FMPy's simulate_fmu drive it against a bridge with a set parameter
+    and a driven input; the outputs reproduce gm.run_scan to float32
+    round-off"; FMPy's validate_fmu reports no problems.
+  sources:
+    - docs/user_guide/fmu_export.md (Verification)
+  conditions: a C compiler and FMPy; a single-rate graph.
+  oracle: gm.run_scan with the same parameter and input.
+  tests:
+    - tests/fmi/test_c_wrapper.py::test_fmpy_drives_the_compiled_fmu_against_the_graph
+    - tests/fmi/test_c_wrapper.py::test_fmpy_validate_fmu_reports_no_problems
+    - tests/fmi/test_c_wrapper.py::test_bridge_handler_set_get_step_matches_graph
+  status: verified
+
+- id: FMU-003
+  area: model description
+  claim: >-
+    "Conservative by default: only surfaces tagged @stability(STABLE) enter
+    the FMU unless the caller opts in via include_evolving=True."
+  sources:
+    - src/maddening/fmi/model_description.py:1 (module docstring)
+    - src/maddening/fmi/model_description.py:683 (build_model_description, include_evolving)
+  conditions: an evolving node; a stable one.
+  oracle: the variables emitted.
+  tests:
+    - tests/fmi/test_model_description.py::TestStabilityGating::test_evolving_nodes_excluded_by_default
+    - tests/fmi/test_model_description.py::TestStabilityGating::test_stable_surfaces_always_included
+    - tests/fmi/test_params_the_step_cannot_read.py::test_an_experimental_node_exports_no_parameter_and_lists_every_leaf_as_fixed
+  status: verified
+
+- id: FMU-004
+  area: model description
+  claim: >-
+    "Outputs are <node>.<field>.  External inputs are <node>.<field> of the
+    target boundary field (start value 0, description and unit from the
+    target node's boundary_input_spec).  Parameters are
+    <node>.params.<key>, with the ParamSpec bounds as min / max", every
+    parameter causality="parameter", variability="tunable".
+  sources:
+    - docs/user_guide/fmu_export.md (Building and packaging, Variables)
+    - docs/user_guide/parameters.md (Persistence and FMI)
+  conditions: a graph with state fields, an external input and parameters; include_parameters=False.
+  oracle: the variables and their attributes; the token with and without parameters.
+  tests:
+    - tests/fmi/test_model_description.py::TestBuildModelDescription::test_outputs_include_state_fields
+    - tests/fmi/test_multi_clock.py::test_external_inputs_of_a_real_graph_are_fmu_inputs
+    - tests/fmi/test_params_causality.py::TestModelDescription::test_every_params_leaf_the_step_reads_is_a_tunable_parameter
+    - tests/fmi/test_params_causality.py::TestModelDescription::test_parameters_can_be_left_out_and_change_the_token
+    - tests/fmi/test_params_causality.py::TestBoundsThroughFMI::test_model_description_emits_min_max_from_param_spec
+  status: verified
+
+- id: FMU-005
+  area: model description
+  claim: >-
+    "Every start, min and max is written in its type's lexical form, which
+    FMI 3.0's schema requires ... An integer's bounds are the integers
+    inside the declared interval, and a Boolean carries no min / max.  A
+    Boolean or integer input or output is variability="discrete"".
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/model_description.py:83 (FMIVariable, start)
+  conditions: Boolean, integer and float variables; a hand-built start in float form; FMPy and the FMI 3.0 schema.
+  oracle: the XML attributes; schema validation; simulate_fmu with its default validation.
+  tests:
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_boolean_or_integer_input_or_output_is_discrete
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_the_fmi3_schema_validates_the_description
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_simulate_fmu_with_its_default_validation_runs_the_fmu
+    - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_hand_built_start_in_float_form_is_written_in_the_types_form
+  status: verified
+
+- id: FMU-006
+  area: model description
+  claim: >-
+    "Only parameters the compiled step reads are exported ... an initial_*
+    condition ..., a value a node consumed when it was constructed
+    (LBMPipeNode.pipe_radius) or declares in static_data_deps
+    (WaveletAdaptiveNode.mass), or one only an unconnected input would read
+    ... is left out and listed, with the reason, in md.fixed_parameters.
+    So is one from which a node derives the points an interface mapping
+    was built from".
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/model_description.py:683 (build_model_description, include_parameters)
+  conditions: each kind of unreadable leaf; a mapped edge built from a rod's grid_x; unmapped rods.
+  oracle: the variables and md.fixed_parameters.
+  tests:
+    - tests/fmi/test_params_the_step_cannot_read.py::test_a_pipe_exports_what_its_step_reads_and_not_its_geometry
+    - tests/fmi/test_params_the_step_cannot_read.py::test_a_wavelet_node_does_not_export_the_mass_baked_into_its_operator
+    - tests/fmi/test_params_the_step_cannot_read.py::test_a_stable_graph_does_not_export_its_initial_conditions
+    - tests/core/test_mapping_point_reference_writes.py::test_an_fmu_does_not_export_a_length_a_mapping_was_built_from
+    - tests/core/test_mapping_point_reference_writes.py::test_an_fmu_of_unmapped_rods_still_exports_their_lengths
+  status: verified
+
+- id: FMU-007
+  area: model description
+  claim: >-
+    "The bridge applies that list to its sidecar: no door into the
+    parameter tree -- fmi3Set*, fmi3SetFMUState, the sidecar's own
+    set_params / set_fmu_state -- installs a new value for one of them; the
+    request is fmi3Error naming the parameter and why, and nothing is
+    written."
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/sidecar.py:364 (SidecarConfig, fixed_params)
+  conditions: a sidecar built without the list behind a bridge; set_params, set_fmu_state, the bridge's set_state, the pickled RPC, the compiled FMU.
+  oracle: the refusal and the unchanged parameter.
+  tests:
+    - tests/fmi/test_params_the_step_cannot_read.py::test_the_sidecar_refuses_a_value_its_step_would_ignore
+    - tests/fmi/test_params_the_step_cannot_read.py::test_a_snapshot_cannot_install_a_value_the_step_cannot_read
+    - tests/fmi/test_params_the_step_cannot_read.py::test_a_bridge_applies_its_model_description_to_a_sidecar_built_without_it
+    - tests/fmi/test_params_the_step_cannot_read.py::test_the_bridge_set_state_refuses_an_archive_that_changes_a_fixed_parameter
+    - tests/fmi/test_params_the_step_cannot_read.py::test_the_compiled_fmu_returns_fmi3_error_for_such_an_archive
+  status: verified
+
+- id: FMU-008
+  area: model description
+  claim: >-
+    "A node name may itself contain a . ... the variable carries its (node,
+    field) pair, so the bridge never has to guess where the name splits,
+    and an export in which two nodes would spell the same variable name is
+    refused naming both"; a node name holding .params. has settable
+    parameters matched exactly.
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/model_description.py:83 (FMIVariable, node / field)
+  conditions: dotted node names; a node named rig.params.v2; a clash.
+  oracle: inputs routed to the right node; the parameter set and read back; the ValueError.
+  tests:
+    - tests/fmi/test_dotted_node_names.py::test_a_node_name_containing_a_dot_routes_fmu_inputs_to_that_node
+    - tests/fmi/test_dotted_node_names.py::test_two_nodes_that_spell_the_same_fmu_variable_are_refused_by_name
+    - tests/fmi/test_a_node_name_holding_params_has_settable_parameters.py::test_its_parameter_is_set_and_read_back
+    - tests/fmi/test_a_node_name_holding_params_has_settable_parameters.py::test_the_bridge_uses_the_pair_the_variable_carries_not_the_name
+  status: verified
+
+- id: FMU-009
+  area: model description
+  claim: >-
+    "A model_name of exactly NaN, Infinity or -Infinity is refused by
+    build_model_description ... Any other spelling (nan, Infinity_2) is
+    fine".
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/model_description.py:683 (build_model_description, Raises)
+  conditions: the three tokens and look-alikes.
+  oracle: the ValueError; acceptance.
+  tests:
+    - tests/fmi/test_non_finite_json_tokens.py::test_a_model_name_spelling_a_non_finite_token_is_refused_at_build_time
+    - tests/fmi/test_non_finite_json_tokens.py::test_a_model_name_that_only_looks_like_a_token_is_accepted
+  status: verified
+
+- id: FMU-010
+  area: model description
+  claim: >-
+    "The instantiationToken covers every variable's start, bounds,
+    variability, value reference and clocks, besides its name, type,
+    causality and shape.  An FMU packaged from a description with other
+    start values or bounds than the one a bridge serves fails
+    fmi3InstantiateCoSimulation against it with a token mismatch."
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/model_description.py:208 (ModelDescription, instantiation_token)
+  conditions: another start, other bounds, clocks, variability, value references and shapes under the same names.
+  oracle: the tokens; the compiled FMU's instantiation.
+  tests:
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_another_parameter_start_gives_another_token
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_other_bounds_give_another_token
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_clocks_and_variability_are_part_of_the_token
+    - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_an_fmu_with_other_start_values_does_not_instantiate_against_the_bridge
+    - tests/fmi/test_fmu_claims_edges.py::test_the_token_covers_value_references_and_shapes
+  status: verified
+
+- id: FMU-011
+  area: model description
+  claim: >-
+    default_step_size "Defaults to one step of the graph,
+    graph_manager.timestep: the fastest node's timestep on a uniform-rate
+    graph, and on a multi-rate graph the GCD of the timesteps as scheduled
+    (a sub-cycling coupling group at its largest member timestep)"; an
+    explicit value is advertised and recorded beside graph_timestep.
+  sources:
+    - src/maddening/fmi/model_description.py:683 (build_model_description, default_step_size)
+    - docs/user_guide/fmu_export.md (Building and packaging)
+  conditions: single-rate, multi-rate dividing and not, sub-cycled; an explicit default.
+  oracle: gm.timestep.
+  tests:
+    - tests/fmi/test_default_step_is_one_graph_step.py::test_the_default_step_is_one_graph_step
+    - tests/fmi/test_default_step_is_one_graph_step.py::test_an_explicit_default_step_size_still_wins
+    - tests/fmi/test_default_step_is_one_graph_step.py::test_a_sub_cycled_member_is_on_its_groups_clock
+  status: verified
+
+- id: FMU-012
+  area: model description
+  claim: >-
+    multi_clock=True: one constant-interval <Clock> per distinct node
+    timestep, clock_0, clock_1 ... by increasing interval, every output and
+    external input of a node tagged with its clock and discrete; "The
+    fastest clock equals the default experiment step size."
+  sources:
+    - docs/user_guide/fmu_export.md (Multi-rate graphs, clocks)
+    - src/maddening/fmi/model_description.py:683 (build_model_description, multi_clock)
+  conditions: >-
+    unstated in the guide: timesteps that do not divide each other; the
+    docstring states it ("the fastest equals it unless the timesteps do not
+    divide each other").
+  oracle: the clocks against the default step, for 0.01 / 0.05 and for 0.02 / 0.03.
+  tests:
+    - tests/fmi/test_fmu_claims_edges.py::test_the_fastest_clock_is_the_default_step_only_where_the_timesteps_divide
+    - tests/fmi/test_multi_clock.py::test_one_clock_per_distinct_timestep_and_outputs_tagged
+    - tests/fmi/test_multi_clock.py::test_xml_clock_elements_and_attributes
+    - tests/fmi/test_multi_clock.py::test_fmpy_validates_a_multi_clock_description
+    - tests/fmi/test_default_step_is_one_graph_step.py::test_every_clock_is_a_whole_number_of_default_steps
+  status: ambiguous
+  proposed_wording: >-
+    Every clock interval is a whole number of default steps, and the
+    fastest clock equals the default step when the node timesteps divide
+    each other; otherwise the default step is their GCD (nodes at 0.02 and
+    0.03 run on a 0.01 step under clocks of 0.02 and 0.03).
+  notes: The guide and build_model_description's docstring disagree; the docstring is right.
+
+- id: FMU-013
+  area: model description
+  claim: >-
+    "Clocks are off by default, so a single-clock FMU is byte-for-byte what
+    v0.3.0 produced."
+  sources:
+    - docs/user_guide/fmu_export.md (Multi-rate graphs, clocks)
+    - src/maddening/fmi/model_description.py:1 (module docstring)
+  conditions: a default export of a one-spring graph.
+  oracle: the description v0.3.0 wrote for the same graph (git archive v0.3.0), embedded in the test.
+  tests:
+    - tests/fmi/test_fmu_claims_edges.py::test_a_single_clock_export_is_byte_for_byte_what_v0_3_0_produced
+  status: failing
+  finding: >-
+    A default 0.4.0 export differs from v0.3.0's in its token, its
+    UnitDefinitions, its stepSize (0.01 against 0.001, the MADD-ANO-078
+    fix) and four parameter variables (include_parameters defaults to
+    True).  What holds is narrower: multi_clock=False emits no <Clock> and
+    no clocks= attribute.  Reproducer: the test above.  Docs fix:
+    docs/user_guide/fmu_export.md, "Multi-rate graphs: clocks", and the
+    model_description module docstring ("the single-clock v0.3.0 surface
+    is unchanged").
+
+- id: FMU-014
+  area: model description
+  claim: >-
+    selected_inputs: "A name the graph does not declare is a ValueError ...
+    A declared input left out is not an FMU variable, but the graph still
+    reads it: the bridge holds it at zero on every step ... listed in
+    ModelDescription.held_inputs.  A UserWarning names every such input."
+  sources:
+    - src/maddening/fmi/model_description.py:683 (build_model_description, selected_inputs)
+    - docs/user_guide/fmu_export.md (Variables)
+  conditions: an undeclared name; an omitted input; a restore; an importer driving the partial FMU.
+  oracle: held_inputs; the warning; the graph stepped with the input at zero.
+  tests:
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_description_lists_the_inputs_it_holds_at_zero
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_build_model_description_refuses_an_input_the_graph_does_not_declare
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_bridge_holds_an_unexported_input_at_zero_like_the_graph
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_held_inputs_are_not_in_the_fmu_state_and_a_restore_keeps_them_at_zero
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_an_importer_driving_the_partial_fmu_reproduces_the_graph
+  status: verified
+
+- id: FMU-015
+  area: model description
+  claim: >-
+    "A parameter constructed outside its ParamSpec bounds is advertised
+    with a start outside its min / max, and the FMU starts there, as the
+    graph does"; its own snapshots restore, while a set is still held to
+    the bounds.
+  sources:
+    - docs/user_guide/fmu_export.md (Variables, The trust boundary)
+  conditions: a parameter started below its lower bound; a legal set; a forged archive.
+  oracle: the start; the restore on both paths; the refusals.
+  tests:
+    - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_the_fixture_starts_outside_the_declared_bound
+    - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_the_instantiation_snapshot_restores_after_a_legal_set
+    - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_set_params_still_holds_a_set_value_to_the_bounds
+    - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_both_restore_paths_judge_a_forged_value_alike
+  status: verified
+
+- id: FMU-016
+  area: model description
+  claim: >-
+    min / max "come from ParamSpec.bounds, so an importer sees the same
+    envelope the sidecar enforces": an open log or logit bound is
+    advertised as the nearest representable value inside it.
+  sources:
+    - src/maddening/fmi/model_description.py:83 (FMIVariable, min / max)
+  conditions: log with a zero and a non-zero lower bound; logit; inclusive identity bounds; no bounds.
+  oracle: the advertised attribute against the float32 envelope.
+  tests:
+    - tests/fmi/test_advertised_bounds.py::test_log_leaf_with_zero_bound_advertises_smallest_normal
+    - tests/fmi/test_advertised_bounds.py::test_log_leaf_with_nonzero_bound_advertises_next_float
+    - tests/fmi/test_advertised_bounds.py::test_logit_leaf_advertises_both_open_bounds
+    - tests/fmi/test_advertised_bounds.py::test_inclusive_identity_bounds_are_unchanged
+    - tests/fmi/test_advertised_bounds.py::test_a_parameter_the_description_bounds_nowhere_stays_unbounded
+  status: verified
+
+- id: FMU-017
+  area: model description
+  claim: >-
+    include_parameters: "the FMU's directional derivatives with respect to
+    them are the real jax.jvp"; the guide: "Directional derivatives with
+    respect to a parameter are the same jax.jvp the graph uses
+    everywhere."
+  sources:
+    - src/maddening/fmi/model_description.py:683 (build_model_description, include_parameters)
+    - docs/user_guide/parameters.md (Persistence and FMI)
+    - src/maddening/fmi/__init__.py:1 (module docstring)
+  conditions: >-
+    unstated: which surface.  The fmi package docstring says "The FMU
+    cannot reach it: the C wrapper's fmi3GetDirectionalDerivative returns
+    fmi3Error, and the bridge protocol has no derivative request."
+  oracle: the sidecar's get_dd against jax.grad; the description's capability flags.
+  tests:
+    - tests/fmi/test_params_causality.py::TestDirectionalDerivativeWrtParameter::test_forward_mode_wrt_stiffness_matches_grad
+    - tests/fmi/test_fmu_claims_edges.py::test_the_description_offers_no_directional_derivative
+  status: ambiguous
+  proposed_wording: >-
+    The sidecar's Python API (FmuSidecar get_dd, maddening.fmi.
+    get_directional_derivative) computes directional derivatives with
+    respect to parameters with jax.jvp.  The FMU binary does not provide
+    them: the description does not claim providesDirectionalDerivative,
+    and fmi3GetDirectionalDerivative returns fmi3Error.
+  notes: >-
+    The C stub's fmi3Error is in maddening_fmu.c (fmi3GetDirectionalDerivative);
+    no test calls it.
+
+- id: FMU-018
+  area: model description
+  claim: >-
+    "Model exchange and scheduled execution are refused at instantiation";
+    "fmi3GetClock and fmi3SetClock are fmi3Error, because FMI 3.0 allows
+    them only in Event Mode, which this FMU does not have
+    (hasEventMode="false")".
+  sources:
+    - docs/user_guide/fmu_export.md (Building and packaging, Multi-rate graphs)
+    - src/maddening/fmi/__init__.py:1 (module docstring)
+  conditions: a C compiler.
+  oracle: the C unit test binary's checks on the exported functions.
+  tests:
+    - tests/fmi/test_c_unit.py::test_c_unit_tests
+    - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_the_clock_functions_are_refused_for_any_value_reference
+  status: verified
+
+# ---------------------------------------------------------------------------
+# FMU: the bridge's stepping and time
+# ---------------------------------------------------------------------------
+
+- id: FMU-020
+  area: bridge stepping
+  claim: >-
+    "A communication step of h runs h / master_dt graph steps.  Pass
+    master_dt=gm.timestep ... the bridge refuses any other master_dt, and a
+    description whose default_step_size is not a whole number of graph
+    steps"; at the graph step the FMU is the graph at the time it reports.
+  sources:
+    - docs/user_guide/fmu_export.md (Building and packaging)
+    - src/maddening/fmi/tcp_bridge.py:762 (FmuTcpBridge, master_dt)
+  conditions: uniform, multi-rate not dividing (0.02 / 0.03), multi-rate dividing, sub-cycled; a coarser advertised step; a multi-clock description; a hand-built one.
+  oracle: gm.run over the same simulated time; the ValueError.
+  tests:
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_a_master_dt_other_than_the_graph_step_is_refused
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_at_the_graph_step_the_fmu_is_the_graph_at_the_time_it_reports
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_an_advertised_step_of_several_graph_steps_runs_that_many
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_an_advertised_step_the_bridge_would_refuse_is_refused_up_front
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_a_multi_clock_description_is_served_at_the_graph_step
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_master_dt_must_be_a_positive_finite_number
+    - tests/fmi/test_bridge_security_and_stepping.py::test_step_must_be_a_whole_multiple_of_master_dt
+  status: verified
+
+- id: FMU-021
+  area: bridge stepping
+  claim: >-
+    "One doStep runs at most max_steps_per_request graph steps (100000 by
+    default ...), and a long one stops at the first graph step after
+    stop(), committing nothing."
+  sources:
+    - docs/user_guide/fmu_export.md (Building and packaging)
+  conditions: a request one over the cap; the audit's billion-step request; stop() during a long step.
+  oracle: the refusal with nothing advanced; the state after stop.
+  tests:
+    - tests/fmi/test_one_step_request_is_bounded_and_stoppable.py::test_a_request_for_more_graph_steps_than_the_cap_is_refused
+    - tests/fmi/test_one_step_request_is_bounded_and_stoppable.py::test_the_audits_billion_step_request_is_refused_at_once
+    - tests/fmi/test_one_step_request_is_bounded_and_stoppable.py::test_a_long_step_stops_at_the_first_graph_step_after_stop
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_max_steps_per_request_must_be_a_positive_integer
+  status: verified
+
+- id: FMU-022
+  area: bridge stepping
+  claim: >-
+    "When a new connection claims the bridge ..., the bridge resets to the
+    state it was built over.  Every parameter goes back to the start value
+    the model description advertises, every input to zero, and the time to
+    zero.  fmi3Reset goes to the same point"; a sidecar built with other
+    parameter values is brought into line with a UserWarning; simulate_fmu
+    twice gives the same answer.
+  sources:
+    - docs/user_guide/fmu_export.md (Instances and time)
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Instances)
+  conditions: a second connection; reset; a refused second connection; an in-process caller; FMPy twice.
+  oracle: the start values; the warning; identical runs.
+  tests:
+    - tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_a_connection_that_claims_the_slot_starts_from_the_start_values
+    - tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_reset_and_a_new_instance_land_on_the_same_point
+    - tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_a_refused_second_connection_resets_nothing
+    - tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_a_sidecar_configured_away_from_the_description_starts_at_the_description
+    - tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_simulate_fmu_twice_with_the_same_arguments_gives_the_same_result
+  status: verified
+
+- id: FMU-023
+  area: bridge stepping
+  claim: >-
+    "fmi3EnterInitializationMode(startTime) sets the FMU's time ... accepted
+    until the instance's first step.  Each fmi3DoStep must start at the
+    FMU's current time ... The tolerance is a millionth of a master step
+    ... A step size is held to the same absolute tolerance ... A point
+    inside it is adopted ... A point outside it is fmi3Error with nothing
+    advanced ... restore an FMU state; the clock moves with it."
+  sources:
+    - docs/user_guide/fmu_export.md (Instances and time)
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Instances)
+  conditions: a jump; a point inside the tolerance; rounded points over a long run; step sizes either side of the tolerance; a restore; the compiled wrapper.
+  oracle: the time variable and the state.
+  tests:
+    - tests/fmi/test_communication_points.py::test_a_discontinuous_communication_point_is_refused_and_advances_nothing
+    - tests/fmi/test_communication_points.py::test_a_point_within_the_tolerance_is_adopted
+    - tests/fmi/test_communication_points.py::test_an_importers_rounded_points_are_accepted_over_a_long_run
+    - tests/fmi/test_communication_points.py::test_initialize_sets_the_start_time_until_the_first_step
+    - tests/fmi/test_communication_points.py::test_restoring_an_fmu_state_moves_the_clock_to_the_snapshot
+    - tests/fmi/test_communication_points.py::test_a_step_inside_the_tolerance_leaves_the_next_legal_point_accepted
+    - tests/fmi/test_communication_points.py::test_a_step_outside_the_tolerance_is_refused_and_advances_nothing
+    - tests/fmi/test_communication_points.py::test_the_wrapper_reports_the_start_time_and_refuses_a_jump
+  status: verified
+
+- id: FMU-025
+  area: bridge stepping
+  claim: >-
+    "fmi3Terminate puts the instance in FMI 3.0's Terminated state.  There,
+    fmi3Get*, the FMU-state functions and fmi3Reset are allowed, and
+    fmi3DoStep, fmi3Set* and fmi3EnterInitializationMode are fmi3Error
+    with nothing written, until fmi3Reset (or a new instance) starts it
+    again ... Restoring an FMU state does not leave Terminated."
+  sources:
+    - docs/user_guide/fmu_export.md (Instances and time)
+  conditions: the bridge and the compiled wrapper.
+  oracle: each call's status and the unchanged model.
+  tests:
+    - tests/fmi/test_a_terminated_instance_only_reads_until_reset.py::test_step_set_and_initialize_are_refused_after_terminate
+    - tests/fmi/test_a_terminated_instance_only_reads_until_reset.py::test_reading_and_the_fmu_state_functions_stay_allowed
+    - tests/fmi/test_a_terminated_instance_only_reads_until_reset.py::test_reset_and_a_new_instance_start_it_again
+    - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_a_terminated_instance_refuses_to_step_set_and_initialize_until_reset
+  status: verified
+
+# ---------------------------------------------------------------------------
+# FMU: values, types and the write doors
+# ---------------------------------------------------------------------------
+
+- id: FMU-024
+  area: values
+  claim: >-
+    "Values are checked in the variable's own type: a float32 input set to
+    1e308 is refused, not stored as inf"; every value must be
+    "representable in the dtype of the array it replaces".
+  sources:
+    - docs/user_guide/fmu_export.md (Robustness, The trust boundary)
+    - src/maddening/fmi/tcp_bridge.py:723 (checked_value)
+  conditions: >-
+    unstated: a value below the type's range.  A float32 set to 1e-50 is
+    accepted and reads back as 0.0; 1e-40 is kept as a subnormal.
+  oracle: the reply and the value read back.
+  tests:
+    - tests/fmi/test_fmu_claims_edges.py::test_a_float32_value_beyond_its_range_is_refused_and_one_below_it_rounds_to_zero
+    - tests/fmi/test_bridge_security_and_stepping.py::test_set_refuses_values_that_overflow_the_variable_dtype
+  status: ambiguous
+  proposed_wording: >-
+    Values are checked against the variable's own type: a value beyond its
+    range (a float32 above FLT_MAX, an integer that would wrap) or not
+    finite is refused; a float is otherwise rounded to the type, so one
+    below a float32's smallest subnormal is stored as 0.0.
+  notes: >-
+    "Representable" cannot mean exact (0.1 is not a float32); the tests
+    support "in range".
+
+- id: FMU-026
+  area: values
+  claim: >-
+    "Each variable is read and written only through the fmi3Get / fmi3Set
+    function of its declared type ... Any other is fmi3Error with nothing
+    read or written"; "A set that names one value reference twice is
+    refused, and so is a numeric set of a <Clock>"; a type that is not an
+    FMI type is refused; a JSON client that names no type is not checked.
+  sources:
+    - docs/user_guide/fmu_export.md (Variables, Float64 on the wire)
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Types)
+  conditions: JSON and binary sets; gets; the compiled wrapper.
+  oracle: the refusal with nothing written.
+  tests:
+    - tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_set_of_another_type_is_refused_and_writes_nothing
+    - tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_binary_set_carries_its_type_to_the_same_check
+    - tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_get_of_another_type_is_refused
+    - tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_type_that_is_not_an_fmi_type_is_refused
+    - tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_value_reference_named_twice_in_one_set_is_refused
+    - tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_clock_takes_no_numeric_set
+    - tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_each_variable_is_read_only_through_the_getter_of_its_type
+  status: verified
+
+- id: FMU-027
+  area: values
+  claim: >-
+    "A Boolean variable takes true or false, which travel as 1 and 0; any
+    other number is refused rather than read by its truthiness"; "A Boolean
+    takes true / false or exactly 0 / 1 on both doors."
+  sources:
+    - docs/user_guide/fmu_export.md (Variables, The trust boundary)
+  conditions: set, an archive member, the sidecar's restore and set_params.
+  oracle: the refusal; 0 and 1 reaching the step.
+  tests:
+    - tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_a_set_of_a_boolean_input_to_a_non_0_1_number_is_refused
+    - tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_exactly_0_and_1_set_a_boolean_input_and_reach_the_step
+    - tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_an_archive_with_a_fraction_in_a_boolean_member_does_not_restore
+    - tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_set_params_holds_a_boolean_parameter_to_the_same_rule
+  status: verified
+
+- id: FMU-028
+  area: values
+  claim: >-
+    "every value must be a number (a string such as "45" or a boolean is
+    refused, not parsed)"; "A step's dt and t must be numbers too."
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Instances)
+  conditions: set, step, set_state and set_params; integers and binary floats.
+  oracle: the refusal; JSON integers accepted.
+  tests:
+    - tests/fmi/test_the_fmu_takes_numbers_only.py::test_set_refuses_a_value_that_is_not_a_number
+    - tests/fmi/test_the_fmu_takes_numbers_only.py::test_set_takes_a_json_integer_and_the_binary_floats
+    - tests/fmi/test_the_fmu_takes_numbers_only.py::test_step_refuses_a_time_that_is_not_a_number
+    - tests/fmi/test_the_fmu_takes_numbers_only.py::test_set_params_refuses_what_set_refuses
+  status: verified
+
+- id: FMU-029
+  area: values
+  claim: >-
+    "A set is atomic: parameters are bounds-checked by the sidecar and
+    inputs are committed only when every value in the request was valid";
+    a set carrying a non-finite value is refused; a failed sub-step leaves
+    the state and time untouched.
+  sources:
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring)
+  conditions: a request mixing valid and invalid values; a sub-step that fails.
+  oracle: the model unchanged.
+  tests:
+    - tests/fmi/test_bridge_security_and_stepping.py::test_set_is_atomic_and_refuses_non_finite_inputs
+    - tests/fmi/test_bridge_inputs_and_robustness.py::test_failed_sub_step_leaves_state_and_time_untouched
+    - tests/fmi/test_bridge_inputs_and_robustness.py::test_unset_input_is_the_advertised_zero_like_the_graph
+  status: verified
+
+- id: FMU-030
+  area: sidecar
+  claim: >-
+    SidecarConfig.step_fn: "step_fn(state, external_inputs) -> new_state.
+    Typically GraphManager.step bound to a particular graph."
+  sources:
+    - src/maddening/fmi/sidecar.py:364 (SidecarConfig, step_fn)
+  conditions: a sidecar built on gm.step as the docstring suggests.
+  oracle: one step.
+  tests:
+    - tests/fmi/test_fmu_claims_edges.py::test_a_sidecar_built_on_gm_step_as_its_docstring_suggests_steps
+  status: failing
+  finding: >-
+    GraphManager.step(external_inputs=None, *, params=None) takes no state,
+    so a sidecar built on it raises TypeError at its first step
+    ("GraphManager.step() takes from 1 to 2 positional arguments but 3 were
+    given").  Every recipe in the guides passes gm._compiled_step, whose
+    contract is step_fn(state, external_inputs, params).  Docs fix:
+    src/maddening/fmi/sidecar.py, SidecarConfig.step_fn.
+
+- id: FMU-031
+  area: sidecar
+  claim: >-
+    input_resolver: "It completes the inputs a caller omits with zeros and
+    refuses a (node, field) the graph does not declare -- what
+    GraphManager.step does"; FmuTcpBridge "installs a resolver built from
+    its model description when none was given".
+  sources:
+    - src/maddening/fmi/sidecar.py:364 (SidecarConfig, input_resolver)
+    - docs/user_guide/fmu_export.md (Variables)
+  conditions: with the graph's resolver, with a configured one behind a bridge, with none.
+  oracle: gm.step with the same inputs; the ValueError.
+  tests:
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_sidecar_with_the_graphs_resolver_steps_like_the_graph
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_sidecar_refuses_a_misspelt_input_like_the_graph
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_a_configured_resolver_is_kept_by_the_bridge
+    - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_a_sidecar_without_a_resolver_steps_with_what_it_is_given
+  status: verified
+
+- id: FMU-032
+  area: sidecar
+  claim: >-
+    set_params: "an unknown name, a shape that differs from the current
+    leaf, a value that is not a number ..., not finite, or that the leaf's
+    dtype cannot hold ..., a new value for a parameter the step cannot read
+    ..., or a value outside the leaf's ParamSpec.bounds ... is an error ...
+    The call is atomic"; a set value "takes effect on the next step without
+    recompiling".
+  sources:
+    - src/maddening/fmi/sidecar.py:596 (FmuSidecar.set_params)
+    - docs/user_guide/parameters.md (Persistence and FMI)
+  conditions: each refused value; a multi-entry update with one bad entry; no params config.
+  oracle: the refusal with nothing written; the next step against the graph's.
+  tests:
+    - tests/fmi/test_params_causality.py::TestSidecar::test_set_params_changes_next_step_without_recompile
+    - tests/fmi/test_params_causality.py::TestSidecar::test_set_params_rejects_unknown_name_and_bad_shape
+    - tests/fmi/test_params_causality.py::TestSidecar::test_set_params_refuses_values_the_leaf_cannot_hold
+    - tests/fmi/test_params_causality.py::TestSidecar::test_set_params_refuses_what_the_bridge_set_refuses
+    - tests/fmi/test_params_causality.py::TestBoundsThroughFMI::test_set_params_rejects_out_of_bounds_atomically
+    - tests/fmi/test_params_causality.py::TestSidecar::test_set_params_without_params_config_errors
+  status: verified
+
+- id: FMU-033
+  area: sidecar
+  claim: >-
+    "Setting a parameter is held to the min / max the description
+    advertises, whether or not the sidecar was built with param_specs.  The
+    bridge adds a bounds-only spec for every exported parameter its sidecar
+    has no spec for"; the sidecar's own specs are kept and not written
+    into.
+  sources:
+    - docs/user_guide/fmu_export.md (Variables)
+    - src/maddening/fmi/sidecar.py:364 (SidecarConfig, param_specs)
+  conditions: a sidecar without param_specs behind a bridge; one with its own specs.
+  oracle: the refusal; the specs object untouched.
+  tests:
+    - tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs
+    - tests/fmi/test_advertised_bounds.py::test_the_sidecars_own_specs_are_kept_and_not_written_into
+    - tests/fmi/test_params_causality.py::TestBoundsThroughFMI::test_sidecar_without_specs_keeps_old_behaviour
+  status: verified
+
+- id: FMU-034
+  area: FMU state
+  claim: >-
+    "A value that set refuses, set_state refuses too": finite,
+    representable in the dtype, inside the declared bounds, not a new value
+    for a fixed parameter, no interface-mapping weight; "The sidecar's own
+    in-process doors apply the same checks with the same messages".
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+    - src/maddening/fmi/sidecar.py:675 (FmuSidecar.set_fmu_state)
+  conditions: archives with an out-of-bounds parameter, a non-finite field or input, a value the dtype cannot hold, new mapping weights; the sidecar's restore.
+  oracle: the refusal with nothing committed; a healthy snapshot round-tripping.
+  tests:
+    - tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_set_a_parameter_outside_its_declared_bounds
+    - tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_install_a_non_finite_state_field
+    - tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_narrow_a_value_the_live_dtype_cannot_hold
+    - tests/fmi/test_fmu_state_archive_values.py::test_a_refused_archive_commits_nothing_at_all
+    - tests/fmi/test_fmu_state_archive_values.py::test_no_archive_can_install_a_parameter_value_that_set_would_refuse
+    - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_an_archive_with_new_mapping_weights_is_refused
+    - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_the_sidecars_own_restore_door_refuses_the_same_weights
+    - tests/fmi/test_params_causality.py::TestSnapshotValues::test_set_fmu_state_refuses_what_the_bridge_set_state_refuses
+  status: verified
+
+- id: FMU-035
+  area: FMU state
+  claim: >-
+    "An archive must carry its time, and exactly the model's state fields,
+    parameters and pending inputs"; "a snapshot of a diverged model ...
+    does not restore.  The error names the field.  A non-finite value the
+    FMU was instantiated with is not a divergence and restores".
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+    - src/maddening/fmi/sidecar.py:675 (FmuSidecar.set_fmu_state)
+  conditions: a missing and an extra input member; a model with no inputs; clocks; NaN-seeded diagnostics slots; a field that became non-finite.
+  oracle: the refusal; the restore.
+  tests:
+    - tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing
+    - tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_with_an_extra_input_member_is_refused
+    - tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_a_model_with_no_inputs_restores_an_archive_with_none
+    - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_a_snapshot_of_the_nan_seeded_diagnostics_restores_on_both_paths
+    - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_a_field_that_became_non_finite_still_does_not_restore
+    - tests/fmi/test_params_causality.py::TestSnapshotValues::test_set_fmu_state_refuses_a_snapshot_whose_keys_differ_as_the_bridge_does
+  status: verified
+
+- id: FMU-036
+  area: FMU state
+  claim: >-
+    "Nothing on the socket is unpickled or evaluated.  The FMU-state blob is
+    an npz of plain arrays read with allow_pickle=False, and its archive
+    directory is checked before anything is decompressed", with each
+    member capped by the live array it replaces and a cap on the total.
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary, Robustness)
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring)
+  conditions: a pickle payload; a zip bomb on the JSON and binary paths; an oversized total; a member larger than the model.
+  oracle: the refusal before decompression; the bridge's own round trip passing.
+  tests:
+    - tests/fmi/test_bridge_security_and_stepping.py::test_set_state_never_unpickles
+    - tests/fmi/test_bridge_security_and_stepping.py::test_state_blob_is_arrays_only_and_validated
+    - tests/fmi/test_bridge_security_and_stepping.py::test_set_state_refuses_a_zip_bomb_before_decompressing_on_both_paths
+    - tests/fmi/test_bridge_security_and_stepping.py::test_set_state_total_declared_size_is_capped
+    - tests/fmi/test_bridge_security_and_stepping.py::test_set_state_round_trip_still_passes_the_directory_check
+    - tests/fmi/test_bridge_inputs_and_robustness.py::test_state_member_larger_than_the_model_is_refused_before_loading
+  status: verified
+
+- id: FMU-037
+  area: FMU state
+  claim: >-
+    serialize_fmu_state / deserialize_fmu_state: the payload is an npz of
+    plain arrays; "params ... a snapshot taken after an importer tuned one
+    restores it"; a mismatched schema token is rejected; "A payload written
+    by a MADDENING before 0.4.0 was a pickle and is refused by name rather
+    than unpickled"; a non-string key or non-array leaf is refused at
+    snapshot time.
+  sources:
+    - src/maddening/fmi/fmu_state.py:56 (serialize_fmu_state)
+    - src/maddening/fmi/fmu_state.py:182 (deserialize_fmu_state)
+  conditions: a round trip with params; a token mismatch; a pickle; a bad key and leaf; a legacy snapshot without params.
+  oracle: the restored tree; the refusals.
+  tests:
+    - tests/fmi/test_fmu_state.py::TestRoundTrip::test_basic_round_trip
+    - tests/fmi/test_fmu_state.py::TestRoundTrip::test_schema_mismatch_rejected
+    - tests/fmi/test_fmu_state.py::TestNoPickle::test_the_payload_is_an_archive_and_carries_no_pickle_opcodes
+    - tests/fmi/test_fmu_state.py::TestNoPickle::test_params_round_trip_beside_the_state
+    - tests/fmi/test_fmu_state.py::TestNoPickle::test_a_pickle_payload_is_refused_rather_than_unpickled
+    - tests/fmi/test_fmu_state.py::TestNoPickle::test_a_non_string_key_is_refused_at_snapshot_time
+    - tests/fmi/test_params_causality.py::TestSidecar::test_fmu_state_round_trip_carries_params
+  status: verified
+
+- id: FMU-038
+  area: FMU state
+  claim: >-
+    "The serialized FMU state is opaque to the importer; its encoding (raw
+    npz on protocol 2, base64 text on protocol 1) is that of the connection
+    it came from".
+  sources:
+    - docs/user_guide/fmu_export.md (Robustness)
+  conditions: a binary-negotiated connection and a JSON one.
+  oracle: the reply form; the round trip.
+  tests:
+    - tests/fmi/test_binary_frames.py::test_binary_state_round_trip_carries_raw_npz
+    - tests/fmi/test_binary_frames.py::test_json_only_client_sees_protocol_one_behaviour_unchanged
+  status: verified
+
+- id: FMU-040
+  area: graph agreement
+  claim: >-
+    An exported FMU reproduces the graph it was exported from ("the outputs
+    reproduce gm.run_scan to float32 round-off"), and a node.params write
+    after compile() "takes effect at the next run of any entry point ... so
+    they all run the same model".
+  sources:
+    - docs/user_guide/fmu_export.md (Verification)
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+  conditions: >-
+    unstated: a node.params write pending since the last compile when the
+    description and the sidecar are built (the guide's recipe compiles
+    first).
+  oracle: gm.run over the same simulated time; the start the description advertises.
+  tests:
+    - tests/fmi/test_fmu_claims_edges.py::test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs
+  status: failing
+  finding: >-
+    After gm.get_node("s0").params["stiffness"] = 60.0 on a compiled graph,
+    build_model_description advertises start="30.0" and a bridge over
+    gm._compiled_step and gm.params runs 30: s0.position 0.52176 after five
+    graph steps, where gm.run(5) -- which recompiles for the write --
+    reaches 0.54321.  Nothing warns.  build_model_description and the
+    sidecar read gm.params and gm._compiled_step as of the last compile,
+    which a pending node.params write does not update.  Guess:
+    src/maddening/fmi/model_description.py:683 (build_model_description
+    reads graph_manager.params) and the GraphManager.params property;
+    #203's sync-on-read for pending writes may close it.
+
+# ---------------------------------------------------------------------------
+# FMU: transport
+# ---------------------------------------------------------------------------
+
+- id: FMU-041
+  area: transport
+  claim: >-
+    "Bit 31 of the prefix marks a binary frame; the low 31 bits are the
+    payload length.  Frames are limited to 64 MiB in both directions and
+    for both kinds: the bridge drops a connection that announces a longer
+    request ..., answers a get / get_state whose reply would be longer with
+    a JSON error instead ..., and the C wrapper refuses to read a longer
+    frame".
+  sources:
+    - docs/user_guide/fmu_export.md (Wire protocol)
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Frame limit)
+  conditions: a reply over the limit; the compiled wrapper with a state frame over the limit.
+  oracle: no frame over the limit is sent; the instance survives.
+  tests:
+    - tests/fmi/test_binary_frames.py::test_bridge_never_sends_a_frame_over_the_limit
+    - tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_an_fmu_state_frame_over_the_limit_is_refused_and_the_instance_lives
+    - tests/fmi/test_c_wrapper.py::test_wire_framing_over_a_real_socket
+  status: verified
+
+- id: FMU-042
+  area: transport
+  claim: >-
+    Negotiation: a hello with protocol 2 and binary true gets binary get /
+    get_state replies and binary set / set_state for that connection; a
+    hello without protocol gets protocol-1 behaviour (the reply gains
+    "protocol": 2, "binary": false); an unknown protocol is refused at
+    hello; JSON and binary mix on one connection.
+  sources:
+    - docs/user_guide/fmu_export.md (Wire protocol, Negotiation)
+  conditions: protocol 1, 2 and 3; a binary frame before a binary hello; a socketless handle.
+  oracle: the replies' forms; the refusal.
+  tests:
+    - tests/fmi/test_binary_frames.py::test_hello_advertises_protocol_and_negotiates_binary_per_request
+    - tests/fmi/test_binary_frames.py::test_unknown_higher_protocol_is_refused_at_hello
+    - tests/fmi/test_binary_frames.py::test_json_and_binary_requests_mix_on_one_connection
+    - tests/fmi/test_binary_frames.py::test_binary_frame_before_a_binary_hello_is_refused
+    - tests/fmi/test_binary_frames.py::test_json_only_client_sees_protocol_one_behaviour_unchanged
+  status: verified
+
+- id: FMU-043
+  area: transport
+  claim: >-
+    "The wire carries every value as a float64"; a binary set / get
+    round-trips as the JSON path does; "A non-finite value is written as
+    the quoted token "NaN", "Infinity" or "-Infinity" ...  Both spellings
+    are accepted on the way in, and the C wrapper reads either."
+  sources:
+    - docs/user_guide/fmu_export.md (Float64 on the wire)
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring)
+  conditions: any float64 payload; a diverged model's get; a pre-0.4.0 peer's frame; the compiled wrapper over JSON.
+  oracle: bitwise round trips; strict JSON; the wrapper's values.
+  tests:
+    - tests/fmi/test_binary_frames.py::test_binary_set_get_round_trip_matches_the_json_path
+    - tests/fmi/test_binary_frames_properties.py::test_float64_payload_round_trips_bitwise
+    - tests/fmi/test_non_finite_json_tokens.py::test_a_non_finite_get_reply_is_strict_json
+    - tests/fmi/test_non_finite_json_tokens.py::test_a_frame_from_a_pre_040_peer_still_decodes
+    - tests/fmi/test_non_finite_json_tokens.py::test_the_compiled_wrapper_reads_a_diverged_get_over_json
+  status: verified
+
+- id: FMU-044
+  area: transport
+  claim: >-
+    "Nothing in a binary frame is trusted ... (a header nested too deeply
+    for the JSON parser is a malformed request like any other), and [the
+    bridge] answers a malformed frame with an error reply rather than
+    dropping the instance"; a malformed JSON request gets an error reply,
+    not a disconnect.
+  sources:
+    - docs/user_guide/fmu_export.md (Robustness)
+  conditions: malformed binary frames of every kind; a deeply nested header; malformed JSON; any binary request.
+  oracle: an error reply and a live connection.
+  tests:
+    - tests/fmi/test_binary_frames.py::test_malformed_binary_frames_get_error_replies_and_the_bridge_survives
+    - tests/fmi/test_binary_frames.py::test_deeply_nested_header_is_an_error_reply_not_a_disconnect
+    - tests/fmi/test_bridge_inputs_and_robustness.py::test_malformed_request_gets_an_error_reply_not_a_disconnect
+    - tests/fmi/test_binary_frames_properties.py::test_every_binary_request_gets_a_reply_and_the_connection_survives
+  status: verified
+
+- id: FMU-045
+  area: transport
+  claim: >-
+    The C wrapper "refuses a reply value its getter's C type cannot hold
+    ..., and an fmi3SetInt64 / fmi3SetUInt64 value a double cannot carry
+    exactly (above 2^53 in magnitude) is refused"; numbers on the JSON path
+    are written and read in the C locale; TCP_NODELAY is set; a get reply
+    must carry exactly nValues; the wrapper's clock follows a restore and a
+    reset.
+  sources:
+    - docs/user_guide/fmu_export.md (Float64 on the wire, Robustness)
+  conditions: a C compiler; a comma-decimal locale.
+  oracle: the C unit test binary; FMPy under the locale.
+  tests:
+    - tests/fmi/test_c_unit.py::test_c_unit_tests
+    - tests/fmi/test_c_unit.py::test_c_unit_tests_under_a_comma_decimal_locale
+    - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_an_importer_under_a_comma_decimal_locale_steps_the_fmu
+    - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_a_refused_step_after_a_restore_reports_the_restored_time
+  status: verified
+
+# ---------------------------------------------------------------------------
+# FMU: the trust boundary
+# ---------------------------------------------------------------------------
+
+- id: FMU-050
+  area: trust boundary
+  claim: >-
+    "ten seconds to begin the first frame, five minutes of silence between
+    frames once the peer has spoken, and two minutes to finish a frame
+    whose length it has announced ... At most sixteen connection threads
+    are live at once"; 64 MiB a frame; 100000 graph steps a request;
+    stop() returns within about five seconds; a communication point within
+    a millionth of a master step.
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+    - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Connection lifetime)
+  conditions: the defaults.
+  oracle: the module's constants; the behaviour at shortened budgets.
+  tests:
+    - tests/fmi/test_fmu_claims_edges.py::test_the_bridges_waits_and_limits_are_the_documented_numbers
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_a_silent_peer_is_dropped_and_leaks_no_thread
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_a_peer_that_stalls_mid_frame_is_dropped_at_the_frame_deadline
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_a_peer_that_dribbles_a_frame_is_dropped_at_the_frame_deadline
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_an_established_connection_that_goes_silent_is_dropped
+  status: verified
+
+- id: FMU-051
+  area: trust boundary
+  claim: >-
+    "The instance slot is claimed when a peer sends its first complete
+    frame, not when it connects, so a peer that connects and says nothing
+    ... claims nothing.  At most sixteen connection threads are live at
+    once; further connections are closed on accept"; a second instance is
+    refused, not blocked.
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+  conditions: silent connects; a frame announced and never sent; the thread cap; a second importer; a reconnect.
+  oracle: an honest client served; the refusal.
+  tests:
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_a_connection_that_sends_nothing_never_holds_the_instance_slot
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_a_connection_that_announces_a_frame_it_never_sends_holds_nothing
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_the_number_of_connection_threads_is_capped
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_no_sequence_of_silent_connects_can_lock_out_an_honest_client
+    - tests/fmi/test_bridge_security_and_stepping.py::test_second_instance_on_one_bridge_is_refused_not_blocked
+  status: verified
+
+- id: FMU-052
+  area: trust boundary
+  claim: >-
+    "stop() shuts every live connection down and joins its worker.  A
+    bridge serves once: calling start() again, or after stop(), raises
+    RuntimeError"; "once stop() has begun, no request changes the model's
+    state, parameters, inputs or time".
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+    - src/maddening/fmi/tcp_bridge.py:970 (FmuTcpBridge.stop)
+  conditions: a second start; start after stop; a worker parked, inside a request, registered late; a step running when stop returns.
+  oracle: the RuntimeError; the model unchanged.
+  tests:
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_a_bridge_starts_once
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_a_stopped_bridge_refuses_to_start
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_stop_ends_a_worker_parked_on_a_live_connection
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_stop_waits_for_a_worker_that_is_inside_a_request
+    - tests/fmi/test_bridge_stop_commits_nothing.py::test_a_step_still_running_when_stop_returns_commits_nothing
+    - tests/fmi/test_bridge_stop_commits_nothing.py::test_a_stopped_bridge_refuses_every_op_that_would_change_the_model
+  status: verified
+
+- id: FMU-053
+  area: trust boundary
+  claim: >-
+    "The five minutes are FmuTcpBridge(idle_timeout=...): a master that
+    pauses longer ... passes more, or None for no limit"; idle_timeout is
+    "neither None nor a positive finite number" refused.
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+    - src/maddening/fmi/tcp_bridge.py:762 (FmuTcpBridge, idle_timeout)
+  conditions: a short value; None; zero, negative, NaN.
+  oracle: the drop at the value; the kept connection; the ValueError.
+  tests:
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_idle_timeout_drops_a_silent_connection_at_the_value_given
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_idle_timeout_none_keeps_a_silent_connection
+    - tests/fmi/test_bridge_connection_lifecycle.py::test_idle_timeout_must_be_a_positive_number_or_none
+  status: verified
+
+- id: FMU-054
+  area: trust boundary
+  claim: >-
+    "The importer is untrusted.  Bind the bridge to 127.0.0.1 unless the
+    network is trusted"; "The bridge authenticates no caller, so keep it
+    on its default loopback bind (MADD-ANO-023)".
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+    - src/maddening/fmi/__init__.py:1 (module docstring)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-023)
+  conditions: the default bind; an unrelated local process.
+  oracle: the bound address; the documented open door.
+  tests:
+    - tests/fmi/test_bridge_unauthenticated_access.py::test_the_default_bind_is_loopback
+    - tests/fmi/test_bridge_unauthenticated_access.py::test_an_unrelated_local_process_reads_writes_and_steps_the_model_with_no_secret
+  status: verified
+
+- id: FMU-055
+  area: trust boundary
+  claim: >-
+    "FmuSidecar.handle ... speaks a pickled request/response protocol ...
+    It refuses to run unless the sidecar was built with SidecarConfig(...,
+    allow_pickle_rpc=True)".
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+    - src/maddening/fmi/sidecar.py:830 (FmuSidecar.handle)
+  conditions: a sidecar built without the opt-in.
+  oracle: the RuntimeError.
+  tests:
+    - tests/fmi/test_sidecar.py::TestWireProtocol::test_the_pickled_rpc_protocol_is_refused_unless_opted_into
+  status: verified
+
+- id: FMU-056
+  area: trust boundary
+  claim: >-
+    "Every receive and send on its connection times out after
+    MADDENING_FMU_TIMEOUT seconds of silence (600 by default; 0 waits for
+    ever ...) ... Connecting (on Linux) and the hello get the smaller of
+    that and 30 s ... A value that is not a number of seconds from 0 to 1e6
+    fails instantiation."
+  sources:
+    - docs/user_guide/fmu_export.md (The trust boundary)
+  conditions: a C compiler; an endpoint that accepts and never answers; bad values.
+  oracle: instantiation failing by the deadline; the log message.
+  tests:
+    - tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_an_endpoint_that_never_answers_fails_instantiation_by_the_deadline
+    - tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_a_deadline_that_is_not_a_number_of_seconds_fails_instantiation
+    - tests/fmi/test_c_unit.py::test_c_unit_tests
+  status: verified
+
+- id: FMU-057
+  area: directional derivatives
+  claim: >-
+    get_directional_derivative: "In FORWARD mode: J @ v, same pytree as y.
+    In REVERSE mode: J^T @ v, same pytree as x"; an unknown kind is
+    rejected; the sidecar's get_dd needs an unknown_fn.
+  sources:
+    - src/maddening/fmi/directional_derivatives.py:55 (get_directional_derivative)
+    - src/maddening/fmi/sidecar.py:364 (SidecarConfig, unknown_fn)
+  conditions: dense functions and pytrees, both modes; no unknown_fn.
+  oracle: the dense Jacobian; the two modes against each other.
+  tests:
+    - tests/fmi/test_directional_derivatives.py::TestForwardMode::test_jvp_matches_dense_jacobian_product
+    - tests/fmi/test_directional_derivatives.py::TestReverseMode::test_vjp_matches_dense_jacobian_transpose_product
+    - tests/fmi/test_directional_derivatives.py::TestRoundTrip::test_forward_and_reverse_agree
+    - tests/fmi/test_directional_derivatives.py::TestErrors::test_unknown_kind_rejected
+    - tests/fmi/test_sidecar.py::TestGetDirectionalDerivative::test_get_dd_without_unknown_fn_raises
+  status: verified
+
+- id: FMU-058
+  area: model description
+  claim: >-
+    FMIVariable "Construction is keyword-only"; an invalid causality,
+    variability or dtype is rejected.
+  sources:
+    - src/maddening/fmi/model_description.py:83 (FMIVariable)
+  conditions: positional construction; each invalid field.
+  oracle: TypeError; ValueError.
+  tests:
+    - tests/fmi/test_model_description.py::TestFMIVariableIsKeywordOnly::test_positional_construction_is_a_type_error
+    - tests/fmi/test_model_description.py::TestFMIVariable::test_invalid_causality_rejected
+    - tests/fmi/test_model_description.py::TestFMIVariable::test_invalid_variability_rejected
+    - tests/fmi/test_model_description.py::TestFMIVariable::test_invalid_dtype_rejected
+  status: verified

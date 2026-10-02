@@ -722,46 +722,57 @@ relies on gets `equivalent="<why>"` and is asserted to survive. A live gap
 gets `gap="<what is unguarded>"` and runs as a strict xfail until a guard
 catches it.
 
-## The coupling claims inventory
+## The claims inventories
 
-`docs/validation/coupling_claims.yaml` lists every documented claim about
-coupling that a user could rely on. That covers coupling groups, their
-solvers, schedules and accelerations; sub-cycling, multi-rate groups and the
-adaptive steppers; `coupling_diagnostics()`, `coupling_report()` and
-`strict_convergence`; the precision floor and every bound and `*_usable`
-flag; IFT gradients; the profiler's coupling statistics; and `sysid`'s
-convergence mask. Each row records:
+Each `docs/validation/*_claims.yaml` lists the documented claims of one
+audit area that a user could rely on:
+
+| file | prefixes | covers |
+|------|----------|--------|
+| `coupling_claims.yaml` | `CPL` | coupling groups, their solvers, schedules and accelerations; sub-cycling, multi-rate groups and the adaptive steppers on coupled graphs; `coupling_diagnostics()`, `coupling_report()` and `strict_convergence`; the precision floor and every bound and `*_usable` flag; IFT gradients; the profiler's coupling statistics; `windowed_loss`'s convergence mask |
+| `sysid_fmu_claims.yaml` | `SYS`, `FMU` | `maddening.sysid` (`windowed_loss`, `fim`, `fim_core`, the three fitters and their results, truth recovery and units); `ParamSpec` bounds and transforms; `node.params` and `gm.params` as fitting and export see them; the FMI 3.0 export: model description, TCP bridge, sidecar, FMU state, C wrapper, conformance, refusals, timeouts, tokens and the terminated state |
+
+Each row records:
 
 - the claim's wording and where it is stated;
 - the domain the documentation states, with any part it leaves unstated
   called out;
 - the oracle: how truth is known (an exact float64 fixed point, a dense
-  solve, finite differences, bit-identity or a closed form);
+  solve, finite differences, bit-identity, a closed form, the graph the
+  FMU was exported from, or what an earlier release wrote);
 - the pytest node ids that fail if the claim stops holding;
 - a status: `verified`, `failing`, `untested` or `ambiguous`.
 
-An audit attacks the list rather than hunting open-ended, and a fix PR
+An audit attacks the lists rather than hunting open-ended, and a fix PR
 re-classifies the rows it touches.
 
-To add a claim, add a row in the same change as the sentence. Give it the
-next free `CPL-NNN` and cite a test that can fail at the edge of the
-claim's conditions, not in their comfortable middle. If the tree does not
-meet the claim, the test is
-`@pytest.mark.xfail(strict=True, raises=..., reason="CPL-NNN: <one line>; pending fix")`
+To add a claim, add a row in the same change as the sentence, in the file
+whose area it belongs to. Give it the next free id under that file's
+prefix and cite a test that can fail at the edge of the claim's
+conditions, not in their comfortable middle: units on every axis, a value
+on and just past a bound, every transform, float32 and float64, multi-rate
+and sub-cycled graphs, each surface that serves the same model. If the
+tree does not meet the claim, the test is
+`@pytest.mark.xfail(strict=True, raises=..., reason="<ID>: <one line>; pending fix")`
 and the row is `failing`, with a `finding` that gives the reproducer and a
 file:line guess. If the documentation leaves the domain unstated, or two
 documents disagree, the row is `ambiguous`: it carries the
 `proposed_wording` its tests support and leaves the docs to the fix PR.
 
-`tests/compliance/test_coupling_claims.py` checks four rules, mutation-tested
-by self-tests in the same module:
+A new inventory needs only its file: `schema_version: 1`, a `prefixes`
+list of the id prefixes it owns (two to six capital letters, owned by no
+other file) and its `claims`.
+`tests/compliance/test_claims_inventories.py` finds every
+`docs/validation/*_claims.yaml` and checks five rules, mutation-tested by
+self-tests in the same module:
 
-- every row is well-formed;
+- every file is well-formed, and no two files own a prefix;
+- every row is well-formed, with an id under one of its file's prefixes;
 - every cited test is collected and runs on every push, or is slow-marked
   with a `# Per push:` witness;
 - every `failing` row cites a strict xfail that names it;
-- no `verified` row cites an xfail, and no xfail names a row that does not
-  cite it.
+- no `verified` row cites an xfail, and every xfail that names a row is
+  strict, cited by that row, and names a row some inventory holds.
 
 `tests/property/test_coupling_invariances.py` holds three metamorphic rows:
 

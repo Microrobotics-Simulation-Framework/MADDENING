@@ -5,7 +5,7 @@ coupling with a test that can fail.  The rows below had no test, or none at
 the edge of the conditions the documentation states; each test names the row
 it pins.  A test that fails on the tree is a strict ``xfail`` whose reason
 starts with its row id, and the row is ``failing``; the compliance test
-``tests/compliance/test_coupling_claims.py`` holds the two together.
+``tests/compliance/test_claims_inventories.py`` holds the two together.
 
 Most graphs are the synthetic relays of :mod:`tests.property.coupled_graphs`
 (``x <- alpha x_pre + sum_j G_j u_j + b``), whose fixed point is a float64

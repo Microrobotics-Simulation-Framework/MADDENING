@@ -5,7 +5,7 @@
 # node id that fails if it stops being true.  An audit attacks this list;
 # a new claim in a docstring, a guide or the release notes gets a row here
 # in the same change (docs/developer_guide/testing_standards.md, "The
-# coupling claims inventory").  tests/compliance/test_coupling_claims.py
+# claims inventories").  tests/compliance/test_claims_inventories.py
 # checks every row: its fields, that each cited test is collected and runs
 # on every push (or is slow-marked and names a per-push witness), that a
 # `failing` row cites a strict xfail and that a `verified` row cites none.
@@ -24,6 +24,9 @@
 # Out of scope, with their own audit areas: interface mappings
 # (coupling/mapping.py, mapping_spec.py, interface_mapping.py) and the
 # edge-construction conveniences in coupling/helpers.py.
+#
+# Top level: schema_version (1), prefixes (the id prefixes this file owns,
+# here CPL; no other inventory may use them) and claims.
 #
 # Row fields:
 #   id          CPL-NNN, unique.
@@ -46,6 +49,8 @@
 # each makes it findable when they move.
 
 schema_version: 1
+
+prefixes: [CPL]
 
 claims:
 
@@ -2579,7 +2584,7 @@ claims:
     differs from the schedule) gives bit-identical states, verdicts and
     reports, up to the name keys.
   sources:
-    - docs/developer_guide/testing_standards.md#the-coupling-claims-inventory
+    - docs/developer_guide/testing_standards.md#the-claims-inventories
     - src/maddening/core/graph_manager.py:928 (_refuse_colliding_group_keys)
   conditions: both solvers, both schedules, every acceleration and norm, diagnostics on.
   oracle: bit-identity against the run under the original names.
@@ -2596,7 +2601,7 @@ claims:
     result: the same graph built in another order gives bit-identical
     states, verdicts and reports.
   sources:
-    - docs/developer_guide/testing_standards.md#the-coupling-claims-inventory
+    - docs/developer_guide/testing_standards.md#the-claims-inventories
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     both solvers, both schedules, every acceleration and norm; the group's
@@ -2641,7 +2646,7 @@ claims:
     the derived bound stated in the test) and the verdicts not at all away
     from the threshold.
   sources:
-    - docs/developer_guide/testing_standards.md#the-coupling-claims-inventory
+    - docs/developer_guide/testing_standards.md#the-claims-inventories
     - src/maddening/core/coupling/group.py:8 (module docstring)
     - docs/developer_guide/coupling_algorithm_guide.md#the-finding-that-matters-most
   conditions: >-

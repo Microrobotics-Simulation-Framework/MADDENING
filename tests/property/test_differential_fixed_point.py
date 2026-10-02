@@ -677,24 +677,37 @@ _GAIN_CHAIN = ("square", "product", "square", "quartic", "square", "square",
 _SIGNED_CHAIN = ("affine",) * 6
 
 
-@pytest.mark.parametrize("kinds", [_GAIN_CHAIN, _SIGNED_CHAIN], ids=["gain-above-one", "mixed-sign"])
-# Costly tier: one compile per chain; the examples draw the constants.
+# Costly tier: one compile; the examples draw the constants.
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
-def test_a_usable_spectral_bound_holds_on_an_adversarial_chain(kinds, data):
-    """Per push; slow siblings draw the chain and check the gradient bound.
+def test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one(data):
+    """Per push; slow siblings take a signed chain, draw the chain, and check the gradient bound.
 
-    Gauss-Seidel only: under Jacobi these rings contract at ``rho**(1/K)`` a
-    pass and their rounding noise keeps the residual above the floor, so
-    the bound there is the residual's and the floor is never tested.
+    Gauss-Seidel only, here and in the siblings: under Jacobi these rings
+    contract at ``rho**(1/K)`` a pass and their rounding noise keeps the
+    residual above the floor, so the bound there is the residual's and the
+    floor is never tested.
     """
     assert_the_bound_holds_on_an_adversarial_chain(
-        kinds, data.draw(_adversarial_constants(kinds)),
+        _GAIN_CHAIN, data.draw(_adversarial_constants(_GAIN_CHAIN)),
+        data.draw(st.sampled_from([1e-3, 1e-4])))
+
+
+# Slow: 7 s on CI, most of it tracing a seven-node chain with diagnostics.
+# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one
+# Per push: tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_each_read_is_weighted_by_its_measured_gain
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_usable_spectral_bound_holds_on_a_signed_chain_whose_terms_cancel(data):
+    """Signed affine links, ``|a u|`` up to 150 ``|x|``: kept apart from the no-cancellation chains."""
+    assert_the_bound_holds_on_an_adversarial_chain(
+        _SIGNED_CHAIN, data.draw(_adversarial_constants(_SIGNED_CHAIN)),
         data.draw(st.sampled_from([1e-3, 1e-4])))
 
 
 # Slow: the chain is drawn, so every example compiles a graph of its own.
-# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_an_adversarial_chain
+# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one
 @pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(data=st.data())
@@ -708,7 +721,7 @@ def test_a_usable_spectral_bound_holds_on_drawn_adversarial_chains(data):
 
 
 # Slow: the gradient compiles the step twice more per chain.
-# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_an_adversarial_chain
+# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one
 @pytest.mark.slow
 @pytest.mark.parametrize("kinds", [_GAIN_CHAIN, _SIGNED_CHAIN], ids=["gain-above-one", "mixed-sign"])
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)

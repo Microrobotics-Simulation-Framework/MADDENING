@@ -163,8 +163,11 @@ def assert_derivatives_agree_at_every_scale(n, mode, values):
             assert _rel(j, dense_j) < 1e-3, (path, k, "jacfwd", j, dense_j)
 
 
-# Costly tier: three jitted derivative programs per size, compiled once; each
-# example sweeps nine scales on them.
+# Slow: six jitted derivative programs per (size, mode), 6-12 s each on CI;
+# each example sweeps nine scales on them.
+# Per push: tests/core/test_coupling_ift_gradient_in_any_units.py::test_the_tangent_and_the_adjoint_are_the_same_at_every_scale
+# Per push: tests/core/test_coupling_ift_gradient_in_any_units.py::test_the_adjoint_above_the_dense_fallback_is_the_same_at_every_scale
+@pytest.mark.slow
 @pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
 @pytest.mark.parametrize("n", sorted(_GDEFS), ids=lambda n: f"{3 * n}dof")
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)

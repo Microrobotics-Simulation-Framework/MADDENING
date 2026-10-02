@@ -7888,7 +7888,8 @@ anomalies:
       - "tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_each_read_is_weighted_by_its_measured_gain"
       - "tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_the_spectral_bound_holds_on_a_stalled_squaring_chain"
       - "tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_the_gradient_bound_holds_on_a_stalled_squaring_chain"
-      - "tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_an_adversarial_chain"
+      - "tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one"
+      - "tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_signed_chain_whose_terms_cancel"
       - "tests/core/test_coupling_report_follows_the_group_that_ran.py::test_rebuilding_a_member_before_the_next_step_leaves_the_report_alone"
       - "tests/core/test_coupling_report_follows_the_group_that_ran.py::test_a_member_removed_since_the_step_takes_the_report_with_it"
     github_issue: null

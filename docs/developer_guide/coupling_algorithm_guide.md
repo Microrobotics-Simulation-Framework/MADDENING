@@ -81,7 +81,7 @@ not, and says which.
 | every node expensive (grid-to-grid) | `gauss-seidel` / `none` / `interface` | the interface norm alone takes `expensive-pair` from 2.95 iterations and 7.56 ms to 1.65 and 5.15 ms; IQN buys nothing more under that norm (1.60–1.65 iterations) for 32–42x the step time and is not affordable at 2x10⁵ accelerated DOFs |
 | deep chain (information must cross many nodes) | `gauss-seidel` / `aitken` / `interface` | Gauss-Seidel's advantage is real but *flat* in depth — it does not grow with the chain length |
 | wide star (independent leaves) | `gauss-seidel` / `aitken` / `interface` | both accelerators are flat in width (Aitken 7.9 → 8.1 iterations from 2 to 16 leaves under the interface norm, IQN 3.0 → 3.0) but IQN's step cost is not: 1.89 ms against 1.02 ms at 16 leaves, for 5 fewer iterations that the dispatch floor hides |
-| ring / cycle with no natural first node | `jacobi` if the answer must not depend on how the graph was built, otherwise `gauss-seidel` / `aitken` | Gauss-Seidel on a ring is measurably order-dependent; Jacobi is bit-identical under rotation and reversal |
+| ring / cycle with no natural first node | `jacobi` with `acceleration="none"` or `"fixed"` if the answer must not depend on how the graph was built, otherwise `gauss-seidel` / `aitken` | Gauss-Seidel on a ring is measurably order-dependent.  Jacobi's returned states under `"none"` and `"fixed"` do not depend on the order the members were added in -- to the bit unless a residual lands within an ulp of the threshold, since the norm sums the members in the schedule's order.  Under `"aitken"` and the IQN pair they agree to float32 round-off and not to the bit (the accelerator's dot products follow the schedule), and the spectral keys and `gradient_relative_error_bound` follow the build order too (see [the gradient bound](#gradient_relative_error_bound-the-gradient-not-the-solve)) |
 | fixed point that barely moves between steps, **and nothing else** | `gauss-seidel` / `none` / `l2`; under Jacobi, `fixed` ω = 0.8 — one of only two places a constant ω wins | `gs/none/l2` takes 3.10 passes at 100% converged on `slow-drift`, and ω = 0.8 is what brings Jacobi down to the same place: 6.40 → 3.20, also at 100%.  This row used to recommend `jacobi` / `fixed` ω = 0.8 outright, as the sweep's best configuration here; by time the picker now names `gs/none/interface` (3.66 passes), and by passes plain Gauss-Seidel was level with it in both recordings.  **Do not carry ω = 0.8 to another shape.**  `jac/fixed0.8/l2` converges on **23%** of `star-16` steps, 72% of `star-8`, 88% of `star-4`, 94% of `star-2`, 96% of `stiff-pair-0.8` and 68% of `chain-20` — a wide star under it converges one step in four.  `iqn-imvj` with `jacobian_reuse` does cut iterations further (3.1 → 2.0) but costs ~13x the plain step to do it |
 | two subsystems with different shapes | one group each, with its own settings | groups in one graph keep independent schedules, iteration counts and convergence flags |
 
@@ -422,7 +422,12 @@ Beyond that: it inherits every condition of `spectral_error_bound`; it
 is leading-order in the distance (the curvature is measured over `δ` and
 extrapolated linearly, and `h` checks the Jacobian's variation along `δ`
 only); a field-valued constant is probed along one
-random direction; and it is relative to the tangent's norm, so a scalar
+random direction -- fixed-seed, but drawn per constant in the order the
+group's map reads its constants, which follows the build order, so the
+same graph built with its members added in another order probes other
+directions and reports another number (83.5 to 99.5 over three build
+orders of one three-member Jacobi group, jaxlib 0.11.0);
+and it is relative to the tangent's norm, so a scalar
 loss whose gradient nearly cancels across the state can carry a larger
 relative error.  `gradient_bound_usable` reports a finite bound and a
 settled spectrum, not those conditions.  It is not spelled
@@ -853,9 +858,28 @@ guard is specified to cost.
 What the old sentence generalised from is the L2 rows it sampled, where
 Aitken does land on 4.0: on a group that already converges in three it
 costs a pass — `slow-drift` goes 3.1 → 4.0 under L2 and
-`stiff-pair-0.25` 3.6 → 4.0 under the interface norm.  Budget one pass over the unaccelerated exit, not a floor of
-four.  It is an accelerator for iterations you have, not for iterations
-you do not.
+`stiff-pair-0.25` 3.6 → 4.0 under the interface norm.  The guard adds
+at most one pass to Aitken's *own* exit -- the pass before the loop is
+the streak's first member -- so it sets no floor of four.  It is not a
+bound on Aitken against
+`acceleration="none"`, which follows different iterates and can stop
+sooner or later -- on these rows a pass later, on a group that already
+converges in three.  It is an accelerator for iterations you have, not
+for iterations you do not.
+
+A second property: Aitken's single relaxation factor is derived from the
+residual *vector*, so a quantity that enters that vector twice weighs
+twice in it.  Under Jacobi that can stall it.  An identity relay put on
+one of a three-member group's internal edges (`x <- u`, the same coupled
+system with one more copy of a field) left Aitken at its cap of 400
+passes, unconverged, where the relay-free group at the same rate (0.9)
+crept under its threshold through the raw-residual fallback in 278 --
+the failure of the single-mode assumption `_fixed_point_while`
+describes, not rounding.  Under Gauss-Seidel, and for every other
+acceleration, the relayed group converges with the relay-free one
+(`tests/property/test_coupling_invariances.py`, CPL-183).  If a group
+carries the same quantity in two members, prefer Gauss-Seidel or an IQN
+acceleration to Jacobi with Aitken.
 
 ## What IQN costs
 
@@ -1159,7 +1183,8 @@ Read the cost first.
 
 `"dense"` materialises the full `N x N` coupling Jacobian **and** the
 identity basis `jacfwd` builds it from, so both are live at once and
-the peak working set is `2 * N**2 * itemsize`. In float32:
+the peak working set of the solve `jax.grad` runs (the transposed one)
+is `2 * N**2 * itemsize`. In float32:
 
 | coupled DOF `N` | peak working set | single Jacobian |
 |---|---|---|
@@ -1175,6 +1200,15 @@ compiled-module memory analysis of the `_dense` body in
 jax/jaxlib 0.11.0 on the CPU backend; nothing was allocated to produce
 them, and the analysis agrees with `2 * N**2 * 4` to within a few tens
 of kilobytes at every size from 64 DOF to 3.6e5.
+
+**Forward mode costs half as much again.**  The tangent solve
+`jax.jvp` / `jacfwd` runs -- the FMI `FORWARD` directional derivative
+among them -- keeps `I - J` live beside the identity basis and the
+Jacobian-vector products, so a dense coupling Jacobian peaks at
+`3 * N**2 * itemsize`: 3.00 `N**2` floats at `N` = 256 and 512 in the
+same analysis (a diagonal one, which XLA simplifies, at 2.00).  Read
+the table's middle column as one and a half times larger for a forward
+derivative.
 
 The last row is the point. There is no soft edge to this curve: the
 solve does not thrash, or slow down, or lose accuracy. It does not
@@ -1206,6 +1240,43 @@ MADDENING does re-solve densely on its own, but only below
 already the whole space and `N**2` floats of scratch are negligible.
 Above that cap the failure is raised rather than silently paid for, and
 the message it raises now prices the dense path at your own `N`.
+
+## What the way a graph is built can change
+
+A coupled graph is written as `add_node`, `add_edge` and
+`add_coupling_group` calls, and most of what those calls fix is
+structure, not order.  What the order still reaches, and what it does
+not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
+`docs/validation/coupling_claims.yaml`):
+
+* **Names do not reach the solve.**  A group is keyed by its sorted node
+  names, and renaming every node gives bit-identical states, verdicts
+  and reports.
+* **A group's members are swept in the order they were added.**  That is
+  Gauss-Seidel's order by design (a ring has no natural first node), so
+  under Gauss-Seidel the members' order is part of the method; under
+  Jacobi it reaches the states only through the accelerators' dot
+  products (see the ring row of [Start here](#start-here)).
+* **Everything that reads a group runs after it in the same step,
+  whatever order it was added in.**  Since 0.4.0 the schedule orders a
+  cycle and everything downstream of it by their strongly connected
+  components; before, a node downstream of a group that had been added
+  before the group's members was scheduled ahead of them and read their
+  previous-step output, silently.
+* **The edges' order does not reach a norm.**  The interface norm sums
+  its terms in the order of the edges' keys (it summed in insertion
+  order, and a reversed build moved the residual in its last bits).
+* **Three or more additive edges into one input sum in the order they
+  were added.**  Floating-point addition does not associate, so
+  `a + b + c` and `a + c + b` can differ in the last bit, and with them
+  the input, the pass and, near a threshold, the verdict.  Two additive
+  edges commute exactly.  If an input's last bit matters, add its
+  additive edges in a fixed order.  (A non-additive edge into the same
+  input is not a rounding matter: it replaces whatever the edges before
+  it delivered, so an input fed by both kinds depends on their order
+  outright -- make every edge into it additive.)
+* **The gradient bound's probe directions follow the build order**
+  (see [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
 
 ## Invariants
 

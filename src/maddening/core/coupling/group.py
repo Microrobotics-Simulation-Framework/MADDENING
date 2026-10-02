@@ -63,13 +63,19 @@ class CouplingGroup:
         straight through that single pass rather than through a fixed
         point -- the same derivative ``"fori"`` would give, since there
         is no fixed point to apply the implicit function theorem at.
-        ``strict_convergence`` is still honoured, and still reports
-        that the pass did not converge.
+        The single pass's own residual is the verdict -- the raw
+        residual test, since one residual gives no ratio, so
+        ``ratio_usable`` is ``False``: ``converged`` is ``True`` when
+        that residual meets the threshold, and ``strict_convergence``,
+        still honoured, raises when it does not.
     tolerance : float
         Convergence threshold under ``convergence_norm="l2"``.  Since
         0.4.0 the L2 norm divides each field's change by that field's
-        own magnitude, so this is a *relative* tolerance; for fields of
-        order one it is the absolute threshold it used to be.
+        largest magnitude (the larger of its two iterates' ``max|v|``),
+        so this is a *relative* tolerance: it equals the pre-0.4.0
+        absolute threshold exactly when every field's largest magnitude
+        is 1, and is an absolute threshold of ``tolerance * max|v|`` per
+        field otherwise.
 
         Read **only** when ``convergence_norm="l2"``.  The other two
         norms carry their tolerance in ``rtol`` and test against a
@@ -242,8 +248,11 @@ class CouplingGroup:
         that always runs ``max_iterations`` passes (freezing the state
         once converged) and differentiates straight through the
         iterates.  Deprecated: emits ``DeprecationWarning`` and will be
-        removed in the next minor release.  Forward-mode AD does not
-        work through it.
+        removed in the next minor release.  Both AD modes work through
+        it by unrolling: ``jax.jvp`` / ``jacfwd`` and ``jax.grad`` /
+        ``jacrev`` give the derivative of the iterate it returned.
+        (Earlier versions of this docstring said forward mode did not
+        work through it; it always has.)
 
         The two return the *same state*: both stop on the iterate whose
         residual met the criterion rather than on the update it went on
@@ -286,9 +295,14 @@ class CouplingGroup:
         config option.  It is viable for a **small** group only, and
         "small" is a specific number: the path materialises the full
         ``N x N`` Jacobian and the identity basis used to build it, so
-        its peak working set is ``2 * N**2 * itemsize`` — 0.48 GiB at
-        N = 8,000, 2 GiB at N = 16,384 and 32 GiB at N = 65,536 in
-        float32, and twice that under ``jax_enable_x64``.  A
+        in reverse mode (``jax.grad``: the transposed solve) its peak
+        working set is ``2 * N**2 * itemsize`` — 0.48 GiB at N = 8,000,
+        2 GiB at N = 16,384 and 32 GiB at N = 65,536 in float32, and
+        twice that under ``jax_enable_x64`` — and in forward mode
+        (``jax.jvp`` / ``jacfwd``, the FMI ``FORWARD`` derivative) a
+        dense coupling Jacobian costs half as much again,
+        ``3 * N**2 * itemsize``: the identity basis, its
+        Jacobian-vector products and ``I - J`` are live at once.  A
         grid-coupled group passes those DOF counts as a matter of
         course, and there the solve does not degrade, it does not
         start: at N ≈ 3.6e5 the Jacobian alone is a single 523 GB

@@ -304,8 +304,11 @@ def coupling_residual_mixed(
     not by less than ``rtol``, and satisfied that on its first pass
     while still percent-sized from its fixed point.  Above the dead band
     the new scale is a pure ratio, so ``rtol`` means the same thing in
-    every field's units; for fields well above ``atol / rtol`` the two
-    formulas agree to within ``1 + atol/(rtol*|v|)``.
+    every field's units.  For a scalar field (or an entry at its field's
+    largest magnitude) well above ``atol / rtol`` the two formulas agree
+    to within ``1 + atol/(rtol*|v|)``.  An entry smaller than its field's
+    largest is measured against the field's scale, so the new norm can be
+    smaller than the old elementwise one by up to ``max|v| / |v_i|``.
 
     Parameters
     ----------
@@ -385,10 +388,22 @@ def coupling_residual_interface(
     -------
     jnp.ndarray
         Scalar RMS error norm.  Converged when <= 1.0.
+
+    Notes
+    -----
+    The terms are summed over the edges in the order of their
+    :attr:`~maddening.core.edge.EdgeSpec.key`, not the order they were
+    added in: floating-point addition does not associate, and summed in
+    insertion order the same group built with its ``add_edge`` calls
+    reversed reported a residual that differed in its last bits -- enough
+    to move a verdict, and with it the pass and the state, wherever the
+    estimate sat within an ulp of the threshold.  Two edges with one key
+    (the same source field into the same input, say an additive pair with
+    different transforms) keep their relative order.
     """
     sum_sq = jnp.array(0.0)
     count = jnp.array(0, dtype=jnp.int32)
-    for edge in interface_edges:
+    for edge in sorted(interface_edges, key=lambda e: e.key):
         new_val = s_new[edge.source_node][edge.source_field]
         if not _is_float_leaf(new_val):
             continue            # an integer interface field cannot carry a norm

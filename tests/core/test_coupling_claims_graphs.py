@@ -209,11 +209,13 @@ def test_one_pass_reads_the_iterate_its_mode_documents(mode):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "CPL-025: a node downstream of a coupling group added before the group's members "
-    "is scheduled before them and reads their previous-step output; pending fix"))
 def test_a_node_downstream_of_a_group_reads_it_in_the_same_step():
-    """CPL-025: only a cycle's back edges are staggered, whatever order the nodes were added in."""
+    """CPL-025: only a cycle's back edges are staggered, whatever order the nodes were added in.
+
+    The sink reads ``g1`` through an edge on no cycle, so it reads the
+    value ``g1`` returns in the same step: ``sink <- 0.5 sink_pre + G g1 +
+    b``, whether it was added before or after the group's members.
+    """
     gdef = cg._cycle(2, 1, outside=True, leaves=())
     names = [nd.name for nd in gdef.nodes]
     assert names == ["drv", "g0", "g1", "sink"]
@@ -221,12 +223,112 @@ def test_a_node_downstream_of_a_group_reads_it_in_the_same_step():
     group = dict(max_iterations=20, tolerance=1e-6)
     last = _build(gdef, group)
     first = _build(gdef, group, node_order=[names.index(n) for n in ("sink", "drv", "g0", "g1")])
+    assert first.schedule == last.schedule == ["drv", "g0", "g1", "sink"]
     a = cg.trajectory(last, gdef, values, 2)
     b = cg.trajectory(first, gdef, values, 2)
+    sink_pre = np.asarray(values["sink"]["x0"], np.float64)
+    G, bias = (np.asarray(values["sink"][k][0] if k == "G" else values["sink"][k], np.float64)
+               for k in ("G", "b"))
     for k, ((sa, _, _), (sb, _, _)) in enumerate(zip(a, b)):
-        np.testing.assert_array_equal(sb["sink"]["x"], sa["sink"]["x"],
-                                      err_msg=f"step {k + 1}: schedules {last.schedule} "
-                                              f"and {first.schedule}")
+        np.testing.assert_array_equal(sb["sink"]["x"], sa["sink"]["x"], err_msg=f"step {k + 1}")
+        want = 0.5 * sink_pre + G @ np.asarray(sa["g1"]["x"], np.float64) + bias
+        np.testing.assert_allclose(sa["sink"]["x"], want, rtol=1e-5, err_msg=f"step {k + 1}")
+        sink_pre = np.asarray(sa["sink"]["x"], np.float64)
+
+
+@pytest.mark.parametrize("variant", ["uncovered-cycle", "multirate", "subcycled", "adaptive"])
+def test_a_downstream_node_added_first_reads_the_cycle_in_the_same_step_on_every_path(variant):
+    """CPL-025, the neighbouring paths: a staggered cycle with no group, a
+    multi-rate graph, a sub-cycling group and the adaptive stepper all run
+    the sink after the cycle it reads, whichever order it was added in."""
+    base = cg._cycle(2, 1, outside=True, leaves=())
+    names = [nd.name for nd in base.nodes]
+    group = dict(max_iterations=30, tolerance=1e-6)
+    gdef = base
+    if variant == "multirate":
+        gdef = dataclasses.replace(base, nodes=tuple(
+            dataclasses.replace(nd, timestep=0.5 if nd.name == "drv" else 1.0)
+            for nd in base.nodes))
+    elif variant == "subcycled":
+        gdef = dataclasses.replace(base, nodes=tuple(
+            dataclasses.replace(nd, timestep=0.5 if nd.name == "g0" else 1.0)
+            for nd in base.nodes))
+        group = dict(group, subcycling=True, boundary_interpolation="constant")
+    elif variant == "adaptive":
+        gdef = base.as_ode(alpha=-1.0)
+    values = cg.draw_values(np.random.default_rng(17), gdef, 0.5)
+    sink_first = [names.index(n) for n in ("sink", "drv", "g0", "g1")]
+
+    def build(order):
+        if variant != "uncovered-cycle":
+            return _build(gdef, group, node_order=order)
+        gm = GraphManager()
+        for nd in (gdef.nodes if order is None else [gdef.nodes[i] for i in order]):
+            gm.add_node(cg.make_node(nd, gdef.n))
+        for e in gdef.edges:
+            gm.add_edge(e.src, e.dst, e.field, f"u{e.port}")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")     # the uncovered cycle's advisory
+            gm.compile()
+        return gm
+
+    runs = []
+    for order in (None, sink_first):
+        gm = build(order)
+        cg.set_initial(gm, values)
+        params = _step_params(gm, values)
+        if variant == "adaptive":
+            final, info = gm.run_adaptive(0.3, dt_initial=0.1, dt_max=0.1, params=params)
+            runs.append(({n: {"x": np.asarray(final[n]["x"])} for n in names},
+                         tuple(info["dt_history"])))
+        else:
+            for _ in range(3):
+                gm.step(params=params)
+            runs.append(cg.snapshot(gm))
+        assert gm.schedule.index("sink") > max(gm.schedule.index("g0"),
+                                               gm.schedule.index("g1")), gm.schedule
+    assert not cg.bitwise_differences(runs[0] if variant != "adaptive" else runs[0][0],
+                                      runs[1] if variant != "adaptive" else runs[1][0])
+    if variant == "adaptive":
+        assert runs[0][1] == runs[1][1]
+
+
+def test_a_reader_of_one_group_runs_after_it_whatever_the_build_order():
+    """CPL-025: an edge from one group into another is read in the same step too.
+
+    Two groups, ``a0 <-> a1`` feeding ``b0 <-> b1``, every interleaving of
+    their members: the schedule puts the upstream group first and keeps
+    each group's own order, and every build gives the same bits.
+    """
+    nodes = (cg.NodeDef("a0", 1), cg.NodeDef("a1", 1), cg.NodeDef("b0", 2), cg.NodeDef("b1", 1))
+    edges = (cg.EdgeDef("a0", "a1", 0), cg.EdgeDef("a1", "a0", 0), cg.EdgeDef("b0", "b1", 0),
+             cg.EdgeDef("b1", "b0", 0), cg.EdgeDef("a1", "b0", 1))
+    gm_ref = None
+    ref = None
+    # Every build keeps each group's own order (a0 before a1, b0 before
+    # b1), which its Gauss-Seidel sweep follows by design (CPL-077), and
+    # interleaves the two groups differently.
+    for order in (("a0", "a1", "b0", "b1"), ("b0", "a0", "b1", "a1"), ("b0", "b1", "a0", "a1")):
+        gm = GraphManager()
+        by = {nd.name: nd for nd in nodes}
+        for name in order:
+            gm.add_node(cg.make_node(by[name], 1))
+        for e in edges:
+            gm.add_edge(e.src, e.dst, e.field, f"u{e.port}")
+        gm.add_coupling_group(["a0", "a1"], max_iterations=30, tolerance=1e-6)
+        gm.add_coupling_group(["b0", "b1"], max_iterations=30, tolerance=1e-6)
+        gm.compile()
+        assert gm.schedule == ["a0", "a1", "b0", "b1"], (order, gm.schedule)
+        gdef = cg.GraphDef(n=1, nodes=nodes, edges=edges, group_nodes=("a0", "a1"))
+        values = cg.draw_values(np.random.default_rng(13), gdef, 0.5)
+        cg.set_initial(gm, values)
+        gm.step(params=cg.params_for(gm, values))
+        got = cg.snapshot(gm)
+        if ref is None:
+            gm_ref, ref = gm, got
+            continue
+        assert not cg.bitwise_differences(got, ref), order
+    assert gm_ref is not None
 
 
 # ---------------------------------------------------------------------------
@@ -234,23 +336,39 @@ def test_a_node_downstream_of_a_group_reads_it_in_the_same_step():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=(
-    "CPL-031: forward-mode AD does work through solver='fori' (the docstring says it does "
-    "not); pending a docs fix"))
-def test_forward_mode_through_a_fori_group_is_refused():
-    """CPL-031: "Forward-mode AD does not work through it" (``solver="fori"``)."""
+@pytest.mark.parametrize("acceleration", ["none", "aitken", "iqn-ils"])
+def test_forward_mode_through_a_fori_group_works(acceleration):
+    """CPL-031: both AD modes work through ``solver="fori"`` by unrolling.
+
+    ``jax.jvp`` gives a finite tangent, which is the transpose of what
+    ``jax.vjp`` gives (one derivative, two modes), and at a tight
+    criterion it is the IFT tangent of the fixed point.
+    """
     gdef = cg._cycle(2, 2, outside=False, leaves=())
     values = cg.draw_values(np.random.default_rng(2), gdef, 0.6)
-    gm = _build(gdef, dict(max_iterations=10, tolerance=1e-6, solver="fori"))
-    cg.set_initial(gm, values)
-    params = _step_params(gm, values)
-    state, ext = gm._state, gm._default_external_inputs()
+    tangents = {}
+    for solver in ("fori", "ift"):
+        gm = _build(gdef, _knobs(acceleration, max_iterations=60, tolerance=1e-7,
+                                 solver=solver))
+        cg.set_initial(gm, values)
+        params = _step_params(gm, values)
+        state, ext = gm._state, gm._default_external_inputs()
 
-    def f(p):
-        return gm._compiled_step(state, ext, p)["g0"]["x"]
+        def f(p, gm=gm, state=state, ext=ext):
+            return gm._compiled_step(state, ext, p)["g0"]["x"]
 
-    with pytest.raises(Exception):
-        jax.jvp(f, (params,), (jax.tree.map(jnp.ones_like, params),))
+        direction = jax.tree.map(jnp.ones_like, params)
+        out, tan = jax.jvp(f, (params,), (direction,))
+        assert np.all(np.isfinite(np.asarray(tan))), (solver, tan)
+        _, pullback = jax.vjp(f, params)
+        cot = jnp.asarray([1.0, -0.5], F32)
+        (g,) = pullback(cot)
+        lhs = float(jnp.dot(cot, tan))
+        rhs = float(sum(jnp.sum(a * b) for a, b in zip(jax.tree.leaves(g),
+                                                     jax.tree.leaves(direction))))
+        assert lhs == pytest.approx(rhs, rel=1e-4), (solver, lhs, rhs)
+        tangents[solver] = np.asarray(tan)
+    np.testing.assert_allclose(tangents["fori"], tangents["ift"], rtol=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -813,3 +931,64 @@ def test_the_mask_changes_nothing_where_every_window_converges():
     assert float(on[0]) == float(off[0])
     for a, b in zip(jax.tree.leaves(on[1]), jax.tree.leaves(off[1])):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+# ---------------------------------------------------------------------------
+# CPL-062: the two-pass guard costs Aitken at most one pass
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+def test_the_two_pass_guard_adds_at_most_one_pass_to_aitkens_exit(mode, monkeypatch):
+    """CPL-062: Aitken with its guard stops at most one pass after Aitken without it.
+
+    The guard is ``_TWO_PASS_EXIT``, read when the step is traced; the
+    control is the same group compiled with it emptied.  One step per
+    draw, so both start from the same state.
+    """
+    from maddening.core import graph_manager as gm_mod
+
+    gdef = cg.TRIANGLE
+    group = dict(acceleration="aitken", iteration_mode=mode, max_iterations=60,
+                 tolerance=1e-5)
+    guarded = _build(gdef, group)
+    monkeypatch.setattr(gm_mod, "_TWO_PASS_EXIT", ())
+    unguarded = _build(gdef, group)
+    extra = []
+    for seed in range(6):
+        values = cg.draw_values(np.random.default_rng(seed), gdef, (0.3, 0.6, 0.9)[seed % 3])
+        (_s1, _m1, with_guard), = cg.trajectory(guarded, gdef, values, 1)
+        (_s0, _m0, without), = cg.trajectory(unguarded, gdef, values, 1)
+        if without["converged"] and without["iterations"] < 60:
+            extra.append(with_guard["iterations"] - without["iterations"])
+    assert extra, "the draws must give the unguarded loop a criterion exit"
+    assert all(0 <= k <= 1 for k in extra), extra
+
+
+# ---------------------------------------------------------------------------
+# CPL-078: Jacobi under Aitken and IQN agrees to round-off across build orders
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("acceleration", ["aitken", "iqn-ils"])
+def test_jacobi_states_agree_to_round_off_under_aitken_and_iqn_whatever_the_build_order(
+        acceleration):
+    """CPL-078: not to the bit -- the accelerator's dot products follow the schedule -- but to round-off.
+
+    The allowance is the forward error of each node's sum per pass
+    (``coupled_graphs.rounding_bound``), over the passes the step ran,
+    amplified by ``1 / (1 - rho)`` -- the error a contraction can carry
+    to the state it stops on.
+    """
+    gdef = cg._cycle(3, 2, chords=((0, 2),), outside=False, leaves=())
+    rho = 0.9
+    values = cg.draw_values(np.random.default_rng(5), gdef, rho)
+    group = _knobs(acceleration, iteration_mode="jacobi", max_iterations=60, tolerance=1e-5)
+    (s0, _m0, r0), = cg.trajectory(_build(gdef, group), gdef, values, 1)
+    for order in ([1, 2, 0], [2, 1, 0]):
+        (s1, _m1, r1), = cg.trajectory(_build(gdef, group, node_order=order), gdef, values, 1)
+        assert r0["converged"] and r1["converged"], (r0, r1)
+        passes = max(r0["iterations"], r1["iterations"])
+        allowed = cg.rounding_bound(gdef, values, s0, passes) / (1.0 - rho)
+        gap = cg.relative_gap(s0, s1, nodes=gdef.group_nodes)
+        assert gap <= allowed, (order, gap, allowed)

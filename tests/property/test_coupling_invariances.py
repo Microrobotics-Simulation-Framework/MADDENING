@@ -15,21 +15,18 @@ for both solvers, both schedules, every acceleration and every norm, the
 spectral and gradient-bound keys included.
 
 **The build order.**  The order of the ``add_edge`` calls, and of the
-``add_node`` calls for nodes the schedule does not order by insertion,
-must not change the result either.  Two orders are *not* free, by design
-or by finding, and the strategies hold them fixed:
-
-* the relative order of a group's members, which a Gauss-Seidel sweep
-  follows on purpose (CPL-077; under Jacobi the members' order still
-  reaches the states through the accelerators' dot products, CPL-078);
-* a node downstream of the group must be added after its members
-  (CPL-025, a strict xfail in ``tests/core/test_coupling_claims_graphs.py``).
-
-Under ``convergence_norm="interface"`` the residual sums over the group's
-edges in the order they were added (CPL-182, the strict xfail below), so
-the build-order oracles draw the l2 and mixed norms.  Three or more
-additive edges into one input would sum in insertion order too (float
-addition does not associate); the structures here carry none.
+``add_node`` calls for every node outside the group, must not change the
+result either -- a node downstream of the group included, which used to
+read the group's previous-step output when it was added before the
+group's members (CPL-025).  One order is *not* free, by design, and the
+strategies hold it fixed: the relative order of a group's members, which
+a Gauss-Seidel sweep follows on purpose (CPL-077; under Jacobi the
+members' order still reaches the states through the accelerators' dot
+products, CPL-078).  Every norm is drawn: the interface norm used to sum
+its terms in the order the edges were added (CPL-182).  Three or more
+additive edges into one input still sum in insertion order (float
+addition does not associate; documented in the coupling guide); the
+structures here carry none.
 
 **An identity relay on an internal edge** (``x <- I u``, exact in float32)
 is the same coupled system with one more copy of a field, so it cannot
@@ -103,9 +100,10 @@ STRUCT = cg.GraphDef(n=2, nodes=_NODES, edges=_EDGES, group_nodes=("g0", "g1", "
 RENAME = {"d0": "y_drive", "d1": "b_drive", "g0": "zeta", "g1": "Alpha", "g2": "mu",
           "s0": "a_sink", "s1": "z_sink"}
 
-#: A build order that keeps the members' relative order and the sinks
-#: after the members, and moves everything else; the edges reversed.
-NODE_ORDER = ("d1", "g0", "d0", "g1", "g2", "s1", "s0")
+#: A build order that keeps the members' relative order and moves
+#: everything else, a sink ahead of the members included; the edges
+#: reversed.
+NODE_ORDER = ("s0", "d1", "g0", "d0", "g1", "g2", "s1")
 EDGE_ORDER = tuple(reversed(range(len(_EDGES))))
 
 
@@ -129,15 +127,14 @@ CASES = {
                                        convergence_norm="mixed", rtol=1e-4),
     "iqn-imvj-gs-fori-l2": _knobs("iqn-imvj", solver="fori", diagnostics=True,
                                   tolerance=1e-5),
+    "fixed-gs-ift-interface": _knobs("fixed", convergence_norm="interface", rtol=1e-4),
 }
 
-#: The renaming oracle also takes the interface norm (it is order-free
-#: under renaming) and a diagnostics group, whose spectral and
+#: The renaming oracle also takes a diagnostics group, whose spectral and
 #: gradient-bound keys must not move either -- on a two-member group, the
 #: diagnostics' compile being the cost.
 RENAME_CASES = {
     **CASES,
-    "fixed-gs-ift-interface": _knobs("fixed", convergence_norm="interface", rtol=1e-4),
     "none-gs-ift-l2-diag": _knobs("none", diagnostics=True, tolerance=1e-5),
 }
 
@@ -302,18 +299,15 @@ def test_the_build_order_changes_nothing(case, data):
 
 
 def _order_strategy(gdef):
-    """A node order keeping the members' relative order and every downstream node last."""
+    """Any node order that keeps the group's members in their relative order."""
     members = list(gdef.group_nodes)
-    downstream = {e.dst for e in gdef.edges if e.src in members and e.dst not in members}
-    head = [nd.name for nd in gdef.nodes if nd.name not in downstream]
-    tail = [nd.name for nd in gdef.nodes if nd.name in downstream]
+    names = [nd.name for nd in gdef.nodes]
 
     @st.composite
     def order(draw):
-        drawn = draw(st.permutations(head))
+        drawn = draw(st.permutations(names))
         slots = iter(members)
-        merged = [next(slots) if n in members else n for n in drawn]
-        return tuple(merged + list(draw(st.permutations(tail))))
+        return tuple(next(slots) if n in members else n for n in drawn)
 
     return order()
 
@@ -326,7 +320,7 @@ def _order_strategy(gdef):
 def test_the_build_order_is_invariant_on_generated_graphs(data):
     """CPL-181 with the structure, the configuration and both orders drawn."""
     gdef = data.draw(cg.graph_defs(max_group=4))
-    group = data.draw(cg.group_configs(gdef, norms=("l2", "mixed")))
+    group = data.draw(cg.group_configs(gdef))
     node_order = data.draw(_order_strategy(gdef))
     edge_order = data.draw(st.permutations(range(len(gdef.edges))))
     values = data.draw(_VALUES(gdef))
@@ -335,18 +329,23 @@ def test_the_build_order_is_invariant_on_generated_graphs(data):
     assert_same_runs(a, b)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "CPL-182: the interface norm sums over the group's edges in the order they were "
-    "added; pending fix"))
 def test_the_interface_residual_does_not_depend_on_the_edge_order():
-    """CPL-182: the same group, its edges added in reverse, reports the same residual."""
+    """CPL-182: the same group, its edges added in reverse, reports the same residual.
+
+    The draw on which the residual moved in its last bits (228.80760
+    against 228.80762) while the interface norm summed in insertion order;
+    both solvers, and every step's state and report.
+    """
     gdef = cg.TRIANGLE
     values = cg.draw_values(np.random.default_rng(3), gdef, 0.9, nonnormal=True)
-    group = _knobs("fixed", convergence_norm="interface", rtol=1e-5, max_iterations=12)
-    a = run(build(gdef, group), gdef, values, steps=1)
-    b = run(build(gdef, group, edge_order=tuple(reversed(range(len(gdef.edges))))), gdef,
-            values, steps=1)
-    assert a[0][1]["residual"] == b[0][1]["residual"], (a[0][1], b[0][1])
+    for solver in ("ift", "fori"):
+        group = _knobs("fixed", convergence_norm="interface", rtol=1e-5, max_iterations=12,
+                       solver=solver, diagnostics=solver == "fori")
+        a = run(build(gdef, group), gdef, values, steps=2)
+        b = run(build(gdef, group, edge_order=tuple(reversed(range(len(gdef.edges))))),
+                gdef, values, steps=2)
+        assert a[0][1]["residual"] == b[0][1]["residual"], (solver, a[0][1], b[0][1])
+        assert_same_runs(a, b)
 
 
 # ---------------------------------------------------------------------------

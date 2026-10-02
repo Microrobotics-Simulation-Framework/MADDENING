@@ -61,24 +61,25 @@ def _strict_loads(text):
 def _diverged_bridge(bridge_cls=FmuTcpBridge):
     """A bridge whose state holds ``inf`` and ``NaN``.
 
-    Written straight into the sidecar rather than through ``set`` or
-    ``set_state``: both of those refuse a non-finite value, by design.  A
-    model that diverges on its own arrives here without asking anyone,
-    which is the case this whole file is about.
+    Written straight into the sidecar's initial state rather than through
+    ``set`` or ``set_state``: both of those refuse a non-finite value, by
+    design.  A model that diverges on its own arrives here without asking
+    anyone, which is the case this whole file is about.  It is the state
+    the bridge is *built over*, not one written in afterwards, because a
+    connection that claims the instance slot starts a new instance from
+    that state (what ``fmi3InstantiateCoSimulation`` promises).
     """
     gm = _graph()
     md = build_model_description(gm, model_name="Plant",
                                  model_identifier=MODEL_IDENTIFIER)
-    sidecar = FmuSidecar(SidecarConfig(
-        schema_token=md.instantiation_token, step_fn=gm._compiled_step,
-        initial_state=gm._state, params=gm.params, param_specs=gm.param_specs(),
-    ))
-    bridge = bridge_cls(sidecar, md, master_dt=DT)
-    state = {n: dict(f) for n, f in bridge._sidecar.state.items()}
+    state = {n: dict(f) for n, f in gm._state.items()}
     state["spring"]["position"] = jnp.asarray(np.inf, dtype=jnp.float32)
     state["spring"]["velocity"] = jnp.asarray(np.nan, dtype=jnp.float32)
-    bridge._sidecar._state = state
-    return md, bridge
+    sidecar = FmuSidecar(SidecarConfig(
+        schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+        initial_state=state, params=gm.params, param_specs=gm.param_specs(),
+    ))
+    return md, bridge_cls(sidecar, md, master_dt=DT)
 
 
 def _get_reply(bridge, md, names, hello):

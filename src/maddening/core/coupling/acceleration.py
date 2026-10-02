@@ -1042,11 +1042,33 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: ``coupling_diagnostics`` withholds ``spectral_usable`` wherever the
 #: residual is at the floor, where that count carries the bound.
 #:
-#: It is a model of the map's rounding, not a proof of it: a node whose
-#: update cancels catastrophically -- a small output computed as the
-#: difference of two large intermediates -- can exceed any fixed number
-#: of ulps of its *output's* magnitude, and nothing outside the node can
-#: see that.
+#: **Gains.**  "The sum along the chain" assumes a read passes a relative
+#: rounding on at most unchanged.  A squaring relay doubles it with no
+#: cancellation at all, and a node whose terms cancel (``3u - 2v`` at
+#: ``u ~ v``) amplifies its own rounding as well as its inputs': a
+#: Gauss-Seidel ring of twelve squares read the bound at 0.20x its true
+#: distance, and its gradient bound at 0.018x, with the flags set.  So
+#: with ``diagnostics=True`` the step measures every group-internal
+#: read's relative gain ``g`` at the returned state (one JVP of the
+#: reading node's update along the source's own state), scales each
+#: node's own count by ``max(1, sum g)`` over its reads, weights each
+#: same-pass read by its gain along the chain, and never goes below the
+#: structural count; the report reads that count from the step
+#: (``coupling_<key>_pass_evaluations``).  Without diagnostics the
+#: structural count stands (``precision_limited`` only, no bound).  The
+#: weighting adds gain *magnitudes*, which keeps it a bound and makes it
+#: loose where signs alternate: a ten-link chain ``3 c_(j-1) - 2 c_(j-2)
+#: + c`` counts 3.6e5 evaluations and its bound reads 1.1e7x the true
+#: distance, usable.  Sub-cycled members are counted as undamped sub-steps
+#: and read 1.5e3x-9.6e4x over.  Valid, and too loose to read there.
+#:
+#: It is a model of the map's rounding, not a proof of it: the measured
+#: gains are first-order and taken along one direction per read (the
+#: source's own state), and a node whose update cancels *inside* itself
+#: -- a small output computed as the difference of two large
+#: intermediates it computes, not reads -- can exceed any fixed number
+#: of ulps of its output's magnitude where nothing outside the node can
+#: see it.
 PRECISION_FLOOR_ULPS = 4.0
 
 
@@ -1679,6 +1701,42 @@ def _pow2_normaliser(*vectors):
     return jnp.ldexp(jnp.ones((), dtype), -exponent)
 
 
+def _relaxed_step(x_old, x_raw, omega):
+    """``x_old + omega * (x_raw - x_old)``, formed entry by entry in a power-of-two frame.
+
+    Each entry is computed on the pair rescaled by its own power of two
+    (``max(|x_old_i|, |x_raw_i|)`` brought into ``[0.5, 1)``) and scaled
+    back: the same rounding, so a step between ordinary numbers is the
+    one the bare formula gives, bit for bit -- but the difference is
+    taken between two normal numbers.  Bare, an entry whose one-pass
+    change is below ``finfo.tiny`` (any change of less than an ulp of a
+    field below about 1e-31 in float32) had its difference flushed to
+    zero, the relaxed entry stopped moving while the convergence norm --
+    which rescales the same pair (``_scaled_change``) -- still measured
+    its residual, and the stalled ratio fell back to the raw residual
+    test.  Entries are framed separately so a small field beside a large
+    one in the same vector moves too.
+    """
+    k = _pow2_entrywise(x_old, x_raw)
+    old_k, raw_k = x_old * k, x_raw * k
+    return (old_k + omega * (raw_k - old_k)) / k
+
+
+def _pow2_entrywise(*arrays):
+    """Per entry, a power of two ``k`` with ``max_j |a_j[i]| * k[i]`` in ``[0.5, 1)``.
+
+    The entrywise sibling of :func:`_pow2_normaliser`: the exponent is
+    clamped so every ``k`` is a normal number of the dtype, and a zero or
+    non-finite entry gets ``k = 1``.
+    """
+    dtype = jnp.result_type(*arrays)
+    info = jnp.finfo(dtype)
+    biggest = functools.reduce(jnp.maximum, [jnp.abs(jnp.asarray(a, dtype)) for a in arrays])
+    _, exponent = jnp.frexp(jnp.where(jnp.isfinite(biggest), biggest, jnp.zeros_like(biggest)))
+    exponent = jnp.clip(exponent, 1 - int(info.maxexp), -int(info.minexp))
+    return jnp.ldexp(jnp.ones_like(biggest), -exponent)
+
+
 def aitken_relaxation(
     x_old_flat: jnp.ndarray,
     x_raw_flat: jnp.ndarray,
@@ -1755,7 +1813,7 @@ def aitken_relaxation(
     # overflowed, or when there is no previous residual to extrapolate from.
     new_omega = jnp.where(usable, new_omega, omega)
 
-    x_relaxed = x_old_flat + new_omega * residual
+    x_relaxed = _relaxed_step(x_old_flat, x_raw_flat, new_omega)
     return x_relaxed, new_omega, residual
 
 
@@ -1950,4 +2008,4 @@ def fixed_relaxation(
     jnp.ndarray
         Relaxed state vector.
     """
-    return x_old_flat + omega * (x_raw_flat - x_old_flat)
+    return _relaxed_step(x_old_flat, x_raw_flat, omega)

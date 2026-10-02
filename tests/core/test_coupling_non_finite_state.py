@@ -460,14 +460,19 @@ class _TinyLinear(SimulationNode):
         return {"x": self._g * boundary_inputs["u"] + self._c}
 
 
-def _tiny_graph(norm, c, *, solver="ift", max_iterations=20):
+def _tiny_graph(norm, c, *, solver="ift", max_iterations=20, acceleration="none",
+                diagnostics=True):
     gm = GraphManager()
     gm.add_node(_TinyLinear("a", 0.9, c))
     gm.add_node(_TinyLinear("b", 1.0, 0.0))
     gm.add_edge(source="b", target="a", source_field="x", target_field="u")
     gm.add_edge(source="a", target="b", source_field="x", target_field="u")
     kw = {"tolerance": 1e-6} if norm == "l2" else {}
-    gm.add_coupling_group(["a", "b"], convergence_norm=norm, diagnostics=True,
+    if acceleration.startswith("fixed"):
+        kw.update(acceleration="fixed", relaxation=float(acceleration.split(":")[1]))
+    elif acceleration != "none":
+        kw["acceleration"] = acceleration
+    gm.add_coupling_group(["a", "b"], convergence_norm=norm, diagnostics=diagnostics,
                           max_iterations=max_iterations, solver=solver, **kw)
     gm.compile()
     return gm
@@ -496,6 +501,106 @@ def test_the_verdict_does_not_change_below_the_scale_underflow(norm):
 #: The control's ``c``: ``x* = 10 c`` is about ``1e-29``, where a change
 #: of one ulp of the field (about ``1.2e-36``) is still a normal number.
 _C_NORMAL = float(np.float32(1e-30))
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+@pytest.mark.parametrize("acceleration", ("fixed:0.8", "fixed:1.3", "aitken", "iqn-ils", "iqn-imvj"))
+@pytest.mark.parametrize("shift", (14, 24))
+def test_an_accelerated_verdict_does_not_change_below_the_change_underflow(acceleration, solver, shift):
+    """The same claim under every acceleration: the accelerators' steps are framed too.
+
+    ``fixed``, Aitken and IQN formed their step from the raw difference
+    ``x_raw - x_old``, which flushes to zero below the normal range: the
+    relaxed iterate stopped moving while the norm still measured the
+    residual, the stalled ratio read 1 and was rejected, and the raw
+    residual test reported ``converged=True`` 1.8-7.4x the threshold from
+    the fixed point (``shift=14``: ``x*`` about 6e-34; at ``shift=24``,
+    ``x*`` about 6e-37, IQN stalled at its cap too).  The steps are now
+    formed in a power-of-two frame, so the group at ``2**-shift`` of its
+    units reproduces the control to the bit.
+    """
+    cap = 400
+    # ``fori`` reports only with diagnostics; ``ift`` always, so it skips them.
+    diag = solver == "fori"
+    ref = _tiny_graph("l2", _C_NORMAL, solver=solver, max_iterations=cap,
+                      acceleration=acceleration, diagnostics=diag)
+    ref.step()
+    want = ref.coupling_diagnostics()["a+b"]
+    gm = _tiny_graph("l2", _C_NORMAL * 2.0 ** -shift, solver=solver, max_iterations=cap,
+                     acceleration=acceleration, diagnostics=diag)
+    gm.step()
+    got = gm.coupling_diagnostics()["a+b"]
+    assert want["converged"] is True and want["iterations"] < cap, (
+        f"fixture premise: the control converges inside the cap: {want}")
+    assert (got["iterations"], got["converged"], got["residual"]) == (
+        want["iterations"], want["converged"], want["residual"]), (got, want)
+    assert float(gm.get_node_state("a")["x"][0]) == (
+        float(ref.get_node_state("a")["x"][0]) * 2.0 ** -shift), "the state scaled exactly"
+
+
+class _TwoScale(SimulationNode):
+    """Two independent fields: ``x <- g u + cx`` and ``y <- g v + cy`` (a relay when ``g = 1``)."""
+
+    def __init__(self, name, g, cx, cy):
+        super().__init__(name=name, timestep=1.0)
+        self._g, self._cx, self._cy = g, cx, cy
+
+    def initial_state(self):
+        return {"x": jnp.zeros(1, jnp.float32), "y": jnp.zeros(1, jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {k: BoundaryInputSpec(shape=(1,), dtype=jnp.float32,
+                                     default=jnp.zeros(1, jnp.float32)) for k in ("u", "v")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        return {"x": self._g * boundary_inputs["u"] + self._cx,
+                "y": self._g * boundary_inputs["v"] + self._cy}
+
+
+def _two_scale_graph(cx, acceleration, solver):
+    gm = GraphManager()
+    gm.add_node(_TwoScale("a", 0.9, cx, 1.0))
+    gm.add_node(_TwoScale("b", 1.0, 0.0, 0.0))
+    for src, dst in (("a", "b"), ("b", "a")):
+        gm.add_edge(source=src, target=dst, source_field="x", target_field="u")
+        gm.add_edge(source=src, target=dst, source_field="y", target_field="v")
+    kw = dict(acceleration="fixed", relaxation=float(acceleration.split(":")[1])) if (
+        acceleration.startswith("fixed")) else dict(acceleration=acceleration)
+    gm.add_coupling_group(["a", "b"], tolerance=1e-6, max_iterations=400, solver=solver,
+                          diagnostics=True, **kw)
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+@pytest.mark.parametrize("acceleration", ("fixed:0.8", "fixed:1.3", "aitken"))
+def test_a_tiny_field_beside_a_normal_one_relaxes_like_its_control(acceleration, solver):
+    """``x`` near ``6e-34`` beside ``y`` near 10, in one accelerated vector.
+
+    A frame fixed for the whole vector is set by its largest entry, so it
+    leaves ``x`` where its per-pass change is subnormal; the relaxed step
+    is therefore formed entry by entry in a frame of its own
+    (``_relaxed_step``).  The fields are independent and the relaxation
+    is linear per entry, so ``x`` at ``2**-14`` of the control's units
+    takes the control's passes and lands on its state times ``2**-14``,
+    to the bit (Aitken's ``omega`` is decided by ``y`` in both: ``x``'s
+    share of its dot products is below the normal range either way).
+    With the vector's frame alone ``x`` stopped moving while the norm
+    still measured it.
+    """
+    ref = _two_scale_graph(_C_NORMAL, acceleration, solver)
+    ref.step()
+    want = ref.coupling_diagnostics()["a+b"]
+    gm = _two_scale_graph(_C_NORMAL * 2.0 ** -14, acceleration, solver)
+    gm.step()
+    got = gm.coupling_diagnostics()["a+b"]
+    assert want["converged"] is True, f"fixture premise: the control converges: {want}"
+    assert (got["iterations"], got["converged"], got["residual"]) == (
+        want["iterations"], want["converged"], want["residual"]), (got, want)
+    for nm in ("a", "b"):
+        assert float(gm.get_node_state(nm)["x"][0]) == (
+            float(ref.get_node_state(nm)["x"][0]) * 2.0 ** -14), nm
+        assert float(gm.get_node_state(nm)["y"][0]) == float(ref.get_node_state(nm)["y"][0]), nm
 
 
 @pytest.mark.parametrize("solver", SOLVERS)

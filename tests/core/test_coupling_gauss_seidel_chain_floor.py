@@ -162,8 +162,8 @@ def test_edges_outside_the_group_do_not_count():
 # ---------------------------------------------------------------------------
 
 
-def _ring_graph(n, mode, *, diagnostics=False, x0=0.0, g=0.5, c=0.0):
-    names = [f"n{k:03d}" for k in range(n)]
+def _ring_graph(n, mode, *, diagnostics=False, x0=0.0, g=0.5, c=0.0, names=None):
+    names = names or [f"n{k:03d}" for k in range(n)]
     gm = GraphManager()
     for nm in names:
         gm.add_node(_Relay(nm, gain=g, bias=c, x0=x0))
@@ -175,12 +175,21 @@ def _ring_graph(n, mode, *, diagnostics=False, x0=0.0, g=0.5, c=0.0):
     return gm, "+".join(sorted(names))
 
 
+#: A ring whose sweep order is not its sorted order: a call site that lost the
+#: schedule (and fell back to sorted names) counts a different chain -- two,
+#: where the ring in its own order is five long.
+_PERMUTED = ["n4", "n2", "n0", "n3", "n1"]
+
+
+@pytest.mark.parametrize("names", [None, _PERMUTED], ids=["sorted-order", "permuted-order"])
 @pytest.mark.parametrize("mode, want", [("gauss-seidel", 5.0), ("jacobi", 1.0)])
-def test_the_report_and_the_step_count_the_same_chain(monkeypatch, mode, want):
+def test_the_report_and_the_step_count_the_same_chain(monkeypatch, mode, want, names):
     """The in-graph resolution and ``coupling_diagnostics``' floor see one count.
 
-    Both read ``_group_evaluations``; a call site that went back to the
-    worst node's count (or lost the schedule) would answer 1 here under
+    Both read ``_group_evaluations`` -- the step when it is built, the
+    report from the snapshot ``compile()`` took -- in the order the step
+    sweeps.  A call site that went back to the worst node's count, or
+    lost the schedule, answers 1 (or, on the permuted ring, 2) here under
     Gauss-Seidel.
     """
     seen = []
@@ -192,13 +201,13 @@ def test_the_report_and_the_step_count_the_same_chain(monkeypatch, mode, want):
         return out
 
     monkeypatch.setattr(gm_mod, "_group_evaluations", spy)
-    gm, key = _ring_graph(5, mode)
+    gm, key = _ring_graph(5, mode, names=names)
+    if names is not None:
+        assert [nm for nm in gm.schedule] == _PERMUTED, "fixture premise: swept as added"
     gm.step()
-    assert seen, "the step was built without counting"
-    built = list(seen)
+    assert seen and set(seen) == {want}, seen
+    assert gm._committed_floor_inputs[key][0] == want
     gm.coupling_diagnostics()
-    assert built and set(built) == {want}, built
-    assert seen[len(built):] == [want], seen
 
 
 # ---------------------------------------------------------------------------

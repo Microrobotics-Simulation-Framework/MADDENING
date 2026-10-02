@@ -119,17 +119,9 @@ def _scaled_values(values, s):
             for nm, v in values.items()}
 
 
-_SCALE_FINDING = ("CPL-010: at 2**-110 the accelerator step subtracts the iterates before "
-                  "rescaling and a subnormal difference flushes to zero; pending fix")
-
-
-@pytest.mark.parametrize("acceleration", [
-    "none",
-    pytest.param("aitken", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=_SCALE_FINDING)),
-    pytest.param("fixed", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=_SCALE_FINDING)),
-    "iqn-ils",
-    pytest.param("iqn-imvj", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=_SCALE_FINDING)),
-])
+# Aitken, "fixed" and IQN-IMVJ failed this until the accelerators formed their
+# steps in power-of-two frames (MADD-ANO-115).
+@pytest.mark.parametrize("acceleration", ["none", "aitken", "fixed", "iqn-ils", "iqn-imvj"])
 def test_a_group_at_2_to_the_minus_110_takes_the_unscaled_passes(acceleration):
     """CPL-010: "a group at any power-of-two scale reproduce[s] the unscaled run bit for bit".
 
@@ -510,18 +502,13 @@ class _Lin16(SimulationNode):
         return {"x": (self.params["G"] @ boundary_inputs["u"] + self.params["b"]).astype(self._dtype)}
 
 
-_FORI_16 = pytest.mark.xfail(strict=True, raises=TypeError, reason=(
-    "CPL-072: solver='fori' widens the aitken / iqn carries to float32 and the fori_loop "
-    "hands back the 16-bit dtype; pending a decision"))
-
-
+# The fori rows raised a carry TypeError until the accelerators' returns were
+# cast to their carries' dtypes (MADD-ANO-116).
 @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16], ids=["bfloat16", "float16"])
 @pytest.mark.parametrize("acceleration,solver", [
     *[(acc, "ift") for acc in ACCELERATIONS],
     ("none", "fori"), ("fixed", "fori"),
-    pytest.param("aitken", "fori", marks=_FORI_16),
-    pytest.param("iqn-ils", "fori", marks=_FORI_16),
-    pytest.param("iqn-imvj", "fori", marks=_FORI_16),
+    ("aitken", "fori"), ("iqn-ils", "fori"), ("iqn-imvj", "fori"),
 ])
 def test_a_sixteen_bit_group_steps_under_every_accelerator(dtype, acceleration, solver):
     """CPL-072: a bfloat16 / float16 group steps and scans and keeps its dtype."""
@@ -637,15 +624,19 @@ def test_a_group_whose_norm_reads_nothing_is_not_precision_limited():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "CPL-086: coupling_diagnostics re-derives the float floor from the current edges, not "
-    "the committed ones; pending fix"))
 def test_an_edge_added_after_the_step_does_not_rejudge_its_floor():
     """CPL-086: an edge added after a step, before any recompile, does not move that step's bound.
 
     Three scalar relays around a hub ``g0`` (``g0 <-> g1``, ``g0 <-> g2``):
     under Gauss-Seidel the longest same-pass chain is two.  ``g1 -> g2``
     added afterwards would make it three, but the step did not run with it.
+    The floor is added to the residual at any distance, so the bound moved
+    by it whether or not the group had stalled (on the base tree it read
+    0.000506 before the edit and 0.000547 after); the report now reads the
+    count the step measured or ``compile()`` snapshotted.  This test's
+    first edition also asserted ``precision_limited``, which the 200-pass
+    run never reaches (residual 0.10) -- the assertion that failed was
+    that premise, on the base tree and the fixed one alike.
     """
     nodes = (cg.NodeDef("g0", 2), cg.NodeDef("g1", 1), cg.NodeDef("g2", 2))
     edges = (cg.EdgeDef("g1", "g0", 0), cg.EdgeDef("g2", "g0", 1),
@@ -656,7 +647,7 @@ def test_an_edge_added_after_the_step_does_not_rejudge_its_floor():
     cg.set_initial(gm, values)
     gm.step(params=_step_params(gm, values))
     before = dict(gm.coupling_diagnostics()[gdef.key])
-    assert before["precision_limited"], before         # the floor is the bound here
+    assert math.isfinite(before["spectral_error_bound"]), before
     gm.add_edge("g1", "g2", "x", "u1")                  # no recompile
     after = dict(gm.coupling_diagnostics()[gdef.key])
     assert after["spectral_error_bound"] == before["spectral_error_bound"]
@@ -757,9 +748,8 @@ def test_the_report_flags_an_unsettled_spectral_bound_only_where_one_was_compute
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "CPL-134: run_adaptive keeps a rejected attempt when the shrunk step would fall to "
-    "dt_min; run_adaptive_scan rejects it and retries at dt_min; pending fix"))
+# run_adaptive kept a rejected attempt when the shrunk step would fall to
+# dt_min until both steppers took one rule (adaptive.step_decision; MADD-ANO-118).
 def test_both_adaptive_steppers_accept_the_same_steps_at_dt_min():
     """CPL-134: "Like run_adaptive but fully JIT-compiled" -- the same accepted steps at ``dt_min``."""
     def graph():
@@ -823,12 +813,8 @@ def test_the_ift_gradient_of_an_affine_group_is_the_same_under_every_acceleratio
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("scale", [
-    1.0,
-    pytest.param(1e-12, marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-        "CPL-143: the adjoint's GMRES atol is 1e-8 + rtol * max|b|, absolute for a small "
-        "cotangent, so the solve returns zero; pending fix"))),
-])
+# 1e-12 read exactly 0.0 until the solve dropped its absolute 1e-8 (MADD-ANO-113).
+@pytest.mark.parametrize("scale", [1.0, 1e-12])
 def test_the_ift_gradient_is_scale_equivariant_in_the_cotangent(scale):
     """CPL-143: ``d(s * L)/dtheta = s * dL/dtheta``: the adjoint is relative to its right-hand side.
 

@@ -38,8 +38,8 @@
     },
     "coupled_diagnostics": {
       "retrace_count": 1,
-      "jaxpr_primitive_count": 7838,
-      "hlo_op_count": 4835
+      "jaxpr_primitive_count": 8567,
+      "hlo_op_count": 5477
     }
   }
 }

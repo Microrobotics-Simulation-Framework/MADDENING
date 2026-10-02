@@ -1,7 +1,11 @@
 """Property-based tests for adaptive timestepping arithmetic.
 
-Tests the PI step-size controller logic extracted from
-:func:`maddening.core.simulation.adaptive.build_adaptive_step`.
+Tests :func:`maddening.core.simulation.adaptive.step_decision` -- the one
+acceptance rule and PI controller ``run_adaptive``, ``run_adaptive_scan``
+and ``build_adaptive_step`` all call -- rather than a copy of it: until
+0.4.0's round-4 audit this module checked an extract of the controller
+while the two steppers each carried their own, and they disagreed near
+``dt_min``.
 """
 
 
@@ -10,6 +14,7 @@ import jax.numpy as jnp
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from maddening.core.simulation.adaptive import step_decision
 from tests.conftest import EXAMPLES_CHEAP
 
 
@@ -21,16 +26,11 @@ MIN_FACTOR = 0.2
 ORDER = 1
 
 
-def step_size_controller(dt, error_norm):
-    """Extract of the PI controller logic from adaptive.py."""
-    factor = SAFETY * jnp.where(
-        error_norm > 0,
-        jnp.power(1.0 / error_norm, 1.0 / (ORDER + 1)),
-        MAX_FACTOR,
-    )
-    factor = jnp.clip(factor, MIN_FACTOR, MAX_FACTOR)
-    dt_next = jnp.clip(dt * factor, DT_MIN, DT_MAX)
-    accepted = error_norm <= 1.0
+def step_size_controller(dt, error_norm, xp=jnp):
+    """``(dt_next, factor, accepted)`` from the library's own rule."""
+    accepted, _forced, dt_next, factor = step_decision(
+        error_norm, dt, DT_MIN, DT_MAX, safety=SAFETY, order=ORDER,
+        min_factor=MIN_FACTOR, max_factor=MAX_FACTOR, xp=xp)
     return dt_next, factor, accepted
 
 
@@ -123,3 +123,25 @@ class TestZeroErrorMaxGrowth:
         assert val >= float(np.float32(MIN_FACTOR))
         assert val <= float(np.float32(MAX_FACTOR)) + 1e-7
         assert bool(accepted)
+
+
+class TestOneRuleOnBothBackends:
+    """The host stepper (NumPy) and the traced one (jax.numpy) decide alike."""
+
+    @given(dt=dt_st, error_norm=error_st)
+    @settings(max_examples=EXAMPLES_CHEAP)
+    def test_accepted_is_within_tolerance_or_at_dt_min(self, dt, error_norm):
+        dt32, err32 = np.float32(dt), np.float32(error_norm)
+        for xp in (np, jnp):
+            _, _, accepted = step_size_controller(xp.asarray(dt32), xp.asarray(err32), xp=xp)
+            assert bool(accepted) == bool(err32 <= 1.0 or dt32 <= np.float32(DT_MIN)), (
+                xp.__name__, dt, error_norm)
+
+    @given(dt=dt_st, error_norm=error_st)
+    @settings(max_examples=EXAMPLES_CHEAP)
+    def test_the_numpy_and_jax_rules_choose_the_same_next_dt(self, dt, error_norm):
+        dt32, err32 = np.float32(dt), np.float32(error_norm)
+        n_next, _, n_acc = step_size_controller(np.asarray(dt32), np.asarray(err32), xp=np)
+        j_next, _, j_acc = step_size_controller(jnp.asarray(dt32), jnp.asarray(err32), xp=jnp)
+        assert bool(n_acc) == bool(j_acc)
+        np.testing.assert_allclose(float(j_next), float(n_next), rtol=1e-6)

@@ -266,19 +266,18 @@ claims:
     - tests/property/test_differential_coupling_units.py::test_a_coupled_group_takes_the_same_passes_at_every_scale
     - tests/core/test_coupling_accelerators_are_units_invariant.py::test_aitken_omega_is_the_same_at_every_scale
     - tests/core/test_coupling_claims_graphs.py::test_a_group_at_2_to_the_minus_110_takes_the_unscaled_passes
-  status: failing
-  finding: >-
-    At 2**-110 (states ~1e-33, a field's one-ulp change ~1e-40, subnormal)
-    the "aitken" and "fixed" steps are not scale-free: Aitken on a
-    Gauss-Seidel triangle takes 42 passes where the unscaled run takes 45,
-    and "fixed" (relaxation 0.8) returns a different state and residual on
-    the same pass count, while "none" and the IQN pair reproduce the
-    unscaled run bit for bit.  The accelerators subtract the iterates
-    (residual = x_raw - x_old in aitken_relaxation, x_raw - x_old in
-    fixed_relaxation) before any rescaling, and a subnormal difference is
-    flushed to zero on XLA's CPU backend.  Guess:
-    src/maddening/core/coupling/acceleration.py:1700 and :1933.  Reproducer:
-    the cited test.
+    - tests/core/test_coupling_non_finite_state.py::test_an_accelerated_verdict_does_not_change_below_the_change_underflow
+    - tests/core/test_coupling_non_finite_state.py::test_a_tiny_field_beside_a_normal_one_relaxes_like_its_control
+  status: verified
+  notes: >-
+    Failing until 0.4.0's round-4 fix (MADD-ANO-115): at 2**-110 Aitken took
+    42 passes where the unscaled run took 45, and "fixed" and IQN-IMVJ
+    returned a different state, because the accelerators subtracted the
+    iterates before any rescaling and a subnormal difference flushed.  The
+    accelerators now work in a power-of-two frame fixed for the solve and
+    form each relaxed entry in its own frame.  The test below runs every
+    acceleration at 2**-14 and 2**-24 of a 1e-30 control (states to 6e-37)
+    on both solvers, and a tiny field beside a normal one.
 
 - id: CPL-011
   area: configuration
@@ -1336,22 +1335,20 @@ claims:
     - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
     - src/maddening/core/graph_manager.py:560 (_analysis_dtype)
     - src/maddening/core/coupling/group.py:236 (CouplingGroup, solver)
-  conditions: unstated for solver="fori" with an accelerator.
+  conditions: every acceleration, both solvers, bfloat16 and float16.
   oracle: step and run_scan succeed and keep the group's dtype.
   tests:
     - tests/core/test_coupling_sixteen_bit_groups.py::test_diagnostics_run_on_a_sixteen_bit_group
     - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
     - tests/core/test_coupling_claims_graphs.py::test_a_sixteen_bit_group_steps_under_every_accelerator
-  status: ambiguous
-  proposed_wording: >-
-    Under solver="ift" a bfloat16 or float16 group steps and scans under
-    every acceleration.  Under the deprecated solver="fori", "aitken",
-    "iqn-ils" and "iqn-imvj" raise a fori_loop carry TypeError on a 16-bit
-    group (their carries are widened to float32 and the loop hands back the
-    group's dtype); "none" and "fixed" step.
+    - tests/core/test_coupling_sixteen_bit_groups.py::test_fori_and_ift_take_the_same_passes_on_an_accelerated_sixteen_bit_group
+  status: verified
   notes: >-
-    The fori failure is loud (TypeError at the first step) and on a
-    deprecated path; the strict xfail parameters of the cited test pin it.
+    Ambiguous until 0.4.0's round-4 fix (MADD-ANO-116): under the
+    deprecated solver="fori", "aitken", "iqn-ils" and "iqn-imvj" raised a
+    fori_loop carry TypeError on a 16-bit group (since 0.1.0).  The
+    accelerators' returns are now cast to their carries' dtypes, and the
+    two solvers take the same passes on a 16-bit group.
 
 - id: CPL-073
   area: loop
@@ -1618,17 +1615,19 @@ claims:
     - tests/core/test_coupling_report_follows_the_group_that_ran.py::test_recompiling_a_replaced_group_restarts_its_report
     - tests/core/test_inspection_views.py::test_coupling_report_judges_a_replaced_group_under_the_one_that_ran
     - tests/core/test_coupling_claims_graphs.py::test_an_edge_added_after_the_step_does_not_rejudge_its_floor
-  status: failing
-  finding: >-
-    Only the group is taken from the committed snapshot.  The float floor
-    behind spectral_error_bound, precision_limited and spectral_usable is
-    re-derived from the graph's current nodes, schedule and edges
-    (coupling_diagnostics calls _group_evaluations(group, self._nodes,
-    self._schedule, self._edges)), so an edge added between two members
-    after a step, before any recompile, changes the last step's floor and
-    bound: on a Gauss-Seidel chain of relays a chord that lengthens the
-    longest same-pass chain raises spectral_error_bound of a step that
-    never ran with that edge.  Guess: src/maddening/core/graph_manager.py:8339.
+    - tests/core/test_coupling_report_follows_the_group_that_ran.py::test_rebuilding_a_member_before_the_next_step_leaves_the_report_alone
+    - tests/core/test_coupling_report_follows_the_group_that_ran.py::test_a_member_removed_since_the_step_takes_the_report_with_it
+  status: verified
+  notes: >-
+    Failing until 0.4.0's round-4 fix (folded into MADD-ANO-094): the float
+    floor was re-derived from the graph's current nodes, schedule and edges,
+    so an edge added after a step moved that step's bound.  The report now
+    reads the count the step measured (coupling_<key>_pass_evaluations),
+    else the structural count and internal edges snapshotted at compile(),
+    and a group a member of which was removed since has no entry.  The
+    cited claims test's first edition also asserted precision_limited,
+    which its 200-pass run never reaches; that premise is dropped (the
+    floor is added to the residual at any distance).
 
 - id: CPL-087
   area: report
@@ -2199,19 +2198,20 @@ claims:
     - src/maddening/core/graph_manager.py:9376 (GraphManager.run_adaptive)
     - src/maddening/core/graph_manager.py:9424 (GraphManager.run_adaptive_scan)
     - docs/validation/known_anomalies.yaml (MADD-ANO-061)
-  conditions: 'unstated: whether the two steppers accept the same attempts at the dt_min boundary.'
+  conditions: the dt_min boundary included.
   oracle: the two steppers' accepted steps on the same graph.
   tests:
     - tests/core/test_adaptive_dt_min_accept_keeps_the_clock.py::test_the_clock_advances_by_the_attempt_a_dt_min_accept_keeps
     - tests/core/test_coupling_claims_graphs.py::test_both_adaptive_steppers_accept_the_same_steps_at_dt_min
-  status: ambiguous
-  proposed_wording: >-
-    run_adaptive accepts an attempt whose error is above tolerance when the
-    shrunk step would fall to dt_min, and keeps the attempt's own size
-    (up to dt_min / min_factor); run_adaptive_scan accepts only an attempt
-    made at dt_min, so it rejects that attempt, retries at dt_min and keeps
-    the retry.  The two step sequences differ at the dt_min boundary.
-  notes: The second test is a strict xfail of the reading "the two accept the same steps".
+    - tests/core/test_adaptive_steppers_share_one_acceptance_rule.py::test_both_steppers_take_the_same_steps_at_dt_min
+    - tests/verification/hypothesis/test_hypothesis_adaptive.py::TestOneRuleOnBothBackends::test_the_numpy_and_jax_rules_choose_the_same_next_dt
+  status: verified
+  notes: >-
+    Ambiguous until 0.4.0's round-4 fix (MADD-ANO-118): run_adaptive
+    accepted a failed attempt up to dt_min / min_factor whenever its shrink
+    reached dt_min, where run_adaptive_scan retried at dt_min.  Both now
+    take their decision and next step from adaptive.step_decision, so they
+    accept the same steps.
 
 # ---------------------------------------------------------------------------
 # IFT gradients
@@ -2281,23 +2281,24 @@ claims:
     tighter than ~100 ulp of the dtype", so exact zeros in a cotangent no
     longer read as a breakdown.
   sources:
-    - src/maddening/core/graph_manager.py:1863 (_ift_linear_solve)
+    - src/maddening/core/graph_manager.py:2021 (_ift_linear_solve)
     - docs/release_notes/v0.4.0.md#the-iqn-family-corrected
-  conditions: 'unstated: the absolute term atol = 1e-8 + rtol * max|b| dominates when every rhs entry is below ~1e-3.'
+  conditions: any rhs scale with a normal largest entry; a zero rhs is answered with zeros.
   oracle: the gradient of s * sum(x*) divided by s, against the analytic 1 / (1 - g) at s = 1e-12.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_the_ift_gradient_is_scale_equivariant_in_the_cotangent
     - tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises
-  status: failing
-  finding: >-
-    The adjoint is not scale-free: atol is 1e-8 + rtol * max|b|, absolute
-    below max|b| ~ 1e-3, so a cotangent whose entries are all below about
-    1e-8 satisfies the GMRES tolerance at x = 0 and the solve returns zero
-    with lineax reporting success (no dense fallback, no error).  The
-    gradient of 1e-12 * sum(x*) through a linear pair is exactly 0.0 where
-    the analytic value is 2.17e-12 -- a silent, plausible zero gradient for
-    any loss written in small units.  Guess:
-    src/maddening/core/graph_manager.py:1972 (atol in _krylov).
+    - tests/core/test_coupling_ift_gradient_in_any_units.py::test_the_tangent_and_the_adjoint_are_the_same_at_every_scale
+    - tests/core/test_coupling_ift_gradient_in_any_units.py::test_the_adjoint_above_the_dense_fallback_is_the_same_at_every_scale
+    - tests/property/test_differential_ift_derivatives.py::test_the_ift_derivatives_agree_with_dense_and_fori_at_every_scale
+  status: verified
+  notes: >-
+    Failing until 0.4.0's round-4 fix (MADD-ANO-113, since 0.3.0): atol was
+    1e-8 + rtol * max|b|, so a cotangent below about 1e-8 met the GMRES
+    test at x = 0 and the gradient came back exactly zero, reported
+    successful.  The solve now runs on b rescaled by an exact power of two
+    with a purely relative tolerance; the differential oracle compares jacfwd
+    and grad against dense and fori from 2**-100 to 2**60.
 
 - id: CPL-144
   area: ift gradients

@@ -661,6 +661,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **A loopback-bound API answers only to loopback host names** (CRITICAL, MADD-ANO-076, now resolved): a DNS-rebinding page's `Host` and
+  `Origin` agree, so it passed the Origin check and could drive every route, `/cloud/launch` included; any other `Host` is now a 403.
+  Action: pass `SimulationServer(allowed_hosts=)` to serve a loopback-bound server under a proxy's name or an `/etc/hosts` alias
 - **Cloud launches reach ready again, and cross-origin browser requests are
   refused** (CRITICAL, MADD-ANO-076, since 0.1.0; partially resolved, a DNS-rebinding page still passes): set `MADDENING_TRANSPORT_TOKEN` so the ZeroMQ CURVE key is not the
   cleartext API bearer token; pass `allowed_origins=` to embed the UI elsewhere

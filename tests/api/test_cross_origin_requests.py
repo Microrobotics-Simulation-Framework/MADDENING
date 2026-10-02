@@ -31,7 +31,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import pytest
 from fastapi.testclient import TestClient
 
-from maddening.api.server import SimulationServer
+from maddening.api.server import SimulationServer, _host_name
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.spring import SpringDamperNode
 
@@ -207,31 +207,112 @@ def test_a_websocket_with_no_origin_header_is_unaffected():
 # attacker then re-points at 127.0.0.1 is same-origin in the browser's
 # eyes: it sends ``Host`` and ``Origin`` that both name its own domain, so
 # the comparison above passes it, and a loopback bind demands no token.
-# Nothing checks ``Host`` against the names the server is reached by, which
-# is the defence against rebinding.  The first test pins the hole as it
-# stands; when it fails, the hole has been closed -- update the registry
-# entry and its ``residual_risk`` rather than the expectation here.
+# Until the Host allowlist, ``POST /sim/reset`` and ``/checkpoint/save``
+# answered 200 (and wrote the file), ``GET /graph`` 200, and ``/ws/state``
+# accepted the handshake.  A loopback-bound server now answers only to the
+# names this machine is reached by.  These requests come from a loopback
+# TCP peer, as a browser's do (``client=``); Starlette's in-process
+# ``"testclient"`` peer is not a browser and is not asked.
 
 REBOUND = "http://attacker.example:8000"
+LOOPBACK_PEER = ("127.0.0.1", 51234)
 
 
-def test_a_dns_rebound_page_passes_the_origin_check(tmp_path):
+def _rebound_client(tmp_path, *, base_url=REBOUND, **kwargs):
     server = SimulationServer(
         node_registry=REGISTRY, graph_manager=_graph(),
-        bind_host="127.0.0.1", checkpoint_root=str(tmp_path),
+        bind_host="127.0.0.1", checkpoint_root=str(tmp_path), **kwargs,
     )
-    client = TestClient(server.create_app(), base_url=REBOUND)
+    return TestClient(server.create_app(), base_url=base_url, client=LOOPBACK_PEER,
+                      raise_server_exceptions=False)
+
+
+def test_a_dns_rebound_page_is_refused_by_its_host(tmp_path):
+    client = _rebound_client(tmp_path)
     rebound = {"Origin": REBOUND, "Content-Type": "text/plain;charset=UTF-8"}
 
-    assert client.post("/sim/reset", headers=rebound).status_code == 200
-    assert client.post(
-        "/checkpoint/save?path=rebound.npz", headers=rebound,
-    ).status_code == 200
-    assert (tmp_path / "rebound.npz").exists()
-    with client.websocket_connect(
-        "/ws/state", headers={"Origin": REBOUND, "Host": "attacker.example:8000"},
-    ) as ws:
-        assert ws.accepted_subprotocol is None
+    for method, path in [("POST", "/sim/reset"), ("POST", "/checkpoint/save?path=rebound.npz"),
+                         ("GET", "/graph"), ("GET", "/graph/state"), ("GET", "/healthz")]:
+        response = client.request(method, path, headers=rebound)
+        assert response.status_code == 403, (path, response.text)
+        assert "allowed_hosts" in response.json()["detail"]
+    assert not (tmp_path / "rebound.npz").exists()
+    with pytest.raises(Exception):
+        with client.websocket_connect(
+            "/ws/state", headers={"Origin": REBOUND, "Host": "attacker.example:8000"},
+        ):
+            pass
+
+
+def test_a_dns_rebound_page_cannot_reach_the_cloud_launch_route(tmp_path, monkeypatch):
+    """The route that provisions paid instances, with the launcher stubbed
+    to raise if it were ever called and an empty HOME."""
+    import maddening.cloud.session as cloud_session
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    for name in list(os.environ):
+        if name.upper().startswith(("RUNPOD_", "AWS_", "GOOGLE_", "SKYPILOT_", "LAMBDA_")):
+            monkeypatch.delenv(name, raising=False)
+    launched = []
+
+    class NoLaunch:
+        def __init__(self, *args, **kwargs):
+            launched.append(args)
+            raise AssertionError("the cloud launcher was reached")
+
+    monkeypatch.setattr(cloud_session, "CloudSession", NoLaunch)
+    client = _rebound_client(tmp_path)
+    response = client.post("/cloud/launch", json={},
+                           headers={"Origin": REBOUND})
+    assert response.status_code == 403, response.text
+    assert launched == []
+
+
+@pytest.mark.parametrize("base_url", [
+    "http://127.0.0.1:8000", "http://localhost:8000",
+    "http://localhost", "http://127.0.0.2:9000", "http://LOCALHOST.:8000",
+])
+def test_the_loopback_names_are_served(tmp_path, base_url):
+    origin = base_url.lower().rstrip(".")
+    client = _rebound_client(tmp_path, base_url=base_url)
+    assert client.get("/graph").status_code == 200
+    response = client.post("/sim/reset", headers={"Origin": base_url})
+    assert response.status_code == 200, (base_url, origin, response.text)
+
+
+def test_an_operator_can_name_more_hosts(tmp_path):
+    client = _rebound_client(tmp_path, base_url="http://sim.lab.example:8443",
+                             allowed_hosts=["sim.lab.example"])
+    assert client.get("/graph").status_code == 200
+    assert _rebound_client(tmp_path, base_url="http://other.example:8443",
+                           allowed_hosts=["sim.lab.example"]).get("/graph").status_code == 403
+
+
+@pytest.mark.parametrize("host", ["attacker.example", "127.0.0.1.attacker.example",
+                                  "localhost.attacker.example", "localhost:http", "", " "])
+def test_a_host_that_is_not_a_loopback_name_fails_closed(tmp_path, host):
+    client = _rebound_client(tmp_path, base_url="http://127.0.0.1:8000")
+    assert client.get("/graph", headers={"Host": host}).status_code == 403
+
+
+@pytest.mark.parametrize("header, name", [
+    ("localhost:8000", "localhost"), ("LocalHost.", "localhost"),
+    ("[::1]:8000", "::1"), ("[::1]", "::1"), ("127.0.0.1", "127.0.0.1"),
+    # not a valid host[:port]: None, which is refused
+    ("::1", None), ("[::1]x", None), ("[::1", None), ("a:b:c", None),
+    ("host:", None), ("host:80a", None), ("", None),
+])
+def test_how_a_host_header_is_read(header, name):
+    """IPv6 literals are read here directly: Starlette's ``TestClient``
+    cannot carry one in its URL."""
+    assert _host_name(header) == name
+
+
+def test_an_allowed_hosts_entry_that_is_not_a_host_is_refused():
+    with pytest.raises(ValueError, match="not a host name"):
+        SimulationServer(node_registry=REGISTRY, allowed_hosts=["a:b:c"])
 
 
 def test_the_token_a_non_loopback_bind_demands_refuses_a_rebound_page():

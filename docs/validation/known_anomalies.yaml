@@ -6677,7 +6677,7 @@ anomalies:
       with 200 too.  Found by the second security round of
       the 0.4.0 audit and described in the CHANGELOG, but not registered
       until the round-3 confirmation audit.
-      Partially resolved in 0.4.0 (afddbf8, 2026-09-20): a state-changing
+      First fixed in 0.4.0 (afddbf8, 2026-09-20): a state-changing
       request or a WebSocket handshake whose `Origin` names neither the
       server itself (its authority compared with the `Host` header) nor an
       origin passed in `SimulationServer(allowed_origins=)` is refused with
@@ -6685,6 +6685,21 @@ anomalies:
       userinfo-prefixed one.  A request with no `Origin` (curl, a script)
       and a cross-origin `GET`, whose reply a page cannot read, are served
       as before.
+      That left DNS rebinding.  A page served from
+      `http://attacker.example:8000`, whose name the attacker then
+      re-points at 127.0.0.1, sends a `Host` and an `Origin` that both name
+      its own domain, so it passed the comparison.  On the 0.4.0 tree
+      (CPU, `TestClient`, a loopback bind with no token), with `Host` and
+      `Origin` both naming `attacker.example:8000`, `POST /sim/reset` and
+      `POST /checkpoint/save` answered 200 (the file was written under
+      `checkpoint_root`), `GET /graph` answered 200, and a `/ws/state`
+      handshake was accepted.  Resolved in 0.4.0 by a `Host` allowlist.
+      Where no token is demanded and the peer is a TCP address, a request
+      or WebSocket handshake whose `Host` is not `localhost`, a
+      `127.0.0.0/8` or `::1` literal (any port), or a name in
+      `SimulationServer(allowed_hosts=)` is refused with 403 or a 1008
+      close.  That covers every route, `GET` and `/healthz` included, and
+      `POST /cloud/launch`.
     severity: "critical"
     safety_relevance: "safety_relevant"
     safety_relevance_rationale: >
@@ -6698,9 +6713,9 @@ anomalies:
       other hosts' requests to the port itself.  The definition's note that
       a loopback default is not an exposure to other hosts rests on only
       local users reaching a loopback socket, which is exactly what this
-      defect made false.  The part still reachable in 0.4.0 (residual_risk)
-      is reached in the shipped default configuration, a loopback bind with
-      no token.
+      defect made false.  The rebinding form reached the shipped default
+      configuration of the 0.4.0 tree, a loopback bind with no token, until
+      the `Host` allowlist.
       Graded `safety_relevant` on the ground MADD-ANO-051 is: the writes
       change what the simulation computes with nothing in the reply or the
       state to show it, a checkpoint loaded into the graph or overwritten on
@@ -6709,43 +6724,33 @@ anomalies:
     affected_components:
       - "maddening.api.server.SimulationServer.create_app"
       - "maddening.api.server.origin_is_same_site"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Before 0.4.0: do not leave the API running while a browser on the same
       machine has pages open that you do not trust, or put it behind a
-      reverse proxy that refuses a request carrying a foreign `Origin`.
-      From 0.4.0, against the DNS rebinding that residual_risk describes:
-      run the API only while it is in use, or front it with a proxy that
-      refuses any `Host` header other than the loopback names you reach it
-      by.
-    resolution_status: "partially_resolved"
+      reverse proxy that refuses a request carrying a foreign `Origin` or a
+      `Host` other than the loopback names you reach it by.
+    resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      Live in 0.4.0, which is why this entry is partially resolved rather
-      than resolved: the check compares the `Origin` with the `Host` header,
-      and a DNS-rebinding page sends both naming its own domain.  A page
-      served from `http://attacker.example:8000`, whose name the attacker
-      then re-points at 127.0.0.1, is same-origin in the browser's eyes, so
-      it can send any request, JSON bodies included, and read the replies.
-      Measured on the 0.4.0 tree (CPU, `TestClient`, a loopback bind with
-      no token): with `Host` and `Origin` both naming
-      `attacker.example:8000`, `POST /sim/reset` and `POST /checkpoint/save`
-      answered 200 (the file was written under `checkpoint_root`), `GET
-      /graph` answered 200 and a `/ws/state` handshake was accepted.  The
-      server checks the `Host` against no list of the names it is reached
-      by, which is the defence against rebinding.  Some browsers now block
+      The check is skipped for a peer that is not an IP address: an
+      in-process client, and a connection over a Unix socket.  A browser
+      reaches the API only through a proxy there, and a same-host proxy
+      that forwards remote requests to a loopback-bound API is outside the
+      loopback trust model in any case (MADD-ANO-051's residual risk); such
+      a proxy should check `Host` itself.  A name added with
+      `allowed_hosts` is trusted on every port.  Some browsers also block
       or prompt for a public page's requests to a private address; the
       library does not rely on that.  Off loopback the bearer token is
-      demanded (MADD-ANO-051) and a rebound page does not hold it.  Pinned
-      by test_a_dns_rebound_page_passes_the_origin_check, which fails when
-      the hole is closed.
+      demanded (MADD-ANO-051), and a rebound page does not hold it.
     verification:
       - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_state_change_is_refused"
       - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_checkpoint_write_never_reaches_the_filesystem"
       - "tests/api/test_cross_origin_requests.py::test_a_cross_origin_page_cannot_open_the_state_stream"
       - "tests/api/test_cross_origin_requests.py::test_the_token_a_non_loopback_bind_demands_refuses_a_rebound_page"
-      # What stays open, pinned so that closing it fails.
-      - "tests/api/test_cross_origin_requests.py::test_a_dns_rebound_page_passes_the_origin_check"
+      - "tests/api/test_cross_origin_requests.py::test_a_dns_rebound_page_is_refused_by_its_host"
+      - "tests/api/test_cross_origin_requests.py::test_a_dns_rebound_page_cannot_reach_the_cloud_launch_route"
+      - "tests/api/test_cross_origin_requests.py::test_a_host_that_is_not_a_loopback_name_fails_closed"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-077"

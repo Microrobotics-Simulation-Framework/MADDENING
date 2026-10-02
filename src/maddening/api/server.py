@@ -24,7 +24,11 @@ Usage
 Security
 --------
 A **loopback bind is unauthenticated**, exactly as it always was: bind
-``127.0.0.1`` and nothing changes for local development.  **Any other
+``127.0.0.1`` and nothing changes for local development.  It answers only
+to the names this machine is reached by (``localhost``, ``127.0.0.1``,
+``[::1]``, and any ``allowed_hosts``) and refuses a state change from a
+foreign ``Origin``, so a web page in the developer's browser -- DNS
+rebinding included -- cannot drive it.  **Any other
 bind requires a bearer token on every route** except ``/healthz`` and
 the static ``/viz/*`` pages -- see :mod:`maddening.api.auth` for where
 the token comes from and how a client presents it.  Tell the server
@@ -44,6 +48,7 @@ the best-supported way to reach this API from another machine.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import math
 import os
@@ -1045,6 +1050,86 @@ _CROSS_ORIGIN_DETAIL = (
 )
 
 
+def _host_name(host_header: str) -> Optional[str]:
+    """The host part of a ``Host`` header -- lowercased, without its port
+    or a trailing dot, an IPv6 literal without its brackets -- or ``None``
+    when the header is not a valid ``host[:port]``."""
+    value = host_header.strip().lower()
+    if not value:
+        return None
+    if value.startswith("["):
+        end = value.find("]")
+        rest = value[end + 1:] if end > 0 else None
+        if rest is None or (rest and not (rest.startswith(":") and rest[1:].isdigit())):
+            return None
+        return value[1:end]
+    if value.count(":") > 1:           # a bare IPv6 address is not a valid Host
+        return None
+    name, colon, port = value.partition(":")
+    if colon and not port.isdigit():
+        return None
+    return name.rstrip(".") or None
+
+
+def _is_ip_address(peer: Optional[str]) -> bool:
+    try:
+        ipaddress.ip_address((peer or "").split("%", 1)[0])
+    except ValueError:
+        return False
+    return True
+
+
+def _rebinding_refusal(auth: APIAuth, peer: Optional[str], host_header: Optional[str],
+                       allowed_hosts: frozenset) -> Optional[str]:
+    """Why a request that reached a loopback-bound API without a token is
+    refused for its ``Host``, or ``None``.
+
+    The ``Origin`` check compares the ``Origin`` with the ``Host``, and a
+    DNS-rebinding page sends both naming its own domain: served from
+    ``http://attacker.example:8000`` and then re-pointed at 127.0.0.1, it is
+    same-origin in the browser's eyes, so it could reset the simulation,
+    write checkpoints, read every reply and open ``/ws/state`` -- and
+    ``POST /cloud/launch``.  It cannot choose the ``Host`` its browser
+    sends, which names its own domain, so a loopback-bound API serves only
+    the names this machine is reached by: ``localhost``, a ``127.0.0.0/8``
+    or ``::1`` literal (any port), and the names in *allowed_hosts*.
+
+    Asked only where nothing else authenticates the caller: a request that
+    must present the bearer token (a non-loopback bind, or a routable peer)
+    is not, since the token is what a rebound page does not hold.  And
+    only of a peer that is an IP address, because a browser reaches the API
+    over TCP: an in-process client (Starlette's ``TestClient`` reports the
+    peer ``"testclient"``) or a Unix-socket connection (no peer address) is
+    not a browser's.  A request with no ``Host`` at all is not a browser's
+    either and is served.
+    """
+    if auth.required_for_peer(peer) or not _is_ip_address(peer) or host_header is None:
+        return None
+    name = _host_name(host_header)
+    if name is not None and (is_loopback(name) or name in allowed_hosts):
+        return None
+    return (
+        f"This request named the host {host_header!r}, which is not a name of "
+        "this loopback-bound server (localhost, 127.0.0.1, [::1]).  On a "
+        "loopback bind the API is unauthenticated, and a request for another "
+        "name is how a DNS-rebinding web page reaches it from the developer's "
+        "browser.  To serve this server under another name (a reverse proxy, "
+        "an /etc/hosts alias), pass allowed_hosts to SimulationServer."
+    )
+
+
+def _normalised_hosts(hosts: Iterable[str]) -> frozenset:
+    """*hosts* as :func:`_host_name` reads a ``Host`` header (port and
+    case ignored); an entry that is not a host name raises ``ValueError``."""
+    out = set()
+    for host in hosts:
+        name = _host_name(str(host))
+        if name is None:
+            raise ValueError(f"allowed_hosts entry {host!r} is not a host name")
+        out.add(name)
+    return frozenset(out)
+
+
 class _WebSocketAuthMiddleware:
     """Default-deny for WebSocket handshakes.
 
@@ -1070,10 +1155,12 @@ class _WebSocketAuthMiddleware:
         The token and the rule for when it is demanded.
     """
 
-    def __init__(self, app, auth: APIAuth, allowed_origins: Iterable[str] = ()) -> None:
+    def __init__(self, app, auth: APIAuth, allowed_origins: Iterable[str] = (),
+                 allowed_hosts: frozenset = frozenset()) -> None:
         self.app = app
         self._auth = auth
         self._allowed_origins = frozenset(allowed_origins)
+        self._allowed_hosts = frozenset(allowed_hosts)
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "websocket":
@@ -1085,6 +1172,17 @@ class _WebSocketAuthMiddleware:
             key.decode("latin-1").lower(): value.decode("latin-1")
             for key, value in (scope.get("headers") or ())
         }
+        # A DNS-rebinding page passes the origin check below (its Origin
+        # and Host both name its own domain); its Host is what gives it
+        # away.  See _rebinding_refusal.
+        if _rebinding_refusal(self._auth, peer, headers.get("host"),
+                              self._allowed_hosts) is not None:
+            logger.warning(
+                "Refused WebSocket %s for host %r: not a name of this "
+                "loopback-bound server", scope.get("path", "?"), headers.get("host"),
+            )
+            await self._refuse(receive, send)
+            return
         # The origin check runs whether or not a token is demanded.  A
         # loopback bind demands none, and WebSocket is exempt from the
         # same-origin policy, so without this a page on any origin could
@@ -1320,6 +1418,14 @@ class SimulationServer:
         an embedder that serves its UI from another port.  The default
         -- none -- means same-origin only, which is the safe answer for
         every shipped configuration: see :func:`origin_is_same_site`.
+    allowed_hosts : iterable of str, optional
+        Host names, besides ``localhost`` and the loopback addresses, that
+        a loopback-bound server answers to (a reverse proxy's name, an
+        ``/etc/hosts`` alias); ports are ignored.  On a loopback bind the
+        API is unauthenticated, and a request whose ``Host`` names
+        anything else is refused with 403: that is how a DNS-rebinding web
+        page reaches it.  Not consulted where the bearer token is demanded
+        (a non-loopback bind, or a routable peer).
 
     Attributes
     ----------
@@ -1331,7 +1437,8 @@ class SimulationServer:
     Raises
     ------
     ValueError
-        If ``MADDENING_API_TOKEN`` or *api_token* is set but blank.
+        If ``MADDENING_API_TOKEN`` or *api_token* is set but blank, or an
+        *allowed_hosts* entry is not a host name.
     """
 
     def __init__(
@@ -1343,10 +1450,12 @@ class SimulationServer:
         bind_host: Optional[str] = None,
         api_token: Optional[str] = None,
         allowed_origins: Optional[Iterable[str]] = None,
+        allowed_hosts: Optional[Iterable[str]] = None,
     ) -> None:
         self.registry = dict(node_registry)
         self.auth = APIAuth(bind_host=bind_host, token=api_token)
         self.allowed_origins = frozenset(allowed_origins or ())
+        self.allowed_hosts = _normalised_hosts(allowed_hosts or ())
         self.gm = graph_manager if graph_manager is not None else GraphManager()
         # /checkpoint/{save,load} only touch files under this directory:
         # a client must not choose arbitrary server paths.  That holds
@@ -1604,6 +1713,7 @@ class SimulationServer:
             _WebSocketAuthMiddleware,
             auth=self.auth,
             allowed_origins=self.allowed_origins,
+            allowed_hosts=self.allowed_hosts,
         )
 
         @app.middleware("http")
@@ -1623,6 +1733,17 @@ class SimulationServer:
                         content={"detail": self._unauthorized_detail(peer)},
                         headers={"WWW-Authenticate": "Bearer"},
                     )
+            # Every method, GET included: a rebound page is same-origin to
+            # its browser, so it can read the replies it gets.
+            rebinding = _rebinding_refusal(self.auth, peer, request.headers.get("host"),
+                                           self.allowed_hosts)
+            if rebinding is not None:
+                logger.warning(
+                    "Refused %s %s for host %r: not a name of this "
+                    "loopback-bound server", request.method, request.url.path,
+                    request.headers.get("host"),
+                )
+                return JSONResponse(status_code=403, content={"detail": rebinding})
             if (request.method in _STATE_CHANGING_METHODS
                     and not origin_is_same_site(
                         request.headers.get("origin"),

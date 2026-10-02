@@ -361,3 +361,25 @@ def test_a_shrunken_step_never_reads_as_stationary(monkeypatch):
     res = _unit_fit(m, k, c_true)
     assert not res.converged
     assert _damping(res) == pytest.approx(3.0 * c_true, rel=1e-2)    # it really was stuck
+
+
+def test_a_run_of_stalled_candidates_is_not_the_rounding_floor(monkeypatch):
+    """The floor rule's defence: after progress, every candidate rejected
+    down to one within ``step_tol`` reads as the rounding floor only if the
+    undamped Gauss-Newton step does not lower the loss either.  Simulated by
+    candidates that stop moving after the first (accepted) step: they all
+    tie and are rejected, but the fit is nowhere near its floor."""
+    from maddening import sysid
+
+    real = sysid._marquardt_step  # noqa: SLF001
+    calls = []
+
+    def stalls(th, r, J, lam, lo, hi):
+        calls.append(1)
+        return real(th, r, J, lam, lo, hi) if len(calls) == 1 else th
+
+    monkeypatch.setattr(sysid, "_marquardt_step", stalls)
+    m, k, c_true = _UNITS["tonnes"]
+    res = _unit_fit(m, k, c_true)
+    assert len(res.losses) >= 2 and res.losses[1] < res.losses[0]     # it progressed
+    assert not res.converged

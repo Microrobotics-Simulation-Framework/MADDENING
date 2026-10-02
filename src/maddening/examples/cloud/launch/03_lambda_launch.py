@@ -5,9 +5,9 @@ This example mirrors ``02_runpod_launch.py`` but selects the
 ``lambda_labs`` provider via the job config.
 
 Usage:
-    python 03_lambda_launch.py
-    python 03_lambda_launch.py --job job_config.example.yaml
-    python 03_lambda_launch.py --dry-run
+    python -m maddening.examples.cloud.launch.03_lambda_launch
+    python -m maddening.examples.cloud.launch.03_lambda_launch --job job_config.example.yaml
+    python -m maddening.examples.cloud.launch.03_lambda_launch --dry-run
 
 Requires:
     - ~/.maddening/cloud_credentials.yaml with your Lambda Labs API key
@@ -15,6 +15,12 @@ Requires:
 
 Set the job config's ``provider:`` field to ``lambda_labs`` (or use
 ``--cloud lambda`` on the CLI; see SkyPilot docs).
+
+``--job`` defaults to ``job_config.example.yaml`` in the current
+directory.  The template ships with MADDENING; print the directory that
+holds it (and the credentials template) with::
+
+    python -c "import maddening.examples.cloud.config as c; print(c.__path__[0])"
 """
 
 import argparse

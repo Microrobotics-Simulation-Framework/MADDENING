@@ -186,6 +186,7 @@ def _sum_sq(tree):
 
 class TestWindowedLoss:
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_sysid.py::TestWindowedLoss::test_zero_at_truth_nonneg_and_finite_elsewhere_at_fixed_draws
     @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st,
            factor=perturb_st)
@@ -196,9 +197,26 @@ class TestWindowedLoss:
         """At the truth the loss vanishes; away from it it is finite and
         >= 0; its gradient is finite; a >= 20% stiffness error on a
         moving trajectory gives a strictly positive loss."""
-        gm = single
-        n_steps, sample_every, window = tiling
         note(f"truth={truth} init={init} tiling={tiling} factor={factor}")
+        self._check_zero_at_truth(single, truth, init, tiling, factor)
+
+    # The property above at two fixed draws, on every push and both JAX
+    # lanes: one window per sample, and three windows of a subsampled
+    # rollout (``sample_every=2``).  Each tiling is one compile.
+    @pytest.mark.parametrize("truth, init, tiling, factor", [
+        ({"stiffness": 30.0, "damping": 2.0, "mass": 1.0}, {"position": 0.0, "velocity": 1.0},
+         (20, 1, 1), {"stiffness": 1.3, "damping": 0.7}),
+        ({"stiffness": 150.0, "damping": 0.5, "mass": 3.0}, {"position": 4.0, "velocity": -2.0},
+         (24, 2, 4), {"stiffness": 0.6, "damping": 1.8}),
+    ], ids=["a-window-per-sample", "subsampled-three-windows"])
+    def test_zero_at_truth_nonneg_and_finite_elsewhere_at_fixed_draws(
+        self, single, truth, init, tiling, factor,
+    ):
+        self._check_zero_at_truth(single, truth, init, tiling, factor)
+
+    @staticmethod
+    def _check_zero_at_truth(gm, truth, init, tiling, factor):
+        n_steps, sample_every, window = tiling
 
         p_truth = _with_params(gm, "s", truth)
         _set_state(gm, "s", init["position"], init["velocity"])
@@ -272,6 +290,7 @@ class TestWindowedLoss:
                                 - obs["s"]["position"][1:]) ** 2))
         assert np.isclose(windowed, direct, rtol=1e-5, atol=1e-7), (windowed, direct)
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_sysid.py::TestWindowedLoss::test_mask_unconverged_through_coupled_group_at_one_draw
     @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st,
            tiling=st.sampled_from([t for t in TILINGS if t[1] == 1 and t[0] <= 60]),
@@ -290,9 +309,20 @@ class TestWindowedLoss:
         """Through an IFT-coupled group: the masked loss is finite,
         non-negative, never exceeds the unmasked one, and its gradient
         w.r.t. both nodes' params is finite."""
-        gm = coupled
-        n_steps, sample_every, window = tiling
         note(f"truth={truth} init={init} tiling={tiling} factor={factor}")
+        self._check_mask_unconverged(coupled, truth, init, tiling, factor)
+
+    # The property above at one fixed draw (the shortest rollout, four
+    # windows), on every push and both JAX lanes.
+    def test_mask_unconverged_through_coupled_group_at_one_draw(self, coupled):
+        self._check_mask_unconverged(
+            coupled, {"stiffness": 80.0, "damping": 1.0, "mass": 2.0},
+            {"position": -1.0, "velocity": 1.5}, (20, 1, 5),
+            {"stiffness": 1.4, "damping": 0.6})
+
+    @staticmethod
+    def _check_mask_unconverged(gm, truth, init, tiling, factor):
+        n_steps, sample_every, window = tiling
 
         p_truth = _with_params(gm, "s", truth)
         p_truth = {**p_truth, "nodes": {**p_truth["nodes"],
@@ -701,6 +731,7 @@ class TestFIM:
 
 class TestMultipleShooting:
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_sysid.py::TestMultipleShooting::test_seeded_window_states_reproduce_teacher_forcing_at_one_draw
     @pytest.mark.slow  # rollouts or fits compiled per example: over 5 s on CI; still in verify-hypothesis
     @given(truth=truth_params_st, init=initial_state_st, tiling=tiling_st)
     @settings(max_examples=EXAMPLES_COSTLY, deadline=None)
@@ -709,10 +740,21 @@ class TestMultipleShooting:
         continuity weight, multiple shooting equals the teacher-forced loss
         at the truth (both ~0) and its window-state gradient is finite —
         for every tiling incl. ``sample_every=2``."""
-        from maddening.sysid import init_window_states
-        gm = single
-        n_steps, sample_every, window = tiling
         note(f"truth={truth} init={init} tiling={tiling}")
+        self._check_seeded_windows(single, truth, init, tiling)
+
+    # The property above at one fixed draw, on every push and both JAX
+    # lanes: a subsampled rollout (``sample_every=2``) in three windows,
+    # so the off-data window start is exercised too.
+    def test_seeded_window_states_reproduce_teacher_forcing_at_one_draw(self, single):
+        self._check_seeded_windows(
+            single, {"stiffness": 60.0, "damping": 3.0, "mass": 1.5},
+            {"position": 2.5, "velocity": -1.0}, (24, 2, 4))
+
+    @staticmethod
+    def _check_seeded_windows(gm, truth, init, tiling):
+        from maddening.sysid import init_window_states
+        n_steps, sample_every, window = tiling
         p_truth = _with_params(gm, "s", truth)
         _set_state(gm, "s", init["position"], init["velocity"])
         obs = _observe(gm, n_steps, p_truth, sample_every)
@@ -933,6 +975,7 @@ class TestPrecisionLimitedRank:
         assert not warned
         assert report.rank == n
 
+    # Per push: tests/verification/hypothesis/test_hypothesis_sysid.py::TestPrecisionLimitedRank::test_the_threshold_still_separates_a_smaller_population
     @pytest.mark.slow  # 1,350 FIM reports over a fixed population: 6-8 s on CI; still in verify-hypothesis
     def test_the_threshold_still_separates_the_two_populations(self):
         """A calibration gate, not a property: fixed seed, no
@@ -953,12 +996,37 @@ class TestPrecisionLimitedRank:
         in recall on the ``m = 400`` cells rather than as nothing at
         all.
         """
-        rng = np.random.default_rng(20260919)
+        self._assert_separates(*self._separation(20260919, per_cell=150),
+                               min_disagreements=5)
+
+    def test_the_threshold_still_separates_a_smaller_population(self):
+        """The gate above over a third of the population (50 reports per
+        cell instead of 150, same cells, its own fixed seed), on every
+        push and both JAX lanes.  The verdicts are float32 decompositions,
+        so this is the one check here whose outcome moves with jaxlib,
+        and it must see both lanes' jaxlib, not only verify-hypothesis's.
+
+        The recall and fire-rate floors are the gate's.  Only the floor
+        on the number of disagreements scales with the population: this
+        seed gives (disagreements, caught, far, fired, long-residual)
+        = (3, 3, 180, 0, 2) on jaxlib 0.10.2 and 0.11.0 and
+        (4, 4, 180, 0, 3) on 0.11.2.  Measured against a seeded warning
+        factor on 0.11.0 (it is 2): 1.01 (catching nothing) and 8 (firing
+        on 40 of 180 ordinary reports) fail it; 1.3, 3 and 4 pass it, and
+        pass the full gate above too."""
+        self._assert_separates(*self._separation(20261002, per_cell=50),
+                               min_disagreements=2)
+
+    @staticmethod
+    def _separation(seed, per_cell):
+        """``(dis, caught, far, fired, long_dis)`` over ``per_cell`` reports
+        in each of the nine ``(n, m)`` cells."""
+        rng = np.random.default_rng(seed)
         dis = caught = far = fired = long_dis = 0
         for n in (2, 3, 5):
             for m in (12, 40, 400):
                 cutoff = max(n, np.sqrt(m)) * _EPS32
-                for _ in range(150):
+                for _ in range(per_cell):
                     rc = float(np.exp(rng.uniform(np.log(0.2), np.log(50.0))))
                     J64, _ = _fisher_with_known_ratio(
                         n, m, rc, int(rng.integers(0, 2**31 - 1)))
@@ -971,9 +1039,13 @@ class TestPrecisionLimitedRank:
                     elif rc >= 5.0:
                         far += 1
                         fired += warned
+        return dis, caught, far, fired, long_dis
+
+    @staticmethod
+    def _assert_separates(dis, caught, far, fired, long_dis, *, min_disagreements):
         where = (f"disagreements={dis} caught={caught} "
                  f"far={far} fired={fired} long_residual={long_dis}")
-        assert dis >= 5, f"population produced too few disagreements; {where}"
+        assert dis >= min_disagreements, f"population produced too few disagreements; {where}"
         # Measured 1.000 / 0.0000 over six seeds; the floors sit inside
         # that.  0.90 was 0.75 before the cutoff saw ``m``, when the
         # long-residual misses made a tighter floor unmeetable.

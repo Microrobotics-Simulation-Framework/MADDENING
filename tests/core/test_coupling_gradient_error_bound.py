@@ -226,6 +226,7 @@ _SWEEP = (3, 4, 6, 8)
 # stays on every push in
 # ``test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes``
 # and the NaN-where-not-computed tests.
+# Per push: tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes
 @pytest.mark.slow
 @pytest.mark.parametrize("kind", ["log", "square"])
 def test_the_gradient_bound_holds_across_an_early_exit_sweep(kind):
@@ -316,6 +317,7 @@ def _switched_off_graph(**group_kw):
 
 # Slow-marked: a tight reference gradient and two capped forward/gradient
 # pairs, 11-14 s on the CI runner (see the sweep above).
+# Per push: tests/core/test_coupling_gradient_error_bound.py::test_a_parameter_that_sits_at_zero_is_still_probed_at_one_cap
 @pytest.mark.slow
 def test_a_parameter_that_sits_at_zero_is_still_probed():
     """``h = 0`` still gets a probe, and the bound covers its gradient.
@@ -346,6 +348,33 @@ def test_a_parameter_that_sits_at_zero_is_still_probed():
         assert 1.0 <= ratio <= 1.35 * _BAND, (
             f"m={m}: bound / true for d/dh = {ratio:.3f}; a zero-valued "
             f"constant that is not probed reads ~0.6 here")
+
+
+def test_a_parameter_that_sits_at_zero_is_still_probed_at_one_cap():
+    """The test above at a cap of three, per push.
+
+    Cheaper in two ways that change nothing it asserts: the reference is
+    the float64 fixed point's gradient in closed form (``u* = 1 + 0.2
+    u*^2``, so ``d u*/d(a, g, h) = (1, u*^2, u*^5) / (1 - 0.4 u*)``), which
+    the tight float32 reference above matches to 1e-5, and the capped
+    gradient is taken without diagnostics, which leave it bit-identical
+    (the cap, not the criterion, stops the solve).
+    """
+    u_star, _ = _analytic_curved("square")
+    den = 1.0 - 0.4 * u_star
+    exact = {"a": 1.0 / den, "g": u_star ** 2 / den, "h": u_star ** 5 / den}
+    gm = _switched_off_graph(max_iterations=3)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["iterations"] == 3 and d["gradient_bound_usable"] is True, d
+    g_k = _gradients(_switched_off_graph, max_iterations=3, diagnostics=False)
+    true = {p: abs(float(g_k[p]) - exact[p]) / abs(float(g_k[p])) for p in exact}
+    assert true["h"] == max(true.values()), (
+        "fixture premise: the switched-off term has the largest error", true)
+    ratio = d["gradient_relative_error_bound"] / true["h"]
+    assert 1.0 <= ratio <= 1.35 * _BAND, (
+        f"bound / true for d/dh = {ratio:.3f}; a zero-valued constant that is "
+        f"not probed reads ~0.6 here")
 
 
 # ---------------------------------------------------------------------------
@@ -439,6 +468,7 @@ def _two_mode_reference(q):
 
 # Slow-marked: its reference is two gradients through 20 000 passes, 10-12 s
 # on the CI runner (see the sweep above).
+# Per push: tests/core/test_coupling_gradient_error_bound.py::test_on_an_affine_map_the_bound_reads_zero_against_the_exact_gradient
 @pytest.mark.slow
 def test_on_an_affine_map_the_gradient_bound_reads_zero_while_the_forward_is_far_off():
     """The docstring caveat, as a test: a tiny bound is not a healthy solve.
@@ -481,8 +511,33 @@ def test_on_an_affine_map_the_gradient_bound_reads_zero_while_the_forward_is_far
         f"point's {g_star}")
 
 
+def test_on_an_affine_map_the_bound_reads_zero_against_the_exact_gradient():
+    """The test above, per push, with the float64 fixed point's gradient
+    (``1 / (1 - 0.999)``) as the reference in place of the two arms of
+    twenty thousand passes, which match it to 1e-4.  The gradient is
+    taken without diagnostics: on this map it is exact from any iterate,
+    so the premise does not depend on where the solve stopped."""
+    tol = 1e-4
+    gm = _two_mode_graph(0.0, tolerance=tol)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _two_mode_distance(gm, 0.0)
+    assert d["converged"] is True, d
+    assert distance > 100 * tol, (
+        f"fixture premise: the forward is {distance:.3e} from the fixed point")
+    assert d["spectral_error_bound"] >= distance, (d, distance)
+    assert d["gradient_bound_usable"] is True, d
+    assert d["gradient_relative_error_bound"] <= 1e-6, d
+    g_k = float(_gradients(functools.partial(_two_mode_graph, 0.0), tolerance=tol,
+                           diagnostics=False)["c_slow"])
+    _, exact = _two_mode_fixed_point(0.0)
+    assert abs(g_k - exact) <= 1e-4 * abs(exact), (
+        f"fixture premise: the early-exit gradient {g_k} is the fixed point's {exact}")
+
+
 # Slow-marked: two capped forward/gradient pairs, 8-9 s on the CI runner
 # (see the sweep above).
+# Per push: tests/core/test_coupling_gradient_error_bound.py::test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap
 @pytest.mark.slow
 def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt():
     """Affine in the state is not enough: ``g`` multiplies it.
@@ -513,6 +568,25 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt():
             f"m={m}: bound / true = {ratio:.4f}; recorded 1.814")
 
 
+def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap():
+    """The test above at a cap of three, per push; the capped gradient is
+    taken without diagnostics, which leave it bit-identical (the cap stops
+    the solve)."""
+    _, exact = _analytic_curved("affine")
+    gm = _curved_graph("affine", max_iterations=3)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    assert d["iterations"] == 3 and d["converged"] is False, d
+    g_k = _gradients(functools.partial(_curved_graph, "affine"), max_iterations=3,
+                     diagnostics=False)
+    assert float(g_k["a"]) == pytest.approx(exact["a"], rel=1e-5), (
+        "fixture premise: the additive parameter's gradient is exact")
+    true = abs(float(g_k["g"]) - exact["g"]) / abs(float(g_k["g"]))
+    assert true > 0.5, "fixture premise: the multiplicative one is far off"
+    ratio = d["gradient_relative_error_bound"] / true
+    assert 1.0 <= ratio <= 1.814 * 1.1, f"bound / true = {ratio:.4f}; recorded 1.814"
+
+
 # ---------------------------------------------------------------------------
 # The distance is the spectral bound's
 # ---------------------------------------------------------------------------
@@ -523,6 +597,7 @@ _HIDDEN_Q = -0.02
 
 # Slow-marked: its reference is two gradients through 20 000 passes, 10-12 s
 # on the CI runner (see the sweep above).
+# Per push: tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient
 @pytest.mark.slow
 def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
     """On a hidden slow mode the distance is what decides the bound.
@@ -555,6 +630,30 @@ def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
     assert with_estimate < true / 10, (
         f"fixture premise: with error_estimate as its distance the bound "
         f"would read {with_estimate:.3e} against a true {true:.3e}")
+
+
+def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient():
+    """The test above, per push, with the float64 fixed point's gradient
+    as the reference in place of the two arms of twenty thousand passes,
+    which match it to 1e-4 (the gradient here is ~25% off).  The gradient
+    is taken without diagnostics, which leave the returned iterate
+    bit-identical (``tests/core/test_coupling_diagnostics_leave_the_state_alone.py``),
+    and so the gradient at it: measured equal to the last bit (997.6342)."""
+    q = _HIDDEN_Q
+    gm = _two_mode_graph(q)
+    gm.step()
+    d = gm.coupling_diagnostics()["a+b"]
+    distance = _two_mode_distance(gm, q)
+    assert d["converged"] is True and d["gradient_bound_usable"] is True, d
+    assert distance > 50 * d["error_estimate"], (
+        "fixture premise: error_estimate understates the distance", d, distance)
+    g_k = float(_gradients(functools.partial(_two_mode_graph, q), diagnostics=False)["c_slow"])
+    _, g_star = _two_mode_fixed_point(q)
+    true = abs(g_k - g_star) / abs(g_k)
+    bound = d["gradient_relative_error_bound"]
+    assert true <= bound, f"the gradient is {true:.3e} off and the bound reads {bound:.3e}"
+    with_estimate = bound * d["error_estimate"] / d["spectral_error_bound"]
+    assert with_estimate < true / 10, (with_estimate, true)
 
 
 # ---------------------------------------------------------------------------

@@ -169,6 +169,28 @@ a value that would change the state's layout, or take it past the API's
 state cap, is refused before a node of that size is built wherever its
 `initial_state()` can be evaluated abstractly.
 
+Two more rules close what that leaves.  A value the node's step cannot run
+with is a 400 naming the error: the node's hooks are traced, on a copy,
+with the request's values, and a trace that raises where the current
+values' trace does not is refused (`RigidBodyNode` `constraints: {"w": 0}`
+used to answer 200 and make every later step a 500).  And a structural
+value is stored in its parameter's own numeric type: a float with no
+fractional part written for an integer parameter is stored as that integer
+(`stencil_order: 4.0` is `4`), any other float for one is a 400, and an
+integer written for a float parameter is stored as a float.  Before 0.4.0
+the raw value was stored, and `stencil_order: 4.0` became a trainable leaf
+of `gm.params`.
+
+The size of what a write, or a new node, would build is checked before
+anything is built.  `HeatNode`, `LBMNode`, `LBMPipeNode` and
+`WaveletAdaptiveNode` estimate, from their parameters alone, the state they
+build and the memory their constructor takes; `POST /graph/nodes` and
+`PUT /graph/params` refuse a node over `MAX_NODE_STATE_ELEMENTS` state
+elements or `MAX_NODE_BUILD_BYTES` of build memory before calling its
+constructor, and `GraphManager.from_dict` refuses (`ValueError`) one that
+would not fit in the machine's memory.  A node class without an estimate
+is checked on the state it builds, as before.
+
 `python -m maddening.examples.servers.rest_params_demo` walks through
 these answers in-process (FastAPI's `TestClient`, no port): a write
 honoured on the next step without a recompile, a bound and a

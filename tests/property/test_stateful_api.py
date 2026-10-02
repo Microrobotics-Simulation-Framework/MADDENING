@@ -46,6 +46,7 @@ from hypothesis import settings
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 
+from tests.conftest import EXAMPLES_FLOOR
 from tests.property.stateful_model import (
     BOUNDARY_INPUTS,
     DT,
@@ -71,8 +72,11 @@ CHECKPOINT_SLOTS = ("first.npz", "nested/second.npz", "third")
 """Checkpoint names inside the configured root (the last one has no suffix,
 which ``numpy.savez`` appends and ``load_state`` retries with)."""
 
-ESCAPING_PATHS = ("../escaped.npz", "/tmp/escaped.npz", "a/../../escaped.npz")
-"""Paths that resolve outside ``checkpoint_root`` and must be refused."""
+ESCAPING_PATHS = ("../escaped.npz", "/tmp/escaped.npz", "a/../../escaped.npz",
+                  "", ".", "nested/..")
+"""Paths that resolve outside ``checkpoint_root`` and must be refused --
+the last three to the root itself, which ``numpy.savez`` turned into
+``<root>.npz`` in its parent."""
 
 
 class SimulationServerMachine(RuleBasedStateMachine):
@@ -226,6 +230,20 @@ class SimulationServerMachine(RuleBasedStateMachine):
                                source_field=src_field, target_field=tgt_field)
         # remove_edge drops every copy of a repeated edge, not just one.
         self.edges = [e for e in self.edges if e != edge]
+
+    @precondition(lambda self: bool(self.types))
+    @rule(data=st.data())
+    def remove_missing_edge(self, data):
+        """Removing an edge the graph does not have is a 404 that changes
+        nothing (it used to answer 200)."""
+        tgt = data.draw(st.sampled_from(sorted(self.types)))
+        before = self._snapshot()
+        resp = self._send("DELETE", "/graph/edges", json={
+            "source_node": "ghost", "target_node": tgt,
+            "source_field": "x", "target_field": "y",
+        })
+        assert resp.status_code == 404, resp.text[:500]
+        self._reject(resp, before)
 
     @precondition(lambda self: bool(self._boundary_targets()))
     @rule(kind=st.sampled_from(("unknown_source", "unknown_target", "unknown_field")),
@@ -534,6 +552,7 @@ class SimulationServerMachine(RuleBasedStateMachine):
             self._send("GET", "/graph/state").json())
 
 
+# Per push: tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
 @pytest.mark.slow  # a state machine over the REST server: 8-19 s on CI
 def test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step():
     """Any sequence of REST calls: no 5xx, no partial write, model agreement.
@@ -550,6 +569,25 @@ def test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step():
     run_state_machine_as_test(
         SimulationServerMachine,
         settings=settings(stateful_step_count=14),
+    )
+
+
+def test_short_rest_sequences_keep_the_server_and_the_model_in_step():
+    """The machine above at reduced depth, on every push: six calls per
+    sequence instead of fourteen, the same rules and invariants, drawn the
+    same way on every run.  Six calls still build a node, wire and compile
+    it and step or checkpoint it, and every example still pays for the
+    teardown's rebuild-and-replay.
+
+    ``max_examples`` is the house floor (``EXAMPLES_FLOOR``) and is set
+    here rather than left to the profile: this is the per-push sibling of
+    the test above, sized to stay inside the time budget, and under the
+    ``ci`` profile the depth comes from that test instead.
+    """
+    run_state_machine_as_test(
+        SimulationServerMachine,
+        settings=settings(stateful_step_count=6, max_examples=EXAMPLES_FLOOR,
+                          derandomize=True),
     )
 
 

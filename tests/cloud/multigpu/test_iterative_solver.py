@@ -498,6 +498,9 @@ class TestPreconditioned:
         assert jnp.allclose(jnp.asarray(g_sh), jnp.asarray(g_ref), rtol=1e-3, atol=1e-3)
 
 
+# Per push: tests/cloud/multigpu/test_iterative_solver.py::TestDifferentiability::test_jvp_through_sharded_cg_matches_unsharded
+# and tests/cloud/multigpu/test_iterative_solver.py::TestPreconditioned::test_grad_through_sharded_preconditioned_cg_on_4_device_mesh
+# (32 unknowns rather than 1e5).
 @pytest.mark.slow
 class TestGradientParityAtScale:
     """The v0.4.0 plan's gradient-parity gate at real-mesh size, the half

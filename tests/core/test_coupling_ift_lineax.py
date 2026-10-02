@@ -142,6 +142,8 @@ def _grad_through_compiled_step(gm: GraphManager, perturbed_node: str):
 # linearising the IFT rule over 40 coupled floats.  The IFT adjoint is held
 # on every push by the analytic-gradient tests below and in
 # ``tests/core/test_coupling_ift_gradient.py``.
+# Per push: tests/core/test_coupling_ift_gradient.py::test_backward_parity_through_jit and
+# tests/core/test_coupling_ift_lineax.py::test_default_adjoint_solve_returns_the_analytic_gradient_when_stiff
 @pytest.mark.slow
 def test_small_chain_backward_parity():
     """N=20 chain: jax.grad through jitted step agrees fori vs ift."""
@@ -163,6 +165,9 @@ def test_small_chain_backward_parity():
 # ----------------------------------------------------------------------
 
 
+# Per push: tests/core/test_coupling_ift_gradient.py::test_backward_parity_through_jit and
+# tests/core/test_coupling_ift_lineax.py::test_default_adjoint_solve_returns_the_analytic_gradient_when_stiff
+# (the IFT adjoint on small groups; the 120-node scale is slow-lane only).
 @pytest.mark.slow
 def test_large_chain_backward_finite_diff():
     """N=120 chain (~240 floats of group state): IFT backward via
@@ -308,6 +313,7 @@ def test_bicgstab_known_breakdown_with_function_operator():
 # Slow-marked (still run by slow-tests.yml), for the reason above: 12-15 s on
 # the CI runner.  ``test_stiff_adjoint_agrees_across_linear_solvers`` keeps
 # dense-vs-gmres agreement on every push on a four-float group.
+# Per push: tests/core/test_coupling_ift_lineax.py::test_stiff_adjoint_agrees_across_linear_solvers
 @pytest.mark.slow
 def test_dense_matches_gmres_gradient_small_chain():
     """``linear_solver='dense'`` agrees with ``'gmres'`` on a small chain.

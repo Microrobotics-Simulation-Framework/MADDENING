@@ -106,7 +106,7 @@ def test_a_run_that_raises_at_its_first_step_is_a_400_and_moves_nothing():
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-061: a run that raises part-way says nothing was stepped "
+                   reason="REST-058: a run that raises part-way says nothing was stepped "
                           "after stepping; pending fix")
 def test_a_run_that_raises_part_way_does_not_say_nothing_was_stepped(monkeypatch):
     """Slices that always double (1, 2, 4, ... steps): the 33rd step is
@@ -236,7 +236,7 @@ def test_a_checkpoint_that_is_not_an_archive_is_a_400_naming_no_internals(tmp_pa
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-071: a file NumPy refuses with a ValueError has NumPy's "
+                   reason="REST-095: a file NumPy refuses with a ValueError has NumPy's "
                           "message echoed in the 400; pending fix")
 def test_a_checkpoint_numpy_refuses_as_a_pickle_is_a_400_naming_no_internals(tmp_path):
     """The release notes: "load errors no longer echo parser internals".
@@ -275,3 +275,44 @@ def test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded(tmp_path):
         assert client.get("/graph/state").json() == before
         assert client.get("/graph/params/ball").json() == params_before
     assert np.isfinite(before["ball"]["position"])
+
+
+# ---------------------------------------------------------------------------
+# Shutdown signals
+# ---------------------------------------------------------------------------
+
+def test_the_shutdown_signals_are_chained_only_from_the_main_thread_over_a_python_handler():
+    """``_chain_shutdown_signals``: SIGINT and SIGTERM call
+    ``request_shutdown`` ahead of the handler already installed -- only from
+    the main thread, and only over a Python handler (a default or ignored
+    signal is left alone)."""
+    import signal
+    import threading
+
+    server, _client = _ball_server()
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    seen: list = []
+    try:
+        signal.signal(signal.SIGINT, lambda signum, frame: seen.append(signum))
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        restore = server._chain_shutdown_signals()
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+        chained = signal.getsignal(signal.SIGINT)
+        chained(signal.SIGINT, None)
+        assert server._shutdown.is_set() and seen == [signal.SIGINT]
+        restore()
+        assert signal.getsignal(signal.SIGINT) is not chained
+        # From another thread nothing is installed.
+        server._shutdown.clear()
+        installed = signal.getsignal(signal.SIGINT)
+        out: list = []
+        worker = threading.Thread(target=lambda: out.append(server._chain_shutdown_signals()))
+        worker.start()
+        worker.join(10)
+        assert signal.getsignal(signal.SIGINT) is installed
+        assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
+        out[0]()
+        assert signal.getsignal(signal.SIGINT) is installed
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)

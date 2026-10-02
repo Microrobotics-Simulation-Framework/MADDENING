@@ -109,6 +109,7 @@ def _load(directory: Path, goal: str) -> dict:
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
 @pytest.mark.slow
 @pytest.mark.parametrize("goal", _GOALS)
 def test_every_goal_records_checks_and_passes_them_in_the_dry_run(dry_run_dir, goal):
@@ -129,6 +130,7 @@ def test_every_goal_records_checks_and_passes_them_in_the_dry_run(dry_run_dir, g
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
 @pytest.mark.slow
 def test_coupled_json_compares_forward_and_adjoint_under_both_solvers(dry_run_dir):
     doc = _load(dry_run_dir, "coupled")
@@ -168,6 +170,7 @@ def test_coupled_json_compares_forward_and_adjoint_under_both_solvers(dry_run_di
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_halo_reference_encodes_the_documented_boundary_fill
 @pytest.mark.slow
 def test_halo_json_is_bit_exact_on_every_boundary_mode_width_and_mesh(dry_run_dir):
     doc = _load(dry_run_dir, "halo")
@@ -330,6 +333,7 @@ def test_gradient_json_reports_parity_for_rollout_and_sharded_cg(dry_run_dir):
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_exchange_timing_input_is_presharded_on_the_mesh
 @pytest.mark.slow
 def test_rollout_grad_timings_are_of_compiled_functions(dry_run_dir):
     """Both sides are ``jax.jit(jax.grad(...))`` with compile time reported
@@ -348,6 +352,7 @@ def test_rollout_grad_timings_are_of_compiled_functions(dry_run_dir):
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_recommendation_rule
 @pytest.mark.slow
 def test_summarise_prints_ranking_table_but_does_not_rank_a_dry_run(dry_run_dir):
     out = _run("--summarise", str(dry_run_dir)).stdout
@@ -360,6 +365,7 @@ def test_summarise_prints_ranking_table_but_does_not_rank_a_dry_run(dry_run_dir)
 
 
 # Slow: reads the all-goals dry run (dry_run_dir), one subprocess of 13-17 s on CI.
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_the_checklist_closes_only_on_a_real_gpu_run_with_enough_devices
 @pytest.mark.slow
 def test_summarise_does_not_close_the_checklist_from_a_dry_run(dry_run_dir):
     out = _run("--summarise", str(dry_run_dir)).stdout
@@ -1006,6 +1012,7 @@ def test_a_replicated_array_is_not_partitioned():
     assert rp._is_partitioned(jnp.ones((8, 4)), _N_DEV) is False      # one device
 
 
+# Per push: tests/cloud/multigpu/test_run_pod_dry_run.py::test_a_two_device_run_records_the_cases_it_cannot_run
 @pytest.mark.slow
 def test_a_two_device_run_of_the_wrapper_goals_records_the_pencil_as_not_run():
     """The goals that run the stencil wrapper, on 2 devices: every case of

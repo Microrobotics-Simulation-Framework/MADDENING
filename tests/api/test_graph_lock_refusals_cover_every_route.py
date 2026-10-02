@@ -15,7 +15,8 @@ well), with nothing written by any refused request.
 
 The lock-timeout rows are checked with ``_GRAPH_LOCK_TIMEOUT`` patched to
 a fraction of a second.  Three rows the tree does not meet are strict
-xfails (``REST-0xx`` in ``docs/validation/rest_runpod_claims.yaml``): the
+xfails (``REST-044``, ``REST-045`` and ``REST-046`` in
+``docs/validation/rest_runpod_claims.yaml``): the
 runner routes wait for the runner's own lock before the graph's, so a
 request queued behind a ``POST /sim/start`` that is waiting for the graph
 answers after more than one timeout, a ``POST /sim/stop`` behind it is not
@@ -256,7 +257,7 @@ def _queue_behind_a_start(server, client, calls) -> dict:
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-047: a runner route behind a waiting /sim/start answers after "
+                   reason="REST-044: a runner route behind a waiting /sim/start answers after "
                           "more than one lock timeout; pending fix")
 def test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout(
         tmp_path, monkeypatch):
@@ -273,7 +274,7 @@ def test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout(
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-048: POST /sim/stop waits for a /sim/start that is waiting for "
+                   reason="REST-045: POST /sim/stop waits for a /sim/start that is waiting for "
                           "the graph; pending fix")
 def test_stop_is_answered_at_once_while_a_start_waits_for_the_graph(tmp_path, monkeypatch):
     monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", 1.0)
@@ -287,7 +288,7 @@ def test_stop_is_answered_at_once_while_a_start_waits_for_the_graph(tmp_path, mo
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-049: a reset that stopped the runner and then timed out on "
+                   reason="REST-046: a reset that stopped the runner and then timed out on "
                           "the graph says nothing was changed; pending fix")
 def test_a_reset_that_stopped_the_runner_does_not_say_nothing_was_changed(
         tmp_path, monkeypatch):

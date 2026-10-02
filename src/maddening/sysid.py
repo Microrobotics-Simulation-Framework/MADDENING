@@ -2595,6 +2595,41 @@ _HOLD_LOSS_RTOL_EPS = 1024.0
 #: ``eps * max(1, |u|)``.
 _HOLD_LOSS_ROUNDINGS = 4.0
 
+#: :func:`fit_lm`'s default ``step_tol``, in units of each parameter's own
+#: ``eps``: a proposed step converges the run when it moves every trainable
+#: parameter by at most ``2**4`` units in the last place of itself.
+#:
+#: The tolerance is the parameters' float resolution because that is the
+#: only scale every fit has.  The fixed ``1e-8`` it replaces was an
+#: absolute distance in the optimiser's coordinates, and in float32 it is
+#: below one ulp of almost any coordinate (``log(40)`` has an ulp of
+#: 2.4e-7), so no step could meet it.  What a fit at the float32 floor
+#: does instead is propose a step that rounds to nothing: noiseless spring
+#: data reached loss 8.7e-14 in four iterations, the next proposal moved
+#: neither coordinate by a single bit, and the run ended "unconverged".
+#: ``2**4`` rather than 1 because a proposal at the floor is the
+#: Gauss-Newton fit of the residual's rounding noise, which can land a few
+#: ulps from the iterate rather than on it; it is far below anything a
+#: float32 fit determines (16 ulps is 1.9e-6 relative).
+_STEP_TOL_ULPS = 2.0 ** 4
+
+
+def _float_resolution(tree) -> np.ndarray:
+    """``eps`` of each entry's own dtype, in ``ravel_pytree(tree)`` order.
+
+    Per entry rather than of the raveled vector's dtype: ``ravel_pytree``
+    promotes a float32 leaf beside a float64 one to float64, and a
+    tolerance taken from float64's ``eps`` is one no float32 parameter
+    can meet.  A non-floating leaf (never trainable) gets float32's.
+    """
+    parts = []
+    for leaf in jax.tree.leaves(tree):
+        dtype = jnp.result_type(leaf)
+        eps = float(np.finfo(dtype if jnp.issubdtype(dtype, jnp.floating)
+                             else np.float32).eps)
+        parts.append(np.full(_leaf_size(leaf), eps))
+    return np.concatenate(parts) if parts else np.zeros(0)
+
 
 class _ExcitationTracker:
     """Accumulated gradient second moment ``G = sum_t g_t g_t^T`` of a fit.
@@ -3144,8 +3179,33 @@ class FitResult:
     ``params`` is a physical pytree (already mapped back through
     ``GraphManager.constrain``); ``losses[i]`` is the loss *before*
     update ``i + 1`` -- the loss of the iterate ``i`` updates produced, so
-    ``losses[0]`` is the starting point's; ``converged`` is whether
-    ``losses[-1] <= tol``.
+    ``losses[0]`` is the starting point's.
+
+    ``converged``
+        Whether the run stopped because a stopping test was met, rather
+        than because it used its whole ``n_iter`` or (:func:`fit_lm`)
+        because no damping could make a step acceptable.  The tests:
+
+        * the loss reached ``tol``: ``losses[-1] <= tol``, tested before
+          each update, by all three fitters.  ``tol=0.0``, the default,
+          turns this test off, and for :func:`fit` and
+          :func:`fit_multiple_shooting` it is the only one -- so with the
+          default ``tol`` their ``converged`` is always ``False``, and a
+          fit's quality is read from ``best_loss`` and ``losses``, not
+          from this flag;
+        * :func:`fit_lm` only: the step an iteration *proposed* (its first
+          candidate) moved every trainable parameter by no more than
+          ``step_tol`` of its own magnitude -- by default ``2**4`` ulps of
+          its dtype, the parameters' float resolution.  The proposal
+          counts whether or not it lowered the loss, because at the float
+          floor it rounds to (nearly) nothing and cannot strictly lower a
+          loss that is rounding noise.  Then ``losses[-1]`` is the loss of
+          the iterate the proposal was made from.
+
+        It says the iteration stopped moving, not that the data determined
+        the parameters: a residual that reads none of the trainable
+        parameters converges at its start (its proposal is exactly zero).
+        :attr:`excited_rank` and :func:`fim` answer the second question.
 
     ``params`` is the **lowest-loss iterate the fitter evaluated**, not
     necessarily its last; ``best_iteration`` says which.  Earlier 0.4.0
@@ -3583,7 +3643,7 @@ def fit_lm(
     lam_up: float = 10.0,
     lam_down: float = 0.1,
     tol: float = 0.0,
-    step_tol: float = 1e-8,
+    step_tol: Optional[float] = None,
     noise_std: Optional[Any] = None,
     callback: Optional[Callable[[int, float, dict], None]] = None,
     notify_every: int = 1,
@@ -3602,9 +3662,14 @@ def fit_lm(
     ``lam_up``.  ``noise_std`` weights the residual as in :func:`fim`.
 
     Returns a :class:`FitResult` whose ``losses[i]`` is the (weighted)
-    ``0.5 ||r||²`` at the start of iteration ``i + 1``; ``converged`` when
-    the loss reached ``tol`` or the step norm in unconstrained
-    coordinates fell below ``step_tol``.
+    ``0.5 ||r||²`` at the start of iteration ``i + 1``.  ``converged`` is
+    ``True`` when the loss reached ``tol``, or when the step an iteration
+    *proposed* -- its first candidate, at the damping it started with --
+    moved every trainable parameter by no more than ``step_tol`` of its
+    own magnitude, whether or not that step lowered the loss (see
+    ``step_tol``).  A run that ends because twelve damping retries were
+    all rejected after a larger proposal is not converged, and neither is
+    one that ran out of ``n_iter``.
 
     Like :func:`fit`, it returns the **lowest-loss iterate** it evaluated,
     and here that is always the last one: a step is accepted only when it
@@ -3614,10 +3679,41 @@ def fit_lm(
     :attr:`FitResult.best_iteration` is ``len(losses)`` when the run ended
     on an accepted step (the loss of that iterate, ``best_loss``, is the
     one the acceptance test computed) and ``len(losses) - 1`` when it
-    ended on ``tol`` or on a step no damping could make acceptable.
+    ended on ``tol``, on a proposed step within ``step_tol`` that did not
+    lower the loss, or on a step no damping could make acceptable.
 
     Parameters
     ----------
+    step_tol : float, optional
+        Relative step tolerance: an iteration whose proposed step changes
+        every trainable parameter ``p`` by at most ``step_tol * |p|``
+        (compared with ``<=``) ends the run as converged.  ``None`` (the
+        default) is ``2**4`` units in the last place of each parameter's
+        own dtype -- ``2**4 * eps``, 1.9e-6 in float32 and 3.6e-15 in
+        float64 -- the parameters' own float resolution, so the default
+        can be met at either precision.  ``0.0`` counts only a step that
+        leaves every parameter bit for bit where it was.  Measured on the
+        physical parameters, after ``constrain``: so a step that pushes a
+        clipped parameter further past its bound moves it by nothing, and
+        the tolerance means the same under every transform.  A parameter
+        whose value is exactly ``0`` has no relative resolution and meets
+        it only with a step of exactly nothing there; give such a fit a
+        ``tol``.
+
+        The proposal is tested whether or not it was accepted, because at
+        the float floor its verdict carries no information: a fit that has
+        reached its optimum proposes a step that rounds to (nearly)
+        nothing, and a step of nothing cannot *strictly* lower a loss that
+        is already rounding noise.  Earlier 0.4.0 development builds
+        tested only accepted steps, against a fixed ``1e-8`` in the
+        optimiser's coordinates that float32 cannot resolve, and reported
+        ``converged=False`` for a noiseless fit at loss 8.7e-14 whose last
+        proposal moved neither parameter by a single bit.  Only the
+        *proposal* counts, not a damped retry: retries shrink the step by
+        a factor of ``lam_up`` each whatever the loss is doing, so a short
+        retry is evidence about the damping and not about the iterate.
+        Changed from an absolute ``1e-8`` during 0.4.0 development, before
+        any release.
     hold_undetermined : bool
         Keep the fitted parameters out of the directions the data does not
         determine, exactly as :func:`fit` does and by the same shared
@@ -3689,10 +3785,12 @@ def fit_lm(
     _check_hyper("tol", tol, ge=0.0,
                  why=" tol is compared with <=, so NaN never stops the loop and "
                      "a negative tol never can either; 0.0 disables the early stop.")
-    _check_hyper("step_tol", step_tol, ge=0.0,
-                 why=" step_tol is compared with <, so a negative one can never "
-                     "be met and 'converged' could only ever mean the loss "
-                     "reached tol.")
+    if step_tol is not None:
+        _check_hyper("step_tol", step_tol, ge=0.0,
+                     why=" step_tol is a relative change compared with <=, so a "
+                         "negative one can never be met and 'converged' could only "
+                         "ever mean the loss reached tol; None is the parameters' "
+                         "own float resolution.")
     _check_count("notify_every", notify_every)
     _check_hold_undetermined(hold_undetermined)
     start = gm._params_or_default(params)  # noqa: SLF001
@@ -3732,6 +3830,21 @@ def fit_lm(
         A_damped = A + lam * jnp.diag(jnp.diag(A)) + 1e-12 * jnp.eye(A.shape[0], dtype=A.dtype)
         delta = jnp.linalg.solve(A_damped, g)
         return th - delta
+
+    # The step test, on the physical trainable entries (see ``step_tol``):
+    # per entry, a relative tolerance -- ``step_tol``, or ``2**4`` ulps of
+    # the entry's own dtype -- so a float32 leaf beside a float64 one is
+    # held to float32's resolution, not to the raveled vector's.
+    rel_tol = (_STEP_TOL_ULPS * _float_resolution(start)[idx] if step_tol is None
+               else float(step_tol))
+
+    def _physical(th) -> np.ndarray:
+        p = gm.constrain(unravel(flat_u.at[idx].set(th)))
+        return np.asarray(ravel_pytree(p)[0][idx], dtype=np.float64)
+
+    def _within_step_tol(th, cand) -> bool:
+        before, after = _physical(th), _physical(cand)
+        return bool(np.all(np.abs(after - before) <= rel_tol * np.abs(before)))
 
     lam = float(lam0)
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
@@ -3779,22 +3892,44 @@ def fit_lm(
             converged = True
             break
         # Try a step; shrink lambda on success, grow it (and retry) on failure.
+        # The first candidate is the iteration's proposal, and only it is put
+        # to ``step_tol`` -- accepted or not: at the float floor a proposal
+        # rounds to (nearly) nothing and cannot *strictly* lower a loss that
+        # is rounding noise, so its rejection says nothing.  A retry is
+        # shorter only because it is damped more, so it is not tested.
         accepted = False
-        step_norm = float("inf")   # only meaningful once a step is accepted
-        for _ in range(12):
+        stationary = False
+        for attempt in range(12):
             cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype))
             r_new = residual_only(cand)
             loss_new = 0.5 * float(jnp.sum(r_new * r_new))
+            proposal_within = attempt == 0 and _within_step_tol(theta, cand)
             if np.isfinite(loss_new) and loss_new < loss:
-                step_norm = float(jnp.linalg.norm(cand - theta))
                 theta = cand
                 theta_iteration, theta_loss = i, loss_new
                 lam = max(lam * lam_down, 1e-12)
                 accepted = True
+                stationary = proposal_within
+                break
+            if proposal_within:
+                # Nothing to retry: every further candidate is shorter still.
+                stationary = True
                 break
             lam = min(lam * lam_up, 1e12)
-        if not accepted or step_norm < step_tol:
-            converged = accepted and step_norm < step_tol
+        if stationary and accepted and tracker is not None:
+            # Stopping on an accepted proposal leaves the run at an iterate
+            # whose gradient no iteration formed.  A run that kept going
+            # would have formed it next, and the guard's tracker needs it:
+            # a fit that converges in as many iterations as it has
+            # parameters otherwise has too few gradients to measure
+            # ``excited_rank`` at all.  The guard's curvature test reads
+            # the same ``J`` (``_rj_selected``), so it is formed once.
+            r_end, J_end = residual_and_jac(theta)
+            if bool(jnp.all(jnp.isfinite(r_end))) and bool(jnp.all(jnp.isfinite(J_end))):
+                tracker.observe(J_end.T @ r_end)
+                rJ, rJ_iteration = (r_end, J_end), theta_iteration
+        if stationary or not accepted:
+            converged = stationary
             break
 
     selected = theta
@@ -3803,7 +3938,9 @@ def fit_lm(
     def _rj_selected():
         # Formed at most once, and not at all when the loop already did:
         # the run ended on ``tol`` or on a rejected step, either way still
-        # at the iterate whose ``(r, J)`` it formed last.
+        # at the iterate whose ``(r, J)`` it formed last, or on an accepted
+        # proposal within ``step_tol``, whose ``(r, J)`` it formed for the
+        # tracker.
         if "rJ" not in at_selected:
             at_selected["rJ"] = (rJ if rJ is not None and rJ_iteration == theta_iteration
                                  else residual_and_jac(selected))

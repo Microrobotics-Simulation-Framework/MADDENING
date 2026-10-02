@@ -436,7 +436,9 @@ def test_fit_progress_events_reach_observers(spring):
     gm.add_observer(lambda ev, data: seen.append(data["method"]) if ev == EVENT_FIT_PROGRESS else None)
     fit(gm, _loss_fn(gm, obs), n_iter=2, notify_every=0)
     assert seen == []
-    fit_lm(gm, _full_residual(gm, obs), n_iter=2)
+    # Started off the truth: from the truth itself the first proposal is
+    # within ``step_tol`` and the run converges after one event.
+    fit_lm(gm, _full_residual(gm, obs), params=_perturbed(gm, 1.2, 1.0), n_iter=2)
     gm._observers.clear()  # noqa: SLF001
     assert seen == ["lm", "lm"]
 

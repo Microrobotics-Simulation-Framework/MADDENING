@@ -559,6 +559,7 @@ def _spy(monkeypatch, name):
 
 
 @pytest.mark.parametrize("fitter", ["fit", "fit_lm", "fit_lm-accepted-last",
+                                    "fit_lm-converged-on-an-accepted-proposal",
                                     "fit_multiple_shooting"])
 def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, fitter):
     """Each fitter's loss, gradient and curvature, as the guard receives
@@ -570,10 +571,13 @@ def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, 
     or at the seed window states, would hold it all the same and only this
     comparison would notice.
 
-    ``fit_lm`` twice, once per way it obtains ``J`` at the selected iterate:
-    a run that ends on a rejected step is still at the iterate whose ``J``
-    it formed last and reuses it; a run whose last step was accepted has
-    never formed ``J`` there and must, rather than reuse the one before."""
+    ``fit_lm`` three times, once per way it obtains ``J`` at the selected
+    iterate: a run that ends on a rejected step (``step_tol=0.0``, so only a
+    proposal of exactly nothing stops it, and that is never accepted) is
+    still at the iterate whose ``J`` it formed last and reuses it; a run
+    whose budget ran out on an accepted step has never formed ``J`` there
+    and must, rather than reuse the one before; and a run that converged on
+    an accepted proposal formed it there for the tracker, and reuses that."""
     from jax.flatten_util import ravel_pytree
 
     gm, obs = degenerate
@@ -595,12 +599,17 @@ def test_each_fitter_hands_the_hold_its_selected_point(degenerate, monkeypatch, 
         objective = lambda t: loss(physical(t))          # noqa: E731
     elif lm:
         residual = _trajectory_residual(gm, 60)
-        accepted_last = fitter == "fit_lm-accepted-last"
-        res = fit_lm(gm, residual, params=start, n_iter=3 if accepted_last else 20,
+        n_iter, step_tol, ends_rejected, converged = {
+            "fit_lm": (20, 0.0, True, True),
+            "fit_lm-accepted-last": (3, None, False, False),
+            "fit_lm-converged-on-an-accepted-proposal": (20, None, False, True),
+        }[fitter]
+        res = fit_lm(gm, residual, params=start, n_iter=n_iter, step_tol=step_tol,
                      notify_every=0)
         # Which path: one past ``losses`` is an iterate the loop never formed
-        # ``J`` at; the last entry of ``losses`` is one it did.
-        assert res.best_iteration == len(res.losses) - (0 if accepted_last else 1)
+        # ``J`` at in an iteration; the last entry of ``losses`` is one it did.
+        assert res.best_iteration == len(res.losses) - (1 if ends_rejected else 0)
+        assert res.converged is converged
         objective = lambda t: 0.5 * jnp.sum(residual(physical(t)) ** 2)   # noqa: E731
     else:
         res, ws = fit_multiple_shooting(gm, obs, obs_fn=obs_fn, window=10,

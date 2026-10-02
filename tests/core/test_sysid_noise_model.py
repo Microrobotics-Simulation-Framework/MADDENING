@@ -70,11 +70,24 @@ def test_fit_lm_noise_std_pytree_dict():
 
 
 def test_fit_lm_never_accepting_a_step_returns_cleanly():
-    """A residual no step can lower: the loop must exit as not converged
-    rather than touch an unset ``step_norm``."""
+    """A residual no step can lower -- its Jacobian has the wrong sign, so
+    every candidate climbs -- must exit as not converged rather than touch
+    an unset step length.  (A residual that reads no parameter at all is a
+    stationary point and converges at its start; see
+    ``test_sysid_fit_returns_lowest_loss_iterate``.)"""
     from maddening.sysid import fit_lm
+
+    @jax.custom_jvp
+    def reversed_slope(x):
+        return x
+
+    @reversed_slope.defjvp
+    def _jvp(primals, tangents):
+        return primals[0], -tangents[0]
+
     gm = _spring_gm()
-    res = fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=4)
+    res = fit_lm(gm, lambda p: reversed_slope(p["nodes"]["s"]["stiffness"])[None] - 40.0,
+                 n_iter=4)
     assert res.converged is False and res.n_iter == 1
 
 

@@ -23,6 +23,7 @@ rather than turning silently; the rules are in ``_INERT_RULES``.
 
 from __future__ import annotations
 
+import math
 import sys
 import warnings
 from collections.abc import Callable, Mapping
@@ -36,6 +37,8 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+
+import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -351,6 +354,51 @@ class CouplingGroup:
     strict_convergence: bool = False
     linear_solver: Literal["gmres", "dense"] = "gmres"
 
+    def _refuse_out_of_range_numbers(self) -> None:
+        """Raise ``ValueError`` for a count or a threshold outside the range it has a meaning in.
+
+        Each of these was accepted and solved silently wrong, or not at
+        all.  ``waveform_iterations=0`` (or negative) on a sub-cycling
+        group ran *no* sweep: the members never stepped, the state stayed
+        at its initial value, and ``coupling_diagnostics()`` had no entry
+        -- nothing raised or warned.  A ``max_iterations`` below one is
+        the same for a plain group; a negative ``jacobian_reuse`` keeps
+        no secant pairs; a non-finite or negative ``tolerance``, ``rtol``
+        or ``atol`` makes ``converged`` mean nothing; a ``relaxation``
+        that is zero, negative or non-finite never moves the iterate
+        toward the fixed point.  The counts must be integers (a ``bool``
+        is not one), the thresholds finite and non-negative, and the
+        relaxation finite and positive.
+        """
+        def _is_int(value) -> bool:
+            return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
+
+        for name, lowest in (("max_iterations", 1), ("waveform_iterations", 1),
+                             ("jacobian_reuse", 0)):
+            value = getattr(self, name)
+            if not _is_int(value) or int(value) < lowest:
+                raise ValueError(
+                    f"CouplingGroup.{name}={value!r}: it must be an integer >= {lowest}."
+                    + (" A sub-cycling group runs this many waveform sweeps per step, "
+                       "and at 0 it ran none: its members never stepped."
+                       if name == "waveform_iterations" else "")
+                )
+        for name in ("tolerance", "rtol", "atol"):
+            value = getattr(self, name)
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                    value, (int, float, np.integer, np.floating)) \
+                    or not math.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(
+                    f"CouplingGroup.{name}={value!r}: it must be a finite number >= 0."
+                )
+        value = self.relaxation
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value, (int, float, np.integer, np.floating)) \
+                or not math.isfinite(float(value)) or float(value) <= 0.0:
+            raise ValueError(
+                f"CouplingGroup.relaxation={value!r}: it must be a finite number > 0."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Every field of this group as JSON-compatible plain data.
 
@@ -412,6 +460,7 @@ class CouplingGroup:
                     f"CouplingGroup.{f.name}={value!r} is not a valid "
                     f"option; expected one of {valid!r}"
                 )
+        self._refuse_out_of_range_numbers()
         if self.accelerated_fields is not None:
             # Shape, before anything reads the mapping.  A non-mapping
             # used to reach ``.values()`` and surface as

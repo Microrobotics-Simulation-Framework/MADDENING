@@ -179,6 +179,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`LBMPipeNode` refuses a `propeller_radius` above 1** (MADD-ANO-058): the disc reached past the pipe wall and pushed on wall cells (64 of 140 disc cells at 1.5 on a 12x12 cross-section; mean `u_x` 1.9% off), with no error.
+  Action: pass a radius in `(0, 1]` (1 is the whole cross-section); a config saved with a larger one no longer reloads.
 - **`run_scan` and the other loop entry points refuse a `ShardedStencilNode` step XLA miscompiles inside a loop** (MADD-ANO-068, now `partially_resolved`): a node reading a sharded static in its halo beside a `shard_info`-offset window into another array, the static copied along a mesh axis of 2+ devices,
   raises `RuntimeError` from `run_scan`, `run_scan_with_history`, `run_sweep`, `run_adaptive_scan` and `sysid.windowed_loss` (gradients included), and from every entry point in a coupling group; `step()` / `run()` keep working otherwise.
   Action: use a mesh without the axis the static is copied along, or `step()` / `run()`; check a loop you write yourself around such a node against `step()`.
@@ -484,10 +486,10 @@ guidance; the itemized changes follow.
   from its fixed point** — `atol` removes a field from the norm, so it defaults to
   `0.0` and is live under every norm — and `iterations` at the cap agrees by solver
 - **A recompile no longer re-phases a multi-rate graph or restarts a coupling warm
-  start** — only graphs with a rate divider > 1 or a warm start were ever affected;
+  start** (MADD-ANO-079, since 0.1.0) — only graphs with a rate divider > 1 or a warm start were ever affected;
   `set_param_spec` and `external_inputs` are now checked as strictly as `params`
 - **Swapping a surrogate in or out no longer resets an edge's `additive`, units,
-  `mapping` or fitted mapping weights**: an additive input read 3.0 before a swap and
+  `mapping` or fitted mapping weights** (MADD-ANO-077, since 0.1.0): an additive input read 3.0 before a swap and
   1.0 after.  Re-check results crossing `replace_node` / `POST /surrogate/deactivate`
 - **`jax.grad` no longer crashes on a stiff coupling group**: a failed GMRES
   adjoint re-solves directly at small DOF, or names `linear_solver="dense"`
@@ -530,7 +532,7 @@ guidance; the itemized changes follow.
   which is what `coupling_diagnostics()` already reported for it
 - **`gm.compile()` drops every node's materialised statics**, including one
   inside a wrapped node: `invalidate_static_cache` is now a `SimulationNode`
-  method that forwards inwards, so a static rewritten in place is not baked in
+  method that forwards inwards, so a static rewritten in place is not baked in (MADD-ANO-081, never released)
 - **Examples no longer save plots into the installed package** (they broke on
   a read-only install): output goes to the working directory, usage lines use
   `python -m maddening.examples...`, and a smoke test pins both
@@ -538,9 +540,9 @@ guidance; the itemized changes follow.
   `acceleration="aitken"` needs the threshold met on two consecutive passes
   (a lone dip is not arrival), `max_iterations=1` reports its real residual
 - Sharded pointwise nodes honour parameter writes again (`PUT /graph/params`)
-- `POST /surrogate/deactivate` restores every edge field, or changes nothing
-- A `.` in a node name no longer misroutes that node's FMU inputs and outputs
-- **FMU export of a real graph had no inputs and a wrong step size**: inputs
+- `POST /surrogate/deactivate` restores every edge field, or changes nothing (MADD-ANO-077)
+- A `.` in a node name no longer misroutes that node's FMU inputs and outputs (MADD-ANO-080, never released)
+- **FMU export of a real graph had no inputs and a wrong step size** (MADD-ANO-078, since 0.3.0): inputs
   now come from the graph's external-input list as `<node>.<field>`, and the
   step is the graph's base timestep
 - **FMU bridge and C wrapper robustness**: a non-whole-multiple communication
@@ -649,9 +651,10 @@ guidance; the itemized changes follow.
   normal and hostile bridges, `validate_fmu`, and a `-std=c11 -pedantic`
   build.  CI installs valgrind and clang; each part self-skips if its tool is
   missing
-- Full MADDENING test suite at `1ad3fa2`: **6386 tests collected** locally, 6198
-  under `-m "not slow"` (188 deselected); CI's run at the same commit passed 5986
-  (jax 0.10.2) / 5985 (jax 0.11.2) — see `docs/release_notes/v0.4.0.md`.  v0.2.1's own
+- Full MADDENING test suite on 2026-10-02: **8634 tests collected** locally, 8169
+  in CI's default lane (`-m "not slow"`, `--ignore=tests/viz`; 432 slow deselected).
+  These counts are regenerated at the tag, with CI's pass/skip figures from the tag's
+  run — see `docs/release_notes/v0.4.0.md`.  v0.2.1's own
   Verification block, which an edit during this cycle had moved here, is back
   under [0.2.1] as released
 - Differentiable sharded solves and the C1 multi-physics IQN-IMVJ case match
@@ -659,7 +662,7 @@ guidance; the itemized changes follow.
 
 ### Security
 - **Cloud launches reach ready again, and cross-origin browser requests are
-  refused**: set `MADDENING_TRANSPORT_TOKEN` so the ZeroMQ CURVE key is not the
+  refused** (CRITICAL, MADD-ANO-076, since 0.1.0; partially resolved, a DNS-rebinding page still passes): set `MADDENING_TRANSPORT_TOKEN` so the ZeroMQ CURVE key is not the
   cleartext API bearer token; pass `allowed_origins=` to embed the UI elsewhere
 - **The ZeroMQ transports bind loopback and encrypt any other bind** (CRITICAL, MADD-ANO-015):
   5555/5556/5580 published state, commands and worker rendezvous to anyone who
@@ -668,8 +671,8 @@ guidance; the itemized changes follow.
   set `MADDENING_API_TOKEN` or read the one logged at start-up; `JobConfig.ports`
   no longer defaults to `[8000]`, so a cloud launch stops opening the API port
 - **FMI/USD hardening** (three HIGH): a silent TCP peer no longer wedges the FMU
-  bridge, `set_state` is value-checked exactly as `set` is, and loading a USD
-  stage no longer imports the class it names — pass `node_registry=` to allow one
+  bridge, `set_state` is value-checked exactly as `set` is (MADD-ANO-082), and loading a USD
+  stage no longer imports the class it names (MADD-ANO-075, since 0.1.0) — pass `node_registry=` to allow one
 - **Cloud surface**: the signaling WebSocket validated its own token, not the
   client's (CRITICAL, MADD-ANO-053; set `MADDENING_STREAM_SECRET`), and the unauthenticated
   API now caps `n_steps`, node dimensions and training args, warning on 0.0.0.0
@@ -688,13 +691,15 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-075 to 082 (new)**: defects this release fixes that had no entry, five of them carried by releases — a USD stage imported the module it named (075, since 0.1.0); the API checked no `Origin` (076, critical, since 0.1.0, `partially_resolved`: a DNS-rebinding page still drives a loopback bind, so run the API only while you use it); a surrogate swap dropped edges' `additive` and units (077, since 0.1.0); FMI export of a real graph had no inputs and a 1e-3 step (078, since 0.3.0); a recompile re-phased a multi-rate graph (079, since 0.1.0) — and three majors never released (080, 081, 082; see `### Fixed`, `### Security`).
+  **MADD-ANO-048** is `partially_resolved`: a `gm.params` write or a fit still saves a value the constructor refuses, and the saved graph then does not load; bound such a parameter inside the constructor's range.  **MADD-ANO-058** now also covers `propeller_radius > 1`.
 - **MADD-ANO-069 (new, never released)**: `hold_undetermined` held every direction a fit's gradients had not spanned, so a short or fast-converging fit came back above the loss it had reached (0.4.0 development builds only; see `### Fixed`)
 - **MADD-ANO-064 to 067 (new, resolved in this release)**: the four sharding defects above (064, 065 and 067 since 0.2.1 or 0.3.0; 066 never released).
-  **MADD-ANO-068 (new, open)**: XLA (jaxlib 0.10.2 to 0.11.2) miscompiles a `ShardedStencilNode` step inside `run_scan` for a node reading a sharded
-  static replicated over a mesh axis in its halo beside a window at its `shard_info` offset; check such a node's `run_scan` against `step()`
+  **MADD-ANO-068 (new, `partially_resolved`)**: XLA (jaxlib 0.10.2 to 0.11.2) miscompiles a `ShardedStencilNode` step inside `run_scan` for a node reading a sharded
+  static replicated over a mesh axis in its halo beside a window at its `shard_info` offset; the loop entry points now refuse such a node (see `### Changed`), and a loop you write yourself is not asked
 - **MADD-ANO-063 (new, never released)**: a write moving the points a mapped edge was built from ran on the old mapping weights and saved a config that did not load (see `### Fixed`); **MADD-ANO-049** is now resolved (an in-process non-finite parameter is served as a token, not a 500), and **MADD-ANO-022** narrowed: a write is refused, a fit through the mapped edge still uses the constructor's geometry
 - **Severities defined; fourteen relabelled; four entries partially resolved**: `AnomalySeverity` now defines each level, and a silent wrong result is never `minor`, so MADD-ANO-005, 009, 025, 027, 029, 031, 038, 041, 048, 055, 057, 058 and 061 move to `major`, and 052 (a default-exposed route) to `critical`.
-  MADD-ANO-032, 036, 047 and 049 are `partially_resolved`, not `resolved`: their routes outside a graph or the REST route are still live (see each `residual_risk`); the release notes' Known anomalies section now names every reachable entry, and a test keeps it so.
+  MADD-ANO-032, 036, 047 and 048 are `partially_resolved`, not `resolved`: their routes outside a graph or the REST route are still live (see each `residual_risk`); the release notes' Known anomalies section now names every reachable entry, and a test keeps it so.
   Sharded nodes: iterate `update_padded`'s `shard_info` over its `int` keys only; `"n_local"` (unstructured wrapper) is the one string key.
 - **MADD-ANO-062 (new, resolved in this release)**: `HeatNode` accepted a non-positive `length` or `timestep`, a negative `thermal_diffusivity` and `grid_points` out of order, and answered wrongly without a word (since 0.1.0; see `### Changed`)
 - **MADD-ANO-059, 060, 061 (new, resolved in this release)**: accelerating a coupling group holding an integer, boolean or PRNG-key leaf raised a `TypeError`; a group-internal flux edge read by the interface norm or a sub-cycled member's linear interpolation raised a bare `KeyError`; `run_adaptive` advanced its clock by `dt_min` on a `dt_min` accept whose state covered more (all since 0.1.0; see `### Fixed`, `### Changed`).
@@ -702,17 +707,17 @@ guidance; the itemized changes follow.
 - **MADD-ANO-051, 052, 053 (new, resolved in this release; all since 0.1.0)**: the HTTP API served every route, `/cloud/launch` included, with no credential while the container bound `0.0.0.0`; the checkpoint routes took any server path; the signaling server admitted every client (see `### Security`).
   **MADD-ANO-054 (new, never released)**: the FMU bridge unpickled the importer's state blob, remote code execution; **MADD-ANO-055 (new, resolved)**: `deserialize_fmu_state` and `FmuSidecar.handle` unpickled their input (since 0.3.0).
   The registry now holds every defect a release carried and every critical or major one found in the cycle, shipped or not (CONTRIBUTING.md)
-- **MADD-ANO-047, 048, 049 (new, resolved in this release)**: `PUT /graph/params` accepted a write flipping a branch the node fixed at construction, values its constructor refuses, and a non-finite value (since 0.1.0; see `### Fixed`).
+- **MADD-ANO-047, 048, 049 (new; 049 resolved in this release, 047 and 048 `partially_resolved`)**: `PUT /graph/params` accepted a write flipping a branch the node fixed at construction, values its constructor refuses, and a non-finite value (since 0.1.0; see `### Fixed`).
   **MADD-ANO-050 (new, open)**: two `HeatNode` rods coupled end to end by a converged exchange are unstable above Fo = 3/8 at `stencil_order=2` and 0.226 at 4, not the 1/2 or 5/16 each accepts; keep Fo below those on such pairs (`compile()` warns; see `### Changed`)
 - **MADD-ANO-046 (new, resolved in this release)**: a sub-cycled node whose timestep did not divide the macro timestep drifted by a fixed fraction of every step (since 0.1.0; see `### Changed`)
 - **MADD-ANO-043, 044, 045 (new, resolved in this release)**: `run_adaptive*` advanced a sub-cycled node `divider * dt` per step; a multi-rate group's diagnostics, predictor and IQN-IMVJ warm start came from discarded solves;
   `solver="fori"` + `iqn-imvj` carried zero secant columns, so `jacobian_reuse` did nothing (all since 0.1.0; see `### Fixed`)
 - **MADD-ANO-037 to 042 (new, resolved in this release)**: `ShardedUnstructuredNode` stepped a Cartesian stencil node wrong, dropped cells past its layout's count and gave no way to leave padding out of an integral (all since 0.3.0); both sharded wrappers placed a domain integral in the state like a grid field (since 0.2.1);
   a sharded static was edge-filled under a periodic wrapper (since 0.2.1); `halo_exchange` ignored an unknown `boundary` key and `ShardedStencilNode` accepted an empty `axis_map` (since 0.2.0).  See `### Fixed` and `### Changed`
-- **MADD-ANO-034, 036 (new, resolved in this release)**: a walled `LBMNode` reloaded with no walls (since 0.1.0; see `### Fixed`); a config round trip dropped a node's sharding with no word (since 0.2.0; now a warning, see `### Changed`).
+- **MADD-ANO-034 (new, resolved in this release), 036 (new, `partially_resolved`)**: a walled `LBMNode` reloaded with no walls (since 0.1.0; see `### Fixed`); a config round trip dropped a node's sharding with no word (since 0.2.0; now a warning, see `### Changed`).
   **MADD-ANO-035 (new, open)**: on a balanced partition not in global order, `ShardedUnstructuredNode` reads a global-order state written with `set_node_state` as partition layout, so each cell steps from another cell's value (since 0.3.0).
   Convert the state with `partition_value` first, or renumber the cells with `np.argsort(partition_assignment, kind="stable")`; an explicit layout on the state write is planned for 0.5.0
-- **MADD-ANO-032, 033 (new, resolved in this release)**: the sharded wrappers kept a compiled step across `compile()`, so a legacy node's params write after a step never reached the sharded physics; `ShardedStencilNode` stepped with a float32 `dt` under x64 (both since 0.2.0; see `### Fixed`).
+- **MADD-ANO-033 (new, resolved in this release), 032 (new, `partially_resolved`)**: `ShardedStencilNode` stepped with a float32 `dt` under x64; the sharded wrappers kept a compiled step across `compile()`, so a legacy node's params write after a step never reached the sharded physics (a wrapper's own `update()` still does until `invalidate_static_cache()`; both since 0.2.0; see `### Fixed`).
   **MADD-ANO-024** now records the routes its first fix left open, all closed, and **MADD-ANO-004**'s workaround says it held only before the first step
 - **MADD-ANO-028, 029, 030 (new, resolved in this release)**: periodic global halos on a size-1 mesh axis; a wide `"edge"` fill that copied the shard's first cells;
   a sharded `HeatNode` that ignored its end temperatures (all since 0.2.0; see `### Fixed`).  **MADD-ANO-031 (new, open)**: at `stencil_order=4` an end with no
@@ -776,7 +781,7 @@ guidance; the itemized changes follow.
   *estimate* instead; read `coupling_diagnostics()['ratio_usable']` to see
   whether the contraction ratio was usable, and treat `False` as the old
   behaviour.  The estimate is not a bound and can understate by 122x on a
-  hidden slow mode (minor, partially_resolved in 0.4.0, context_dependent)
+  hidden slow mode (major, partially_resolved in 0.4.0, context_dependent)
 - MADD-ANO-003: AdaptiveNode frozen-set gradient omits a first-order term at
   active-set switches -- the frozen-set objective jumps where two candidates
   swap rank, so no Clarke subgradient exists there and the integral of the

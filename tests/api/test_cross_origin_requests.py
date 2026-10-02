@@ -197,3 +197,55 @@ def test_a_websocket_with_no_origin_header_is_unaffected():
 
     with client.websocket_connect("/ws/state") as ws:
         assert ws.accepted_subprotocol is None
+
+
+# ----------------------------------------------------------------------
+# What the Origin check cannot see: DNS rebinding (MADD-ANO-076)
+# ----------------------------------------------------------------------
+#
+# A page served from ``http://attacker.example:8000`` whose name the
+# attacker then re-points at 127.0.0.1 is same-origin in the browser's
+# eyes: it sends ``Host`` and ``Origin`` that both name its own domain, so
+# the comparison above passes it, and a loopback bind demands no token.
+# Nothing checks ``Host`` against the names the server is reached by, which
+# is the defence against rebinding.  The first test pins the hole as it
+# stands; when it fails, the hole has been closed -- update the registry
+# entry and its ``residual_risk`` rather than the expectation here.
+
+REBOUND = "http://attacker.example:8000"
+
+
+def test_a_dns_rebound_page_passes_the_origin_check(tmp_path):
+    server = SimulationServer(
+        node_registry=REGISTRY, graph_manager=_graph(),
+        bind_host="127.0.0.1", checkpoint_root=str(tmp_path),
+    )
+    client = TestClient(server.create_app(), base_url=REBOUND)
+    rebound = {"Origin": REBOUND, "Content-Type": "text/plain;charset=UTF-8"}
+
+    assert client.post("/sim/reset", headers=rebound).status_code == 200
+    assert client.post(
+        "/checkpoint/save?path=rebound.npz", headers=rebound,
+    ).status_code == 200
+    assert (tmp_path / "rebound.npz").exists()
+    with client.websocket_connect(
+        "/ws/state", headers={"Origin": REBOUND, "Host": "attacker.example:8000"},
+    ) as ws:
+        assert ws.accepted_subprotocol is None
+
+
+def test_the_token_a_non_loopback_bind_demands_refuses_a_rebound_page():
+    """The boundary of that hole: off loopback the bearer token is
+    demanded (MADD-ANO-051), and a rebound page does not hold it."""
+    server = SimulationServer(
+        node_registry=REGISTRY, graph_manager=_graph(),
+        bind_host="0.0.0.0", api_token="s3cret-for-this-test",
+    )
+    client = TestClient(server.create_app(), base_url=REBOUND)
+
+    response = client.post(
+        "/sim/reset",
+        headers={"Origin": REBOUND, "Content-Type": "text/plain;charset=UTF-8"},
+    )
+
+    assert response.status_code == 401

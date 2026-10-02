@@ -342,6 +342,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **FMU export: schema-valid starts, a locale-proof wrapper, the FMI state machine** (MADD-ANO-106, never released): Boolean/integer `start`/`min`/`max` in their type's form and discrete; the C wrapper writes and reads numbers in the C locale; an archive cannot install mapping weights;
+  the token covers starts and bounds; terminate refuses step/set/initialize until reset; `fmi3GetClock`/`SetClock` are `fmi3Error`; `FmuTcpBridge(idle_timeout=None)` waits for ever; a node named `x.params.y` has settable parameters.
+  Action: rebuild FMUs (their tokens change) and re-package them with their bridge's description.
 - **Fitters keep each parameter where `constrain` is not a clip or a clamp** (MADD-ANO-104, never released: a coordinate past one stayed there and `fit_lm` said converged); `fit_lm`'s floor is relative to the residual; `windowed_loss(start_step=)` (experimental) says where a multi-rate record began;
   `node.params` writes are counted, so every entry point recompiles for one and `load_state` supersedes them (MADD-ANO-105, since 0.1.0: `gm.step` and a new `run_scan` length ran different models).  Action: after writing `node.params` on a 0.3.x graph, `compile()` before running it.
 - **The FMU bridge and C wrapper refuse what they used to coerce or drop** (MADD-ANO-100 to 103, never released): a `master_dt` other than `md.graph_timestep`, a Boolean other than 0/1, an `fmi3Get`/`Set` of another type than the variable's, a repeated value reference, a numeric set of a Clock,

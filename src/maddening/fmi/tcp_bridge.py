@@ -18,9 +18,9 @@ Requests (importer -> sidecar) and responses, JSON form::
     {"op": "initialize", "t": t0}         -> {"ok": true, "t": t0}
     {"op": "step", "t": t, "dt": h}       -> {"ok": true, "t": t + h}
     {"op": "get_state"}                   -> {"ok": true, "state": "<base64>"}
-    {"op": "set_state", "state": ".."}    -> {"ok": true}
+    {"op": "set_state", "state": ".."}    -> {"ok": true, "t": restored time}
     {"op": "reset"}                       -> {"ok": true}
-    {"op": "terminate"}                   -> {"ok": true}
+    {"op": "terminate"}                   -> {"ok": true}   (Terminated until reset)
     any failure                           -> {"ok": false, "error": "..."}
 
 **Instances.**  A connection that claims the bridge's instance slot (its
@@ -100,7 +100,8 @@ longer frame, never sees one from this bridge.
 **Connection lifetime.**  A connection holds the bridge's single FMU
 instance for as long as it lives, so no wait on it is unbounded: a peer
 has ten seconds to begin its first frame, five minutes of silence
-between frames once it has spoken, and two minutes to finish a frame it
+between frames once it has spoken (``FmuTcpBridge(idle_timeout=...)``;
+``None`` lifts this one), and two minutes to finish a frame it
 has announced the length of -- two minutes in total, whether the rest
 of the frame dribbles in or stops arriving.  Overrunning any of them
 ends the connection exactly as EOF does, and the instance slot is free

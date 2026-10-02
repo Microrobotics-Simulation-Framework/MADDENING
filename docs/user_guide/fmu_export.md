@@ -94,10 +94,40 @@ outside it is `fmi3Error` with nothing advanced: an importer that jumped
 from 0.01 to 100 used to get one master step of physics labelled 100.01.
 To go back in time, restore an FMU state; the clock moves with it.
 
+`fmi3Terminate` puts the instance in FMI 3.0's Terminated state.  There,
+`fmi3Get*`, the FMU-state functions and `fmi3Reset` are allowed, and
+`fmi3DoStep`, `fmi3Set*` and `fmi3EnterInitializationMode` are `fmi3Error`
+with nothing written, until `fmi3Reset` (or a new instance) starts it again.
+A step after terminate used to advance the model.  Restoring an FMU state
+does not leave Terminated.
+
 **Variables.**  Outputs are `<node>.<field>`.  External inputs are
 `<node>.<field>` of the target boundary field (start value 0, description
 and unit from the target node's `boundary_input_spec`).  Parameters are
 `<node>.params.<key>`, with the `ParamSpec` bounds as `min` / `max`.
+
+Every `start`, `min` and `max` is written in its type's lexical form, which
+FMI 3.0's schema requires: `true` / `false` for a Boolean, an integer
+literal for an integer type, an `xs:double` for a float.  An integer's
+bounds are the integers inside the declared interval, and a Boolean carries
+no `min` / `max`.  A Boolean or integer input or output is
+`variability="discrete"`, since FMI 3.0 allows `continuous` only for floats.
+Until 0.4.0 shipped, a Boolean or Int32 input was written `start="0.0"` and
+`continuous`.  FMPy's `simulate_fmu`, which validates the description by
+default, refused such an FMU.
+
+The `instantiationToken` covers every variable's start, bounds, variability,
+value reference and clocks, besides its name, type, causality and shape.  An
+FMU packaged from a description with other start values or bounds than the
+one a bridge serves fails `fmi3InstantiateCoSimulation` against it with a
+token mismatch.  It used to instantiate, advertising starts the bridge did
+not use.  Rebuild and re-package an FMU whenever its graph's parameters
+change.
+
+A node's name may hold `.params.` (`rig.params.v2`).  Its parameter
+variables (`rig.params.v2.params.elasticity`) carry their `(node, key)`, and
+the sidecar matches a parameter name exactly rather than splitting it.  Such
+a parameter used to be refused as unknown on every set.
 
 Each variable is read and written only through the `fmi3Get` / `fmi3Set`
 function of its declared type, as FMI 3.0 requires: a Float32 output with
@@ -264,7 +294,14 @@ a longer one is `fmi3Error`, as a shorter one always was, rather than
 `fmi3OK` with the rest dropped.  A send interrupted by a signal is
 retried, and any other failed send closes the connection, because part of
 the frame may already be on the wire.  An empty instantiation token is a
-mismatch.  The wrapper's socket has `TCP_NODELAY` set: a frame goes out as
+mismatch.  Numbers on the JSON path are written and read in the C
+locale, whatever `LC_NUMERIC` the importer runs under: an importer under a
+locale with a `','` decimal point (a GUI tool on a Dutch or German desktop)
+used to send `"dt":0,01`, and every `fmi3DoStep` failed.  The wrapper's own
+clock, which `fmi3DoStep` reports as `lastSuccessfulTime` when it fails,
+follows `fmi3SetFMUState` (the bridge's reply carries the restored time)
+and `fmi3Reset` (once the reset has succeeded).  The wrapper's socket has
+`TCP_NODELAY` set: a frame goes out as
 two writes, and with Nagle's algorithm the second waited for the bridge's
 delayed ACK, so until 0.4.0 shipped every FMI call took at least 40 ms on
 Linux.  The
@@ -293,7 +330,10 @@ finite budget: ten seconds to begin the first frame, five minutes of
 silence between frames once the peer has spoken, and two minutes to
 finish a frame whose length it has announced -- two minutes in total,
 whether the rest of the frame dribbles in or stops arriving.  Overrunning
-any of them ends the connection exactly as EOF does.  One `step` request
+any of them ends the connection exactly as EOF does.  The five minutes are
+`FmuTcpBridge(idle_timeout=...)`: a master that pauses longer between calls
+(a debugging session, a slow partner model) passes more, or `None` for no
+limit.  It also bounds sending a reply.  One `step` request
 may ask for at most `max_steps_per_request` graph steps, and a step stops at
 the next graph step once `stop()` is called; until 0.4.0 shipped,
 `dt = 1e9 * master_dt` held the worker for as long as a billion steps take.
@@ -314,7 +354,11 @@ replaces, and every parameter must lie inside its declared `ParamSpec`
 bounds — the `min` / `max` the model description advertises, which the
 bridge enforces however its sidecar was built.  An importer therefore
 cannot use an FMU-state archive to install a constant the graph declares
-invalid.  A Boolean takes true / false or exactly 0 / 1 on both doors.  An
+invalid.  An archive cannot change interface-mapping weights either
+(`params["mappings"]`): they are not FMI variables, so no `set` reaches
+them, and an archive that replaced them made the FMU compute a coupling its
+description does not describe (MADD-ANO-106).  A Boolean takes true / false
+or exactly 0 / 1 on both doors.  An
 archive must carry its time, and exactly the model's state fields,
 parameters and pending inputs: an archive missing an input used to restore
 with that input at zero (MADD-ANO-103).  The sidecar's own in-process
@@ -412,7 +456,11 @@ output and external input of a node with its clock (`clocks=` attribute,
 `variability="discrete"`).  An importer then knows that a node on a five
 times coarser rate only changes on every fifth master step.  The fastest
 clock equals the default experiment step size.  Clocks are off by default,
-so a single-clock FMU is byte-for-byte what v0.3.0 produced.
+so a single-clock FMU is byte-for-byte what v0.3.0 produced.  The clocks
+are constant-interval and tick with time.  `fmi3GetClock` and
+`fmi3SetClock` are `fmi3Error`, because FMI 3.0 allows them only in Event
+Mode, which this FMU does not have (`hasEventMode="false"`).  They used to
+answer `fmi3OK` for any value reference.
 
 ## Verification
 

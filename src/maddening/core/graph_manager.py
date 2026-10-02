@@ -670,12 +670,75 @@ def _probe_direction(c, key):
     A zero entry is probed at the constant's largest magnitude (or 1.0
     for an all-zero constant), so a parameter that happens to sit at
     zero is still probed -- the relative error of ``dx*/dc`` is defined
-    there even though ``c`` is not a scale.
+    there even though ``c`` is not a scale.  ``key=None`` returns the
+    magnitudes alone: the size an entry probe moves each entry by.
     """
     mag = jnp.abs(c)
     top = jnp.max(mag)
     mag = jnp.where(mag > 0, mag, jnp.where(top > 0, top, jnp.ones_like(top)))
+    if key is None:
+        return mag
     return mag * jax.random.rademacher(key, c.shape, c.dtype)
+
+
+#: A floating constant of at most this many entries is probed entry by
+#: entry by the gradient bound (each entry is "one scalar constant" of
+#: ``gradient_relative_error_bound``'s reading); a larger one is probed as
+#: a whole, along one fixed-seed direction weighted by its magnitudes, and
+#: ``coupling_report()`` names it.  The bound costs five Jacobian-vector
+#: products per probe.
+GRADIENT_PROBE_ENTRY_LIMIT = 64
+
+
+def _whole_probe_names(consts, node_params, full_state, new_state, external_inputs):
+    """``((name, entries), ...)`` for each floating constant above :data:`GRADIENT_PROBE_ENTRY_LIMIT`.
+
+    A constant of the closure-converted pass is named by identity: a node
+    parameter (``node.param``), a state field at the step's start
+    (``node.field (step start)``), a value this step already computed
+    upstream (``node.field (this step)``) or an external input
+    (``external node.field``); anything else -- a value the step derived
+    before the group -- by its shape.
+    """
+    names: dict[int, str] = {}
+
+    def walk(tree, prefix, suffix=""):
+        if isinstance(tree, dict):
+            for k, v in tree.items():
+                walk(v, f"{prefix}.{k}" if prefix else str(k), suffix)
+        else:
+            names.setdefault(id(tree), prefix + suffix)
+
+    walk(node_params or {}, "")
+    walk({f"external {k}": v for k, v in (external_inputs or {}).items()}, "")
+    walk({k: v for k, v in (full_state or {}).items() if k != _META_KEY}, "", " (step start)")
+    walk({k: v for k, v in (new_state or {}).items() if k != _META_KEY}, "", " (this step)")
+    out = []
+    for c in consts:
+        if not jnp.issubdtype(jnp.asarray(c).dtype, jnp.floating):
+            continue
+        size = int(np.prod(jnp.shape(c), dtype=np.int64))
+        if size > GRADIENT_PROBE_ENTRY_LIMIT:
+            out.append((names.get(id(c), f"a derived constant of shape {tuple(jnp.shape(c))}"),
+                        size))
+    return tuple(out)
+
+
+def _probe_plan(consts, probed):
+    """``[(constant index, entry index or -1)]``: one row per gradient-bound probe.
+
+    Every entry of a floating constant of at most
+    :data:`GRADIENT_PROBE_ENTRY_LIMIT` entries is its own probe; a larger
+    constant is one probe (``-1``) along :func:`_probe_direction`.
+    """
+    rows: list[tuple[int, int]] = []
+    for i in probed:
+        size = int(np.prod(jnp.shape(consts[i]), dtype=np.int64))
+        if size <= GRADIENT_PROBE_ENTRY_LIMIT:
+            rows.extend((i, j) for j in range(size))
+        else:
+            rows.append((i, -1))
+    return rows
 
 
 def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
@@ -790,6 +853,56 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
     )
 
 
+def _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype):
+    """``J(x_k)^T`` in the gradient bound's scaled coordinates, or ``None``.
+
+    The transpose of the bound's ``matvec`` (``z -> (s / lift) J ((s_inv
+    lift) z)``): ``u -> (s_inv lift) J^T ((s / lift) u)``, one
+    reverse-mode product of the one-pass map per call.  ``None`` where
+    the map cannot be differentiated in reverse mode -- a node that loops
+    with ``lax.while_loop`` inside ``update`` -- which forward-mode
+    products, all the rest of the bound uses, still go through.
+    """
+    try:
+        _, vjp_fn = jax.vjp(lambda xx: _F_dispatch(step_pure, xx, consts_sg), x_sg)
+
+        def matvec_t(u):
+            (out,) = vjp_fn(((s / lift) * u).astype(x_sg.dtype))
+            return (s_inv * lift) * out.astype(dtype)
+
+        jax.eval_shape(matvec_t, jnp.zeros(x_sg.shape, dtype))
+    except (ValueError, TypeError, NotImplementedError):
+        return None
+    return matvec_t
+
+
+def _full_resolvent_norm(U, M, matvec_t):
+    """``||(I - J)^{-1}||_2`` over the whole space, from the range basis; ``None`` without ``J^T``.
+
+    With ``range(J)`` inside ``span(U)`` (orthonormal, ``n x k``) and
+    ``M = U^T J U``, the resolvent is ``I + U (I - M)^{-1} B`` with
+    ``B = U^T J``: the identity plus a rank-``k`` term whose columns lie in
+    ``span(U)`` and whose rows lie in ``span(B^T)``.  It maps ``W =
+    span(U, B^T)`` (at most ``2k`` dimensions) into itself and is the
+    identity on ``W``'s orthogonal complement, so its norm is the larger
+    of ``1`` and the norm of its compression to ``W`` -- exact, from a
+    ``2k x 2k`` SVD.  ``B`` costs ``k`` reverse-mode products
+    (``matvec_t``).  Where ``U`` is square (``n <= k``) the resolvent is
+    ``U (I - M)^{-1} U^T`` and needs no product.  ``None`` where
+    ``matvec_t`` is ``None`` and ``U`` is not square.
+    """
+    n, k = U.shape
+    eye_k = jnp.eye(k, dtype=M.dtype)
+    if n <= k:
+        return jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2)
+    if matvec_t is None:
+        return None
+    B = jax.vmap(matvec_t)(U.T)                     # row i: u_i^T J
+    P, _ = jnp.linalg.qr(jnp.concatenate([U, B.T], axis=1))
+    T = jnp.eye(P.shape[1], dtype=M.dtype) + (P.T @ U) @ jnp.linalg.solve(eye_k - M, B @ P)
+    return jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype))
+
+
 def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
                                arnoldi_residual, amplification, res):
     """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
@@ -810,15 +923,27 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     s_inv = 1.0 / s
     nan = jnp.full((), jnp.nan, dtype)
     keys = jax.random.split(jax.random.PRNGKey(1), len(consts_sg))
-    direction = {i: _probe_direction(consts_sg[i], keys[i]) for i in probed}
-    row_of = {i: j for j, i in enumerate(probed)}
+    plan = _probe_plan(consts_sg, probed)
+    n_rows = len(plan)
+    # Per row the constant it moves and the entry (``-1``: the whole
+    # constant along one direction); one more row past the probes moves
+    # nothing (the Kantorovich row, below).
+    row_const = jnp.asarray([i for i, _ in plan] + [-1], jnp.int32)
+    row_entry = jnp.asarray([j for _, j in plan] + [0], jnp.int32)
+    whole = {i for i, j in plan if j < 0}
+    direction = {i: _probe_direction(consts_sg[i], keys[i]) for i in whole}
+    entry_scale = {i: _probe_direction(consts_sg[i], None) for i in set(probed) - whole}
 
     def tangent_for(row):
-        """The constants' tangent for probe ``row``: one constant, the rest held."""
+        """The constants' tangent for probe ``row``: one entry (or one constant), the rest held."""
         out = []
         for i, c in enumerate(consts_sg):
-            if i in row_of:
-                out.append(jnp.where(row == row_of[i], direction[i], jnp.zeros_like(c)))
+            mine = row_const[row] == i
+            if i in direction:
+                out.append(jnp.where(mine, direction[i], jnp.zeros_like(c)))
+            elif i in entry_scale:
+                one_hot = (jnp.arange(c.size) == row_entry[row]).reshape(c.shape).astype(c.dtype)
+                out.append(jnp.where(mine, one_hot * entry_scale[i], jnp.zeros_like(c)))
             elif jnp.issubdtype(c.dtype, jnp.floating):
                 out.append(jnp.zeros_like(c))
             else:
@@ -838,13 +963,14 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         return (s / lift) * Jv.astype(dtype)
 
     U, M, captured = jacobian_range_basis(matvec, x_sg.shape[0], dtype=dtype)
+    matvec_t = _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype)
 
     def rhs_for(row):
         return jax.jvp(
             lambda cc: _F_dispatch(step_pure, x_sg, cc), (consts_sg,), (tangent_for(row),)
         )
 
-    rows = jnp.arange(len(probed))
+    rows = jnp.arange(n_rows)
     f_k, w = jax.vmap(rhs_for)(rows)          # the primal is unbatched inside
     w = w.astype(dtype)
     # Entry by entry in a power-of-two frame: a raw ``F(x) - x`` of a
@@ -913,7 +1039,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # that row is how much the *Jacobian* changes across the step (see
     # the leading-order check below).  ``tangent_for`` of an index past
     # the probes moves no constant.
-    rows_ext = jnp.arange(len(probed) + 1)
+    rows_ext = jnp.arange(n_rows + 1)
     ts_ext = jnp.concatenate([t_s, delta_s[None]], axis=0)
     G = jax.vmap(
         lambda xx: jax.vmap(lambda row, ts: linearisation(xx, row, ts))(rows_ext, ts_ext)
@@ -925,10 +1051,44 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     secant_s, jac_secant_s = secant_ext[:-1], secant_ext[-1]
 
     amp = spectral_error_bound(jnp.ones((), dtype), rho, arnoldi_residual, amplification)
-    distance = spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification,
-                                    floor=floor)
-    per_probe = ift_gradient_error_bound(
+    # Never below the Newton step itself: ``delta = (I - J)^{-1} r`` is
+    # ``x* - x_k`` exactly on an affine map, so the spectral bound, which
+    # bounds the same vector through the Krylov compression, can only
+    # fall short of it by rounding or where that compression missed part
+    # of the range.  (NaN and ``inf`` pass through ``maximum``.)
+    distance = jnp.maximum(
+        spectral_error_bound(norm(r_s), rho, arnoldi_residual, amplification, floor=floor),
+        norm(delta_s))
+
+    # **The resolvent applied to each secant, not its norm.**  The error
+    # is ``(I - J)^{-1}`` applied to the change of ``G``, and the factor
+    # the spectral bound applies (``amp``, the Arnoldi resolvent norm) is
+    # ``(I - J)^{-1}`` *restricted to the Krylov space* ``span(v0, r)`` --
+    # exact for the residual, which lies in it, and not for a secant,
+    # which need not: on an affine scalar Gauss-Seidel ring stopped at
+    # three passes it was 8.57 where the full resolvent norm is 45.2, and
+    # the bound read 0.19x the true gradient error with
+    # ``gradient_bound_usable=True`` (MADD-ANO-131).  The range basis
+    # applies the resolvent exactly for one more JVP per probe
+    # (``resolvent_apply``), so the per-probe bound is
+    # ``distance * ||(I - J)^{-1} secant_i|| / (||delta|| * ||t_i||)``.
+    # On a map that is affine in the state the secant *is* the change of
+    # ``G`` between ``x_k`` and ``x*`` (``delta = x* - x_k`` exactly), so
+    # the bound is then the true error times ``distance / ||delta|| >= 1``.
+    def resolve(v):
+        return resolvent_apply(U, M, v, matvec(v))
+
+    resolved_secant = jax.vmap(resolve)(secant_s)
+    # ``amp`` is kept for the conventions alone: NaN where nothing was
+    # computed and ``inf`` where nothing contracts read as before.
+    conventions = ift_gradient_error_bound(
         amp, distance, norm(secant_s), norm(delta_s), norm(t_s),
+    )
+    per_probe = jnp.where(
+        jnp.isfinite(conventions),
+        ift_gradient_error_bound(jnp.ones((), dtype), distance, norm(resolved_secant),
+                                 norm(delta_s), norm(t_s)),
+        conventions,
     )
     # The worst probe the fixed point responds to.  A responding probe
     # whose bound is NaN (a non-finite secant) poisons the maximum
@@ -942,13 +1102,20 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # above takes the resolvent and the distance at ``x_k``; the exact
     # error needs the resolvent at ``x*``, and a distance that holds for
     # a map whose Jacobian moves.  Newton-Kantorovich supplies both from
-    # what is already measured.  With ``beta = amp`` (the resolvent at
-    # ``x_k``), ``eta = ||delta||`` (the Newton correction) and ``L`` the
-    # Jacobian's Lipschitz constant -- estimated along ``delta`` from
-    # the extra row, ``||(J(x_k + delta) - J(x_k)) delta|| / ||delta||**2``
-    # -- the check is ``h = beta L eta < 1/2``.  Where it holds a fixed
+    # what is already measured.  With ``beta = ||(I - J(x_k))^{-1}||`` --
+    # the *full-operator* norm (``_full_resolvent_norm``), not the
+    # Krylov-restricted ``amp``, which can be several times smaller
+    # (MADD-ANO-131) -- ``eta = ||delta||`` (the Newton correction) and
+    # ``L`` the Jacobian's Lipschitz constant -- estimated along ``delta``
+    # from the extra row, ``||(J(x_k + delta) - J(x_k)) delta|| /
+    # ||delta||**2`` -- the check is ``h = beta L eta < 1/2``.  (The
+    # affine-covariant form, the exact resolvent applied to that change
+    # of the Jacobian along ``delta`` alone, was measured too and is not
+    # enough: on the stiff ``x <- a + g u**2`` pair at three passes it
+    # read ``h = 0.48`` where ``beta L eta = 0.67``, and the bound came out
+    # 0.999x the true error.)  Where it holds a fixed
     # point exists within ``t* = eta (1 - sqrt(1 - 2h)) / h`` of ``x_k``
-    # and ``||(I - J(x*))^{-1}|| <= amp / sqrt(1 - 2h)``, so the bound is
+    # and ``||(I - J(x*))^{-1}|| <= beta / sqrt(1 - 2h)``, so the bound is
     # multiplied by ``1 / sqrt(1 - 2h)`` and its distance is the larger
     # of the spectral bound and ``t*``.  Where it fails, nothing measured
     # at ``x_k`` bounds the resolvent at the fixed point, and the bound
@@ -960,8 +1127,19 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # point, the uncorrected bound read 0.20-0.96x the true relative
     # error with the flag True; ``h`` there is 0.48-0.58.
     step = norm(delta_s)
+    beta = _full_resolvent_norm(U, M, matvec_t)
+    jac_change = norm(jac_secant_s)
+    if beta is None:
+        # No transpose to take the full norm with (a node the map cannot be
+        # reverse-differentiated through, in a group larger than the range
+        # basis): a map whose Jacobian does not move (``jac_change == 0``,
+        # bit for bit on an affine map) needs no ``beta``; any other has no
+        # certified bound.
+        numerator = jnp.where(jac_change > 0, jnp.inf, jnp.zeros_like(jac_change))
+    else:
+        numerator = beta * jac_change
     h = jnp.where(
-        step > 0, amp * norm(jac_secant_s) / jnp.where(step > 0, step, 1.0), 0.0,
+        step > 0, numerator / jnp.where(step > 0, step, 1.0), 0.0,
     )
     certified = h < 0.5
     root = jnp.sqrt(jnp.maximum(1.0 - 2.0 * h, 0.0))
@@ -2685,7 +2863,7 @@ def _run_coupled_block_impl(
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
     multigpu_device_map=None, node_params=None, fires=None,
-    strict_sink=None,
+    strict_sink=None, probe_sink=None,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -3591,6 +3769,12 @@ def _run_coupled_block_impl(
                 _step_flat, x0_full
             )
             consts = tuple(consts_list)
+            if probe_sink is not None and group.diagnostics:
+                # Which constants the gradient bound probes as a whole, by
+                # name where a constant is a parameter, a state field or an
+                # external input the closure read directly (``_probe_plan``).
+                probe_sink["+".join(sorted(group.nodes))] = _whole_probe_names(
+                    consts, _node_params, full_state, new_state, external_inputs)
 
             def _measured_pass_evaluations(x_full):
                 """The pass's evaluation count with every read weighted by its measured gain.
@@ -5019,6 +5203,10 @@ class GraphManager:
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
         self._committed_floor_inputs: dict[str, tuple] = {}
+        # Per group key, the floating constants the gradient bound probed
+        # as a whole rather than entry by entry (``_probe_plan``), as
+        # ``(name, entries)``; written when the step is traced.
+        self._gradient_whole_probes: dict[str, tuple] = {}
         # MADD-ANO-068, per compile generation: ``[generation, candidates,
         # hazards]``; see ``_refuse_xla_loop_hazards``.
         self._xla_loop_hazards: Optional[list] = None
@@ -7855,6 +8043,7 @@ class GraphManager:
                 has_external=has_external, all_edges=self._edges,
                 multigpu_device_map=self._multigpu_device_map,
                 node_params=node_params, fires=fires,
+                probe_sink=self._gradient_whole_probes,
             )
 
         if not is_multirate and not has_coupling:
@@ -9661,6 +9850,7 @@ class GraphManager:
                             multigpu_device_map=self._multigpu_device_map,
                             node_params=node_params,
                             strict_sink=sink,
+                            probe_sink=self._gradient_whole_probes,
                         )
                         if sink:
                             # One entry per checked solve (one per waveform

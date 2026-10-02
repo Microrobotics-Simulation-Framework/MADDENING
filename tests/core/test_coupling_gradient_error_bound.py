@@ -592,7 +592,11 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap(
 # ---------------------------------------------------------------------------
 
 #: The hidden-slow-mode map with a concave slow mode: ``F'(x*) = 0.99866``.
-_HIDDEN_Q = -0.02
+#: The slow mode's curvature.  -0.02 until 0.4.0's round-5 fix: the
+#: Kantorovich check there passed only on the Krylov-restricted resolvent
+#: norm (h = 0.48); with the full norm it is 0.56, no certified bound, so
+#: the fixture now sits where the check holds (h below one half).
+_HIDDEN_Q = -0.014
 
 
 # Slow-marked: its reference is two gradients through 20 000 passes, 10-12 s
@@ -605,7 +609,7 @@ def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
     ``error_estimate`` reads the fast mode's rate off the residual
     sequence and puts the forward ~100x closer to the fixed point than
     it is (``converged=True`` all the same).  The slow mode is where the
-    curvature is, so the gradient is ~25% off.  The bound holds because
+    curvature is, so the gradient is ~20% off.  The bound holds because
     its distance is ``spectral_error_bound``, which sees the slow mode;
     the same arithmetic with ``error_estimate`` as the distance -- the
     bound is linear in it -- would read two orders of magnitude short.
@@ -635,10 +639,10 @@ def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
 def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient():
     """The test above, per push, with the float64 fixed point's gradient
     as the reference in place of the two arms of twenty thousand passes,
-    which match it to 1e-4 (the gradient here is ~25% off).  The gradient
+    which match it to 1e-4 (the gradient here is ~20% off).  The gradient
     is taken without diagnostics, which leave the returned iterate
     bit-identical (``tests/core/test_coupling_diagnostics_leave_the_state_alone.py``),
-    and so the gradient at it: measured equal to the last bit (997.6342)."""
+    and so the gradient at it: measured equal to the last bit (998.3466)."""
     q = _HIDDEN_Q
     gm = _two_mode_graph(q)
     gm.step()

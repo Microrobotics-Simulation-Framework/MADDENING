@@ -490,3 +490,47 @@ def test_a_one_sweep_group_divides_by_iterations_less_one_as_before():
     if st["mean"] > 1.0:
         assert rep.coupling_per_iteration_ms == pytest.approx(
             rep.coupling_overhead_ms / (st["mean"] - 1.0), rel=1e-12, abs=0.0)
+
+
+# ---------------------------------------------------------------------------
+# A node.params write pending at profile time survives the profiler's recompiles
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("measure_coupling", [True, False])
+def test_a_pending_node_params_write_survives_profiling(measure_coupling):
+    """``node.params`` written after compile, then profiled, then compiled: the write applies.
+
+    A ``node.params`` write made after a compile reaches the step at the
+    next ``compile()``: that compile sees the node's value move since the
+    last committed compile while ``gm.params`` did not (MADD-ANO-093).  The
+    profiler's one-iteration variant recompiles twice and then restores
+    the caller's ``gm.params``, so those compiles recorded the new node
+    value as already taken while the restored ``gm.params`` still held the
+    old one -- and the caller's next compile kept the old value.  The
+    profiler now restores the committed params snapshot as well.
+    """
+    gm = _coupled()
+    gm.step()
+    old = float(gm.params["nodes"]["a"]["stiffness"])
+    gm._nodes["a"].node.params["stiffness"] = 2.0 * old
+    profile_graph(gm, n_steps=2, n_warmup=1, counts=False, measure_coupling=measure_coupling)
+    gm.compile()
+    assert float(gm.params["nodes"]["a"]["stiffness"]) == 2.0 * old
+
+
+def test_a_gm_params_write_survives_profiling_and_the_next_compile():
+    """The neighbouring case: a ``gm.params`` leaf (a calibration) is not discarded.
+
+    Profiling recompiles twice and restores ``gm.params``; the snapshot it
+    restores beside it must not make the caller's next compile take the
+    node's (old) value over the written leaf.
+    """
+    gm = _coupled()
+    gm.step()
+    old = float(gm.params["nodes"]["a"]["stiffness"])
+    gm.params["nodes"]["a"]["stiffness"] = jnp.float32(3.0 * old)
+    profile_graph(gm, n_steps=2, n_warmup=1, counts=False)
+    assert float(gm.params["nodes"]["a"]["stiffness"]) == 3.0 * old
+    gm.compile()
+    assert float(gm.params["nodes"]["a"]["stiffness"]) == 3.0 * old

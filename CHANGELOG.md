@@ -648,7 +648,7 @@ guidance; the itemized changes follow.
   normal and hostile bridges, `validate_fmu`, and a `-std=c11 -pedantic`
   build.  CI installs valgrind and clang; each part self-skips if its tool is
   missing
-- Full MADDENING test suite on 2026-10-02: **8227 tests collected** locally, 7762
+- Full MADDENING test suite on 2026-10-02: **8634 tests collected** locally, 8169
   in CI's default lane (`-m "not slow"`, `--ignore=tests/viz`; 432 slow deselected).
   These counts are regenerated at the tag, with CI's pass/skip figures from the tag's
   run — see `docs/release_notes/v0.4.0.md`.  v0.2.1's own

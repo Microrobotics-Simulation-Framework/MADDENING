@@ -533,6 +533,32 @@ def test_the_coupled_goal_fails_a_last_step_that_did_not_iterate(rp, recorded, i
     assert rp.check_status(_check_named(after, name)) == "failed"
 
 
+@pytest.mark.parametrize("key, fragments", [
+    ("stencil", ("stencil 17x20 on 4 devices: ValueError",
+                 "stencil refusal names the cell count, the device count")),
+    ("stencil_axis1", ("along spatial axis 1 on 4 devices: ValueError",
+                       "axis-1 stencil refusal names")),
+    ("pointwise", ("pointwise 17x20 on 4 devices: ValueError", "pointwise refusal names")),
+    ("pencil", ("on a 2x2 mesh: ValueError", "pencil refusal names")),
+])
+def test_the_indivisible_goal_fails_when_a_shape_it_must_refuse_is_accepted(rp, recorded, key,
+                                                                            fragments):
+    """A grid the mesh cannot split, accepted: the wrapper would run it on
+    blocks of different sizes.  Each refusal's check -- and the one that it
+    names the numbers -- must fail on a result that recorded no refusal."""
+    (doc,) = recorded["indivisible"]
+
+    def accept(results):
+        results[0][key]["raised"] = None
+        results[0][key]["message"] = ""
+
+    before, after = _rederived(rp, doc, accept)
+    for fragment in fragments:
+        assert rp.check_status(_check_named(before, fragment)) == "passed", fragment
+        assert rp.check_status(_check_named(after, fragment)) == "failed", fragment
+    assert sum(rp.check_status(c) == "failed" for c in after) == len(fragments)
+
+
 @pytest.mark.parametrize("key", ["stencil", "stencil_axis1"])
 def test_the_indivisible_goal_fails_when_the_divisible_shape_is_refused(rp, recorded, key):
     """A wrapper that refused every grid would pass each refusal check; the

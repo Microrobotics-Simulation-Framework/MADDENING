@@ -978,6 +978,29 @@ def test_a_spatial_axis_no_case_splits_over_three_devices_is_a_check_not_run():
         checks = rp.GOAL_CHECKS[goal]([], 4)
         assert [c["name"].split(":")[0] for c in checks if c.get("not_run")] == sorted(
             _NEIGHBOUR_NOT_RUN), goal
+        # and with no pencil (an odd count, or fewer than four), that too
+        for n_dev in (2, 3, 5):
+            names = [c["name"] for c in rp.GOAL_CHECKS[goal]([], n_dev) if c.get("not_run")]
+            assert names[0].startswith("2d pencil mesh: "), (goal, n_dev, names)
+
+
+def test_a_replicated_array_is_not_partitioned():
+    """The wrapper goals' "is partitioned over D devices" checks: a state
+    every device holds whole is not one the mesh split."""
+    import jax
+    import jax.numpy as jnp
+    from jax.sharding import NamedSharding, PartitionSpec as P
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner_module()
+    rp._load_backend()
+    mesh = rp._mesh_for(_N_DEV)
+    split = jax.device_put(jnp.ones((8, 4)), NamedSharding(mesh, P("devices")))
+    whole = jax.device_put(jnp.ones((8, 4)), NamedSharding(mesh, P()))
+    assert rp._is_partitioned(split, _N_DEV) is True
+    assert rp._is_partitioned(whole, _N_DEV) is False
+    assert rp._is_partitioned(jnp.ones((8, 4)), _N_DEV) is False      # one device
 
 
 @pytest.mark.slow

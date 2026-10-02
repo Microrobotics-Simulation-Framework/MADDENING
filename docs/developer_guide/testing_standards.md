@@ -722,6 +722,55 @@ relies on gets `equivalent="<why>"` and is asserted to survive. A live gap
 gets `gap="<what is unguarded>"` and runs as a strict xfail until a guard
 catches it.
 
+## The coupling claims inventory
+
+`docs/validation/coupling_claims.yaml` lists every documented claim about
+coupling that a user could rely on. That covers coupling groups, their
+solvers, schedules and accelerations; sub-cycling, multi-rate groups and the
+adaptive steppers; `coupling_diagnostics()`, `coupling_report()` and
+`strict_convergence`; the precision floor and every bound and `*_usable`
+flag; IFT gradients; the profiler's coupling statistics; and `sysid`'s
+convergence mask. Each row records:
+
+- the claim's wording and where it is stated;
+- the domain the documentation states, with any part it leaves unstated
+  called out;
+- the oracle: how truth is known (an exact float64 fixed point, a dense
+  solve, finite differences, bit-identity or a closed form);
+- the pytest node ids that fail if the claim stops holding;
+- a status: `verified`, `failing`, `untested` or `ambiguous`.
+
+An audit attacks the list rather than hunting open-ended, and a fix PR
+re-classifies the rows it touches.
+
+To add a claim, add a row in the same change as the sentence. Give it the
+next free `CPL-NNN` and cite a test that can fail at the edge of the
+claim's conditions, not in their comfortable middle. If the tree does not
+meet the claim, the test is
+`@pytest.mark.xfail(strict=True, raises=..., reason="CPL-NNN: <one line>; pending fix")`
+and the row is `failing`, with a `finding` that gives the reproducer and a
+file:line guess. If the documentation leaves the domain unstated, or two
+documents disagree, the row is `ambiguous`: it carries the
+`proposed_wording` its tests support and leaves the docs to the fix PR.
+
+`tests/compliance/test_coupling_claims.py` checks four rules, mutation-tested
+by self-tests in the same module:
+
+- every row is well-formed;
+- every cited test is collected and runs on every push, or is slow-marked
+  with a `# Per push:` witness;
+- every `failing` row cites a strict xfail that names it;
+- no `verified` row cites an xfail, and no xfail names a row that does not
+  cite it.
+
+`tests/property/test_coupling_invariances.py` holds three metamorphic rows:
+
+- renaming every node changes nothing;
+- the build order changes nothing (the members' relative order excepted:
+  Gauss-Seidel follows it on purpose);
+- an identity relay on an internal edge moves the fixed point only by
+  rounding.
+
 ## Differential tests
 
 A differential test compares two paths through the library that must agree,

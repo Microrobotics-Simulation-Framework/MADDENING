@@ -14,6 +14,8 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Coupling claims inventory** (`docs/validation/coupling_claims.yaml`): every documented coupling claim with its conditions, oracle and a test that can fail -- 130 rows, 114 verified, 6 failing (strict xfails), 10 ambiguous -- checked by `tests/compliance/test_coupling_claims.py`.
+  Read the failing and ambiguous rows before relying on those claims; a new coupling claim gets a row in the same change (`testing_standards.md`).
 - **Eight new or extended examples**, each asserting what it prints: `advanced.profiling_demo` (the full `ProfileReport`), `sysid_demo`,
   `checkpoint_resume_demo`, `sharding_demo` (4 emulated CPU devices), `fmu_export_demo`, `coupling.interface_mapping_demo`,
   `servers.rest_params_demo` (in-process), and `print_coupling_report()` / `strict_convergence` in `convergence_diagnostics_demo`

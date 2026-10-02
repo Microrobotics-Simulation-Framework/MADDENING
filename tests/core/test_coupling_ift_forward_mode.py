@@ -115,6 +115,8 @@ def test_forward_reverse_adjoint_identity():
 # IFT step, compiled for both solvers -- 8-10 s on the CI runner.  First-order
 # forward and reverse mode through the same step are checked on every push
 # by the two tests above.
+# Per push: tests/core/test_coupling_claims_graphs.py::test_jax_hessian_runs_through_an_ift_step
+# (a Hessian through the smallest coupled group, against the analytic one).
 @pytest.mark.slow
 def test_hessian_through_ift_step():
     f_ift = _positions_fn_for("ift")

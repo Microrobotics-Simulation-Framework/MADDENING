@@ -9178,7 +9178,7 @@ anomalies:
       one moves too; the report's residuals, curvature step and secant are
       formed entry by entry in power-of-two frames, and its JVP tangent,
       in state units, is lifted by the least power of two that keeps its
-      components normal, only below `tiny / eps` (`_tangent_lift`).  A
+      components normal, only below `tiny / eps` (`pow2_frame`'s lift).  A
       group scaled by `2**-14` or `2**-24` reproduces its control's
       passes, verdict and residual to the bit under every acceleration;
       a ring at `2**-118` and `2**-122` its spectral rate and both bounds.

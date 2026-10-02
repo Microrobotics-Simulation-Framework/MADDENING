@@ -11,12 +11,13 @@ inside ``jax.lax.fori_loop``.
 
 from __future__ import annotations
 
-import functools
 from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from maddening.core._pow2_frame import pow2_frame, pow2_rescue
 
 
 # ------------------------------------------------------------------
@@ -201,7 +202,7 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
         scaled = jnp.where(active, diff / safe, jnp.zeros_like(diff))
     else:
         underflow = jnp.logical_and(above, scale < tiny)
-        k = jnp.where(underflow, 1.0 / tiny, 1.0).astype(dtype)
+        k = jnp.where(underflow, pow2_rescue(dtype), 1.0).astype(dtype)
         active = jnp.logical_or(jnp.logical_and(above, scale > 0), underflow)
         safe = jnp.where(active, rtol * (ref * k), jnp.ones_like(scale))
         scaled = jnp.where(active, (diff * k) / safe, jnp.zeros_like(diff))
@@ -215,7 +216,7 @@ def _scaled_change(new_val, old_val, atol: float, rtol: float):
     # covers the scale's underflow end too wherever ``rtol >= eps``.
     # ``ref * K`` stays below ``1 / eps`` on the fields it is applied to.
     small = jnp.logical_and(above, ref < float(tiny) / float(info.eps))
-    big_k = float(1.0 / float(tiny))
+    big_k = float(pow2_rescue(dtype))
     active = jnp.logical_or(active, small)
     pair = jnp.abs(new_val * big_k - old_val * big_k)
     small_safe = jnp.where(small, rtol * (ref * big_k), jnp.ones_like(scale))
@@ -1658,29 +1659,6 @@ def unflatten_coupled_state(
 # Acceleration methods
 # ------------------------------------------------------------------
 
-def _pow2_normaliser(*vectors):
-    """A power of two ``p`` with ``max_i |v_i| * p`` in ``[0.5, 1)``, in their dtype.
-
-    Scale-free arithmetic for the accelerators: a dot product or a norm
-    of ``p * v`` is the one of ``v`` times an exact power of two, so a
-    *ratio* of two of them is bit-identical to the unscaled one wherever
-    the unscaled products neither underflowed nor overflowed -- and
-    unlike the unscaled one it does not underflow at small units (the
-    squares of a float32 residual change near 1e-20 flush to zero).  The
-    exponent is clamped so ``p`` itself is a normal number of the dtype;
-    ``1`` for all-zero or non-finite input, which the callers' own guards
-    then reject.
-    """
-    dtype = jnp.result_type(*vectors)
-    biggest = functools.reduce(
-        jnp.maximum, [jnp.max(jnp.abs(v)) for v in vectors])
-    info = jnp.finfo(dtype)
-    _, exponent = jnp.frexp(jnp.where(jnp.isfinite(biggest), biggest,
-                                      jnp.zeros_like(biggest)))
-    exponent = jnp.clip(exponent, 1 - int(info.maxexp), -int(info.minexp))
-    return jnp.ldexp(jnp.ones((), dtype), -exponent)
-
-
 def _relaxed_step(x_old, x_raw, omega):
     """``x_old + omega * (x_raw - x_old)``, formed entry by entry in a power-of-two frame.
 
@@ -1697,24 +1675,9 @@ def _relaxed_step(x_old, x_raw, omega):
     test.  Entries are framed separately so a small field beside a large
     one in the same vector moves too.
     """
-    k = _pow2_entrywise(x_old, x_raw)
+    k = pow2_frame(x_old, x_raw, mode="entrywise")
     old_k, raw_k = x_old * k, x_raw * k
     return (old_k + omega * (raw_k - old_k)) / k
-
-
-def _pow2_entrywise(*arrays):
-    """Per entry, a power of two ``k`` with ``max_j |a_j[i]| * k[i]`` in ``[0.5, 1)``.
-
-    The entrywise sibling of :func:`_pow2_normaliser`: the exponent is
-    clamped so every ``k`` is a normal number of the dtype, and a zero or
-    non-finite entry gets ``k = 1``.
-    """
-    dtype = jnp.result_type(*arrays)
-    info = jnp.finfo(dtype)
-    biggest = functools.reduce(jnp.maximum, [jnp.abs(jnp.asarray(a, dtype)) for a in arrays])
-    _, exponent = jnp.frexp(jnp.where(jnp.isfinite(biggest), biggest, jnp.zeros_like(biggest)))
-    exponent = jnp.clip(exponent, 1 - int(info.maxexp), -int(info.minexp))
-    return jnp.ldexp(jnp.ones_like(biggest), -exponent)
 
 
 def aitken_relaxation(
@@ -1758,7 +1721,7 @@ def aitken_relaxation(
     residual = x_raw_flat - x_old_flat
     delta_r = residual - prev_residual_flat
     # The two dot products, taken on the vectors rescaled by one power of
-    # two (``_pow2_normaliser``), so their ratio does not depend on the
+    # two (``pow2_frame``), so their ratio does not depend on the
     # units the group's state is written in.  The ratio itself is
     # scale-free; what was not was the guard on its denominator, an
     # absolute ``denom > 1e-30`` on ``sum(delta_r**2)``, which is
@@ -1772,7 +1735,7 @@ def aitken_relaxation(
     # in the guard can fix.  Multiplying by a power of two is exact, so
     # wherever nothing underflowed before, the ratio -- and omega -- is
     # bit-identical to the unscaled formula's.
-    pow2 = _pow2_normaliser(prev_residual_flat, delta_r)
+    pow2 = pow2_frame(prev_residual_flat, delta_r)
     p_hat = prev_residual_flat * pow2
     d_hat = delta_r * pow2
     denom = jnp.sum(d_hat ** 2)
@@ -1920,7 +1883,7 @@ def iqn_ils_update(
     # then rounded its secant step differently from the same group at
     # scale 1.  An exact power of two leaves every product of a matrix in
     # range as it was.
-    ls_pow2 = _pow2_normaliser(V_masked, residual)
+    ls_pow2 = pow2_frame(V_masked, residual)
     c = jnp.linalg.pinv(V_masked * ls_pow2, rtol=1e-6) @ (-(residual * ls_pow2))
 
     # QN correction
@@ -1948,7 +1911,7 @@ def iqn_ils_update(
     # wherever nothing underflowed; an exactly zero residual still
     # accepts only a zero correction (and its Aitken fallback is the
     # same unmoved iterate).
-    pow2 = _pow2_normaliser(correction, residual)
+    pow2 = pow2_frame(correction, residual)
     correction_norm = jnp.sqrt(jnp.sum((correction * pow2) ** 2))
     residual_norm = jnp.sqrt(jnp.sum((residual * pow2) ** 2))
     is_valid = (

@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     # inside them (see "Read-only inspection" at the end of the class).
     from maddening.core.inspection import InspectionTable
 
+from maddening.core._pow2_frame import pow2_frame
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     _field_reference,
@@ -516,12 +517,12 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         live = ww > 0
         w_inv = jnp.where(live, 1.0 / jnp.where(live, ww, 1.0), 0.0)
         # The tangent lifted out of the underflow range where the group is
-        # that small (``_tangent_lift``; 1 elsewhere) and the residual's
+        # that small (``pow2_frame(..., mode="lift")``; 1 elsewhere) and the residual's
         # difference taken entry by entry in a power-of-two frame
         # (``_framed_difference``): in state units a group of magnitude
         # ~1e-34 handed the JVP tangents below the normal range, and its
         # residual ``F(x) - x`` flushed to zero.
-        lift = _tangent_lift(w_inv)
+        lift = pow2_frame(w_inv, mode="lift")
 
         def matvec(v):
             _, Jv = jax.jvp(
@@ -589,42 +590,8 @@ def _framed_difference(a, b, weight):
     a change of an ulp is subnormal and the bare difference flushed to
     zero.
     """
-    from maddening.core.coupling.acceleration import _pow2_entrywise  # noqa: PLC0415
-
-    k = _pow2_entrywise(a, b)
+    k = pow2_frame(a, b, mode="entrywise")
     return (a * k - b * k) * (weight / k)
-
-
-def _tangent_lift(scale):
-    """The least power of two ``>= 1`` that keeps a JVP tangent of size ``max|scale|`` normal.
-
-    The report's Jacobian-vector products take their tangent in state
-    units (``v * max|field|`` for a unit vector ``v``: a relative
-    perturbation of order one), which keeps every intermediate a node's
-    derivative forms at its natural size.  Below ``tiny / eps`` (``2**-102``
-    in float32) the small components of such a tangent are subnormal and
-    flush to zero, and the products read a different Jacobian.  There, and
-    only there, the tangent is multiplied by the least power of two that
-    brings its largest entry to ``tiny / eps`` -- every component down to
-    one ``eps`` of it normal -- and the product is divided by it again,
-    exactly (``J`` is linear).  It is 1 at every other magnitude, so the
-    program is the one it was.  Lifting to order one instead was tried and
-    is wrong both ways: at a large state a tangent of order one is a
-    relative perturbation of ``1/|x|``, and a nonlinear node's derivative
-    intermediates (``d(1/u) = -du/u**2``) underflowed -- a gradient bound
-    0.79x its control at ``|x| ~ 1e18``, usable -- and at a tiny state its
-    ``1/u`` times an order-one tangent overflowed.  A node whose derivative
-    intermediates are within ``2**24`` of overflow at a near-subnormal
-    state can still overflow under the lift, which reads as a non-finite
-    report (``spectral_usable=False``), not a wrong number.
-    """
-    dtype = jnp.asarray(scale).dtype
-    info = jnp.finfo(dtype)
-    biggest = jnp.max(jnp.abs(scale))
-    usable = jnp.logical_and(jnp.isfinite(biggest), biggest > 0)
-    _, have = jnp.frexp(jnp.where(usable, biggest, jnp.ones_like(biggest)))
-    _, want = np.frexp(float(info.tiny) / float(info.eps))
-    return jnp.ldexp(jnp.ones((), dtype), jnp.maximum(int(want) - have, 0))
 
 
 def _framed_shift(x, step, scale):
@@ -634,19 +601,8 @@ def _framed_shift(x, step, scale):
     near 1e-34 the increment ``step * scale`` is below the normal range
     and the bare product flushed to zero before it was added.
     """
-    from maddening.core.coupling.acceleration import _pow2_entrywise  # noqa: PLC0415
-
-    k = _pow2_entrywise(x)
+    k = pow2_frame(x, mode="entrywise")
     return (x * k + step * (scale * k)) / k
-
-
-def _pow2_normaliser(*vectors):
-    """See :func:`maddening.core.coupling.acceleration._pow2_normaliser`."""
-    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        _pow2_normaliser as normaliser,
-    )
-
-    return normaliser(*vectors)
 
 
 def _default_resolution(x):
@@ -853,8 +809,8 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         return tuple(out)
 
     # The state tangent lifted out of the underflow range where the group
-    # is that small, as ``_spectral_rate_at`` takes it (``_tangent_lift``).
-    lift = _tangent_lift(s_inv)
+    # is that small, as ``_spectral_rate_at`` takes it (``pow2_frame``'s lift).
+    lift = pow2_frame(s_inv, mode="lift")
 
     def matvec(z):
         """``J(x_k)`` in the scaled coordinates."""
@@ -1648,7 +1604,6 @@ def _fixed_point_while(
       the while_loop with the same column convention as the fori path.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        _pow2_normaliser,
         aitken_relaxation,
         fixed_relaxation,
         iqn_ils_update,
@@ -1679,7 +1634,7 @@ def _fixed_point_while(
     # residual test reported ``converged=True`` up to 7x the threshold
     # away; MADD-ANO-115).  Not formed without an accelerator, so the
     # plain loop's program is the one it was.
-    frame = _pow2_normaliser(x0_acc) if acceleration != "none" else None
+    frame = pow2_frame(x0_acc) if acceleration != "none" else None
 
     if acceleration in ("none", "fixed"):
         # Annotated: the three branches below build tuples of different
@@ -2124,10 +2079,6 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # ``solver='ift'`` pay this import cost.
         import lineax as lx  # noqa: PLC0415  (lazy by design)
 
-        from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-            _pow2_normaliser,
-        )
-
         # The solve is posed on ``b`` rescaled by one exact power of two
         # (largest entry in ``[0.5, 1)``), and its answer scaled back by
         # the reciprocal: ``A`` is linear, so that is the same solution,
@@ -2142,7 +2093,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # to its minimum -- and above the dense fallback's size a
         # moderately small ``b`` raised the "ill-conditioned" error
         # instead.  A zero rhs is answered with exact zeros.
-        scale = _pow2_normaliser(b)
+        scale = pow2_frame(b)
         b_hat = b * scale
         # lineax declares `atol: float`, but it only ever compares against
         # it, and under `jit` this is a traced scalar that must stay one.
@@ -3388,10 +3339,7 @@ def _run_coupled_block_impl(
             # power-of-two rescaling the ift path applies
             # (``_fixed_point_while``), so a group in small units forms its
             # relaxed step from normal numbers and the two solvers agree.
-            from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-                _pow2_normaliser,
-            )
-            accel_frame = _pow2_normaliser(n_dof_flat)
+            accel_frame = pow2_frame(n_dof_flat)
 
         track_diag = group.diagnostics
         first_r = _compute_residual(state_after_first, new_state_inner)

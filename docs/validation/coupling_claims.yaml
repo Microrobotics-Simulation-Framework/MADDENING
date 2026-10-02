@@ -252,7 +252,7 @@ claims:
     every acceleration, norm and solver."
   sources:
     - docs/release_notes/v0.4.0.md#the-coupling-runtime-round-3-confirmation-audit
-    - src/maddening/core/coupling/acceleration.py:1639 (_pow2_normaliser)
+    - src/maddening/core/_pow2_frame.py (pow2_frame)
     - src/maddening/core/coupling/acceleration.py:1702 (aitken_relaxation)
   conditions: >-
     "any power-of-two scale", every acceleration, norm and solver; the

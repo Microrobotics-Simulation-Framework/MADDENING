@@ -974,7 +974,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
 _GROUP_META_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification", "rho_spectral",
     "spectral_residual", "spectral_amplification",
-    "gradient_relative_error_bound", "V", "W", "pred_count",
+    "gradient_relative_error_bound", "pass_evaluations", "V", "W", "pred_count",
     "pred_0", "pred_1", "pred_2",
 )
 
@@ -1237,6 +1237,27 @@ def _group_evaluations(group, nodes, schedule, edges):
     starting a chain of its own) and ``edges`` every edge of the graph;
     only those between two members count.
     """
+    order, own, same_pass, declared = _group_pass_structure(group, nodes, schedule, edges)
+    if group.iteration_mode == "jacobi":
+        return max([1.0, *own.values()]), declared
+    depth: dict[str, float] = {}
+    for nn in order:
+        depth[nn] = own[nn] + max((depth[m] for m in same_pass[nn]), default=0.0)
+    return max([1.0, *depth.values()]), declared
+
+
+def _group_pass_structure(group, nodes, schedule, edges):
+    """``(order, own, same_pass, declared)``: what a pass's rounding is counted on.
+
+    ``order`` is the sweep order (``schedule`` restricted to the group,
+    any member missing from it last), ``own[n]`` node ``n``'s own count
+    ``d_n e_n`` (sub-cycling divider times declared evaluations, one
+    where undeclared), ``same_pass[n]`` the members scheduled before
+    ``n`` that ``n`` reads (an empty set for every node under Jacobi is
+    the caller's business: this lists the reads), and ``declared``
+    whether every member declared its count.  See
+    :func:`_group_evaluations`.
+    """
     dividers = _group_dividers(group, nodes) or {}
     declared = True
     own: dict[str, float] = {}
@@ -1246,8 +1267,6 @@ def _group_evaluations(group, nodes, schedule, edges):
             declared = False
             count = 1.0
         own[nn] = float(dividers.get(nn, 1)) * count
-    if group.iteration_mode == "jacobi":
-        return max([1.0, *own.values()]), declared
     order = [nn for nn in schedule if nn in group.nodes]
     order += sorted(nn for nn in group.nodes if nn not in order)
     position = {nn: i for i, nn in enumerate(order)}
@@ -1256,10 +1275,7 @@ def _group_evaluations(group, nodes, schedule, edges):
         src, dst = edge.source_node, edge.target_node
         if src in position and dst in position and position[src] < position[dst]:
             same_pass[dst].add(src)
-    depth: dict[str, float] = {}
-    for nn in order:
-        depth[nn] = own[nn] + max((depth[m] for m in same_pass[nn]), default=0.0)
-    return max([1.0, *depth.values()]), declared
+    return order, own, same_pass, declared
 
 
 def _group_residual_dtype(state, node_names):
@@ -2199,7 +2215,7 @@ _META_KEY = "_meta"
 _REPORT_SLOT_SUFFIXES = (
     "iterations", "total_iterations", "residual", "amplification",
     "rho_spectral", "spectral_residual", "spectral_amplification",
-    "gradient_relative_error_bound",
+    "gradient_relative_error_bound", "pass_evaluations",
 )
 
 
@@ -2474,7 +2490,7 @@ def _raise_if_a_kept_solve_failed(messages: dict, verdicts: Sequence[dict]) -> N
 #: every value it reports from one solve.
 _PER_SOLVE_REPORT_SUFFIXES = (
     "residual", "amplification", "rho_spectral", "spectral_residual",
-    "spectral_amplification", "gradient_relative_error_bound",
+    "spectral_amplification", "gradient_relative_error_bound", "pass_evaluations",
 )
 
 
@@ -2843,6 +2859,57 @@ def _run_coupled_block_impl(
     # diagnostics compare against (see ``_group_evaluations``).
     pass_evaluations, _declared = _group_evaluations(
         group, nodes, group_node_names, group_internal_list)
+    gs_order, gs_own, gs_same_pass, _ = _group_pass_structure(
+        group, nodes, group_node_names, group_internal_list)
+
+    def _same_pass_gain(s_star, src, dst):
+        """Measured relative gain of ``dst``'s update in its same-pass read of ``src``.
+
+        One JVP of ``dst``'s update, at ``s_star``, along ``src``'s own
+        state (a relative perturbation of every floating field of
+        ``src`` by one), the response measured per floating field of
+        ``dst`` relative to that field's magnitude, worst field taken:
+        how many times a relative rounding of ``src`` grows in ``dst``.
+        A squaring relay reads 2, ``3u - 2v`` at ``u ~ v`` reads about 3,
+        an affine relay of gain ``g`` reads ``|g| * |u| / |x|``.  A read
+        through a sub-cycled member counts as one (its update is several
+        sub-steps; its own count already carries them).  The perturbation
+        moves ``src``'s fluxes with its state, so a flux edge is measured
+        through the flux.
+        """
+        if group_dividers.get(src, 1) > 1 or group_dividers.get(dst, 1) > 1:
+            return jnp.float32(1.0)
+        dst_pre = _pre(dst)
+        src_state = s_star[src]
+        floats = [f for f, v in src_state.items()
+                  if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)]
+
+        def dst_of(src_floats):
+            s = {**s_star, src: {**src_state, **src_floats}}
+            flux_s: dict[str, dict] = {}
+            if has_flux_edges:
+                # Two sweeps, as ``one_pass_gs`` seeds them: a producer may
+                # read another producer's flux.
+                for strict in (False, True):
+                    for nn in group_node_names:
+                        if nn in flux_producing_nodes:
+                            flux_s[nn] = _node_fluxes(
+                                nodes[nn], s[nn],
+                                _resolve_boundary(nn, s, flux_s, strict=strict),
+                                _get_dt(nn), _np(nn))
+            out = _node_update(nodes[dst], dst_pre, _resolve_boundary(dst, s, flux_s),
+                               _get_dt(dst), _np(dst))
+            return {f: v for f, v in out.items()
+                    if jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating)}
+
+        primal = {f: src_state[f] for f in floats}
+        out, d_out = jax.jvp(dst_of, (primal,), (primal,))
+        gain = jnp.float32(0.0)
+        for f, v in out.items():
+            ref = jnp.max(jnp.abs(v)).astype(jnp.float32)
+            change = jnp.max(jnp.abs(d_out[f])).astype(jnp.float32)
+            gain = jnp.maximum(gain, jnp.where(ref > 0, change / jnp.where(ref > 0, ref, 1.0), 0.0))
+        return gain
 
     def _resolve_boundary_interpolated(nn, s_prev, s_cur, alpha,
                                         flux_s=None, s_prev_prev=None):
@@ -3209,7 +3276,7 @@ def _run_coupled_block_impl(
             # ``gradient_bound_usable=False``.
             if group.solver == "ift" or group.diagnostics:
                 nan = jnp.full((), jnp.nan, jnp.asarray(single_r).dtype)
-                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan), None
+                return r, (jnp.array(1.0), single_r, single_amp, nan, nan, nan, nan, nan), None
             return r, None, None
 
         # Determine n_dof for acceleration
@@ -3405,6 +3472,33 @@ def _run_coupled_block_impl(
             )
             consts = tuple(consts_list)
 
+            def _measured_pass_evaluations(x_full):
+                """The pass's evaluation count with every same-pass read gain-weighted.
+
+                ``max(structural, max_n depth(n))`` with ``depth(n) =
+                d_n e_n + sum_m g_nm depth(m)`` over the members ``m``
+                ``n`` reads from the same Gauss-Seidel pass, ``g_nm`` the
+                measured relative gain of that read
+                (``_same_pass_gain``).  In its own ``lax.cond`` branch so
+                its products cannot share subexpressions with the forward.
+                """
+                def measure(xx):
+                    s_star = _embed_live(xx)
+                    depth = {}
+                    for nn in gs_order:
+                        acc = jnp.asarray(gs_own[nn], jnp.float32)
+                        for mm in sorted(gs_same_pass[nn]):
+                            acc = acc + _same_pass_gain(s_star, mm, nn) * depth[mm]
+                        depth[nn] = acc
+                    weighted = functools.reduce(jnp.maximum, depth.values())
+                    return jnp.maximum(jnp.float32(pass_evaluations), weighted)
+
+                if use_jacobi or not any(gs_same_pass.values()):
+                    return jnp.asarray(pass_evaluations, jnp.float32)
+                return jax.lax.cond(
+                    jnp.all(jnp.isfinite(x_full)), measure,
+                    lambda _xx: jnp.asarray(pass_evaluations, jnp.float32), x_full)
+
             def _read_fields(s_star):
                 """``(node, field, value)`` for every field the norm reads."""
                 read = {(e.source_node, e.source_field) for e in group_internal_list}
@@ -3531,7 +3625,14 @@ def _run_coupled_block_impl(
             # The bound on the IFT gradient's error is built on that
             # triple, so it has the same gate and the same NaN.
             grad_bound = jnp.full((), jnp.nan, x0_full.dtype)
+            pass_evals = jnp.full((), jnp.nan, x0_full.dtype)
             if group.diagnostics:
+                # How many evaluations' rounding the pass carries, with
+                # each same-pass read weighted by its measured relative
+                # gain at the returned state (``_gain_weighted_evaluations``),
+                # never below the structural count.
+                pass_evals = _measured_pass_evaluations(
+                    jax.lax.stop_gradient(x_star_full)).astype(x0_full.dtype)
                 weight_scale = _weight_scale(jax.lax.stop_gradient(x_star_full))
                 weights = _norm_weights(jax.lax.stop_gradient(x_star_full),
                                         scale=weight_scale)
@@ -3548,8 +3649,8 @@ def _run_coupled_block_impl(
                 # The residual's float resolution per entry, each field at
                 # its own dtype's eps (``_residual_resolution``), in the
                 # weights' units (so times their common scale), for a pass
-                # that rounds like ``pass_evaluations`` single ones.
-                resolution = (weight_scale * pass_evaluations) * _residual_resolution(_flatten_full({
+                # that rounds like ``pass_evals`` single ones.
+                resolution = (weight_scale * pass_evals) * _residual_resolution(_flatten_full({
                     nn: {fld: jnp.full(
                         jnp.shape(template_state[nn][fld]),
                         jnp.finfo(template_state[nn][fld].dtype).eps,
@@ -3590,11 +3691,12 @@ def _run_coupled_block_impl(
                            _with_nonfloat_fields_at(_embed_live(x_star_full)),
                            jnp.array(False))
             return (final, (n_iters, final_res, final_amp, rho_spec, spec_resid,
-                            spec_amp, grad_bound), (vw if vw else None))
+                            spec_amp, grad_bound, pass_evals), (vw if vw else None))
 
         if group.solver == "ift":
             (final_state, (iter_count, final_res, final_amp, rho_spec,
-                           spec_resid, spec_amp, grad_bound), vw) = _run_ift_forward(state_after_first)
+                           spec_resid, spec_amp, grad_bound, pass_evals),
+             vw) = _run_ift_forward(state_after_first)
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = final_state[nn]
@@ -3604,7 +3706,7 @@ def _run_coupled_block_impl(
             # through this step is trustworthy.  The spectral pair is
             # NaN unless ``diagnostics=True`` (see ``_run_ift_forward``).
             diag_data = (iter_count, final_res, final_amp, rho_spec,
-                         spec_resid, spec_amp, grad_bound)
+                         spec_resid, spec_amp, grad_bound, pass_evals)
             return r, diag_data, vw
 
         # ---- Legacy unrolled fori_loop path (``solver="fori"``,
@@ -3985,7 +4087,7 @@ def _run_coupled_block_impl(
         diag_data = None
         if track_diag:
             nan = jnp.full((), jnp.nan, jnp.asarray(final_res).dtype)
-            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan)
+            diag_data = (iter_count, final_res, final_amp, nan, nan, nan, nan, nan)
 
         vw_data = None
         if group.acceleration in ("iqn-ils", "iqn-imvj"):
@@ -4117,7 +4219,7 @@ def _run_coupled_block_impl(
     # fori path only reports with diagnostics=True.
     if diag_data is not None and (group.diagnostics or _META_KEY in full_state):
         (iter_count, final_res, final_amp, rho_spec, spec_resid, spec_amp,
-         grad_bound) = diag_data
+         grad_bound, pass_evals) = diag_data
         # Written in the dtype ``compile()`` seeded the slot with, so the
         # scan carry keeps its type whatever the residual was computed
         # in (the seed is the promotion of the group's floating fields,
@@ -4167,6 +4269,9 @@ def _run_coupled_block_impl(
                 ),
                 f"coupling_{group_key}_gradient_relative_error_bound": jnp.asarray(
                     grad_bound, dtype=res_dtype
+                ),
+                f"coupling_{group_key}_pass_evaluations": jnp.asarray(
+                    pass_evals, dtype=res_dtype
                 ),
             }
 
@@ -4775,6 +4880,7 @@ class GraphManager:
         # the group that wrote them, which until the next compile is this
         # one and not a replacement registered since.
         self._committed_coupling_groups: dict[str, CouplingGroup] = {}
+        self._committed_floor_inputs: dict[str, tuple] = {}
         # MADD-ANO-068, per compile generation: ``[generation, candidates,
         # hazards]``; see ``_refuse_xla_loop_hazards``.
         self._xla_loop_hazards: Optional[list] = None
@@ -6840,6 +6946,13 @@ class GraphManager:
                         meta[f"coupling_{key}_gradient_relative_error_bound"] = jnp.array(
                             jnp.nan, dtype=res_dtype
                         )
+                        # The evaluations the pass rounds like, measured
+                        # at the step's state with each same-pass read
+                        # gain-weighted; NaN reads as "not measured" and
+                        # the report falls back to the structural count.
+                        meta[f"coupling_{key}_pass_evaluations"] = jnp.array(
+                            jnp.nan, dtype=res_dtype
+                        )
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
                     from maddening.core.coupling.acceleration import (
@@ -7142,6 +7255,16 @@ class GraphManager:
         self._committed_rate_dividers = dict(plan.rate_dividers)
         self._committed_coupling_groups = {
             "+".join(sorted(g.nodes)): g for g in self._coupling_groups
+        }
+        # What the report's float floor rests on, as the step was built:
+        # each group's structural evaluation count, whether every member
+        # declared it, and its internal edges (``coupling_diagnostics``).
+        self._committed_floor_inputs = {
+            "+".join(sorted(g.nodes)): (
+                *_group_evaluations(g, self._nodes, self._schedule, self._edges),
+                tuple(e for e in self._edges
+                      if e.source_node in g.nodes and e.target_node in g.nodes))
+            for g in self._coupling_groups
         }
         # Count Python-level traces of the step: a robust, JAX-version-
         # independent retrace probe (the jit object's C++ cache count is
@@ -8450,13 +8573,34 @@ class GraphManager:
                 # A pass that sub-cycles a node, or whose nodes loop inside
                 # ``update``, rounds like several single ones: the floor is
                 # per evaluation (``_group_evaluations``).
-                evaluations, declared = _group_evaluations(
-                    group, self._nodes, self._schedule, self._edges)
+                #
+                # Taken from what the compiled step was built from
+                # (``_committed_floor_inputs``, snapshot at ``compile()``),
+                # not the live graph: an edit since -- the remove-and-re-add
+                # recipe with a node declaring another count -- moved the
+                # bound of a step that had already run (17x measured), and
+                # a removed member raised ``KeyError`` here.  Where the step
+                # measured the count with its same-pass reads gain-weighted
+                # (``pass_evaluations``, ``diagnostics=True`` under ``"ift"``)
+                # that is the count.
+                committed = self._committed_floor_inputs.get(key)
+                if committed is None:
+                    committed = (*_group_evaluations(
+                        group, self._nodes, self._schedule, self._edges),
+                        tuple(e for e in self._edges
+                              if e.source_node in group.nodes
+                              and e.target_node in group.nodes))
+                evaluations, declared, internal_edges = committed
+                measured = float(meta.get(f"coupling_{key}_pass_evaluations", float("nan")))
+                if math.isfinite(measured):
+                    evaluations = max(evaluations, measured)
+                if any(nn not in self._state for nn in group.nodes):
+                    # A member removed since the step: its state, which the
+                    # floor is measured on, is gone, and so is this report.
+                    continue
                 floor = float(residual_precision_floor(
                     self._state, sorted(group.nodes), group.convergence_norm,
-                    group.atol, group.rtol,
-                    [e for e in self._edges
-                     if e.source_node in group.nodes and e.target_node in group.nodes],
+                    group.atol, group.rtol, list(internal_edges),
                     evaluations=evaluations,
                 ))
                 spectral_bound = float(spectral_error_bound(
@@ -9706,7 +9850,8 @@ class GraphManager:
         for group in self._coupling_groups:
             key = "+".join(sorted(group.nodes))
             for suffix in ("rho_spectral", "spectral_residual",
-                           "spectral_amplification", "gradient_relative_error_bound"):
+                           "spectral_amplification", "gradient_relative_error_bound",
+                           "pass_evaluations"):
                 seeds[f"coupling_{key}_{suffix}"] = nan
             for suffix in ("iterations", "total_iterations", "residual",
                            "amplification", "pred_count", "V", "W"):

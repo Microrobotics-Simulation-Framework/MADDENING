@@ -1271,6 +1271,8 @@ def coupling_report(gm: "GraphManager") -> InspectionTable:
                            "diagnostics=True",)
         elif key not in committed:
             row[_FLAGS] = ("no report: the group was added after the last compile",)
+        elif any(nn not in gm._state for nn in group.nodes):
+            row[_FLAGS] = ("no report: a member was removed since the last step",)
         else:
             row[_FLAGS] = ("no report yet: no step has run since compile() or reset_state()",)
         rows.append(row)

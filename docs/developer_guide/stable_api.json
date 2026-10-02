@@ -1497,6 +1497,12 @@
           "parameters": [],
           "returns": "dict"
         },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
+        },
         "params_table": {
           "kind": "method",
           "parameters": [],

@@ -2773,8 +2773,14 @@ anomalies:
         - `hello` returned the instantiation token.
       An importer that connected afterwards read a stiffness of 77.0 and
       a time of 0.01.  The stranger's write and step carried into its
-      session, because the bridge keeps the sidecar's state across
-      connections and the C wrapper does not reset on instantiation.
+      session, because the bridge kept the sidecar's state across
+      connections and the C wrapper did not reset on instantiation.
+      That carry-over was MADD-ANO-083, resolved in 0.4.0: a connection
+      that claims the slot now starts a new instance at the model
+      description's start values, so what a stranger does before an
+      instance begins no longer reaches it.  What a stranger does while it
+      holds the slot still reaches the model, and holding the slot still
+      locks the importer out.
       Separately, a client that connects first and keeps talking holds
       the bridge's single instance slot.  A later importer's `hello` is
       refused with "bridge already serves an FMU instance", after the
@@ -2830,7 +2836,9 @@ anomalies:
       produces a co-simulation that runs, converges and returns finite
       numbers from physics the importer never set, and nothing on the
       importer's side of the protocol distinguishes that session from
-      an honest one.
+      an honest one.  (That path, writes made before the importer
+      connects, closed with MADD-ANO-083's fix; the grading above was made
+      before it.)
     affected_components:
       - "maddening.fmi.tcp_bridge.FmuTcpBridge"
       - "maddening.fmi.tcp_bridge.FmuTcpBridge.handle"
@@ -2842,11 +2850,10 @@ anomalies:
       network namespace, so that no other user or process can reach its
       loopback port.  On a shared host, firewall the port, for example
       with an owner-matching nftables or iptables rule that admits only
-      the importer's user to it.  An importer that must be sure of its
-      starting point can call `fmi3Reset` (the bridge's `reset`, which
-      restores the initial state and parameters) or restore a known
-      FMU state after instantiating.  That undoes an earlier stranger's
-      writes; it does not stop a later one.
+      the importer's user to it.  Since MADD-ANO-083's fix every new
+      instance starts at the model description's start values, which
+      undoes an earlier stranger's writes without any call; nothing stops
+      a stranger that holds the slot.
     resolution_status: "open"
     resolution_version: null
     residual_risk: null
@@ -7084,6 +7091,228 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-083"
+    title: "A second FMU instance on the same bridge started from the previous instance's final state, parameters, inputs and time"
+    description: >
+      An FMI master that runs an FMU more than once frees the instance and
+      instantiates a new one between runs (`fmi3FreeInstance`, then
+      `fmi3InstantiateCoSimulation`), and FMI 3.0 starts every instance at
+      the start values of its `modelDescription.xml`.  The bridge supported
+      that sequence -- the C wrapper opens a new connection per instance, and
+      the bridge waits out the hand-over of its single instance slot -- but
+      nothing on the instantiation path reset anything.  The wrapper's
+      instantiation sent only `hello`, claiming the slot reset nothing, and
+      `reset` was sent only by `fmi3Reset`.  So the second instance inherited
+      the first one's model state, the parameters it had tuned, its pending
+      inputs and its time, and every call returned `fmi3OK`.
+
+      Found by the 0.4.0 round-4 confirmation audit and reproduced
+      2026-10-02 (CPU, jaxlib 0.11.0, FMPy 0.3.29) on the test suite's
+      table/ball/spring plant.  FMPy's `simulate_fmu` was called against one
+      running bridge, three times, as a notebook or a parameter study does.
+      Runs 1 and 2 had identical arguments, a stiffness of 45 and a driven
+      anchor.  Run 1 matched `GraphManager.run_scan`.  Run 2 started at run
+      1's final spring position (1.036 instead of 0.5) and ended at 1.668
+      against the graph's 1.036.  Run 3 set no start values and reported and
+      computed with run 1's stiffness of 45, not the advertised 30, ending
+      at 1.554 against 0.877.
+
+      Introduced with the bridge and the C wrapper in 2efcaea, during the
+      0.4.0 development line.  No tagged release contains it: v0.1.0 to
+      v0.3.1 have no `src/maddening/fmi/tcp_bridge.py` and no C wrapper.
+
+      Resolved in 0.4.0.  A connection that claims the instance slot is a
+      new instance, and the bridge resets it to where a fresh one starts:
+      the state the bridge was built over, every parameter at the start
+      value the description advertises, every input at zero and the time at
+      zero.  `fmi3Reset` goes to the same point through the same commit.
+      `fmi3EnterInitializationMode` now passes its start time to the bridge
+      (op `initialize`), and a step whose communication point is not the
+      FMU's time is refused.  A sidecar configured with other parameters
+      than its description advertises is brought into line, with a
+      `UserWarning`.
+    severity: "critical"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong in the most ordinary use of an exported FMU: running it
+      twice.  Every second run computed from the previous run's end state
+      and parameters, every call returned `fmi3OK`, and the numbers stayed
+      finite and plausible.  A parameter study's runs depended on their
+      order, and a run without start values used the values of whatever ran
+      before it.  Graded `critical` because nothing in the importer's
+      protocol could tell it apart from a correct run, and because it hit
+      every master that reuses a sidecar between runs, not a corner case.
+      `context_dependent` because whether a wrong co-simulation result
+      matters depends on what it is used for.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.package.C_SOURCE"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: build a new `FmuTcpBridge` per instance, or call `fmi3Reset`
+      straight after instantiating.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The reset belongs to a connection: an in-process caller of
+      `FmuTcpBridge.handle` claims no slot and keeps the state it finds, and
+      a client that opens a new connection per request now starts a new
+      instance each time.  The documented contract is one connection per
+      instance, which is how the C wrapper works.  The state an instance
+      starts from is the sidecar's state when the bridge was built, which
+      outputs have no start value in the XML to check against.
+    verification:
+      - "tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_simulate_fmu_twice_with_the_same_arguments_gives_the_same_result"
+      - "tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_a_connection_that_claims_the_slot_starts_from_the_start_values"
+      - "tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_reset_and_a_new_instance_land_on_the_same_point"
+      - "tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_a_refused_second_connection_resets_nothing"
+      - "tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence"
+      - "tests/property/test_stateful_bridge.py::test_arbitrary_sidecar_sequences_keep_the_bridge_and_the_model_in_step"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-084"
+    title: "An external input the FMU did not export, or that an in-process caller omitted, was not zero-filled: the node took its own \"input missing\" branch"
+    description: >
+      `GraphManager.step` completes a partial `external_inputs` with zeros
+      and refuses a name the graph does not declare (since 2428f5e, during
+      the 0.4.0 development line).  The FMU paths did neither.  The bridge
+      built its inputs from the model description's input variables only,
+      so an input that `build_model_description(selected_inputs=...)` left
+      out never reached the compiled step.  `FmuSidecar.step` called the
+      compiled step directly with whatever it was given, so an input its
+      caller omitted never reached it either, and a misspelt node name was
+      ignored without a word.  A node whose input is missing takes its own
+      fallback branch, which need not be what zero gives.
+
+      Found by the 0.4.0 round-4 confirmation audit and reproduced
+      2026-10-02 (CPU, jaxlib 0.11.0) on a `BallNode` with an external
+      `table_position` and a spring with an external anchor, the FMU
+      exporting only the anchor.  After 80 steps the graph's ball, bouncing
+      on a table at height 0, was at +0.4635.  The bridge's and the
+      sidecar's ball took the "no table" branch and was at -2.178: it fell
+      through the floor, with every value finite and no warning.
+
+      No tagged release had the divergence.  At v0.3.0 and v0.3.1 (`git
+      archive` of each tag, same plant) `FmuSidecar.step` and
+      `GraphManager.step`, given the same partial dict, both gave -2.178:
+      the graph did not complete a partial dict either, and there was no
+      bridge.  The two parted when 2428f5e taught the graph to complete
+      one and the FMU paths, new or unchanged, were not taught the same.
+
+      Resolved in 0.4.0.  `build_model_description` lists the declared
+      inputs it leaves out in `ModelDescription.held_inputs`, warns naming
+      them, and refuses a `selected_inputs` name the graph does not declare.
+      `SidecarConfig.input_resolver` (pass `gm._resolve_external_inputs`)
+      completes and checks a sidecar's inputs before every step, on both
+      `step` and the bridge's path.  A bridge whose sidecar has no resolver
+      installs one built from its description, covering the exported inputs
+      and the held ones.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silently wrong: the FMU computed a different model from the graph it
+      was exported from, with finite values and no warning, whenever an
+      input was left out of the export (or omitted by an in-process caller)
+      and its node's fallback differed from zero.  Graded `major` (a silent
+      wrong result is never `minor`).  Not `critical`: it took a partial
+      export or a partial in-process call, and a node with a non-zero
+      fallback.  `context_dependent` for the reason every wrong co-simulation
+      result is.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.sidecar.FmuSidecar.step"
+      - "maddening.fmi.model_description.build_model_description"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: export every external input, and pass a complete
+      `external_inputs` to `FmuSidecar.step`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A stand-alone `FmuSidecar` (not behind a bridge) built without
+      `input_resolver` still hands its inputs to the step as given, as
+      documented: the sidecar holds only the compiled step and cannot know
+      the graph's declared inputs.  A hand-built `ModelDescription` that
+      does not list `held_inputs` gives the bridge only its exported inputs
+      to complete with.
+    verification:
+      - "tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_bridge_holds_an_unexported_input_at_zero_like_the_graph"
+      - "tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_sidecar_with_the_graphs_resolver_steps_like_the_graph"
+      - "tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_sidecar_refuses_a_misspelt_input_like_the_graph"
+      - "tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_an_importer_driving_the_partial_fmu_reproduces_the_graph"
+      - "tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-085"
+    title: "The FMU advertised min / max for its parameters but enforced them only if the sidecar had been given param_specs: a set or an archive outside them was accepted"
+    description: >
+      `build_model_description` writes every bounded parameter's
+      `ParamSpec.bounds` into the XML as `min` / `max`, and the user guide
+      promised that both doors into the parameter tree -- `set` and the
+      FMU-state archive -- hold that envelope.  But the bridge enforced only
+      the specs its sidecar had been built with, and
+      `SidecarConfig.param_specs` defaults to `None`.  The bridge applied the
+      description's fixed parameters to the sidecar "however it was
+      configured", and did nothing equivalent for the bounds published in
+      the same description.
+
+      Found by the 0.4.0 round-4 confirmation audit and reproduced
+      2026-10-02 (CPU, jaxlib 0.11.0) on the table/ball/spring plant, with
+      the sidecar built without `param_specs`.  The XML said
+      `ball.params.elasticity` had `min="0.0" max="1.0"`.  A `set` of 1.5
+      answered `{"ok": true}` and read back 1.5.  An FMU-state archive
+      carrying -3.0 answered `{"ok": true}` and read back -3.0.  Built with
+      `param_specs`, the same `set` was refused.
+
+      Introduced during the 0.4.0 development line with the FMU's parameter
+      variables and the bridge.  No tagged release contains it: v0.3.0 and
+      v0.3.1 export no parameter variables and no `min` / `max`, and have no
+      bridge.
+
+      Resolved in 0.4.0.  The bridge adds a bounds-only `ParamSpec`, built
+      from its description's `min` / `max`, for every exported parameter
+      its sidecar has no spec for.  `set`, `set_state` and the sidecar's own
+      `set_params` then refuse a value outside the advertised envelope.  A
+      spec the sidecar was given is kept (it is the graph's own declaration,
+      the open bound of a `log` leaf for one), and the caller's tree is
+      copied, never written into.  An FMU instantiated with a parameter
+      outside its bounds still restores its own snapshot.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent at the write: the bridge answered `ok` to values outside the
+      envelope its own XML advertises, and computed with them.  Graded
+      `major` under the 0.4.0 severity definition (a silent wrong result is
+      never `minor`).  It is the same class as MADD-ANO-082 (accepting an
+      input the model's own declarations refuse, and computing from it), and
+      the same door, reached here through `set` as well.  Not `critical`: it
+      needs a sidecar built without `param_specs`, and the value reads back
+      as written, so an importer that checks it can see it.
+      `context_dependent` because an out-of-bounds parameter is as harmful as
+      the model makes it.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.sidecar.SidecarConfig"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: build the sidecar with `param_specs=gm.param_specs()`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A stand-alone `FmuSidecar` (not behind a bridge) built without
+      `param_specs` enforces no bounds, as documented: it has no description
+      to read them from.  The bounds the bridge adds are the advertised,
+      inclusive ones; a `log` / `logit` leaf's open bound is advertised as
+      the nearest float inside it, so the envelope is the same.
+    verification:
+      - "tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs"
+      - "tests/fmi/test_advertised_bounds.py::test_the_sidecars_own_specs_are_kept_and_not_written_into"
+      - "tests/fmi/test_advertised_bounds.py::test_an_fmu_started_outside_its_advertised_bounds_restores_its_own_snapshot"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-086"
     title: "A node.params write made after compile was dropped by every later compile: compile() kept the stale gm.params leaf over the node's new value"
     description: >
       `compile()` builds the step with `gm.params`, and since 0.4.0

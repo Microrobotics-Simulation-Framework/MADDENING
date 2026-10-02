@@ -7,7 +7,46 @@
  * plain and under -fsanitize=address,undefined.
  */
 
+/* send() is routed through a fault injector for the send-failure tests
+ * (test_send_failures).  Feature macros and the socket header come first,
+ * so the macro below renames only the wrapper's call, never the
+ * declaration in <sys/socket.h>. */
+#if !defined(_POSIX_C_SOURCE)
+#  define _POSIX_C_SOURCE 200809L
+#  define _DEFAULT_SOURCE 1
+#endif
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+
+/* Faults apply to one socket only (the client end under test), never to
+ * the fake server's sends on the other end of the pair. */
+enum { FAULT_NONE = 0, FAULT_EINTR_ONCE, FAULT_HALF_THEN_RESET, FAULT_HALF_THEN_EINTR };
+static int g_fault_fd = -1, g_fault_mode = FAULT_NONE, g_fault_calls = 0;
+static ssize_t fault_send(int s, const void *buf, size_t n, int flags);
+#define send fault_send
 #include "../../../src/maddening/fmi/c/maddening_fmu.c"
+#undef send
+
+static ssize_t fault_send(int s, const void *buf, size_t n, int flags) {
+    if (s != g_fault_fd || g_fault_mode == FAULT_NONE) return send(s, buf, n, flags);
+    int k = g_fault_calls++;
+    switch (g_fault_mode) {
+    case FAULT_EINTR_ONCE:                      /* a signal before anything is written */
+        if (k == 0) { errno = EINTR; return -1; }
+        break;
+    case FAULT_HALF_THEN_RESET:                 /* a partial write, then a real failure */
+        if (k == 0 && n > 1) return send(s, buf, n / 2, flags);
+        if (k >= 1) { errno = ECONNRESET; return -1; }
+        break;
+    case FAULT_HALF_THEN_EINTR:                 /* a partial write, then a signal */
+        if (k == 0 && n > 1) return send(s, buf, n / 2, flags);
+        if (k == 1) { errno = EINTR; return -1; }
+        break;
+    default: break;
+    }
+    return send(s, buf, n, flags);
+}
 
 #include <assert.h>
 #include <pthread.h>
@@ -129,6 +168,20 @@ static void test_parse_values(void) {
     CHECK(parse_values(in, out, 0) == fmi3OK);
     /* too few values */
     CHECK(parse_values(in, out, 5) == fmi3Error);
+    /* more values than nValues: refused, not the first n with the rest
+     * dropped (FMI's nValues is what the value references hold) */
+    g_log_calls = 0;
+    CHECK(parse_values(in, out, 3) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "more values in reply than nValues") != NULL);
+    CHECK(parse_values(in, out, 1) == fmi3Error);
+    free(in->resp);
+    /* a list that does not close where the n-th value ends is malformed */
+    in->resp = strdup("{\"ok\":true,\"values\":[1,2}");
+    CHECK(parse_values(in, out, 2) == fmi3Error);
+    CHECK(strstr(g_last_log, "malformed values list") != NULL);
+    free(in->resp);
+    in->resp = strdup("{\"ok\":true,\"values\":[1, 2 ]}");
+    CHECK(parse_values(in, out, 2) == fmi3OK && out[0] == 1.0 && out[1] == 2.0);
     free(in->resp);
     in->resp = strdup("{\"ok\":true}");
     CHECK(parse_values(in, out, 1) == fmi3Error);
@@ -283,14 +336,56 @@ static void test_bridge_call_paths(void) {
     CHECK(bridge_call(dead, "{}") == fmi3Error);
     CHECK(g_log_calls == 1 && strstr(g_last_log, "connection to the sidecar is closed") != NULL);
     free_instance(dead);
-    /* the peer is gone before we send: EPIPE -> fmi3Error, not SIGPIPE */
+    /* the peer is gone before we send: EPIPE -> fmi3Error, not SIGPIPE;
+     * and the connection is dropped, as on a failed receive */
     int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     sock_close(sv[1]);
     Instance *gone = fake_instance(sv[0]);
     g_log_calls = 0;
     CHECK(bridge_call(gone, "{\"op\":\"hello\"}") == fmi3Error);
     CHECK(g_log_calls == 1 && strstr(g_last_log, "send failed") != NULL);
-    sock_close(sv[0]); free_instance(gone);
+    CHECK(gone->sock == SOCK_INVALID);
+    if (gone->sock != SOCK_INVALID) sock_close(sv[0]);
+    free_instance(gone);
+}
+
+/* ------------------------------------------------------- send failures */
+
+static void test_send_failures(void) {
+    /* A signal before anything is written is retried: the request goes
+     * out whole and the call succeeds. */
+    WITH_SERVER("{\"ok\":true}", 0, {
+        g_fault_fd = in->sock; g_fault_mode = FAULT_EINTR_ONCE; g_fault_calls = 0;
+        CHECK(bridge_call(in, "{\"op\":\"terminate\"}") == fmi3OK);
+        CHECK(in->sock != SOCK_INVALID);
+        g_fault_mode = FAULT_NONE;
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"terminate\"}") == 0);
+    /* A partial write and then a signal: the rest is sent, the frame
+     * arrives intact, the call succeeds (send_all used to give up on
+     * EINTR with half a frame on the wire). */
+    WITH_SERVER("{\"ok\":true}", 0, {
+        g_fault_fd = in->sock; g_fault_mode = FAULT_HALF_THEN_EINTR; g_fault_calls = 0;
+        CHECK(bridge_call(in, "{\"op\":\"get\",\"vr\":[7]}") == fmi3OK);
+        CHECK(in->sock != SOCK_INVALID);
+        g_fault_mode = FAULT_NONE;
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"get\",\"vr\":[7]}") == 0);
+    /* A partial write and then a real failure: the stream is out of step
+     * (the peer holds half a frame and would read the next request as its
+     * rest), so the connection is dropped -- every later call fails
+     * honestly, and none is ever read as the remainder. */
+    WITH_SERVER("{\"ok\":true}", 0, {
+        g_fault_fd = in->sock; g_fault_mode = FAULT_HALF_THEN_RESET; g_fault_calls = 0;
+        g_log_calls = 0;
+        CHECK(bridge_call(in, "{\"op\":\"get\",\"vr\":[7]}") == fmi3Error);
+        CHECK(g_log_calls == 1 && strstr(g_last_log, "send failed") != NULL);
+        CHECK(in->sock == SOCK_INVALID);
+        g_fault_mode = FAULT_NONE; g_fault_fd = -1;
+        CHECK(bridge_call(in, "{\"op\":\"get\",\"vr\":[7]}") == fmi3Error);
+        CHECK(strstr(g_last_log, "connection to the sidecar is closed") != NULL);
+    });
+    g_fault_mode = FAULT_NONE; g_fault_fd = -1;
 }
 
 /* --------------------------------------------------- get / set / step */
@@ -343,6 +438,11 @@ static void test_get_set_step(void) {
     WITH_SERVER("{\"ok\":true,\"values\":[1]}", 0, {
         CHECK(fmi3GetFloat32((fmi3Instance)in, vr, 2, g32, 2) == fmi3Error);
     });
+    /* and with more values than nValues: error too, outputs untouched */
+    WITH_SERVER("{\"ok\":true,\"values\":[1,2,3]}", 0, {
+        CHECK(fmi3GetFloat32((fmi3Instance)in, vr, 2, g32, 2) == fmi3Error);
+    });
+    CHECK(g32[0] == 42.0f);
     /* DoStep bookkeeping */
     fmi3Boolean ev, term, early; fmi3Float64 last;
     WITH_SERVER("{\"ok\":true,\"t\":0.25}", 0, {
@@ -356,6 +456,39 @@ static void test_get_set_step(void) {
         CHECK(fmi3DoStep((fmi3Instance)in, 0.2, 0.05, fmi3False, &ev, &term, &early, &last) == fmi3Error);
         CHECK(last == 0.2);
     });
+    /* a non-finite point or step never reaches the wire (%.17g would
+     * write "nan", which is not JSON) */
+    {
+        Instance *dead = fake_instance(SOCK_INVALID);
+        dead->time = 0.3;
+        g_log_calls = 0;
+        CHECK(fmi3DoStep((fmi3Instance)dead, NAN, 0.05, fmi3False, &ev, &term, &early, &last) == fmi3Error);
+        CHECK(last == 0.3 && g_log_calls == 1 && strstr(g_last_log, "must be finite") != NULL);
+        CHECK(fmi3DoStep((fmi3Instance)dead, 0.3, INFINITY, fmi3False, &ev, &term, &early, &last) == fmi3Error);
+        free_instance(dead);
+    }
+    /* EnterInitializationMode tells the bridge the start time, which is the
+     * instance's time from then on (it used to stay in the wrapper, and the
+     * "time" variable read 0.0 until the first step) */
+    WITH_SERVER("{\"ok\":true,\"t\":5}", 0, {
+        CHECK(fmi3EnterInitializationMode((fmi3Instance)in, fmi3False, 0, 5.0, fmi3False, 0) == fmi3OK);
+        CHECK(in->time == 5.0);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"initialize\",\"t\":5}") == 0);
+    WITH_SERVER("{\"ok\":false,\"error\":\"ValueError: initialize after the instance has stepped\"}", 0, {
+        in->time = 0.7;
+        g_log_calls = 0;
+        CHECK(fmi3EnterInitializationMode((fmi3Instance)in, fmi3False, 0, 0.0, fmi3False, 0) == fmi3Error);
+        CHECK(in->time == 0.7 && strstr(g_last_log, "has stepped") != NULL);
+    });
+    {
+        Instance *dead = fake_instance(SOCK_INVALID);
+        g_log_calls = 0;
+        CHECK(fmi3EnterInitializationMode((fmi3Instance)dead, fmi3False, 0, NAN, fmi3False, 0) == fmi3Error);
+        CHECK(g_log_calls == 1 && strstr(g_last_log, "start time must be finite") != NULL);
+        CHECK(fmi3EnterInitializationMode(NULL, fmi3False, 0, 0.0, fmi3False, 0) == fmi3Error);
+        free_instance(dead);
+    }
 }
 
 /* ------------------------------------------------------- binary frames */
@@ -382,11 +515,17 @@ static void test_binary_get_set(void) {
         CHECK(fmi3GetFloat32((fmi3Instance)in, vr, 2, g32, 2) == fmi3OK);   /* parsed by flag, not mode */
         CHECK(g32[0] == 2.5f);
     });
-    /* fewer values requested than sent is fine; more is an error */
+    /* fewer values requested than sent is an error, as more is: nValues
+     * is the number of values the value references hold, so a reply of
+     * any other length answers a different request (it used to return
+     * fmi3OK with the extra values dropped) */
+    g64[0] = 42;
+    g_log_calls = 0;
     WITH_BINARY_SERVER((const char *)frame, n, {
         in->binary = 1;
-        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 1, g64, 1) == fmi3OK && g64[0] == 2.5);
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 1, g64, 1) == fmi3Error);
     });
+    CHECK(g64[0] == 42 && strstr(g_last_log, "more values in reply than nValues") != NULL);
     fmi3Float64 g3[3] = { 42, 42, 42 };
     g_log_calls = 0;
     WITH_BINARY_SERVER((const char *)frame, n, {
@@ -495,17 +634,22 @@ static void test_binary_get_set(void) {
         CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
         CHECK(in->resp_cap < 1000);
     });
-    /* exactly the limit is still read (the bridge may send that much) */
+    /* exactly the limit is still read (the bridge may send that much): the
+     * frame is taken in full and judged on its contents -- here refused for
+     * its count, which is not the caller's nValues, with the connection
+     * intact -- never dropped as over the limit */
     {
         unsigned char *max = (unsigned char *)malloc(FRAME_MAX);
         size_t hl = bin_payload(max, "{\"ok\":true,\"n\":8388602,\"dtype\":\"f64\",\"p\":12}", NULL, 0) - 4;
         memset(max + 4 + hl, 0, FRAME_MAX - 4 - hl);
         CHECK(4 + hl + 8 * 8388602ul == FRAME_MAX);
+        g_log_calls = 0;
         WITH_BINARY_SERVER((const char *)max, FRAME_MAX, {
             in->binary = 1;
-            CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3OK && g64[0] == 0.0);
-            CHECK(in->sock != SOCK_INVALID);
+            CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, g64, 2) == fmi3Error);
+            CHECK(in->sock != SOCK_INVALID && in->resp_binary && in->raw_len == 8 * 8388602ul);
         });
+        CHECK(g_log_calls == 1 && strstr(g_last_log, "more values in reply than nValues") != NULL);
         free(max);
     }
     /* a binary-flagged error reply is reported like a JSON one */
@@ -779,7 +923,8 @@ static void test_fmu_state(void) {
 
 /* ------------------------------------------------ instantiate via TCP */
 
-typedef struct { int listen_fd; const char *hello_reply; int accepted; char *hello_seen; } Listener;
+typedef struct { int listen_fd; const char *hello_reply; int accepted; char *hello_seen;
+                 char *second_seen; } Listener;
 static void *listener_thread(void *p) {
     Listener *L = (Listener *)p;
     int c = accept(L->listen_fd, NULL, NULL);
@@ -787,8 +932,8 @@ static void *listener_thread(void *p) {
     L->accepted = 1;
     char *req = fake_exchange(c, L->hello_reply, 0);      /* hello */
     free(L->hello_seen); L->hello_seen = req;
-    req = fake_exchange(c, "{\"ok\":true}", 0);          /* terminate (from FreeInstance) */
-    free(req);
+    req = fake_exchange(c, "{\"ok\":true}", 0);          /* initialize, or terminate */
+    free(L->second_seen); L->second_seen = req;
     sock_close(c);
     return NULL;
 }
@@ -806,7 +951,7 @@ static void test_instantiate(const char *good_token) {
 
     /* an old (protocol-1) bridge: its hello lacks "protocol" -> JSON everywhere */
     char reply[256]; snprintf(reply, sizeof reply, "{\"ok\":true,\"token\":\"%s\",\"model\":\"m\"}", good_token);
-    Listener L = { fd, reply, 0, NULL };
+    Listener L = { fd, reply, 0, NULL, NULL };
     pthread_t th; pthread_create(&th, NULL, listener_thread, &L);
     fmi3Instance inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3True,
                                                     fmi3False, fmi3False, NULL, 0, NULL, test_logger, NULL);
@@ -815,62 +960,83 @@ static void test_instantiate(const char *good_token) {
         Instance *in = (Instance *)inst;
         CHECK(strcmp(in->instance_name, "i") == 0 && in->logging_on == fmi3True);
         CHECK(in->binary == 0);
+        /* Nagle is off: every call is a small request awaiting its reply,
+         * sent as two writes, and with Nagle the second waited for the
+         * peer's delayed ACK (>= 40 ms per FMI call on Linux) */
+        {
+            int nodelay = 0; socklen_t len = sizeof nodelay;
+            CHECK(getsockopt(in->sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, &len) == 0 && nodelay != 0);
+        }
         CHECK(fmi3EnterInitializationMode(inst, fmi3False, 0, 0.5, fmi3False, 0) == fmi3OK && in->time == 0.5);
         CHECK(fmi3ExitInitializationMode(inst) == fmi3OK);
-        fmi3FreeInstance(inst);                          /* sends terminate */
+        /* the listener has hung up after two exchanges, so FreeInstance's
+         * terminate finds a closed peer: it must still free cleanly */
+        fmi3FreeInstance(inst);
     }
     pthread_join(th, NULL);
     CHECK(L.accepted == 1);
     /* the client always offers protocol 2 */
     CHECK(L.hello_seen != NULL && strcmp(L.hello_seen, "{\"op\":\"hello\",\"protocol\":2,\"binary\":true}") == 0);
-    free(L.hello_seen);
+    /* and tells the bridge the start time */
+    CHECK(L.second_seen != NULL && strcmp(L.second_seen, "{\"op\":\"initialize\",\"t\":0.5}") == 0);
+    free(L.hello_seen); free(L.second_seen);
 
     /* a protocol-2 bridge that confirms binary frames */
     char reply2[256];
     snprintf(reply2, sizeof reply2,
              "{\"ok\":true,\"token\":\"%s\",\"model\":\"m\",\"master_dt\":0.01,\"protocol\":2,\"binary\":true}",
              good_token);
-    Listener Lb = { fd, reply2, 0, NULL };
+    Listener Lb = { fd, reply2, 0, NULL, NULL };
     pthread_create(&th, NULL, listener_thread, &Lb);
     inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3False,
                                        fmi3False, fmi3False, NULL, 0, NULL, test_logger, NULL);
     CHECK(inst != NULL);
     if (inst) { CHECK(((Instance *)inst)->binary == 1); fmi3FreeInstance(inst); }
     pthread_join(th, NULL);
-    free(Lb.hello_seen);
+    free(Lb.hello_seen); free(Lb.second_seen);
 
     /* protocol 2 announced but binary declined: JSON */
     snprintf(reply2, sizeof reply2,
              "{\"ok\":true,\"token\":\"%s\",\"protocol\":2,\"binary\":false}", good_token);
-    Listener Lc = { fd, reply2, 0, NULL };
+    Listener Lc = { fd, reply2, 0, NULL, NULL };
     pthread_create(&th, NULL, listener_thread, &Lc);
     inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3False,
                                        fmi3False, fmi3False, NULL, 0, NULL, test_logger, NULL);
     CHECK(inst != NULL);
     if (inst) { CHECK(((Instance *)inst)->binary == 0); fmi3FreeInstance(inst); }
     pthread_join(th, NULL);
-    free(Lc.hello_seen);
+    free(Lc.hello_seen); free(Lc.second_seen);
 
     /* a bridge that refuses the protocol -> NULL */
-    Listener Ld = { fd, "{\"ok\":false,\"error\":\"protocol 2 is not supported\"}", 0, NULL };
+    Listener Ld = { fd, "{\"ok\":false,\"error\":\"protocol 2 is not supported\"}", 0, NULL, NULL };
     pthread_create(&th, NULL, listener_thread, &Ld);
     g_log_calls = 0;
     inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3False,
                                        fmi3False, fmi3False, NULL, 0, NULL, test_logger, NULL);
     CHECK(inst == NULL && g_log_calls >= 1 && strstr(g_last_log, "not supported") != NULL);
     pthread_join(th, NULL);            /* its second exchange sees the client's EOF */
-    free(Ld.hello_seen);
+    free(Ld.hello_seen); free(Ld.second_seen);
 
-    /* token mismatch -> NULL, with a log line */
-    Listener L2 = { fd, reply, 0, NULL };
-    pthread_create(&th, NULL, listener_thread, &L2);
-    g_log_calls = 0;
-    inst = fmi3InstantiateCoSimulation("i", "wrong-token", NULL, fmi3False, fmi3False, fmi3False,
-                                       fmi3False, NULL, 0, NULL, test_logger, NULL);
-    CHECK(inst == NULL && g_log_calls >= 1 && strstr(g_last_log, "token") != NULL);
+    /* token mismatch -> NULL, with a log line; so is an empty or NULL
+     * token (FMI requires the modelDescription's; an empty one used to
+     * skip the check), and a token that is a prefix of the bridge's, or
+     * has the bridge's as a prefix: the comparison is of whole strings */
+    char longer[128]; snprintf(longer, sizeof longer, "%sX", good_token);
+    char shorter[128]; snprintf(shorter, sizeof shorter, "%.*s", (int)strlen(good_token) - 1, good_token);
+    const char *bad_tokens[] = { "wrong-token", "", NULL, longer, shorter };
+    for (size_t k = 0; k < sizeof bad_tokens / sizeof *bad_tokens; ++k) {
+        Listener L2 = { fd, reply, 0, NULL, NULL };
+        pthread_create(&th, NULL, listener_thread, &L2);
+        g_log_calls = 0;
+        inst = fmi3InstantiateCoSimulation("i", bad_tokens[k], NULL, fmi3False, fmi3False, fmi3False,
+                                           fmi3False, NULL, 0, NULL, test_logger, NULL);
+        CHECK(inst == NULL && g_log_calls >= 1 && strstr(g_last_log, "token") != NULL);
+        if (inst) fmi3FreeInstance(inst);
+        pthread_join(th, NULL);            /* its second exchange sees the client's EOF */
+        CHECK(L2.accepted == 1 && L2.second_seen == NULL);
+        free(L2.hello_seen); free(L2.second_seen);
+    }
     shutdown(fd, SHUT_RDWR); sock_close(fd);
-    pthread_join(th, NULL);
-    free(L2.hello_seen);
 
     /* no endpoint at all / closed port */
     unsetenv("MADDENING_FMU_ENDPOINT");
@@ -918,6 +1084,7 @@ int main(int argc, char **argv) {
     test_parse_values_non_finite();
     test_read_endpoint();
     test_bridge_call_paths();
+    test_send_failures();
     test_get_set_step();
     test_binary_get_set();
     test_binary_fmu_state();

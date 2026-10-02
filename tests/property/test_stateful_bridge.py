@@ -9,9 +9,10 @@ drive hand-written sequences; this module drives arbitrary ones.
 
 A :class:`~hypothesis.stateful.RuleBasedStateMachine` holds one real
 connection for the length of an example and interleaves ``hello`` (protocol
-1 and 2, with and without binary), ``set``, ``get``, ``step``, ``get_state``,
-``set_state``, ``reset``, ``terminate``, refusals of each, and malformed
-frames of both kinds.  The reference is a second bridge over a second
+1 and 2, with and without binary), ``set``, ``get``, ``step``,
+``initialize``, ``get_state``, ``set_state``, ``reset``, ``terminate``, a
+reconnect (a new FMU instance, which starts where ``reset`` puts the
+reference), refusals of each, and malformed frames of both kinds.  The reference is a second bridge over a second
 sidecar on the same compiled step, driven in process with
 :meth:`~maddening.fmi.tcp_bridge.FmuTcpBridge.handle`.  After every rule:
 
@@ -119,6 +120,7 @@ class FmuBridgeMachine(RuleBasedStateMachine):
         self.model.handle({"op": "hello", "protocol": 2, "binary": True})
         self.binary = True
         self.time = 0.0
+        self.stepped = False      # since instantiation / reset: may still initialize
         self.vr = {name: vr_of(self.md, name) for name in ALL_VARIABLES}
         self.all_vrs = [self.vr[n] for n in ALL_VARIABLES]
         self.snapshots: list[tuple[bytes, bytes, list[float]]] = []
@@ -221,12 +223,16 @@ class FmuBridgeMachine(RuleBasedStateMachine):
 
     @rule(kind=st.sampled_from(("unknown_vr", "trailing_values", "short_values",
                                 "non_finite", "read_only", "out_of_bounds",
-                                "vr_not_a_list")),
+                                "vr_not_a_list", "string_value", "bool_value")),
           data=st.data())
     def rejected_set(self, kind, data):
         anchor = self.vr["spring.anchor_position"]
         request: dict = {"op": "set", "vr": [anchor], "values": [0.0]}
-        if kind == "unknown_vr":
+        if kind == "string_value":
+            request["values"] = ["0.5"]           # a number in a string: not a number
+        elif kind == "bool_value":
+            request["values"] = [data.draw(st.booleans())]
+        elif kind == "unknown_vr":
             request["vr"] = [10_000]
         elif kind == "trailing_values":
             request["values"] = [0.0, 1.0]
@@ -257,12 +263,31 @@ class FmuBridgeMachine(RuleBasedStateMachine):
         assert model_reply["ok"] is True, model_reply
         assert reply["t"] == model_reply["t"]
         self.time = float(reply["t"])
+        self.stepped = True
+
+    @rule(start=st.sampled_from((0.0, 0.5, 3.0)))
+    def initialize(self, start):
+        """``fmi3EnterInitializationMode``: accepted until the first step."""
+        reply = self._round_trip({"op": "initialize", "t": start})
+        model_reply = self.model.handle({"op": "initialize", "t": start})
+        assert reply["ok"] is model_reply["ok"] is (not self.stepped), (reply, model_reply)
+        if reply["ok"]:
+            self.time = start
 
     @rule(kind=st.sampled_from(("zero", "negative", "nan", "infinite",
-                                "not_a_multiple", "missing_dt", "bad_t")))
+                                "not_a_multiple", "missing_dt", "bad_t",
+                                "discontinuous", "string_dt", "bool_dt", "string_t")))
     def rejected_step(self, kind):
         request: dict = {"op": "step", "t": self.time, "dt": DT}
-        if kind == "zero":
+        if kind == "discontinuous":
+            request["t"] = self.time + 5 * DT       # not where the FMU is
+        elif kind == "string_dt":
+            request["dt"] = str(DT)
+        elif kind == "bool_dt":
+            request["dt"] = True
+        elif kind == "string_t":
+            request["t"] = str(self.time)
+        elif kind == "zero":
             request["dt"] = 0.0
         elif kind == "negative":
             request["dt"] = -DT
@@ -336,6 +361,20 @@ class FmuBridgeMachine(RuleBasedStateMachine):
         assert self._round_trip({"op": "reset"}) == {"ok": True}
         assert self.model.handle({"op": "reset"}) == {"ok": True}
         self.time = 0.0
+        self.stepped = False
+
+    @rule(protocol=st.sampled_from((1, 2)), want_binary=st.booleans())
+    def reconnect(self, protocol, want_binary):
+        """``fmi3FreeInstance`` then ``fmi3InstantiateCoSimulation``: a new
+        connection is a new FMU instance, at the description's start values
+        -- exactly where ``reset`` puts the in-process reference.  The slot
+        used to carry the previous instance over."""
+        self.conn.close()
+        self.conn, hello = connect(self.bridge, protocol=protocol, binary=want_binary)
+        self.binary = bool(hello["binary"])
+        assert self.model.handle({"op": "reset"}) == {"ok": True}
+        self.time = 0.0
+        self.stepped = False
 
     @rule()
     def terminate(self):

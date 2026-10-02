@@ -56,6 +56,10 @@ class StateRelay:
         self._elapsed: float = 0.0
         self._gm: Optional[GraphManager] = None
         self._stride: int = max(1, stride)
+        # Bumped on every change of what latest_snapshot() returns, so a
+        # reader can tell a new snapshot from an old one even when its
+        # sim_time repeats (a checkpoint restored to a time already shown).
+        self._seq: int = 0
 
     @property
     def stride(self) -> int:
@@ -91,6 +95,49 @@ class StateRelay:
             self._elapsed = 0.0
             self._sim_time = 0.0
             self._snapshot = None
+            self._seq += 1
+
+    def restore(self, snapshot: Optional[dict], *, step_count: int = 0,
+                elapsed: float = 0.0) -> None:
+        """Make *snapshot* the current one, at the clock of a restored state.
+
+        For a graph whose state was replaced without a step -- a checkpoint
+        loaded: the relay goes on counting from *step_count* steps and
+        *elapsed* seconds of simulated time, and :meth:`latest_snapshot`
+        returns *snapshot* at once.  Without this the streams kept serving
+        the state from before the load, and kept counting from the old
+        step, until the next step.
+
+        Parameters
+        ----------
+        snapshot : dict or None
+            The restored user state ``{node: {field: array}}`` (``_meta``
+            excluded), or ``None`` to publish nothing until the next step.
+        step_count : int, optional
+            The step count the restored state is at (for :attr:`stride`).
+        elapsed : float, optional
+            Its simulated time.
+        """
+        with self._lock:
+            self._step_count = max(0, int(step_count))
+            self._elapsed = float(elapsed)
+            self._sim_time = self._elapsed
+            self._snapshot = (None if snapshot is None
+                              else {node: dict(fields) for node, fields in snapshot.items()})
+            self._seq += 1
+
+    @property
+    def step_count(self) -> int:
+        """Steps observed since the last :meth:`reset` (or the count a
+        :meth:`restore` set)."""
+        return self._step_count
+
+    @property
+    def elapsed(self) -> float:
+        """Simulated time of the steps observed since the last
+        :meth:`reset` (or the time a :meth:`restore` set), whether or not
+        :attr:`stride` captured the last one."""
+        return self._elapsed
 
     def _on_event(self, event: str, data) -> None:
         """Observer callback -- invoked on the simulation thread."""
@@ -106,6 +153,7 @@ class StateRelay:
                     node: dict(fields) for node, fields in data.items()
                 }
                 self._sim_time = self._elapsed
+                self._seq += 1
 
     def latest_snapshot(self) -> tuple[float, Optional[dict]]:
         """Return ``(sim_time, state_dict_or_None)``.
@@ -115,3 +163,14 @@ class StateRelay:
         """
         with self._lock:
             return (self._sim_time, self._snapshot)
+
+    def latest_frame(self) -> tuple[int, float, Optional[dict]]:
+        """``(sequence, sim_time, state_dict_or_None)``.
+
+        *sequence* changes whenever the snapshot does -- a captured step,
+        a :meth:`reset`, a :meth:`restore` -- so a stream can send exactly
+        the snapshots it has not sent, which comparing ``sim_time`` cannot
+        do once a restore repeats a time.
+        """
+        with self._lock:
+            return (self._seq, self._sim_time, self._snapshot)

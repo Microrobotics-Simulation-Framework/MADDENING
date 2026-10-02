@@ -144,25 +144,70 @@ already been applied.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root |
-| POST | `/checkpoint/load?path=` | Restore them. A checkpoint that does not fit this graph -- including one whose parameters carry another value of one a node consumed at construction -- is a 400, and nothing is loaded |
+| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root, and beside the file a manifest (`<path>.manifest.json`: its SHA-256 and the streams' clock, `sim_time` and step count). Replies `{status, path, sim_time}` |
+| POST | `/checkpoint/load?path=` | Restore them. A checkpoint that does not fit this graph -- including one whose parameters carry another value of one a node consumed at construction -- is a 400, and nothing is loaded. The streams then serve the loaded state at the checkpoint's `sim_time` -- the one its manifest records, or zero, counted from the load, for a file without one or whose manifest does not hash to it (`sim_time_from_checkpoint` says which). 409 while the runner runs or a `/sim/run` is in progress |
 
 ### Simulation Control
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/sim/step` | Advance one timestep. Returns new state |
-| POST | `/sim/run?n_steps=100` | Run N steps. Returns final state |
-| POST | `/sim/start` | Start real-time runner (background thread) |
-| POST | `/sim/pause` | Pause the runner |
-| POST | `/sim/resume` | Resume the runner |
-| POST | `/sim/stop` | Stop the runner |
+| POST | `/sim/run?n_steps=100` | Run N steps (at most 100000). Returns final state. While it runs, writes are a 409 and reads are served between its slices. When the server shuts down it stops within a slice and answers 503 `{status: "interrupted", steps_run, n_steps}`; the graph is left after `steps_run` steps |
+| POST | `/sim/start` | Start real-time runner (background thread). A runner whose thread died (a step raised) is replaced |
+| POST | `/sim/pause` | Pause the runner. 409 when it is not running, saying why a started one stopped |
+| POST | `/sim/resume` | Resume the runner, paced from the resume |
+| POST | `/sim/stop` | Stop the runner. A runner whose thread had died is reported stopped, with `error` |
+| POST | `/sim/reset` | Stop the runner and reset every node. `was_running` is whether a runner was running |
+
+### Surrogates
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/surrogate/train` | Train a surrogate of one node in a background job. One job runs at a time (409 otherwise). The memory the job would take -- the data sweep over the whole graph, its dataset, the network -- is estimated first and refused (400) over `MAX_SURROGATE_TRAIN_BYTES`, and `width**2 * depth` of the network is bounded (422). The data come from a batched sweep that leaves the live simulation where it was. Replies `{job_id, status, estimated_bytes}` |
+| GET | `/surrogate/status/{job_id}` | The job's progress. The last `MAX_SURROGATE_JOBS_KEPT` (8) finished jobs are kept; a job stopped by a shutdown reads `cancelled` |
 
 ### WebSocket
 
 | Path | Description |
 |------|-------------|
 | `/ws/state` | Streams state snapshots at ~30 Hz as JSON `{sim_time, state}` |
+| `/ws/state/binary` | The same as binary frames, after a JSON schema; a new schema is sent before the first frame of another layout (a node added, removed or replaced) |
+| `/ws/render` | Server-rendered frames, when a renderer is configured |
+
+At most `MAX_STREAM_CONNECTIONS` (16) streams are open at once; past it a
+handshake is closed with 1013.  Frames are encoded off the event loop, and
+a frame of the whole state is encoded once for every client of it.
+
+## Concurrency, limits and shutdown
+
+FastAPI runs the routes on a thread pool, so requests arrive at the same
+time.  **One lock serialises every use of the graph**: each route that
+reads or writes its state, parameters or structure, the runner's every
+step, a surrogate job's data sweep, and `/sim/run` slice by slice.  N
+concurrent `POST /sim/step` take N steps.  Until 0.4.0 they raced: two
+steps read the same state and one result overwrote the other, every reply
+200.  A request waits at most `_GRAPH_LOCK_TIMEOUT` (30 s) for the lock and
+then answers 503; a read waits for the step in flight.
+
+While the runner runs, or a `/sim/run` is in progress, the routes that
+write the state or the structure -- `/sim/step`, `/sim/run`,
+`PUT /graph/state`, `/checkpoint/load`, adding or removing a node or an
+edge, `/sim/profile` -- answer 409.  `PUT /graph/params` still reaches a
+running graph, between two steps.
+
+Memory: a request body over `MAX_REQUEST_BODY_BYTES` (32 MiB) is a 413
+before it is parsed; `PUT /graph/state` counts each field's values against
+the live field before converting them; the whole graph's state is held to
+`MAX_GRAPH_STATE_ELEMENTS` (10^8) as well as each node's to
+`MAX_NODE_STATE_ELEMENTS`; and nodes are built one at a time.
+
+Shutdown: the app's lifespan, and a SIGINT or SIGTERM when it is served
+from the main thread, tell an in-flight `/sim/run` to stop at its next
+slice and a training job at its next epoch, then stop the runner.  The
+signal is chained ahead of uvicorn's own handler, because uvicorn waits
+for in-flight requests before it runs the lifespan shutdown.  A server run
+in another thread, or stopped by setting `uvicorn.Server.should_exit`,
+calls `SimulationServer.request_shutdown()` first.
 
 ## Example curl Commands
 

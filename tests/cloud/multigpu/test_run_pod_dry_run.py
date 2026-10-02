@@ -732,7 +732,10 @@ def _goal_doc(goal: str, *, platform: str = "gpu", dry_run: bool = False, n_devi
             "allow_fewer_devices": allow_fewer_devices, "checks": [check], "passed": passed,
             "results": [],
             "environment": {"platform": platform, "device_kinds": ["NVIDIA A100-SXM4-80GB"],
-                            "jax": "0.11.2", "jaxlib": "0.11.2"}}
+                            "jax": "0.11.2", "jaxlib": "0.11.2",
+                            # one session's commit: a directory where no file
+                            # records one exits 4 (MIXED COMMITS)
+                            "git_commit": "c" * 40}}
 
 
 def _all_goal_docs(**kw) -> dict:
@@ -1090,3 +1093,50 @@ def test_a_multi_goal_run_stops_at_the_first_failing_goal(tmp_path, monkeypatch)
     assert rp.main(["--goal", "checklist", "--dry-run", "--keep-going",
                     "--out", str(tmp_path / "all")]) == 1
     assert ran == ["indivisible", "halo", "coupled", "stencil", "hybrid"]
+
+
+def test_keep_going_records_a_goal_that_raises_and_runs_the_rest(tmp_path, monkeypatch):
+    """``--keep-going`` used to keep going only past a goal whose checks
+    failed: a goal that raised (a seeded wrapper fault makes ``shard_map``
+    refuse the step) ended the run, and every later goal read ``not run``.
+    It is recorded now -- one failed ``goal raised`` check, the exception
+    under ``raised``, a record ``--summarise`` accepts as valid -- and the
+    rest run.  Without ``--keep-going`` the exception ends the run, as
+    before."""
+    import jax
+
+    if len(jax.devices()) < _N_DEV:
+        pytest.skip(f"needs >= {_N_DEV} devices")
+    rp = _runner_module()
+    ran = []
+
+    def raising(args, out):
+        ran.append("halo")
+        out["results"] = [{"partial": True}]        # whatever it had got to
+        raise ValueError("seeded: shard_map refused the step")
+
+    def passing(name):
+        def run(args, out):
+            ran.append(name)
+            return rp.finish_checks(out, [rp.check_that("fine", True)])
+        return run
+
+    monkeypatch.setattr(rp, "run_halo", raising)
+    for name in ("indivisible", "coupled", "stencil", "hybrid"):
+        monkeypatch.setattr(rp, f"run_{name}", passing(name))
+    assert rp.main(["--goal", "checklist", "--dry-run", "--keep-going",
+                    "--out", str(tmp_path)]) == 1
+    assert ran == ["indivisible", "halo", "coupled", "stencil", "hybrid"]
+    (doc,) = rp._load_results(tmp_path, "halo")
+    assert doc["raised"]["type"] == "ValueError"
+    assert doc["raised"]["message"] == "seeded: shard_map refused the step"
+    assert "Traceback" in doc["raised"]["traceback"]
+    assert doc["results"] == [] and doc["passed"] is False
+    assert [(c["name"], c["passed"]) for c in doc["checks"]] == [("goal raised", False)]
+    assert rp.record_problems(doc) == []
+    assert rp.goal_verdict([doc]) == "FAIL"
+    ran.clear()
+    with pytest.raises(ValueError, match="seeded: shard_map refused the step"):
+        rp.main(["--goal", "checklist", "--dry-run", "--out", str(tmp_path / "stop")])
+    assert ran == ["indivisible", "halo"]
+    assert not (tmp_path / "stop" / "halo.json").exists()

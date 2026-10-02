@@ -805,6 +805,16 @@ harness lists them. Random draws have twice let a floor defect through
 claim rests on a model's premise needs a generator that attacks the
 premise, not only one that samples around it.
 
+### System identification and the params machinery
+
+Two oracles; each was mutation-tested against a scratch copy of `src/`
+(the PR that added them lists the faults).
+
+| Oracle | Paths compared | Covers | Cannot see |
+|---|---|---|---|
+| Truth recovery (`tests/property/test_sysid_truth_recovery.py`) | A fit's `converged=True` against the truth it was generated from: noiseless data, a truth drawn anywhere inside the bounds (near them too), a start anywhere in the box. The fit must recover the truth to 1e-3 of the coordinate's range, or say `converged=False` | `fit_lm` per push on a closed-form problem whose only constrained stationary point is the truth (one strictly monotone, non-saturating block of residuals per coordinate, nonlinear so that a Gauss-Newton step overshoots), over every transform: a clipped `transform=None` leaf, `log`, `logit`. In the slow lane, more draws, `fit` (Adam with a `tol`), and all three fitters on the spring graph | A problem with a second stationary point (a plateau where the model saturates is one, and a fit may stop there); the size of a fit's error when it says `converged=False` |
+| Entry points agree after a `node.params` write (`tests/property/test_differential_entry_points_after_a_node_write.py`) | `gm.step`, `gm.run`, `gm.run_scan` at a length traced before the write and at a new one, `gm.run_scan_with_history` and `sysid.windowed_loss`, each from one fixed state, after a write with no compile and again after `compile()`: all must run the model the write leaves | A constant of a three-argument node, a structural `int` and a `gm.params` leaf of a params-taking node; two writes in a row | An entry point that keeps its own copy of the compiled step (an FMU sidecar built before the write runs the step it was given) |
+
 ### Sharding wrappers
 
 **Oracle.** For a node and a composition of sharded wrappers around it,

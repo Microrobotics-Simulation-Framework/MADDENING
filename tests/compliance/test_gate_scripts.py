@@ -3776,19 +3776,36 @@ class TestHeatStabilityCounts:
                          unstable, unchecked, seen)
         return unstable, unchecked, seen
 
-    def test_a_non_positive_argument_is_not_counted_as_verified(
+    def test_a_non_positive_argument_is_refused_not_verified(
         self, heat_stability_gate
     ):
+        """A zero timestep has no Fourier number; the constructor refuses
+        it, and the gate says so rather than "not evaluated" (audit_040_p4_4,
+        L5).  A refused rod is in ``seen`` as an unstable one always was:
+        ``main`` fails on it before any count is printed."""
+        unstable, unchecked, seen = self._scan(
+            heat_stability_gate,
+            'HeatNode("a", timestep=0.0, n_cells=10, length=1.0,'
+            " thermal_diffusivity=100.0)\n",
+        )
+        assert unchecked == []
+        assert len(unstable) == 1 and len(seen) == 1
+        assert "HeatNode.__init__ refuses it" in unstable[0][2]
+        assert "timestep must be a finite number > 0" in unstable[0][2]
+
+    def test_a_zero_diffusivity_is_a_rod_the_constructor_builds(
+        self, heat_stability_gate
+    ):
+        """Fourier number 0: evaluated, and verified -- it used to be
+        reported with the negative values as not evaluated."""
         unstable, unchecked, seen = self._scan(
             heat_stability_gate,
             'HeatNode("a", timestep=1.0, n_cells=10, length=1.0,'
             " thermal_diffusivity=0.0)\n",
         )
-        assert seen == []
-        assert len(unchecked) == 1
-        assert "non-positive" in unchecked[0][2]
+        assert unstable == [] and unchecked == [] and len(seen) == 1
 
-    def test_an_unknown_stencil_order_is_not_counted_as_verified(
+    def test_an_unknown_stencil_order_is_refused_not_verified(
         self, heat_stability_gate
     ):
         unstable, unchecked, seen = self._scan(
@@ -3796,9 +3813,9 @@ class TestHeatStabilityCounts:
             'HeatNode("c", timestep=1.0, n_cells=10, length=1.0,'
             " thermal_diffusivity=100.0, stencil_order=3)\n",
         )
-        assert seen == []
-        assert len(unchecked) == 1
-        assert "MAX_FOURIER_NUMBER" in unchecked[0][2]
+        assert unchecked == []
+        assert len(unstable) == 1
+        assert "stencil_order must be 2 or 4, got 3" in unstable[0][2]
 
     def test_an_evaluated_rod_is_counted_as_verified(
         self, heat_stability_gate
@@ -4041,8 +4058,10 @@ class TestHeatStabilityAllowlist:
             "FIXTURE = 'HeatNode(\"h\", 0.51, n_cells=10, length=1.0, "
             "thermal_diffusivity=1.0)'\n"
         )
-        monkeypatch.setitem(gate._ALLOWED_UNSTABLE, str(planted),
-                            ("the fixture for this test", gate.EMBEDDED_ONLY))
+        # The planted file alone: the shipped entries would put the
+        # allowlist over its ceiling, which is not what this replays.
+        monkeypatch.setattr(gate, "_ALLOWED_UNSTABLE", {
+            str(planted): ("the fixture for this test", gate.EMBEDDED_ONLY)})
         assert gate.main([str(tmp_path)]) == 0, capsys.readouterr().out
         assert "1 deliberately unstable construction(s) exempt" in (
             capsys.readouterr().out)
@@ -4054,13 +4073,163 @@ class TestHeatStabilityAllowlist:
         assert "planted.py:9: Fourier number" in capsys.readouterr().out
 
     def test_the_allowlist_stays_small(self, heat_stability_gate):
-        allowlist = heat_stability_gate._ALLOWED_UNSTABLE
-        cap = heat_stability_gate._MAX_ALLOWED_UNSTABLE
-        assert len(allowlist) <= cap, (
-            f"{len(allowlist)} allowlisted files (cap {cap}).  Each one is a "
-            f"file whose planted rods this gate stops refusing; fix the rod "
-            f"instead of raising the cap."
-        )
+        assert heat_stability_gate.allowlist_ceiling_error() is None, (
+            "fix the rod instead of raising the cap")
+
+    # -- the ceiling is enforced by the gate, not only by this test --------
+    #
+    # audit_040_p4_4, L5: _MAX_ALLOWED_UNSTABLE was declared and never read,
+    # so the gate passed with fourteen entries.
+
+    def test_the_gate_fails_on_an_allowlist_over_its_ceiling(
+            self, heat_stability_gate, tmp_path, monkeypatch, capsys):
+        gate = heat_stability_gate
+        root = _rod(tmp_path, 'HeatNode("ok", timestep=1e-3)')
+        assert gate.main([str(root)]) == 0
+        padded = dict(gate._ALLOWED_UNSTABLE)
+        for i in range(10):
+            padded[f"probe_{i}.py"] = ("an audit probe", frozenset({2}))
+        monkeypatch.setattr(gate, "_ALLOWED_UNSTABLE", padded)
+        capsys.readouterr()
+        assert gate.main([str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "over the ceiling of" in out and "_MAX_ALLOWED_UNSTABLE" in out
+
+    def test_lines_count_towards_the_ceiling_not_only_files(
+            self, heat_stability_gate, monkeypatch):
+        """One entry pinning eight lines exempts eight rods."""
+        gate = heat_stability_gate
+        monkeypatch.setattr(gate, "_ALLOWED_UNSTABLE", {
+            "probe.py": ("an audit probe", frozenset(range(1, 9)))})
+        assert "names 8 exempt construction(s) across 1 file(s)" in (
+            gate.allowlist_ceiling_error())
+        monkeypatch.setattr(gate, "_ALLOWED_UNSTABLE", {
+            "probe.py": ("an audit probe", frozenset(range(1, 8)))})
+        assert gate.allowlist_ceiling_error() is None
+
+
+class TestHeatStabilityAsksTheConstructor:
+    """audit_040_p4_4, L5: the gate mirrored only the Fourier test, so it
+    counted as verified rods the constructor refuses on its other checks,
+    and reported literal values the constructor refuses outright as merely
+    not evaluated.  It now asks ``HeatNode.__init__`` itself."""
+
+    @pytest.mark.parametrize("call, refusal", [
+        ('HeatNode("r", timestep=1e-3, n_cells=4, stencil_order=4)',
+         "4th-order stencil requires at least 5 cells"),
+        ('HeatNode("r", timestep=1e-3, grid_points=[0.0, 0.1, 0.2])',
+         "grid_points length (3) must match n_cells (10)"),
+        ('HeatNode("r", timestep=-1e-3)', "timestep must be a finite number > 0"),
+        ('HeatNode("r", timestep=1e-3, length=0.0)',
+         "length must be a finite number > 0"),
+        ('HeatNode("r", timestep=1e-3, stencil_order=3)',
+         "stencil_order must be 2 or 4, got 3"),
+        ('HeatNode("r", timestep=1e-3, thermal_diffusivity=-0.01)',
+         "thermal_diffusivity must be a finite number >= 0"),
+        ('HeatNode("r", timestep=1e-3, n_cells=0)', "HeatNode.__init__ refuses it"),
+        ('HeatNode("r", 1e-3, grid_points=4)', "must match n_cells"),
+    ], ids=["order4-four-cells", "grid-length", "negative-dt", "zero-length",
+            "order3", "negative-alpha", "zero-cells", "scalar-grid"])
+    def test_a_literal_rod_the_constructor_refuses_fails_the_gate(
+            self, heat_stability_gate, tmp_path, capsys, call, refusal):
+        root = _rod(tmp_path, f'HeatNode("ok", timestep=1e-3)\n{call}')
+        assert heat_stability_gate.main([str(root)]) == 1
+        out = capsys.readouterr().out
+        assert "mod.py:3:" in out and refusal in out, out
+
+    @pytest.mark.parametrize("call, refusal", [
+        ('HeatNode("r", timestep=1e-3, n_cell=10)', "no parameter 'n_cell'"),
+        ('HeatNode("r", 1e-3, 10, 1.0, 0.01, 0.0, 2, None, None, "x")',
+         "10 positional arguments"),
+        ('HeatNode("r", n_cells=10)', "no 'timestep' argument"),
+    ], ids=["unknown-keyword", "too-many-positional", "missing-timestep"])
+    def test_a_call_that_raises_type_error_fails_the_gate(
+            self, heat_stability_gate, tmp_path, capsys, call, refusal):
+        root = _rod(tmp_path, f'HeatNode("ok", timestep=1e-3)\n{call}')
+        assert heat_stability_gate.main([str(root)]) == 1
+        assert refusal in capsys.readouterr().out
+
+    def test_what_the_constructor_refuses_matches_what_it_raises(
+            self, heat_stability_gate):
+        """The probe is the constructor: the two cannot disagree."""
+        from maddening.nodes.heat import HeatNode
+        import ast as _ast
+
+        call = 'HeatNode("r", timestep=1e-3, n_cells=4, stencil_order=4)'
+        node = _ast.parse(call).body[0].value
+        args, _ = heat_stability_gate._call_arguments(node)
+        verdict, why = heat_stability_gate.constructor_probe(args)
+        with pytest.raises(ValueError) as raised:
+            HeatNode("r", timestep=1e-3, n_cells=4, stencil_order=4)
+        assert verdict == "refused" and str(raised.value) in why
+
+    def test_a_refusal_inside_pytest_raises_is_what_its_test_expects(
+            self, heat_stability_gate, tmp_path, capsys):
+        root = _rod(tmp_path,
+                    "import pytest\n"
+                    'HeatNode("ok", timestep=1e-3)\n'
+                    "with pytest.raises(ValueError):\n"
+                    '    HeatNode("r", 0.001, n_cells=4, stencil_order=4)\n'
+                    "with pytest.raises(ValueError, match='unstable'):\n"
+                    '    HeatNode("r", timestep=10.0)\n')
+        assert heat_stability_gate.main([str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "OK: 1 HeatNode construction(s) verified" in out
+        assert "2 construction(s) refused inside pytest.raises" in out
+
+    def test_the_same_refusal_outside_pytest_raises_still_fails(
+            self, heat_stability_gate, tmp_path):
+        root = _rod(tmp_path,
+                    "import pytest\n"
+                    "with pytest.raises(ValueError):\n"
+                    '    HeatNode("r", 0.001, n_cells=4, stencil_order=4)\n'
+                    'HeatNode("r", 0.001, n_cells=4, stencil_order=4)\n')
+        assert heat_stability_gate.main([str(root)]) == 1
+
+    def test_a_rod_inside_pytest_raises_the_constructor_builds_is_verified(
+            self, heat_stability_gate, tmp_path, capsys):
+        """The raise comes from elsewhere (a duplicate name, say): the rod
+        is an ordinary one and counts as verified."""
+        root = _rod(tmp_path,
+                    "import pytest\n"
+                    "with pytest.raises(ValueError):\n"
+                    '    gm.add_node(HeatNode("r", timestep=1e-3))\n')
+        assert heat_stability_gate.main([str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "OK: 1 HeatNode construction(s) verified" in out
+        assert "pytest.raises" not in out
+
+    def test_a_grid_rod_whose_cell_count_is_computed_is_not_evaluated(
+            self, heat_stability_gate, tmp_path, capsys):
+        """The grid's length must match n_cells, so a computed n_cells
+        decides whether the constructor accepts it; this rod used to be
+        verified on its Fourier number alone."""
+        root = _rod(tmp_path,
+                    'HeatNode("ok", timestep=1e-3)\n'
+                    'HeatNode("g", timestep=1e-4, n_cells=n,'
+                    ' grid_points=[0.0, 0.1, 0.3])\n')
+        assert heat_stability_gate.main(["--list-unevaluated", str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "OK: 1 HeatNode construction(s) verified" in out
+        assert "mod.py:3: n_cells is computed" in out
+
+    def test_a_rod_too_large_to_build_is_not_evaluated_rather_than_built(
+            self, heat_stability_gate, tmp_path, capsys):
+        root = _rod(tmp_path,
+                    'HeatNode("ok", timestep=1e-3)\n'
+                    'HeatNode("big", timestep=1e-30, n_cells=2000000)\n')
+        assert heat_stability_gate.main(["--list-unevaluated", str(root)]) == 0
+        out = capsys.readouterr().out
+        assert "mod.py:3:" in out and "not built to ask the constructor" in out
+
+    def test_the_repository_holds_refusals_only_where_expected(
+            self, heat_stability_gate, capsys):
+        """The shipped tree: every refusal is allowlisted or inside a
+        ``pytest.raises``; ``tests/core/test_spatial_accuracy.py`` asserts
+        two of them."""
+        assert heat_stability_gate.main([]) == 0
+        out = capsys.readouterr().out
+        assert "refused inside pytest.raises, as their test expects" in out
 
 
 # ---------------------------------------------------------------------------

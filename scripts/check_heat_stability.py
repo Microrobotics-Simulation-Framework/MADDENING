@@ -34,19 +34,28 @@ So this walks the AST, and:
 Scope is the repository's *tracked* Python files (``git ls-files``),
 so untracked scratch under ``benchmarks/results/`` is not scanned.
 
-Every construction lands in exactly one of three counts, and only the
+Every construction lands in exactly one of four counts, and only the
 first is "verified":
 
-* **verified** -- every argument that decides the Fourier number was read
-  as a literal (or is the constructor's default), and the rod is within
-  its stencil's limit;
-* **refused** -- the same, and the rod is past the limit: the gate fails;
-* **not evaluated** -- something decides the Fourier number that the gate
-  cannot read: a computed argument, a ``**mapping`` held in a variable, a
-  ``*args`` splat, a keyword given twice, a non-positive value, a
-  stencil order with no limit, or a computed ``grid_points``.  These are counted and reported by reason
-  (``--list-unevaluated`` prints each one), never folded into the verified
-  count, and a scope in which *nothing* could be evaluated fails.
+* **verified** -- every argument that decides the Fourier number, or
+  whether the constructor accepts the rod, was read as a literal (or is
+  the constructor's default); the rod is within its stencil's limit; and
+  ``HeatNode.__init__`` itself, called with those literals, builds it
+  (:func:`constructor_probe`);
+* **refused** -- the rod is past its limit, or the constructor raises on
+  it (``n_cells=4, stencil_order=4``, a ``grid_points`` of the wrong
+  length, a non-positive timestep or length, ``stencil_order=3``, an
+  unknown keyword): the gate fails.  Until audit_040_p4_4 (L5) the gate
+  mirrored only the Fourier test, so the first two were counted as
+  verified and the rest as not evaluated;
+* **refused as expected** -- the same, inside a ``with pytest.raises``
+  block: a test asserting the refusal.  Counted apart; never verified;
+* **not evaluated** -- something that decides the answer is not a
+  literal: a computed argument, a ``**mapping`` held in a variable, a
+  ``*args`` splat, a keyword given twice, or a computed ``grid_points``.
+  These are counted and reported by reason (``--list-unevaluated`` prints
+  each one), never folded into the verified count, and a scope in which
+  *nothing* could be evaluated fails.
 
 A rod given a literal non-uniform grid (``grid_points=[...]``) is judged
 by the constructor's non-uniform criterion.  That is ``dt * alpha /
@@ -180,6 +189,24 @@ _ALLOWED_UNSTABLE = {
         "attribute heat.HeatNode.  It was invisible while the gate matched "
         "ast.Name only",
         frozenset({3})),
+    "benchmarks/results/audit_040_r2/numerics/repro/gate_probes/"
+    "a_nonpositive.py": (
+        "archived audit probe: a rod with timestep=0.0, which the gate "
+        "counted as verified until round 2 and then reported as merely not "
+        "evaluated.  The constructor refuses it, and since the gate asks the "
+        "constructor, so does the gate",
+        frozenset({4})),
+    "benchmarks/results/audit_040_r2/numerics/repro/gate_probes/"
+    "b_unknown_order.py": (
+        "archived audit probe: stencil_order=3, reported as not evaluated "
+        "until the gate asked the constructor, which refuses it",
+        frozenset({3})),
+    "benchmarks/results/audit_040_final/params-io/repro/r11_fmi_desc.py": (
+        "archived audit probe of the FMI description: grid_points=4 against "
+        "the default 10 cells, a construction the constructor refuses on "
+        "the grid's length; the probe records what the description did with "
+        "it before that check",
+        frozenset({48})),
 }
 
 #: How ``scan_source`` marks the origin of a construction found inside a
@@ -198,11 +225,31 @@ def _is_allowed(origin: str, lineno: int) -> bool:
         return embedded
     return not embedded and lineno in scope
 
-#: A ceiling, not a target.  One test file has to plant defects to prove the
-#: gate catches them, and the archived round-2 probes are the positive
-#: controls for the three holes this gate has had.  A sixth entry means
-#: unstable rods are being allowlisted rather than fixed.
-_MAX_ALLOWED_UNSTABLE = 6
+#: A ceiling on the named exemptions, enforced by :func:`main` before it
+#: scans anything: an ``EMBEDDED_ONLY`` entry counts once, a line-pinned
+#: entry once per line.  It was declared and never read, so fourteen
+#: entries passed (audit_040_p4_4, L5).  One test file has to plant
+#: defects to prove the gate catches them, and the archived audit probes
+#: are the positive controls for the holes this gate has had; three of
+#: those joined when the gate began asking the constructor, whose
+#: refusals they plant.  Raising this is a reviewed decision, made beside
+#: the entry that needs it -- an unstable rod in live code is fixed, not
+#: allowlisted.
+_MAX_ALLOWED_UNSTABLE = 7
+
+
+def allowlist_ceiling_error():
+    """Why the allowlist is over :data:`_MAX_ALLOWED_UNSTABLE`, or ``None``."""
+    named = sum(1 if scope == EMBEDDED_ONLY else len(scope)
+                for _reason, scope in _ALLOWED_UNSTABLE.values())
+    if named <= _MAX_ALLOWED_UNSTABLE:
+        return None
+    return (f"_ALLOWED_UNSTABLE names {named} exempt construction(s) across "
+            f"{len(_ALLOWED_UNSTABLE)} file(s), over the ceiling of "
+            f"{_MAX_ALLOWED_UNSTABLE} (_MAX_ALLOWED_UNSTABLE).  Each one is a "
+            f"rod this gate stops refusing: fix the rod rather than "
+            f"allowlisting it, or raise the ceiling in a reviewed change "
+            f"that says why")
 
 
 def _defaults() -> dict:
@@ -376,66 +423,211 @@ def _call_arguments(node):
     return args, None
 
 
-def _judge_grid(origin, lineno, points, args, defaults, unstable,
-                unchecked, seen):
-    """Judge a rod built on a literal ``grid_points``, as the constructor does.
+#: Parameters the gate passes through to the constructor probe only when
+#: they are literal, and otherwise leaves at their defaults: none of them
+#: decides whether ``HeatNode.__init__`` accepts the rod or what its Fourier
+#: number is.  ``name`` is required, so a computed one is replaced.
+_NOT_DECIDING = ("name", "initial_temperature", "geometry_source")
+
+#: The name a probe construction gets when the call's own is computed.
+_PROBE_NAME = "check_heat_stability_probe"
+
+#: Literal rods larger than this are not built to ask the constructor: the
+#: probe allocates the rod's grid.  None in the repository comes close.
+_MAX_PROBE_CELLS = 1_000_000
+
+
+def _signature_parameters():
+    """``(every parameter, the required ones)`` of ``HeatNode.__init__``."""
+    params = [(name, p) for name, p in
+              inspect.signature(HeatNode.__init__).parameters.items()
+              if name != "self"]
+    return ([name for name, _p in params],
+            [name for name, p in params if p.default is p.empty
+             and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD,
+                            p.KEYWORD_ONLY)])
+
+
+_PARAMETERS, _REQUIRED = _signature_parameters()
+
+
+def _structural_refusal(node, args):
+    """The ``TypeError`` the call raises before the constructor runs, or ``None``."""
+    if len(node.args) > len(_POSITIONAL):
+        return (f"{len(node.args)} positional arguments, but HeatNode.__init__ "
+                f"takes at most {len(_POSITIONAL)}; the call raises TypeError")
+    unknown = sorted(set(args) - set(_PARAMETERS))
+    if unknown:
+        return (f"HeatNode.__init__ has no parameter {unknown[0]!r}; the call "
+                f"raises TypeError")
+    missing = [name for name in _REQUIRED if name not in args]
+    if missing:
+        return (f"no {missing[0]!r} argument, which HeatNode.__init__ "
+                f"requires; the call raises TypeError")
+    return None
+
+
+def constructor_probe(args):
+    """Ask ``HeatNode.__init__`` itself: ``(outcome, detail)``.
+
+    ``outcome`` is ``"refused"`` (``detail`` is what it raised),
+    ``"accepted"``, or ``"unprobed"`` (``detail`` says why not: an argument
+    that could decide the answer is computed, or the rod is too large to
+    build).  Every argument except :data:`_NOT_DECIDING` must be a literal.
+
+    This is what makes "verified" mean "the constructor builds it".  The
+    gate used to mirror only the Fourier test, so ``n_cells=4,
+    stencil_order=4`` and a ``grid_points`` of the wrong length -- both
+    refused before the Fourier test is reached -- were counted as verified,
+    and literal values the constructor refuses outright (a non-positive
+    timestep or length, ``stencil_order=3``) were reported as merely not
+    evaluated (audit_040_p4_4, L5).  Asking the constructor keeps the gate
+    in step with every check it has, including ones added later.
+    """
+    import warnings
+
+    kwargs = {}
+    for name, value in args.items():
+        if _is_literal(value):
+            kwargs[name] = ast.literal_eval(value)
+        elif name == "name":
+            kwargs[name] = _PROBE_NAME
+        elif name not in _NOT_DECIDING:
+            return "unprobed", f"{name} is computed, not literal"
+    n_cells = kwargs.get("n_cells", 0)
+    points = kwargs.get("grid_points")
+    size = len(points) if isinstance(points, (list, tuple)) else 0
+    if (isinstance(n_cells, int) and n_cells > _MAX_PROBE_CELLS) or (
+            size > _MAX_PROBE_CELLS):
+        return "unprobed", (f"a rod of more than {_MAX_PROBE_CELLS} cells is "
+                            f"not built to ask the constructor")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            HeatNode(**kwargs)
+    except Exception as exc:  # noqa: BLE001 -- any raise is a refusal
+        return "refused", f"{type(exc).__name__}: {exc}"
+    return "accepted", None
+
+
+def _expected_to_raise(tree) -> set:
+    """``id``s of the calls inside a ``with pytest.raises(...)`` body.
+
+    A construction a test expects to raise is the constructor's refusal
+    under test (``tests/core/test_spatial_accuracy.py`` asserts
+    ``stencil_order=3`` is refused), not a rod anybody builds.  It is
+    counted apart, and is never verified.  ``self.assertRaises`` and a
+    bare ``raises`` are read the same way.
+    """
+    ids = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.With, ast.AsyncWith)):
+            continue
+        if not any(isinstance(item.context_expr, ast.Call)
+                   and (getattr(item.context_expr.func, "attr", None)
+                        or getattr(item.context_expr.func, "id", None))
+                   in ("raises", "assertRaises", "assertRaisesRegex")
+                   for item in node.items):
+            continue
+        for stmt in node.body:
+            ids.update(id(sub) for sub in ast.walk(stmt)
+                       if isinstance(sub, ast.Call))
+    return ids
+
+
+def _judge_grid(points, args, defaults):
+    """``(outcome, detail)`` for a rod on a literal ``grid_points``.
 
     The non-uniform stencil is 2nd order whatever ``stencil_order`` says, and
     ``length`` and ``n_cells`` do not enter its Fourier number.  So only
-    ``timestep``, ``thermal_diffusivity`` and the points are read.
+    ``timestep``, ``thermal_diffusivity`` and the points are read here; the
+    constructor probe judges the rest.  ``outcome`` is ``"unstable"``,
+    ``"within"`` (the Fourier test passes), ``"undefined"`` (no Fourier
+    number: the probe decides) or ``"unchecked"``.
     """
     try:
         coords = [float(v) for v in points]
     except (TypeError, ValueError):
-        unchecked.append((origin, lineno,
-                          "grid_points is a literal but not a sequence of "
-                          "numbers, so this was NOT checked"))
-        return
+        return "undefined", ("grid_points is a literal but not a sequence of "
+                             "numbers")
     if len(coords) < 2:
-        unchecked.append((origin, lineno,
-                          "grid_points has fewer than two points, so no "
-                          "spacing is defined and this was NOT checked"))
-        return
+        return "undefined", ("grid_points has fewer than two points, so no "
+                             "spacing is defined")
     values = {}
     for key in ("timestep", "thermal_diffusivity"):
         values[key] = _number(args[key]) if key in args else defaults.get(key)
     if any(v is None for v in values.values()):
-        unchecked.append((origin, lineno,
-                          "a constructor argument is computed, not literal"))
-        return
+        return "unchecked", "a constructor argument is computed, not literal"
     dt, alpha = values["timestep"], values["thermal_diffusivity"]
     spacing = _nonuniform_fourier_spacing(coords)
     if spacing is None:
-        seen.append((origin, lineno))
-        unstable.append((
-            origin, lineno,
-            f"grid_points {coords!r} is not strictly increasing; "
-            f"HeatNode.__init__ raises ValueError"))
-        return
-    if min(dt, alpha) <= 0:
-        unchecked.append((
-            origin, lineno,
-            f"a non-positive constructor argument (dt={dt!r}, "
-            f"alpha={alpha!r}); no Fourier number is defined, so this was "
-            f"NOT checked"))
-        return
-    seen.append((origin, lineno))
+        return "unstable", (f"grid_points {coords!r} is not strictly "
+                            f"increasing; HeatNode.__init__ raises ValueError")
+    if dt <= 0 or alpha < 0:
+        return "undefined", (f"a non-positive constructor argument "
+                             f"(dt={dt!r}, alpha={alpha!r})")
     limit = MAX_FOURIER_NUMBER[2]
     fourier = dt * alpha / spacing
     if fourier > limit:
-        unstable.append((
-            origin, lineno,
+        return "unstable", (
             f"Fourier number {fourier:.4g} (dt*alpha/min(h_left*h_right) on "
             f"the non-uniform grid) exceeds the {limit:g} limit of the "
             f"2nd-order variable-spacing stencil (dt={dt!r}, "
             f"alpha={alpha!r}, min(h_left*h_right)={spacing:.6g}); "
             f"HeatNode.__init__ raises ValueError. "
             f"Use timestep <= {limit * spacing / alpha:.6g}, a wider finest "
-            f"spacing, or a smaller thermal_diffusivity"))
+            f"spacing, or a smaller thermal_diffusivity")
+    return "within", None
 
 
-def scan_source(src, origin, defaults, unstable, unchecked, seen):
-    """Walk one source string, recursing into embedded source."""
+def _judge_uniform(args, defaults):
+    """``(outcome, detail)`` for a uniform rod; outcomes as :func:`_judge_grid`."""
+    values = {}
+    for key in ("timestep", "n_cells", "length",
+                "thermal_diffusivity", "stencil_order"):
+        values[key] = _number(args[key]) if key in args else defaults.get(key)
+    if any(v is None for v in values.values()):
+        return "unchecked", "a constructor argument is computed, not literal"
+    dt, n_cells = values["timestep"], values["n_cells"]
+    length, alpha = values["length"], values["thermal_diffusivity"]
+    order = values["stencil_order"]
+    # A zero diffusivity is a rod that does not conduct: the constructor
+    # builds it, and its Fourier number is 0.  It used to be "not
+    # evaluated" with the negative values.
+    if min(dt, n_cells, length) <= 0 or alpha < 0:
+        return "undefined", (f"a non-positive constructor argument "
+                             f"(dt={dt!r}, n_cells={n_cells!r}, "
+                             f"length={length!r}, alpha={alpha!r})")
+    limit = MAX_FOURIER_NUMBER.get(order)
+    if limit is None:
+        return "undefined", (f"stencil_order={order!r} has no entry in "
+                             f"MAX_FOURIER_NUMBER ({sorted(MAX_FOURIER_NUMBER)})")
+    dx = length / n_cells
+    fourier = dt * alpha / (dx * dx)
+    if fourier > limit:
+        return "unstable", (
+            f"Fourier number {fourier:.4g} exceeds the {limit:g} limit of "
+            f"the order-{order} stencil "
+            f"(dt={dt!r}, alpha={alpha!r}, dx=length/n_cells={dx:.6g}); "
+            f"HeatNode.__init__ raises ValueError. "
+            f"Use timestep <= {limit * dx * dx / alpha:.6g}, more cells, "
+            f"or a smaller thermal_diffusivity")
+    return "within", None
+
+
+def scan_source(src, origin, defaults, unstable, unchecked, seen,
+                expected=None):
+    """Walk one source string, recursing into embedded source.
+
+    Each construction lands in exactly one list: ``seen`` (verified),
+    ``unstable`` (refused: past its limit, or refused by the constructor --
+    also recorded in ``seen``, which ``main`` reconciles with the
+    allowlist), ``unchecked`` (not evaluated, with the reason), or
+    ``expected`` (refused inside a ``pytest.raises`` block, as its test
+    expects).
+    """
+    if expected is None:
+        expected = []
     tree = _parse(src)
     if tree is None:
         if "HeatNode(" in src:
@@ -444,11 +636,12 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
 
     aliases = _local_aliases(tree)
     subclasses = _local_subclasses(tree, aliases)
+    raising = _expected_to_raise(tree)
     for node in ast.walk(tree):
         if (isinstance(node, ast.Constant) and isinstance(node.value, str)
                 and "HeatNode" in node.value and "(" in node.value):
             scan_source(node.value, f"{origin}{_EMBEDDED}",
-                        defaults, unstable, unchecked, seen)
+                        defaults, unstable, unchecked, seen, expected)
             continue
         if not _is_heat_node_call(node, aliases, subclasses):
             continue
@@ -460,11 +653,24 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
                 f"HeatNode.__init__ as written"))
             continue
 
+        def refuse(why, node=node):
+            if id(node) in raising:
+                expected.append((origin, node.lineno, why))
+            else:
+                # In ``seen`` too, as every refused rod is: ``main`` takes
+                # an allowlisted one back out of it.
+                seen.append((origin, node.lineno))
+                unstable.append((origin, node.lineno, why))
+
         # A ``**`` splat used to be dropped (``if kw.arg``), so the rod was
         # judged on the defaults it overrode and counted as verified.
         args, why_not = _call_arguments(node)
         if args is None:
             unchecked.append((origin, node.lineno, why_not))
+            continue
+        structural = _structural_refusal(node, args)
+        if structural:
+            refuse(structural)
             continue
 
         # An explicit grid is a non-uniform rod, judged on the constructor's
@@ -481,62 +687,37 @@ def scan_source(src, origin, defaults, unstable, unchecked, seen):
                     "grid_points is computed, so the grid the Fourier number "
                     "depends on cannot be read"))
                 continue
-            _judge_grid(origin, node.lineno, ast.literal_eval(grid), args,
-                        defaults, unstable, unchecked, seen)
-            continue
+            outcome, detail = _judge_grid(ast.literal_eval(grid), args, defaults)
+        else:
+            outcome, detail = _judge_uniform(args, defaults)
 
-        values = {}
-        for key in ("timestep", "n_cells", "length",
-                    "thermal_diffusivity", "stencil_order"):
-            if key in args:
-                values[key] = _number(args[key])
-            else:
-                values[key] = defaults.get(key)
-        if any(v is None for v in values.values()):
-            unchecked.append((origin, node.lineno,
-                              "a constructor argument is computed, not literal"))
-            continue
-
-        dt = values["timestep"]
-        n_cells = values["n_cells"]
-        length = values["length"]
-        alpha = values["thermal_diffusivity"]
-        order = values["stencil_order"]
         # ``seen`` is appended *after* every way out of this block, because
         # it is the count the summary line calls "verified".  It used to be
-        # appended above, so the two ``continue``s below inflated the
-        # headline: 132 reported against 131 actually evaluated
-        # (audit_040_r2/gates, finding G3).
-        if min(dt, n_cells, length, alpha) <= 0:
-            unchecked.append((
-                origin, node.lineno,
-                f"a non-positive constructor argument (dt={dt!r}, "
-                f"n_cells={n_cells!r}, length={length!r}, alpha={alpha!r}); "
-                f"no Fourier number is defined, so this was NOT checked"
-            ))
+        # appended before the non-positive and unknown-order exits, so the
+        # headline counted rods nobody had evaluated: 132 reported against
+        # 131 (audit_040_r2/gates, finding G3).
+        if outcome == "unchecked":
+            unchecked.append((origin, node.lineno, detail))
             continue
-        limit = MAX_FOURIER_NUMBER.get(order)
-        if limit is None:
-            unchecked.append((
-                origin, node.lineno,
-                f"stencil_order={order!r} has no entry in MAX_FOURIER_NUMBER "
-                f"({sorted(MAX_FOURIER_NUMBER)}), so this was NOT checked"
-            ))
+        if outcome == "unstable":
+            refuse(detail)
             continue
-        seen.append((origin, node.lineno))
-
-        dx = length / n_cells
-        fourier = dt * alpha / (dx * dx)
-        if fourier > limit:
-            unstable.append((
-                origin, node.lineno,
-                f"Fourier number {fourier:.4g} exceeds the {limit:g} limit of "
-                f"the order-{order} stencil "
-                f"(dt={dt!r}, alpha={alpha!r}, dx=length/n_cells={dx:.6g}); "
-                f"HeatNode.__init__ raises ValueError. "
-                f"Use timestep <= {limit * dx * dx / alpha:.6g}, more cells, "
-                f"or a smaller thermal_diffusivity"
-            ))
+        # "within" or "undefined": the constructor has the last word.
+        verdict, why = constructor_probe(args)
+        if verdict == "refused":
+            refuse(f"HeatNode.__init__ refuses it: {why}")
+        elif verdict == "unprobed":
+            unchecked.append((origin, node.lineno,
+                              f"{detail + '; ' if detail else ''}{why}, so "
+                              f"whether the constructor accepts it was NOT "
+                              f"checked"))
+        elif outcome == "undefined":
+            unchecked.append((origin, node.lineno,
+                              f"{detail}; the constructor accepts it, but no "
+                              f"Fourier number is defined, so this was NOT "
+                              f"checked"))
+        else:
+            seen.append((origin, node.lineno))
 
 
 def tracked_python_files(root: Path):
@@ -569,8 +750,13 @@ def main(argv=None) -> int:
         paths = tracked_python_files(REPO_ROOT)
         scanned = "the repository's tracked .py files"
 
+    ceiling = allowlist_ceiling_error()
+    if ceiling:
+        print(f"FAIL: {ceiling}")
+        return 1
+
     defaults = _defaults()
-    unstable, unchecked, seen = [], [], []
+    unstable, unchecked, seen, expected = [], [], [], []
     for path in paths:
         try:
             src = path.read_text(errors="replace")
@@ -582,7 +768,7 @@ def main(argv=None) -> int:
             origin = str(path.relative_to(REPO_ROOT))
         except ValueError:
             origin = str(path)
-        scan_source(src, origin, defaults, unstable, unchecked, seen)
+        scan_source(src, origin, defaults, unstable, unchecked, seen, expected)
 
     # The allowlist names constructions, not files: everything else in an
     # allowlisted file was scanned above and is judged like any other rod.
@@ -595,13 +781,15 @@ def main(argv=None) -> int:
         seen.remove(key)
 
     if unstable:
-        print(f"FAIL: {len(unstable)} HeatNode construction(s) the stability "
-              f"guard refuses:")
+        print(f"FAIL: {len(unstable)} HeatNode construction(s) the constructor "
+              f"refuses (its stability guard or its other checks):")
         for origin, lineno, why in unstable:
             print(f"  {origin}:{lineno}: {why}")
-        print("\nFix: give the construction a stable timestep.  If the test "
-              "does not care about the physics, it still cannot build a rod "
-              "that diverges -- see MADD-ANO-009.")
+        print("\nFix: give the construction a stable timestep and arguments "
+              "the constructor accepts.  If the test does not care about the "
+              "physics, it still cannot build a rod that diverges -- see "
+              "MADD-ANO-009.  A test that asserts the refusal does it inside "
+              "pytest.raises, which this gate reads.")
         return 1
 
     if not seen and not unchecked:
@@ -646,8 +834,11 @@ def main(argv=None) -> int:
                 print(f"  {origin}:{lineno}: {why}")
     exempt = (f"; {len(allowed)} deliberately unstable construction(s) "
               f"exempt by name (_ALLOWED_UNSTABLE)" if allowed else "")
-    print(f"OK: {len(seen)} HeatNode construction(s) verified within their "
-          f"stencil's stability limit{note}{exempt}")
+    raised = (f"; {len(expected)} construction(s) refused inside "
+              f"pytest.raises, as their test expects" if expected else "")
+    print(f"OK: {len(seen)} HeatNode construction(s) verified: the "
+          f"constructor builds each, within its stencil's stability "
+          f"limit{note}{exempt}{raised}")
     return 0
 
 

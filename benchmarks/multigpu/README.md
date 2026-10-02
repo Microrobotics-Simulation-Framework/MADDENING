@@ -199,7 +199,10 @@ session, it is a different measurement).
 
 ### 2a. Sanity, and what to record before the first goal
 
-Each file records the commit `git rev-parse HEAD` names and nothing more:
+Each file records the commit `git rev-parse HEAD` names -- when git exits 0
+with a full SHA; otherwise none, which keeps every item open (a tree
+synced without `.git` and then `git init`-ed used to record `"HEAD"`, which
+the summary took for a commit) -- and nothing more:
 not whether the tree was dirty, nor where `maddening` was imported from.
 Until the runner records those, the session makes them true by procedure:
 
@@ -377,8 +380,11 @@ and commit it with the summary output pasted into the commit body.
 exits 0 when no recorded check failed and every file records one commit,
 3 when any check failed or a file cannot decide (below), 4 when nothing
 failed but the files come from more than one commit, or any file records
-none -- every file recording none included, which used to exit 0 -- (below),
-and 1 when the directory holds no goal JSON.  A goal that raised under
+none -- every file recording none included, which used to exit 0; a recorded
+commit that is not a full SHA counts as none -- (below), and 1 when the
+directory holds no goal JSON.  A file this runner cannot read in full (an
+older runner's) reads `INVALID` and is left out of the tables, which say
+so; it used to stop the summary on a traceback.  A goal that raised under
 `--keep-going` reads `FAIL`, its one `goal raised` check naming the
 exception; its record is valid only with no results and exactly that
 check.  It does not

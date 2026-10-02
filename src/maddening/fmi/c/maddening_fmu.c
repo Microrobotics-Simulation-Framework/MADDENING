@@ -52,6 +52,7 @@
 #  include <arpa/inet.h>
 #  include <netdb.h>
 #  include <netinet/in.h>
+#  include <netinet/tcp.h>
 #  include <sys/socket.h>
 #  include <unistd.h>
    typedef int sock_t;
@@ -565,6 +566,13 @@ static sock_t connect_endpoint(const char *host, int port) {
 #ifdef SO_NOSIGPIPE
         { int one = 1; setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one); }
 #endif
+        /* Every call is a small request answered before the next is sent,
+         * and a frame goes out as two writes (prefix, then body).  With
+         * Nagle's algorithm on, the body waited for the ACK of the prefix,
+         * which the bridge's kernel delays (40 ms on Linux): every FMI call
+         * took at least that long.  Measured: 245 calls of an 80-step FMPy
+         * run took 10.1 s, about 41 ms each. */
+        { int one = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one); }
         if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) break;
         sock_close(s); s = SOCK_INVALID;
     }

@@ -20,18 +20,29 @@ Per directory:
 * no other ``*.cdx.json`` (a previous version's file, an install nobody
   covers);
 * ``soup_package.md`` names every SBOM file, so the SOUP document and the
-  directory cannot drift apart.
+  directory cannot drift apart;
+* the SBOMs share one resolution: one cutoff, index, resolver, platform
+  and marker environment (:data:`SHARED_PROPERTIES`), because they are
+  read as one record of one release.
 
 Per SBOM:
 
 * the root component is ``maddening`` at the declared version, with its
   purl and the declared licence;
-* the metadata records which install it is and the environment it was
-  resolved in (the PEP 508 marker variables), since the transitive
-  versions depend on both;
+* the metadata records which install it is, the environment it was
+  resolved in (the PEP 508 marker variables) and the resolution cutoff
+  (``maddening:sbom:exclude-newer``), since the transitive versions
+  depend on all three;
 * every component has a name, a version, a ``pkg:pypi`` purl that agrees
-  with both, and a licence (``soup_package.md`` §6: "the licence its
-  metadata declares"), and no package appears twice;
+  with both, and a non-blank licence (``soup_package.md`` §6: "the
+  licence its metadata declares"), and no package appears twice;
+* the components are closed under their own requirements: following the
+  declared direct dependencies and each component's recorded
+  ``Requires-Dist`` (markers evaluated in the recorded environment, with
+  the extras its dependants ask for), every requirement the install turns
+  on names a component at a version it admits and is an edge of the
+  dependency graph, every edge is a requirement the component declares,
+  and every component is reached;
 * every component is reachable from the root component through the
   dependency graph: an SBOM is what one install resolved to, and a
   package nothing in that install depends on is not part of it;
@@ -48,9 +59,19 @@ Per SBOM:
   admits;
 * every ``dependsOn`` reference resolves;
 * components and dependencies are in canonical order, and the
-  ``serialNumber`` is the one the content implies (:func:`seal`), so a
-  hand edit -- bumping a version in the JSON to make this check pass, say
-  -- is refused rather than trusted.
+  ``serialNumber`` is the one the content implies (:func:`seal`), so an
+  edit that was not re-sealed -- a merge, a careless hand edit -- is
+  refused.
+
+What it cannot prove is that the content is what a resolver produced.
+:func:`seal` is public, so an edit can be re-sealed, and an edit that
+keeps every rule above -- numpy moved to another version both its range
+and its dependants admit, say -- passes.  These rules prove that the
+files are consistent with ``pyproject.toml``, the SOUP package and
+themselves.  Only regeneration proves the content:
+``python scripts/generate_sbom.py --exclude-newer <the recorded cutoff>
+--output-dir <dir>`` resolves each install again, and the result must be
+byte-identical to the committed file.
 
 Usage
 -----
@@ -193,7 +214,9 @@ def content_serial(sbom: dict) -> str:
     with the same timestamp get the same serial, so the committed file is
     reproducible; any change of content gets a different one, as
     CycloneDX asks of a serial; and a file edited after generation no
-    longer matches its own serial, which :func:`check_sbom` refuses.
+    longer matches its own serial, which :func:`check_sbom` refuses --
+    unless the edit was re-sealed with :func:`seal`, which anyone can
+    call.  The serial detects an accident, not a deliberate edit.
     """
     body = {k: v for k, v in sbom.items() if k != "serialNumber"}
     digest = hashlib.sha256(_canonical_json(body).encode("utf-8")).hexdigest()
@@ -882,18 +905,19 @@ def _shared_resolution_errors(recorded: dict[str, dict[str, str]],
     resolved on another day, with another numpy, than the core one passed
     (audit_040_p4_4, M4, G5) -- and the SOUP package's table, which reads
     the four as one record of one release, would have described two
-    environments as one.  A property missing from a file is reported per
-    file; here it simply has no value to agree on.
+    environments as one.  A property one file records and another does
+    not is a disagreement too (``None`` in the listing): the file without
+    it cannot be shown to share the resolution.
     """
     errors = []
     for prop in SHARED_PROPERTIES:
-        values: dict[str, list[str]] = {}
+        values: dict[str | None, list[str]] = {}
         for name, props in sorted(recorded.items()):
-            if prop in props:
-                values.setdefault(props[prop], []).append(name)
+            values.setdefault(props.get(prop), []).append(name)
         if len(values) > 1:
             listing = "; ".join(f"{v!r} in {', '.join(names)}"
-                                for v, names in sorted(values.items()))
+                                for v, names in sorted(values.items(),
+                                                       key=lambda kv: str(kv[0])))
             errors.append(
                 f"{where}: the SBOMs disagree about {prop} ({listing}).  They "
                 f"are one record of one release, resolved together: regenerate "

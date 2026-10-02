@@ -107,9 +107,13 @@ every goal deciding it passed with every check run and every file valid,
 on real GPUs, not a dry run, on at least ``MIN_DECIDING_DEVICES`` (4)
 devices, and every deciding file records the same git commit.  Each item's
 line names the commit its files record, and a directory whose files come
-from more than one commit prints a ``MIXED COMMITS`` warning naming each
-commit's items and files, and exits 4.  It does not import JAX, so it
-works on a laptop without a usable jaxlib.
+from more than one commit, or record none, prints a ``MIXED COMMITS``
+warning naming each commit's items and files, and exits 4.  It does not
+import JAX, so it works on a laptop without a usable jaxlib.
+
+With ``--keep-going`` a goal that raises is recorded -- one failed ``goal
+raised`` check, the exception under ``raised`` -- and the run goes on to
+the next goal; without it the exception ends the run as before.
 
 Every timed callable receives inputs that were placed on the device mesh
 once, with the ``NamedSharding`` the compiled executable expects, outside
@@ -162,6 +166,7 @@ import statistics
 import subprocess
 import sys
 import time
+import traceback
 import warnings
 from pathlib import Path
 
@@ -1079,6 +1084,38 @@ def finish_checks(out: dict, checks: list) -> dict:
     out["checks"] = checks
     out["passed"] = bool(checks) and all(c["passed"] for c in checks)
     return out
+
+
+#: The name of the one check a goal that raised records (``--keep-going``).
+GOAL_RAISED_CHECK = "goal raised"
+
+
+def goal_raised_check(raised: dict) -> dict:
+    """The failed check a goal that raised records, derived from its
+    ``raised`` entry (the exception's type and message)."""
+    return check_that(GOAL_RAISED_CHECK, False,
+                      detail=f"{raised.get('type')}: {raised.get('message')}")
+
+
+def record_goal_raised(doc: dict, exc: BaseException) -> dict:
+    """Make *doc* the record of a goal that raised *exc*: no results, one
+    failed ``goal raised`` check, and the exception under ``raised``.
+
+    For ``--keep-going``, which used to stop at the first goal that raised
+    (only a goal whose *checks* failed was kept going past), leaving every
+    later goal not run -- a seeded wrapper fault that makes ``shard_map``
+    refuse the step recorded nothing for three of the five checklist goals.
+    The record is valid (:func:`record_problems` derives the same single
+    check from ``raised``), so ``--summarise`` reads the goal ``FAIL`` and
+    names the exception, rather than ``not run``.
+    """
+    doc["raised"] = {
+        "type": type(exc).__name__,
+        "message": str(exc)[:4000],
+        "traceback": "".join(traceback.format_exception(exc))[-8000:],
+    }
+    doc["results"] = []
+    return finish_checks(doc, [goal_raised_check(doc["raised"])])
 
 
 def check_status(c: dict) -> str:
@@ -2895,6 +2932,19 @@ def record_problems(doc: dict) -> list[str]:
     results, checks = doc.get("results"), doc.get("checks")
     if not isinstance(results, list) or not isinstance(checks, list):
         return problems + ["no results or no checks recorded"]
+    if "raised" in doc:
+        # A goal that raised (--keep-going): no cases, and exactly the one
+        # check its exception gives.
+        raised = doc["raised"]
+        if not (isinstance(raised, dict) and isinstance(raised.get("type"), str)
+                and isinstance(raised.get("message"), str)):
+            return problems + ["its 'raised' entry does not record the exception's "
+                               "type and message"]
+        if results:
+            problems.append("records results, though its goal raised")
+        if not all(isinstance(c, dict) for c in checks):
+            return problems + ["a recorded check is not a record"]
+        return problems + _check_differences(checks, [goal_raised_check(raised)])
     measured_on = sorted({repr(r.get("n_devices")) for r in results
                           if not isinstance(r, dict) or r.get("n_devices") != n_dev})
     if measured_on:
@@ -3168,8 +3218,8 @@ def _item_commits(docs: list) -> str:
 
 def _print_mixed_commits(docs_by_goal: dict) -> bool:
     """A prominent warning when the directory's files record more than one
-    commit (or some record none), naming each commit's items and files.
-    Returns whether it printed one.
+    commit, or any of them records none, naming each commit's items and
+    files.  Returns whether it printed one.
 
     An item is decided only by files of one commit (:func:`item_problems`),
     but the rule is per item: items decided by different goals can each
@@ -3178,10 +3228,17 @@ def _print_mixed_commits(docs_by_goal: dict) -> bool:
     """
     docs = [d for goal in ALL_GOALS for d in docs_by_goal.get(goal, [])]
     by_commit = files_by_commit(docs)
-    if len(by_commit) < 2:
+    if len(by_commit) < 2 and None not in by_commit:
         return False
-    print(f"\nWARNING: MIXED COMMITS -- this directory's files come from {len(by_commit)} "
-          "commits, so its checklist is not one session's verdict (exit 4)")
+    if list(by_commit) == [None]:
+        # No file records a commit (a tree synced without .git): nothing
+        # ties the files to one session's code.  This used to exit 0.
+        print("\nWARNING: MIXED COMMITS -- no file in this directory records a git "
+              "commit, so nothing says its checklist is one session's verdict (exit 4)")
+    else:
+        print(f"\nWARNING: MIXED COMMITS -- this directory's files come from "
+              f"{len(by_commit)} commits (counting none recorded as one), so its "
+              "checklist is not one session's verdict (exit 4)")
     for commit, files in by_commit.items():
         items = [str(item) for item, (_claim, goals) in CHECKLIST.items()
                  if any(_commit_of(d) == commit for g in goals for d in docs_by_goal.get(g, []))]
@@ -3337,10 +3394,11 @@ def summarise(directory: Path) -> int:
     ``directory``, 3 = at least one check failed, a recorded pass/fail
     disagrees with its value and limit, or a file is not evidence this
     runner would have written (:func:`record_problems`), 4 = nothing
-    failed, but the files come from more than one commit (or some record
-    none and others do): the items they decide may each have closed on a
-    different commit, and the summary prints a ``MIXED COMMITS`` warning
-    naming each commit's items and files."""
+    failed, but the files come from more than one commit, or a file
+    records none (every file recording none included -- that used to exit
+    0): the items they decide may each have closed on a different commit,
+    and the summary prints a ``MIXED COMMITS`` warning naming each
+    commit's items and files."""
     docs_by_goal = {goal: _load_results(directory, goal) for goal in ALL_GOALS}
     if not any(docs_by_goal.values()):
         print(f"no goal JSON ({'/'.join(ALL_GOALS)}) under {directory}")
@@ -3413,7 +3471,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "recommendation from DIR and exit (no JAX needed)")
     ap.add_argument("--keep-going", action="store_true",
                     help="with --goal checklist/all, run the remaining goals after one fails "
-                         "(default: stop after the goal whose checks failed)")
+                         "or raises (a goal that raises is recorded as one failed 'goal "
+                         "raised' check); default: stop after the goal whose checks failed, "
+                         "and let an exception end the run")
     ap.add_argument("--dry-run", action="store_true",
                     help="small sizes on CPU virtual devices; proves the script, ranks nothing")
     ap.add_argument("--cells", type=int, nargs="+",
@@ -3511,6 +3571,12 @@ def main(argv: list[str] | None = None) -> int:
             runners[goal](args, doc)
         except MeshPartitionError as e:
             raise SystemExit(str(e)) from e
+        except Exception as e:  # noqa: BLE001 - recorded with --keep-going, re-raised without
+            if not args.keep_going:
+                raise
+            record_goal_raised(doc, e)
+            print(f"GOAL RAISED [{goal}] {type(e).__name__}: {str(e)[:500]} "
+                  "(--keep-going: recorded as a failed check, running the rest)")
         doc["wall_s"] = time.perf_counter() - t0
         path = args.out / f"{goal}.json"
         with open(path, "w", encoding="utf-8") as f:

@@ -267,8 +267,11 @@ python benchmarks/multigpu/run_pod.py --summarise results/multigpu | tee $L/summ
 The checklist goals come first because they are cheap and decisive; the
 coupled goal is third because item 6 is the one no other measurement
 covers.  `--goal checklist` runs the first five in one process and
-`--goal all` all eight; both stop after the first goal whose checks fail
-(`--keep-going` overrides; do not use it on the pod).  Defaults on GPUs:
+`--goal all` all eight; both stop after the first goal whose checks fail,
+and an exception in a goal ends the run (`--keep-going` overrides both:
+a goal that raises is then recorded as one failed `goal raised` check,
+with the exception's type, message and traceback under `raised`, and the
+next goal runs; do not use it on the pod).  Defaults on GPUs:
 cells `1e5 3e5 1e6` (2-D fields of `ny × (ny + 4)` for the stencil goals,
 never square, both a multiple of the device count), 5 warmup + 20 timed
 repeats, 20 steps per
@@ -373,8 +376,12 @@ and commit it with the summary output pasted into the commit body.
 `python benchmarks/multigpu/run_pod.py --summarise benchmarks/results/multigpu`
 exits 0 when no recorded check failed and every file records one commit,
 3 when any check failed or a file cannot decide (below), 4 when nothing
-failed but the files come from more than one commit (below), and 1 when
-the directory holds no goal JSON.  It does not
+failed but the files come from more than one commit, or any file records
+none -- every file recording none included, which used to exit 0 -- (below),
+and 1 when the directory holds no goal JSON.  A goal that raised under
+`--keep-going` reads `FAIL`, its one `goal raised` check naming the
+exception; its record is valid only with no results and exactly that
+check.  It does not
 take a check's recorded `passed` on trust: pass/fail is re-derived from
 the check's `value`, `limit` and `sense`, and a record that disagrees --
 a value of 0.5 against a limit of 0.0 recorded as passed, say -- is
@@ -410,8 +417,8 @@ each close on a different commit -- the directory a session leaves when it
 re-runs some goals on a fix commit and keeps the earlier passing files.
 So every checklist line names the commit its item's files record (each
 commit with its files, when they disagree), and a directory whose files
-come from more than one commit -- or where some record none -- prints
-`WARNING: MIXED COMMITS`, naming each commit with the items it decides and
+come from more than one commit -- or where any records none, all of them
+included -- prints `WARNING: MIXED COMMITS`, naming each commit with the items it decides and
 its files, repeats the warning as the last line, and exits 4 (3 if a check
 failed as well).  Read such a checklist as several sessions, not one.  If the runner itself changed between the session and the
 summary (a new check, a new case), the session's files no longer match

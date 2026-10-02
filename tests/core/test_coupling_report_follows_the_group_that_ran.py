@@ -96,3 +96,83 @@ def test_an_equal_replacement_keeps_its_report(stepped):
     _regroup(gm, 1e-3)
     gm.compile()
     assert _as_text(gm.coupling_diagnostics()[KEY]) == report
+
+
+# ---------------------------------------------------------------------------
+# The report's float floor is the step's, not the live graph's
+# ---------------------------------------------------------------------------
+
+import jax.numpy as jnp  # noqa: E402
+
+from maddening.core.node import BoundaryInputSpec, SimulationNode  # noqa: E402
+
+
+class _Relay(SimulationNode):
+    def __init__(self, name, g, c, x0, evaluations=1):
+        super().__init__(name, 1.0, g=jnp.float32(g), c=jnp.float32(c))
+        self._x0, self._ev = x0, evaluations
+
+    def initial_state(self):
+        return {"x": jnp.asarray([self._x0], jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(1,), dtype=jnp.float32,
+                                       default=jnp.zeros(1, jnp.float32))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": p["g"] * boundary_inputs["u"] + p["c"]}
+
+    def update_evaluations(self):
+        return self._ev
+
+
+_NAMES = ["n0", "n1", "n2"]
+_G, _C = 0.99 ** (1 / 3), 1.0 - 0.99 ** (1 / 3)
+_KEY = "n0+n1+n2"
+
+
+def _stalled_ring(diagnostics=True):
+    gm = GraphManager()
+    for nm in _NAMES:
+        gm.add_node(_Relay(nm, _G, _C, 0.999))
+    for k in range(3):
+        gm.add_edge(_NAMES[k - 1], _NAMES[k], "x", "u")
+    gm.add_coupling_group(_NAMES, max_iterations=2000, tolerance=1e-12,
+                          diagnostics=diagnostics)
+    gm.compile()
+    gm.step()
+    return gm
+
+
+@pytest.mark.parametrize("diagnostics", [True, False])
+def test_rebuilding_a_member_before_the_next_step_leaves_the_report_alone(diagnostics):
+    """The documented remove-and-re-add recipe, no step since: the report is unchanged.
+
+    The floor the report adds (``spectral_error_bound`` at a stalled
+    residual, ``precision_limited``) was re-derived from the live graph:
+    the rebuilt node declaring 50 evaluations moved the bound of the step
+    that had already run 17x.  It is now taken from what ``compile()``
+    built the step from, and -- with ``diagnostics=True`` -- from the count
+    the step measured.
+    """
+    gm = _stalled_ring(diagnostics)
+    before = dict(gm.coupling_diagnostics()[_KEY])
+    assert before["precision_limited"], "fixture premise: the residual is the floor"
+    gm.remove_node("n1")
+    gm.add_node(_Relay("n1", _G, _C, 0.999, evaluations=50))
+    gm.add_edge("n0", "n1", "x", "u")
+    gm.add_edge("n1", "n2", "x", "u")
+    after = dict(gm.coupling_diagnostics()[_KEY])
+    for key in before:
+        a, b = before[key], after[key]
+        assert a == b or (a != a and b != b), (key, a, b)
+
+
+def test_a_member_removed_since_the_step_takes_the_report_with_it():
+    """No ``KeyError``: the group has no entry, and the coupling report says why."""
+    gm = _stalled_ring()
+    gm.remove_node("n1")
+    assert _KEY not in gm.coupling_diagnostics()
+    row = next(r for r in gm.coupling_report() if r["group"] == _KEY)
+    assert any("removed" in flag for flag in row["flags"]), row

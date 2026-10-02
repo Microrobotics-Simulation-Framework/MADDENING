@@ -188,7 +188,22 @@ same pass, already rounded, so the roundings along the chain add up.  On
 a Gauss-Seidel ring of 32 scalar relays stalled at float32 the worst
 node's count let the bound read 0.51x the true distance with
 `spectral_usable=True` (0.30x at 64 relays; MADD-ANO-094); counted along
-the chain it reads 16x over.  A composite map's error grows with its evaluations: explicit
+the chain it reads 16x over.  Both rules assume a read passes a relative
+rounding on at most unchanged.  A squaring relay doubles it with no
+cancellation, and a node whose terms cancel (`3u - 2v` at `u ~ v`)
+amplifies its own rounding as well: a Gauss-Seidel ring of twelve squares
+read its bound at 0.20x with the flag set.  So with `diagnostics=True` the
+step measures each group-internal read's relative gain `g` at the returned
+state -- one JVP of the reading node's update along the source's own
+state, per read, every step -- scales each node's own count by
+`max(1, sum g)` over its reads, weights each same-pass read by its `g`
+along the chain, never goes below the structural count, and the report
+reads that count from the step (`coupling_<key>_pass_evaluations`), or the
+structural one `compile()` snapshotted -- never the graph as it stands when
+`coupling_diagnostics()` is called.  Magnitudes add, so the count is a
+bound and can be useless as one: a ten-link chain `3 c_(j-1) - 2 c_(j-2)
++ c` reads 1.1e7x its true distance, usable, and a sub-cycled member,
+counted as undamped sub-steps, 1.5e3x-9.6e4x.  A composite map's error grows with its evaluations: explicit
 Euler in `N` sub-steps, each moving its field by less than half an ulp,
 is 5.8 units off the exact map at `N = 20` and 29.4 at `N = 100`, and
 while the floor was a flat four units a stalled relay built on such a
@@ -1149,6 +1164,16 @@ different things, and on a grid the L2 number is mostly a statement
 about the grid, not about the coupling.  Use the
 interface norm on grid couplings, and read `coupling_iter_stats` rather
 than trusting a residual whose units you have not thought about.
+
+## The adjoint solve has no absolute tolerance
+
+The IFT tangent and adjoint are one solve of `(I - dF/dx) v = b` each, and
+the matrix-free backends stop on a tolerance relative to `max|b|` only, on
+`b` rescaled by an exact power of two.  Until 0.4.0 the criterion also
+carried an absolute `1e-8`, which a small `b` met before a single step: the
+derivative of a group in small units, or of a loss near its minimum, came
+back exactly zero and "successful" (MADD-ANO-113).  An ill-conditioned
+solve now fails at every scale alike, with the error below.
 
 ## `linear_solver="dense"` is not an escape hatch on a grid
 

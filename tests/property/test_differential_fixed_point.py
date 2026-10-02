@@ -56,6 +56,11 @@ import pytest
 from hypothesis import given, note, settings
 from hypothesis import strategies as st
 
+import jax
+import jax.numpy as jnp
+
+from maddening.core.graph_manager import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
 from tests.conftest import EXAMPLES_COSTLY
 from tests.core.test_coupling_solver_equivalence import residual_noise_floor
 from tests.property import coupled_graphs as cg
@@ -472,6 +477,281 @@ def test_a_usable_spectral_bound_holds_on_a_long_gauss_seidel_chain(m, data):
     assert_the_floor_bound_holds_on_a_long_ring(
         m, "gauss-seidel", data.draw(_long_ring_values(m)),
         data.draw(st.sampled_from([1e-3, 3e-4])))
+
+
+# ---------------------------------------------------------------------------
+# Adversarial chains: relative gains above one, and terms that cancel
+# ---------------------------------------------------------------------------
+#
+# Random rank-one gains missed both the round-3 floor defect (a long chain
+# counted as one node) and the round-4 one (a squaring link doubling every
+# rounding upstream of it): such gains have relative gain below one per
+# link almost surely.  These generators build the chains the floor's model
+# has to survive -- links whose relative gain exceeds one without any
+# cancellation (``u**2``, ``u**4``, ``u0 * u1``), and links whose terms
+# cancel (``a u + b`` with ``|a u| >> |x|``, signs mixed) -- each as a
+# Gauss-Seidel ring closed by an affine head with a small gain, so the loop
+# contracts at a drawn rate, every node declares one evaluation, the
+# Jacobian has rank one, and the exact fixed point is a float64 Newton
+# solve of the head's scalar loop map.  Whenever a ``*_usable`` flag is set
+# its bound must be at least the true error.
+
+
+class _Link(SimulationNode):
+    """One link of an adversarial chain: ``kind`` decides the update, ``a``/``b`` its constants.
+
+    ``"head"`` and ``"affine"``: ``x <- a u0 + b``; ``"square"``: ``a u0**2``;
+    ``"quartic"``: ``a u0**4`` (three multiplies); ``"product"``:
+    ``a u0 u1`` (two reads: the previous link and the one before it).
+    """
+
+    def __init__(self, name, kind, n_inputs):
+        super().__init__(name, 1.0, a=jnp.float32(1.0), b=jnp.float32(0.0))
+        self._kind, self._k = kind, n_inputs
+
+    def initial_state(self):
+        return {"x": jnp.ones(1, jnp.float32)}
+
+    def boundary_input_spec(self):
+        return {f"u{j}": BoundaryInputSpec(shape=(1,), dtype=jnp.float32,
+                                           default=jnp.ones(1, jnp.float32))
+                for j in range(self._k)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        u = boundary_inputs["u0"]
+        if self._kind in ("head", "affine"):
+            x = p["a"] * u + p["b"]
+        elif self._kind == "square":
+            x = p["a"] * (u * u)
+        elif self._kind == "quartic":
+            x = p["a"] * (u * u * u * u)
+        else:
+            x = p["a"] * (u * boundary_inputs["u1"])
+        return {"x": x}
+
+    def update_evaluations(self):
+        return 1
+
+
+def _chain_names(kinds):
+    return ["c00"] + [f"c{k + 1:02d}" for k in range(len(kinds))]
+
+
+@functools.lru_cache(maxsize=None)
+def _chain_graph(kinds):
+    """The ring ``c00 (head) -> c01 -> ... -> cK -> c00`` for link ``kinds``, compiled once."""
+    names = _chain_names(kinds)
+    gm = GraphManager()
+    gm.add_node(_Link(names[0], "head", 1))
+    for k, kind in enumerate(kinds, start=1):
+        gm.add_node(_Link(names[k], kind, 2 if kind == "product" else 1))
+    gm.add_edge(names[-1], names[0], "x", "u0")
+    for k, kind in enumerate(kinds, start=1):
+        gm.add_edge(names[k - 1], names[k], "x", "u0")
+        if kind == "product":
+            gm.add_edge(names[max(k - 2, 0)], names[k], "x", "u1")
+    gm.add_coupling_group(names, max_iterations=3000, tolerance=1e-12, diagnostics=True)
+    gm.compile()
+    assert [nm for nm in gm.schedule] == names, "fixture premise: swept in chain order"
+    return gm, names
+
+
+def _chain_values(kinds, n0, consts):
+    """``(values, slopes)``: every link's value and ``d value / d n0``, in float64."""
+    vals, slopes = [n0], [1.0]
+    for k, kind in enumerate(kinds, start=1):
+        a, b = consts[k]
+        u, du = vals[k - 1], slopes[k - 1]
+        if kind == "affine":
+            v, dv = a * u + b, a * du
+        elif kind == "square":
+            v, dv = a * u * u, 2 * a * u * du
+        elif kind == "quartic":
+            v, dv = a * u ** 4, 4 * a * u ** 3 * du
+        else:
+            w, dw = vals[max(k - 2, 0)], slopes[max(k - 2, 0)]
+            v, dv = a * u * w, a * (du * w + u * dw)
+        vals.append(v)
+        slopes.append(dv)
+    return vals, slopes
+
+
+@st.composite
+def _adversarial_constants(draw, kinds):
+    """Constants for every link and the head, rounded to float32, plus the target ``n0``.
+
+    Multiplicative links keep ``a = 1`` around a head value just above one
+    (the values stay within ``e**0.25`` of 1 whatever the exponent);
+    affine links get a signed gain of magnitude 0.5-3 and a bias that puts
+    the next value at a drawn signed target of magnitude 0.02-0.3 (0.9-1.1
+    where a multiplicative link follows), so ``a u`` and the bias cancel:
+    ``|a u|`` is up to 150 times ``|x|``.  The head's gain makes the loop contract at ``rho``.
+    """
+    rho = draw(st.sampled_from([0.9, 0.99]))
+    seed = draw(st.integers(0, 2 ** 32 - 1))
+    rng = np.random.default_rng(seed)
+    exponent = [1.0]
+    for k, kind in enumerate(kinds, start=1):
+        e = exponent[k - 1]
+        exponent.append({"square": 2 * e, "quartic": 4 * e,
+                         "product": e + exponent[max(k - 2, 0)]}.get(kind, e))
+    n0t = 1.0 + 0.25 / max(exponent)
+    consts = {0: (0.0, 0.0)}
+    target = [n0t]
+    for k, kind in enumerate(kinds, start=1):
+        if kind == "affine":
+            a = float(rng.choice([-1.0, 1.0]) * rng.uniform(0.5, 3.0))
+            # Small targets only where no multiplicative link follows: a
+            # square of 0.1 five times over is 1e-32.
+            small = all(kd == "affine" for kd in kinds[k:])
+            nxt = float(rng.choice([-1.0, 1.0])
+                        * (rng.uniform(0.02, 0.3) if small else rng.uniform(0.9, 1.1)))
+            consts[k] = (a, nxt - a * target[k - 1])
+            target.append(nxt)
+        else:
+            consts[k] = (1.0, 0.0)
+            target.append(None)
+        if target[-1] is None:
+            vals, _ = _chain_values(kinds[:k], n0t, consts)
+            target[-1] = vals[-1]
+    consts = {k: (float(np.float32(a)), float(np.float32(b))) for k, (a, b) in consts.items()}
+    vals, slopes = _chain_values(kinds, n0t, consts)
+    g = rho / slopes[-1]
+    c = n0t - g * vals[-1]
+    consts[0] = (float(np.float32(g)), float(np.float32(c)))
+    consts["n0"] = n0t
+    return consts
+
+
+def _exact_chain(kinds, consts, start=None):
+    """The fixed point of the float32-constant map: Newton on ``g s_K(n0) + c - n0``.
+
+    Started at the designed head value, or at *start* (the head value the
+    loop returned): the map is a polynomial with other roots (a signed
+    affine link between squares puts one 0.4 away), and the one to measure
+    against is the one the loop approached.
+    """
+    g, c = consts[0]
+    n0 = consts["n0"] if start is None else float(start)
+    for _ in range(200):
+        vals, slopes = _chain_values(kinds, n0, consts)
+        n0 -= (g * vals[-1] + c - n0) / (g * slopes[-1] - 1.0)
+    vals, slopes = _chain_values(kinds, n0, consts)
+    return np.asarray(vals, np.float64), np.asarray(slopes, np.float64)
+
+
+def _run_chain(kinds, consts, head):
+    gm, names = _chain_graph(kinds)
+    xs, _slopes = _exact_chain(kinds, consts)
+    cg.recover(gm)
+    gm.reset_state()
+    for nm, x in zip(names, xs):
+        gm.set_node_state(nm, {"x": jnp.asarray([x * (1.0 - head)], jnp.float32)})
+    params = jax.tree.map(lambda v: v, gm.params)
+    for k, nm in enumerate(names):
+        params["nodes"][nm]["a"] = jnp.float32(consts[k][0])
+        params["nodes"][nm]["b"] = jnp.float32(consts[k][1])
+    gm.step(params=params)
+    d = gm.coupling_diagnostics()["+".join(sorted(names))]
+    x = np.array([float(gm.get_node_state(nm)["x"][0]) for nm in names], np.float64)
+    return gm, names, x, xs, d, params
+
+
+def assert_the_bound_holds_on_an_adversarial_chain(kinds, consts, head):
+    _gm, _names, x, _xs, d, _p = _run_chain(kinds, consts, head)
+    xs, _slopes = _exact_chain(kinds, consts, start=x[0])
+    dist = float(np.sqrt(np.sum(((x - xs) / np.maximum(np.abs(x), np.abs(xs))) ** 2)))
+    note(f"kinds={kinds} consts={consts} dist={dist:.4e} {dict(d)}")
+    if d["spectral_usable"]:
+        assert d["spectral_error_bound"] >= dist, (
+            f"spectral_error_bound {d['spectral_error_bound']:.4e} below the true distance "
+            f"{dist:.4e} on {kinds} (precision_limited={d['precision_limited']})")
+
+
+#: Per push: one chain whose links' relative gains exceed one without
+#: cancelling, long enough that the gain-blind floor read the bound low.
+_GAIN_CHAIN = ("square", "product", "square", "quartic", "square", "square",
+               "product", "square")
+#: Per push: a signed affine chain whose terms cancel.
+_SIGNED_CHAIN = ("affine",) * 6
+
+
+# Costly tier: one compile; the examples draw the constants.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one(data):
+    """Per push; slow siblings take a signed chain, draw the chain, and check the gradient bound.
+
+    Gauss-Seidel only, here and in the siblings: under Jacobi these rings
+    contract at ``rho**(1/K)`` a pass and their rounding noise keeps the
+    residual above the floor, so the bound there is the residual's and the
+    floor is never tested.
+    """
+    assert_the_bound_holds_on_an_adversarial_chain(
+        _GAIN_CHAIN, data.draw(_adversarial_constants(_GAIN_CHAIN)),
+        data.draw(st.sampled_from([1e-3, 1e-4])))
+
+
+# Slow: 7 s on CI, most of it tracing a seven-node chain with diagnostics.
+# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one
+# Per push: tests/core/test_coupling_gauss_seidel_gain_weighted_floor.py::test_each_read_is_weighted_by_its_measured_gain
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_usable_spectral_bound_holds_on_a_signed_chain_whose_terms_cancel(data):
+    """Signed affine links, ``|a u|`` up to 150 ``|x|``: kept apart from the no-cancellation chains."""
+    assert_the_bound_holds_on_an_adversarial_chain(
+        _SIGNED_CHAIN, data.draw(_adversarial_constants(_SIGNED_CHAIN)),
+        data.draw(st.sampled_from([1e-3, 1e-4])))
+
+
+# Slow: the chain is drawn, so every example compiles a graph of its own.
+# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_usable_spectral_bound_holds_on_drawn_adversarial_chains(data):
+    """Chains of 3-10 links drawn from every kind, mixed-sign ones included."""
+    kinds = tuple(data.draw(st.lists(
+        st.sampled_from(["square", "quartic", "product", "affine"]), min_size=3, max_size=10)))
+    assert_the_bound_holds_on_an_adversarial_chain(
+        kinds, data.draw(_adversarial_constants(kinds)),
+        data.draw(st.sampled_from([1e-3, 1e-4])))
+
+
+# Slow: the gradient compiles the step twice more per chain.
+# Per push: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_holds_on_a_chain_whose_gains_exceed_one
+@pytest.mark.slow
+@pytest.mark.parametrize("kinds", [_GAIN_CHAIN, _SIGNED_CHAIN], ids=["gain-above-one", "mixed-sign"])
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_usable_gradient_bound_holds_on_an_adversarial_chain(kinds, data):
+    """``gradient_relative_error_bound`` against the exact derivative of the fixed point in ``c``."""
+    consts = data.draw(_adversarial_constants(kinds))
+    gm, names, x, xs, d, params = _run_chain(kinds, consts, data.draw(st.sampled_from([1e-3, 1e-4])))
+    if not d["gradient_bound_usable"]:
+        return
+    # The compiled step itself, a pure function of the state and the
+    # parameters, from the state the loop returned.
+    step, state = gm._compiled_step, gm._state
+    ext = gm._resolve_external_inputs(None)
+
+    def f(c):
+        p = jax.tree.map(lambda v: v, params)
+        p["nodes"][names[0]]["b"] = c
+        out = step(state, ext, p)
+        return jnp.stack([out[nm]["x"][0] for nm in names])
+
+    tk = np.asarray(jax.jacfwd(f)(params["nodes"][names[0]]["b"]), np.float64)
+    g = consts[0][0]
+    _vals, slopes = _exact_chain(kinds, consts, start=x[0])
+    dn0 = 1.0 / (1.0 - g * slopes[-1])
+    tstar = slopes * dn0
+    w = 1.0 / np.abs(x)
+    rel = float(np.linalg.norm(w * (tk - tstar)) / np.linalg.norm(w * tk))
+    note(f"kinds={kinds} rel={rel:.4e} {dict(d)}")
+    assert d["gradient_relative_error_bound"] >= rel, (d["gradient_relative_error_bound"], rel)
 
 
 # ---------------------------------------------------------------------------

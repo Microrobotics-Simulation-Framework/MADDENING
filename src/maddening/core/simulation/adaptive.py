@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -52,6 +53,43 @@ class AdaptiveConfig:
     max_factor: float = 5.0
     min_factor: float = 0.2
     order: int = 1
+
+
+def step_decision(error_norm, dt, dt_min, dt_max, *, safety, order, min_factor,
+                  max_factor, xp=np):
+    """``(accepted, forced, dt_next, factor)``: the one acceptance rule of the adaptive steppers.
+
+    ``run_adaptive`` (host loop, ``xp=numpy``) and ``run_adaptive_scan``
+    (traced, ``xp=jax.numpy``) and :func:`build_adaptive_step` all call
+    this, so they accept the same attempts and choose the same next
+    timestep.
+
+    * An attempt is **accepted** when its step-doubling error is within
+      tolerance (``error_norm <= 1``) or when it was already made at
+      ``dt_min`` (``dt <= dt_min``), where the controller cannot shrink
+      further; ``forced`` says the second, which ``run_adaptive`` warns
+      about.
+    * The next timestep is the PI controller's ``factor``,
+      ``safety * error_norm**(-1/(order+1))`` clipped to
+      ``[min_factor, max_factor]`` (``max_factor`` at zero error), times
+      ``dt``, clipped to ``[dt_min, dt_max]`` -- after an accepted attempt
+      and a rejected one alike.
+
+    Until 0.4.0's round-4 audit the two steppers had their own copies, and
+    ``run_adaptive``'s accepted a *rejected* attempt larger than ``dt_min``
+    whenever shrinking it would reach ``dt_min``: on an explicit-Euler decay
+    held at ``dt_min=0.005`` it took a failed first step of 0.008 and
+    overshot ``t_end`` to 0.103, where ``run_adaptive_scan`` retried at
+    ``dt_min`` and ended at 0.1 (final states 16% apart).
+    """
+    within = error_norm <= 1.0
+    at_floor = dt <= dt_min
+    accepted = xp.logical_or(within, at_floor)
+    forced = xp.logical_and(at_floor, xp.logical_not(within))
+    safe = xp.maximum(error_norm, 1e-10)
+    factor = xp.clip(safety * xp.power(1.0 / safe, 1.0 / (order + 1)), min_factor, max_factor)
+    dt_next = xp.clip(dt * factor, dt_min, dt_max)
+    return accepted, forced, dt_next, factor
 
 
 def _is_inexact_leaf(leaf) -> bool:
@@ -166,18 +204,12 @@ def build_adaptive_step(
         user_half = {k: v for k, v in state_half.items() if k != "_meta"}
         error_norm = _tree_error_norm(user_half, user_full, atol, rtol)
 
-        # PI controller: dt_new = dt * safety * (1/error)^(1/(order+1))
-        # Clamp to [min_factor, max_factor]
-        factor = safety * jnp.where(
-            error_norm > 0,
-            jnp.power(1.0 / error_norm, 1.0 / (order + 1)),
-            max_factor,
-        )
-        factor = jnp.clip(factor, min_factor, max_factor)
-        dt_next = jnp.clip(dt * factor, config.dt_min, config.dt_max)
-
-        # Accept if error <= 1 (scaled error)
-        accepted = error_norm <= 1.0
+        # The one acceptance rule and PI controller of the adaptive
+        # steppers (``step_decision``): accepted within tolerance or at
+        # ``dt_min``.
+        accepted, _forced, dt_next, _factor = step_decision(
+            error_norm, dt, config.dt_min, config.dt_max, safety=safety,
+            order=order, min_factor=min_factor, max_factor=max_factor, xp=jnp)
 
         # Use the more accurate result (half-step) when accepted
         new_state = state_half

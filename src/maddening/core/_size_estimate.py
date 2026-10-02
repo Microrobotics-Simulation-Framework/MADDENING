@@ -148,12 +148,9 @@ def estimate_allocation(node_cls: Any, params: Mapping[str, Any]) -> Optional[Al
         estimate = hook(args)
     except Exception:  # noqa: BLE001 - a hook must not raise; "cannot tell"
         return None
-    if estimate is None:
+    if not isinstance(estimate, tuple) or len(estimate) != 2:
         return None
-    try:
-        state, peak = estimate
-    except (TypeError, ValueError):
-        return None
+    state, peak = estimate
     if any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in (state, peak)):
         return None
     return AllocationEstimate(state, peak)

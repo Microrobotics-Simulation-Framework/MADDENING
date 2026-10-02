@@ -437,8 +437,10 @@ def _coerced_to_param_type(old: Any, new: Any) -> tuple[Any, Optional[str]]:
     ``params_pytree()``, ``to_dict()`` and every rebuild read.  Writing the
     raw value used to change the parameter's type: ``PUT`` HeatNode
     ``stencil_order: 4.0`` stored a float, which ``params_pytree()`` then
-    exposed as a new *trainable* leaf of ``gm.params``; ``length: 2`` on a
-    float parameter stored an ``int``, which drops out of it.  The rule:
+    exposed as a new *trainable* leaf of ``gm.params``, and an integer
+    written for a structural float parameter stored an ``int``.  (A leaf of
+    the params pytree is cast to its own dtype before this is asked.)  The
+    rule:
 
     * an integer parameter takes an integer, or a float with no fractional
       part, stored as ``int`` (the convention the constructors' own count

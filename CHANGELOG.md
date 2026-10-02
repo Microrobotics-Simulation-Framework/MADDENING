@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **One-command local runs for the remote-simulation examples**: `python -m maddening.examples.servers.remote_viz_client --local` starts the
+  simulation server on a free loopback port, streams to the viewer and stops the server on exit (Ctrl-C and errors included); the HTTP example
+  servers take `--port 0`, and `cloud/server/04`, `05` and `cloud/multijob/08` gain a `--local` mode that needs no cloud account.
 - **Read-only graph inspection** (experimental): `gm.print_graph()` / `format_graph()`, `to_mermaid()` / `to_dot()`, and tables
   `state_summary()`, `params_table()`, `coupling_report()` (caveats flagged), `memory_estimate()` with `print_*` forms; none writes or
   compiles anything.  `maddening.show_versions()` / `python -m maddening info` for bug reports; `print()` of `FitResult` / `FIMReport`
@@ -330,6 +333,8 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The shipped examples run, and print only what they measure** (49 examples; each now runs in CI or is excluded with a reason, see `examples/README.md`): two used the deprecated `RigidBody2DNode`, one raced its own server; the coupled-spring demos had no rest state yet reported "settled" (rest lengths now `+L`/`-L`);
+  `vessel_flow_server`'s parameter endpoints reported success without changing the run (they write `gm.params` now); others printed claims their numbers contradicted, deleted the results they announced, or ignored `--gpu`.  Action: none, unless you copied an example -- re-copy it.
 - **Coupling harness findings** (MADD-ANO-070 to 074, new, resolved): a group's integer/boolean fields are those the pass gives at the returned state, on both solvers (`ift` returned first-pass flags and froze edge-carried ones); predictor + mixed norm with such a field, Jacobi with a flux-reading producer, `reset_state`/`set_node_state` after `jax.grad`, under-relaxed `fixed` stopping on its first pass (~2x short) and the adaptive norm on integer leaves all fixed.
   `boundary_interpolation`'s "bit-identical under Jacobi" is round-off; a near-1 rate's noise-rejected ratio falls back to the raw test (MADD-ANO-005).  Action: re-run `run_adaptive*` results from graphs holding integer leaves.
 - **`hold_undetermined` no longer returns a fit's parameters above the loss it reached** (MADD-ANO-069, never released): a direction is held only if the

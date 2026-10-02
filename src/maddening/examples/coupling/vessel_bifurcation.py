@@ -15,18 +15,22 @@ branches (initially 20C).  At the bifurcation, the parent's rightmost
 temperature is the Dirichlet BC for both daughters, and one daughter's
 leftmost temperature feeds back as the parent's right BC.
 
+The phantom and the time-sampled results are written to the current
+directory as ``vessel_bifurcation_phantom.usda`` and
+``vessel_bifurcation_results.usda`` (``--out-dir`` to choose another).
+
 Usage::
 
     JAX_PLATFORMS=cpu python -m maddening.examples.coupling.vessel_bifurcation
+    JAX_PLATFORMS=cpu python -m maddening.examples.coupling.vessel_bifurcation --steps 1000
 
-With visualization (requires pyvista)::
+With visualization (requires pyvista and a display)::
 
     JAX_PLATFORMS=cpu python -m maddening.examples.coupling.vessel_bifurcation --viz
 """
 
+import argparse
 import os
-import sys
-import tempfile
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -55,16 +59,18 @@ def extract_left_temp(T):
     return T[0]
 
 
-def main(visualize: bool = False):
+def main(visualize: bool = False, n_steps: int = 10000, out_dir: str = "."):
     print("=" * 60)
     print("Vessel Bifurcation: Y-junction heat coupling via OpenUSD")
     print("=" * 60)
 
     # --- Step 1: Create vessel phantom as USD file ---
     print("\n1. Creating Y-shaped vessel phantom...")
-    tmpdir = tempfile.mkdtemp()
-    vessel_path = os.path.join(tmpdir, "vessel.usda")
-    results_path = os.path.join(tmpdir, "results.usda")
+    os.makedirs(out_dir, exist_ok=True)
+    vessel_path = os.path.abspath(
+        os.path.join(out_dir, "vessel_bifurcation_phantom.usda"))
+    results_path = os.path.abspath(
+        os.path.join(out_dir, "vessel_bifurcation_results.usda"))
 
     stage = create_vessel_phantom(
         vessel_path,
@@ -147,11 +153,10 @@ def main(visualize: bool = False):
         ["parent", "daughter_left", "daughter_right"],
         max_iterations=20,
         tolerance=1e-8,
-        diagnostics=True,
     )
 
     gm.compile()
-    print(f"   Graph compiled: 3 nodes, {len(gm._edges)} edges, "
+    print(f"   Graph compiled: 3 nodes, {len(gm.edges)} edges, "
           f"1 coupling group")
 
     # --- Step 4: Run simulation and write results to USD ---
@@ -160,7 +165,6 @@ def main(visualize: bool = False):
     results_stage = Usd.Stage.CreateNew(results_path)
     writer = USDWriter(results_stage, gm)
 
-    n_steps = 10000
     write_every = 10  # write every 10th step to keep file small
 
     for step in range(n_steps):
@@ -168,7 +172,7 @@ def main(visualize: bool = False):
         if step % write_every == 0:
             sim_time = step * dt
             writer.write_frame(state, sim_time)
-            if step % 50 == 0:
+            if step % 500 == 0:
                 T_p = state["parent"]["temperature"]
                 print(f"   Step {step:4d}: parent T_mean={float(T_p.mean()):.2f}, "
                       f"T_right={float(T_p[-1]):.2f}")
@@ -184,10 +188,17 @@ def main(visualize: bool = False):
     T_left = state["daughter_left"]["temperature"]
     T_right = state["daughter_right"]["temperature"]
 
-    total_energy = (float(jnp.sum(T_parent)) + float(jnp.sum(T_left))
-                    + float(jnp.sum(T_right)))
-    initial_energy = (len(parent_x) * 100.0 + len(left_x) * 20.0
-                      + len(right_x) * 20.0)
+    # Heat content per unit (rho * c * area): sum of T * cell width.
+    # The parent's cells are narrower than the daughters', so a bare sum
+    # of temperatures would weight them wrongly.
+    def heat(T, x):
+        return float(jnp.sum(T)) * float(x[-1] - x[0]) / len(x)
+
+    total_energy = (heat(T_parent, parent_x) + heat(T_left, left_x)
+                    + heat(T_right, right_x))
+    initial_energy = (100.0 * float(parent_x[-1] - parent_x[0])
+                      + 20.0 * float(left_x[-1] - left_x[0])
+                      + 20.0 * float(right_x[-1] - right_x[0]))
 
     print(f"   Parent:   T = [{float(T_parent.min()):.1f}, "
           f"{float(T_parent.max()):.1f}] C")
@@ -198,9 +209,12 @@ def main(visualize: bool = False):
     print(f"   Bifurcation: parent_right={float(T_parent[-1]):.1f} C, "
           f"left_in={float(T_left[0]):.1f} C, "
           f"right_in={float(T_right[0]):.1f} C")
-    print(f"   Total energy: {total_energy:.1f} "
-          f"(initial: {initial_energy:.1f}, "
-          f"delta: {total_energy - initial_energy:+.1f})")
+    print(f"   Heat content (sum T*dx): {total_energy:.2f} "
+          f"(initial: {initial_energy:.2f}, "
+          f"delta: {total_energy - initial_energy:+.2f})")
+    print("   (Not conserved, and not meant to be: the junction exchanges")
+    print("   temperatures, not fluxes -- both daughters take the parent's")
+    print("   end value while the parent sees only one daughter.)")
 
     diag = gm.coupling_diagnostics()
     group_key = list(diag.keys())[0]
@@ -250,14 +264,16 @@ def main(visualize: bool = False):
     else:
         print("\n   (Run with --viz for 3D visualization)")
 
-    # Clean up
-    os.unlink(vessel_path)
-    os.unlink(results_path)
-    os.rmdir(tmpdir)
-
     print("\nDone.")
 
 
 if __name__ == "__main__":
-    viz = "--viz" in sys.argv
-    main(visualize=viz)
+    parser = argparse.ArgumentParser(description="Vessel bifurcation via OpenUSD")
+    parser.add_argument("--viz", action="store_true",
+                        help="Open an interactive PyVista replay (needs a display)")
+    parser.add_argument("--steps", type=int, default=10000,
+                        help="Simulation steps (default: 10000)")
+    parser.add_argument("--out-dir", default=".",
+                        help="Directory for the phantom and results .usda files")
+    args = parser.parse_args()
+    main(visualize=args.viz, n_steps=args.steps, out_dir=args.out_dir)

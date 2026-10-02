@@ -5,30 +5,33 @@ Uses the SSH-based approach: provisions a VM via SkyPilot, then runs
 pip install and server start directly via SSH (bypassing Ray's job
 scheduler which has GPU isolation issues).
 
+``--local`` runs the same server script on this machine instead -- on a
+free loopback port, no cloud account, no GPU -- and runs the same
+endpoint checks against it.  It never imports the cloud launcher.
+
 Usage:
-    python 04_server_test.py
-    python 04_server_test.py --gpu RTX4090
-    python 04_server_test.py --keep   # don't teardown (for manual inspection)
+    # No cloud account needed:
+    python -m maddening.examples.cloud.server.04_server_test --local
+
+    # Provisions a billable RunPod VM (needs ~/.maddening/cloud_credentials.yaml):
+    python -m maddening.examples.cloud.server.04_server_test
+    python -m maddening.examples.cloud.server.04_server_test --gpu RTX4090
+    python -m maddening.examples.cloud.server.04_server_test --keep   # don't teardown
 """
 
 import argparse
 import json
 import os
+import re
 import secrets
 import shlex
+import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
-
-from maddening.cloud.launcher import (
-    CloudJob,
-    CloudLauncher,
-    CostPolicy,
-    JobConfig,
-    LaunchError,
-)
 
 
 # -- Remote install + server script ------------------------------------
@@ -66,7 +69,23 @@ INSTALL_CMD = (
 # throwaway VM rather than a deployment pattern.
 API_TOKEN = secrets.token_urlsafe(32)
 
+# Host and port come from the environment so that --local can run this
+# exact script on a free loopback port; on the VM the defaults apply.
 SERVER_SCRIPT = r"""
+import os, socket
+HOST = os.environ.get("MADDENING_DEMO_HOST", "0.0.0.0")
+PORT = int(os.environ.get("MADDENING_DEMO_PORT", "8000"))
+
+# --local: stop if the process that started us goes away.
+_parent = os.environ.get("MADDENING_DEMO_PARENT_PID")
+if _parent:
+    import signal, threading, time
+    def _watch_parent():
+        while os.getppid() == int(_parent):
+            time.sleep(1.0)
+        os.kill(os.getpid(), signal.SIGINT)
+    threading.Thread(target=_watch_parent, daemon=True).start()
+
 import jax
 print(f"JAX devices: {jax.devices()}")
 print(f"Platform: {jax.devices()[0].platform}")
@@ -79,7 +98,7 @@ from maddening.api.server import SimulationServer
 import uvicorn
 
 gm = GraphManager()
-gm.add_node(BallNode(name="ball", timestep=0.01))
+gm.add_node(BallNode(name="ball", timestep=0.01, initial_position=5.0))
 gm.add_node(TableNode(name="table", timestep=0.01))
 gm.add_node(SpringDamperNode(
     name="spring", timestep=0.01,
@@ -102,12 +121,19 @@ server = SimulationServer(
         "SpringDamperNode": SpringDamperNode,
     },
     graph_manager=gm,
-    # The bind address has to be handed to the server: it turns on the
-    # bearer token, and the app cannot see the socket uvicorn opens.
-    bind_host="0.0.0.0",
+    # The bind address has to be handed to the server: a non-loopback one
+    # turns on the bearer token, and the app cannot see the socket.
+    bind_host=HOST,
 )
-print("Starting server on 0.0.0.0:8000...")
-uvicorn.run(server.create_app(), host="0.0.0.0", port=8000, log_level="info")
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind((HOST, PORT))
+print(f"Serving on {HOST}:{sock.getsockname()[1]}", flush=True)
+try:
+    uvicorn.Server(uvicorn.Config(server.create_app(), log_level="info")).run(
+        sockets=[sock])
+except KeyboardInterrupt:
+    pass
 """
 
 
@@ -150,11 +176,153 @@ def http_post(base_url: str, path: str) -> dict:
         return json.loads(resp.read())
 
 
+def check_endpoints(base_url: str) -> None:
+    """The endpoint checks, shared by the cloud and the --local runs."""
+    print("  GET /graph...")
+    graph = http_get(base_url, "/graph")
+    # nodes can be a list of dicts or a dict depending on API version
+    nodes_data = graph.get("nodes", [])
+    if isinstance(nodes_data, list):
+        nodes = [n.get("name", "") for n in nodes_data]
+    else:
+        nodes = list(nodes_data.keys())
+    print(f"    Nodes: {nodes}")
+    print(f"    Edges: {len(graph.get('edges', []))}")
+    assert "ball" in nodes, f"Expected 'ball' node, got {nodes}"
+    print("    PASS")
+
+    print("  GET /graph/state...")
+    state = http_get(base_url, "/graph/state")
+    start_pos = state.get("ball", {}).get("position")
+    print(f"    Ball position: {start_pos}")
+    print(f"    Ball velocity: {state.get('ball', {}).get('velocity')}")
+    assert start_pos is not None, "Expected ball position"
+    print("    PASS")
+
+    print("  POST /sim/step (5 steps)...")
+    for _ in range(5):
+        state = http_post(base_url, "/sim/step")
+    ball_pos = state.get("ball", {}).get("position")
+    print(f"    Ball position after 5 steps: {ball_pos}")
+    # Released from 5 m, the ball has fallen a little.
+    assert ball_pos is not None and ball_pos < start_pos, (
+        f"Expected the ball to fall from {start_pos}, got {ball_pos}"
+    )
+    print("    PASS")
+
+    print("  POST /sim/run (100 steps)...")
+    state = http_post(base_url, "/sim/run?n_steps=100")
+    after_run = state.get("ball", {}).get("position")
+    print(f"    Ball position after 100 more steps: {after_run}")
+    assert after_run is not None and after_run != ball_pos, (
+        f"Expected /sim/run to advance the ball from {ball_pos}"
+    )
+    print("    PASS")
+
+
+def _stop_process(proc: subprocess.Popen, grace: float = 10.0) -> int:
+    """Stop *proc* and reap it: SIGINT, then SIGTERM, then SIGKILL."""
+    if proc.poll() is None:
+        steps = [proc.terminate, proc.kill]
+        if os.name == "posix":
+            steps.insert(0, lambda: proc.send_signal(signal.SIGINT))
+        for step in steps:
+            step()
+            try:
+                proc.wait(timeout=grace)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    return proc.wait()
+
+
+def start_local_server(script: str, startup_timeout: float = 180.0):
+    """Run *script* in a subprocess on a free loopback port.
+
+    Returns ``(process, base_url)``.  The script binds port 0 and prints
+    the port the OS gave it, so nothing can take the port in between.
+    """
+    env = dict(os.environ)
+    env.update({
+        "MADDENING_DEMO_HOST": "127.0.0.1",
+        "MADDENING_DEMO_PORT": "0",
+        "MADDENING_DEMO_PARENT_PID": str(os.getpid()),
+        "MADDENING_API_TOKEN": API_TOKEN,
+    })
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script], env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+        # Its own session: a Ctrl-C here reaches only this script, which
+        # then stops the server in its ``finally``.
+        start_new_session=(os.name == "posix"),
+    )
+    output: list[str] = []
+    port: list[int] = []
+    done = threading.Event()
+
+    def _drain():
+        # Read for the server's whole life, so a full pipe never blocks it.
+        for line in proc.stdout:
+            output.append(line)
+            m = re.search(r"Serving on 127\.0\.0\.1:(\d+)", line)
+            if m and not port:
+                port.append(int(m.group(1)))
+                done.set()
+        done.set()
+
+    threading.Thread(target=_drain, daemon=True).start()
+    done.wait(startup_timeout)
+    if not port:
+        code = _stop_process(proc)
+        raise RuntimeError(
+            f"local server did not start (exit code {code}); last output:\n"
+            + "".join(output[-20:])
+        )
+    return proc, f"http://127.0.0.1:{port[0]}"
+
+
+def run_local() -> int:
+    """Run SERVER_SCRIPT on this machine and test it.  No cloud involved."""
+    print("Local run: starting the server script on a free loopback port...")
+    proc, base_url = start_local_server(SERVER_SCRIPT)
+    print(f"  Server pid {proc.pid} at {base_url}")
+    try:
+        print("Waiting for server to respond...")
+        if not wait_for_server(base_url, timeout=120):
+            print("  ERROR: Server did not respond within 120s")
+            return 1
+        print("  Server is UP!")
+        print()
+        print("Testing API endpoints...")
+        check_endpoints(base_url)
+    finally:
+        code = _stop_process(proc)
+        print(f"  Local server (pid {proc.pid}) stopped, exit code {code}")
+    print()
+    print("All server tests passed!")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Cloud server test")
     parser.add_argument("--gpu", default="RTX4090", help="GPU type")
     parser.add_argument("--keep", action="store_true", help="Don't teardown")
+    parser.add_argument(
+        "--local", action="store_true",
+        help="Run the server script on this machine (loopback, no cloud)",
+    )
     args = parser.parse_args()
+
+    if args.local:
+        sys.exit(run_local())
+
+    # Imported here so that --local never loads the cloud launcher.
+    from maddening.cloud.launcher import (
+        CloudLauncher,
+        CostPolicy,
+        JobConfig,
+        LaunchError,
+    )
 
     # Find project root
     project_root = os.path.dirname(os.path.abspath(__file__))
@@ -297,39 +465,7 @@ def main():
     # --- Phase 7: Test endpoints ---
     print()
     print("Phase 7: Testing API endpoints...")
-
-    print("  GET /graph...")
-    graph = http_get(base_url, "/graph")
-    # nodes can be a list of dicts or a dict depending on API version
-    nodes_data = graph.get("nodes", [])
-    if isinstance(nodes_data, list):
-        nodes = [n.get("name", "") for n in nodes_data]
-    else:
-        nodes = list(nodes_data.keys())
-    print(f"    Nodes: {nodes}")
-    print(f"    Edges: {len(graph.get('edges', []))}")
-    assert "ball" in nodes, f"Expected 'ball' node, got {nodes}"
-    print("    PASS")
-
-    print("  GET /graph/state...")
-    state = http_get(base_url, "/graph/state")
-    print(f"    Ball position: {state.get('ball', {}).get('position')}")
-    print(f"    Ball velocity: {state.get('ball', {}).get('velocity')}")
-    print("    PASS")
-
-    print("  POST /sim/step (5 steps)...")
-    for _ in range(5):
-        state = http_post(base_url, "/sim/step")
-    ball_pos = state.get("ball", {}).get("position")
-    print(f"    Ball position after 5 steps: {ball_pos}")
-    assert ball_pos is not None, "Expected ball position"
-    print("    PASS")
-
-    print("  POST /sim/run (100 steps)...")
-    state = http_post(base_url, "/sim/run?n_steps=100")
-    ball_pos = state.get("ball", {}).get("position")
-    print(f"    Ball position after 100 more steps: {ball_pos}")
-    print("    PASS")
+    check_endpoints(base_url)
 
     # --- Teardown ---
     if args.keep:

@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """
-Coupled spring-ball system using the MADDENING GraphManager.
+Chained spring-ball system using the MADDENING GraphManager.
 
-Demonstrates multi-node graph construction with two-way data coupling:
+Demonstrates multi-node graph construction with a chain of one-way
+couplings (nothing feeds back, so no coupling group is needed):
 - A table provides a collision surface at height 0.
 - A ball starts at height 5 and bounces on the table under gravity.
 - A spring-damper has its anchor wired to the ball's position, so
@@ -13,8 +14,9 @@ The graph wiring is:
     ball.position   -> spring.anchor_position (spring follows ball)
 
 This produces oscillatory behavior in both the ball (bouncing with
-energy loss from elasticity) and the spring (oscillating around
-the ball's position with damping).
+energy loss from elasticity) and the spring (``SpringDamperNode`` pulls
+its end towards ``anchor + rest_length``, so it oscillates, with
+damping, about a point 1 m above the ball).
 
 Uses run_scan_with_history() for efficient trajectory collection
 and matplotlib (Agg backend) for plotting.
@@ -53,7 +55,7 @@ def main() -> None:
         damping=2.0,
         mass=0.5,
         rest_length=1.0,
-        initial_position=4.0,  # starts 1m below ball (at rest length)
+        initial_position=4.0,  # 1 m below the ball: 2 m short of rest (ball + 1 m)
         initial_velocity=0.0,
     )
 
@@ -123,6 +125,13 @@ def main() -> None:
     assert spring_range > 0.1, f"Spring did not oscillate (range={spring_range:.4f})"
     print(f"Sanity check: spring oscillated with range {spring_range:.4f}.")
 
+    # Once the ball has settled, the damped spring end comes to rest one
+    # rest length above it.
+    rest_offset = float(final_state["spring"]["position"]) - float(final_state["ball"]["position"])
+    assert abs(rest_offset - 1.0) < 1e-2, f"spring end not at rest length: {rest_offset:.4f}"
+    print(f"Sanity check: spring end settled {rest_offset:.4f} m above the ball "
+          f"(rest length 1.0).")
+
     # ---- plot -----------------------------------------------------------
     try:
         import matplotlib
@@ -147,11 +156,11 @@ def main() -> None:
         axes[1].set_ylabel("Velocity (m/s)")
         axes[1].legend()
 
-        # Separation (spring stretch)
-        separation = ball_pos - spring_pos
-        axes[2].plot(t, separation, "g-", linewidth=0.7)
+        # Offset of the spring end from its anchor (the ball)
+        offset = spring_pos - ball_pos
+        axes[2].plot(t, offset, "g-", linewidth=0.7)
         axes[2].axhline(1.0, color="k", linewidth=1, linestyle="--", label="Rest length")
-        axes[2].set_ylabel("Spring stretch (m)")
+        axes[2].set_ylabel("Spring end - ball (m)")
         axes[2].set_xlabel("Time (s)")
         axes[2].legend()
 

@@ -15,8 +15,11 @@ This architecture is ideal for:
 Usage::
 
     python -m maddening.examples.servers.launch_server_render
+    python -m maddening.examples.servers.launch_server_render --port 0   # any free port
 
-Then open http://localhost:8000/viz/render in a browser.
+Then open http://localhost:8000/viz/render in a browser (the server
+prints the address it is serving on).  It binds 127.0.0.1 only; to reach
+it from another machine: ``ssh -L 8000:127.0.0.1:8000 <host>``.
 
 Controls:
   - Space: start/pause simulation
@@ -25,7 +28,9 @@ Controls:
   - Bottom bar: change format, quality, target FPS
 """
 
+import argparse
 import os
+import socket
 os.environ.setdefault("XLA_FLAGS", "--xla_gpu_autotune_level=0")
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -74,15 +79,20 @@ def build_demo_graph() -> GraphManager:
     return gm
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Server-side rendering demo")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="Port on 127.0.0.1 (default: 8000; 0 = any free port)")
+    args = parser.parse_args(argv)
+
     print("=" * 60)
     print("  MADDENING Server-Side Rendering Demo")
     print("=" * 60)
 
     print("\nBuilding physics graph...")
     gm = build_demo_graph()
-    print(f"  Nodes: {list(gm._nodes.keys())}")
-    print(f"  Edges: {len(gm._edges)}")
+    print(f"  Nodes: {gm.node_names}")
+    print(f"  Edges: {len(gm.edges)}")
 
     # --- Server-side frame renderer ---
     from maddening.api.frame_renderer import (
@@ -159,20 +169,27 @@ def main():
     print(f"    Format:     {renderer.fmt.upper()} (quality {renderer.quality})")
     print(f"    Panels:     scene + 2 time series + heatmap")
     print()
+    # Bound to loopback: a loopback bind is the one the API serves
+    # without a bearer token.  Binding 0.0.0.0 here (as this used to)
+    # published a graph-mutating API on the LAN.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", args.port))
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+    print(f"  Serving on {url}", flush=True)
     print("  Open in browser:")
-    print("    http://localhost:8000/viz/render    (server-rendered viewer)")
-    print("    http://localhost:8000/viz/app       (client-rendered app)")
+    print(f"    {url}/viz/render    (server-rendered viewer)")
+    print(f"    {url}/viz/app       (client-rendered app)")
     print()
     print("  The browser is a thin display client -- all rendering happens")
-    print("  on the server.  Suitable for remote/cloud deployment.\n")
+    print("  on the server.\n", flush=True)
 
     import uvicorn
-    # Bound to loopback: every line this script prints points at
-    # http://localhost:8000, and a loopback bind is the one the API
-    # serves without a bearer token.  Binding 0.0.0.0 here (as this
-    # used to) published a graph-mutating API on the LAN.  To reach
-    # it from another machine: ssh -L 8000:127.0.0.1:8000 <host>.
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    try:
+        uvicorn.Server(uvicorn.Config(app, log_level="info")).run(sockets=[sock])
+    except KeyboardInterrupt:   # uvicorn re-raises Ctrl-C after shutting down
+        pass
 
 
 if __name__ == "__main__":

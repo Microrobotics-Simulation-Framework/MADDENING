@@ -9,10 +9,15 @@ real-time via WebSocket.
 Usage::
 
     python -m maddening.examples.servers.interactive_graph_server
+    python -m maddening.examples.servers.interactive_graph_server --port 0   # any free port
 
-Then open http://localhost:8000/viz/graph in your browser.
+Then open http://localhost:8000/viz/graph in your browser (the server
+prints the address it is serving on).  It binds 127.0.0.1 only; to reach
+it from another machine: ``ssh -L 8000:127.0.0.1:8000 <host>``.
 """
 
+import argparse
+import socket
 import sys
 
 from maddening.core.graph_manager import GraphManager
@@ -27,10 +32,10 @@ def build_demo_graph():
     Graph topology:
         table --position--> ball.table_position
         ball --position--> spring.anchor_position
-        spring --position--> ball.spring_force (via force transform)
 
-    This creates a ball bouncing on a table with a spring pulling it
-    back toward a rest position.
+    A ball bouncing on a table, and a spring whose free end follows the
+    ball (the spring does not act back on the ball: nothing feeds back,
+    so there is no cycle).
     """
     gm = GraphManager()
 
@@ -43,7 +48,7 @@ def build_demo_graph():
                                   rest_length=3.0,
                                   initial_position=5.0))
 
-    # Edges: table drives ball, ball drives spring anchor, spring drives ball force
+    # Edges: table drives ball, ball drives spring anchor
     gm.add_edge("table", "ball", "position", "table_position")
     gm.add_edge("ball", "spring", "position", "anchor_position")
 
@@ -51,7 +56,12 @@ def build_demo_graph():
     return gm
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Interactive graph visualization server")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="Port on 127.0.0.1 (default: 8000; 0 = any free port)")
+    args = parser.parse_args(argv)
+
     try:
         import uvicorn
     except ImportError:
@@ -72,12 +82,21 @@ def main():
     )
     app = server.create_app()
 
+    # Bound to loopback: a loopback bind is the one the API serves
+    # without a bearer token.  Binding 0.0.0.0 here (as this used to)
+    # published a graph-mutating API on the LAN.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("127.0.0.1", args.port))
+    url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+
     print("=" * 60)
     print("MADDENING Interactive Graph Server")
     print("=" * 60)
     print()
-    print("  Graph visualization: http://localhost:8000/viz/graph")
-    print("  API docs:            http://localhost:8000/docs")
+    print(f"  Serving on {url}", flush=True)
+    print(f"  Graph visualization: {url}/viz/graph")
+    print(f"  API docs:            {url}/docs")
     print()
     print("  Nodes: table, ball, spring")
     print("  Edges: table->ball (position), ball->spring (anchor)")
@@ -89,14 +108,12 @@ def main():
     print("    - Step through the simulation manually")
     print()
     print("  Press Ctrl-C to stop.")
-    print("=" * 60)
+    print("=" * 60, flush=True)
 
-    # Bound to loopback: every line this script prints points at
-    # http://localhost:8000, and a loopback bind is the one the API
-    # serves without a bearer token.  Binding 0.0.0.0 here (as this
-    # used to) published a graph-mutating API on the LAN.  To reach
-    # it from another machine: ssh -L 8000:127.0.0.1:8000 <host>.
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
+    try:
+        uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])
+    except KeyboardInterrupt:   # uvicorn re-raises Ctrl-C after shutting down
+        pass
 
 
 if __name__ == "__main__":

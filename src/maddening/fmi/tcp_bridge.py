@@ -15,12 +15,27 @@ Requests (importer -> sidecar) and responses, JSON form::
     {"op": "set", "vr": [..], "values": [..]}
                                           -> {"ok": true}
     {"op": "get", "vr": [..]}             -> {"ok": true, "values": [..]}
+    {"op": "initialize", "t": t0}         -> {"ok": true, "t": t0}
     {"op": "step", "t": t, "dt": h}       -> {"ok": true, "t": t + h}
     {"op": "get_state"}                   -> {"ok": true, "state": "<base64>"}
     {"op": "set_state", "state": ".."}    -> {"ok": true}
     {"op": "reset"}                       -> {"ok": true}
     {"op": "terminate"}                   -> {"ok": true}
     any failure                           -> {"ok": false, "error": "..."}
+
+**Instances.**  A connection that claims the bridge's instance slot (its
+first complete frame) is a new FMU instance, and starts where FMI starts
+one: the state the bridge was built over, every parameter at the
+``start`` its model description advertises, every input at zero and the
+time at zero.  ``reset`` (``fmi3Reset``) returns to the same point.
+``initialize`` (``fmi3EnterInitializationMode``) sets the start time; it
+is accepted until the instance's first step.  A ``step``'s ``t`` must be
+the FMU's current time -- the previous ``t`` plus the previous ``h``, or
+the start time -- to within a millionth of a master step
+(``_COMM_POINT_TOLERANCE``); a point inside it is adopted, one outside it
+is refused with nothing advanced.  ``t``, ``h`` and every entry of
+``values`` must be JSON numbers: a string or a boolean is refused, not
+parsed.
 
 ``values`` are flat numbers in value-reference order; an array variable
 contributes ``prod(shape)`` entries in row-major order.  A **non-finite**
@@ -35,7 +50,11 @@ until the next ``step``; a communication step ``h`` must be a whole
 multiple of ``master_dt`` (it runs ``h / master_dt`` graph steps; anything
 else is refused, and the FMU advertises a fixed communication step).  A
 ``set`` is atomic: parameters are bounds-checked by the sidecar and inputs
-are committed only when every value in the request was valid.
+are committed only when every value in the request was valid.  The bounds
+are the ``min`` / ``max`` the model description advertises, whether or not
+the sidecar was built with ``param_specs``, and a declared external input
+the description does not export (``held_inputs``) is held at zero on every
+step, as ``GraphManager.step`` holds an input its caller omits.
 
 **Binary frames (protocol 2).**  Bit 31 of the length prefix marks a
 *binary* frame; the low 31 bits are the payload length.  A binary
@@ -109,6 +128,7 @@ import socket
 import struct
 import threading
 import time
+import warnings
 import zipfile
 from typing import Any, Iterator, Optional, cast
 
@@ -117,10 +137,12 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.params import ParamSpec
 from maddening.fmi.model_description import FMIVariable, ModelDescription
 from maddening.fmi.sidecar import (
     FmuSidecar,
     _checked_value,
+    _declared_inputs_resolver,
     _key_set_error,
     _restored_leaf,
 )
@@ -219,6 +241,22 @@ peer that really is a second instance gets its error reply, two seconds
 later, instead of hanging on a lock for ever."""
 _HANDOVER_POLL = 0.05
 """Granularity of that wait, so ``stop()`` is not held up by the grace."""
+_COMM_POINT_TOLERANCE = 1e-6
+"""How far a ``step``'s communication point may sit from the FMU's own time,
+as a fraction of the master timestep (plus a few ulps of the time itself).
+
+FMI 3.0 has each ``fmi3DoStep`` start where the previous one ended -- the
+previous communication point plus the previous step size -- or, first, at
+the start time ``fmi3EnterInitializationMode`` was given.  An importer
+computes that point in its own floating point (FMPy as ``start + k * h``,
+others as a running sum), so it agrees with the bridge's clock to rounding,
+never exactly; a millionth of a master step is many orders of magnitude
+above that rounding for any run shorter than about 10^9 master steps, and
+far below any real discontinuity, which the physics could not honour anyway
+(it advances whole master steps).  A point inside the tolerance is
+*adopted* -- the step ends at ``t + n * master_dt`` on the importer's clock,
+so the two clocks never drift apart -- and one outside it is refused with
+nothing advanced."""
 _STOP_JOIN_TIMEOUT = 5.0
 """Seconds :meth:`FmuTcpBridge.stop` waits, in total, for its threads.
 
@@ -447,8 +485,85 @@ def _value_reference(vr: Any) -> int:
     return int(vr)
 
 
+def _real_number(x: Any, what: str) -> float:
+    """``x`` as a finite float, refused unless it already is a number.
+
+    The rule :func:`_value_reference` applies to a value reference, for the
+    times a request carries: ``float()`` parses ``"0.01"`` and turns
+    ``true`` into 1.0, so a ``step`` whose ``dt`` was the JSON boolean
+    ``true`` advanced a hundred master steps of 0.01 s and answered ``ok``.
+    A JSON integer or float (or a NumPy one) is accepted; a boolean, a
+    string, ``null`` or a container is not.
+
+    Raises
+    ------
+    ValueError
+        If ``x`` is not a real number, or is not finite.
+    """
+    if isinstance(x, (bool, np.bool_)) or not isinstance(x, (int, float, np.integer,
+                                                               np.floating)):
+        raise ValueError(f"{what} must be a number, got {x!r}")
+    try:
+        v = float(x)
+    except OverflowError as exc:                    # a JSON integer of 400 digits
+        raise ValueError(f"{what} must be finite, got {x!r}") from exc
+    if not np.isfinite(v):
+        raise ValueError(f"{what} must be finite, got {x!r}")
+    return v
+
+
+def _flat_numbers(values: Any) -> np.ndarray:
+    """A ``set`` request's ``values`` as float64, refused unless every entry
+    already is a number.
+
+    ``np.asarray(values, dtype=float64)`` parses the string ``"45"`` and
+    turns ``true`` into 1.0, so both used to be stored as numbers with the
+    reply ``ok``.  A flat list (or tuple) of JSON integers and floats is
+    accepted -- a non-finite one too, as a float, for the finiteness check
+    downstream to refuse by variable name -- and so is a float or integer
+    array (the binary path's, or an in-process caller's).
+
+    Raises
+    ------
+    ValueError
+        If ``values`` is not a flat sequence of numbers.
+    """
+    if isinstance(values, np.ndarray):
+        if values.dtype.kind not in "iuf":
+            raise ValueError(f"values must be numbers, got an array of {values.dtype}")
+        arr = values.astype(np.float64)
+    elif isinstance(values, (list, tuple)):
+        for i, x in enumerate(values):
+            if isinstance(x, (bool, np.bool_)) or not isinstance(
+                    x, (int, float, np.integer, np.floating)):
+                raise ValueError(f"values must be a flat list of numbers; entry {i} is {x!r}")
+        try:
+            arr = np.asarray(values, dtype=np.float64)
+        except OverflowError as exc:
+            raise ValueError(f"values must be finite numbers: {exc}") from exc
+    else:
+        raise ValueError(f"values must be a flat list of numbers, got {type(values).__name__}")
+    if arr.ndim != 1:
+        raise ValueError("values must be a flat list of numbers")
+    return arr
+
+
 def _size(var: FMIVariable) -> int:
     return int(np.prod(var.shape)) if var.shape else 1
+
+
+def _start_leaf(var: FMIVariable, live: Any) -> np.ndarray:
+    """A parameter variable's advertised ``start`` in its live leaf's dtype
+    and shape (``ValueError`` if the description cannot describe the leaf)."""
+    live_arr = np.asarray(live)
+    tokens = (var.start or "").split()
+    if len(tokens) != live_arr.size:
+        raise ValueError(
+            f"the model description's start value for {var.name!r} has "
+            f"{len(tokens)} entries, but the sidecar's leaf has shape "
+            f"{live_arr.shape}; the description does not describe this sidecar")
+    flat = np.asarray([float(tok) for tok in tokens], dtype=np.float64)
+    return flat.reshape(live_arr.shape)
 
 
 def checked_value(arr, dtype, *, what: str) -> np.ndarray:
@@ -526,8 +641,11 @@ class FmuTcpBridge:
         # (HeatNode's T_left = T[0]) behaves like the graph.
         self._inputs: dict[str, dict[str, Any]] = self._zero_inputs()
         self._time = 0.0
+        # Has the instance taken a step since it was instantiated or reset?
+        # (FMI's "Instantiated" state is the one in which it has not, and
+        # the only one in which ``initialize`` is accepted.)
+        self._stepped = False
         self._initial_state = _copy_tree(sidecar.state)
-        self._initial_params = _copy_tree(sidecar.params)
         # The description is the FMU's contract: a graph parameter it does
         # not export as a tunable variable is one the step cannot read (see
         # ModelDescription.fixed_parameters), and no door into the sidecar's
@@ -546,6 +664,31 @@ class FmuTcpBridge:
                         name, "it is not a tunable parameter variable of this "
                               "FMU's model description")
         sidecar._refuse_new_values_for(fixed)             # noqa: SLF001
+        # The same contract for the bounds the description advertises.  The
+        # sidecar enforces a ParamSpec it was given; one built without
+        # ``param_specs`` (the default) enforced nothing, so the XML said
+        # ``elasticity`` in [0, 1] and a ``set`` of 1.5 -- or an archive
+        # installing -3.0 -- answered ok.
+        sidecar._adopt_advertised_bounds(                 # noqa: SLF001
+            self._advertised_bounds(model_description, sidecar))
+        # And for the inputs: the sidecar completes and checks each step's
+        # inputs with the graph's own resolver when it was given one;
+        # otherwise with one built from the description, which knows the
+        # inputs it exports and those it holds at zero (``held_inputs``).
+        # Without either, an input the description left out never reached
+        # its node, which took its own "input missing" branch.
+        sidecar._adopt_input_resolver(                    # noqa: SLF001
+            _declared_inputs_resolver(self._declared_inputs(model_description),
+                                      whose="this FMU's model description"))
+        # What an instance starts from: FMI starts every instance at the
+        # start values its modelDescription.xml advertises, which for a
+        # parameter is the value it held when the description was built.
+        # A sidecar configured with something else is brought into line,
+        # loudly, so the FMU never computes with a value its XML denies.
+        start = self._start_params(model_description, sidecar)
+        if start is not None:
+            sidecar._adopt_instantiation_params(start)    # noqa: SLF001
+        self._initial_params = _copy_tree(sidecar.params)
         self._busy = threading.Lock()                     # one instance per bridge
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -838,6 +981,19 @@ class FmuTcpBridge:
                                 pass
                             return
                         held = True
+                        # A connection that claims the slot is a new FMU
+                        # instance (the C wrapper opens one per
+                        # fmi3InstantiateCoSimulation), and FMI starts every
+                        # instance at the description's start values.  The
+                        # slot used to carry the previous instance's state,
+                        # parameters, inputs and time over, so FMPy's
+                        # simulate_fmu called twice with the same arguments
+                        # gave two different answers, each fmi3OK.  Here,
+                        # in the bridge, so every client is covered.
+                        try:
+                            self._reset_instance("instantiate")
+                        except RuntimeError:
+                            return           # stopped meanwhile: serve nothing
                         # From here the generous budget applies to the reply
                         # send as well: a first frame that asks for a 64 MiB
                         # get should not be cut off by the handshake budget.
@@ -1056,8 +1212,8 @@ class FmuTcpBridge:
             if op == "get":
                 return {"ok": True, "values": self._get(req["vr"])}
             if op == "step":
-                h = float(req["dt"])
-                if not np.isfinite(h) or h <= 0:
+                h = _real_number(req["dt"], "communication step")
+                if h <= 0:
                     raise ValueError(f"communication step must be positive, got {h!r}")
                 ratio = h / self._dt
                 n = int(round(ratio))
@@ -1076,16 +1232,22 @@ class FmuTcpBridge:
                 # physics already advanced and ``_time`` left behind it: the
                 # importer's clock and the bridge's state desynchronise
                 # permanently, and nothing on the wire says so.
-                raw_t = req.get("t", self._time)
-                try:
-                    t0 = float(raw_t)
-                except (TypeError, ValueError) as exc:
+                t0 = (_real_number(req["t"], "communication point") if "t" in req
+                      else self._time)
+                # And it must be where the FMU is (_COMM_POINT_TOLERANCE).  A
+                # point that jumped -- 0.01 to 100, say -- used to be
+                # accepted: the physics advanced one master step and ``time``
+                # read 100.01, a state labelled with a time it never reached.
+                tolerance = (_COMM_POINT_TOLERANCE * self._dt
+                             + 16 * float(np.spacing(max(abs(t0), abs(self._time), 1.0))))
+                if abs(t0 - self._time) > tolerance:
                     raise ValueError(
-                        f"communication point must be a number, got {raw_t!r}"
-                    ) from exc
-                if not np.isfinite(t0):
-                    raise ValueError(
-                        f"communication point must be finite, got {raw_t!r}"
+                        f"communication point {t0!r} is not the FMU's current time "
+                        f"{self._time!r} (tolerance {tolerance:.3g}): a step starts "
+                        "where the previous one ended -- the previous communication "
+                        "point plus the previous step size -- or, first, at the start "
+                        "time given to initialize (fmi3EnterInitializationMode).  "
+                        "Restore an FMU state to go back in time; nothing was advanced"
                     )
                 # Every sub-step runs on a local state and the result is
                 # committed once, at the end: a failed sub-step leaves no
@@ -1099,8 +1261,26 @@ class FmuTcpBridge:
                     state = self._sidecar._advanced(state, self._inputs)  # noqa: SLF001
                 with self._committing("step"):
                     self._sidecar._state = state                    # noqa: SLF001
+                    # On the importer's clock: the point it sent, adopted
+                    # within the tolerance, plus the master steps taken.
                     self._time = t0 + n * self._dt
+                    self._stepped = True
                     return {"ok": True, "t": self._time}
+            if op == "initialize":
+                # fmi3EnterInitializationMode(startTime): the instance's time
+                # is the start time from here, before its first step.  The C
+                # wrapper used to keep startTime to itself, so ``time`` read
+                # 0.0 until the first step.
+                t_start = _real_number(req.get("t"), "start time")
+                if self._stepped:
+                    raise ValueError(
+                        "initialize after the instance has stepped: FMI enters "
+                        "initialization mode once, between instantiation (or "
+                        "reset) and the first step; reset first to start again"
+                    )
+                with self._committing("initialize"):
+                    self._time = t_start
+                return {"ok": True, "t": t_start}
             if op == "get_state":
                 return {"ok": True, "state": self._encode_state()}
             if op == "set_state":
@@ -1110,16 +1290,9 @@ class FmuTcpBridge:
                 self._decode_state(bytes(blob))
                 return {"ok": True}
             if op == "reset":
-                with self._committing("reset"):
-                    # A copy of the state dict the bridge started from;
-                    # _copy_tree is typed for any tree, so say which one
-                    # this is.
-                    self._sidecar._state = cast(                          # noqa: SLF001
-                        "dict[str, dict[str, Any]]", _copy_tree(self._initial_state))
-                    if self._initial_params is not None:
-                        self._sidecar._params = _copy_tree(               # noqa: SLF001
-                            self._initial_params)
-                    self._inputs, self._time = self._zero_inputs(), 0.0
+                # fmi3Reset: the state a fresh instance starts from, the
+                # same commit a claim of the instance slot makes.
+                self._reset_instance("reset")
                 return {"ok": True}
             if op == "terminate":
                 return {"ok": True}
@@ -1134,6 +1307,117 @@ class FmuTcpBridge:
                 node, field = var.node_field()
                 out.setdefault(node, {})[field] = jnp.zeros(var.shape or (), dtype=var.dtype)
         return out
+
+    # ------------------------------------------------- the description's contract
+    @staticmethod
+    def _declared_inputs(md: ModelDescription) -> dict[tuple[str, str], Any]:
+        """Every external input the described graph reads, with its zero:
+        the exported input variables and the description's ``held_inputs``."""
+        declared: dict[tuple[str, str], Any] = {}
+        for var in md.variables:
+            if var.causality == "input" and not var.is_clock:
+                declared[var.node_field()] = jnp.zeros(var.shape or (), dtype=var.dtype)
+        for node, field, shape, dtype in (getattr(md, "held_inputs", {}) or {}).values():
+            declared.setdefault((node, field), jnp.zeros(tuple(shape), dtype=dtype))
+        return declared
+
+    @staticmethod
+    def _advertised_bounds(md: ModelDescription,
+                           sidecar: FmuSidecar) -> dict[tuple[str, str], ParamSpec]:
+        """A bounds-only ``ParamSpec`` per exported parameter that
+        advertises a ``min`` or ``max`` (``ValueError`` on bounds no spec
+        can hold, which no description this package builds carries)."""
+        leaves = (sidecar.params or {}).get("nodes") or {}
+        out: dict[tuple[str, str], ParamSpec] = {}
+        for var in md.variables:
+            if var.causality != "parameter" or (var.min is None and var.max is None):
+                continue
+            node, _, key = var.name.partition(".params.")
+            if key not in leaves.get(node, {}):
+                continue
+            try:
+                out[(node, key)] = ParamSpec(
+                    bounds=(var.min, var.max),
+                    description=f"the min / max the model description advertises "
+                                f"for {var.name!r}")
+            except ValueError as exc:
+                raise ValueError(
+                    f"the model description advertises bounds ({var.min}, {var.max}) "
+                    f"for {var.name!r} that no value can satisfy: {exc}") from exc
+        return out
+
+    @staticmethod
+    def _start_params(md: ModelDescription, sidecar: FmuSidecar) -> Optional[dict]:
+        """The sidecar's parameter tree with every exported parameter at the
+        description's ``start``, or ``None`` when it already is.
+
+        A leaf whose start, read back as float64, equals the sidecar's leaf
+        (``NaN`` equal to ``NaN``) is kept as the sidecar holds it, so a
+        value the XML can only write rounded -- an int64 past 2**53 -- is
+        not "corrected".  Any other difference is warned about, naming the
+        parameter, and the description's value wins.
+        """
+        params = sidecar.params
+        if params is None:
+            return None
+        nodes = params.get("nodes") or {}
+        changed: dict[tuple[str, str], np.ndarray] = {}
+        for var in md.variables:
+            if var.causality != "parameter" or var.start is None:
+                continue
+            node, _, key = var.name.partition(".params.")
+            if key not in nodes.get(node, {}):
+                continue
+            live = nodes[node][key]
+            start = _start_leaf(var, live)
+            if np.array_equal(np.asarray(live, dtype=np.float64), start, equal_nan=True):
+                continue
+            changed[(node, key)] = start
+        if not changed:
+            return None
+        warnings.warn(
+            "FmuTcpBridge: the sidecar's parameters differ from the start values "
+            "its model description advertises for "
+            f"{sorted(f'{n}.params.{k}' for n, k in changed)}; every FMU instance "
+            "starts from the description's values (FMI 3.0), so the bridge uses "
+            "them.  Build the description and the sidecar from the same "
+            "parameters to silence this.",
+            UserWarning, stacklevel=3,
+        )
+        tree = {section: {owner: dict(leaves) for owner, leaves in owners.items()}
+                for section, owners in params.items()}
+        for (node, key), start in changed.items():
+            live = np.asarray(tree["nodes"][node][key])
+            tree["nodes"][node][key] = jnp.asarray(
+                _checked_value(start, live.dtype,
+                               what=f"start value of {node}.params.{key}")
+                if np.all(np.isfinite(start)) else start.astype(live.dtype))
+        return tree
+
+    def _reset_instance(self, op: str) -> None:
+        """Put the FMU where a freshly instantiated one starts.
+
+        The state the bridge was built over, every parameter at the start
+        value the model description advertises, every input at its zero
+        start value, and the time at zero (``initialize`` sets the start
+        time).  Applied when a new connection claims the instance slot --
+        ``fmi3InstantiateCoSimulation`` -- and on ``reset`` --
+        ``fmi3Reset``, which FMI 3.0 defines as returning the instance to
+        that same state.  One commit, under the lifecycle lock.
+
+        Raises
+        ------
+        RuntimeError
+            If the bridge has been stopped; nothing is written.
+        """
+        state = cast("dict[str, dict[str, Any]]", _copy_tree(self._initial_state))
+        params = _copy_tree(self._initial_params)
+        inputs = self._zero_inputs()
+        with self._committing(op):
+            self._sidecar._state = state                          # noqa: SLF001
+            if params is not None:
+                self._sidecar._params = params                    # noqa: SLF001
+            self._inputs, self._time, self._stepped = inputs, 0.0, False
 
     # -------------------------------------------------------- FMU state blob
     _META = "_meta"
@@ -1302,7 +1586,16 @@ class FmuTcpBridge:
                         checked_value(arr, var.dtype,
                                       what=f"FMU state input {node}.{field}")
                     )
-            t = float(data["_time"]) if "_time" in keys else 0.0
+            # The time is part of the state: an archive without it used to
+            # restore at t = 0 whatever the state was, and one storing it
+            # as a string ("5") was parsed.  It is a real scalar or refused.
+            if "_time" not in keys:
+                raise ValueError("FMU state carries no time (member '_time')")
+            stamp = data["_time"]
+            if stamp.dtype.kind not in "iuf" or stamp.shape != ():
+                raise ValueError(f"FMU state time must be a real scalar, got "
+                                 f"{stamp.dtype} of shape {stamp.shape}")
+            t = float(stamp)
             if not np.isfinite(t):
                 raise ValueError("FMU state carries a non-finite time")
         if new_params is not None:
@@ -1329,9 +1622,7 @@ class FmuTcpBridge:
     def _set(self, vrs: list[int], values) -> None:
         if not isinstance(vrs, (list, tuple)):
             raise ValueError("vr must be a list of value references")
-        values = np.asarray(values, dtype=np.float64)
-        if values.ndim != 1:
-            raise ValueError("values must be a flat list of numbers")
+        values = _flat_numbers(values)
         pos = 0
         staged: list[tuple[FMIVariable, np.ndarray]] = []
         for vr in vrs:

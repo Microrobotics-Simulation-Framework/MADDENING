@@ -245,3 +245,54 @@ def test_fmpy_validate_fmu_reports_no_problems(tmp_path):
     fmu = write_fmu(md, tmp_path / "plant.fmu", binary=build_fmu_binary(tmp_path),
                     endpoint="127.0.0.1:1")
     assert validate_fmu(str(fmu)) == []
+
+
+def _rod_graph():
+    """An array state field and an array external input."""
+    from maddening.nodes.heat import HeatNode
+
+    gm = GraphManager()
+    gm.add_node(HeatNode("rod", DT, n_cells=5, thermal_diffusivity=0.01,
+                         initial_temperature=[1.0, 1.25, 1.5, 1.75, 2.0]))
+    gm.add_external_input("rod", "heat_source", shape=(5,))
+    gm.compile()
+    return gm
+
+
+@needs_cc
+def test_an_array_variable_is_read_with_its_full_count(tmp_path):
+    """Neighbouring case of the exact-count rule (``fmi3Get*`` refuses a
+    reply whose length is not ``nValues``): an array variable is read by
+    the number of values it holds.  FMPy's recorder passes that count, so
+    ``simulate_fmu`` records the array; a ``getFloat64`` that passes the
+    number of value references instead -- one for a five-cell rod -- is
+    ``fmi3Error``, where it used to return the first cell with ``fmi3OK``."""
+    fmpy = pytest.importorskip("fmpy")
+    from fmpy.fmi1 import FMICallException
+    from fmpy.fmi3 import FMU3Slave
+
+    gm = _rod_graph()
+    md = build_model_description(gm, model_name="Rod", model_identifier=MODEL_IDENTIFIER)
+    sc = FmuSidecar(SidecarConfig(
+        schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+        initial_state=gm._state, params=gm.params, param_specs=gm.param_specs()))
+    so = build_fmu_binary(tmp_path)
+    with FmuTcpBridge(sc, md, master_dt=DT) as bridge:
+        fmu = write_fmu(md, tmp_path / "rod.fmu", binary=so, endpoint=bridge.endpoint)
+        res = fmpy.simulate_fmu(str(fmu), start_time=0.0, stop_time=5 * DT, step_size=DT,
+                                output_interval=DT, output=["rod.temperature"])
+        unz = fmpy.extract(str(fmu))
+        desc = fmpy.read_model_description(unz)
+        inst = FMU3Slave(guid=desc.guid, unzipDirectory=unz,
+                         modelIdentifier=desc.coSimulation.modelIdentifier, instanceName="i")
+        inst.instantiate()
+        try:
+            vr = _vr(md, "rod.temperature")
+            assert inst.getFloat64([vr], nValues=5) == pytest.approx([1.0, 1.25, 1.5, 1.75, 2.0])
+            with pytest.raises(FMICallException):
+                inst.getFloat64([vr])                        # nValues = 1: not what it holds
+            inst.terminate()
+        finally:
+            inst.freeInstance()
+    ref = np.asarray(_rod_graph().run_scan(5)["rod"]["temperature"])
+    np.testing.assert_allclose(res["rod.temperature"][-1], ref, rtol=1e-6)

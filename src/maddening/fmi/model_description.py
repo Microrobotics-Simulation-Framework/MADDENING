@@ -34,6 +34,7 @@ What's deferred:
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 import xml.etree.ElementTree as ET
@@ -233,6 +234,17 @@ class ModelDescription:
         (``"<node>.params.<key>"``) with the reason.  Not part of the XML;
         the bridge and the sidecar use it to refuse a write that would be
         reported and never used.
+    held_inputs : dict[str, tuple]
+        The graph's declared external inputs that the description does
+        *not* export (``build_model_description(selected_inputs=...)``),
+        by name (``"<node>.<field>"``), each as ``(node, field, shape,
+        dtype)``.  Not part of the XML: an importer cannot set them, and
+        :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge` holds each at zero
+        on every step, as ``GraphManager.step`` does for an input its
+        caller omits.  Without it the bridge passed only the exported
+        inputs, and a node whose input was left out took its own "input
+        missing" branch instead (a ball with no table falls through the
+        floor).
     """
     model_name: str
     instantiation_token: str
@@ -251,6 +263,11 @@ class ModelDescription:
     # ``FmuTcpBridge`` and ``SidecarConfig(fixed_params=...)`` refuse a new
     # value for any of them.
     fixed_parameters: dict[str, str] = field(default_factory=dict)
+    # ``{"<node>.<field>": (node, field, shape, dtype)}``: declared external
+    # inputs *not* exported (``selected_inputs``), held at zero by the
+    # bridge (not written to the XML).
+    held_inputs: dict[str, tuple[str, str, tuple[int, ...], str]] = field(
+        default_factory=dict)
 
     def clocks(self) -> list[FMIVariable]:
         """The ``<Clock>`` variables (empty for a single-clock FMU)."""
@@ -520,9 +537,15 @@ def build_model_description(
         Identifier the FMU will be called by.  Becomes ``modelName``
         in the XML.
     selected_inputs : iterable of str, optional
-        FMU input variables to surface.  Names must match the graph's
-        registered external-input keys.  When ``None`` (default),
-        every external input is included.
+        FMU input variables to surface, as ``"<node>.<field>"`` of the
+        graph's declared external inputs.  When ``None`` (default),
+        every external input is included.  A name the graph does not
+        declare is a ``ValueError`` (it used to export nothing in silence).
+        A declared input left out is not an FMU variable, but the graph
+        still reads it: the bridge holds it at zero on every step, as
+        ``GraphManager.step`` does for an input its caller omits, and it is
+        listed in :attr:`ModelDescription.held_inputs`.  A ``UserWarning``
+        names every such input.
     selected_outputs : iterable of (node, field) tuples, optional
         Which per-node state fields to expose as FMU outputs.  When
         ``None`` (default), every state field of every node is
@@ -580,6 +603,14 @@ def build_model_description(
         (``MADD-ANO-010``); refusing it here is the only point at which
         the caller still has the name in its hand and can change it.
         See :data:`maddening.serialization.json_codec.NON_FINITE_TOKENS`.
+        Also if *selected_inputs* names an input the graph does not
+        declare.
+
+    Warns
+    -----
+    UserWarning
+        If *selected_inputs* leaves out a declared external input; the
+        message names each one and says it is held at zero.
     """
     if model_name in NON_FINITE_TOKENS:
         # MADD-ANO-010's refusal is otherwise reached from the *reply*
@@ -632,10 +663,45 @@ def build_model_description(
                 description=getattr(declared, "description", "") or "",
                 expected_units=getattr(declared, "expected_units", "") or "",
             )
+    if isinstance(selected_inputs, str):
+        raise ValueError(
+            f"selected_inputs must be an iterable of input names, not the "
+            f"string {selected_inputs!r}; pass [{selected_inputs!r}]")
     selected_input_keys = (
         set(selected_inputs) if selected_inputs is not None
         else set(ext_specs.keys())
     )
+    unknown_inputs = sorted(selected_input_keys - set(ext_specs))
+    if unknown_inputs:
+        raise ValueError(
+            f"selected_inputs names {unknown_inputs}, which the graph does not "
+            f"declare; declared external inputs: {sorted(ext_specs) or ['(none)']}.  "
+            "An unknown name would export nothing and leave the input it was "
+            "meant to be held at zero; fix the name."
+        )
+    held_inputs: dict[str, tuple[str, str, tuple[int, ...], str]] = {}
+    for ext_key, ext_spec in ext_specs.items():
+        if ext_key in selected_input_keys:
+            continue
+        held_dtype = getattr(ext_spec, "dtype", "float32")
+        if not isinstance(held_dtype, str):
+            held_dtype = getattr(held_dtype, "name", str(held_dtype))
+        held_inputs[ext_key] = (
+            str(getattr(ext_spec, "target_node", "") or ""),
+            str(getattr(ext_spec, "target_field", "") or ""),
+            tuple(getattr(ext_spec, "shape", ()) or ()),
+            held_dtype,
+        )
+    if held_inputs:
+        warnings.warn(
+            f"build_model_description: selected_inputs leaves out the declared "
+            f"external input(s) {sorted(held_inputs)}, which will be held at "
+            "zero on every step.  They are not FMU variables, so no importer "
+            "can set them, but the graph still reads them; the bridge passes "
+            "zero, as GraphManager.step does for an input it is not given.  "
+            "They are listed in ModelDescription.held_inputs.",
+            UserWarning, stacklevel=2,
+        )
 
     variables: list[FMIVariable] = []
     next_vr = 1  # FMI uses 1-based valueReference
@@ -859,6 +925,7 @@ def build_model_description(
         default_step_size=default_step_size,
         co_simulation_model_identifier=model_identifier,
         fixed_parameters=fixed_parameters,
+        held_inputs=held_inputs,
     )
 
 

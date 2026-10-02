@@ -287,15 +287,23 @@ def test_sysid_fit_leaves_mapping_weights_untouched():
     assert res.losses[-1] <= res.losses[0]
 
 
-def test_sidecar_without_params_ignores_params_in_snapshot():
+def test_sidecar_without_params_refuses_params_in_snapshot():
+    """It used to drop them in silence, while the bridge's ``set_state``
+    refused the same snapshot; both doors now refuse it, with the same
+    words (``tests/fmi/test_the_fmu_takes_numbers_only.py``)."""
     from maddening.fmi.fmu_state import serialize_fmu_state
     from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
     sc = FmuSidecar(SidecarConfig(schema_token="t", step_fn=lambda s, e: s,
                                   initial_state={"n": {"x": jnp.array(0.0)}}))
     snap = serialize_fmu_state(state={"n": {"x": jnp.array(2.0)}}, schema_token="t",
                                params={"nodes": {"n": {"k": jnp.array(1.0)}}, "mappings": {}})
-    sc.set_fmu_state(snap)
-    assert sc.params is None and float(sc.state["n"]["x"]) == 2.0
+    with pytest.raises(ValueError, match=r"parameters differ from the model: missing \[\], "
+                                         r"extra \['p/nodes/n/k'\]"):
+        sc.set_fmu_state(snap)
+    assert sc.params is None and float(sc.state["n"]["x"]) == 0.0
+    # a snapshot without parameters still restores
+    sc.set_fmu_state(serialize_fmu_state(state={"n": {"x": jnp.array(2.0)}}, schema_token="t"))
+    assert float(sc.state["n"]["x"]) == 2.0
 
 
 # ---------------------------------------------------------------------------

@@ -59,6 +59,7 @@ import jax.numpy as jnp
 from jax import lax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
+from maddening.core._pow2_frame import pow2_frame
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
@@ -158,6 +159,43 @@ def _materialise_b(
     return jax.device_put(jnp.asarray(b), sharding)
 
 
+
+
+def _framed(solve, b, x0, atol):
+    """Run ``solve(b_hat, x0_hat, atol_hat)`` on ``b`` rescaled by an exact
+    power of two and scale its result back.
+
+    ``p`` brings ``max|b|`` into ``[0.5, 1)`` (:func:`~maddening.core._pow2_frame.pow2_frame`);
+    the operator is linear, so the solution of ``A x = b p`` is ``x p``
+    exactly, and every Krylov product on the rescaled vectors is the
+    unscaled one times a power of two -- bit for bit where the unscaled
+    arithmetic stayed in the normal range, and in range where it did not
+    (the residual's squared norm of a ``b`` near ``1e-20`` flushed to zero
+    in float32).  An ``atol`` the caller gave is an absolute floor in
+    ``b``'s units and is rescaled with ``b``; ``None`` stays ``None``, and
+    each backend reads it as a purely relative test (the loop backends'
+    ``||r|| <= rtol * ||b||``; for lineax's entrywise test the floor
+    ``rtol * max|b|``, the usual "relative to ``||b||``" Krylov criterion,
+    which also lets an entry of ``b`` at or near zero converge on rounding
+    rather than on an absolute number below it).  Until 0.4.0 the default
+    was an absolute ``1e-8``: a right-hand side below about ``1e-2``
+    (``1e-8 / rtol``) was solved only to that absolute floor, a relative
+    accuracy of ``1e-8 / ||b||`` instead of ``rtol``, and one below about
+    ``1e-8`` passed the test with the zero initial guess before a single
+    step -- measured on a 12-unknown SPD system in float32, relative errors
+    of 5e-3 at ``||b|| ~ 1e-6`` and 0.4-1.0 at ``1e-9``, every backend
+    reporting ``converged=True``: the defect ``graph_manager._ift_linear_solve``
+    had (MADD-ANO-113).  ``p`` is ``stop_gradient``-ed: it is piecewise
+    constant in ``b``.
+    """
+    p = jax.lax.stop_gradient(pow2_frame(b))
+    res = solve(b * p, x0 * p, None if atol is None else atol * p)
+    return SharedSolveResult(
+        value=res.value / p, converged=res.converged, iters=res.iters,
+        residual_norm=res.residual_norm / p,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Hand-rolled fallbacks (no lineax dependency)
 # ---------------------------------------------------------------------------
@@ -169,7 +207,7 @@ def _cg_loop(
     *,
     x0: jax.Array,
     rtol: float,
-    atol: float,
+    atol: Any,  # a float, or a traced scalar in the solve's frame
     max_iters: int,
     preconditioner: Optional[Callable[[jax.Array], jax.Array]],
 ) -> SharedSolveResult:
@@ -182,7 +220,7 @@ def _cg_loop(
     M = preconditioner if preconditioner is not None else (lambda r: r)
     b_norm = jnp.linalg.norm(b)
     # Guard against a zero RHS — solution is trivially x0.
-    tol2 = jnp.maximum(atol, rtol * b_norm) ** 2
+    tol2 = (rtol * b_norm if atol is None else jnp.maximum(atol, rtol * b_norm)) ** 2
 
     r0 = b - matvec(x0)
     z0 = M(r0)
@@ -269,7 +307,7 @@ def _gmres_loop(
     *,
     x0: jax.Array,
     rtol: float,
-    atol: float,
+    atol: Any,  # a float, or a traced scalar in the solve's frame
     restart: int,
     max_iters: int,
     preconditioner: Optional[Callable[[jax.Array], jax.Array]],
@@ -304,8 +342,13 @@ def _gmres_loop(
         b_eff = b
 
     b_norm = jnp.linalg.norm(b_eff)
-    tol = jnp.maximum(atol, rtol * b_norm)
-    restart = max(1, int(restart))
+    tol = rtol * b_norm if atol is None else jnp.maximum(atol, rtol * b_norm)
+    # A Krylov space of an ``n``-vector has at most ``n`` dimensions: past
+    # that the Arnoldi step normalises a zero (or rounding) vector, and the
+    # cycle's least squares returned NaN with ``converged=False`` whenever
+    # ``restart`` exceeded ``n`` -- the default 50 against any system of
+    # fewer than 50 unknowns.  The lineax path clamps the same way.
+    restart = max(1, min(int(restart), int(b.shape[0])))
     n_cycles = max(1, (max_iters + restart - 1) // restart)
 
     def cycle_body(i, carry):
@@ -343,7 +386,7 @@ def _lineax_solve(
     b: jax.Array,
     *,
     rtol: float,
-    atol: float,
+    atol: Any,  # a float, or a traced scalar in the solve's frame
     restart: int,
     max_iters: int,
 ) -> SharedSolveResult:
@@ -356,6 +399,13 @@ def _lineax_solve(
     """
     import lineax as lx  # noqa: PLC0415  (lazy: import-time cost only)
 
+    if atol is None:
+        # Relative to the largest entry of ``b``: lineax's test is entrywise
+        # (``|r_i| <= atol + rtol |b_i|``), so an entry of ``b`` at zero needs
+        # a floor, and one below float rounding of the large entries made it
+        # raise "iterative breakdown" on a solve as exact as the dtype allows.
+        # A tolerance carries no derivative (lineax refuses a tangent on it).
+        atol = jax.lax.stop_gradient(rtol * jnp.max(jnp.abs(b)))
     tags = ()
     if solver_kind == "cg":
         # lineax CG requires the user to assert positive-semidefiniteness.
@@ -403,7 +453,8 @@ def _lineax_solve(
 
 
 def _differentiable_solve(
-    matvec, b, *, solve_value, transpose_solve_value, symmetric, rtol, atol,
+    matvec, b, *, solve_value, transpose_solve_value, symmetric, rtol,
+    atol: Optional[float],
 ) -> SharedSolveResult:
     """Route the solve through ``lax.custom_linear_solve``.
 
@@ -423,10 +474,16 @@ def _differentiable_solve(
                           else {"transpose_solve": transpose_solve_value})
     x = lax.custom_linear_solve(matvec, b, solve_value, **kw)
     res = b - matvec(x)
-    res_norm = jnp.linalg.norm(res)
-    tol = jnp.maximum(atol, rtol * jnp.linalg.norm(b))
+    # The test is taken on ``b`` and the residual rescaled by one power of
+    # two (see ``_framed``), so their norms do not flush at small units.
+    p = jax.lax.stop_gradient(pow2_frame(b))
+    res_norm_hat = jnp.linalg.norm(res * p)
+    tol_hat = rtol * jnp.linalg.norm(b * p)
+    if atol is not None:
+        tol_hat = jnp.maximum(atol * p, tol_hat)
     return SharedSolveResult(
-        value=x, converged=res_norm <= tol, iters=jnp.int32(-1), residual_norm=res_norm,
+        value=x, converged=res_norm_hat <= tol_hat, iters=jnp.int32(-1),
+        residual_norm=res_norm_hat / p,
     )
 
 
@@ -506,7 +563,7 @@ def sharded_cg(
     in_specs: Optional[PartitionSpec] = None,
     x0: Optional[jax.Array] = None,
     rtol: float = 1e-6,
-    atol: float = 1e-8,
+    atol: Optional[float] = None,
     max_iters: int = 200,
     preconditioner: Optional[Callable[[jax.Array], jax.Array]] = None,
     backend: str = "auto",
@@ -539,8 +596,22 @@ def sharded_cg(
         pre-sharded input.
     x0 : jax.Array, optional
         Initial guess.  Defaults to zeros_like(b).
-    rtol, atol : float
-        Stopping criterion: ``||r|| <= max(atol, rtol * ||b||)``.
+    rtol : float
+        Relative tolerance: stop when ``||r|| <= max(atol, rtol * ||b||)``.
+    atol : float or None
+        Absolute floor of that test, in ``b``'s units: give a number only to
+        assert a noise floor in ``b``'s own units.  ``None`` (the default)
+        makes the test purely relative, so it means the same in any units:
+        ``||r|| <= rtol * ||b||`` on the loop backend, and on lineax's
+        entrywise test the floor ``rtol * max|b|``.  The solve itself runs
+        on ``b`` rescaled by the power of two that brings ``max|b|`` into
+        ``[0.5, 1)``, which is exact.  Before 0.4.0 the default was an
+        absolute ``1e-8``: a right-hand side below about ``1e-2``
+        (``1e-8 / rtol``) was solved only to that floor, and one below about
+        ``1e-8`` passed the test with the zero initial guess before its
+        first step and came back wrong with ``converged=True``.  On the loop
+        backend a ``b`` with ``||b|| >= 1e-8 / rtol`` stops exactly where it
+        did.
     max_iters : int
         Iteration budget.
     preconditioner : callable, optional
@@ -573,7 +644,7 @@ def sharded_cg(
     else:
         x0 = _materialise_b(x0, mesh=mesh, in_specs=in_specs)
 
-    def _run(mv, rhs):
+    def _dispatch(mv, rhs, x_start, atol_hat):
         if backend == "lineax":
             if preconditioner is not None:
                 raise ValueError(
@@ -582,12 +653,12 @@ def sharded_cg(
                     "preconditioned solve to the loop backend)."
                 )
             return _lineax_solve(
-                "cg", mv, rhs, rtol=rtol, atol=atol,
+                "cg", mv, rhs, rtol=rtol, atol=atol_hat,
                 restart=0, max_iters=max_iters,
             )
         if backend == "loop":
             return _cg_loop(
-                mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
+                mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
                 max_iters=max_iters, preconditioner=preconditioner,
             )
         if backend != "auto":
@@ -597,13 +668,20 @@ def sharded_cg(
         # none), in which case the loop backend applies it.
         if preconditioner is None:
             return _lineax_solve(
-                "cg", mv, rhs, rtol=rtol, atol=atol,
+                "cg", mv, rhs, rtol=rtol, atol=atol_hat,
                 restart=0, max_iters=max_iters,
             )
         return _cg_loop(
-            mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
+            mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
             max_iters=max_iters, preconditioner=preconditioner,
         )
+
+    def _run(mv, rhs):
+        # In a power-of-two frame of the right-hand side (``_framed``); the
+        # tangent and cotangent solves of ``differentiable=True`` start at 0.
+        x_start = x0 if mv is matvec else jnp.zeros_like(rhs)
+        return _framed(lambda b_hat, x_hat, atol_hat: _dispatch(mv, b_hat, x_hat, atol_hat),
+                       rhs, x_start, atol)
 
     if not differentiable:
         return _run(matvec, b)
@@ -623,7 +701,7 @@ def sharded_gmres(
     in_specs: Optional[PartitionSpec] = None,
     x0: Optional[jax.Array] = None,
     rtol: float = 1e-6,
-    atol: float = 1e-8,
+    atol: Optional[float] = None,
     restart: int = 50,
     max_iters: int = 200,
     preconditioner: Optional[Callable[[jax.Array], jax.Array]] = None,
@@ -640,9 +718,12 @@ def sharded_gmres(
 
     Parameters
     ----------
+    rtol, atol : float, float or None
+        As for :func:`sharded_cg`: ``atol=None`` (the default) is relative.
     restart : int
         Krylov subspace dimension before restart.  Capped to ``b.shape[0]``
-        inside the solver.  Lineax's default is 20, which silently
+        inside the solver, on both backends (the loop backend returned NaN
+        above it until 0.4.0).  Lineax's default is 20, which silently
         produces low-rank approximations on problems larger than 20
         unknowns — we default to 50 here.  See the regression test in
         ``tests/core/test_coupling_ift_lineax.py`` for the historical
@@ -662,7 +743,7 @@ def sharded_gmres(
     else:
         x0 = _materialise_b(x0, mesh=mesh, in_specs=in_specs)
 
-    def _run(mv, rhs):
+    def _dispatch(mv, rhs, x_start, atol_hat):
         if backend == "lineax":
             if preconditioner is not None:
                 raise ValueError(
@@ -670,12 +751,12 @@ def sharded_gmres(
                     "takes none); use backend='loop' or 'auto'."
                 )
             return _lineax_solve(
-                "gmres", mv, rhs, rtol=rtol, atol=atol,
+                "gmres", mv, rhs, rtol=rtol, atol=atol_hat,
                 restart=restart, max_iters=max_iters,
             )
         if backend == "loop":
             return _gmres_loop(
-                mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
+                mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
                 restart=restart, max_iters=max_iters,
                 preconditioner=preconditioner,
             )
@@ -686,14 +767,20 @@ def sharded_gmres(
         # takes none), in which case the loop backend applies it.
         if preconditioner is None:
             return _lineax_solve(
-                "gmres", mv, rhs, rtol=rtol, atol=atol,
+                "gmres", mv, rhs, rtol=rtol, atol=atol_hat,
                 restart=restart, max_iters=max_iters,
             )
         return _gmres_loop(
-            mv, rhs, x0=(x0 if mv is matvec else jnp.zeros_like(rhs)), rtol=rtol, atol=atol,
+            mv, rhs, x0=x_start, rtol=rtol, atol=atol_hat,
             restart=restart, max_iters=max_iters,
             preconditioner=preconditioner,
         )
+
+    def _run(mv, rhs):
+        # As in :func:`sharded_cg`: in a power-of-two frame of the rhs.
+        x_start = x0 if mv is matvec else jnp.zeros_like(rhs)
+        return _framed(lambda b_hat, x_hat, atol_hat: _dispatch(mv, b_hat, x_hat, atol_hat),
+                       rhs, x_start, atol)
 
     if not differentiable:
         return _run(matvec, b)

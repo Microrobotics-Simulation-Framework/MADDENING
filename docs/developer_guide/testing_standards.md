@@ -100,6 +100,7 @@ python -m pytest tests/nodes/test_your_node.py tests/verification/test_your_node
 python scripts/check_anomalies.py
 python scripts/check_impl_mapping.py
 python scripts/check_citations.py
+python scripts/check_numeric_constants.py
 ```
 
 ## Environment Variables
@@ -777,6 +778,41 @@ by self-tests in the same module:
 - an identity relay on an internal edge moves the fixed point only by
   rounding.
 
+## Numeric constants carry their units
+
+`scripts/check_numeric_constants.py` (CI's compliance job) scans
+`src/maddening/core/`, `src/maddening/sysid.py` and
+`src/maddening/cloud/multigpu/` for small float literals (`|v| <= 1e-3`, or a
+decimal exponent of `-4` or below) and for `finfo(...).tiny` / `.eps` used
+additively or as a floor (`x + eps`, `max(x, tiny)`).  Each must carry an
+inline `# units: <what it is relative to>` comment or a counted line in
+`scripts/numeric_constants_allowlist.txt`.  A stale or miscounted line fails
+the gate, as does a scope that no longer exists.
+
+Four 0.4.0 defects were one mistake: an absolute constant inside a
+relative computation.  The IFT solve's `atol=1e-8` returned gradients of
+exactly zero for small-unit states, IQN and `fit_lm` had `1e-12` floors, and
+the accelerators' steps flushed at small magnitudes.  The gate found four more
+that had shipped: the public Krylov solvers' `atol=1e-8`, the multi-rate
+GCD's `1e-9`, Adam's `eps`, and the adaptive error norm's `1e-300`.  So when you
+add a small constant to the numerical core:
+
+- **Write the justification as a ratio.**  "Dimensionless, a fraction of
+  `max|b|`" or "dtype range: the smallest normal number" is one; "small" or
+  "avoids division by zero" is not.  If you cannot say what the number is
+  relative to, it is absolute in some quantity's units, and the fix is to
+  make it relative, not to allowlist it.
+- **Pin the fix with a scale test.**  The test that catches this class runs
+  the same computation at two power-of-two scales and asserts bit-identity
+  (`tests/core/test_linear_solvers_in_any_units.py`,
+  `test_sysid_adam_in_any_units.py`, `test_multirate_in_any_units.py`).
+  A decimal scale changes the inputs' rounding; a power of two does not.
+- **Build a power-of-two frame with `maddening.core._pow2_frame`.**  It is
+  the one place the coupling runtime, the solvers and the fitters build
+  their frames.  `tests/core/test_pow2_frame.py` refuses a `frexp` or
+  `ldexp` anywhere else in the scanned scope, and a frame that is not an
+  exact power of two breaks the coupling bit-identity claims.
+
 ## Differential tests
 
 A differential test compares two paths through the library that must agree,
@@ -867,8 +903,8 @@ Two oracles; each was mutation-tested against a scratch copy of `src/`
 
 | Oracle | Paths compared | Covers | Cannot see |
 |---|---|---|---|
-| Truth recovery (`tests/property/test_sysid_truth_recovery.py`) | A fit's `converged=True` against the truth it was generated from: noiseless data, a truth drawn anywhere inside the bounds (near them too), a start anywhere in the box. The fit must recover the truth to 1e-3 of the coordinate's range, or say `converged=False` | `fit_lm` per push on a closed-form problem whose only constrained stationary point is the truth (one strictly monotone, non-saturating block of residuals per coordinate, nonlinear so that a Gauss-Newton step overshoots), over every transform: a clipped `transform=None` leaf, `log`, `logit`. In the slow lane, more draws, `fit` (Adam with a `tol`), and all three fitters on the spring graph | A problem with a second stationary point (a plateau where the model saturates is one, and a fit may stop there); the size of a fit's error when it says `converged=False` |
-| Entry points agree after a `node.params` write (`tests/property/test_differential_entry_points_after_a_node_write.py`) | `gm.step`, `gm.run`, `gm.run_scan` at a length traced before the write and at a new one, `gm.run_scan_with_history` and `sysid.windowed_loss`, each from one fixed state, after a write with no compile and again after `compile()`: all must run the model the write leaves | A constant of a three-argument node, a structural `int` and a `gm.params` leaf of a params-taking node; two writes in a row | An entry point that keeps its own copy of the compiled step (an FMU sidecar built before the write runs the step it was given) |
+| Truth recovery (`tests/property/test_sysid_truth_recovery.py`) | A fit's `converged=True` against the truth it was generated from: noiseless data, a truth drawn anywhere inside the bounds (near them too), a start anywhere in the box. The fit must recover the truth to 1e-3 of the coordinate's range, or say `converged=False`; and the same fit with one parameter measured in a unit 1e4 times larger or smaller must give the same answer in about as many iterations | `fit_lm` per push on a closed-form problem whose only constrained stationary point is the truth (one strictly monotone, non-saturating block of residuals per coordinate, nonlinear so that a Gauss-Newton step overshoots), over every transform: a clipped `transform=None` leaf, `log`, `logit`. In the slow lane, more draws, `fit` (Adam with a `tol`), and all three fitters on the spring graph | A problem with a second stationary point (a plateau where the model saturates is one, and a fit may stop there); the size of a fit's error when it says `converged=False` |
+| Entry points and readers agree after a `node.params` write (`tests/property/test_differential_entry_points_after_a_node_write.py`) | `gm.step`, `gm.run`, `gm.run_scan` at a length traced before the write and at a new one, `gm.run_scan_with_history` and `sysid.windowed_loss`, each from one fixed state, after a write with no compile and again after `compile()`: all must run the model the write leaves. Readers likewise, with nothing run first: `gm.params`, a `jax.jit` and a `jax.grad` of a sysid loss handed `gm.params`, `to_dict` reloaded, a checkpoint, `GET /graph/params` (the FMU export: `tests/core/test_node_params_writes_are_observed.py`) | A constant of a three-argument node, a structural `int` and a `gm.params` leaf of a params-taking node; two writes in a row | An entry point that keeps its own copy of the compiled step (an FMU sidecar built before the write runs the step it was given) |
 
 ### Sharding wrappers
 

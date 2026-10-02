@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     # inside them (see "Read-only inspection" at the end of the class).
     from maddening.core.inspection import InspectionTable
 
+from maddening.core._pow2_frame import pow2_frame
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     _field_reference,
@@ -533,12 +534,12 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         live = ww > 0
         w_inv = jnp.where(live, 1.0 / jnp.where(live, ww, 1.0), 0.0)
         # The tangent lifted out of the underflow range where the group is
-        # that small (``_tangent_lift``; 1 elsewhere) and the residual's
+        # that small (``pow2_frame(..., mode="lift")``; 1 elsewhere) and the residual's
         # difference taken entry by entry in a power-of-two frame
         # (``_framed_difference``): in state units a group of magnitude
         # ~1e-34 handed the JVP tangents below the normal range, and its
         # residual ``F(x) - x`` flushed to zero.
-        lift = _tangent_lift(w_inv)
+        lift = pow2_frame(w_inv, mode="lift")
 
         def matvec(v):
             _, Jv = jax.jvp(
@@ -606,42 +607,8 @@ def _framed_difference(a, b, weight):
     a change of an ulp is subnormal and the bare difference flushed to
     zero.
     """
-    from maddening.core.coupling.acceleration import _pow2_entrywise  # noqa: PLC0415
-
-    k = _pow2_entrywise(a, b)
+    k = pow2_frame(a, b, mode="entrywise")
     return (a * k - b * k) * (weight / k)
-
-
-def _tangent_lift(scale):
-    """The least power of two ``>= 1`` that keeps a JVP tangent of size ``max|scale|`` normal.
-
-    The report's Jacobian-vector products take their tangent in state
-    units (``v * max|field|`` for a unit vector ``v``: a relative
-    perturbation of order one), which keeps every intermediate a node's
-    derivative forms at its natural size.  Below ``tiny / eps`` (``2**-102``
-    in float32) the small components of such a tangent are subnormal and
-    flush to zero, and the products read a different Jacobian.  There, and
-    only there, the tangent is multiplied by the least power of two that
-    brings its largest entry to ``tiny / eps`` -- every component down to
-    one ``eps`` of it normal -- and the product is divided by it again,
-    exactly (``J`` is linear).  It is 1 at every other magnitude, so the
-    program is the one it was.  Lifting to order one instead was tried and
-    is wrong both ways: at a large state a tangent of order one is a
-    relative perturbation of ``1/|x|``, and a nonlinear node's derivative
-    intermediates (``d(1/u) = -du/u**2``) underflowed -- a gradient bound
-    0.79x its control at ``|x| ~ 1e18``, usable -- and at a tiny state its
-    ``1/u`` times an order-one tangent overflowed.  A node whose derivative
-    intermediates are within ``2**24`` of overflow at a near-subnormal
-    state can still overflow under the lift, which reads as a non-finite
-    report (``spectral_usable=False``), not a wrong number.
-    """
-    dtype = jnp.asarray(scale).dtype
-    info = jnp.finfo(dtype)
-    biggest = jnp.max(jnp.abs(scale))
-    usable = jnp.logical_and(jnp.isfinite(biggest), biggest > 0)
-    _, have = jnp.frexp(jnp.where(usable, biggest, jnp.ones_like(biggest)))
-    _, want = np.frexp(float(info.tiny) / float(info.eps))
-    return jnp.ldexp(jnp.ones((), dtype), jnp.maximum(int(want) - have, 0))
 
 
 def _framed_shift(x, step, scale):
@@ -651,19 +618,8 @@ def _framed_shift(x, step, scale):
     near 1e-34 the increment ``step * scale`` is below the normal range
     and the bare product flushed to zero before it was added.
     """
-    from maddening.core.coupling.acceleration import _pow2_entrywise  # noqa: PLC0415
-
-    k = _pow2_entrywise(x)
+    k = pow2_frame(x, mode="entrywise")
     return (x * k + step * (scale * k)) / k
-
-
-def _pow2_normaliser(*vectors):
-    """See :func:`maddening.core.coupling.acceleration._pow2_normaliser`."""
-    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        _pow2_normaliser as normaliser,
-    )
-
-    return normaliser(*vectors)
 
 
 def _default_resolution(x):
@@ -870,8 +826,8 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         return tuple(out)
 
     # The state tangent lifted out of the underflow range where the group
-    # is that small, as ``_spectral_rate_at`` takes it (``_tangent_lift``).
-    lift = _tangent_lift(s_inv)
+    # is that small, as ``_spectral_rate_at`` takes it (``pow2_frame``'s lift).
+    lift = pow2_frame(s_inv, mode="lift")
 
     def matvec(z):
         """``J(x_k)`` in the scaled coordinates."""
@@ -1665,7 +1621,6 @@ def _fixed_point_while(
       the while_loop with the same column convention as the fori path.
     """
     from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-        _pow2_normaliser,
         aitken_relaxation,
         fixed_relaxation,
         iqn_ils_update,
@@ -1696,7 +1651,7 @@ def _fixed_point_while(
     # residual test reported ``converged=True`` up to 7x the threshold
     # away; MADD-ANO-115).  Not formed without an accelerator, so the
     # plain loop's program is the one it was.
-    frame = _pow2_normaliser(x0_acc) if acceleration != "none" else None
+    frame = pow2_frame(x0_acc) if acceleration != "none" else None
 
     if acceleration in ("none", "fixed"):
         # Annotated: the three branches below build tuples of different
@@ -2150,10 +2105,6 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # ``solver='ift'`` pay this import cost.
         import lineax as lx  # noqa: PLC0415  (lazy by design)
 
-        from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-            _pow2_normaliser,
-        )
-
         # The solve is posed on ``b`` rescaled by one exact power of two
         # (largest entry in ``[0.5, 1)``), and its answer scaled back by
         # the reciprocal: ``A`` is linear, so that is the same solution,
@@ -2168,7 +2119,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # to its minimum -- and above the dense fallback's size a
         # moderately small ``b`` raised the "ill-conditioned" error
         # instead.  A zero rhs is answered with exact zeros.
-        scale = _pow2_normaliser(b)
+        scale = pow2_frame(b)
         b_hat = b * scale
         # lineax declares `atol: float`, but it only ever compares against
         # it, and under `jit` this is a traced scalar that must stay one.
@@ -2458,24 +2409,77 @@ def _outside_jax_trace() -> bool:
         return False
 
 
+def _underflow_range_fields(groups, state) -> dict[str, list]:
+    """``{group key: [(node, field, magnitude, dtype), ...]}``, smallest first.
+
+    The floating fields of each coupled group whose magnitude ``max|field|``
+    is nonzero, finite and below ``finfo(dtype).tiny / finfo(dtype).eps``:
+    the range where a change of one ulp of the field is subnormal.  An
+    exactly zero field (or an empty one) is never listed -- zero is not a
+    small unit -- nor is a non-finite one, which the coupling verdict
+    already reports.  Read on the host (``numpy``), so it compiles nothing.
+    """
+    out: dict[str, list] = {}
+    for group in groups:
+        key = "+".join(sorted(group.nodes))
+        hits = []
+        for nn in sorted(group.nodes):
+            for fld, value in sorted((state.get(nn) or {}).items()):
+                # The dtype first: a typed PRNG key (or any other extended
+                # dtype) cannot be converted to a numpy array at all.
+                # ``jnp``'s predicates and ``finfo``, because numpy's do not
+                # know bfloat16; neither traces anything.
+                dtype = getattr(value, "dtype", None)
+                if dtype is None or not jnp.issubdtype(dtype, jnp.floating):
+                    continue
+                arr = np.asarray(jax.device_get(value))
+                if arr.size == 0:
+                    continue
+                mag = float(np.max(np.abs(arr.astype(np.float64))))
+                info = jnp.finfo(arr.dtype)
+                if 0.0 < mag < float(info.tiny) / float(info.eps):
+                    hits.append((nn, fld, mag, arr.dtype))
+        if hits:
+            out[key] = sorted(hits, key=lambda h: h[2])
+    return out
+
+
 # ------------------------------------------------------------------
 # Floating-point-tolerant GCD
 # ------------------------------------------------------------------
 
-def _float_gcd(a: float, b: float, tol: float = 1e-9) -> float:
-    """GCD of two positive floats using Euclidean algorithm with tolerance."""
+#: Relative tolerance of the timestep GCD: a Euclidean remainder at or below
+#: this fraction of the largest timestep is representation noise, not a
+#: smaller common step.  Decimal timesteps carry a few float64 ulps of noise
+#: (``0.3 % 0.1`` is ``0.0999...98``, then ``2.8e-17``), far below it, and a
+#: genuine common step is a decimal digit away from the noise, far above it.
+#: Until 0.4.0 the tolerance was an *absolute* ``1e-9`` (seconds, in effect),
+#: so a graph whose timesteps were themselves near a nanosecond stopped the
+#: algorithm before its first step: nodes at ``1e-9`` and ``2e-9`` got a base
+#: step of ``2e-9``, the fast node advanced ``1e-9`` per base step while the
+#: slow one advanced ``2e-9``, and their clocks drifted apart with no error.
+#: Relative to the largest timestep it is the old ``1e-9`` exactly for a
+#: graph whose largest timestep is one second.
+_GCD_RTOL = 1e-9  # units: dimensionless, a fraction of the largest timestep
+
+
+def _float_gcd(a: float, b: float, rtol: float = _GCD_RTOL, scale: Optional[float] = None) -> float:
+    """GCD of two positive floats: Euclid's algorithm, stopping on a remainder
+    at or below ``rtol * scale`` (``scale`` defaults to ``max(a, b)``)."""
     if a < b:
         a, b = b, a
+    tol = rtol * (a if scale is None else scale)
     while b > tol:
         a, b = b, a % b
     return a
 
 
-def _multi_gcd(values: Sequence[float], tol: float = 1e-9) -> float:
-    """GCD of multiple positive floats."""
+def _multi_gcd(values: Sequence[float], rtol: float = _GCD_RTOL) -> float:
+    """GCD of multiple positive floats, to ``rtol`` of the largest of them."""
+    scale = max(values)
     result = values[0]
     for v in values[1:]:
-        result = _float_gcd(result, v, tol)
+        result = _float_gcd(result, v, rtol, scale)
     return result
 
 
@@ -3418,10 +3422,7 @@ def _run_coupled_block_impl(
             # power-of-two rescaling the ift path applies
             # (``_fixed_point_while``), so a group in small units forms its
             # relaxed step from normal numbers and the two solvers agree.
-            from maddening.core.coupling.acceleration import (  # noqa: PLC0415
-                _pow2_normaliser,
-            )
-            accel_frame = _pow2_normaliser(n_dof_flat)
+            accel_frame = pow2_frame(n_dof_flat)
 
         track_diag = group.diagnostics
         first_r = _compute_residual(state_after_first, new_state_inner)
@@ -4924,49 +4925,6 @@ def _leaf_values_equal(a, b) -> bool:
     return True
 
 
-class _ParamsSnapshot:
-    """What one compile took from the nodes and left in ``gm.params``.
-
-    ``gen`` is the compile generation the snapshot belongs to once that
-    compile commits; ``node_before`` / ``live_before`` are
-    ``{node: {key: leaf}}`` -- the nodes' own values and the merged
-    ``gm.params`` -- and ``writes`` is ``{node: (params object, total
-    writes, {key: writes})}`` read off each node's ``_ParamsDict`` at that
-    moment, so a later write is seen as a write even when it stores the
-    value the node already held.  ``total`` is ``-1`` when a write is known
-    to be pending on a key no snapshot value covers.
-    """
-
-    __slots__ = ("gen", "node_before", "live_before", "writes")
-
-    def __init__(self, gen: int, node_before: dict, live_before: dict, writes: dict) -> None:
-        self.gen = gen
-        self.node_before = node_before
-        self.live_before = live_before
-        self.writes = writes
-
-
-def _params_write_record(params) -> tuple:
-    """``(object, total writes, {key: writes})`` of a node's params mapping;
-    the counts are ``None`` / ``{}`` for a plain dict, which counts nothing."""
-    return (params, getattr(params, "_writes", None),
-            dict(getattr(params, "_key_writes", None) or {}))
-
-
-def _key_written_since(record: Optional[tuple], params, key) -> bool:
-    """Whether ``params[key]`` was written after ``record`` was taken: the
-    mapping replaced, or its count for ``key`` moved."""
-    if record is None:
-        return False
-    obj, _total, counts = record
-    if params is not obj:
-        return True
-    key_writes = getattr(params, "_key_writes", None)
-    if key_writes is None:
-        return False
-    return key_writes.get(key, 0) != counts.get(key, 0)
-
-
 def _short_value(value) -> str:
     """A parameter value for a message: the number(s) if few, else the shape."""
     arr = np.asarray(value)
@@ -5022,15 +4980,13 @@ class GraphManager:
         # step reads it on every call: edit it in place (or pass
         # ``params=`` to step/run_scan) to change constants without a
         # recompile, and differentiate with respect to it for
-        # calibration / system identification.  Each compile takes every
-        # leaf from whichever of ``node.params`` and ``gm.params`` was
-        # written since the previous compile (``_merge_live_params``).
-        self.params: dict = {"nodes": {}, "mappings": {}}
-        # What the last *committed* compile took the node leaves from and
-        # left in ``gm.params``, and the same pair for a compile still in
-        # flight; see ``_merge_live_params``.
-        self._params_snapshot: Optional[_ParamsSnapshot] = None
-        self._params_snapshot_pending: Optional[_ParamsSnapshot] = None
+        # calibration / system identification.  Read through the
+        # ``params`` property, which first takes in any ``node.params``
+        # write (``_sync_node_param_writes``).
+        self._params: dict = {"nodes": {}, "mappings": {}}
+        # What the last sync saw of each node: its params mapping and write
+        # counts.  A ``node.params`` write is what moved them since.
+        self._node_writes_seen: dict[str, tuple] = {}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
         # The raw (uncounted, unjitted) step of the last compile, for the
@@ -5044,6 +5000,11 @@ class GraphManager:
         # boundary input supplied, keyed by compile generation and by the
         # node object (a node replaced under the same name is asked again).
         self._node_reads: dict[str, tuple[int, Any, set]] = {}
+        # The underflow-range check (``_warn_underflow_range``): pending
+        # until the first untraced step after each compile, and the groups
+        # already warned about, which are never warned about again.
+        self._underflow_check_pending = False
+        self._underflow_warned: set[str] = set()
         # Escaped-tracer bookkeeping; see ``_recover_from_escaped_tracers``.
         self._state_traced = False
         self._state_before_trace: Optional[dict] = None
@@ -5076,60 +5037,122 @@ class GraphManager:
             },
         }
 
+    @property
+    def params(self) -> dict:
+        """The graph parameter pytree, ``{"nodes": {name: {key: leaf}},
+        "mappings": {edge: {key: leaf}}}``, which the compiled step reads on
+        every call.
+
+        Reading it first takes in every ``node.params`` write the graph has
+        not seen (:meth:`_sync_node_param_writes`), so whatever reads the
+        parameters -- your code, ``save_state``, ``to_dict``, the FMU export,
+        ``GET /graph/params``, a ``jax.jit`` of a sysid loss handed
+        ``gm.params`` -- reads the values the next step will run.  Assigning
+        it replaces the tree; editing a leaf in place is a write the next
+        step uses.
+        """
+        self._sync_node_param_writes()
+        return self._params
+
+    @params.setter
+    def params(self, value: dict) -> None:
+        # A node write made before this assignment is older than it: taken
+        # in first, then replaced.
+        self._sync_node_param_writes()
+        self._params = value
+
+    def _sync_node_param_writes(self) -> bool:
+        """Take every ``node.params`` write since the last sync into the
+        graph: the one place a node write reaches ``gm.params``.  Return
+        whether it marked the graph dirty.
+
+        Called on every read (and assignment) of :attr:`params`, by every
+        entry point (through :meth:`_check_static_data_dirty`) and at the
+        start of :meth:`compile`, so every reader and every runner sees one
+        state.
+
+        * A write to a constant ``gm.params`` carries is copied into that
+          leaf, at the leaf's dtype: the compiled step reads ``gm.params``
+          on every call, so it needs no recompile.
+        * A write to anything else -- a structural value, any constant of a
+          node on the three-argument contract -- is read when the step is
+          traced, so the graph is marked dirty and the next run of any entry
+          point recompiles.
+
+        Order: a pending node write is newer than every read of
+        ``gm.params`` before it, because each read syncs, so it wins over a
+        ``gm.params`` value written through such a read; and a
+        ``gm.params`` write made after it reads ``gm.params`` first, which
+        takes the node write in, so that write wins in turn.  (Only a leaf
+        written through a reference held across the node write, with no
+        read in between, loses to it.)  A write is a counted write to the
+        node's ``_ParamsDict``, or the mapping replaced, so a write of the
+        value the node already held counts.  Never compiles, so it is safe
+        from a getter and from :meth:`compile`; node values are taken under
+        ``jax.ensure_compile_time_eval``, so a sync inside a trace stores
+        concrete arrays.
+        """
+        marked = False
+        nodes_live = self._params.get("nodes") or {}
+        for name, spec in self._nodes.items():
+            params = spec.node.params
+            seen = self._node_writes_seen.get(name)
+            if seen is None:
+                continue                    # added since the last compile
+            if params is seen[0] and getattr(params, "_writes", None) == seen[1]:
+                continue
+            key_writes = getattr(params, "_key_writes", None)
+            if params is not seen[0] or key_writes is None:
+                written = set(params) | set(seen[0] if isinstance(seen[0], dict) else ())
+            else:
+                counts = seen[2]
+                written = {k for k in set(key_writes) | set(counts)
+                           if key_writes.get(k, 0) != counts.get(k, 0)}
+            live = nodes_live.get(name)
+            values: dict = {}
+            if written and live is not None:
+                with jax.ensure_compile_time_eval():
+                    values = spec.node.params_pytree()
+            for key in written:
+                if live is None or key not in live or key not in values \
+                        or jnp.shape(values[key]) != jnp.shape(live[key]):
+                    marked = True
+                    continue
+                with jax.ensure_compile_time_eval():
+                    live[key] = jnp.asarray(values[key], dtype=jnp.asarray(live[key]).dtype)
+            self._node_writes_seen[name] = (params, getattr(params, "_writes", None),
+                                            dict(key_writes or {}))
+        if marked:
+            self._dirty = True
+        return marked
+
+    def _record_param_sync(self) -> None:
+        """After a compile commits: every node's mapping and write counts, as
+        of now, are what the next sync compares against."""
+        self._node_writes_seen = {
+            name: (spec.node.params, getattr(spec.node.params, "_writes", None),
+                   dict(getattr(spec.node.params, "_key_writes", None) or {}))
+            for name, spec in self._nodes.items()
+        }
+
     def _merge_live_params(self, fresh: dict, live: Optional[dict]) -> dict:
-        """The params a compile builds its step with: ``fresh`` (the nodes'
-        own values, now) merged with ``live`` (``gm.params``).
-
-        One rule per leaf: **the value written since the previous compile
-        wins.**
-
-        * A leaf only ``gm.params`` changed -- a calibration, an edit, a
-          leaf the node has not touched -- keeps its live value, so adding
-          an edge, replacing a node elsewhere or a profiler's recompile
-          never discards a fit.
-        * A leaf whose node value changed (``node.params[key] = value``
-          after the graph was compiled) while ``gm.params`` did not takes
-          the node's new value.  Until this rule a recompile kept the old
-          ``gm.params`` value instead: ``HeartPumpNode`` set to 144 bpm
-          through ``node.params`` and recompiled went on at 72, with no
-          sign the write had been dropped (0.3.x took such a write at the
-          recompile, and so does this).
-        * Both changed, to different values: the live value is kept -- the
-          one the compiled step was already running -- and a
-          ``RuntimeWarning`` names the leaf and both values.  Both changed
-          to the *same* value (``PUT /graph/params`` writes both) is no
-          conflict.
-
-        "Changed" is measured against the last compile that committed:
-        what it took from each node and what it left in ``gm.params``.  A
-        compile that raises after this merge commits nothing, so its
-        snapshot is discarded and the next compile still sees the write.
-        Only node constants (``"nodes"``) have a node value to change;
-        mapping weights keep their live value as before.  Leaves that no
+        """``fresh`` (the nodes' own values) with every leaf of ``live``
+        (``gm.params``) that still fits written over it; leaves that no
         longer fit (owner or key gone, shape changed) are dropped with a
         ``RuntimeWarning``.
+
+        ``live`` wins because :meth:`compile` syncs first: every
+        ``node.params`` write is already in it by the time this runs
+        (:meth:`_sync_node_param_writes`), so what it carries is the newest
+        value of every leaf -- a calibration survives a recompile, and a
+        node write reaches it.
         """
-        snapshot = self._committed_params_snapshot()
-        # A pending snapshot still here belongs to a compile that raised
-        # after its merge and committed nothing: discarded.
-        self._params_snapshot_pending = None
-        node_before = snapshot.node_before if snapshot is not None else {}
-        live_before = snapshot.live_before if snapshot is not None else {}
-        writes_before = snapshot.writes if snapshot is not None else {}
-        node_now = {owner: dict(leaves) for owner, leaves in fresh.get("nodes", {}).items()}
-
-        def same(a, b) -> bool:
-            if a is b:
-                return True
-            try:
-                return _leaf_values_equal(a, b)
-            except TypeError:           # a leaked tracer has no value to compare
-                return False
-
-        dropped, conflicts = [], []
+        if not live:
+            return fresh
+        dropped = []
         for section in ("nodes", "mappings"):
             fresh_sec = fresh.setdefault(section, {})
-            for owner, leaves in ((live or {}).get(section) or {}).items():
+            for owner, leaves in (live.get(section) or {}).items():
                 if owner not in fresh_sec:
                     if leaves:
                         dropped.append(f"{section}[{owner!r}]")
@@ -5143,23 +5166,6 @@ class GraphManager:
                     if jnp.shape(value) != jnp.shape(base):
                         dropped.append(f"{section}[{owner!r}][{key!r}] (shape changed)")
                         continue
-                    was = node_before.get(owner, {}).get(key) if section == "nodes" else None
-                    spec = self._nodes.get(owner) if section == "nodes" else None
-                    node_written = was is not None and (
-                        _key_written_since(writes_before.get(owner),
-                                           spec.node.params if spec is not None else None, key)
-                        or not same(base, was))
-                    if node_written:
-                        # The node was written since the last compile: a
-                        # write through ``node.params`` (counted, so one that
-                        # stores the value the node already held counts
-                        # too), or a value changed in place.
-                        live_was = live_before.get(owner, {}).get(key)
-                        if (live_was is not None and same(value, live_was)) or same(value, base):
-                            continue            # keep the node's value (``fresh``)
-                        conflicts.append(
-                            f"nodes[{owner!r}][{key!r}]: node.params "
-                            f"{_short_value(base)}, gm.params {_short_value(value)}")
                     # A Python float assigned into gm.params is float64
                     # under x64 and weak-typed otherwise: coerce to the
                     # leaf's own dtype (strongly typed) so it is kept and
@@ -5170,130 +5176,7 @@ class GraphManager:
                 "compile() dropped live gm.params leaves that no longer fit "
                 f"the graph: {dropped}", RuntimeWarning, stacklevel=3,
             )
-        if conflicts:
-            warnings.warn(
-                "compile(): node.params and gm.params were both written since the "
-                f"last compile and disagree for {'; '.join(conflicts)}.  Keeping "
-                "gm.params' value, the one the compiled step was already running.  "
-                "Write the value you mean into gm.params['nodes'][node][key] (it "
-                "takes effect on the next step, with no recompile).",
-                RuntimeWarning, stacklevel=3,
-            )
-        self._params_snapshot_pending = _ParamsSnapshot(
-            self._compile_generation + 1,
-            node_now,
-            {owner: dict(leaves) for owner, leaves in fresh.get("nodes", {}).items()},
-            {name: _params_write_record(spec.node.params) for name, spec in self._nodes.items()},
-        )
         return fresh
-
-    def _committed_params_snapshot(self) -> Optional[_ParamsSnapshot]:
-        """The snapshot of the last compile that committed.
-
-        ``compile`` bumps ``_compile_generation`` at its commit point and
-        nowhere else, so a pending snapshot stamped with the generation that
-        compile would reach is the committed one, and is promoted here.
-        """
-        pending = self._params_snapshot_pending
-        if pending is not None and pending.gen == self._compile_generation:
-            self._params_snapshot = pending
-            self._params_snapshot_pending = None
-        return self._params_snapshot
-
-    def _check_node_param_writes(self) -> bool:
-        """Mark the graph dirty if a ``node.params`` write since the last
-        compile is not yet in the compiled step; return whether it did.
-
-        The value a node reads from ``self.params`` when its step is traced
-        -- a structural constant of any node, every constant of a node on
-        the three-argument contract -- is baked into whichever program is
-        traced next.  ``gm.step`` kept its cached trace while a new
-        ``run_scan`` length, ``run_scan_with_history`` or a sysid loss traced
-        afresh, so after a write with no compile different entry points ran
-        different models.  Every entry point calls this first, so a write
-        makes the next run of any of them recompile -- all of them then run
-        the written value.  A write the running step already reflects -- a
-        constant ``gm.params`` carries, written to the value ``gm.params``
-        holds, as ``PUT /graph/params`` writes both -- costs no recompile:
-        it is absorbed into the snapshot, so the next compile does not read
-        it as a pending node write either.
-        """
-        snapshot = self._committed_params_snapshot()
-        if snapshot is None:
-            return False
-        for name, spec in self._nodes.items():
-            params = spec.node.params
-            record = snapshot.writes.get(name)
-            if record is None:
-                continue                    # added since: the graph is dirty anyway
-            if params is record[0] and getattr(params, "_writes", None) == record[1]:
-                continue
-            key_writes = getattr(params, "_key_writes", None)
-            if params is not record[0] or key_writes is None:
-                written = set(params) | set(record[0])
-            else:
-                counts = record[2]
-                written = {k for k in set(key_writes) | set(counts)
-                           if key_writes.get(k, 0) != counts.get(k, 0)}
-            live = (self.params.get("nodes") or {}).get(name) or {}
-            values = spec.node.params_pytree() if (written and live) else {}
-            reflected = {}
-            for key in written:
-                if key not in live or key not in values:
-                    break
-                try:
-                    if not _leaf_values_equal(values[key], live[key]):
-                        break
-                except TypeError:
-                    break
-                reflected[key] = values[key]
-            else:
-                snapshot.writes[name] = _params_write_record(params)
-                for key, value in reflected.items():
-                    snapshot.node_before.setdefault(name, {})[key] = value
-                    snapshot.live_before.setdefault(name, {})[key] = live[key]
-                continue
-            self._dirty = True
-            return True
-        return False
-
-    def _supersede_node_param_writes(self) -> None:
-        """After ``load_state``: the restored ``gm.params`` supersedes every
-        earlier ``node.params`` write to a constant it carries.
-
-        Without this a node write made before the restore was still read as
-        newer by the next compile, so the restored value was overwritten --
-        or not, depending on whether ``load_state`` had found the graph
-        dirty (it compiles a dirty graph first, taking the write in, before
-        it restores).  A pending write to a value the checkpoint does not
-        hold (a structural constant) stays pending.
-        """
-        snapshot = self._committed_params_snapshot()
-        if snapshot is None:
-            return
-        for name, spec in self._nodes.items():
-            live = (self.params.get("nodes") or {}).get(name)
-            record = snapshot.writes.get(name)
-            if not live or record is None:
-                continue
-            params = spec.node.params
-            key_writes = getattr(params, "_key_writes", None) or {}
-            old_counts = record[2] if params is record[0] else {}
-            counts = dict(old_counts)
-            pending = False
-            for key in set(key_writes) | set(old_counts) | set(params):
-                if key in live:
-                    counts[key] = key_writes.get(key, 0)
-                elif key_writes.get(key, 0) != old_counts.get(key, 0) or params is not record[0]:
-                    counts[key] = -1        # still written: nothing restored it
-                    pending = True
-            total = getattr(params, "_writes", None)
-            snapshot.writes[name] = (params, -1 if pending else total, counts)
-            values = spec.node.params_pytree()
-            for key in live:
-                if key in values:
-                    snapshot.node_before.setdefault(name, {})[key] = values[key]
-                    snapshot.live_before.setdefault(name, {})[key] = live[key]
 
     def _check_param_shapes(self, section: str, owner: str, leaves: dict) -> None:
         """A leaf of the wrong shape would broadcast the node's *state* to
@@ -7403,11 +7286,15 @@ class GraphManager:
         # wins (see ``_merge_live_params``); anything that no longer fits
         # is dropped with a warning.  ``reset_params`` restores the
         # constructor values on purpose.
+        # Every node.params write first goes into gm.params (or marks the
+        # graph dirty, which this compile is about to clear), so the merge
+        # below can let the live value win.
+        self._sync_node_param_writes()
         fresh = self._snapshot_params()
         # Which leaves are still the constructor snapshot after the merge:
         # those need no baked-write check (see _refuse_baked_param_writes).
         fresh_leaves = {o: dict(v) for o, v in fresh.get("nodes", {}).items()}
-        params = self._merge_live_params(fresh, self.params)
+        params = self._merge_live_params(fresh, self._params)
         params_dtypes = {
             section: {
                 owner: {k: jnp.asarray(v).dtype for k, v in leaves.items()}
@@ -7539,7 +7426,8 @@ class GraphManager:
         self._back_edges = plan.back_edges
         self._is_multirate = plan.is_multirate
         self._rate_dividers = plan.rate_dividers
-        self.params = plan.params
+        self._params = plan.params
+        self._record_param_sync()
         self._params_dtypes = params_dtypes
         self._params_shapes = params_shapes
         self._state = state
@@ -7581,6 +7469,7 @@ class GraphManager:
         self._static_data_hashes = static_data_hashes
 
         self._dirty = False
+        self._underflow_check_pending = bool(self._coupling_groups)
         # A rebuilt step invalidates every scan built against the old
         # one.  Bumping the generation as well as clearing means a scan
         # a caller still holds can never be re-entered into the cache.
@@ -7598,10 +7487,10 @@ class GraphManager:
         before the standard dirty-check so a stale JIT cache is caught
         without requiring the caller to mark the graph dirty manually.  It
         also catches a ``node.params`` write since the last compile
-        (:meth:`_check_node_param_writes`), so every entry point runs the
+        (:meth:`_sync_node_param_writes`), so every entry point runs the
         same model.
         """
-        if self._check_node_param_writes():
+        if self._sync_node_param_writes():
             return True
         for name, spec in self._nodes.items():
             if spec.node.static_data_hash() != self._static_data_hashes.get(name, 0):
@@ -8186,6 +8075,44 @@ class GraphManager:
             self._state_traced = False
             self._state_before_trace = None
         self._state = new_state
+        if self._underflow_check_pending and not self._state_traced:
+            self._underflow_check_pending = False
+            self._warn_underflow_range(new_state)
+
+    def _warn_underflow_range(self, state: dict) -> None:
+        """Warn once per coupled group whose fields are in the subnormal range.
+
+        Runs on the host, once per compile, on the first state a stepper
+        stores outside a transform (:meth:`_store_state`): the remedy --
+        rescaling the field's units -- is a decision about the model's
+        configuration, and the first step is where every caller passes,
+        whether or not they ever read :meth:`coupling_diagnostics`.  It reads
+        each group field once (one device-to-host copy per compile) and
+        nothing inside the compiled step changes, so stepping and its
+        results are untouched.  A state that decays into the range after the
+        first step is not re-checked.  See
+        :class:`~maddening.warnings.UnderflowRangeWarning`.
+        """
+        from maddening.warnings import UnderflowRangeWarning  # noqa: PLC0415
+
+        for key, hits in _underflow_range_fields(self._coupling_groups, state).items():
+            if key in self._underflow_warned or not hits:
+                continue
+            self._underflow_warned.add(key)
+            (nn, fld, mag, dtype), more = hits[0], len(hits) - 1
+            info = jnp.finfo(dtype)
+            threshold = float(info.tiny) / float(info.eps)
+            warnings.warn(
+                f"coupling group {key!r}: field {nn}.{fld} has magnitude {mag:.3g}, "
+                f"inside the {dtype} subnormal range (below tiny/eps = {threshold:.3g}): "
+                f"a change of one ulp of it is smaller than the smallest normal number, "
+                f"which XLA's CPU backend flushes to zero, so the nodes' arithmetic on it "
+                f"loses resolution, and below tiny = {float(info.tiny):.3g} the group's "
+                f"convergence norm reads it as exactly zero.  Rescale the field's units "
+                f"so that it is of order one."
+                + (f"  {more} more field(s) of this group are in the range too." if more else ""),
+                UnderflowRangeWarning, stacklevel=4,
+            )
 
     def _recover_from_escaped_tracers(self, *, warn: bool = True) -> None:
         """Put the graph back to the last untraced state, if it needs it.
@@ -8567,6 +8494,20 @@ class GraphManager:
               pass's longest chain of same-pass reads, without which a
               stalled 32-relay ring read 0.51x its true distance with the
               flag set (MADD-ANO-094).
+              **The flag assumes the counted floor is honest, which
+              nothing here can check.**  The count trusts each node to
+              declare ``update_evaluations()`` truthfully and not to
+              cancel inside itself.  Measured on 154 fixture
+              configurations (float32 and float64, CPU, the 0.4.0 floor
+              study): a node taking 2000 sub-steps per update but
+              declaring one evaluation read 0.26-0.60x the true distance
+              with this flag set, and a node forming its output as the
+              difference of two terms about 1000x its size read
+              0.02-0.65x, flag set.  In the other direction the count
+              adds gain magnitudes, so mixed-sign Gauss-Seidel chains read
+              very conservatively (up to 1e7x the true distance) and
+              sub-cycled groups 1e3-1e5x.  A measured, opt-in
+              ``diagnostics="rounding"`` level is planned for 0.5.0.
               Like ``"ratio_usable"``, it reports what the code
               checked and nothing more: a settled space has settled
               *somewhere*, and the linearity condition is not checked
@@ -10625,8 +10566,6 @@ class GraphManager:
         from maddening.core.simulation.checkpoint import load_state
         self._recover_from_escaped_tracers()
         load_state(self, path)
-        # The restore is later than any node.params write made before it.
-        self._supersede_node_param_writes()
 
     # ------------------------------------------------------------------
     # Convenience

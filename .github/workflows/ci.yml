@@ -583,6 +583,9 @@ jobs:
       - name: Check HeatNode configurations are constructible
         run: python scripts/check_heat_stability.py
 
+      - name: Check small numeric constants say what units they are in
+        run: python scripts/check_numeric_constants.py
+
       - name: Check STABLE API signatures
         # A @stability(STABLE) surface promises its signature until the next
         # major version (docs/developer_guide/deprecation_policy.md).  This

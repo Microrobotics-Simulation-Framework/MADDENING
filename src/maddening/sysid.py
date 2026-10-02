@@ -50,6 +50,7 @@ from maddening.core.coupling.acceleration import (
     convergence_criterion,
     estimated_error,
 )
+from maddening.core._pow2_frame import pow2_frame
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 # ``_resolve_specs`` is the one walk that decides which ParamSpec governs
@@ -2757,6 +2758,27 @@ def _check_count(name: str, value, *, minimum: int = 0) -> int:
     return int(value)
 
 
+def _adam_frame(g0):
+    """The power of two Adam's gradients are multiplied by for a whole run.
+
+    Adam's step ``m_hat / (sqrt(v_hat) + eps)`` is invariant to the scale of
+    the gradient except through ``eps``, which is absolute: a loss written in
+    small units (squared micrometres in metres, say: ``1e-12``) has
+    gradients far below the default ``eps = 1e-8``, the denominator is
+    ``eps``, and the step shrinks by the same factor -- a spring's damping
+    fitted on such a loss did not move from its starting value in 60
+    iterations, where the same loss at scale one recovered it.  The run's
+    gradients are therefore taken in the frame of the *first* gradient
+    (:func:`~maddening.core._pow2_frame.pow2_frame`: its largest entry
+    brought into ``[0.5, 1)``), fixed for the run so ``m`` and ``v``
+    accumulate in one unit, and ``eps`` is relative to that.  An exact power
+    of two leaves the step bit-identical wherever ``eps`` was negligible and
+    makes the iterates the same, to the bit, for the loss scaled by any
+    power of two.  A first gradient of exact zeros is framed by ``1``.
+    """
+    return pow2_frame(g0)
+
+
 def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
     """The hyper-parameters :func:`fit` and :func:`fit_multiple_shooting`
     share."""
@@ -2846,6 +2868,7 @@ _HOLD_LOSS_ROUNDINGS = 4.0
 #: ulps from the iterate rather than on it; it is far below anything a
 #: float32 fit determines (16 ulps is 1.9e-6 relative).
 _STEP_TOL_ULPS = 2.0 ** 4
+
 
 
 def _float_resolution(tree) -> np.ndarray:
@@ -3678,7 +3701,13 @@ def fit(
         zero, so the fit could only hand it back unchanged.
     n_iter, lr, tol, betas, eps
         Adam hyper-parameters; ``tol > 0`` stops early once the loss is
-        at or below it.
+        at or below it.  ``eps`` is *relative*: it floors Adam's
+        denominator in units of the run's first gradient (its largest entry,
+        rounded to a power of two), so the iterates do not depend on the
+        units the loss is written in.  Earlier 0.4.0 development builds
+        applied it in the loss's own units, and a loss near ``1e-12`` (a
+        position residual in metres at micrometre scale, squared) did not
+        move its parameters at all.
     callback : callable, optional
         ``callback(i, loss, params)`` after each evaluation.
     notify_every : int
@@ -3799,7 +3828,10 @@ def fit(
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
-    def adam_step(theta, m, v, g, i):
+    def adam_step(theta, m, v, g, frame, i):
+        # The gradient in the run's frame (``_adam_frame``): ``eps`` below is
+        # then relative to the first gradient, not absolute in the loss's units.
+        g = g * frame
         m = b1 * m + (1 - b1) * g
         v = b2 * v + (1 - b2) * g * g
         m_hat = m / (1 - b1 ** i)
@@ -3811,6 +3843,7 @@ def fit(
     theta = theta0
     m = jnp.zeros_like(theta)
     v = jnp.zeros_like(theta)
+    frame = None
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
     best = _BestIterate(theta0)
     losses: list[float] = []
@@ -3840,7 +3873,9 @@ def fit(
         if tol > 0.0 and loss_f <= tol:
             converged = True
             break
-        theta, m, v = adam_step(theta, m, v, g, jnp.asarray(i, theta.dtype))
+        if frame is None:
+            frame = _adam_frame(g)
+        theta, m, v = adam_step(theta, m, v, g, frame, jnp.asarray(i, theta.dtype))
 
     if i > 0 and not converged:
         # The budget ran out, so the last thing the loop did was an update
@@ -3896,20 +3931,45 @@ def _marquardt_step(th, r, J, lam, lo, hi):
     free = jnp.where(hold, 0.0, 1.0).astype(A.dtype)
     A = A * free[:, None] * free[None, :]
     g = g * free
-    n = A.shape[0]
-    # The floor that keeps the solve regular is *relative*, ``eps`` times
-    # the mean of ``diag(A)``: an absolute ``1e-12 * I`` was not negligible
-    # once the residual was small in its own units (a residual scaled by
-    # 1e-7 made it 1e-12 / 1e-14 of the curvature it was added to), and the
-    # fit stopped being Gauss-Newton -- it did not converge in 50 iterations
-    # at 1e-7 and barely moved at 1e-8.  Relative, the step is the same for
-    # every scaling of the residual.
-    scale = jnp.trace(A) / n
-    floor = jnp.where(scale > 0, jnp.finfo(A.dtype).eps * scale, 1.0)
-    A_damped = (A + lam * jnp.diag(jnp.diag(A))
-                + floor * jnp.eye(n, dtype=A.dtype) + jnp.diag(1.0 - free))
+    d = jnp.diag(A)
+    # The floor that keeps the solve regular is ``eps`` times each column's
+    # *own* curvature, ``diag(A)_i`` -- Marquardt's scaling with ``lambda``
+    # raised by ``eps`` -- so the step is the same for every scaling of the
+    # residual *and* of each parameter.  An absolute ``1e-12 * I`` was not
+    # negligible for a residual small in its own units (1e-7: unconverged
+    # after 50 iterations); a floor of ``eps`` times the *mean* of
+    # ``diag(A)`` then crushed the step of a coordinate whose column was
+    # small beside another's: a spring in SI units (damping in N s/m, beside
+    # a log stiffness) stopped after two iterations, "converged", with
+    # damping at 3x its truth, where the same spring in tonnes reached it.
+    # A column of exact zeros gets 1.0 (its gradient entry is 0 as well).
+    floor = jnp.where(d > 0, jnp.finfo(A.dtype).eps * d, 1.0)
+    A_damped = A + jnp.diag(lam * d + floor + (1.0 - free))
     delta = jnp.linalg.solve(A_damped, g)
     return jnp.clip(th - delta, lo, hi)
+
+
+@jax.jit
+def _gauss_newton_step(th, r, J, lo, hi):
+    """The undamped Gauss-Newton candidate from ``th``, projected onto
+    ``[lo, hi]``: least squares on the column-equilibrated Jacobian.
+
+    The stationarity test :func:`fit_lm`'s ``converged`` also requires.  It
+    shares nothing with the Marquardt solve -- no ``lambda``, no floor, a
+    different factorisation -- so a step that the damping or a mis-scaled
+    floor shrank cannot read as stationary through it: if the undamped step
+    from the iterate would still move a parameter by more than
+    ``step_tol``, the iterate is not stationary.  Equilibrating the columns
+    (each scaled to unit norm) makes it invariant to the units of every
+    parameter and of the residual.  A coordinate held on its bound (its
+    gradient pointing out of the range) is left out, as in the step.
+    """
+    g = J.T @ r
+    hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+    norms = jnp.sqrt(jnp.sum(J * J, axis=0))
+    scale = jnp.where((norms > 0) & ~hold, 1.0 / jnp.where(norms > 0, norms, 1.0), 0.0)
+    y = jnp.linalg.lstsq(J * scale[None, :], -r)[0]
+    return jnp.clip(th + scale * y, lo, hi)
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -4147,6 +4207,31 @@ def fit_lm(
         before, after = _physical(th), _physical(cand)
         return bool(np.all(np.abs(after - before) <= rel_tol * np.abs(before)))
 
+    def _gauss_newton_stationary(th, r, J, loss_at_th=None) -> bool:
+        """Whether ``th`` is stationary by the undamped, equilibrated
+        Gauss-Newton step from it (:func:`_gauss_newton_step`), which neither
+        the damping nor the Marquardt floor can shrink -- required, beside
+        the step tests below, before ``converged`` is reported.
+
+        Stationary when that step moves every parameter by no more than
+        ``step_tol``.  For the floor rule (``loss_at_th`` given) also when
+        the step does not lower the loss: a parameter the data determine
+        only weakly has, at its rounding floor, a Gauss-Newton step that
+        fits the residual's rounding noise and can be many ulps long, but
+        it lowers nothing.  A measure built from ``r`` and ``J`` alone
+        cannot tell that floor from a real error -- the residual there is
+        structured rounding, whose cosines with the columns measured 0.5-0.9
+        on a spring -- so the second test evaluates the step.
+        """
+        candidate = _gauss_newton_step(th, r, J, bounds.lo, bounds.hi)
+        if _within_step_tol(th, candidate):
+            return True
+        if loss_at_th is None:
+            return False
+        r_gn = residual_only(candidate)
+        loss_gn = 0.5 * float(jnp.sum(r_gn * r_gn))
+        return not (np.isfinite(loss_gn) and loss_gn < loss_at_th)
+
     lam = float(lam0)
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
     losses: list[float] = []
@@ -4213,7 +4298,8 @@ def fit_lm(
             r_new = residual_only(cand)
             loss_new = 0.5 * float(jnp.sum(r_new * r_new))
             proposal_within = (attempt == 0 and not stuck_inward
-                               and _within_step_tol(theta, cand))
+                               and _within_step_tol(theta, cand)
+                               and _gauss_newton_stationary(theta, r, J))
             if np.isfinite(loss_new) and loss_new < loss:
                 theta = cand
                 theta_iteration, theta_loss = i, loss_new
@@ -4241,7 +4327,8 @@ def fit_lm(
             # fit unconverged at loss 1e-13.  A run that never lowered the
             # loss gets no such reading: a residual whose Jacobian is wrong
             # rejects every candidate from its start.
-            stationary = _within_step_tol(theta, cand)
+            stationary = (_within_step_tol(theta, cand)
+                          and _gauss_newton_stationary(theta, r, J, loss))
         if stationary and accepted and tracker is not None:
             # Stopping on an accepted proposal leaves the run at an iterate
             # whose gradient no iteration formed.  A run that kept going
@@ -4431,7 +4518,8 @@ def fit_multiple_shooting(
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
-    def adam(x, m, v, g, i, rate):
+    def adam(x, m, v, g, frame, i, rate):
+        g = g * frame          # in the block's frame (``_adam_frame``), as in ``fit``
         m = b1 * m + (1 - b1) * g
         v = b2 * v + (1 - b2) * g * g
         return x - rate * (m / (1 - b1 ** i)) / (jnp.sqrt(v / (1 - b2 ** i)) + eps), m, v
@@ -4439,6 +4527,7 @@ def fit_multiple_shooting(
     theta, ws = theta0, ws_flat0
     m_t = jnp.zeros_like(theta); v_t = jnp.zeros_like(theta)
     m_s = jnp.zeros_like(ws); v_s = jnp.zeros_like(ws)
+    frames = None
     tracker = _make_excitation_tracker(hold_undetermined, theta0)
     best = _BestIterate((theta0, ws_flat0))
     losses: list[float] = []
@@ -4467,10 +4556,14 @@ def fit_multiple_shooting(
             converged = True
             break
         it = jnp.asarray(i, theta.dtype)
-        theta, m_t, v_t = adam(theta, m_t, v_t, g_t, it, lr)
+        if frames is None:
+            # One frame per block: the parameters' and the window states'
+            # gradients are in different units.
+            frames = (_adam_frame(g_t), _adam_frame(g_s))
+        theta, m_t, v_t = adam(theta, m_t, v_t, g_t, frames[0], it, lr)
         # As in ``fit``: a clipped coordinate is put back on its bound.
         theta = bounds.project(theta)
-        ws, m_s, v_s = adam(ws, m_s, v_s, g_s, it, lr_s)
+        ws, m_s, v_s = adam(ws, m_s, v_s, g_s, frames[1], it, lr_s)
 
     if i > 0 and not converged:
         # As in ``fit``: the last update's result was never evaluated.

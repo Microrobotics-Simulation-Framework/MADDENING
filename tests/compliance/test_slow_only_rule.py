@@ -263,6 +263,16 @@ sys.exit(code)
 class Collection:
     slow: frozenset[str]
     default_lane: frozenset[str]
+    skipped: frozenset[str] = frozenset()
+
+
+def partition(items: list[list]) -> Collection:
+    """``[[node id, slow?, skip-marked?], ...]`` into what the default lane
+    runs, what it does not (slow), and what it collects but always skips."""
+    return Collection(
+        slow=frozenset(n for n, slow, _ in items if slow),
+        default_lane=frozenset(n for n, slow, skip in items if not slow and not skip),
+        skipped=frozenset(n for n, slow, skip in items if not slow and skip))
 
 
 def _files_named() -> set[str]:
@@ -291,9 +301,7 @@ def collection(tmp_path_factory) -> Collection:
          "-m", "slow or not slow", *FRAMEWORK_PATHS, *extra],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=600)
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
-    items = json.loads(dump.read_text())
-    return Collection(slow=frozenset(n for n, slow, _ in items if slow),
-                      default_lane=frozenset(n for n, slow, skip in items if not slow and not skip))
+    return partition(json.loads(dump.read_text()))
 
 
 @cache
@@ -357,6 +365,7 @@ def witness_problems(rel: str, comments: list[tuple[int, str]], collection: Coll
         for target in ids:
             if not any(_covers(target, n) for n in collection.default_lane):
                 why = ("slow-marked itself" if any(_covers(target, n) for n in collection.slow)
+                       else "skip-marked" if any(_covers(target, n) for n in collection.skipped)
                        else "pytest collects no such test")
                 problems.append(f"{rel}:{lineno}: {target} does not run in the default lane ({why})")
     return problems
@@ -455,6 +464,12 @@ class TestPlain:
     @pytest.mark.slow
     def test_method(self):
         pass
+
+
+# Per push, in prose with a colon later: tests/a/test_x.py::test_cheap
+@pytest.mark.slow
+def test_prose_is_not_the_form():
+    pass
 '''
 
 
@@ -468,6 +483,8 @@ def test_the_comment_reader_finds_what_it_is_for():
     assert blocks["test_none"] == []
     assert blocks["TestMarkedClass::test_in_class"] == [(["tests/a/test_z.py::TestZ::test_cls"], [])]
     assert blocks["TestPlain::test_method"] == [(["tests/a/test_z.py::test_method_witness"], [])]
+    # "Per push," is prose, not the form: it is not read as a witness.
+    assert blocks["test_prose_is_not_the_form"] == []
     # A comment above one test is not read for the next one.
     assert blocks["test_other"] == [(["tests/a/test_x.py::test_cheap"], [])]
     # A name missing its class, and a file with no test, are bare.
@@ -509,9 +526,11 @@ def test_the_rule_takes_a_comment_or_a_table_row_but_not_a_row_alone_for_a_hypot
 
 
 def test_a_witness_resolves_only_to_an_item_the_default_lane_runs():
-    c = Collection(slow=frozenset({"tests/a.py::test_slow", "tests/a.py::test_mixed[1]"}),
-                   default_lane=frozenset({"tests/a.py::TestA::test_fast",
-                                           "tests/a.py::test_mixed[0]"}))
+    c = partition([["tests/a.py::test_slow", True, False], ["tests/a.py::test_mixed[1]", True, False],
+                   ["tests/a.py::TestA::test_fast", False, False],
+                   ["tests/a.py::test_mixed[0]", False, False],
+                   ["tests/a.py::test_skipped", False, True]])
+    assert "skip-marked" in witness_problems("tests/b.py", [(1, "tests/a.py::test_skipped")], c)[0]
     ok = [(1, "tests/a.py::TestA::test_fast and tests/a.py::test_mixed (its fast case)")]
     assert witness_problems("tests/b.py", ok, c) == []
     assert "slow-marked itself" in witness_problems("tests/b.py", [(1, "tests/a.py::test_slow")], c)[0]

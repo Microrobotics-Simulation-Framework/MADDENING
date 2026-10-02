@@ -4,7 +4,9 @@ The CI lanes, the per-test time budget, the shard split, the JAX timing
 plugin, the compilation-cache pruner and the duration allowlist are each
 pinned by guard tests (``tests/compliance/test_ci_workflows.py``,
 ``test_ci_sharding.py``, ``test_report_test_durations.py``,
-``test_prune_jax_cache.py`` and ``tests/core/test_compile_cache.py``).  A
+``test_prune_jax_cache.py`` and ``tests/core/test_compile_cache.py``), and
+the rule that a slow mark names its per-push witness by
+``tests/compliance/test_slow_only_rule.py``.  A
 guard that still passes once the workflow, script or config it reads is
 broken protects nothing, and nothing else notices: CI stays green either
 way.  Audits found such gaps by hand, by seeding faults and checking
@@ -68,6 +70,7 @@ _SHARDING = "tests/compliance/test_ci_sharding.py"
 _WORKFLOWS = "tests/compliance/test_ci_workflows.py"
 _PRUNE = "tests/compliance/test_prune_jax_cache.py"
 _COMPILE_CACHE = "tests/core/test_compile_cache.py"
+_SLOW_RULE = "tests/compliance/test_slow_only_rule.py"
 
 #: The budget script and the timing plugin.  The allowlist-collection test
 #: is left out: it collects the whole tree (seconds), and only the allowlist
@@ -77,13 +80,14 @@ SHARD = (_SHARDING,)
 WF = (_WORKFLOWS,)
 PRUNE = (_PRUNE,)
 CC = (_COMPILE_CACHE,)
+SLOW_RULE = (_SLOW_RULE,)
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
 CI_ALL = DUR + SHARD + WF
 
 #: Every guard file, run whole on the unmutated copy before any mutant.
-GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE)
+GUARD_FILES = (_DURATIONS, _SHARDING, _WORKFLOWS, _PRUNE, _COMPILE_CACHE, _SLOW_RULE)
 
 
 @dataclass(frozen=True)
@@ -111,6 +115,10 @@ SL = ".github/workflows/slow-tests.yml"
 PP = "pyproject.toml"
 AL = "tests/duration_allowlist.txt"
 TC = "tests/core/test_compile_cache.py"
+SR = _SLOW_RULE
+TS = "docs/developer_guide/testing_standards.md"
+_LM = "test_fit_lm_through_ift_coupled_group_recovers_stiffness_from_nearby"
+_XF = "tests/core/test_cross_feature_edge_cases.py"
 
 # Lines reused by several allowlist mutants (an existing entry, and a real
 # parametrised test).
@@ -391,6 +399,42 @@ MUTANTS: tuple[Mutant, ...] = (
        "enable(tmp) silently keeps writing to the outer cache"),
     _M("T3", TC, "            jax.config.update(key, value)", "            pass", CC,
        "the three JAX settings left changed"),
+    # --- W: the slow-only rule, tests/compliance/test_slow_only_rule.py -------
+    _M("W1", _XF, f"# Per push: {_XF}::{_LM}\n@pytest.mark.slow", "@pytest.mark.slow", SLOW_RULE,
+       "a slow framework test with no per-push witness and no table row: its property is off "
+       "every push and nothing says so"),
+    _M("W2", _XF, f"\n\ndef {_LM}():", f"\n\n@pytest.mark.slow\ndef {_LM}():", SLOW_RULE,
+       "the named witness slow-marked itself: the property it stands for runs on no push"),
+    _M("W3", "tests/property/test_sysid_contract.py",
+       "tests/property/test_sysid_contract.py::TestBoundsAndTransforms::"
+       "test_a_bound_no_float32_can_hold_is_met_at_the_leafs_precision",
+       "tests/property/test_sysid_contract.py::test_a_bound_no_float32_can_hold_is_met_at_the_leafs_precision",
+       SLOW_RULE, "a witness named without its class: not a node id, so nothing shows it runs"),
+    _M("W4", TS, "`tests/core/test_calibrate.py::TestCalibratePhysics`, ", "", SLOW_RULE,
+       "slow tests dropped from the slow-only table with no witness named"),
+    _M("W5", TS, "`::test_every_recorded_fixture_still_measures_its_baseline_row`",
+       "`::test_every_recorded_fixture_measures_its_row`", SLOW_RULE,
+       "a table row naming a renamed test: the row exempts nothing and the real test is uncovered"),
+    _M("W6", SR, 'SIBLING_REQUIRED = ("tests/verification/hypothesis/",)', "SIBLING_REQUIRED = ()",
+       SLOW_RULE, "a slow hypothesis property listed only in the table: verify-hypothesis runs it on "
+       "jax 0.10.2 only, so jax 0.11.2 sees it in the slow lane alone"),
+    _M("W7", SR, "default_lane=frozenset(n for n, slow, skip in items if not slow and not skip),",
+       "default_lane=frozenset(n for n, slow, skip in items if not skip),", SLOW_RULE,
+       "a slow-marked test accepted as a per-push witness"),
+    _M("W8", SR, '    "tests/core/",\n', "", SLOW_RULE,
+       "tests/core dropped from the covered directories: its slow marks go unchecked"),
+    _M("W9", SR, 'return nodeid == target or nodeid.startswith(target + "[") or',
+       "return nodeid == target or nodeid.startswith(target) or", SLOW_RULE,
+       "a witness name that is only a prefix of a real test (test_x for test_xy) accepted"),
+    _M("W10", SR, r'_PER_PUSH = re.compile(r"^\s*#\s*Per push:")', r'_PER_PUSH = re.compile(r"^\s*#\s*Per push")',
+       SLOW_RULE, "prose such as 'Per push, the forward tests ...' read as a witness"),
+    _M("W11", SR, '    "tests/fmi/test_binary_frames.py":\n',
+       '    "tests/core/test_transforms.py": "stale: this file holds no slow test",\n'
+       '    "tests/fmi/test_binary_frames.py":\n', SLOW_RULE,
+       "an exemption that names a file with no slow test: it outlives what it was for and would "
+       "exempt the next slow test written there"),
+    _M("W12", _XF, f"\n\ndef {_LM}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_LM}():", SLOW_RULE,
+       "the named witness skip-marked: it is collected and never runs"),
 )
 
 

@@ -1,0 +1,64 @@
+# Small numeric constants in the numerical core, each with what it is relative to.
+#
+# Read by scripts/check_numeric_constants.py (see its docstring).  One line per
+# (file, enclosing scope, literal) with the number of such hits in that scope:
+#
+#     <path> <qualname> <token>[*<count>]  # <units justification>
+#
+# A justification says what the number is relative to.  "Dimensionless, a
+# fraction of X" or "dtype range: ..." is a justification; "small" is not.  A
+# constant that is absolute in a quantity's own units belongs here only with
+# the reason it cannot change a result silently, or the registry entry that
+# records that it can.  A stale line (no such constant any more, or a different
+# count) fails the gate.
+
+# --- sharded Krylov solvers -------------------------------------------------
+src/maddening/cloud/multigpu/iterative_solver.py _cg_loop.body finfo.tiny*2  # dtype range: a division guard; b is framed into [0.5, 1) (_framed), so a denominator below the smallest normal is a breakdown's exact or flushed zero, not a small unit
+src/maddening/cloud/multigpu/iterative_solver.py _gmres_inner_cycle finfo.tiny  # dtype range: guards normalising a zero residual; b is framed into [0.5, 1) first, so only an exact (or flushed) zero reaches it
+src/maddening/cloud/multigpu/iterative_solver.py _gmres_inner_cycle.arnoldi_step finfo.tiny  # dtype range: guards normalising a zero Arnoldi vector (a breakdown) in the framed solve
+src/maddening/cloud/multigpu/iterative_solver.py sharded_cg 1e-6  # dimensionless: rtol, a fraction of ||b||
+src/maddening/cloud/multigpu/iterative_solver.py sharded_gmres 1e-6  # dimensionless: rtol, a fraction of ||b||
+
+# --- coupling ----------------------------------------------------------------
+src/maddening/core/coupling/acceleration.py coupling_residual_interface 1e-6  # dimensionless: rtol, the relative change demanded of each interface quantity
+src/maddening/core/coupling/acceleration.py <module> 1e-5  # dimensionless: _ARNOLDI_BREAKDOWN_RTOL, a fraction of ||A q_j||
+src/maddening/core/coupling/acceleration.py <module> 1e-4  # dimensionless: RANGE_CAPTURED_RTOL, a relative Frobenius residual ||J U - U M|| / ||J U||
+src/maddening/core/coupling/acceleration.py iqn_ils_update 1e-6  # dimensionless: pinv's rtol, a fraction of the largest singular value of the framed secant matrix
+src/maddening/core/coupling/group.py CouplingGroup 1e-6*2  # dimensionless: tolerance (every 0.4.0 norm divides a field by its own magnitude) and rtol (a relative change)
+src/maddening/core/coupling/interface_mapping.py rbf_interpolation 1e-8  # dimensionless: ridge, a fraction of max|Phi_ss|
+src/maddening/core/coupling/mapping.py _kernel 1e-300*2  # zero guard for r**2 log r on float64 host distances: below it the value is under 1e-597, which float64 cannot hold, and the limit at r = 0 is 0
+src/maddening/core/coupling/mapping.py rbf_matrix 1e-8  # dimensionless: ridge, a fraction of max|Phi_ss|
+src/maddening/core/coupling/mapping.py rbf_matrix 1e-300  # guard for an all-zero kernel matrix (one point under the thin-plate kernel); float64 host arithmetic, any other kernel matrix has max|Phi_ss| far above it
+src/maddening/core/coupling/mapping.py rbf_mapping 1e-8  # dimensionless: ridge, a fraction of max|Phi_ss|
+
+# --- graph manager -----------------------------------------------------------
+src/maddening/core/graph_manager.py <module> 1e-9  # dimensionless: _SUBCYCLING_RATIO_RTOL, a fraction of macro_dt / node_dt
+src/maddening/core/graph_manager.py _ift_linear_solve 1e-6  # dimensionless: the Krylov rtol, relative to the framed right-hand side
+src/maddening/core/graph_manager.py _ift_linear_solve finfo.eps  # dimensionless: rtol is held no tighter than 100 ulps of the dtype
+src/maddening/core/graph_manager.py GraphManager.add_coupling_group 1e-6  # dimensionless: tolerance, compared with a relative norm
+src/maddening/core/graph_manager.py GraphManager._make_coupling_group 1e-6  # dimensionless: tolerance, compared with a relative norm
+src/maddening/core/graph_manager.py GraphManager.auto_couple 1e-6  # dimensionless: tolerance, compared with a relative norm
+src/maddening/core/graph_manager.py GraphManager.run_adaptive 1e-6  # state units: atol, the caller's absolute error floor (scipy solve_ivp's default); absolute by design, registered as MADD-ANO-122
+src/maddening/core/graph_manager.py GraphManager.run_adaptive 1e-3  # dimensionless: rtol, a fraction of max(|fine|, |coarse|)
+src/maddening/core/graph_manager.py GraphManager.run_adaptive 1e-8  # seconds: dt_min, the caller's timestep floor; absolute by design, registered as MADD-ANO-122
+src/maddening/core/graph_manager.py GraphManager.run_adaptive_scan 1e-6  # state units: atol, as run_adaptive; registered as MADD-ANO-122
+src/maddening/core/graph_manager.py GraphManager.run_adaptive_scan 1e-3  # dimensionless: rtol, a fraction of max(|fine|, |coarse|)
+src/maddening/core/graph_manager.py GraphManager.run_adaptive_scan 1e-8  # seconds: dt_min, as run_adaptive; registered as MADD-ANO-122
+
+# --- parameters, simulation helpers ------------------------------------------
+src/maddening/core/params.py ParamSpec._log_floor finfo.tiny  # dtype range: the smallest positive normal exp(u) may take when the bound is exactly zero; a nonzero bound uses 2 ulps of itself instead
+src/maddening/core/params.py ParamSpec._optimiser_interval.inward 1e-6  # dimensionless: u is an unconstrained log/logit coordinate, and this is a fraction of max(1, |u|)
+src/maddening/core/simulation/adaptive.py AdaptiveConfig 1e-6  # state units: atol, as GraphManager.run_adaptive; registered as MADD-ANO-122
+src/maddening/core/simulation/adaptive.py AdaptiveConfig 1e-3  # dimensionless: rtol, a fraction of max(|fine|, |coarse|)
+src/maddening/core/simulation/adaptive.py AdaptiveConfig 1e-8  # seconds: dt_min, as GraphManager.run_adaptive; registered as MADD-ANO-122
+src/maddening/core/simulation/adaptive.py step_decision 1e-10  # dimensionless: error_norm is already divided by atol + rtol|x|; the floor only keeps a zero error's growth factor finite, and the clip makes it max_factor
+src/maddening/core/simulation/calibration.py tune_coupling_params 1e-3  # units of state_metric's output: an absolute accuracy threshold on a deprecated API (removed in 0.5.0); registered as MADD-ANO-123
+src/maddening/core/simulation/calibration.py calibrate 1e-6  # loss units: an absolute stopping threshold on a deprecated API (removed in 0.5.0); registered as MADD-ANO-123
+src/maddening/core/simulation/implicit.py implicit_euler_step.newton_step 1e-10  # dimensionless: the residual contract R = x_new - x_old - dt f makes dR/dx = I - dt df/dx, and this is 1e-10 of its identity term
+src/maddening/core/simulation/profiler.py ProfileReport.__str__ 1e-10  # milliseconds, display only: keeps a printed percentage finite for a zero mean step time
+src/maddening/core/solver_utils.py ift_linear_solve 1e-6  # dimensionless: rtol, relative to the framed right-hand side
+
+# --- system identification -----------------------------------------------------
+src/maddening/sysid.py fit 1e-8  # dimensionless: Adam's eps, relative to the run's first gradient (_adam_frame)
+src/maddening/sysid.py fit_lm 1e-12  # dimensionless: a floor on the Marquardt damping lambda, which multiplies diag(J^T J)
+src/maddening/sysid.py fit_multiple_shooting 1e-8  # dimensionless: Adam's eps, relative to each block's first gradient (_adam_frame)

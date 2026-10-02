@@ -84,8 +84,8 @@ import re
 import sys
 import tokenize
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 #: Scanned relative to the repository root.  The numerical core, the
 #: system-identification solvers, and the sharded solvers.
@@ -114,8 +114,7 @@ _ENTRY = re.compile(
 )
 
 
-@dataclass(frozen=True)
-class Hit:
+class Hit(NamedTuple):
     path: str
     line: int
     qualname: str
@@ -230,7 +229,10 @@ class _Scanner(ast.NodeVisitor):
     def _is_finfo_val(self, node: ast.AST) -> bool:
         """A dtype constant: ``finfo(d).tiny``, a name bound to one, or one scaled."""
         if isinstance(node, ast.Attribute) and node.attr in FINFO_ATTRS:
-            return self._is_finfo_obj(node.value)
+            # Any ``x.tiny`` / ``x.eps``: the object is usually a ``finfo``
+            # passed in or stored (``fi.tiny``, ``self.eps``), which the scan
+            # cannot resolve, and failing closed costs one justification.
+            return True
         if isinstance(node, ast.Name):
             return self._bound(self.finfo_vals, node.id)
         if isinstance(node, ast.Call) and node.args and _call_name(node.func) in (

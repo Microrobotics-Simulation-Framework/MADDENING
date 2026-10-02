@@ -12,8 +12,11 @@ through the solve and the group hit its cap unconverged where it converged
 in 88 passes at ``s = 1``; IQN's blow-up guard had an absolute floor and its
 least-squares solve was rescaled by LAPACK at extreme scales.
 
-**The scales are powers of two** (``2**-20``, ``2**-40``, ``2**20`` stand in
-for ``1e-6``, ``1e-12``, ``1e6``).  Multiplying a float32 by a power of two is
+**The scales are powers of two** (``2**-20``, ``2**-40``, ``2**-53``,
+``2**20`` and ``2**66`` stand in for ``1e-6``, ``1e-12``, ``1e-16``, ``1e6``
+and ``7e19``; at the last two a float32 residual change squared underflows
+to zero or overflows, which no constant guard can survive and the exact
+power-of-two rescaling does).  Multiplying a float32 by a power of two is
 exact, so the scaled group's inputs are the unscaled ones' bit patterns with
 another exponent, and a units-invariant pipeline reproduces *every* bit:
 the pass count, the verdict, the residual, and the state divided by ``s``.
@@ -43,8 +46,9 @@ from hypothesis import strategies as st
 from tests.conftest import EXAMPLES_COSTLY
 from tests.property import coupled_graphs as cg
 
-#: Powers of two standing in for 1e-6, 1e-12 and 1e6 (see the module docstring).
-SCALES = (2.0 ** -20, 2.0 ** -40, 2.0 ** 20)
+#: Powers of two standing in for 1e-6, 1e-12, 1e-16, 1e6 and 7e19 (see the
+#: module docstring).
+SCALES = (2.0 ** -20, 2.0 ** -40, 2.0 ** -53, 2.0 ** 20, 2.0 ** 66)
 STEPS = 2
 
 

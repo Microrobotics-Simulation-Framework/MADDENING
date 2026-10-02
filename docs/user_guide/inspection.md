@@ -295,7 +295,9 @@ notes:
 
 This counts **state memory only**: it is a floor on what a run needs, not
 an estimate of it.  For a sharded node, `per_device_bytes` is one shard
-and `devices` the number of devices it is spread over.
+and `devices` the number of devices it is spread over;
+`python -m maddening.examples.advanced.sharding_demo` shows it, and the
+wrapper in `print_graph()`, on four emulated CPU devices.
 
 ### Coupling convergence
 
@@ -336,7 +338,10 @@ notes:
 ```
 
 (the counts and residuals are the solver's, so they can differ in the last
-digits between JAX versions).  `diagnostics=True` on a `solver="ift"`
+digits between JAX versions).  Part 5 of
+`python -m maddening.examples.coupling.convergence_diagnostics_demo`
+prints the report for a converged group and a capped one, and shows
+`strict_convergence=True` raising instead of reporting.  `diagnostics=True` on a `solver="ift"`
 group fills `rho_spectral` and `spectral_error_bound`.
 
 ## Graphs that are not ready

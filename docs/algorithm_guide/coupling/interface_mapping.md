@@ -308,6 +308,13 @@ rebuilding a different operator:
 A hand-written reference may omit `sha256`; then nothing is checked and
 the hash is recorded on the first rebuild.
 
+`python -m maddening.examples.coupling.interface_mapping_demo` builds a
+mapped edge between an 8-cell and a 24-cell rod from node references,
+saves it with `to_dict()`, reloads it with `from_dict()` (the rebuilt
+`H` is bitwise equal and the two graphs step identically), and shows the
+MADD-ANO-063 refusal of a `length` write that would move the mapped
+points.
+
 ### Weights: config vs checkpoint
 
 The config carries the recipe; a checkpoint (`save_state`) carries the

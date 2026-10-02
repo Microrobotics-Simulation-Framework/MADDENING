@@ -38,6 +38,13 @@ bridge = FmuTcpBridge(sidecar, md, master_dt=gm.timestep, port=5555).start()
 write_fmu(md, "plant.fmu", binary=binary, endpoint=bridge.endpoint)
 ```
 
+`python -m maddening.examples.advanced.fmu_export_demo` runs the
+build-and-check half of this without a TCP port: the description (with
+the parameters it leaves fixed, and why), the binary and the package in
+a temporary directory, FMPy's `validate_fmu`, and the sidecar driven
+in-process against `run_scan(params=...)`.  It skips the stages whose C
+compiler or FMPy is missing, saying so.
+
 The importer then loads `plant.fmu` as usual; the wrapper reads
 `resources/endpoint.txt` (or `MADDENING_FMU_ENDPOINT`) and connects.  A
 communication step of `h` runs `round(h / master_dt)` graph steps.  Pass

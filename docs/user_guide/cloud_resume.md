@@ -252,6 +252,13 @@ the graph topology, `load_state` raises a `ValueError` listing the
 nodes/fields that don't match — better than silently broadcasting
 garbage.
 
+`python -m maddening.examples.advanced.checkpoint_resume_demo` shows
+the local half of this on one machine: a coupled run saved with
+`save_state`, resumed with `load_state` in a freshly built graph and
+continued bitwise identically -- the coupling group's `_meta` warm
+starts and a calibrated parameter included -- next to a restart from
+the node states alone, which is not the same run.
+
 ## Test coverage and what's deferred
 
 The file:// path is fully unit-covered in

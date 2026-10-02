@@ -30,6 +30,11 @@ Usage:
 
 To profile your own graph, swap ``_build_graph`` for it; the profiler
 does not depend on the graph's shape.
+
+See also ``profiling_demo.py``, which profiles a *coupled* graph and
+reads the rest of the report: the measured coupling overhead and cost per
+iteration, the deterministic compile counts, and the ``trace=True``
+summary.
 """
 
 from __future__ import annotations

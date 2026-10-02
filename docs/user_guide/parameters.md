@@ -191,6 +191,11 @@ constructor, and `GraphManager.from_dict` refuses (`ValueError`) one that
 would not fit in the machine's memory.  A node class without an estimate
 is checked on the state it builds, as before.
 
+`python -m maddening.examples.servers.rest_params_demo` walks through
+these answers in-process (FastAPI's `TestClient`, no port): a write
+honoured on the next step without a recompile, a bound and a
+constructor refusal, and an initial condition applied at reset.
+
 Before 0.4.0 such a write answered 200, was served by `GET`, was ignored by
 every step (even after `POST /graph/compile`) and was saved by `to_dict()`
 and `save_state()`, so the reloaded graph ran a different model.  The check
@@ -291,6 +296,14 @@ obs = observations_from_history(init, hist)          # T = 1001 samples
 loss = lambda p: windowed_loss(
     gm, p, obs, obs_fn=lambda h: h["spring"]["position"], window=50)
 ```
+
+`python -m maddening.examples.advanced.sysid_demo` runs this section end
+to end on a spring recorded with noise: the FIM's rank-2-of-3 verdict
+for `(k, c, m)`, `fit` holding the undetermined scale (`excited_rank`,
+`hold_declined`), `fit_lm` recovering `k` and `c` after a `ParamSpec`
+freeze and under a `mask=`, `params_table()` before and after, and the
+Cramér–Rao bounds the fit lands within.  Its residual is a `run_sweep`
+rollout, which does not advance the graph.
 
 Record data that can tell the parameters apart.  `run_scan` leaves the
 graph at its final state, and the 1000 steps run above left the spring
@@ -599,7 +612,8 @@ linearises, it never steps a parameter.)
 ## Persistence and FMI
 
 * **Checkpoints** (`save_state` / `load_state`) store `gm.params`
-  alongside the state, so a calibrated graph resumes calibrated.
+  alongside the state, so a calibrated graph resumes calibrated
+  (`python -m maddening.examples.advanced.checkpoint_resume_demo`).
 * **Graph serialisation** (`gm.to_dict()`, `maddening.serialization.config`,
   `save_graph_to_usd`) writes each node's *effective* params — the
   constructor arguments with the live `gm.params` values written over
@@ -680,6 +694,11 @@ the mapping kept the old points, and the saved config would not load. Until
 `to_dict()` wrote a config whose mapping `from_dict()` refused to rebuild.
 So the result of a fit through the mapped edge cannot be written back; the
 fit itself is not refused.
+
+`python -m maddening.examples.coupling.interface_mapping_demo` shows the
+refusal at the next run and at `to_dict()`, the state left untouched,
+and the supported alternative: rebuilding the node and the mapped edge
+from the new points.
 
 What you would see, measured on an 8-cell rod calibrated from `length`
 1.0 to 1.25 and mapped onto a 16-cell rod:

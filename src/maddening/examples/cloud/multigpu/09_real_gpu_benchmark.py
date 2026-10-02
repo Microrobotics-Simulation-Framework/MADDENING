@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Benchmark multi-GPU vs single-GPU Jacobi coupling on real hardware.
 
-Provisions a 2xA100-80GB instance on RunPod, runs coupled simulations
+Provisions a 2x RTX 4090 instance on RunPod, runs coupled simulations
 with varying node state sizes, measures the crossover point where
 multi-GPU device placement starts to pay off.
 
 JIT warmup is accounted for: 10 warmup steps before timing.
 
 Usage:
-    python 09_real_gpu_benchmark.py
-    python 09_real_gpu_benchmark.py --keep
+    python -m maddening.examples.cloud.multigpu.09_real_gpu_benchmark
+    python -m maddening.examples.cloud.multigpu.09_real_gpu_benchmark --keep
 """
 
 import argparse

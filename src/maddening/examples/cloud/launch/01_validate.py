@@ -5,9 +5,15 @@ Parses the job config and credentials, resolves the GPU type to an
 instance type, checks cost guards, and prints the result.
 
 Usage:
-    python 01_validate.py
-    python 01_validate.py --job job_config.example.yaml
-    python 01_validate.py --creds ~/.maddening/cloud_credentials.yaml
+    python -m maddening.examples.cloud.launch.01_validate
+    python -m maddening.examples.cloud.launch.01_validate --job job_config.example.yaml
+    python -m maddening.examples.cloud.launch.01_validate --creds ~/.maddening/cloud_credentials.yaml
+
+``--job`` defaults to ``job_config.example.yaml`` in the current
+directory.  The template ships with MADDENING; print the directory that
+holds it (and the credentials template) with::
+
+    python -c "import maddening.examples.cloud.config as c; print(c.__path__[0])"
 """
 
 import argparse

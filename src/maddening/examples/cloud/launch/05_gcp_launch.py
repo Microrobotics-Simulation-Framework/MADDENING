@@ -5,8 +5,8 @@ Uses the v0.2 #7 ``GCPProvider`` to materialise credentials in
 ``~/.config/gcloud/application_default_credentials.json``.
 
 Usage:
-    python 05_gcp_launch.py
-    python 05_gcp_launch.py --job job_config.example.yaml --dry-run
+    python -m maddening.examples.cloud.launch.05_gcp_launch
+    python -m maddening.examples.cloud.launch.05_gcp_launch --job job_config.example.yaml --dry-run
 
 Credentials YAML structure expected
 (``~/.maddening/cloud_credentials.yaml``).  Provide ONE of:
@@ -32,6 +32,12 @@ Credentials YAML structure expected
 Requires:
     - pip install "skypilot[gcp]"
     - A GCP project with Compute Engine enabled.
+
+``--job`` defaults to ``job_config.example.yaml`` in the current
+directory.  The template ships with MADDENING; print the directory that
+holds it (and the credentials template) with::
+
+    python -c "import maddening.examples.cloud.config as c; print(c.__path__[0])"
 """
 
 import argparse

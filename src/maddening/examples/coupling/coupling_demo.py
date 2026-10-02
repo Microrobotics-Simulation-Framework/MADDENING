@@ -6,16 +6,27 @@ Demonstrates the difference between *staggered* coupling (default for
 cycles -- back-edges read previous timestep) and *Gauss-Seidel*
 coupling via ``add_coupling_group()`` / ``auto_couple()``.
 
-Setup: two spring-dampers connected in a loop -- each spring's anchor
-is the other spring's position.  This creates a bidirectional coupling
-(cycle in the graph).
+Setup: two masses joined by one spring, modelled as two
+``SpringDamperNode`` nodes whose anchors are each other's position.  This
+creates a bidirectional coupling (a cycle in the graph).
+
+``SpringDamperNode`` pulls its end towards ``anchor + rest_length``, so
+for the pair to be *one* spring the two rest lengths are equal and
+opposite: A sits 2 m above B at rest (``rest_length=+2``) and B sits 2 m
+below A (``rest_length=-2``).  The forces are then equal and opposite,
+the centre of mass stays at its initial 2.5 m, and the damped pair
+settles at A = 3.5, B = 1.5 -- which the demo checks for the coupled
+runs.  The staggered run settles at the right separation but displaced,
+because its one-step lag breaks the action-reaction pairing.  (With both rest
+lengths +2 each end chases a point 2 m above the other and the pair
+climbs for ever: there is no equilibrium to settle to.)
 
 - **Staggered**: each spring sees the other's *previous-step* position
   as its anchor.  This introduces a one-step lag.
 - **Gauss-Seidel**: within each timestep, the group is iterated until
   the positions converge, giving self-consistent results.
 
-The demo compares the trajectories from both approaches.
+The demo compares the trajectories and end states of both approaches.
 
 Usage
 -----
@@ -61,7 +72,7 @@ def build_coupled_springs(use_coupling=False, use_auto=False):
         stiffness=10.0,
         damping=5.0,
         mass=1.0,
-        rest_length=2.0,
+        rest_length=-2.0,  # B rests 2 m *below* A: one spring, two ends
         initial_position=5.0,
         initial_velocity=0.0,
     )
@@ -117,7 +128,7 @@ def main() -> None:
     print("Coupling Demo: Two Bidirectionally-Coupled Springs")
     print("=" * 60)
     print(f"  Spring A: initial pos = 0.0, k=10, c=5, m=1, rest=2.0")
-    print(f"  Spring B: initial pos = 5.0, k=10, c=5, m=1, rest=2.0")
+    print(f"  Spring B: initial pos = 5.0, k=10, c=5, m=1, rest=-2.0")
     print(f"  Timestep: {dt}, Steps: {n_steps}, Total time: {total_time:.1f}s")
     print(f"  Coupling: A.position -> B.anchor, B.position -> A.anchor")
     print()
@@ -178,27 +189,50 @@ def main() -> None:
     )
     print(f"Check: manual and auto Gauss-Seidel agree (diff A={diff_a:.2e}, B={diff_b:.2e}).")
 
-    # 2. With damping, both springs should settle to a finite equilibrium.
-    #    The midpoint of initial positions is 2.5; the equilibrium depends
-    #    on rest lengths and force law but should be nearby.
-    midpoint = (0.0 + 5.0) / 2.0
-    assert abs(final_a_gs) < 50.0, f"Spring A diverged: {final_a_gs}"
-    assert abs(final_b_gs) < 50.0, f"Spring B diverged: {final_b_gs}"
-    print(f"Check: springs settled to finite values -- "
-          f"A={final_a_gs:.4f}, B={final_b_gs:.4f}.")
+    # 2. The pair is one spring between two equal masses with equal
+    #    damping, so with the forces applied at the same time level the
+    #    centre of mass stays where it started (2.5) and the spring comes
+    #    to rest at its natural length (A - B = 2): A = 3.5, B = 1.5.
+    #    Five seconds is about twelve decay times of the relative mode.
+    eq_a, eq_b = 3.5, 1.5
+    assert abs(final_a_gs - eq_a) < 1e-4 and abs(final_b_gs - eq_b) < 1e-4, (
+        f"Gauss-Seidel did not settle at A={eq_a}, B={eq_b}: "
+        f"A={final_a_gs:.6f}, B={final_b_gs:.6f}"
+    )
+    print(f"Check: Gauss-Seidel settled at the analytic equilibrium "
+          f"A={eq_a}, B={eq_b} (A={final_a_gs:.6f}, B={final_b_gs:.6f}).")
 
-    # 3. Springs should be close to each other (damping brings them together)
-    separation = abs(final_a_gs - final_b_gs)
-    print(f"Check: final separation = {separation:.4f} (started at 5.0).")
+    #    Staggering applies each end's force one step late, so the pair's
+    #    forces are not equal and opposite at the same instant and the
+    #    centre of mass drifts while the spring rings down.  It settles
+    #    at the right separation, displaced.
+    com_gs = 0.5 * (final_a_gs + final_b_gs)
+    com_stag = 0.5 * (final_a_stag + final_b_stag)
+    drift_gs = abs(com_gs - 2.5)
+    drift_stag = abs(com_stag - 2.5)
+    assert drift_stag > 10 * drift_gs, (
+        f"expected the staggered run's centre of mass to drift more than "
+        f"the coupled run's: {drift_stag:.2e} vs {drift_gs:.2e}"
+    )
+    print(f"Check: centre-of-mass drift -- staggered {drift_stag:.2e} m, "
+          f"Gauss-Seidel {drift_gs:.2e} m (the lag breaks the action-"
+          f"reaction pairing; iterating restores it).")
 
-    # 4. Staggered and coupled should give different results
-    # (demonstrating that coupling matters)
-    stag_gs_diff_a = abs(final_a_stag - final_a_gs)
-    stag_gs_diff_b = abs(final_b_stag - final_b_gs)
-    max_diff = max(stag_gs_diff_a, stag_gs_diff_b)
-    # With dt=0.001 and stiff springs, the difference may be small but nonzero.
-    print(f"Check: staggered vs coupled difference = {max_diff:.2e} "
-          f"(A: {stag_gs_diff_a:.2e}, B: {stag_gs_diff_b:.2e}).")
+    # 3. The spring is back at its natural length.
+    separation = final_a_gs - final_b_gs
+    print(f"Check: final separation = {separation:.4f} (rest length 2.0, "
+          f"started at -5.0).")
+
+    # 4. Along the way the two schemes differ: staggering lags each
+    #    spring's view of the other by one step.  Both end at the same
+    #    equilibrium, so compare the trajectories, not the end points.
+    traj_diff = max(
+        max(abs(a - b) for a, b in zip(pos_a_stag, pos_a_gs)),
+        max(abs(a - b) for a, b in zip(pos_b_stag, pos_b_gs)),
+    )
+    assert traj_diff > 0.0, "staggered and coupled trajectories are identical"
+    print(f"Check: largest staggered-vs-coupled trajectory difference = "
+          f"{traj_diff:.2e} (the one-step lag).")
 
     print("\nAll checks passed.")
 

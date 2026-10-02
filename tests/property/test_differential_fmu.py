@@ -147,10 +147,14 @@ def _coupled():
 def _held():
     """An input the FMU does not export, read by a node whose "input
     missing" branch differs from zero: a ball's ``table_position``.  The
-    graph zero-fills it (the ball bounces on a table at height 0); a path
-    that leaves it out lets the ball fall through the floor."""
+    graph zero-fills it (the ball rests on a table at height 0); a path
+    that leaves it out lets the ball fall through the floor.  The ball
+    starts *on* the table, so the two differ from the first step: a ball
+    dropped from any height would not reach the table within a generated
+    sequence, and the oracle could not tell the paths apart (a mutant
+    that left the held input out survived until it did)."""
     gm = GraphManager()
-    gm.add_node(BallNode("ball", 0.01, initial_position=1.2, elasticity=0.7))
+    gm.add_node(BallNode("ball", 0.01, initial_position=0.0, elasticity=0.7))
     gm.add_node(SpringDamperNode("spring", 0.01, stiffness=30.0, damping=2.0,
                                  rest_length=0.4, initial_position=0.5))
     gm.add_external_input("ball", "table_position")

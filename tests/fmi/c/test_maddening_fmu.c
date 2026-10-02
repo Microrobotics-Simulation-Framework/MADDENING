@@ -243,6 +243,15 @@ static void test_parse_values_non_finite(void) {
     in->resp = strdup("{\"ok\":true,\"values\":[\"1e5xyz\"]}");
     CHECK(parse_values(in, out, 1) == fmi3Error);
     free(in->resp);
+    /* ... and one junk character before the list closes: only the
+     * closing-quote check refuses this ("1e5xyz" is refused again by the
+     * check that the list ends after n values, so it alone could not tell
+     * whether the closing-quote check exists) */
+    g_log_calls = 0;
+    in->resp = strdup("{\"ok\":true,\"values\":[\"1e5x]}");
+    CHECK(parse_values(in, out, 1) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "malformed quoted number") != NULL);
+    free(in->resp);
 
     /* a bare quote with nothing parseable after it is still malformed */
     in->resp = strdup("{\"ok\":true,\"values\":[\"\"]}");
@@ -396,16 +405,20 @@ static void test_get_set_step(void) {
     WITH_SERVER("{\"ok\":true}", 0, {
         CHECK(fmi3SetFloat64((fmi3Instance)in, vr, 3, v64, 3) == fmi3OK);
     });
-    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"vr\":[7,9,11],\"values\":[1.5,-2,1.0000000000000001e-09]}") == 0);
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Float64\",\"vr\":[7,9,11],\"values\":[1.5,-2,1.0000000000000001e-09]}") == 0);
     fmi3Int32 vi[2] = { -5, 7 };
     WITH_SERVER("{\"ok\":true}", 0, {
         CHECK(fmi3SetInt32((fmi3Instance)in, vr, 2, vi, 2) == fmi3OK);
     });
-    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"vr\":[7,9],\"values\":[-5,7]}") == 0);
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Int32\",\"vr\":[7,9],\"values\":[-5,7]}") == 0);
     fmi3Boolean vb[1] = { fmi3True };
     WITH_SERVER("{\"ok\":true}", 0, {
         CHECK(fmi3SetBoolean((fmi3Instance)in, vr, 1, vb, 1) == fmi3OK);
     });
+    /* every request names the type of the function called, so the bridge
+     * can refuse fmi3SetBoolean on a Float32 variable (it used to arrive
+     * as a bare 1.0 and be stored) */
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Boolean\",\"vr\":[7],\"values\":[1]}") == 0);
     /* NaN / inf never leave the process */
     fmi3Float32 bad[1] = { NAN };
     Instance *dead = fake_instance(SOCK_INVALID);
@@ -423,7 +436,7 @@ static void test_get_set_step(void) {
         CHECK(fmi3GetFloat32((fmi3Instance)in, vr, 2, g32, 2) == fmi3OK);
         CHECK(g32[0] == 2.5f && g32[1] == -1.0f);
     });
-    CHECK(strcmp(g_seen, "{\"op\":\"get\",\"vr\":[7,9]}") == 0);
+    CHECK(strcmp(g_seen, "{\"op\":\"get\",\"type\":\"Float32\",\"vr\":[7,9]}") == 0);
     WITH_SERVER("{\"ok\":true,\"values\":[200,255]}", 0, {
         CHECK(fmi3GetUInt8((fmi3Instance)in, vr, 2, g8, 2) == fmi3OK && g8[0] == 200 && g8[1] == 255);
     });
@@ -508,7 +521,7 @@ static void test_binary_get_set(void) {
         CHECK(g64[0] == 2.5 && g64[1] == -1e-300);
         CHECK(in->resp_binary && in->raw_len == 16 && strcmp(in->hdr, "{\"ok\":true,\"n\":2,\"dtype\":\"f64\"}") == 0);
     });
-    CHECK(g_seen_flag == 0 && strcmp(g_seen, "{\"op\":\"get\",\"vr\":[7,9]}") == 0);  /* get stays JSON */
+    CHECK(g_seen_flag == 0 && strcmp(g_seen, "{\"op\":\"get\",\"type\":\"Float64\",\"vr\":[7,9]}") == 0);  /* get stays JSON */
     /* narrower widths are widened from the same float64 wire form */
     fmi3Float32 g32[2];
     WITH_BINARY_SERVER((const char *)frame, n, {
@@ -668,7 +681,7 @@ static void test_binary_get_set(void) {
     });
     CHECK(g_seen_flag == 1);
     {
-        const char *hdr = "{\"op\":\"set\",\"vr\":[7,9,11],\"n\":3,\"dtype\":\"f64\"}";
+        const char *hdr = "{\"op\":\"set\",\"type\":\"Float64\",\"vr\":[7,9,11],\"n\":3,\"dtype\":\"f64\"}";
         size_t hl = strlen(hdr);
         CHECK(g_seen_len == 4 + hl + 24);
         CHECK(get_be32((const unsigned char *)g_seen) == hl);
@@ -682,7 +695,7 @@ static void test_binary_get_set(void) {
         in->binary = 1;
         CHECK(fmi3SetInt32((fmi3Instance)in, vr, 2, vi, 2) == fmi3OK);
     });
-    CHECK(g_seen_flag == 1 && g_seen_len == 4 + strlen("{\"op\":\"set\",\"vr\":[7,9],\"n\":2,\"dtype\":\"f64\"}") + 16);
+    CHECK(g_seen_flag == 1 && g_seen_len == 4 + strlen("{\"op\":\"set\",\"type\":\"Int32\",\"vr\":[7,9],\"n\":2,\"dtype\":\"f64\"}") + 16);
     /* non-finite values never leave the process on the binary path either */
     fmi3Float64 bad[2] = { 1.0, INFINITY };
     Instance *dead = fake_instance(SOCK_INVALID);
@@ -692,7 +705,7 @@ static void test_binary_get_set(void) {
     CHECK(g_log_calls == 1 && strstr(g_last_log, "non-finite") != NULL);
     /* a set larger than the frame limit is refused before any buffer grows
      * (and before any value is read: the count alone decides) */
-    CHECK(do_set(dead, vr, 1, v64, (size_t)FRAME_MAX / 8 + 1) == fmi3Error);
+    CHECK(do_set(dead, "Float64", vr, 1, v64, (size_t)FRAME_MAX / 8 + 1) == fmi3Error);
     CHECK(dead->req_cap == 0 && strstr(g_last_log, "frame limit") != NULL);
     free_instance(dead);
     /* endianness helpers round-trip on this host */
@@ -826,7 +839,7 @@ static void test_max_set_frame_fits_the_bridge_limit(void) {
     char hdr[128];
     size_t n = FRAME_MAX / 8, hl = 0;
     for (;;) {
-        hl = (size_t)snprintf(hdr, sizeof hdr, "{\"op\":\"set\",\"vr\":[%u],\"n\":%lu,\"dtype\":\"f64\"}",
+        hl = (size_t)snprintf(hdr, sizeof hdr, "{\"op\":\"set\",\"type\":\"Float64\",\"vr\":[%u],\"n\":%lu,\"dtype\":\"f64\"}",
                               (unsigned)vr[0], (unsigned long)n);
         if (4 + hl + 8 * n <= FRAME_MAX) break;
         --n;
@@ -835,25 +848,25 @@ static void test_max_set_frame_fits_the_bridge_limit(void) {
     double *vals = (double *)calloc(n + 1, sizeof(double));
     WITH_SERVER("{\"ok\":true}", 0, {
         in->binary = 1;
-        CHECK(do_set(in, vr, 1, vals, n) == fmi3OK);
+        CHECK(do_set(in, "Float64", vr, 1, vals, n) == fmi3OK);
     });
     CHECK(g_seen_flag == 1 && g_seen_len == 4 + hl + 8 * n && g_seen_len <= FRAME_MAX);
     CHECK(get_be32((const unsigned char *)g_seen) == hl && memcmp(g_seen + 4, hdr, hl) == 0);
     Instance *dead = fake_instance(SOCK_INVALID);
     dead->binary = 1;
     g_log_calls = 0;
-    CHECK(do_set(dead, vr, 1, vals, n + 1) == fmi3Error);
+    CHECK(do_set(dead, "Float64", vr, 1, vals, n + 1) == fmi3Error);
     CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);   /* refused, not "closed" */
     /* the header counts: twenty 10-digit value references push the same
      * payload over the limit even with a few values fewer */
     g_log_calls = 0;
-    CHECK(do_set(dead, vr, 20, vals, n - 10) == fmi3Error);
+    CHECK(do_set(dead, "Float64", vr, 20, vals, n - 10) == fmi3Error);
     CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
     /* and an absurd count or vr list is refused before any buffer grows */
     Instance *fresh = fake_instance(SOCK_INVALID);
     fresh->binary = 1;
-    CHECK(do_set(fresh, vr, 1, vals, (size_t)FRAME_MAX / 8 + 1) == fmi3Error && fresh->req_cap == 0);
-    CHECK(do_set(fresh, vr, (size_t)FRAME_MAX, vals, 1) == fmi3Error && fresh->req_cap == 0);
+    CHECK(do_set(fresh, "Float64", vr, 1, vals, (size_t)FRAME_MAX / 8 + 1) == fmi3Error && fresh->req_cap == 0);
+    CHECK(do_set(fresh, "Float64", vr, (size_t)FRAME_MAX, vals, 1) == fmi3Error && fresh->req_cap == 0);
     free_instance(fresh);
     free_instance(dead);
     free(vals);
@@ -872,10 +885,225 @@ static void test_get_request_respects_the_frame_limit(void) {
     double out[1];
     Instance *fresh = fake_instance(SOCK_INVALID);
     g_log_calls = 0;
-    CHECK(do_get(fresh, vr, (size_t)FRAME_MAX / 2 + 1, out, 1) == fmi3Error);
+    CHECK(do_get(fresh, "Float64", vr, (size_t)FRAME_MAX / 2 + 1, out, 1) == fmi3Error);
     CHECK(fresh->req_cap == 0);                    /* refused before any buffer grew */
     CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL);
     free_instance(fresh);
+}
+
+
+/* ------------------------------------- typed access: values a type holds */
+
+static void test_getters_refuse_values_their_type_cannot_hold(void) {
+    /* The bridge refuses a variable of another type (the request names
+     * it); the wrapper still checks every reply value before converting
+     * it, because (CTYPE)NaN, (int32)1e10 and friends are undefined
+     * behaviour and (int32)0.5 is a silent 0.  values[] is untouched on a
+     * refusal. */
+    fmi3ValueReference vr[2] = { 7, 9 };
+    fmi3Int32 i32[2] = { 42, 42 };
+    const char *bad_i32[] = { "[0.5,1]", "[1,\"NaN\"]", "[2147483648,0]", "[-2147483649,0]",
+                              "[1,\"Infinity\"]" };
+    for (size_t k = 0; k < sizeof bad_i32 / sizeof *bad_i32; ++k) {
+        char reply[96]; snprintf(reply, sizeof reply, "{\"ok\":true,\"values\":%s}", bad_i32[k]);
+        g_log_calls = 0;
+        WITH_SERVER(reply, 0, {
+            CHECK(fmi3GetInt32((fmi3Instance)in, vr, 2, i32, 2) == fmi3Error);
+            CHECK(in->sock != SOCK_INVALID);          /* a refused value, not a broken stream */
+        });
+        CHECK(i32[0] == 42 && i32[1] == 42);
+        CHECK(g_log_calls == 1 && strstr(g_last_log, "not a value of type Int32") != NULL);
+    }
+    CHECK(strcmp(g_seen, "{\"op\":\"get\",\"type\":\"Int32\",\"vr\":[7,9]}") == 0);
+    WITH_SERVER("{\"ok\":true,\"values\":[-2147483648,2147483647]}", 0, {
+        CHECK(fmi3GetInt32((fmi3Instance)in, vr, 2, i32, 2) == fmi3OK);
+    });
+    CHECK(i32[0] == INT32_MIN && i32[1] == INT32_MAX);
+    fmi3UInt8 u8[1] = { 7 };
+    WITH_SERVER("{\"ok\":true,\"values\":[256]}", 0, {
+        CHECK(fmi3GetUInt8((fmi3Instance)in, vr, 1, u8, 1) == fmi3Error);
+    });
+    WITH_SERVER("{\"ok\":true,\"values\":[-1]}", 0, {
+        CHECK(fmi3GetUInt8((fmi3Instance)in, vr, 1, u8, 1) == fmi3Error);
+    });
+    CHECK(u8[0] == 7);
+    fmi3UInt64 u64[1] = { 7 };
+    WITH_SERVER("{\"ok\":true,\"values\":[18446744073709551616]}", 0, {   /* 2^64 */
+        CHECK(fmi3GetUInt64((fmi3Instance)in, vr, 1, u64, 1) == fmi3Error);
+    });
+    WITH_SERVER("{\"ok\":true,\"values\":[18446744073709549568]}", 0, {   /* largest double < 2^64 */
+        CHECK(fmi3GetUInt64((fmi3Instance)in, vr, 1, u64, 1) == fmi3OK);
+    });
+    CHECK(u64[0] == 18446744073709549568ull);
+    fmi3Int64 i64[1] = { 7 };
+    WITH_SERVER("{\"ok\":true,\"values\":[9223372036854775808]}", 0, {    /* 2^63 */
+        CHECK(fmi3GetInt64((fmi3Instance)in, vr, 1, i64, 1) == fmi3Error);
+    });
+    WITH_SERVER("{\"ok\":true,\"values\":[-9223372036854775808]}", 0, {
+        CHECK(fmi3GetInt64((fmi3Instance)in, vr, 1, i64, 1) == fmi3OK);
+    });
+    CHECK(i64[0] == INT64_MIN);
+    fmi3Boolean b[1] = { fmi3False };
+    const char *bad_bool[] = { "[0.5]", "[2]", "[-1]", "[\"NaN\"]" };
+    for (size_t k = 0; k < sizeof bad_bool / sizeof *bad_bool; ++k) {
+        char reply[96]; snprintf(reply, sizeof reply, "{\"ok\":true,\"values\":%s}", bad_bool[k]);
+        WITH_SERVER(reply, 0, {
+            CHECK(fmi3GetBoolean((fmi3Instance)in, vr, 1, b, 1) == fmi3Error);
+        });
+        CHECK(b[0] == fmi3False);
+    }
+    CHECK(strstr(g_last_log, "not a value of type Boolean") != NULL);
+    /* Float32: a finite value beyond FLT_MAX is refused (converting it is
+     * undefined); a non-finite one is a value the type holds */
+    fmi3Float32 f32[1] = { 1.0f };
+    WITH_SERVER("{\"ok\":true,\"values\":[1e300]}", 0, {
+        CHECK(fmi3GetFloat32((fmi3Instance)in, vr, 1, f32, 1) == fmi3Error);
+    });
+    CHECK(f32[0] == 1.0f);
+    WITH_SERVER("{\"ok\":true,\"values\":[\"NaN\"]}", 0, {
+        CHECK(fmi3GetFloat32((fmi3Instance)in, vr, 1, f32, 1) == fmi3OK);
+    });
+    CHECK(isnan(f32[0]));
+    /* Float64 takes anything a double is */
+    fmi3Float64 f64[1] = { 0 };
+    WITH_SERVER("{\"ok\":true,\"values\":[1e300]}", 0, {
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 1, f64, 1) == fmi3OK && f64[0] == 1e300);
+    });
+    /* binary replies go through the same check */
+    unsigned char frame[128], le[8];
+    double half = 0.5;
+    f64_to_le(le, &half, 1);
+    size_t n = bin_payload(frame, "{\"ok\":true,\"n\":1,\"dtype\":\"f64\"}", le, 8);
+    i32[0] = 42;
+    WITH_BINARY_SERVER((const char *)frame, n, {
+        in->binary = 1;
+        CHECK(fmi3GetInt32((fmi3Instance)in, vr, 1, i32, 1) == fmi3Error);
+    });
+    CHECK(i32[0] == 42);
+}
+
+static void test_int64_setters_refuse_values_a_double_cannot_carry(void) {
+    fmi3ValueReference vr[1] = { 7 };
+    Instance *dead = fake_instance(SOCK_INVALID);
+    fmi3Int64 big[1] = { 9007199254740993LL };                  /* 2^53 + 1 */
+    g_log_calls = 0;
+    CHECK(fmi3SetInt64((fmi3Instance)dead, vr, 1, big, 1) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "cannot be carried exactly") != NULL);
+    fmi3Int64 top[1] = { INT64_MAX };                           /* rounds to 2^63 */
+    CHECK(fmi3SetInt64((fmi3Instance)dead, vr, 1, top, 1) == fmi3Error);
+    fmi3UInt64 utop[1] = { UINT64_MAX };                        /* rounds to 2^64 */
+    CHECK(fmi3SetUInt64((fmi3Instance)dead, vr, 1, utop, 1) == fmi3Error);
+    CHECK(strstr(g_last_log, "cannot be carried exactly") != NULL);
+    /* exact ones reach the wire (here: a closed connection) */
+    fmi3Int64 ok[2] = { 9007199254740992LL, INT64_MIN };
+    g_log_calls = 0;
+    CHECK(fmi3SetInt64((fmi3Instance)dead, vr, 1, ok, 2) == fmi3Error);
+    CHECK(strstr(g_last_log, "connection to the sidecar is closed") != NULL);
+    free_instance(dead);
+    WITH_SERVER("{\"ok\":true}", 0, {
+        CHECK(fmi3SetInt64((fmi3Instance)in, vr, 1, ok, 2) == fmi3OK);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Int64\",\"vr\":[7],"
+                         "\"values\":[9007199254740992,-9.2233720368547758e+18]}") == 0);
+}
+
+/* ------------------------------------------ SetFMUState: the whole frame */
+
+static void test_set_fmu_state_counts_the_frame_header(void) {
+    /* The bridge drops a connection whose frame exceeds FRAME_MAX.  The
+     * binary set_state frame is [u32 hl][header][blob]; the check used to
+     * be on the blob alone, so a blob of exactly FRAME_MAX bytes passed it
+     * and the instance died ("send failed", then every call closed). */
+    char hdr[64];
+    size_t n = FRAME_MAX, hl;
+    for (;;) {             /* the largest blob whose whole frame fits */
+        hl = (size_t)snprintf(hdr, sizeof hdr, "{\"op\":\"set_state\",\"n\":%lu}", (unsigned long)n);
+        if (4 + hl + n <= FRAME_MAX) break;
+        --n;
+    }
+    char *blob = (char *)calloc(FRAME_MAX + 2, 1);   /* never read past what each case names */
+    FmuState fits = { blob, n }, over = { blob, n + 1 }, whole = { blob, FRAME_MAX };
+    Instance *dead = fake_instance(SOCK_INVALID);
+    dead->binary = 1;
+    g_log_calls = 0;
+    CHECK(fmi3SetFMUState((fmi3Instance)dead, &whole) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL && dead->req_cap == 0);
+    g_log_calls = 0;
+    CHECK(fmi3SetFMUState((fmi3Instance)dead, &over) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL && dead->req_cap == 0);
+    g_log_calls = 0;
+    CHECK(fmi3SetFMUState((fmi3Instance)dead, &fits) == fmi3Error);   /* reaches the wire */
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "connection to the sidecar is closed") != NULL);
+    free_instance(dead);
+    /* the JSON path: {"op":"set_state","state":"<blob>"} */
+    const size_t overhead = strlen("{\"op\":\"set_state\",\"state\":\"\"}");
+    size_t jn = FRAME_MAX - overhead;
+    memset(blob, 'A', jn + 1);
+    FmuState jfits = { blob, jn }, jover = { blob, jn + 1 };
+    dead = fake_instance(SOCK_INVALID);
+    g_log_calls = 0;
+    CHECK(fmi3SetFMUState((fmi3Instance)dead, &jover) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "frame limit") != NULL && dead->req_cap == 0);
+    g_log_calls = 0;
+    blob[jn] = '\0';
+    CHECK(fmi3SetFMUState((fmi3Instance)dead, &jfits) == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "connection to the sidecar is closed") != NULL);
+    CHECK(strlen(dead->req) == FRAME_MAX);                 /* exactly the limit, built */
+    free_instance(dead);
+    free(blob);
+}
+
+/* ------------------------------------------------------------ deadlines */
+
+static void test_read_timeout(void) {
+    double t = -1;
+    unsetenv("MADDENING_FMU_TIMEOUT");
+    CHECK(read_timeout(&t) == 0 && t == REPLY_TIMEOUT_DEFAULT_S && t == 600.0);
+    setenv("MADDENING_FMU_TIMEOUT", "", 1);
+    CHECK(read_timeout(&t) == 0 && t == 600.0);
+    setenv("MADDENING_FMU_TIMEOUT", "2.5", 1);
+    CHECK(read_timeout(&t) == 0 && t == 2.5);
+    setenv("MADDENING_FMU_TIMEOUT", "0", 1);
+    CHECK(read_timeout(&t) == 0 && t == 0.0);
+    setenv("MADDENING_FMU_TIMEOUT", "1e6", 1);
+    CHECK(read_timeout(&t) == 0 && t == 1e6);
+    const char *bad[] = { "-1", "abc", "nan", "inf", "1e7", "5x", "0x" };
+    for (size_t k = 0; k < sizeof bad / sizeof *bad; ++k) {
+        setenv("MADDENING_FMU_TIMEOUT", bad[k], 1);
+        t = 123;
+        CHECK(read_timeout(&t) == -1 && t == 123);
+    }
+    unsetenv("MADDENING_FMU_TIMEOUT");
+}
+
+static void test_a_silent_sidecar_times_out(void) {
+    /* A peer that takes the request and never answers: the wrapper used to
+     * wait in recv for ever.  With a deadline the call is fmi3Error, the
+     * connection is closed (a reply arriving later would be out of step),
+     * and the log says why. */
+    int sv[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    Instance *in = fake_instance(sv[0]);
+    CHECK(set_socket_timeout(sv[0], 0.2) == 0);
+    g_log_calls = 0;
+    CHECK(bridge_call(in, "{\"op\":\"step\"}") == fmi3Error);
+    CHECK(in->sock == SOCK_INVALID);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "did not answer within the deadline") != NULL);
+    /* a peer that hangs up is still reported as a hang-up, not a timeout */
+    int sv2[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv2) == 0);
+    Instance *gone = fake_instance(sv2[0]);
+    CHECK(set_socket_timeout(sv2[0], 5.0) == 0);
+    shutdown(sv2[1], SHUT_WR);
+    g_log_calls = 0;
+    CHECK(bridge_call(gone, "{\"op\":\"step\"}") == fmi3Error);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "recv failed") != NULL);
+    sock_close(sv[1]); sock_close(sv2[1]);
+    free_instance(in); free_instance(gone);
+    /* 0 removes the deadline */
+    int sv3[2]; CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv3) == 0);
+    CHECK(set_socket_timeout(sv3[0], 0.0) == 0);
+    struct timeval tv; socklen_t len = sizeof tv;
+    CHECK(getsockopt(sv3[0], SOL_SOCKET, SO_RCVTIMEO, &tv, &len) == 0 && tv.tv_sec == 0 && tv.tv_usec == 0);
+    sock_close(sv3[0]); sock_close(sv3[1]);
 }
 
 /* ----------------------------------------------------------- FMU state */
@@ -938,6 +1166,23 @@ static void *listener_thread(void *p) {
     return NULL;
 }
 
+/* Accepts one connection, reads the hello and never answers; records
+ * whether the client then hung up. */
+typedef struct { int listen_fd; int accepted; int saw_eof; } Silent;
+static void *silent_thread(void *p) {
+    Silent *S = (Silent *)p;
+    int c = accept(S->listen_fd, NULL, NULL);
+    if (c < 0) return NULL;
+    S->accepted = 1;
+    char buf[256];
+    for (;;) {
+        ssize_t k = recv(c, buf, sizeof buf, 0);
+        if (k <= 0) { S->saw_eof = (k == 0); break; }
+    }
+    sock_close(c);
+    return NULL;
+}
+
 static void test_instantiate(const char *good_token) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr; memset(&addr, 0, sizeof addr);
@@ -966,6 +1211,12 @@ static void test_instantiate(const char *good_token) {
         {
             int nodelay = 0; socklen_t len = sizeof nodelay;
             CHECK(getsockopt(in->sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, &len) == 0 && nodelay != 0);
+        }
+        /* the full reply deadline (default 600 s) once the hello is done */
+        {
+            struct timeval tv; socklen_t len = sizeof tv;
+            CHECK(in->timeout_s == 600.0);
+            CHECK(getsockopt(in->sock, SOL_SOCKET, SO_RCVTIMEO, &tv, &len) == 0 && tv.tv_sec == 600);
         }
         CHECK(fmi3EnterInitializationMode(inst, fmi3False, 0, 0.5, fmi3False, 0) == fmi3OK && in->time == 0.5);
         CHECK(fmi3ExitInitializationMode(inst) == fmi3OK);
@@ -1036,6 +1287,26 @@ static void test_instantiate(const char *good_token) {
         CHECK(L2.accepted == 1 && L2.second_seen == NULL);
         free(L2.hello_seen); free(L2.second_seen);
     }
+    /* an endpoint that accepts and never answers: instantiation used to
+     * block for ever; now the hello gets min(MADDENING_FMU_TIMEOUT, 30 s) */
+    {
+        Silent S = { fd, 0, -1 };
+        pthread_create(&th, NULL, silent_thread, &S);
+        setenv("MADDENING_FMU_TIMEOUT", "0.3", 1);
+        g_log_calls = 0;
+        inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3False, fmi3False,
+                                           fmi3False, NULL, 0, NULL, test_logger, NULL);
+        CHECK(inst == NULL && strstr(g_last_log, "did not answer within the deadline") != NULL);
+        pthread_join(th, NULL);
+        CHECK(S.accepted == 1 && S.saw_eof == 1);     /* the wrapper hung up */
+        /* a deadline that is not a number fails instantiation, loudly */
+        setenv("MADDENING_FMU_TIMEOUT", "soon", 1);
+        g_log_calls = 0;
+        inst = fmi3InstantiateCoSimulation("i", good_token, NULL, fmi3False, fmi3False, fmi3False,
+                                           fmi3False, NULL, 0, NULL, test_logger, NULL);
+        CHECK(inst == NULL && g_log_calls == 1 && strstr(g_last_log, "MADDENING_FMU_TIMEOUT") != NULL);
+        unsetenv("MADDENING_FMU_TIMEOUT");
+    }
     shutdown(fd, SHUT_RDWR); sock_close(fd);
 
     /* no endpoint at all / closed port */
@@ -1091,6 +1362,11 @@ int main(int argc, char **argv) {
     test_oversize_reply_kills_the_connection();
     test_max_set_frame_fits_the_bridge_limit();
     test_get_request_respects_the_frame_limit();
+    test_getters_refuse_values_their_type_cannot_hold();
+    test_int64_setters_refuse_values_a_double_cannot_carry();
+    test_set_fmu_state_counts_the_frame_header();
+    test_read_timeout();
+    test_a_silent_sidecar_times_out();
     test_fmu_state();
     test_instantiate("deadbeef-0000-4000-8000-000000000001");
     test_misc_entry_points();

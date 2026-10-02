@@ -166,10 +166,13 @@ def test_the_wrapper_reports_the_start_time_and_refuses_a_jump(gm, tmp_path):
             assert inst.getFloat64([T])[0] == 5.0
             inst.exitInitializationMode()
             inst.doStep(currentCommunicationPoint=5.0, communicationStepSize=DT)
-            before = inst.getFloat64([T, POS])
+            # time is a Float64, the spring's position a Float32: each is read
+            # through the getter of its own type (FMI 3.0; the bridge refuses
+            # any other)
+            before = inst.getFloat64([T]) + inst.getFloat32([POS])
             with pytest.raises(FMICallException):
                 inst.doStep(currentCommunicationPoint=100.0, communicationStepSize=DT)
-            assert inst.getFloat64([T, POS]) == before
+            assert inst.getFloat64([T]) + inst.getFloat32([POS]) == before
             inst.doStep(currentCommunicationPoint=5.0 + DT, communicationStepSize=DT)
             assert inst.getFloat64([T])[0] == pytest.approx(5.0 + 2 * DT)
             inst.terminate()

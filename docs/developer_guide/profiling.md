@@ -13,6 +13,16 @@ report = profile_graph(gm, n_steps=200, n_warmup=5, trace=True)
 print(report)
 ```
 
+`python -m maddening.examples.advanced.profiling_demo` runs it on a
+coupled pair with every measurement on (`measure_coupling`, `counts`,
+`count_scan_steps`, `trace`) and reads each part of the report back:
+the coupling overhead and its cost per extra iteration, the bottleneck
+and recommendations, the compile counts (checked identical on a freshly
+built graph) and the trace summary, with the Perfetto JSON and the
+trace written to a temporary directory.
+`python -m maddening.examples.advanced.profile_lbm_step` is the short
+Perfetto-export example.
+
 What it measures, and how:
 
 | number | how it is obtained |

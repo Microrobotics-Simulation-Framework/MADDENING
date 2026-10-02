@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Eight new or extended examples**, each asserting what it prints: `advanced.profiling_demo` (the full `ProfileReport`), `sysid_demo`,
+  `checkpoint_resume_demo`, `sharding_demo` (4 emulated CPU devices), `fmu_export_demo`, `coupling.interface_mapping_demo`,
+  `servers.rest_params_demo` (in-process), and `print_coupling_report()` / `strict_convergence` in `convergence_diagnostics_demo`
 - **One-command local runs for the remote-simulation examples**: `python -m maddening.examples.servers.remote_viz_client --local` starts the
   simulation server on a free loopback port, streams to the viewer and stops the server on exit (Ctrl-C and errors included); the HTTP example
   servers take `--port 0`, and `cloud/server/04`, `05` and `cloud/multijob/08` gain a `--local` mode that needs no cloud account.

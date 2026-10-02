@@ -296,3 +296,68 @@ def test_a_noise_std_is_the_same_scaling(linear_problem):
         res = fit_lm(gm, residual, mask=mask, n_iter=50, noise_std=sigma)
         assert res.converged, sigma
         assert float(res.params["nodes"]["s"]["damping"]) == pytest.approx(3.0, rel=2e-6)
+
+
+# ---------------------------------------------------------------------------
+# fit_lm does not depend on the parameters' units
+# (audit_040_p4_6/fmu-sysid/repro_q3_marquardt_floor_units.py)
+# ---------------------------------------------------------------------------
+
+#: One physical spring in two unit systems: positions identical to rounding.
+_UNITS = {"SI": (1e6, 3e7, 2e4), "tonnes": (1e3, 3e4, 20.0)}
+
+
+def _unit_spring(m, k, c):
+    gm = GraphManager()
+    gm.add_node(_Spring(name="s", timestep=0.01, stiffness=k, damping=c, mass=m,
+                        rest_length=1.0, initial_position=1.2, initial_velocity=0.0))
+    gm.compile()
+    return gm
+
+
+def _unit_fit(m, k, c_true, **kw):
+    obs = _unit_spring(m, k, c_true).run_scan_with_history(200)[1]["s"]["position"]
+
+    def residual(p):
+        return _unit_spring(m, k, 1.0).run_scan_with_history(200, params=p)[1]["s"]["position"] - obs
+
+    gm = _unit_spring(m, k, 3.0 * c_true)
+    return fit_lm(gm, residual, mask=_only(gm, "stiffness", "damping"), n_iter=50, **kw)
+
+
+@pytest.mark.parametrize("x64", [False, True], ids=["float32", "float64"])
+def test_fit_lm_answers_the_same_in_every_unit_system(x64):
+    """A floor of ``eps`` times the *mean* of ``diag(JᵀJ)`` crushed the step of
+    damping in SI units (its column is small beside the log stiffness'):
+    two iterations, ``converged=True``, damping at 3x its truth, where the
+    same spring in tonnes reached the truth.  Per column, both do, in about
+    the same number of iterations."""
+    with _precision(x64):
+        runs = {}
+        for name, (m, k, c_true) in _UNITS.items():
+            res = _unit_fit(m, k, c_true)
+            assert res.converged, name
+            assert _damping(res) == pytest.approx(c_true, rel=2e-4), name
+            assert float(res.params["nodes"]["s"]["stiffness"]) == pytest.approx(k, rel=1e-5)
+            runs[name] = res.n_iter
+        assert abs(runs["SI"] - runs["tonnes"]) <= 2, runs
+
+
+def test_a_shrunken_step_never_reads_as_stationary(monkeypatch):
+    """Defence in depth.  Whatever shrinks a step -- a mis-scaled floor, a
+    large damping -- ``converged`` also needs the undamped Gauss-Newton step
+    from the iterate to be within ``step_tol``, which nothing in the
+    Marquardt solve can shrink.  Simulated here by a step that moves a
+    millionth of the way."""
+    from maddening import sysid
+
+    real = sysid._marquardt_step  # noqa: SLF001
+
+    def crushed(th, r, J, lam, lo, hi):
+        return th + 1e-6 * (real(th, r, J, lam, lo, hi) - th)
+
+    monkeypatch.setattr(sysid, "_marquardt_step", crushed)
+    m, k, c_true = _UNITS["tonnes"]
+    res = _unit_fit(m, k, c_true)
+    assert not res.converged
+    assert _damping(res) == pytest.approx(3.0 * c_true, rel=1e-2)    # it really was stuck

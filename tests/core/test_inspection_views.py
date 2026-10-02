@@ -850,3 +850,17 @@ def test_coupling_report_judges_a_replaced_group_under_the_one_that_ran():
     assert row["max_iterations"] == 8
     assert row["iterations"] == gm.coupling_diagnostics()["a+b"]["iterations"]
     assert any("modified since the last compile" in n for n in gm.coupling_report().notes)
+
+
+def test_rich_tables_stay_readable_when_wide():
+    """A table too wide for a grid renders one key/value table per row in
+    ``rich`` too, with flags printed whole beneath it."""
+    pytest.importorskip("rich", reason="rich is an optional extra (maddening[terminal])")
+    buf = io.StringIO()
+    graph("coupled_capped").print_coupling_report(file=buf, rich=True, width=90)
+    out = buf.getvalue()
+    assert "spectral_error_bound" in out and "…" not in out
+    assert "! hit max_iterations (1): the solve stopped on its budget" in out
+    buf = io.StringIO()
+    graph("coupled").print_memory_estimate(file=buf, rich=True, width=90)
+    assert "per_device_bytes" in buf.getvalue() and "total_bytes: 28" in buf.getvalue()

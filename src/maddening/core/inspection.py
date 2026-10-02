@@ -221,6 +221,19 @@ class InspectionTable(Sequence):
     def _label(self, row: Mapping[str, Any]) -> str:
         return ".".join(_cell(row.get(c)) for c in self._label_columns)
 
+    def _grid(self, width: int):
+        """``(cells, column widths, numeric flags, fits)`` of the grid layout."""
+        cols = list(self.columns)
+        cells = [[_cell(r.get(c)) for c in cols] for r in self._rows]
+        widths = [max(len(c), *(len(row[i]) for row in cells)) for i, c in enumerate(cols)]
+        numeric = [
+            all(_is_number(r.get(c)) or r.get(c) is None for r in self._rows)
+            and any(_is_number(r.get(c)) for r in self._rows)
+            for c in cols
+        ]
+        fits = 2 + sum(widths) + 2 * (len(cols) - 1) <= width
+        return cells, widths, numeric, fits
+
     def to_text(self, *, width: int = DEFAULT_WIDTH) -> str:
         """The plain-text layout.
 
@@ -235,15 +248,8 @@ class InspectionTable(Sequence):
         if not self._rows:
             lines.append("  (no rows)")
         else:
-            cells = [[_cell(r.get(c)) for c in cols] for r in self._rows]
-            widths = [max(len(c), *(len(row[i]) for row in cells)) for i, c in enumerate(cols)]
-            numeric = [
-                all(_is_number(r.get(c)) or r.get(c) is None for r in self._rows)
-                and any(_is_number(r.get(c)) for r in self._rows)
-                for c in cols
-            ]
-            grid_width = 2 + sum(widths) + 2 * (len(cols) - 1)
-            if grid_width <= width:
+            cells, widths, numeric, fits = self._grid(width)
+            if fits:
                 def fmt(values: Sequence[str]) -> str:
                     parts = [v.rjust(w) if num else v.ljust(w)
                              for v, w, num in zip(values, widths, numeric)]
@@ -299,21 +305,37 @@ class InspectionTable(Sequence):
             out.write(self.to_text(width=width))
             return
         console, rich_table, text_cls = _rich_parts()
-        table = rich_table(title=self._title, title_justify="left")
-        cols = list(self.columns)
-        has_flags = any(r.get(_FLAGS) for r in self._rows)
-        for c in cols:
-            table.add_column(c, justify="right" if any(_is_number(r.get(c)) for r in self._rows)
-                             else "left")
-        if has_flags:
-            table.add_column(_FLAGS, style="bold red")
-        for r in self._rows:
-            values = [_cell(r.get(c)) for c in cols]
-            if has_flags:
-                values.append("; ".join(r.get(_FLAGS) or ()))
-            table.add_row(*values)
         con = console(file=out, width=width, soft_wrap=False)
-        con.print(table)
+        cols = list(self.columns)
+        if not self._rows:
+            con.print(text_cls(self._title, style="bold"))
+            con.print(text_cls("  (no rows)"))
+        elif self._grid(width)[3]:
+            # The grid fits: one table, flags listed beneath it.
+            cells, _widths, numeric, _fits = self._grid(width)
+            table = rich_table(title=self._title, title_justify="left")
+            for c, num in zip(cols, numeric):
+                table.add_column(c, justify="right" if num else "left")
+            for row in cells:
+                table.add_row(*row)
+            con.print(table)
+            for r in self._rows:
+                for flag in r.get(_FLAGS) or ():
+                    con.print(text_cls(f"! {self._label(r)}: {flag}", style="bold red"))
+        else:
+            # Too wide for a readable grid: one two-column table per row.
+            con.print(text_cls(self._title, style="bold"))
+            rest = [c for c in cols if c not in self._label_columns]
+            for r in self._rows:
+                table = rich_table(title=self._label(r), title_justify="left",
+                                   show_header=False)
+                table.add_column("column")
+                table.add_column("value")
+                for c in rest:
+                    table.add_row(c, _cell(r.get(c)))
+                con.print(table)
+                for flag in r.get(_FLAGS) or ():
+                    con.print(text_cls(f"! {flag}", style="bold red"))
         for key, value in self._summary.items():
             con.print(text_cls(f"{key}: {_cell(value)}"))
         for note in self._notes:

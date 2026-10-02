@@ -704,7 +704,6 @@ claims:
   oracle: XLA's compiled memory analysis of the dense solve (temp bytes) at N = 256 and 512, jaxlib on the box.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_dense_adjoint_peaks_at_two_jacobians_in_reverse_mode
-    - tests/core/test_coupling_claims_helpers.py::test_the_dense_tangent_solve_peaks_at_two_jacobians
   status: ambiguous
   proposed_wording: >-
     In reverse mode (jax.grad: the transposed solve) the dense path peaks at
@@ -713,8 +712,12 @@ claims:
     identity basis, the Jacobian-vector products and I - J are live at once.
   notes: >-
     Measured on jaxlib 0.11.0, CPU: forward 3.00 N**2 floats for a dense or
-    non-linear map, 2.00 for a diagonal one; reverse 2.00.  The second test
-    is the strict xfail of the forward reading.
+    non-linear map, 2.00 for a diagonal one; reverse 2.00.  The forward
+    reading is not pinned by a strict xfail: XLA's buffer assignment can
+    differ between the jaxlib versions CI runs, and a strict xfail that
+    passes on one lane fails it.  Reproducer: compile
+    jax.jit(lambda b: _ift_linear_solve(mv, b, "dense")) for a dense
+    non-linear matvec at N = 512 and read memory_analysis().temp_size_in_bytes.
 
 - id: CPL-037
   area: solvers
@@ -1644,7 +1647,7 @@ claims:
     - tests/core/test_coupling_error_bound.py::test_arnoldi_leaves_a_residual_where_the_space_is_too_small
     - tests/core/test_coupling_error_bound.py::test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed
     - tests/core/test_coupling_error_bound.py::test_on_a_nonlinear_map_the_spectrum_is_taken_at_the_returned_iterate
-    - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_state_never_reads_as_converged
+    - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
   status: verified
 
 - id: CPL-088
@@ -2308,6 +2311,7 @@ claims:
   tests:
     - tests/core/test_coupling_ift_forward_mode.py::TestFMIDirectionalDerivative::test_forward_kind_through_ift_step
     - tests/core/test_coupling_ift_forward_mode.py::test_hessian_through_ift_step
+    - tests/core/test_coupling_claims_graphs.py::test_jax_hessian_runs_through_an_ift_step
     - tests/core/test_coupling_ift_forward_mode.py::test_forward_reverse_adjoint_identity
   status: verified
 
@@ -2645,7 +2649,13 @@ claims:
     bit-identical pass for pass.  Otherwise (Jacobi, Aitken, IQN): both run
     to float32 stationarity and each lands within amp * floor of the exact
     float64 fixed point; a convergent group converges with and without the
-    relay, a divergent one with neither.
+    relay, a divergent one with neither.  The verdict statement is drawn
+    for Aitken under Gauss-Seidel only: under Jacobi its single factor,
+    re-derived from residuals that count the relayed field twice, can
+    stagnate (capped at 400 passes at rate 0.9 where the relay-free group
+    stopped at 278 through the raw-residual fallback) -- the documented
+    failure of Aitken's single-mode assumption on a Jacobi spectrum, not
+    rounding.
   oracle: bit-identity; the exact float64 fixed point and the operator norm of (I - M)^-1.
   tests:
     - tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_no_bit_under_a_gauss_seidel_constant_iterator

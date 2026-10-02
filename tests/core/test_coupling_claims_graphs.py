@@ -736,6 +736,40 @@ def test_the_ift_gradient_is_scale_equivariant_in_the_cotangent(scale):
 
 
 # ---------------------------------------------------------------------------
+# CPL-144: a Hessian through the IFT rule
+# ---------------------------------------------------------------------------
+
+
+def test_jax_hessian_runs_through_an_ift_step():
+    """CPL-144: ``jax.hessian`` through a coupled step, against the analytic Hessian.
+
+    ``a <- 0.6 b + c_a``, ``b <- 0.5 a + c_b``: ``x* = (I - M)^-1 c``, so the
+    loss ``|x*|^2`` has the Hessian ``2 B^T B`` in ``c``, ``B = (I - M)^-1``.
+    The smallest coupled group, so the second-order program compiles on
+    every push (the spring-pair version is slow-marked).
+    """
+    gdef = cg._cycle(2, 1, outside=False, leaves=(), alpha=0.0, beta=0.0)
+    values = {"g0": {"G": [np.array([[0.6]], np.float32)], "b": np.array([1.0], np.float32),
+                     "x0": np.zeros(1, np.float32)},
+              "g1": {"G": [np.array([[0.5]], np.float32)], "b": np.array([0.5], np.float32),
+                     "x0": np.zeros(1, np.float32)}}
+    gm = _build(gdef, dict(max_iterations=100, tolerance=1e-7))
+    cg.set_initial(gm, values)
+    base = _step_params(gm, values)
+    state, ext = gm._state, gm._default_external_inputs()
+
+    def loss(c):
+        nodes = {**base["nodes"], "g0": {**base["nodes"]["g0"], "b": c[:1]},
+                 "g1": {**base["nodes"]["g1"], "b": c[1:]}}
+        out = gm._compiled_step(state, ext, {**base, "nodes": nodes})
+        return jnp.sum(out["g0"]["x"] ** 2) + jnp.sum(out["g1"]["x"] ** 2)
+
+    H = np.asarray(jax.hessian(loss)(jnp.asarray([1.0, 0.5], F32)), np.float64)
+    B = np.linalg.inv(np.eye(2) - np.array([[0.0, 0.6], [0.5, 0.0]]))
+    np.testing.assert_allclose(H, 2.0 * B.T @ B, rtol=1e-4)
+
+
+# ---------------------------------------------------------------------------
 # CPL-150: the profiler's cap check with waveform sweeps
 # ---------------------------------------------------------------------------
 

@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import collections
 import contextlib
 import ipaddress
 import json
@@ -690,32 +691,103 @@ def _json_value_count(value: Any) -> int:
 
 
 class _GraphLock:
-    """The re-entrant lock around every use of a server's graph, which can
-    say whether the calling thread holds it.
+    """The re-entrant lock around every use of a server's graph: granted
+    first come, first served, and able to say whether the calling thread
+    holds it.
 
     ``acquire`` / ``release`` as ``threading.RLock`` (the interface
-    :class:`~maddening.viz.runner.RealtimeRunner` takes); :meth:`held`
-    is what lets a route refuse to wait for the runner's thread while it
-    holds the lock that thread needs for its next step.
+    :class:`~maddening.viz.runner.RealtimeRunner` takes), plus
+    :meth:`acquire_unless`, which the runner uses to wait for its turn
+    while watching its stop event.  :meth:`held` is what lets a route
+    refuse to wait for the runner's thread while it holds the lock that
+    thread needs for its next step.
+
+    First come, first served, because a ``threading.RLock`` is not: a
+    runner behind its schedule releases the lock after a step and takes it
+    straight back, and a request waiting for it could wait for many steps
+    -- 36 s for twenty parameter writes on a two-core CI runner.  Here a
+    thread that asks while others are waiting queues behind them, so a
+    request waits for at most the step in flight.
     """
 
     def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._depth = threading.local()
+        self._cond = threading.Condition(threading.Lock())
+        self._owner: Optional[int] = None
+        self._depth = 0
+        self._queue: collections.deque = collections.deque()
 
-    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
-        acquired = self._lock.acquire(blocking, timeout)
-        if acquired:
-            self._depth.n = getattr(self._depth, "n", 0) + 1
-        return acquired
+    def acquire(self, blocking: bool = True, timeout: float = -1,
+                cancelled: Optional[Any] = None) -> bool:
+        """Take the lock, after every thread that asked for it earlier.
+
+        Parameters
+        ----------
+        blocking : bool
+            ``False`` takes it only if it is free and nobody is waiting.
+        timeout : float
+            Seconds to wait; negative (the default) or ``None`` waits for
+            as long as it takes.
+        cancelled : callable, optional
+            Asked between waits of at most 50 ms; when it returns true the
+            wait is given up.  The thread keeps its place in the queue
+            while it waits.
+
+        Returns
+        -------
+        bool
+            Whether the lock is now held.
+        """
+        me = threading.get_ident()
+        with self._cond:
+            if self._owner == me:
+                self._depth += 1
+                return True
+            if self._owner is None and not self._queue:
+                self._owner, self._depth = me, 1
+                return True
+            if not blocking:
+                return False
+            deadline = (None if timeout is None or timeout < 0
+                        else time.monotonic() + timeout)
+            ticket = object()
+            self._queue.append(ticket)
+            try:
+                while self._owner is not None or self._queue[0] is not ticket:
+                    if cancelled is not None and cancelled():
+                        return False
+                    wait = 0.05 if cancelled is not None else None
+                    if deadline is not None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                        wait = remaining if wait is None else min(wait, remaining)
+                    self._cond.wait(wait)
+                self._queue.popleft()
+                self._owner, self._depth = me, 1
+                return True
+            finally:
+                if self._owner != me and ticket in self._queue:
+                    # Gave up: the next in line may be at the head now.
+                    self._queue.remove(ticket)
+                    self._cond.notify_all()
+
+    def acquire_unless(self, event: threading.Event) -> bool:
+        """Wait for the lock unless *event* is set first; ``False`` (not
+        held) when it is."""
+        return self.acquire(cancelled=event.is_set)
 
     def release(self) -> None:
-        self._depth.n -= 1
-        self._lock.release()
+        with self._cond:
+            if self._owner != threading.get_ident():
+                raise RuntimeError("release of a graph lock this thread does not hold")
+            self._depth -= 1
+            if self._depth == 0:
+                self._owner = None
+                self._cond.notify_all()
 
     def held(self) -> bool:
         """Whether the calling thread holds the lock."""
-        return getattr(self._depth, "n", 0) > 0
+        return self._owner == threading.get_ident()
 
     def __enter__(self) -> "_GraphLock":
         self.acquire()

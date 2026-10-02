@@ -52,7 +52,10 @@ class RealtimeRunner:
         step at a time, never across a pause or a pacing sleep, and the
         thread waits for it in short slices that also watch the stop
         flag, so :meth:`stop` is answered within a step even while
-        someone else holds it.  ``None`` (the default) takes no lock.
+        someone else holds it; a lock with an ``acquire_unless(event)``
+        method is asked through that instead, which waits for the lock
+        unless the stop event is set first.  ``None`` (the default) takes
+        no lock.
     max_catch_up : float
         How far behind its schedule, in wall-clock seconds, the runner
         catches up by stepping without sleeping.  Further behind -- after
@@ -249,6 +252,11 @@ class RealtimeRunner:
         asked for while waiting for it (the lock is then not held)."""
         if self._lock is None:
             return True
+        # A lock that can wait for its turn while watching the stop event
+        # keeps the runner's place in its queue (the REST server's).
+        acquire_unless = getattr(self._lock, "acquire_unless", None)
+        if acquire_unless is not None:
+            return bool(acquire_unless(self._stop))
         while not self._lock.acquire(timeout=0.05):
             if self._stop.is_set():
                 return False

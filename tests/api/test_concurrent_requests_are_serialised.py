@@ -334,3 +334,83 @@ def test_the_runners_steps_never_see_a_params_write_land_inside_them():
     finally:
         assert client.post("/sim/stop").status_code == 200
     assert torn == [], f"{len(torn)} params writes landed inside a runner step"
+
+
+def test_a_request_waits_for_at_most_the_runners_step_in_flight():
+    """A runner behind its schedule releases the graph after each step and
+    asks for it again at once.  The lock is first come, first served, so a
+    request waiting for it goes before the runner's next step: twenty
+    parameter writes took 36 s on a two-core CI runner when it was not."""
+    gm, server, client = _runner_server()
+    real = gm._compiled_step
+
+    def heavy(*args):
+        time.sleep(0.03)                 # always behind a real-time schedule
+        return real(*args)
+
+    gm._compiled_step = heavy
+    assert client.post("/sim/start").status_code == 200
+    waits = []
+    try:
+        assert _wait_for(lambda: server.runner.sim_time > 0.002)
+        for i in range(10):
+            t0 = time.perf_counter()
+            resp = client.put("/graph/params/ball", json={"params": {"elasticity": 0.5 + 0.01 * i}})
+            waits.append(time.perf_counter() - t0)
+            assert resp.status_code == 200, resp.text
+    finally:
+        assert client.post("/sim/stop").status_code == 200
+    assert max(waits) < 1.0, f"a write waited {max(waits):.2f} s behind the runner"
+
+
+def test_the_graph_lock_is_granted_in_the_order_it_was_asked_for():
+    from maddening.api.server import _GraphLock
+
+    lock = _GraphLock()
+    order, ready = [], []
+    lock.acquire()
+
+    def ask(name):
+        ready.append(name)
+        with lock:
+            order.append(name)
+
+    threads = []
+    for name in ("a", "b", "c"):
+        t = threading.Thread(target=ask, args=(name,), daemon=True)
+        t.start()
+        threads.append(t)
+        assert _wait_for(lambda n=name: n in ready and len(lock._queue) == len(threads))
+    # A thread that gives up leaves the order of the rest intact.
+    gave_up = []
+    quitter = threading.Thread(target=lambda: gave_up.extend(
+        [lock.acquire(timeout=0.05), lock.acquire(cancelled=lambda: True)]), daemon=True)
+    quitter.start()
+    quitter.join(5)
+    assert gave_up == [False, False]
+    assert len(lock._queue) == 3
+    lock.release()
+    for t in threads:
+        t.join(5)
+    assert order == ["a", "b", "c"]
+
+
+def test_the_graph_lock_is_re_entrant_and_only_its_holder_releases_it():
+    from maddening.api.server import _GraphLock
+
+    lock = _GraphLock()
+    with lock:
+        with lock:
+            assert lock.held()
+        assert lock.held()
+    assert not lock.held()
+    with pytest.raises(RuntimeError, match="does not hold"):
+        lock.release()
+    lock.acquire()
+    errors = []
+    other = threading.Thread(target=lambda: errors.append(lock.acquire(blocking=False)),
+                             daemon=True)
+    other.start()
+    other.join(5)
+    assert errors == [False]
+    lock.release()

@@ -211,7 +211,7 @@ def _only_damping(gm):
 
 
 # Per push: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_brings_a_clipped_coordinate_back_into_its_range
-#   and ::test_fit_multiple_shooting_brings_a_clipped_coordinate_back_into_its_range
+# Per push: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_multiple_shooting_brings_a_clipped_coordinate_back_into_its_range
 @pytest.mark.slow  # a graph rollout per residual and a fit per example: over 5 s on CI
 @given(truth=st.floats(0.01, 6.0), start=st.floats(0.0, 15.0),
        fitter=st.sampled_from(["fit_lm", "fit", "fit_multiple_shooting"]))

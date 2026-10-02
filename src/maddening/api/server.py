@@ -835,8 +835,9 @@ class _RequestBodyLimitMiddleware:
     """Refuse a request body over :data:`MAX_REQUEST_BODY_BYTES` with 413,
     before anything parses it.
 
-    Pure ASGI, outermost: a ``Content-Length`` over the limit is refused
-    without reading a byte of the body, and a body sent without one
+    Pure ASGI, below only the authentication middlewares (which read no
+    body): a ``Content-Length`` over the limit is refused without reading a
+    byte of the body, and a body sent without one
     (chunked) is counted as the application reads it -- the read that
     takes it past the limit raises, and the 413 is sent in place of
     whatever the application would have answered.  Nothing bounded a body
@@ -2406,6 +2407,16 @@ class SimulationServer:
         # Two of them, because one cannot cover both: ``@app.middleware("http")``
         # is a BaseHTTPMiddleware and never runs for a WebSocket scope, so
         # the WebSocket half is a pure-ASGI middleware of its own.
+        #
+        # The body limit is added first, so it is the innermost: the
+        # authentication refuses an unauthenticated caller (401) before
+        # anything is read, and the limit's 413 is raised straight into
+        # FastAPI's body reader.  Outside a BaseHTTPMiddleware it would be
+        # raised through that middleware's task group, which wraps it in an
+        # ExceptionGroup that FastAPI answers as "There was an error
+        # parsing the body" (400).  No middleware or route reads a body
+        # before it either way.
+        app.add_middleware(_RequestBodyLimitMiddleware)
         app.add_middleware(
             _WebSocketAuthMiddleware,
             auth=self.auth,
@@ -2461,10 +2472,6 @@ class SimulationServer:
                     content={"detail": _CROSS_ORIGIN_DETAIL},
                 )
             return await call_next(request)
-
-        # Outermost, added last: a body over MAX_REQUEST_BODY_BYTES is a 413
-        # before any other middleware or route reads a byte of it.
-        app.add_middleware(_RequestBodyLimitMiddleware)
 
         @app.get("/healthz", tags=["meta"], response_model=None)
         async def healthz() -> dict[str, str]:

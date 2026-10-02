@@ -75,6 +75,12 @@ _PREDICTOR_RUNS: dict = {}
 _PREDICTOR_PAIR = dict(dt=0.02, k=1000.0, c=2.0)
 
 
+# ``_PREDICTOR_PAIR`` is far past MADD-ANO-098's limit (c < k*dt: the
+# pair's centre of mass grows by 1.6 a step, pushed by its equal rest
+# lengths), so compile() warns.  These tests count coupling passes, which
+# the drift does not change; the pass counts in the docstrings were
+# measured on it.
+@pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
 class TestPredictorReducesIterations:
     """Test that predictors reduce coupling iterations."""
 

@@ -23,6 +23,11 @@ from maddening.nodes.spring import SpringDamperNode
 
 KEY = "a+b"
 
+# ``_pair`` is past MADD-ANO-098's limit (c < k*dt: its centre of mass
+# grows by 1.19 a step), so every compile warns.  These tests are about
+# which group a coupling report describes, not the springs' stability.
+pytestmark = pytest.mark.filterwarnings("ignore:.*MADD-ANO-098:UserWarning")
+
 
 def _pair(tolerance=1e-3):
     gm = GraphManager()

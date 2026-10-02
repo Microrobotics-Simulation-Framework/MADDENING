@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -139,6 +140,93 @@ def _merge_from_wrapped(node: "SimulationNode", getter, guard: str) -> dict:
             object.__setattr__(node, guard, False)
         except (AttributeError, TypeError):
             pass
+
+
+class _ParamsDict(dict):
+    """A node's ``params``: a plain ``dict`` that counts its own writes.
+
+    ``GraphManager`` needs to know that ``node.params[key] = value`` happened,
+    not only whether a value changed: a write of the value the node already
+    held (reverting a calibration written into ``gm.params``) is a write, and
+    used to be invisible; and a write the compiled step has not taken must
+    make every entry point recompile before it runs, or a cached trace runs
+    the old model while a fresh trace (a new scan length, a sysid loss) runs
+    the new one.  So each mutation through the mapping interface bumps a
+    total and a per-key count.  A value mutated *inside* a stored object (an
+    element of a list) is not seen here; the graph also compares values.
+
+    Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON, a
+    JAX pytree with the dict's own flattening, and a copy (``dict(p)``,
+    pickle, ``copy.deepcopy``) that starts its counts at zero.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._writes = 0
+        self._key_writes: dict = {}
+
+    def _wrote(self, key) -> None:
+        self._writes += 1
+        self._key_writes[key] = self._key_writes.get(key, 0) + 1
+
+    def __setitem__(self, key, value) -> None:
+        super().__setitem__(key, value)
+        self._wrote(key)
+
+    def __delitem__(self, key) -> None:
+        super().__delitem__(key)
+        self._wrote(key)
+
+    def pop(self, key, *default):
+        present = key in self
+        value = super().pop(key, *default)
+        if present:
+            self._wrote(key)
+        return value
+
+    def popitem(self):
+        key, value = super().popitem()
+        self._wrote(key)
+        return key, value
+
+    def setdefault(self, key, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def update(self, *args, **kwargs) -> None:  # type: ignore[override]
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def clear(self) -> None:
+        keys = list(self)
+        super().clear()
+        for key in keys:
+            self._wrote(key)
+
+    def __ior__(self, other):  # type: ignore[override]
+        self.update(other)
+        return self
+
+    def __reduce__(self):
+        return (_ParamsDict, (dict(self),))
+
+
+def _params_dict_flatten_with_keys(d: _ParamsDict):
+    keys = tuple(sorted(d))
+    return [(jax.tree_util.DictKey(k), d[k]) for k in keys], keys
+
+
+def _params_dict_unflatten(keys, values) -> _ParamsDict:
+    return _ParamsDict(zip(keys, values))
+
+
+# Flattened as a dict is (sorted keys, ``DictKey`` paths), so a tree map
+# over a node's params reaches its values rather than taking the mapping
+# for a leaf.
+jax.tree_util.register_pytree_with_keys(
+    _ParamsDict, _params_dict_flatten_with_keys, _params_dict_unflatten,
+)
 
 
 def _params_empty(params: Any) -> bool:
@@ -451,7 +539,9 @@ class SimulationNode(ABC):
         self.name = name
         self.delta_t = float(timestep)
         self.geometry_source: Optional[str] = params.pop("geometry_source", None)
-        self.params = dict(params)
+        # Counts its writes, so a graph can tell a write after compile from
+        # an unchanged value (see ``_ParamsDict``).
+        self.params: dict = _ParamsDict(params)
 
     # ------------------------------------------------------------------
     # Abstract interface

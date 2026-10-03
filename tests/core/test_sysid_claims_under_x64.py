@@ -398,21 +398,24 @@ def test_a_rank_below_the_normal_range_warns_under_x64(leaves):
                 warnings.simplefilter("error", PrecisionLimitWarning)
                 assert fim(residual, p0, scale=None, noise_std=sigma).rank == 2, sigma
             assert not bool(fim_core(residual, p0, scale=None, noise_std=sigma).precision_limited)
-        with pytest.warns(PrecisionLimitWarning, match=f"below {name}'s normal range"):
+        with pytest.warns(PrecisionLimitWarning, match=f"below {name}'s normal range") as rec:
             fim(residual, p0, scale=None, noise_std=below)
+        msg = str(rec[0].message)
+        # x64 is on: the float32 decomposition is the leaves', and re-running
+        # under x64 is no remedy (SYS-024's rule, for this warning too).
+        assert "re-run under x64" not in msg, msg
+        if leaves == "mixed":
+            assert "hold the parameters and the state in float64" in msg, msg
         core = jax.jit(lambda q: fim_core(residual, q, scale=None, noise_std=below))(p0)
         assert bool(core.precision_limited)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "SYS-024: with float32 leaves in an x64 process the PrecisionLimitWarning's remedy is "
-    "to re-run under x64, which is already on: the remedy is chosen on the decomposition's "
-    "dtype alone (sysid.py ~2694), not on whether jax_enable_x64 is set"))
 def test_a_float32_rank_at_the_floor_in_an_x64_process_names_a_remedy_that_settles_it():
     """SYS-024 with mixed dtypes: the warning names the ratio, the cutoff and
     the remedy.  In an x64 process the float32 decomposition comes from float32
-    leaves, and re-running under x64 -- what the warning says -- changes
-    nothing: the remedy that settles it is float64 leaves."""
+    leaves, and re-running under x64 -- what the warning said -- changes
+    nothing: the remedy that settles it, and the one named, is float64
+    leaves."""
     with _x64(), pytest.warns(PrecisionLimitWarning) as rec:
         report = _linear_fim(2.08e-07, "mixed")
     assert report.rank == 1
@@ -420,6 +423,7 @@ def test_a_float32_rank_at_the_floor_in_an_x64_process_names_a_remedy_that_settl
     msg = str(rec[0].message)
     assert f"{ev[0] / ev[-1]:.4g}" in msg and f"{_cutoff('mixed', 3):.4g}" in msg
     assert "jax_enable_x64', True)" not in msg, msg
+    assert "x64 is already on" in msg and "float64" in msg, msg
 
 
 def _spring_scale_fim(leaves, **kw):
@@ -628,9 +632,9 @@ def _only(gm, *keys):
 @pytest.mark.parametrize("leaves", LEAVES)
 def test_losses_zero_is_the_starting_points_loss_under_x64(leaves):
     """SYS-050: ``losses[i]`` is the loss before update ``i + 1``, so
-    ``losses[0]`` is the start's -- to the bits a ``log`` leaf's round trip
-    through the optimiser's coordinates moves it in the leaves' precision;
-    for ``fit_lm`` the half sum of squares."""
+    ``losses[0]`` is the start's, bit for bit (the run evaluates the start as
+    it went in, not its ``log`` round trip: SYS-071); for ``fit_lm`` the half
+    sum of squares."""
     with _x64():
         gm = _spring(leaves)
         mask = _only(gm, "stiffness")
@@ -639,14 +643,13 @@ def test_losses_zero_is_the_starting_points_loss_under_x64(leaves):
             return (p["nodes"]["s"]["stiffness"] - 25.0) ** 2
 
         res = fit(gm, loss, mask=mask, n_iter=4, lr=0.1)
-        assert float(res.losses[0]) == pytest.approx(float(loss(gm.params)), rel=32 * _eps(leaves))
+        assert float(res.losses[0]) == float(loss(gm.params))
 
         def residual(p):
             return jnp.atleast_1d(p["nodes"]["s"]["stiffness"] - 25.0)
 
         lm = fit_lm(gm, residual, mask=mask, n_iter=4)
-        assert float(lm.losses[0]) == pytest.approx(
-            0.5 * float(residual(gm.params)[0]) ** 2, rel=32 * _eps(leaves))
+        assert float(lm.losses[0]) == float(0.5 * jnp.sum(residual(gm.params) ** 2))
 
 
 @pytest.mark.parametrize("leaves", LEAVES)
@@ -832,24 +835,15 @@ def test_multiple_shooting_that_walks_away_returns_its_start_and_seed_states_und
         assert _bits(ws) == _bits(init_window_states(obs, 20))
 
 
-_SYS071_REASON = (
-    "SYS-071: when the selected iterate is the start, fit_multiple_shooting returns the "
-    "start's bits (unmoved leaves are the input, SYS-054) but best_loss is the loss it "
-    "evaluated at exp(log(k)), one float64 ulp from k=30.03: 5.2e-13 relative here, the "
-    "loss's sensitivity to that ulp near the optimum (sysid.py ~4790, best.loss beside "
-    "to_params(theta))")
-
-
-@pytest.mark.parametrize("leaves", [
-    pytest.param("float64", marks=pytest.mark.xfail(strict=True, raises=AssertionError,
-                                                    reason=_SYS071_REASON)),
-    "mixed"])
+@pytest.mark.parametrize("leaves", LEAVES)
 def test_multiple_shooting_best_loss_is_exactly_the_returned_pairs_under_x64(leaves):
     """SYS-071: without the guard the pair is exact -- the parameters and the
     window states are returned as selected and ``best_loss`` is their loss --
     here for a run that returns its start (SYS-070), whose stiffness, 30.03, a
     ``log`` round trip moves by one float64 ulp; float32 leaves round-trip
-    through the float64 optimiser's coordinates exactly."""
+    through the float64 optimiser's coordinates exactly.  The run evaluated
+    the round trip until the fitters' objectives took the leaves no step
+    moved as they went in (``_exact_physical_params``)."""
     with _x64():
         gm = _spring(leaves)
         obs = _record(gm, leaves, 200)

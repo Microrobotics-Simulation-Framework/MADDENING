@@ -218,3 +218,98 @@ def test_the_floor_rule_never_fires_while_a_bound_coordinate_could_descend(monke
                         lambda self, *args, **kwargs: True)
     res = fit_lm(gm, residual, mask=_only(gm, "damping"), n_iter=50)
     assert not res.converged
+
+
+# ---------------------------------------------------------------------------
+# Under x64: the floor rule's ladder reaches the default tolerance
+# ---------------------------------------------------------------------------
+
+
+def _x64_noiseless_fit(damping_truth, **kw):
+    """The audit's x64 case (audit_040_p4_8/fmu-sysid/repro_fit_lm_converged_x64.py):
+    noiseless spring data, stiffness and damping fitted from (45, 4), mass
+    frozen.  Call inside ``_x64()``: the record starts from the seed cast to
+    float64 (the graph's scans refuse a float32 seed under x64,
+    MADD-ANO-017)."""
+    n = 150
+
+    def build(c):
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("spring", 0.01, initial_position=0.5,
+                                     stiffness=30.0, damping=c, mass=1.0))
+        gm.compile()
+        return gm
+
+    truth = build(damping_truth)
+    init = {"spring": {k: jnp.asarray(v, jnp.float64)[None]
+                       for k, v in truth.get_node_state("spring").items()}}
+    data = truth.run_sweep(n, init, return_history=True)[1]["spring"]["position"][0]
+    gm = build(2.0)
+    residual = jax.jit(lambda p: gm.run_sweep(n, init, return_history=True, params=p)[1]
+                       ["spring"]["position"][0] - data)
+    start = jax.tree.map(lambda x: x, gm.params)
+    start["nodes"]["spring"]["stiffness"] = jnp.asarray(45.0, jnp.float64)
+    start["nodes"]["spring"]["damping"] = jnp.asarray(4.0, jnp.float64)
+    mask = jax.tree.map(lambda _: False, gm.trainable_mask(gm.params))
+    mask["nodes"]["spring"]["stiffness"] = True
+    mask["nodes"]["spring"]["damping"] = True
+    return fit_lm(gm, residual, params=start, mask=mask, n_iter=100, **kw)
+
+
+def test_a_noiseless_float64_fit_at_its_floor_is_converged():
+    """Twelve damped candidates ended one rung short of the default
+    ``step_tol`` (a relative step of ``4.4e-15`` against ``3.6e-15`` at
+    ``lam = 1e5``), so the floor rule could not fire and the fit, at loss
+    ``2.3e-30`` after 8 of 100 iterations, read ``converged=False``.  The
+    ladder now goes on to a candidate within the tolerance."""
+    with _x64():
+        res = _x64_noiseless_fit(1e-6)
+    assert res.converged, (res.n_iter, res.best_loss)
+    assert res.n_iter < 100 and res.best_loss < 1e-25
+    assert float(res.params["nodes"]["spring"]["damping"]) == pytest.approx(1e-6, rel=1e-6)
+
+
+def test_a_truth_of_exactly_zero_has_no_relative_resolution():
+    """The decision, pinned: a damping whose truth is exactly 0 is fitted to
+    the residual's rounding noise around 0 (``1.3e-15`` in float64), and a
+    step relative to rounding noise is never within ``step_tol`` -- so the
+    run stops at its floor with ``converged=False``, at a loss of ``1e-30``.
+    The flag is exact about what it tests; a ``tol`` at the noise floor is
+    how such a fit says it is done, and the ladder's extension must not
+    have bought a looser reading."""
+    with _x64():
+        stopped = _x64_noiseless_fit(0.0)
+        told = _x64_noiseless_fit(0.0, tol=1e-25)
+    assert not stopped.converged and stopped.n_iter < 100
+    assert stopped.best_loss < 1e-28
+    assert abs(float(stopped.params["nodes"]["spring"]["damping"])) < 1e-12
+    assert told.converged and told.best_loss <= 1e-25
+
+
+def test_the_ladder_extension_does_not_depend_on_lam_up(monkeypatch):
+    """A small ``lam_up`` damps the twelve rungs by little (``1.5**12`` is
+    130); the extension grows ``lam`` by at least a decade a rung, so it
+    still reaches a candidate within ``step_tol`` -- in at most 24 more
+    rungs, rather than the ``log(1e24) / log(lam_up)`` a ladder of
+    ``lam_up`` rungs would need -- and the floor rule fires.  The
+    candidates are counted per iteration (``callback`` marks each one's
+    start): measured 22 in the last, 12 and 10; a ladder extended by
+    ``lam_up`` would have needed 69."""
+    from maddening import sysid
+
+    per_iteration: dict[int, int] = {}
+    current = {"i": 0}
+    step = sysid._marquardt_step                      # noqa: SLF001
+
+    def counted(*args):
+        per_iteration[current["i"]] = per_iteration.get(current["i"], 0) + 1
+        return step(*args)
+
+    monkeypatch.setattr(sysid, "_marquardt_step", counted)
+    with _x64():
+        res = _x64_noiseless_fit(1e-6, lam_up=1.5,
+                                 callback=lambda i, *_: current.__setitem__("i", i))
+    assert res.converged, (res.n_iter, res.best_loss)
+    assert res.best_loss < 1e-25
+    assert max(per_iteration.values()) > 12, ("the extension never ran", per_iteration)
+    assert max(per_iteration.values()) <= 12 + 24, per_iteration

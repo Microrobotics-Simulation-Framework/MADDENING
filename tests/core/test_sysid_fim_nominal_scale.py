@@ -501,22 +501,56 @@ class TestRefusals:
         with pytest.raises(ValueError, match="scale must be 'relative', 'nominal' or None"):
             runner(residual, params, scale="absolute")
 
-    @pytest.mark.parametrize("hi", [1e-300, 1e-39, 1e39, 1e20],
-                             ids=["underflows", "subnormal_square_zero",
-                                  "overflows", "square_overflows"])
+    @pytest.mark.parametrize("hi", [1e-300, 1e-39, 1e39],
+                             ids=["underflows", "subnormal", "overflows"])
     @pytest.mark.parametrize("runner", [fim, fim_core], ids=["fim", "fim_core"])
     def test_a_width_that_is_not_a_float32_scale_is_refused_by_name(
             self, runner, hi):
         """``ParamSpec`` accepts ``(0.0, 1e-300)``: ``lo < hi`` holds in
         float64.  At float32 that width is ``0.0`` and the column it
-        scales is the silent zero this mode exists to remove; ``1e20``
-        survives the cast and overflows ``F``.  Refused, naming the
-        column and the width, in both paths."""
+        scales is the silent zero this mode exists to remove; ``1e-39`` is
+        a subnormal the arithmetic flushes to the same zero, and ``1e39``
+        is ``inf``.  Refused, naming the column and the width, in both
+        paths."""
         residual, params = _pair_at_zero()
         specs = {"a": ParamSpec(bounds=(0.0, hi)), "b": ParamSpec(bounds=(-1.0, 1.0))}
         with pytest.raises(ValueError, match=r"width of \['a'\]'s bounds") as info:
             runner(residual, params, scale="nominal", specs=specs)
         assert repr(hi) in str(info.value) or f"{hi:g}" in str(info.value)
+
+    @pytest.mark.parametrize("width", [1e-23, 1e-30, 1e-37, 1e19, 1e20, 1e30])
+    @pytest.mark.parametrize("runner", [fim, fim_core], ids=["fim", "fim_core"])
+    def test_a_representable_width_is_accepted_whatever_its_square(
+            self, runner, width):
+        """The guard tested the width's *square*, a number ``F`` is never
+        built from: it refused the bounds ``(0, 1e-23)`` of a parameter
+        whose natural size is ``1e-23`` (a 10 nm particle's volume in
+        cubic metres) and ``(0, 1e20)`` alike.  The residual reads
+        ``v / width``, so the scaled column is the same at every width and
+        so must the report be (audit_040_p4_8/fmu-sysid/repro_nominal_width_guard.py)."""
+        A = jnp.asarray(np.random.default_rng(0).normal(size=(40, 2)).astype(np.float32))
+
+        def report(w):
+            def residual(p):
+                return A @ jnp.stack([p["a"], p["v"] / jnp.float32(w)])
+            params = {"a": jnp.float32(0.3), "v": jnp.float32(0.5 * w)}
+            specs = {"a": ParamSpec(bounds=(0.0, 1.0)), "v": ParamSpec(bounds=(0.0, w))}
+            return runner(residual, params, scale="nominal", specs=specs)
+
+        got, want = report(width), report(1.0)
+        assert int(got.rank) == 2
+        np.testing.assert_allclose(np.asarray(got.crb), np.asarray(want.crb), rtol=1e-5)
+
+    def test_a_width_whose_column_overflows_is_reported_non_finite(self):
+        """With the square no longer refused, what overflows is the scaled
+        column itself -- ``J * width`` -- and that is the non-finite ``F``
+        :func:`fim` raises on and :func:`fim_core` flags, as it does for any
+        overflowing Jacobian."""
+        residual, params = _pair_at_zero()
+        specs = {"a": ParamSpec(bounds=(0.0, 1e20)), "b": ParamSpec(bounds=(-1.0, 1.0))}
+        with pytest.raises(FloatingPointError, match="non-finite Fisher matrix"):
+            fim(residual, params, scale="nominal", specs=specs)
+        assert not bool(fim_core(residual, params, scale="nominal", specs=specs).finite)
 
     def test_the_guard_is_applied_at_the_parameters_precision(self):
         """The same ``1e-39`` width that is refused for float32

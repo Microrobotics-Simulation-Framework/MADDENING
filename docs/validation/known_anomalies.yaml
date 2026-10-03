@@ -10755,7 +10755,6 @@ anomalies:
       `residual`; the bound is in the weights of the state it reports.
     verification:
       - "tests/core/test_coupling_spectral_bound_in_returned_weights.py::test_the_bound_holds_in_the_returned_states_weights_on_a_growing_group"
-    github_issue: null
 
   - anomaly_id: "MADD-ANO-147"
     title: "An FMU built over a pending structural node.params write ran the old model, while every graph entry point ran the new one"
@@ -10903,4 +10902,210 @@ anomalies:
       - "tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance"
       - "tests/fmi/test_communication_points.py::test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside"
       - "tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-150"
+    title: "Under jax_enable_x64, and with float32 constants in an x64 graph, the identifiability guard missed an exact degeneracy: full excited_rank, nothing held, the fitted scale 1-2% off its start"
+    description: >
+      `hold_undetermined` holds the directions no gradient of a fit pointed
+      along.  Its tracker accumulated `G = sum g g^T` and decomposed it with
+      `eigh`, which resolves `G`'s eigenvalues only to about `eps64` of the
+      largest -- and an exactly null direction of float64 gradients carries
+      `eps64**2` of it.  Under `jax_enable_x64` that energy came back at
+      `5e-17` of the largest against a cutoff of `4e-31`: the spring's
+      `(k, c, m)` scale degeneracy, `log` on all three, read `excited_rank=3`
+      in most runs, nothing was held, and Adam left the scale -1.8% to +1.1%
+      off its start depending on `lr` and `n_iter` (`fit_lm` -0.98%,
+      noiseless), with no warning -- the reproducibility defect the guard
+      exists to remove.  Float32 constants in an x64 graph (a value with its
+      own float dtype keeps it) failed in every run for a second reason:
+      the tracker and the curvature tests took `eps` from the raveled
+      vector, which `ravel_pytree` promotes to float64, while the gradient
+      of a float32 leaf carries float32 rounding.  Found by the B1 round-7
+      claims audit (SYS-062, -064, -065, -067; on 04bc3e5).  No tagged
+      release carried it: `maddening.sysid` is new in 0.4.0.
+      Resolved in 0.4.0 (2026-10-03): the tracker keeps the triangular
+      factor of the stacked gradients (folded by QR) and reads `G`'s
+      spectrum as its singular values, which resolve to `eps` of the
+      largest at either precision, with the same cutoff rule applied to
+      them; the tracker and both curvature tests take `eps` from the
+      coarsest trainable leaf's dtype.  Measured on the spring over `lr`
+      0.01-0.5, 3-1000 iterations and sigma 0, 0.02 and 0.2: the null
+      singular value at most 0.30 of the cutoff in float64 and 0.28 in
+      float32, the next direction 14 decades above it.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the fitted value of an undetermined combination was decided
+      by the optimiser's schedule, and `excited_rank` reported that every
+      direction was determined.  Graded `major` under the 0.4.0 severity
+      definition (a silent wrong result).  Not `critical`: the loss and the
+      determined combinations were unaffected, and only x64 runs or float32
+      leaves in an x64 graph were reached.
+    affected_components:
+      - "maddening.sysid.fit"
+      - "maddening.sysid.fit_lm"
+      - "maddening.sysid.fit_multiple_shooting"
+      - "maddening.sysid._ExcitationTracker"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The cutoff is the same numerical rule at both precisions, so its
+      margin is the measured one: a null direction whose gradients carry
+      more than about three times the measured rounding would be read as
+      excited and left unheld -- the fail-open side, reported as full rank.
+    verification:
+      - "tests/core/test_sysid_undetermined_directions.py::test_fit_holds_the_scale_under_x64"
+      - "tests/core/test_sysid_undetermined_directions.py::test_fit_lm_holds_the_scale_under_x64"
+      - "tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_holds_the_scale_under_x64"
+      - "tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_under_x64_gets_its_iterate_back_bit_for_bit"
+      - "tests/core/test_sysid_undetermined_directions.py::test_the_tracker_resolves_an_exact_null_direction_at_either_precision"
+      - "tests/core/test_sysid_undetermined_directions.py::test_the_guard_reads_its_precision_from_the_coarsest_trainable_leaf"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-151"
+    title: "windowed_loss restarted every coupling warm start cold at each window: with a predictor or IQN-IMVJ the loss at the generating parameters was not zero, and a fit started there walked 6.4% away"
+    description: >
+      A coupling group with a `predictor` or `acceleration="iqn-imvj"`
+      carries state the user state does not hold -- its predictor history
+      and its IQN-IMVJ secant matrices -- and with a finite `max_iterations`
+      it changes what a step returns.  `windowed_loss` rebuilt every window
+      start as the measured user state plus `zeros_like(_meta)`, so each
+      window restarted those warm starts cold while the record had been
+      made with them warm.  Two springs coupled with a quadratic predictor
+      at `max_iterations=1`: the loss at the generating parameters was
+      2.1e-4, 4.0e-3 and 1.7e-2 over windows of 1, 4 and 10 samples, its
+      minimum over the stiffness sat at +6.4%, and `fit` started at the
+      truth returned +6.4%, with no warning; a linear predictor at two
+      passes gave 1.0e-10, a coupled heat pair 1e-5, IQN-IMVJ 8e-17.  Found
+      by the B1 round-7 claims audit (SYS-006, on 04bc3e5).  No tagged
+      release carried it: `maddening.sysid` is new in 0.4.0.
+      Resolved in 0.4.0 (2026-10-03): the warm starts are replayed --
+      window `w` starts from those window `w - 1` ended with, window 0 from
+      the cold ones `compile()` and `reset_state()` leave -- entering with
+      their gradient stopped, so gradients still do not compound across
+      windows; a window `mask_unconverged` drops hands on cold ones.  The
+      loss is exactly zero at the truth for every predictor, IQN-IMVJ,
+      `solver="fori"`, a multi-rate graph, `sample_every` and multiple
+      shooting.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a fit moved its parameters away from the values that made the
+      record, at a lower loss and with no warning.  Graded `major` under the
+      0.4.0 severity definition (a silent wrong result).  Not `critical`:
+      only coupling groups with a predictor or IQN-IMVJ and a finite
+      `max_iterations` were reached, and a converged group by its tolerance.
+    affected_components:
+      - "maddening.sysid.windowed_loss"
+      - "maddening.sysid.fit_multiple_shooting"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A record that began after the graph had stepped (`start_step > 0`)
+      was made with warm starts that are not known, so its replay cannot be
+      exact; `windowed_loss` warns.  Data the model did not generate carries
+      no warm starts; the replay then uses the model's own, from the
+      previous window.
+    verification:
+      - "tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_loss_is_exactly_zero_and_stationary_at_the_truth"
+      - "tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_fit_started_at_the_truth_stays_there"
+      - "tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_inherited_warm_starts_carry_no_gradient"
+      - "tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_window_the_mask_drops_hands_on_cold_warm_starts"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-152"
+    title: "fim's float32 rank verdict moved with noise_std once F = J^T J left the normal range: a determined direction dropped out, every crb inf, no warning"
+    description: >
+      `FIMReport.rank` is documented not to move when the residual is
+      rescaled, because its cutoff scales with the matrix.  That holds only
+      while `F` can be formed.  XLA's CPU backend flushes a subnormal
+      product to zero, so once the cutoff `rank_rtol * max(eigvals)` falls
+      near `m * tiny` the products the smallest directions are built from
+      are lost: in float32 a 50-row residual of size `1e-3` divided by
+      `noise_std=1e15` reported rank 1 of 2, `cond=inf` and every `crb`
+      `inf`, where every smaller `noise_std` reported rank 2 -- with no
+      `PrecisionLimitWarning`, whose band test reads only the ratio.  Found
+      by the B1 round-7 claims audit (SYS-023, on 04bc3e5).  No tagged
+      release carried it: `maddening.sysid` is new in 0.4.0.
+      Resolved in 0.4.0 (2026-10-03): `fim` warns (`PrecisionLimitWarning`)
+      and `FIMCore.precision_limited` is set when the cutoff is below
+      `2 * m * tiny`, naming the remedy (rescale the residual, or x64).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: an identifiability verdict and its Cramer-Rao bounds changed
+      with the units of the noise model and were reported as the data's.
+      Graded `major` under the 0.4.0 severity definition (a silent wrong
+      result).  Not `critical`: only Fisher matrices below float32's normal
+      range, some 30 decades from ordinary use, were reached.
+    affected_components:
+      - "maddening.sysid.fim"
+      - "maddening.sysid.fim_core"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The verdict is flagged, not repaired: below the range it still depends
+      on the scale, as the warning says.  Rescaling the residual or running
+      under x64 gives a verdict that does not.
+    verification:
+      - "tests/core/test_sysid_claims_edges.py::test_a_rank_decided_below_the_normal_range_warns"
+      - "tests/core/test_sysid_claims_edges.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-153"
+    title: "The fitters read wrongly typed arguments instead of refusing them: fit(tol=True) reported converged at an unfitted start, and a mask leaf \"False\" fitted its parameter"
+    description: >
+      The hyper-parameter check converted with `float()`, which reads
+      `True` as `1.0` and the string `"0.05"` as `0.05`: `fit(tol=True)`
+      stopped at its first evaluation and returned `converged=True` with
+      the stiffness still at its start (45 against a truth of 30), and
+      `fit_lm(lam_down=True)` and `windowed_loss(continuity_weight=True)`
+      were accepted the same way.  A mask leaf was read by truthiness, so a
+      leaf of `"False"` -- a non-empty string -- selected its parameter:
+      `fit_lm` moved the damping the caller had excluded, and `fim` listed
+      it as a column.  Found by the B1 round-7 claims audit (SYS-061, on
+      04bc3e5).  No tagged release carried it: `maddening.sysid` is new in
+      0.4.0.
+      Resolved in 0.4.0 (2026-10-03): a hyper-parameter must be a real
+      number (a bool in any spelling, a string, a list or a complex number
+      is refused), and every leaf of a caller's mask must be a bool (a
+      NumPy `bool_` or a 0-d boolean array included), for the three fitters,
+      `fim` and `fim_core`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a fit reported convergence it had not reached, and fitted a
+      parameter the caller had excluded.  Graded `major` under the 0.4.0
+      severity definition (a silent wrong result).  Not `critical`: only a
+      wrongly typed argument reached it.
+    affected_components:
+      - "maddening.sysid.fit"
+      - "maddening.sysid.fit_lm"
+      - "maddening.sysid.fit_multiple_shooting"
+      - "maddening.sysid.windowed_loss"
+      - "maddening.sysid.fim"
+      - "maddening.sysid.fim_core"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  `gm.trainable_mask()` is read as before: a `ParamSpec`
+      built with a non-bool `trainable` is not refused at construction.
+    verification:
+      - "tests/core/test_sysid_degenerate_inputs.py::test_a_bool_or_a_non_number_hyper_parameter_is_refused"
+      - "tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_and_its_fitter_refuse_a_bool_continuity_weight"
+      - "tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_not_a_bool_is_refused"
+      - "tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_a_bool_in_any_spelling_is_read"
     github_issue: null

@@ -23,6 +23,7 @@ itself under all three fitters.
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -109,10 +110,10 @@ def _blocks(p, units=_ONE):
     ])
 
 
-def _start(gm, kinds, fractions, units=_ONE):
+def _start(gm, kinds, fractions, units=_ONE, dtype=jnp.float32):
     p = jax.tree.map(lambda x: x, gm.params)
     for key, kind, fraction, unit in zip(KEYS, kinds, fractions, units):
-        p["nodes"]["s"][key] = jnp.asarray(_value(kind, fraction) * unit, jnp.float32)
+        p["nodes"]["s"][key] = jnp.asarray(_value(kind, fraction) * unit, dtype)
     return p
 
 
@@ -145,14 +146,15 @@ _PROBLEM = dict(
 )
 
 
-def _fit(kinds, truth_at, start_at, units=_ONE):
+def _fit(kinds, truth_at, start_at, units=_ONE, dtype=jnp.float32):
     gm = _graph(kinds, units)
-    truth = _start(gm, kinds, truth_at, units)
+    truth = _start(gm, kinds, truth_at, units, dtype)
     data = _blocks(truth, units)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)       # a declined hold says so
         res = fit_lm(gm, lambda p: _blocks(p, units) - data,
-                     params=_start(gm, kinds, start_at, units), mask=_mask(gm), n_iter=60)
+                     params=_start(gm, kinds, start_at, units, dtype), mask=_mask(gm),
+                     n_iter=60)
     ok, errors = _recovered(res, truth, kinds, units)
     _note(f"units={units} kinds={kinds} converged={res.converged} n_iter={res.n_iter} "
           f"best_loss={res.best_loss} (key, got, truth)={errors}")
@@ -187,6 +189,63 @@ def _check_fit_lm(kinds, truth_at, start_at):
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 def test_fit_lm_converged_means_the_truth(kinds, truth_at, start_at):
     _check_fit_lm(kinds, truth_at, start_at)
+
+
+@contextlib.contextmanager
+def _x64():
+    """Run the body in double precision, restoring the global setting."""
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
+#: Under x64 every trainable leaf at float64 (``"float64"``), or the three
+#: trainable leaves at float32 beside the graph's float64 ones (``"mixed"``:
+#: a value with its own float dtype keeps it, and ``ravel_pytree`` promotes
+#: the optimiser's vector to float64 around it).
+_X64_DTYPES = {"float64": jnp.float64, "mixed": jnp.float32}
+
+
+def _check_fit_lm_x64(kinds, truth_at, start_at, leaves):
+    """The oracle under x64: x64 is a supported mode (``fim`` recommends it),
+    and the identifiability guard, the step tolerance and the floor rule
+    all read their precision from the leaves -- the guard used to take it
+    from the promoted vector, and the floor rule's ladder ended a rung
+    short at float64's resolution."""
+    with _x64():
+        res, ok, errors = _fit(kinds, truth_at, start_at, dtype=_X64_DTYPES[leaves])
+    assert ok or not res.converged, (leaves, errors)
+    return res
+
+
+#: Per push: each transform, near and away from its bounds, both ways round.
+_X64_CASES = [
+    (("clip", "log", "logit"), (0.5, 0.3, 0.6), (0.9, 0.7, 0.2)),
+    (("logit", "clip", "clip"), (0.5, 0.5, 0.75), (0.0625, 0.5, 0.5)),
+    (("clip", "logit", "clip"), (0.5, 0.5, 0.5), (0.5, 0.0001, 0.5)),
+    (("log", "log", "logit"), (1e-3, 0.999, 0.9999), (0.5, 0.02, 0.1)),
+]
+
+
+@pytest.mark.parametrize("leaves", sorted(_X64_DTYPES))
+@pytest.mark.parametrize("kinds, truth_at, start_at", _X64_CASES)
+def test_fit_lm_converged_means_the_truth_under_x64(kinds, truth_at, start_at, leaves):
+    res = _check_fit_lm_x64(kinds, truth_at, start_at, leaves)
+    if (kinds, truth_at, start_at) == _X64_CASES[0]:
+        # Non-vacuity: away from every edge the fit does say converged, so
+        # the oracle above is tested, not satisfied by a run that never is.
+        assert res.converged, (leaves, res.n_iter, res.best_loss)
+
+
+# Per push: tests/property/test_sysid_truth_recovery.py::test_fit_lm_converged_means_the_truth_under_x64
+@pytest.mark.slow  # a fit compiled per example under x64: over 5 s on CI
+@given(**_PROBLEM, leaves=st.sampled_from(sorted(_X64_DTYPES)))
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+def test_fit_lm_converged_means_the_truth_under_x64_broadly(kinds, truth_at, start_at, leaves):
+    _check_fit_lm_x64(kinds, truth_at, start_at, leaves)
 
 
 def _check_units(kinds, truth_at, start_at, which, unit):

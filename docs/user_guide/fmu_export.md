@@ -122,9 +122,25 @@ gathers.  An importer whose every step size is a little long is refused,
 with nothing advanced, once its errors add up past the tolerance.
 Adopting each point used to let the reported time move ahead of the
 physics without bound: 1.6 master steps after 2000 steps at a 1e-12 s
-step (MADD-ANO-149).  An importer that steps at the description's
-`stepSize`, keeping a running sum or computing `start + k * h`, stays
-inside however long it runs: its rounding grows no faster than the slack.
+step (MADD-ANO-149).
+
+No rounding slack is ever more than a tenth of a master step, so the time
+the FMU reports stays within a millionth plus a tenth of a step of the time
+it has simulated, and always names the step its physics is at.  Uncapped,
+the slacks admitted whole steps where an ulp of the time is a sizeable part
+of one: at 1000 s an ulp is 0.11 of a 1e-12 s step, and a `doStep` a whole
+step ahead was adopted (MADD-ANO-164).  So a time whose 16 ulps pass a
+tenth of the master step -- 32 s and beyond at a 1e-12 s master step,
+about 9.1 hours (32768 s) at 1e-9 s, about 3.4e10 s at 1e-3 s -- is refused, at
+`fmi3EnterInitializationMode`, at a `doStep` that would reach it and at
+`fmi3SetFMUState`; the message names the largest time the master step
+resolves.  Start nearer zero, or serve a graph with a larger timestep.
+An importer that computes each point as `start + k * h`, as FMPy does, is
+never refused below that time.  One that keeps a running sum of its step
+sizes gathers up to half an ulp of the time per step, and is refused, with
+nothing advanced, once that passes a tenth of a step: after about 1.2
+million steps from 1 s at a 1e-9 s step, and not before about forty million
+from a start of 0 at any master step.
 
 The wrapper holds FMI 3.0's co-simulation states and refuses a call its
 state does not allow, with `fmi3Error`, a log message naming the state, and
@@ -157,11 +173,15 @@ its own check of the Terminated state, for clients other than the wrapper.
 `<node>.<field>` of the target boundary field (start value 0, description
 and unit from the target node's `boundary_input_spec`).  Parameters are
 `<node>.params.<key>`, with the `ParamSpec` bounds as `min` / `max`.  A
-`log` or `logit` bound is open, so it is advertised as the nearest value
-inside it, and a `log` leaf with no lower bound is bounded by 0 all the
-same: its `min` is the smallest positive normal of its type.  It used to
-carry no `min`, and a bridge whose sidecar had no `param_specs` accepted
-and ran `mass = -1` (MADD-ANO-148).
+`log` or `logit` bound is open, so it is advertised as the outermost value
+inside it that `ParamSpec.check` accepts in the parameter's type: the next
+float in, unless the transform's own arithmetic rounds that onto the bound.
+A float32 `logit` leaf under `(-1, 1)` advertised `max = nextafter(1, 0)`,
+whose `(p - lo) / (hi - lo)` rounds to 1, and a sidecar with `param_specs`
+refused the FMU's own max; it is now two floats in.  A `log` leaf with no
+lower bound is bounded by 0 all the same: its `min` is the smallest positive
+normal of its type.  It used to carry no `min`, and a bridge whose sidecar
+had no `param_specs` accepted and ran `mass = -1` (MADD-ANO-148).
 
 The stability filter is by node: a node's outputs, parameters and external
 inputs enter the FMU only if the node is `STABLE`, or `EVOLVING` /
@@ -234,8 +254,17 @@ none.
 Setting a parameter is held to the `min` / `max` the description
 advertises, whether or not the sidecar was built with `param_specs`.  The
 bridge adds a bounds-only spec for every exported parameter its sidecar has
-no spec for.  So an importer cannot drive the graph with a constant it
-declares invalid.  Only parameters the
+no spec for, and holds a parameter its sidecar has a spec for to that spec
+and to the advertised bounds both.  So an importer cannot drive the graph
+with a constant it declares invalid.  The bridge refuses to start when
+the two would disagree: when a parameter's `ParamSpec` in the description's
+graph has changed since the description was built (`set_param_spec` dirties
+nothing, so the compile check cannot see it) so that its `min`, `max` or
+`unit` is no longer the advertised one, or when the sidecar's own spec for
+an exported parameter enforces another envelope.  It used to keep the
+sidecar's spec, and accepted `damping = 7.0` against an advertised `[1, 5]`
+(MADD-ANO-163).  Build the description, the sidecar and the bridge after
+the last `set_param_spec`.  Only parameters the
 compiled step reads are exported, all `variability="tunable"`: an
 `initial_*` condition (the initial state is already built), a value a node
 consumed when it was constructed (`LBMPipeNode.pipe_radius`) or declares in
@@ -288,10 +317,16 @@ length.  Frames are limited to 64 MiB in both directions and for both
 kinds: the bridge drops a connection that announces a longer *request*
 (the length is not to be trusted), answers a `get` / `get_state` whose
 *reply* would be longer with a JSON error instead (the connection stays in
-sync; a `get` of more than about 8 M values needs to be split), and the C
+sync), and the C
 wrapper refuses to read a longer frame of either kind and closes the
 connection, so the instance fails every later call instead of parsing
-stale bytes.  A binary payload is a short JSON
+stale bytes.  A `get` naming more value references, or variables holding
+more values, than a binary reply frame carries (8 388 480) is refused
+before anything is read; split it.  One 64 MiB request naming a scalar 33.5
+million times used to take about 45 s and over 6 GB before its reply was
+refused (MADD-ANO-165).  A `get` may name a value reference more than once,
+and each occurrence gets the value; a `set` may not.  A JSON `get` reply
+that would pass the limit is abandoned while it is encoded.  A binary payload is a short JSON
 *header* carrying `op` and metadata, then the *raw* data, so bulk values
 and FMU-state blobs never pass through JSON text (no `%.17g` / `strtod`,
 no base64):

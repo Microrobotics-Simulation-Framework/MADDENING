@@ -147,7 +147,13 @@ class FMIVariable:
     min, max : float, optional
         Declared bounds (the XML ``min`` / ``max`` attributes).  For
         graph parameters these come from :class:`ParamSpec.bounds`, so
-        an importer sees the same envelope the sidecar enforces.
+        an importer sees the same envelope the sidecar enforces: an open
+        ``log`` / ``logit`` bound is advertised as the outermost value
+        inside it that ``ParamSpec.check`` accepts in the leaf's dtype --
+        the next float in, unless the transform's arithmetic rounds that
+        onto the bound (a float32 ``logit`` under ``(-1, 1)``, whose
+        ``max`` is then two floats in).  The bridge refuses to serve the
+        description once its graph's spec changes (``set_param_spec``).
     """
     name: str
     value_reference: int

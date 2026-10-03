@@ -361,6 +361,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **FMU export, round-8 audit fixes** (MADD-ANO-163 to 165, never released): the bridge refuses to start when a `set_param_spec` since the description (or a sidecar spec) would enforce another `min` / `max` than the XML advertises, and holds every write to the advertised bounds too; a start, step end or restored time whose 16 ulps pass a tenth of the master step is refused, and no time slack exceeds a tenth of a step;
+  a `get` past what one reply frame carries is refused before anything is read (one 64 MiB frame took 6 GB), a repeated reference is read once; an open `log` / `logit` bound is advertised as the outermost value `ParamSpec.check` accepts (a float32 `logit(-1, 1)` max was refused).
+  Action: build the description, sidecar and bridge after the last `set_param_spec`; start an FMU at a time its master step resolves; compute communication points as `start + k * h`; re-package an FMU with a float32 `logit` leaf (its token may change).
 - **sysid round-7 fixes** (MADD-ANO-150 to 153, never released): the identifiability guard holds an exact degeneracy under x64 and with float32 leaves in an x64 graph; `windowed_loss` replays coupling predictor and IQN-IMVJ warm starts across windows (zero loss at the truth); `fim` warns when its rank cutoff is below float32's normal range;
   bool and non-number hyper-parameters and non-bool mask leaves are refused; `ParamSpec.check` refuses a `log`/`logit` value without a finite coordinate; the nominal width guard tests the width, not its square; `fit_lm` reaches its float64 floor.
   Action: pass real numbers and bool mask leaves; a fit with a predictor or IQN-IMVJ group, or under x64, may return a different (correct) point.  SYS-071 is verified; SYS-127 to 130 are new.

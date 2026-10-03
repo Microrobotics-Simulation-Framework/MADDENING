@@ -42,7 +42,14 @@ few ulps of the time per step, the rounding an importer's running sum of
 step sizes gathers (``_DRIFT_ULPS_PER_STEP``): an importer whose every step
 size is a little long is refused once its errors add up past the tolerance,
 where the reported time used to move ahead of the physics without bound.
-Every tolerance is relative to the master step, at any master step.  ``t``,
+Every tolerance is relative to the master step, at any master step, and no
+rounding slack is ever more than a tenth of one (``_ROUNDING_SLACK_MAX``):
+the reported time stays within a millionth plus a tenth of a master step of
+the simulated time.  A time at which 16 ulps exceed that tenth -- 32 s and
+beyond at a 1e-12 s master step, about 3.4e10 s at 1e-3 s -- is refused at
+``initialize``, at a step that would reach it and at ``set_state``: the
+float64 clock cannot place a communication point there (the uncapped slacks
+used to admit whole master steps of drift).  ``t``,
 ``h`` and every entry of ``values`` must be JSON numbers: a string or a
 boolean is refused, not parsed.
 
@@ -51,7 +58,8 @@ boolean is refused, not parsed.
 ...); the C wrapper always sends it, and a variable of another type is
 refused with nothing read or written, as FMI 3.0 requires.  A Boolean
 variable takes ``0`` or ``1``.  A ``set`` that names a value reference twice
-is refused, and so is a numeric set of a ``<Clock>`` variable.
+is refused, and so is a numeric set of a ``<Clock>`` variable; a ``get`` may
+name one twice, and every occurrence gets the value.
 
 **Steps.**  ``master_dt`` is one step of the graph and must equal the step
 the model description records (``ModelDescription.graph_timestep``); one
@@ -73,7 +81,10 @@ else is refused, and the FMU advertises a fixed communication step).  A
 ``set`` is atomic: parameters are bounds-checked by the sidecar and inputs
 are committed only when every value in the request was valid.  The bounds
 are the ``min`` / ``max`` the model description advertises, whether or not
-the sidecar was built with ``param_specs``, and a declared external input
+the sidecar was built with ``param_specs`` (a sidecar spec is enforced
+beside them, and one that enforces another envelope -- or a description
+whose graph's specs changed since it was built -- makes the bridge refuse
+to start), and a declared external input
 the description does not export (``held_inputs``) is held at zero on every
 step, as ``GraphManager.step`` holds an input its caller omits.
 
@@ -99,10 +110,14 @@ this bridge does not know is refused at hello.
 
 **Frame limit.**  A frame is at most 64 MiB (``_MAX_MESSAGE``) in both
 directions: a longer request drops the connection (its length is not to
-be trusted), and a reply that would be longer (a ``get`` of more than
-about 8 M values, a huge state) is replaced by a JSON error reply, so the
+be trusted), and a reply that would be longer (a huge state, a ``get``
+whose JSON text passes the limit) is replaced by a JSON error reply, so the
 connection stays in sync and the C wrapper, which refuses to read a
-longer frame, never sees one from this bridge.
+longer frame, never sees one from this bridge.  A ``get`` naming more
+value references, or variables holding more values, than a binary reply
+frame carries (``_MAX_GET_VALUES``, 8 388 480) is refused before anything
+is read: one 64 MiB request naming a scalar 33.5 million times used to
+take about 45 s and 6 GB before its reply was refused.
 
 **Connection lifetime.**  A connection holds the bridge's single FMU
 instance for as long as it lives, so no wait on it is unbounded: a peer
@@ -849,7 +864,11 @@ class FmuTcpBridge:
         no larger than ``max_steps_per_request``; if the graph the
         description was built from, or the graph whose compiled step is
         the sidecar's ``step_fn``, has changed or been compiled again
-        since; if ``max_steps_per_request`` is not a positive integer; or if
+        since; if a parameter's ``ParamSpec`` in the description's graph
+        has changed since (``set_param_spec``) so that its ``min``, ``max``
+        or ``unit`` is no longer the one advertised, or the sidecar's own
+        spec for an exported parameter enforces another ``min`` / ``max``;
+        if ``max_steps_per_request`` is not a positive integer; or if
         ``idle_timeout`` is neither ``None`` nor a positive finite number.
     """
 

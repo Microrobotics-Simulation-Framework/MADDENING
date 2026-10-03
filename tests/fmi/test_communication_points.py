@@ -311,16 +311,21 @@ def _spring_bridge(dt):
 @pytest.mark.parametrize("start, dt", [(0.0, 0.01), (1000.0, 0.1), (1.0, 1e-9)])
 def test_an_honest_importers_clock_stays_inside_the_drift_tolerance(start, dt):
     """The drift bound grows by a few ulps of the time per step, the rounding
-    a running sum of step sizes gathers, so an importer that keeps one --
-    or computes ``start + k * h`` -- is never refused, however long it runs.
-    A million steps of both clocks, judged by the bridge's own tolerance at
-    every thousandth step and at the hundred worst ones (no physics is run:
-    the drift check is a function of the times alone)."""
+    a running sum of step sizes gathers, up to a tenth of a master step, so
+    an importer that keeps one -- or computes ``start + k * h`` -- is not
+    refused over a million steps from these starts (the running sum from
+    1 s at 1e-9 s gathers 0.08 of a step by then; past the cap it is
+    refused: the next test).  A million steps of both clocks, judged by the
+    bridge's own tolerance at every thousandth step and at the hundred worst
+    ones (no physics is run: the drift check is a function of the times
+    alone)."""
     bridge = _spring_bridge(dt)
     try:
         bridge._t_ref, bridge._n_ref = start, 0                           # noqa: SLF001
         k = np.arange(1, 1_000_001)
-        running = start + np.cumsum(np.full(k.size, dt))                  # sequential sums
+        # sequential sums from the start, as an importer keeps them (``start +
+        # cumsum`` would round once, not once a step)
+        running = np.add.accumulate(np.concatenate([[start], np.full(k.size, dt)]))[1:]
         clocks = {"running sum": running, "start + k * h": start + k * dt}
         simulated = start + k * dt
         for name, clock in clocks.items():
@@ -330,5 +335,165 @@ def test_an_honest_importers_clock_stays_inside_the_drift_tolerance(start, dt):
             for i in picks:
                 tol = bridge._drift_tolerance(float(clock[i]), int(k[i]))  # noqa: SLF001
                 assert err[i] <= tol, (name, int(k[i]), float(err[i]), tol)
+    finally:
+        bridge.stop()
+
+
+# ----------------------------------- a time the clock cannot resolve
+#
+# The rounding slacks are in ulps of the times involved, and were uncapped:
+# at 1000 s one ulp is 0.11 of a 1e-12 s master step, so the communication
+# point's 16 ulps were 1.8 steps and the drift slack grew by 0.45 of a step
+# per step -- a doStep one whole master step ahead was adopted, and an
+# importer whose clock ran 40% fast was never refused (the B1 round-8
+# audit's M4; the same at 1.7e9 s with 1e-6 s steps).  Each slack is now at
+# most a tenth of a master step, and a time whose 16 ulps pass that is
+# refused outright.
+
+SLACK = 0.1                                           # of a master step
+
+
+def _resolution_limit(dt):
+    """The smallest power of two whose 16 ulps pass a tenth of ``dt``: every
+    time below it is resolved, none at or above it (an independent search,
+    not the bridge's formula)."""
+    k = -1074
+    while 16 * float(np.spacing(2.0 ** k)) <= SLACK * dt:
+        k += 1
+    return 2.0 ** k
+
+
+@pytest.mark.parametrize("start, dt", [(1000.0, 1e-12), (1.7e9, 1e-6)])
+def test_a_start_time_the_clock_cannot_resolve_against_the_master_step_is_refused(start, dt):
+    """The audit's two configurations: refused at ``initialize``, naming the
+    ratio, with the time left at 0; a step from that start is refused too,
+    and nothing advances."""
+    bridge = _spring_bridge(dt)
+    try:
+        reply = bridge.handle({"op": "initialize", "t": start})
+        assert reply["ok"] is False, reply
+        assert "is too large for the master step" in reply["error"], reply
+        assert "of a master step" in reply["error"] and "resolves times below" in reply["error"]
+        assert bridge._time == 0.0 and bridge._n_ref == 0                     # noqa: SLF001
+        refused = bridge.handle({"op": "step", "t": start, "dt": dt})
+        assert refused["ok"] is False and bridge._n_ref == 0, refused         # noqa: SLF001
+    finally:
+        bridge.stop()
+
+
+@pytest.mark.parametrize("dt", [1e-12, 1e-9, 1e-6, 1e-3])
+def test_the_resolution_limit_is_where_sixteen_ulps_pass_a_tenth_of_the_master_step(dt):
+    """Just below the limit a start is accepted, at it refused; and the limit
+    the message names is that one."""
+    limit = _resolution_limit(dt)
+    bridge = _spring_bridge(dt)
+    try:
+        below = float(np.nextafter(limit, 0.0))
+        assert bridge.handle({"op": "initialize", "t": below}) == {"ok": True, "t": below}
+        bridge.handle({"op": "reset"})
+        reply = bridge.handle({"op": "initialize", "t": limit})
+        assert reply["ok"] is False and f"below about {limit:.3g} s" in reply["error"], reply
+        reply = bridge.handle({"op": "initialize", "t": -limit})
+        assert reply["ok"] is False, reply
+    finally:
+        bridge.stop()
+
+
+def test_a_step_that_would_end_past_the_resolution_limit_is_refused():
+    """From an accepted start, a step whose end ``t + h`` is a time the clock
+    cannot resolve is refused, with nothing advanced; one that ends below
+    the limit is taken."""
+    dt = 1e-12
+    limit = _resolution_limit(dt)
+    bridge = _spring_bridge(dt)
+    try:
+        start = limit - 5e-8
+        assert bridge.handle({"op": "initialize", "t": start})["ok"]
+        reply = bridge.handle({"op": "step", "t": start, "dt": 100_000 * dt})
+        assert reply["ok"] is False and "end of the step (t + h)" in reply["error"], reply
+        assert "is too large for the master step" in reply["error"], reply
+        assert bridge._n_ref == 0 and bridge._time == start                   # noqa: SLF001
+        assert bridge.handle({"op": "step", "t": start, "dt": dt})["ok"]
+    finally:
+        bridge.stop()
+
+
+def test_a_restored_time_the_clock_cannot_resolve_is_refused():
+    """An archive is a door into the time too: one carrying 1000 s for a
+    1e-12 s master step is refused with nothing restored, while the FMU's
+    own snapshot restores."""
+    import base64
+    import io
+
+    from maddening.fmi.tcp_bridge import state_of
+
+    bridge = _spring_bridge(1e-12)
+    try:
+        assert bridge.handle({"op": "step", "t": 0.0, "dt": 1e-12})["ok"]
+        blob = state_of(bridge.handle({"op": "get_state"}))
+        with np.load(io.BytesIO(blob), allow_pickle=False) as data:
+            members = {k: data[k] for k in data.files}
+        members["_time"] = np.asarray(1000.0)
+        buf = io.BytesIO()
+        np.savez(buf, **members)
+        reply = bridge.handle({"op": "set_state",
+                               "state": base64.b64encode(buf.getvalue()).decode("ascii")})
+        assert reply["ok"] is False and "FMU state's time" in reply["error"], reply
+        assert bridge._time == 1e-12                                          # noqa: SLF001
+        assert bridge.handle({"op": "set_state", "state": base64.b64encode(blob).decode()})["ok"]
+    finally:
+        bridge.stop()
+
+
+def test_at_a_large_accepted_ratio_a_biased_clock_is_stopped_within_a_tenth_of_a_step():
+    """At 16 s with a 1e-12 s master step (an ulp is 0.0036 of a step, inside
+    the resolution limit), every point a hundredth of a step late: each one
+    passes the communication-point check, but the drift slack used to grow
+    by 4 ulps -- 0.014 of a step -- per step, faster than this bias, so the
+    importer was never refused and the reported time ran ten master steps
+    ahead of the physics in a thousand steps.  Now it is refused once the
+    drift passes a tenth of a step, and the reported time never left the
+    simulated time by more than that; a whole-step skip is refused too."""
+    dt, start = 1e-12, 16.0
+    bridge = _spring_bridge(dt)
+    try:
+        assert bridge.handle({"op": "initialize", "t": start})["ok"]
+        t, refused_at = start, None
+        for k in range(1000):
+            reply = bridge.handle({"op": "step", "t": t, "dt": dt})
+            if not reply["ok"]:
+                refused_at = k
+                assert "from the time the FMU has simulated" in reply["error"], reply
+                break
+            ahead = (bridge._time - (start + bridge._n_ref * dt)) / dt          # noqa: SLF001
+            assert abs(ahead) <= SLACK + 1e-6, (k, ahead)
+            t = t + dt + 0.01 * dt
+        assert refused_at is not None and refused_at < 20, refused_at
+        point = bridge._time                                                  # noqa: SLF001
+        assert bridge.handle({"op": "step", "t": point + dt, "dt": dt})["ok"] is False
+    finally:
+        bridge.stop()
+
+
+def test_an_honest_running_sum_is_refused_once_its_rounding_passes_a_tenth_of_a_step():
+    """The cap's cost, stated: from 1 s at a 1e-9 s step a running sum of step
+    sizes gathers 0.37 ulp of the time per step (systematically, within a
+    binade), passes a tenth of a master step after about 1.2 million steps,
+    and is refused from there, while ``start + k * h`` is not.  The
+    tolerance itself never exceeds a millionth plus a tenth of a step."""
+    dt, start = 1e-9, 1.0
+    bridge = _spring_bridge(dt)
+    try:
+        bridge._t_ref, bridge._n_ref = start, 0                           # noqa: SLF001
+        k = np.arange(1, 2_000_001)
+        running = np.add.accumulate(np.concatenate([[start], np.full(k.size, dt)]))[1:]
+        simulated = start + k * dt
+        tolerance = bridge._drift_tolerance(float(running[-1]), int(k[-1]))  # noqa: SLF001
+        assert tolerance == pytest.approx((1e-6 + SLACK) * dt, rel=1e-12)
+        err = np.abs(running - simulated)
+        first = int(np.argmax(err > tolerance))
+        assert err[first] > tolerance and 1_000_000 < first < 1_500_000, first
+        stepped = np.abs(start + k * dt - simulated)
+        assert float(stepped.max()) <= tolerance
     finally:
         bridge.stop()

@@ -351,7 +351,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **sysid round-7 fixes** (MADD-ANO-147 to 150, never released): the identifiability guard holds an exact degeneracy under x64 and with float32 leaves in an x64 graph; `windowed_loss` replays coupling predictor and IQN-IMVJ warm starts across windows (zero loss at the truth); `fim` warns when its rank cutoff is below float32's normal range;
+- **sysid round-7 fixes** (MADD-ANO-150 to 153, never released): the identifiability guard holds an exact degeneracy under x64 and with float32 leaves in an x64 graph; `windowed_loss` replays coupling predictor and IQN-IMVJ warm starts across windows (zero loss at the truth); `fim` warns when its rank cutoff is below float32's normal range;
   bool and non-number hyper-parameters and non-bool mask leaves are refused; `ParamSpec.check` refuses a `log`/`logit` value without a finite coordinate; the nominal width guard tests the width, not its square; `fit_lm` reaches its float64 floor.
   Action: pass real numbers and bool mask leaves; a fit with a predictor or IQN-IMVJ group, or under x64, may return a different (correct) point.  SYS-071 is verified; SYS-127 to 130 are new.
 - **Coupling round-5 audit fixes** (MADD-ANO-142 to 146; new, resolved): the gradient bound applies the exact resolvent to each secant (it read 5.2x below the true error, usable), probes each entry of an array constant, and certifies Kantorovich with the full resolvent norm; the spectral bound is in the returned state's weights;

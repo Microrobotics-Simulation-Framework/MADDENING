@@ -160,7 +160,7 @@ claims:
     (B1, on 04bc3e5): every window restarted the coupling warm starts at
     zero, so with a predictor or IQN-IMVJ at a finite max_iterations the
     loss at the truth was not zero (1.7e-2 for a quadratic predictor at one
-    pass) and a fit started there walked 6.4% away (MADD-ANO-148).
+    pass) and a fit started there walked 6.4% away (MADD-ANO-151).
 
 - id: SYS-007
   area: windowed_loss
@@ -313,7 +313,7 @@ claims:
     - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_record_that_began_after_the_graph_stepped_warns
   status: verified
   notes: >-
-    New in round 7 (MADD-ANO-148).  Data that the model did not generate
+    New in round 7 (MADD-ANO-151).  Data that the model did not generate
     carries no warm starts of its own; the replay then uses the model's,
     from the previous window, which is the only thing it can use.
 
@@ -389,7 +389,7 @@ claims:
   notes: >-
     Round 7 (B1, on 04bc3e5) moved the verdict inside the stated sigma range
     with |J| near 1e-3: at sigma = 1e15 the rank fell from 2 to 1 and every
-    crb went to inf, silently (MADD-ANO-149).  The condition now states the
+    crb went to inf, silently (MADD-ANO-152).  The condition now states the
     range F can be formed in, and outside it the verdict is flagged.
 
 - id: SYS-024
@@ -670,7 +670,7 @@ claims:
   tests:
     - tests/core/test_sysid_claims_edges.py::test_a_rank_decided_below_the_normal_range_warns
   status: verified
-  notes: New in round 7 (MADD-ANO-149).
+  notes: New in round 7 (MADD-ANO-152).
 
 # ---------------------------------------------------------------------------
 # fim_core and FIMCore
@@ -1012,7 +1012,7 @@ claims:
   notes: >-
     Round 7 (B1, on 04bc3e5): a bool passed float() -- fit(tol=True) stopped
     at its first evaluation and reported converged=True at the unfitted
-    start -- and so did a numeric string (MADD-ANO-150).
+    start -- and so did a numeric string (MADD-ANO-153).
 
 - id: SYS-128
   area: fitters
@@ -1030,7 +1030,7 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_not_a_bool_is_refused
     - tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_a_bool_in_any_spelling_is_read
   status: verified
-  notes: New in round 7 (MADD-ANO-150).
+  notes: New in round 7 (MADD-ANO-153).
 
 # ---------------------------------------------------------------------------
 # The fitters: the identifiability guard (hold_undetermined)
@@ -1068,7 +1068,7 @@ claims:
     exact null direction (eps64**2 of it) read 5e-17 against a cutoff of
     4e-31; excited_rank 3, nothing held, the scale 1-2% off.  float32
     constants in an x64 graph failed in every run, judged at float64's eps
-    (MADD-ANO-147).  The tracker now reads the singular values of the
+    (MADD-ANO-150).  The tracker now reads the singular values of the
     gradients' triangular factor, with the coarsest trainable leaf's eps.
 
 - id: SYS-063

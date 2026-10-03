@@ -10756,7 +10756,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_spectral_bound_in_returned_weights.py::test_the_bound_holds_in_the_returned_states_weights_on_a_growing_group"
 
-  - anomaly_id: "MADD-ANO-147"
+  - anomaly_id: "MADD-ANO-150"
     title: "Under jax_enable_x64, and with float32 constants in an x64 graph, the identifiability guard missed an exact degeneracy: full excited_rank, nothing held, the fitted scale 1-2% off its start"
     description: >
       `hold_undetermined` holds the directions no gradient of a fit pointed
@@ -10818,7 +10818,7 @@ anomalies:
       - "tests/core/test_sysid_undetermined_directions.py::test_the_guard_reads_its_precision_from_the_coarsest_trainable_leaf"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-148"
+  - anomaly_id: "MADD-ANO-151"
     title: "windowed_loss restarted every coupling warm start cold at each window: with a predictor or IQN-IMVJ the loss at the generating parameters was not zero, and a fit started there walked 6.4% away"
     description: >
       A coupling group with a `predictor` or `acceleration="iqn-imvj"`
@@ -10872,7 +10872,7 @@ anomalies:
       - "tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_window_the_mask_drops_hands_on_cold_warm_starts"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-149"
+  - anomaly_id: "MADD-ANO-152"
     title: "fim's float32 rank verdict moved with noise_std once F = J^T J left the normal range: a determined direction dropped out, every crb inf, no warning"
     description: >
       `FIMReport.rank` is documented not to move when the residual is
@@ -10914,7 +10914,7 @@ anomalies:
       - "tests/core/test_sysid_claims_edges.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-150"
+  - anomaly_id: "MADD-ANO-153"
     title: "The fitters read wrongly typed arguments instead of refusing them: fit(tol=True) reported converged at an unfitted start, and a mask leaf \"False\" fitted its parameter"
     description: >
       The hyper-parameter check converted with `float()`, which reads

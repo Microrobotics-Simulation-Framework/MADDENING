@@ -34,14 +34,15 @@ REGISTRY = {"BallNode": BallNode}
 RESERVED = ["_meta", "_params", "_params_mappings"]
 
 
-def _served(*, nodes=True):
+def _served(*, nodes=True, root=None):
     gm = GraphManager()
     if nodes:
         gm.add_node(BallNode("ball", 0.01, initial_position=5.0))
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             gm.compile()
-    server = SimulationServer(REGISTRY, graph_manager=gm)
+    server = SimulationServer(REGISTRY, graph_manager=gm,
+                              checkpoint_root=None if root is None else str(root))
     return gm, server, TestClient(server.create_app(), raise_server_exceptions=False)
 
 
@@ -82,8 +83,8 @@ def test_add_node_refuses_a_timestep_that_is_not_a_finite_positive_number(timest
 
 
 @pytest.mark.parametrize("name", RESERVED)
-def test_a_reserved_state_key_is_refused_as_a_node_name(name):
-    gm, _server, client = _served()
+def test_a_reserved_state_key_is_refused_as_a_node_name(name, tmp_path):
+    gm, _server, client = _served(root=tmp_path)
     resp = client.post("/graph/nodes", json={"type": "BallNode", "name": name,
                                              "timestep": 0.01, "params": {}})
     assert resp.status_code == 400, resp.text
@@ -98,8 +99,8 @@ def test_a_reserved_state_key_is_refused_as_a_node_name(name):
 
 @pytest.mark.parametrize("name", ["meta", "__meta", "_Meta", "_meta_", "params", "_params_",
                                   "_mappings"])
-def test_a_lookalike_of_a_reserved_key_is_taken(name):
-    gm, _server, client = _served()
+def test_a_lookalike_of_a_reserved_key_is_taken(name, tmp_path):
+    gm, _server, client = _served(root=tmp_path)
     resp = client.post("/graph/nodes", json={"type": "BallNode", "name": name,
                                              "timestep": 0.01, "params": {}})
     assert resp.status_code == 201, resp.text

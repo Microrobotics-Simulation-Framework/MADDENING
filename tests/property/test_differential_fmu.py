@@ -45,8 +45,17 @@ graph take external inputs as arrays, so a refused input is checked
 against the bridge's documented contract (finite, and representable in the
 input's dtype) and the other two paths simply do not apply it.
 
-Tolerance: none -- the three paths call one compiled computation with the
-same arguments.
+A second family of sequences (the end of this module) adds the compiled C
+wrapper as a fourth path, through ``ctypes`` against a bridge of its own, and
+``node.params`` writes -- a constant and a structural value, with and
+without ``compile()`` before ``build_model_description`` -- on a multi-rate
+graph and on a sub-cycled coupling group, each write followed by an export
+wired as the guide wires one.  The graph path takes the same write and runs
+what ``gm.step`` runs.  Known failing: H3, a structural write pending at the
+export (the FMU runs the model from before the write).
+
+Tolerance: none -- the paths call one compiled computation with the same
+arguments.
 
 What it cannot see: a defect in the compiled step itself (all three share
 it), and anything the model description leaves out (a parameter it does not
@@ -184,10 +193,13 @@ class Model:
     model description."""
 
     def __init__(self, ref: GraphManager, md: Any, direct: GraphManager,
-                 initial_state: dict, initial_params: dict, label: str = "model") -> None:
+                 initial_state: dict, initial_params: dict, label: str = "model",
+                 md_kw: Optional[dict] = None) -> None:
         self.ref, self.md, self.direct = ref, md, direct
         self.initial_state, self.initial_params, self.label = (
             initial_state, initial_params, label)
+        #: ``build_model_description`` keywords, for an export after a write.
+        self.md_kw = dict(md_kw or {})
         #: ``(bridge, connection)`` kept open across sequences, or ``None``.
         self.served: Optional[tuple] = None
 
@@ -215,7 +227,7 @@ class Model:
         direct = factory()
         return cls(ref, md, direct,
                    {n: dict(f) for n, f in ref._state.items()},  # noqa: SLF001
-                   _copy_params(ref.params), label)
+                   _copy_params(ref.params), label, md_kw)
 
     @property
     def dt(self) -> float:
@@ -357,7 +369,9 @@ class Paths:
 
     def assert_agree(self, what: str) -> None:
         vals = self.values()
-        names = [v.name for v in self.m.md.variables if not v.is_clock]
+        # one name per value: an array variable reads as several
+        names = [v.name for v in self.m.md.variables if not v.is_clock
+                 for _ in range(int(np.prod(v.shape)) if v.shape else 1)]
         for other in ("sidecar", "graph"):
             # The JSON wire writes a NaN as the token "NaN", which has no sign
             # and no payload (``json_codec``): a NaN the sidecar holds with
@@ -932,3 +946,470 @@ def test_an_fmu_restores_its_own_snapshot_whatever_its_parameters():
         paths.assert_agree("after restoring the FMU's own snapshot")
     finally:
         paths.close()
+
+
+# ===========================================================================
+# node.params writes before an export, and the C wrapper as a fourth path
+# ===========================================================================
+#
+# FMU-040: an FMU exported after a ``node.params`` write runs what the graph
+# runs, "like every other reader of gm.params".  The sequences below write a
+# node's constant (a ``gm.params`` leaf) or a structural value (a
+# ``HeatNode``'s ``stencil_order``) into the graph the FMU is exported from,
+# with or without ``compile()`` before ``build_model_description``, and export
+# again, wired the way the guide wires a sidecar (``step_fn=gm._compiled_step``,
+# ``params=gm.params``, ``initial_state=gm._state``).  The graph path gets the
+# same write and runs whatever ``gm.step`` runs (it recompiles a dirty graph).
+# The reference graph's step is traced before the first write -- as it is in
+# any session that ran the graph, or stepped an FMU built from it -- since
+# a write before the first trace is taken in by the trace and proves nothing.
+#
+# The fourth path is the compiled C wrapper an importer loads, driven through
+# ``ctypes`` against a bridge of its own over the same compiled step: every
+# value it reads through ``fmi3Get*`` must equal the TCP bridge's, its own
+# bridge's full state must equal the TCP bridge's, and each operation it can
+# express (set, step, get / set / deserialize an FMU state, reset, a new
+# instance, ``fmi3EnterInitializationMode``, a step off the FMU's time) must
+# succeed exactly when the bridge's does.  A JSON-level operation the C API
+# cannot express (a string time, a misspelt input) is skipped on that path.
+# Without a C compiler the comparison runs with three paths and says so.
+
+import ctypes                                                    # noqa: E402
+import os                                                        # noqa: E402
+
+from maddening.fmi.package import build_fmu_binary, find_c_compiler  # noqa: E402
+
+_FMI_TYPE = {"float32": "Float32", "float64": "Float64", "int32": "Int32", "bool": "Boolean"}
+
+
+class WrapperPath:
+    """The C wrapper, one instance at a time, against a bridge of its own."""
+
+    OK = 0
+
+    def __init__(self, wrapper, model: Model) -> None:
+        self.w = wrapper
+        self.m = model
+        self.bridge: Optional[FmuTcpBridge] = None
+        self.inst = None
+        self.states: list = []
+        self.time = 0.0
+        self.restart()
+
+    def restart(self) -> None:
+        """A new bridge over the model's current export and a new instance:
+        what an importer has after the FMU is exported again."""
+        self.close()
+        self.bridge = FmuTcpBridge(self.m.sidecar(resolver=False), self.m.md,
+                                   master_dt=self.m.dt)
+        self.bridge.start()
+        self.inst = self._instantiate()
+        self.time = 0.0
+
+    def _instantiate(self):
+        assert self.bridge is not None
+        saved = os.environ.get("MADDENING_FMU_ENDPOINT")
+        os.environ["MADDENING_FMU_ENDPOINT"] = self.bridge.endpoint
+        try:
+            inst = self.w.instantiate(self.m.md.instantiation_token)
+        finally:
+            if saved is None:
+                os.environ.pop("MADDENING_FMU_ENDPOINT", None)
+            else:
+                os.environ["MADDENING_FMU_ENDPOINT"] = saved
+        assert inst, self.w.logs[-3:]
+        return inst
+
+    def _free_states(self) -> None:
+        for handle in self.states:
+            if handle is not None:
+                self.w.lib.fmi3FreeFMUState(self.inst, ctypes.byref(handle))
+        self.states = []
+
+    def close(self) -> None:
+        if self.inst is not None:
+            self._free_states()
+            self.w.lib.fmi3FreeInstance(self.inst)
+            self.inst = None
+        if self.bridge is not None:
+            self.bridge.stop()
+            self.bridge = None
+
+    # -- the operations ---------------------------------------------------
+
+    def values(self) -> np.ndarray:
+        out = []
+        for var in self.m.md.variables:
+            if var.is_clock:
+                continue
+            n = int(np.prod(var.shape)) if var.shape else 1
+            status, got = self.w.call("Get", _FMI_TYPE[var.dtype], self.inst,
+                                      [var.value_reference], [0] * n)
+            assert status == self.OK, (var.name, self.w.logs[-2:])
+            out.extend(float(x) for x in got)
+        return np.asarray(out, np.float64)
+
+    def set(self, names: list[str], values: list[float]) -> Optional[bool]:
+        """The same ``set`` through the typed setter; ``None`` when the
+        request mixes FMI types, which one C call cannot carry."""
+        by_name = {v.name: v for v in self.m.md.variables}
+        types = {_FMI_TYPE[by_name[n].dtype] if n in by_name else "Float32" for n in names}
+        if len(types) != 1:
+            return None
+        vrs = [by_name[n].value_reference if n in by_name else 99_999 for n in names]
+        status, _ = self.w.call("Set", types.pop(), self.inst, vrs, list(values))
+        return status == self.OK
+
+    def step(self, t: float, h: float) -> bool:
+        status, last = self.w.step(self.inst, t, h)
+        if status == self.OK:
+            self.time = last
+        return status == self.OK
+
+    def get_state(self) -> None:
+        handle = ctypes.c_void_p()
+        assert self.w.lib.fmi3GetFMUState(self.inst, ctypes.byref(handle)) == self.OK, \
+            self.w.logs[-2:]
+        self.states.append(handle)
+
+    def set_state(self, index: int) -> bool:
+        return self.w.lib.fmi3SetFMUState(self.inst, self.states[index]) == self.OK
+
+    def set_blob(self, blob: bytes) -> bool:
+        handle = ctypes.c_void_p()
+        assert self.w.lib.fmi3DeserializeFMUState(self.inst, blob, len(blob),
+                                                  ctypes.byref(handle)) == self.OK
+        try:
+            return self.w.lib.fmi3SetFMUState(self.inst, handle) == self.OK
+        finally:
+            self.w.lib.fmi3FreeFMUState(self.inst, ctypes.byref(handle))
+
+    def reset(self) -> bool:
+        ok = self.w.lib.fmi3Reset(self.inst) == self.OK
+        if ok:
+            self.time = 0.0
+        return ok
+
+    def reinstantiate(self) -> None:
+        self._free_states()
+        self.w.lib.fmi3FreeInstance(self.inst)
+        self.inst = self._instantiate()
+        self.time = 0.0
+
+    def initialize(self, start: float) -> bool:
+        ok = self.w.lib.fmi3EnterInitializationMode(self.inst, False, 0.0, start,
+                                                    False, 0.0) == self.OK
+        if ok:
+            assert self.w.lib.fmi3ExitInitializationMode(self.inst) == self.OK
+        return ok
+
+
+def _load_wrapper():
+    """The compiled wrapper with every prototype the fourth path calls, or
+    ``None`` without a C compiler."""
+    if find_c_compiler() is None:
+        return None
+    import tempfile
+
+    from tests.fmi.test_c_wrapper_refuses_what_it_used_to_coerce import _Wrapper
+
+    directory = tempfile.mkdtemp(prefix="maddening-diff-wrapper-")
+    wrapper = _Wrapper(build_fmu_binary(directory))
+    lib = wrapper.lib
+    for name in ("fmi3Reset", "fmi3Terminate", "fmi3ExitInitializationMode"):
+        getattr(lib, name).restype = ctypes.c_int
+        getattr(lib, name).argtypes = [ctypes.c_void_p]
+    lib.fmi3GetFMUState.restype = ctypes.c_int
+    lib.fmi3GetFMUState.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    return wrapper
+
+
+_WRAPPER: list = []
+
+
+def wrapper_or_none():
+    if not _WRAPPER:
+        _WRAPPER.append(_load_wrapper())
+    return _WRAPPER[0]
+
+
+class FourPaths(Paths):
+    """:class:`Paths` with the C wrapper as a fourth path, and exports
+    that follow ``node.params`` writes."""
+
+    def __init__(self, model: Model, wrapper) -> None:
+        super().__init__(model)
+        self.cw = WrapperPath(wrapper, model) if wrapper is not None else None
+
+    def close(self) -> None:
+        try:
+            if self.cw is not None:
+                self.cw.close()
+        finally:
+            super().close()
+
+    def restart(self) -> None:
+        """Serve the model's current export: a new bridge and connection, a
+        new in-process sidecar, a new C-wrapper instance, the graph reset."""
+        self.conn.close()
+        self.bridge.stop()
+        self.bridge = FmuTcpBridge(self.m.sidecar(resolver=False), self.m.md,
+                                   master_dt=self.m.dt)
+        self.bridge.start()
+        self.conn = self._connect()
+        self.snapshots = []
+        _fresh_oracles(self)
+        self.m.direct.reset_state()
+        if self.cw is not None:
+            self.cw.restart()
+
+    def assert_agree(self, what: str) -> None:
+        super().assert_agree(what)
+        if self.cw is None:
+            return
+        wire = _nan_canonical(self.values()["bridge"])
+        mine = _nan_canonical(self.cw.values())
+        names = [v.name for v in self.m.md.variables if not v.is_clock
+                 for _ in range(int(np.prod(v.shape)) if v.shape else 1)]
+        if wire.tobytes() != mine.tobytes():
+            raise AssertionError(f"{what}: the C wrapper reads {mine.tolist()}, the bridge "
+                                 f"{wire.tolist()} ({names})")
+        assert self.cw.bridge is not None
+        assert_trees_identical(
+            {n: dict(f) for n, f in self.bridge._sidecar.state.items()},    # noqa: SLF001
+            {n: dict(f) for n, f in self.cw.bridge._sidecar.state.items()},  # noqa: SLF001
+            what=f"{what}: TCP bridge vs C wrapper's bridge state")
+
+
+def op_write_and_export(paths: FourPaths, node: str, key: str, value: Any,
+                        compile_first: bool) -> None:
+    """``node.params[key] = value`` on the graph the FMU comes from and on
+    the graph path; ``compile()`` the former or not; export again as the
+    guide does, and serve the new export on every FMU path."""
+    m = paths.m
+    for gm in (m.ref, m.direct):
+        gm.get_node(node).params[key] = value
+    if compile_first:
+        m.ref.compile()
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*will be held at zero", category=UserWarning)
+        m.md = build_model_description(m.ref, model_name="Diff",
+                                       model_identifier=MODEL_IDENTIFIER, **m.md_kw)
+    m.initial_state = {n: dict(f) for n, f in m.ref._state.items()}       # noqa: SLF001
+    m.initial_params = _copy_params(m.ref.params)
+    paths.restart()
+
+
+def _mirror(paths: FourPaths, op: tuple, bridge_ok: Optional[bool]) -> None:
+    """Drive the C wrapper through ``op`` and hold its verdict to the
+    bridge's (``bridge_ok``, where the bridge's verdict is not implied)."""
+    cw = paths.cw
+    if cw is None:
+        return
+    kind = op[0]
+    if kind == "set":
+        verdict = cw.set(op[1], op[2])
+        if verdict is not None:
+            assert verdict is bridge_ok, (op, verdict, cw.w.logs[-2:])
+    elif kind == "step":
+        assert cw.step(cw.time, op[1] * paths.m.dt), (op, cw.w.logs[-2:])
+    elif kind == "get_state":
+        cw.get_state()
+    elif kind == "set_state":
+        assert cw.set_state(op[1] % len(cw.states)), (op, cw.w.logs[-2:])
+        cw.time = paths.side_time
+    elif kind == "reset":
+        assert cw.reset(), cw.w.logs[-2:]
+    elif kind == "reinstantiate":
+        cw.reinstantiate()
+    elif kind == "initialize":
+        assert cw.initialize(op[1]) is bridge_ok, (op, cw.w.logs[-2:])
+    elif kind == "bad_step" and op[1] == "jump":
+        assert not cw.step(cw.time + op[2] * paths.m.dt, paths.m.dt), op
+
+
+def run_write_sequence(model: Model, ops: list, wrapper) -> None:
+    """:func:`run_sequence` over four paths, with ``write`` operations."""
+    paths = FourPaths(model, wrapper)
+    original_wire = paths._wire
+
+    def recording_wire(message: dict) -> dict:
+        reply = original_wire(message)
+        paths._last_reply = reply                                   # noqa: SLF001
+        return reply
+
+    paths._wire = recording_wire                                    # type: ignore[method-assign]
+    try:
+        paths.assert_agree("at start")
+        for op in ops:
+            note(f"op: {op}")
+            kind = op[0]
+            paths._last_reply = {}                                  # noqa: SLF001
+            if kind == "write":
+                op_write_and_export(paths, *op[1:])
+            elif kind == "set":
+                op_set(paths, op[1], op[2])
+                _mirror(paths, op, paths._last_reply.get("ok") is True)  # noqa: SLF001
+            elif kind == "step":
+                op_step(paths, op[1])
+                _mirror(paths, op, True)
+            elif kind == "get_state":
+                op_get_state(paths)
+                _mirror(paths, op, True)
+            elif kind == "set_state":
+                if not paths.snapshots:
+                    continue
+                op_set_state(paths, op[1])
+                _mirror(paths, op, True)
+            elif kind == "reset":
+                op_reset(paths)
+                _mirror(paths, op, True)
+            elif kind == "reinstantiate":
+                op_reinstantiate(paths)
+                _mirror(paths, op, True)
+            elif kind == "initialize":
+                op_initialize(paths, op[1])
+                _mirror(paths, op, paths._last_reply.get("ok") is True)  # noqa: SLF001
+            elif kind == "bad_step":
+                op_bad_step(paths, op[1], op[2])
+                _mirror(paths, op, False)
+            elif kind == "bad_state":
+                op_set_bad_state(paths, op[1], op[2])
+            paths.assert_agree(f"after {kind}")
+    finally:
+        paths.close()
+
+
+# -- graphs whose writes matter ------------------------------------------------
+
+def _multirate_rod():
+    """``_multirate`` with a rod long enough for a fourth-order stencil."""
+    gm = GraphManager()
+    gm.add_node(HeatNode("rod", 0.01, n_cells=8, thermal_diffusivity=0.01,
+                         initial_temperature=np.linspace(1.0, 2.0, 8).tolist()))
+    gm.add_node(SpringDamperNode("spring", 0.02, stiffness=15.0, rest_length=0.3))
+    gm.add_edge("spring", "rod", "position", "left_temperature")
+    gm.add_external_input("rod", "heat_source", shape=(8,))
+    gm.add_external_input("spring", "anchor_position")
+    gm.compile()
+    return gm
+
+
+def _subcycled_rods():
+    """Two rods end to end in a sub-cycling coupling group, the right one
+    at twice the left's timestep, the left one heated from outside."""
+    gm = GraphManager()
+    gm.add_node(HeatNode("left", 0.01, n_cells=8, thermal_diffusivity=0.01,
+                         initial_temperature=np.linspace(1.0, 2.0, 8).tolist()))
+    gm.add_node(HeatNode("right", 0.02, n_cells=8, thermal_diffusivity=0.01,
+                         initial_temperature=0.5))
+    gm.add_edge("left", "right", "temperature", "left_temperature", transform="extract_last")
+    gm.add_edge("right", "left", "temperature", "right_temperature",
+                transform="extract_first")
+    gm.add_external_input("left", "heat_source", shape=(8,))
+    gm.add_coupling_group(["left", "right"], subcycling=True, max_iterations=4,
+                          predictor="linear")
+    gm.compile()
+    return gm
+
+
+#: Per graph: a constant write (a ``gm.params`` leaf) and a structural one.
+WRITE_GRAPHS = {
+    "multirate": (_multirate_rod, {"constant": ("spring", "stiffness", 40.0),
+                                   "structural": ("rod", "stencil_order", 4)}),
+    "subcycled": (_subcycled_rods, {"constant": ("right", "thermal_diffusivity", 0.02),
+                                    "structural": ("left", "stencil_order", 4)}),
+}
+
+
+def write_model(graph: str) -> Model:
+    """A fresh model whose reference graph has traced its step once."""
+    factory, _ = WRITE_GRAPHS[graph]
+    model = Model.build(factory, graph)
+    ref = model.ref
+    ref.step(external_inputs=ref._default_external_inputs())        # noqa: SLF001
+    ref.reset_state()
+    return model
+
+
+def _ops_around_a_write(write: tuple, compile_first: bool) -> list:
+    """A fixed sequence: run, save, write and export, run, restore the new
+    export's own snapshot, reset, and write the same key back."""
+    node, key, value = write
+    return [("step", 2), ("get_state",), ("write", node, key, value, compile_first),
+            ("step", 3), ("get_state",), ("step", 1), ("set_state", 0), ("step", 2),
+            ("reset",), ("step", 1), ("reinstantiate",), ("step", 2)]
+
+
+_H3_REASON = ("H3: an FMU built over a pending structural node.params write runs the old "
+              "model: build_model_description and the guide's sidecar wiring "
+              "(step_fn=gm._compiled_step) never check gm._dirty; pending fix")
+
+
+def _write_cases():
+    for graph in sorted(WRITE_GRAPHS):
+        for kind in ("constant", "structural"):
+            for compile_first in (False, True):
+                marks = ([pytest.mark.xfail(strict=True, raises=AssertionError,
+                                            reason=_H3_REASON)]
+                         if kind == "structural" and not compile_first else [])
+                yield pytest.param(graph, kind, compile_first, marks=marks,
+                                   id=f"{graph}-{kind}-{'compiled' if compile_first else 'pending'}")
+
+
+@pytest.mark.parametrize("graph, kind, compile_first", list(_write_cases()))
+def test_four_fmu_paths_agree_after_a_node_params_write(graph, kind, compile_first):
+    """One write before an export, with and without ``compile()`` first,
+    on a multi-rate and a sub-cycled graph: the graph, the sidecar, the
+    bridge and the C wrapper agree on every value and the full state after
+    every operation."""
+    model = write_model(graph)
+    try:
+        write = WRITE_GRAPHS[graph][1][kind]
+        run_write_sequence(model, _ops_around_a_write(write, compile_first),
+                           wrapper_or_none())
+    finally:
+        model.stop()
+
+
+def test_the_c_wrapper_is_a_fourth_path_here():
+    """The four-way comparison runs four paths wherever a C compiler is
+    available (CI has one): a harness that silently fell back to three
+    would compare less than it claims."""
+    if find_c_compiler() is None:
+        pytest.skip("no C compiler: the FMU write sequences compare three paths here")
+    assert wrapper_or_none() is not None
+
+
+@st.composite
+def _write_ops(draw, model: Model, graph: str):
+    """Generated operations with writes among them: a constant or a
+    structural write, with or without ``compile()``, anywhere in the
+    sequence, each followed by an export."""
+    writes = WRITE_GRAPHS[graph][1]
+    base = _ops(model)
+    ops = draw(base)
+    n_writes = draw(st.integers(min_value=1, max_value=2))
+    for _ in range(n_writes):
+        kind = draw(st.sampled_from(["constant", "structural"]))
+        node, key, value = writes[kind]
+        compile_first = True if kind == "structural" else draw(st.booleans())
+        # The structural write pending at export is H3's; drawn only by the
+        # pinned cases above until it is fixed.
+        at = draw(st.integers(min_value=0, max_value=len(ops)))
+        ops.insert(at, ("write", node, key, value, compile_first))
+    return [op for op in ops if op[0] != "misspelt_input"]
+
+
+# Per push: tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write
+@pytest.mark.slow  # two graphs compiled, a C-wrapper instance and an export per write, per example
+@pytest.mark.parametrize("graph", sorted(WRITE_GRAPHS))
+@settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
+@given(data=st.data())
+def test_four_fmu_paths_agree_on_sequences_with_node_params_writes(graph, data):
+    model = write_model(graph)
+    try:
+        run_write_sequence(model, data.draw(_write_ops(model, graph), label="ops"),
+                           wrapper_or_none())
+    finally:
+        model.stop()

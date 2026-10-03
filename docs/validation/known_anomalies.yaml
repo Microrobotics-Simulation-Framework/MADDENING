@@ -11854,4 +11854,171 @@ anomalies:
       - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_get_whose_variables_hold_more_values_than_a_reply_frame_is_refused_before_reading"
       - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_repeated_reference_is_answered_in_place_from_one_read"
       - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_json_reply_too_long_to_send_is_abandoned_while_it_is_encoded"
+  - anomaly_id: "MADD-ANO-170"
+    title: "The Aitken two-pass guard can add two passes to Aitken's own exit, where the guide says at most one"
+    description: >
+      Under `acceleration="aitken"` the coupling loop stops only when two
+      consecutive passes meet the threshold (`_TWO_PASS_EXIT`), and
+      `coupling_algorithm_guide.md` says the guard "adds at most one pass to
+      Aitken's own exit" (CPL-062; CPL-061 quotes "the guard costs at most
+      one extra pass").  The rule holds the current pass to its error
+      estimate and its predecessor to its raw residual, and an Aitken
+      estimate can rise back above the threshold on the pass after Aitken's
+      own exit while the raw residuals keep falling, so the guard can stop
+      two passes late.  On three independent modes, `x_a <- g_a x_b + c`,
+      `x_b <- s x_a` entry by entry with `g_a = (-0.02, 0.92, 0.53)`,
+      `s = (-1, -1, 1)`, `c = (1.82, 1.27, 1.02)`, Gauss-Seidel,
+      `tolerance=1e-4`, float32: without the guard Aitken stops at pass 9
+      (estimate 6.9e-5); pass 8's raw residual is 9.2e-4, pass 10's estimate
+      is 1.9e-4 over a raw residual of 4.6e-5, and the guard stops at pass
+      11.  The same holds in float64, with a float32 member under x64, under
+      `vmap`, on multi-rate and sub-cycled graphs, with a predictor and after
+      a checkpoint restart.  The state returned is converged and nearer the
+      fixed point than the unguarded one: what fails is the documented cost,
+      not a result.  The guard and the sentence are new in 0.4.0.  Found by
+      the coupling inventory's domain lift.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A pass count, not a value: every state, verdict and gradient the
+      guarded loop returns is the one its criterion describes, and the extra
+      pass moves the state nearer the fixed point.  A caller who budgets
+      iterations from the guide's sentence can run one pass more than
+      planned, which `iterations` reports.
+    affected_components:
+      - "maddening.core.graph_manager._fixed_point_while"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Budget Aitken's iterations from the reported `iterations`, not from the
+      guide's one-pass sentence; `acceleration="none"` or `"fixed"` carry no
+      guard.  Deferred to 0.5.0, which rewords the sentence or changes the
+      rule.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0: either the guide's sentence is
+      reworded to the rule the loop applies, or the predecessor is held to
+      its estimate too.  Until then Aitken's cost over its own exit is not
+      bounded by one pass.
+    verification:
+      - "tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-171"
+    title: "save_state cannot write a typed PRNG key leaf"
+    description: >
+      `GraphManager.save_state` (`maddening.core.simulation.checkpoint.save_state`)
+      converts every state leaf with `np.asarray`, and a typed PRNG key array
+      (`jax.random.key(...)`) refuses the conversion: `TypeError: JAX array
+      with PRNGKey dtype cannot be converted to a NumPy array`.  A typed key
+      is a supported state leaf (the IFT adjoint carries it as its uint32
+      data, CPL-145), so a graph holding one, in a coupling group or outside
+      it, cannot be checkpointed at all, where `save_state` documents that it
+      persists all node states.  One node
+      `{"x": float32, "key": jax.random.key(0)}`, stepped once and saved,
+      raises on the tree and on the extracted 0.1.0, 0.2.0 and 0.3.1 trees
+      (CPU, empty HOME, jaxlib 0.11.0).  Loud: nothing is written and nothing
+      wrong is restored.  Found by the coupling inventory's domain lift: the
+      invariance claims' checkpoint-restart cells run on the named structures
+      without their key leaves.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An exception at save time: no checkpoint is written, so none can be
+      restored wrongly.  The cost is a run that cannot be checkpointed or
+      resumed while it holds a typed key.
+    affected_components:
+      - "maddening.core.simulation.checkpoint.save_state"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Hold the key's raw data instead (`jax.random.key_data(key)`, a uint32
+      array, rewrapped with `jax.random.wrap_key_data` where it is used), or
+      a legacy `jax.random.PRNGKey`, which is a uint32 array already.
+      Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to write a typed key as
+      its key data with its implementation recorded and rewrap it on load.
+      Until then a graph with a typed key leaf has no checkpoint.
+    verification:
+      - "tests/property/test_differential_coupling_topologies.py::test_a_structure_with_a_typed_prng_key_survives_a_checkpoint_restart"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-172"
+    title: "reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform"
+    description: >
+      A loss that starts each evaluation from the initial state,
+      `loss(p) = (gm.reset_state(); gm.run_scan(n, params=p))`, differentiates
+      once and then raises `UnexpectedTracerError` on the second `jax.grad`
+      (or `jax.jvp`) when a coupling group has `predictor="linear"` or
+      `"quadratic"`.  The first transform leaves its tracers in the graph
+      (run_scan assigns its result), `reset_state` puts the graph back
+      first -- except inside a transform, where the recovery does nothing so
+      that a traced multi-step loop works -- and then sizes the predictor
+      history's seed from the live `_meta` slot, the previous transform's
+      tracer.  Without a predictor both gradients are right (2/3 on the
+      reproducer: `x_a <- -0.5 x_b - 0.1`, `x_b <- x_a`, `d x_b / d c_a`).
+      MADD-ANO-072 fixed `reset_state` called between transforms; this is
+      the call inside one.  `reset_state` is new in 0.4.0, so no release
+      carried it.  Found by the coupling inventory's domain lift (CPL-145's
+      predictor cell).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An exception on the second evaluation; no gradient is returned to be
+      trusted, and the first was right.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.reset_state"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Reset outside the differentiated function (before each `jax.grad`),
+      or call any entry point -- `coupling_diagnostics()` will do -- between
+      two transforms.  Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to seed the predictor
+      history from the compiled structure rather than the live slot.  Until
+      then a fitting loss that resets a predictor group inside itself fails
+      loudly on its second evaluation.
+    verification:
+      - "tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_a_loss_that_resets_a_predictor_group_differentiates_twice"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-173"
+    title: "run_adaptive never returns once its step-doubling error norm is NaN"
+    description: >
+      `GraphManager.run_adaptive` compares the fine and coarse attempts by
+      `|fine - coarse| / (atol + rtol max(|fine|, |coarse|))`; once the state
+      overflows, both attempts hold `inf` and the norm reads `inf / inf =
+      NaN`.  `adaptive.step_decision` then returns a NaN next step (`maximum`
+      and `clip` propagate it), `dt <= dt_min` is never true again so no
+      attempt is accepted, and the loop's `min(dt, t_end - t)` and
+      `max(dt, dt_min)` keep the NaN: the clock never advances and the call
+      never returns, with no warning.  One node `x <- 1e20 x + 1` (float32,
+      `dt_initial=0.1`, `t_end=1`) hangs from its first attempt on the tree
+      and on the extracted 0.1.0, 0.2.0 and 0.3.1 trees (CPU, empty HOME,
+      a 60 s watchdog); a coupling group whose positive eigenvalue exceeds one
+      (CPL-073) does it once its iterate overflows.  `run_adaptive_scan` is
+      bounded by `max_steps`.  Found by the coupling inventory's domain lift
+      (CPL-073's `run_adaptive` cell).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Not a wrong value -- none is ever returned -- but the process spins
+      without end or message, so a batch run burns its whole budget and the
+      divergence that caused it is never reported.  `context_dependent`
+      because what the process held is the caller's.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.simulation.adaptive.step_decision"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Use `run_adaptive_scan`, whose `max_steps` bounds the loop, or check the
+      state for non-finite values in a `callback` (called after each accepted
+      step) before it can overflow; a diverging coupling group reports
+      `converged=False` under `step()`.  Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to reject a non-finite
+      error norm (shrinking towards `dt_min` and then raising, or returning
+      the non-finite state) instead of carrying a NaN step.  Until then a
+      simulation that diverges under `run_adaptive` hangs.
+    verification:
+      - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null

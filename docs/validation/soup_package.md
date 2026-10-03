@@ -232,8 +232,12 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-167 | A ParamSpec changed between the FMU description and its sidecar was enforced in place of the advertised min / max: the bridge accepted values its XML forbids, or refused values it declares settable | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-168 | At a large ratio of time to master step the FMU bridge's ulp slacks exceeded a master step: a doStep a whole step ahead was adopted, and a clock running 40% fast was never refused | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-169 | One in-limit get frame drove the FMU bridge past 6 GB and held the instance for about 45 s before its reply was refused | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-170 | The Aitken two-pass guard can add two passes to Aitken's own exit, where the guide says at most one | `minor` | `not_safety_relevant` | `open` | >=0.4.0.dev0 |
+| MADD-ANO-171 | save_state cannot write a typed PRNG key leaf | `minor` | `not_safety_relevant` | `open` | >=0.1.0 |
+| MADD-ANO-172 | reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform | `minor` | `not_safety_relevant` | `open` | >=0.4.0.dev0 |
+| MADD-ANO-173 | run_adaptive never returns once its step-doubling error norm is NaN | `major` | `context_dependent` | `open` | >=0.1.0 |
 
-*169 anomalies registered.  32 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 24 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*173 anomalies registered.  36 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 28 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

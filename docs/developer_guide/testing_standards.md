@@ -847,7 +847,11 @@ one) and `tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py`
 says otherwise. `tests/core/test_sysid_claims_in_every_domain.py`,
 `tests/core/test_params_claims_in_float64.py` and
 `tests/fmi/test_fmu_claims_in_float64.py` do the same for the sysid and
-FMU rows they cover.
+FMU rows they cover, and `tests/core/test_sysid_claims_under_x64.py` holds
+the sysid rows' `f64` and `mixed_dtype` cells: each test is parametrized
+over `float64` (every leaf float64) and `mixed` (float32 leaves in the x64
+process, where the fitters' coordinates are promoted to float64 around
+them) and sits at float64's own edge where the claim has one.
 
 `tests/property/test_coupling_invariances.py` holds three metamorphic rows:
 

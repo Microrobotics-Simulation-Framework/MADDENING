@@ -1574,7 +1574,18 @@ static void test_misc_entry_points(void) {
     CHECK(fmi3GetClock(NULL, vr, 2, clk) == fmi3Error);
     CHECK(fmi3SetClock(NULL, vr, 2, clk) == fmi3Error);
     fmi3Boolean b1, b2, b3, b4, b5; fmi3Float64 t;
-    CHECK(fmi3UpdateDiscreteStates(NULL, &b1, &b2, &b3, &b4, &b5, &t) == fmi3OK && !b1 && !b5);
+    /* Event Mode's, and not declared: both answered fmi3OK in any state */
+    b1 = b5 = fmi3True;
+    CHECK(fmi3UpdateDiscreteStates(NULL, &b1, &b2, &b3, &b4, &b5, &t) == fmi3Error && !b1 && !b5);
+    {
+        Instance *dead = fake_instance(SOCK_INVALID);
+        g_log_calls = 0;
+        CHECK(fmi3UpdateDiscreteStates((fmi3Instance)dead, &b1, &b2, &b3, &b4, &b5, &t) == fmi3Error);
+        CHECK(g_log_calls == 1 && strstr(g_last_log, "Event Mode") != NULL);
+        CHECK(fmi3EvaluateDiscreteStates((fmi3Instance)dead) == fmi3Error);
+        CHECK(g_log_calls == 2 && strstr(g_last_log, "providesEvaluateDiscreteStates") != NULL);
+        free_instance(dead);
+    }
     CHECK(fmi3EnterContinuousTimeMode(NULL) == fmi3Error);
     CHECK(fmi3GetString(NULL, vr, 1, NULL, 1) == fmi3Error);
     Instance *dead = fake_instance(SOCK_INVALID);

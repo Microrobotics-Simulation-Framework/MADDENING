@@ -74,9 +74,11 @@
  * refused: FMI 3.0 allows it only from Event Mode, and without Event Mode
  * fmi3ExitInitializationMode enters Step Mode itself.  So are
  * fmi3EnterConfigurationMode / fmi3ExitConfigurationMode (the FMU has no
- * structural parameters), fmi3SetTime (model exchange), and fmi3GetClock /
- * fmi3SetClock, which FMI 3.0 allows only in Event Mode (its clocks are
- * constant-interval, their ticks implied by time).  The FMU-state
+ * structural parameters), fmi3SetTime (model exchange),
+ * fmi3EvaluateDiscreteStates (not declared in the description), and
+ * fmi3UpdateDiscreteStates, fmi3GetClock and fmi3SetClock, which FMI 3.0
+ * allows only in Event Mode (the clocks are constant-interval, their ticks
+ * implied by time).  The FMU-state
  * functions are allowed in every state and leave it as it is.  Until
  * 0.4.0's fix fmi3DoStep before fmi3EnterInitializationMode advanced the
  * model, and fmi3ExitInitializationMode, fmi3EnterStepMode and a
@@ -1403,16 +1405,28 @@ FMI3_Export fmi3Status fmi3SetShiftFraction(fmi3Instance instance, const fmi3Val
                                             const fmi3UInt64 resolutions[]) {
     (void)instance; (void)vr; (void)nvr; (void)counters; (void)resolutions; return fmi3Error;
 }
-FMI3_Export fmi3Status fmi3EvaluateDiscreteStates(fmi3Instance instance) { (void)instance; return fmi3OK; }
+/* FMI 3.0 allows fmi3EvaluateDiscreteStates only on an FMU whose description
+ * declares providesEvaluateDiscreteStates, and fmi3UpdateDiscreteStates only
+ * in Event Mode; this FMU has neither, and both used to answer fmi3OK in
+ * any state.  fmi3UpdateDiscreteStates still fills its outputs, with the
+ * values that ask for nothing. */
+FMI3_Export fmi3Status fmi3EvaluateDiscreteStates(fmi3Instance instance) {
+    inst_log((Instance *)instance, fmi3Error, "logStatusError",
+             "maddening_fmu: fmi3EvaluateDiscreteStates is not provided (the model "
+             "description does not declare providesEvaluateDiscreteStates)");
+    return fmi3Error;
+}
 FMI3_Export fmi3Status fmi3UpdateDiscreteStates(
     fmi3Instance instance, fmi3Boolean *discreteStatesNeedUpdate, fmi3Boolean *terminateSimulation,
     fmi3Boolean *nominalsOfContinuousStatesChanged, fmi3Boolean *valuesOfContinuousStatesChanged,
     fmi3Boolean *nextEventTimeDefined, fmi3Float64 *nextEventTime) {
-    (void)instance;
     *discreteStatesNeedUpdate = fmi3False; *terminateSimulation = fmi3False;
     *nominalsOfContinuousStatesChanged = fmi3False; *valuesOfContinuousStatesChanged = fmi3False;
     *nextEventTimeDefined = fmi3False; *nextEventTime = 0.0;
-    return fmi3OK;
+    inst_log((Instance *)instance, fmi3Error, "logStatusError",
+             "maddening_fmu: fmi3UpdateDiscreteStates is allowed only in Event Mode, which this "
+             "FMU does not have (hasEventMode=\"false\")");
+    return fmi3Error;
 }
 
 /* ---- model exchange entry points: not supported (co-simulation FMU) ---- */

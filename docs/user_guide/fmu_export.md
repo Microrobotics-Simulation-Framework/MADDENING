@@ -138,9 +138,11 @@ Mode and Terminated.  `fmi3Set*` is allowed in Instantiated, Initialization
 Mode and Step Mode, a zero-length call included.  `fmi3Terminate` is allowed
 in Step Mode.  The FMU-state functions are allowed in every state, and
 `fmi3Reset` returns to Instantiated from any of them.  The FMU has no
-structural parameters and no model exchange, so
-`fmi3EnterConfigurationMode`, `fmi3ExitConfigurationMode` and `fmi3SetTime`
-are refused too; `fmi3SetTime` used to move the wrapper's clock.
+structural parameters, no model exchange and no Event Mode, so
+`fmi3EnterConfigurationMode`, `fmi3ExitConfigurationMode`, `fmi3SetTime`
+and `fmi3UpdateDiscreteStates` are refused too, and so is
+`fmi3EvaluateDiscreteStates`, which the description does not declare.  All
+of them answered `fmi3OK`, and `fmi3SetTime` moved the wrapper's clock.
 
 `fmi3Terminate` puts the instance in FMI 3.0's Terminated state.  There,
 `fmi3Get*`, the FMU-state functions and `fmi3Reset` are allowed, and

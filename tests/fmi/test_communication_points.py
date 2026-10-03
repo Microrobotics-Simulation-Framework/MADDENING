@@ -255,6 +255,23 @@ def test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance(serv
     assert bridge.handle({"op": "step", "t": t, "dt": DT})["ok"]
 
 
+def test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside(served):
+    """The point and the step's end are each held to the simulated time.  A
+    point 0.9 tolerance ahead of the FMU's clock is adopted; a second one
+    another 0.9 ahead, with a step 0.9 short, would end back inside the
+    tolerance -- but the step would start, and the reported time with it,
+    1.8 tolerances from the physics.  Refused, nothing advanced."""
+    md, bridge = served
+    assert bridge.handle({"op": "step", "t": 0.0, "dt": DT})["ok"]
+    assert bridge.handle({"op": "step", "t": DT + 0.9 * TOL, "dt": DT})["ok"]
+    before = _state(md, bridge)
+    reply = bridge.handle({"op": "step", "t": 2 * DT + 1.8 * TOL, "dt": DT - 0.9 * TOL})
+    assert reply["ok"] is False, reply
+    assert "the communication point" in reply["error"]
+    assert "from the time the FMU has simulated" in reply["error"], reply
+    assert _state(md, bridge) == before
+
+
 @pytest.mark.parametrize("dt", [1e-2, 1e-9, 1e-12])
 def test_the_tolerance_is_a_millionth_of_the_master_step_at_any_step(dt):
     """The rounding slack used to be in ulps of ``max(|t|, 1)``, an absolute

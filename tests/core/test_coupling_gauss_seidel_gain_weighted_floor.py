@@ -22,6 +22,8 @@ report reads that count from the step (``coupling_{key}_pass_evaluations``).
 
 from __future__ import annotations
 
+import math
+
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -180,6 +182,11 @@ def test_the_gradient_bound_holds_on_a_stalled_squaring_chain(n):
 
     Read 0.91x (eight squares) and 0.018x (twelve) the true relative error
     of ``dx/dc`` with ``gradient_bound_usable=True`` before the weighting.
+    Twelve squares, stalled 21% from the fixed point, pass Kantorovich's
+    check along the Newton step (``h = 0.48``) and fail it in the
+    affine-covariant form 0.4.0's round-6 fix added (``h = 0.57``): the
+    bound is withdrawn there, ``inf`` and unusable, which is the other
+    outcome this claim allows.
     """
     gm, names, xs, (g, _c) = _stepped_chain(n)
     d = gm.coupling_diagnostics()["+".join(sorted(names))]
@@ -198,5 +205,9 @@ def test_the_gradient_bound_holds_on_a_stalled_squaring_chain(n):
     tstar = np.array([(2 ** k) * xs[0] ** (2 ** k - 1) * dn0 for k in range(n + 1)])
     w = 1.0 / np.abs(xk)
     rel = float(np.linalg.norm(w * (tk - tstar)) / np.linalg.norm(w * tk))
+    if n == 12:
+        assert not d["gradient_bound_usable"], dict(d)
+        assert math.isinf(d["gradient_relative_error_bound"]), dict(d)
+        return
     assert d["gradient_bound_usable"], dict(d)
     assert d["gradient_relative_error_bound"] >= rel, (d["gradient_relative_error_bound"], rel)

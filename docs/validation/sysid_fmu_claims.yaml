@@ -1191,8 +1191,8 @@ claims:
     than reporting it."; "The same is said when every product flushed and
     F came out exactly zero although J has a nonzero entry".
   sources:
-    - src/maddening/sysid.py:744 (FIMReport, rank)
-    - src/maddening/sysid.py:1789 (FIMCore, precision_limited)
+    - src/maddening/sysid.py:745 (FIMReport, rank)
+    - src/maddening/sysid.py:1790 (FIMCore, precision_limited)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     float32; |J| near 1e-3 with sigma 1 to 1e15; an F flushed to exactly
@@ -1815,8 +1815,8 @@ claims:
     betas, eps, notify_every, lam_up / lam_down) and accept their
     documented defaults.
   sources:
-    - src/maddening/sysid.py:4388 (fit)
-    - src/maddening/sysid.py:4883 (fit_lm)
+    - src/maddening/sysid.py:4389 (fit)
+    - src/maddening/sysid.py:4878 (fit_lm)
   conditions: >-
     zero, negative, NaN and wrongly typed values -- bools in every
     spelling, strings, lists, complex numbers -- and real numbers in every
@@ -1868,8 +1868,8 @@ claims:
     still flush to 0.0: a RuntimeWarning says so once, and such a 0.0 with
     a nonzero gradient does not meet tol".
   sources:
-    - src/maddening/sysid.py:4388 (fit, eps)
-    - src/maddening/sysid.py:3139 (_gradient_lift)
+    - src/maddening/sysid.py:4389 (fit, eps)
+    - src/maddening/sysid.py:3140 (_gradient_lift)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     a loss 0.5 ||s r||² for s from 1e-30 to 1e18 in float32 (the loss
@@ -2418,8 +2418,8 @@ claims:
     never reported on a solve whose live columns were not representable
     even framed, or on a loss of 0.0 from a residual that is not zero".
   sources:
-    - src/maddening/sysid.py:4883 (fit_lm)
-    - src/maddening/sysid.py:4157 (FitResult, converged)
+    - src/maddening/sysid.py:4878 (fit_lm)
+    - src/maddening/sysid.py:4158 (FitResult, converged)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     a noiseless fit at its optimum in float32 and under x64; a run of
@@ -2516,8 +2516,8 @@ claims:
     its own Newton step: a pull smaller than that is the residual's
     rounding ... and counts as zero."
   sources:
-    - src/maddening/sysid.py:4883 (fit_lm)
-    - src/maddening/sysid.py:4157 (FitResult, converged)
+    - src/maddening/sysid.py:4878 (fit_lm)
+    - src/maddening/sysid.py:4158 (FitResult, converged)
   conditions: >-
     a coordinate with a descent direction into the range, including a
     logit coordinate at the flat edge of its sigmoid; a noiseless truth
@@ -2558,7 +2558,7 @@ claims:
     the residual and of each parameter"; the guide: "The solve's floor is
     eps times each column's own curvature".
   sources:
-    - src/maddening/sysid.py:4883 (fit_lm)
+    - src/maddening/sysid.py:4878 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
     - docs/validation/known_anomalies.yaml (MADD-ANO-121)
   conditions: >-
@@ -2615,8 +2615,8 @@ claims:
     parameter: "for the handful of physical constants a model has it
     converges in a few iterations where Adam needs hundreds".
   sources:
-    - src/maddening/sysid.py:4883 (fit_lm)
-    - src/maddening/sysid.py:4772 (_marquardt_step, comment)
+    - src/maddening/sysid.py:4878 (fit_lm)
+    - src/maddening/sysid.py:4766 (_marquardt_step, comment)
   conditions: >-
     one parameter of each transform in units 1e-4 and 1e4; an
     identity-transform parameter in units 1e-5 to 1e6, and at natural
@@ -2697,7 +2697,7 @@ claims:
     (recovers k and c of the spring), and noise_std "weights the residual
     as in fim".
   sources:
-    - src/maddening/sysid.py:4883 (fit_lm)
+    - src/maddening/sysid.py:4878 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     the spring with mass frozen; a per-leaf noise model; float32 constants

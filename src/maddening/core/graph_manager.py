@@ -1530,10 +1530,12 @@ def _staggered_across_components(schedule, edges, groups, back_edges):
     """
     from maddening.core.schedule import find_strongly_connected_components  # noqa: PLC0415
 
-    component = {}
+    # ``find_strongly_connected_components`` returns the cycles only; every
+    # other node is a component of its own (a self-loop stays inside it).
+    component = {name: ("node", name) for name in schedule}
     for i, scc in enumerate(find_strongly_connected_components(list(schedule), edges)):
         for name in scc:
-            component[name] = i
+            component[name] = ("cycle", i)
     texts = []
     for e in sorted(back_edges, key=lambda e: (e.source_node, e.source_field,
                                                e.target_node, e.target_field)):

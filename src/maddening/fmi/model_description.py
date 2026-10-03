@@ -619,7 +619,7 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     m = np.nextafter(dt.type(b), towards)
     if abs(m) < fi.tiny:
         m = dt.type(fi.tiny if side == 0 else -fi.tiny)
-    if not _accepts(spec, m, dt):
+    if _checked_in(dt) and not _accepts(spec, m, dt):
         # One float inside is not always a value the spec takes.  A bound
         # whose spacing is below the smallest normal (``TINY <= |b| <
         # 2**-102`` in float32) is one subnormal step from its neighbour,
@@ -629,6 +629,16 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
         # Advertise the first value the spec accepts instead.
         m = _first_accepted(spec, m, side, dt)
     return float(m)
+
+
+def _checked_in(dt) -> bool:
+    """Whether ``ParamSpec.check`` judges a ``dt`` leaf in ``dt`` itself: a
+    float64 description built without ``jax_enable_x64`` describes a leaf
+    this process would hold, and check, in float32, so it cannot be asked
+    about the float64 envelope it advertises."""
+    import jax  # noqa: PLC0415
+
+    return np.dtype(jax.dtypes.canonicalize_dtype(dt)) == dt
 
 
 def _accepts(spec, value, dt) -> bool:

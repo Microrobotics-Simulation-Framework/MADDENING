@@ -963,30 +963,42 @@ def test_fit_lm_answers_the_same_for_every_scaling_with_float32_leaves_under_x64
                                     float(q["rest_length"])], [40.0, 3.0, 1.2], rtol=2e-6)
 
 
-@pytest.mark.parametrize("scale", [1e-160, 1e-100, 1e100, 1e150])
+#: A noisy right-hand side, so the fit's residual at its optimum is the
+#: noise (``1e-3``) and not its own rounding.
+_B_NOISY = _B + 1e-3 * np.random.default_rng(7).normal(size=_B.shape)
+
+
+@pytest.mark.parametrize("scale", [1e-157, 1e-150, 1e-100, 1e100, 1e150])
 def test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64(scale):
     """SYS-083 at float64's own range: ``r * r`` flushes below ``1e-154`` and
-    overflows above ``1e154``, and so do ``JᵀJ`` and ``Jᵀr`` -- framed, the fit
-    is the unscaled one.  (A float64 residual whose ``0.5 ||r||²`` is not a
-    finite float64, above about ``1e153``, has no loss to report.)"""
+    overflows above ``1e154``, and ``JᵀJ`` and ``Jᵀr`` flush below about
+    ``1e-154`` too -- at ``1e-157`` the bare products gave ``converged=True``
+    33% off.  Framed, the fit is the unscaled one (to ``1e-9`` where the loss
+    at the optimum is a float64 subnormal, ``1e-319``, and its comparisons are
+    that coarse).  The range ends where ``0.5 ||r||²`` itself leaves float64
+    at some iterate: above about ``1e153`` it overflows (refused as
+    non-finite), and below the smallest subnormal it reads 0.0, which
+    ``fit_lm`` does not call converged
+    (``test_a_loss_that_underflows_float64_is_never_converged``)."""
+    optimum = np.linalg.lstsq(_A, _B_NOISY, rcond=None)[0]
     with _x64():
         gm = _spring("float64")
 
         def residual(p):
             q = p["nodes"]["s"]
             x = jnp.stack([q["stiffness"], q["damping"], q["rest_length"]])
-            return scale * (jnp.asarray(_A) @ x - jnp.asarray(_B))
+            return scale * (jnp.asarray(_A) @ x - jnp.asarray(_B_NOISY))
 
         res = fit_lm(gm, residual, mask=_only(gm, "stiffness", "damping", "rest_length"),
                      n_iter=50)
         q = res.params["nodes"]["s"]
     assert res.converged and res.n_iter <= 8, (res.converged, res.n_iter)
     np.testing.assert_allclose([float(q["stiffness"]), float(q["damping"]),
-                                float(q["rest_length"])], [40.0, 3.0, 1.2], rtol=1e-12)
-    assert 0.0 < res.losses[0] < np.inf
+                                float(q["rest_length"])], optimum, rtol=1e-9)
+    assert 0.0 < res.best_loss < res.losses[0] < np.inf
 
 
-@pytest.mark.parametrize("leaves, unit", [("float64", 1e-150), ("float64", 1e150),
+@pytest.mark.parametrize("leaves, unit", [("float64", 1e-160), ("float64", 1e160),
                                           ("mixed", 1e-30), ("mixed", 1e30)])
 def test_fit_lm_answers_the_same_at_every_parameter_scale_under_x64(leaves, unit):
     """SYS-084/SYS-088 at each precision's range: damping, an identity
@@ -1398,7 +1410,7 @@ def test_fit_recovers_the_truth_when_its_gradient_flushes_under_x64(leaves):
 
             def loss(p, Aj=Aj, yj=yj, sj=sj):
                 q = p["nodes"]["h"]
-                return 0.5 * jnp.sum((sj * (Aj @ jnp.stack([q["a"], q["b"]]) - sj * yj)) ** 2)
+                return 0.5 * jnp.sum((sj * (Aj @ jnp.stack([q["a"], q["b"]]) - yj)) ** 2)
 
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)   # a flushed loss says so

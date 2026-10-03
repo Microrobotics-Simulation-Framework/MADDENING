@@ -2565,8 +2565,10 @@ claims:
     any residual whose entries, and whose Jacobian's, are normal numbers of
     the working precision: scaled from 1e-30 to 1e30 in float32 (r * r,
     JᵀJ and Jᵀr flush below about 1e-19 and overflow above 1e19 bare) and
-    from 1e-160 to 1e150 in float64 (a residual whose 0.5 ||r||² is a finite
-    float64); noise_std 1e-20 to 1e20; a spring in SI units and in tonnes,
+    from 1e-157 to 1e150 in float64 (a residual whose 0.5 ||r||² is a
+    nonzero, finite float64 at every iterate: below the smallest subnormal
+    the loss reads 0.0 and fit_lm refuses to call the iterate converged;
+    above about 1e153 it is refused as non-finite); noise_std 1e-20 to 1e20; a spring in SI units and in tonnes,
     float32 and float64. Not claimed for a Jacobian entry that is not a
     normal number, or for 16-bit floats.
   oracle: the optimum of the unscaled problem; the iteration count.
@@ -2614,7 +2616,7 @@ claims:
   conditions: >-
     one parameter of each transform in units 1e-4 and 1e4; an
     identity-transform parameter in units 1e-5 to 1e6, and at natural
-    scales from 1e-30 to 1e30 in float32 (1e-150 to 1e150 in float64) --
+    scales from 1e-30 to 1e30 in float32 (1e-160 to 1e160 in float64) --
     any scale at which its Jacobian column holds normal numbers -- and a
     logit parameter likewise; the guard off and on. Not claimed for a
     Jacobian entry that is not a normal number, or for 16-bit floats.
@@ -2763,7 +2765,7 @@ claims:
   conditions: >-
     fit_lm as called by default, hold_undetermined=True; one
     identity-transform parameter in units 1e-3, 1e-5 and 1e6, and at
-    natural scales from 1e-30 to 1e30 in float32 (1e-150 to 1e150 in
+    natural scales from 1e-30 to 1e30 in float32 (1e-160 to 1e160 in
     float64); any residual of normal magnitude (SYS-083's range). Not
     claimed for a Jacobian entry that is not a normal number, or for
     16-bit floats.

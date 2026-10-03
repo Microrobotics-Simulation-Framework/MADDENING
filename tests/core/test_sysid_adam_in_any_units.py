@@ -81,19 +81,37 @@ def test_fit_takes_the_same_steps_for_a_loss_whose_gradient_flushes(record, k):
     """Smaller still: at ``2**-100`` the first gradient is below ``tiny / eps``
     and is taken with a power-of-two cotangent (``_gradient_lift``), and at
     ``2**-120`` the loss's own value flushes to zero as well.  The cotangent
-    is exact, so the steps are the reference's to the bit either way; the
-    gradient used to read zero there and the fit did not move
-    (MADD-ANO-163)."""
+    is exact, so every iterate is the reference's, to the bit, either way;
+    the gradient used to read zero there and the fit did not move
+    (MADD-ANO-163).  (At ``2**-120`` the losses all read 0.0, so the returned
+    iterate is the last -- a tie goes to the later one -- not the reference's
+    lowest; the iterates themselves are compared.)"""
     import warnings
 
-    ref = _fit_at(1.0, record, False)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)       # a flushed loss says so
-        res = _fit_at(2.0 ** k, record, False)
-    assert np.array_equal(np.asarray(res.params["nodes"]["s"]["damping"]),
-                          np.asarray(ref.params["nodes"]["s"]["damping"])), k
+    def iterates(scale):
+        seen = []
+        obs = record
+
+        def loss(p):
+            x = _spring().run_scan_with_history(N, params=p)[1]["s"]["position"]
+            return scale * jnp.sum((x - obs) ** 2)
+
+        gm = _spring()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)   # a flushed loss says so
+            res = fit(gm, jax.jit(loss), mask=_only_damping(gm), n_iter=40, lr=0.05,
+                      hold_undetermined=False,
+                      callback=lambda i, l, p: seen.append(np.asarray(p["nodes"]["s"]["damping"])))
+        return res, np.stack(seen)
+
+    ref, ref_steps = iterates(1.0)
+    res, steps = iterates(2.0 ** k)
+    assert abs(float(ref_steps[-1]) - 2.0) > 0.5, "the reference fit itself did not move"
+    assert np.array_equal(steps, ref_steps), k
     if k == -100:
         assert np.array_equal(res.losses, (ref.losses * 2.0 ** k).astype(res.losses.dtype))
+        assert np.array_equal(np.asarray(res.params["nodes"]["s"]["damping"]),
+                              np.asarray(ref.params["nodes"]["s"]["damping"]))
 
 
 def test_fit_multiple_shooting_takes_the_same_steps_for_a_loss_in_any_units():

@@ -5179,8 +5179,9 @@ def fit_lm(
     narrow, to_leaf_grid = _leaf_grid(start, idx, theta0.dtype)
     no_hold = jnp.zeros(theta0.shape, dtype=bool)
 
-    def _quantised(solve):
-        """``(candidate, representable)`` from ``solve(held)``, with every
+    def _quantised(th, solve):
+        """``(candidate, representable)`` from ``solve(held)`` -- a step from
+        ``th`` -- with every
         narrow coordinate on its leaf's grid.  A narrow coordinate whose
         proposed move rounds away there is held and the step solved again
         without it, so the others do not compensate for a move the model
@@ -5190,10 +5191,10 @@ def fit_lm(
         if not narrow.any():
             return cand, bool(ok)
         held = np.zeros(narrow.shape, dtype=bool)
-        th = np.asarray(theta)
+        here = np.asarray(th)
         for _ in range(int(narrow.sum())):
             c = np.asarray(cand)
-            lost = narrow & ~held & (np.asarray(to_leaf_grid(cand)) == th) & (c != th)
+            lost = narrow & ~held & (np.asarray(to_leaf_grid(cand)) == here) & (c != here)
             if not lost.any():
                 break
             held |= lost
@@ -5263,7 +5264,7 @@ def fit_lm(
         on a spring -- so the second test evaluates the step.
         """
         candidate, ok = _quantised(
-            lambda held: _gauss_newton_step(th, r, J, bounds.lo, bounds.hi, held))
+            th, lambda held: _gauss_newton_step(th, r, J, bounds.lo, bounds.hi, held))
         verdict["representable"] &= ok
         if _within_step_tol(th, candidate):
             return True
@@ -5357,8 +5358,8 @@ def fit_lm(
                 break
             lam_t = jnp.asarray(lam, theta.dtype)
             cand, cand_ok = _quantised(
-                lambda held, lam_t=lam_t: _lm_step(theta, r, J, lam_t, bounds.lo,
-                                                   bounds.hi, held))
+                theta, lambda held, lam_t=lam_t: _lm_step(theta, r, J, lam_t, bounds.lo,
+                                                          bounds.hi, held))
             if attempt == 0:
                 verdict["representable"] &= cand_ok
             loss_new = _half_squared_norm(residual_only(cand))
@@ -5411,8 +5412,8 @@ def fit_lm(
             # parameters' units happened to round to (MADD-ANO-163).
             if _within_step_tol(theta, cand):
                 gn_cand, gn_ok = _quantised(
-                    lambda held: _gauss_newton_step(theta, r, J, bounds.lo,
-                                                    bounds.hi, held))
+                    theta, lambda held: _gauss_newton_step(theta, r, J, bounds.lo,
+                                                           bounds.hi, held))
                 verdict["representable"] &= gn_ok
                 if _within_step_tol(theta, gn_cand):
                     stationary = True

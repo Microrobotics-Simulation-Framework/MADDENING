@@ -343,6 +343,9 @@ def test_fit_lm_recovers_the_truth_at_every_residual_scale(scale):
     assert base.converged and base_ok, base_errors
     assert res.converged and ok, (scale, res.n_iter, res.best_loss, errors)
     assert abs(res.n_iter - base.n_iter) <= 3, (base.n_iter, res.n_iter)
+    # The identifiability guard sees the same gradients (its tracker reads
+    # ``Jᵀr`` framed; bare, it flushed to zero and the rank read None).
+    assert (res.excited_rank, res.hold_declined) == (base.excited_rank, base.hold_declined)
     for (key, got, _), (_, got_scaled, _), kind in zip(base_errors, errors, kinds):
         lo, hi = _SPECS[kind][1]
         assert abs(got_scaled - got) <= 1e-4 * (hi - lo), (key, got, got_scaled)
@@ -395,9 +398,28 @@ def test_fit_recovers_the_truth_at_every_residual_scale(scale):
     res, ok, errors = _adam_fit(kinds, truth_at, start_at, scale=scale)
     assert base_ok, base_errors
     assert ok, (scale, errors)
+    assert res.excited_rank == base.excited_rank, (res.excited_rank, base.excited_rank)
     for (key, got, _), (_, got_scaled, _), kind in zip(base_errors, errors, kinds):
         lo, hi = _SPECS[kind][1]
         assert abs(got_scaled - got) <= 1e-4 * (hi - lo), (key, got, got_scaled)
+
+
+def test_fit_does_not_count_a_flushed_loss_as_reaching_tol():
+    """``loss_fn`` returning exactly 0.0 with a gradient that is not zero has
+    flushed its own value; with ``tol > 0`` it used to stop at its first
+    evaluation, ``converged=True``, unfitted.  It is warned about and fitted."""
+    kinds, truth_at, start_at = _RANGE_CASE
+    gm = _graph(kinds)
+    truth = _start(gm, kinds, truth_at)
+    data = _blocks(truth)
+    s = jnp.asarray(1e-20, data.dtype)
+    loss = jax.jit(lambda p: 0.5 * jnp.sum((s * (_blocks(p) - data)) ** 2))
+    start = _start(gm, kinds, start_at)
+    assert float(loss(start)) == 0.0                      # the caller's loss flushed
+    with pytest.warns(RuntimeWarning, match="returned exactly 0.0 at iteration 1"):
+        res = fit(gm, loss, params=start, mask=_mask(gm), n_iter=400, lr=0.05, tol=1e-30)
+    assert not res.converged and res.n_iter == 400
+    assert _recovered(res, truth, kinds)[0]
 
 
 def test_fit_refuses_a_loss_that_overflows():

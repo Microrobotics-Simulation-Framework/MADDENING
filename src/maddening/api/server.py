@@ -1661,7 +1661,7 @@ def _leaf_value_refusal(key: str, value: Any, spec: Any) -> Optional[str]:
     *spec* (a :class:`~maddening.core.params.ParamSpec`, or ``None``)
     refuses it; ``None`` when it can.  ``PUT /graph/params`` refuses both
     before it writes; NaN passes every bounds comparison."""
-    if not bool(np.all(np.isfinite(np.asarray(value, dtype=np.float64)))):
+    if not bool(np.all(np.isfinite(np.asarray(value)))):
         return f"{key}: value must be finite"
     if spec is not None:
         try:
@@ -3952,7 +3952,11 @@ class SimulationServer:
                 # diverged.
                 loaded = _state_and_params_snapshot(self.gm)
                 _restore_state_and_params(self.gm, undo)
-                refusal = _loaded_params_refusal(self.gm, loaded[1])
+                try:
+                    refusal = _loaded_params_refusal(self.gm, loaded[1])
+                except Exception as exc:  # noqa: BLE001 - a check that cannot run refuses
+                    refusal = (f"its parameters could not be checked "
+                               f"({type(exc).__name__}: {_checkpoint_reason(exc)})")
                 if refusal is not None:
                     raise HTTPException(
                         status_code=400,

@@ -1740,15 +1740,54 @@ def _new_node_bounds_refusal(node: Any, given: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _installed_part(value: Any, *held: Any) -> Optional[np.ndarray]:
+    """The elements of *value* a checkpoint load installs -- those equal to
+    none of *held* (the leaf the graph holds now, the node's own value in
+    its ``params``; ``None`` or another shape is skipped), NaN equal to
+    NaN -- or ``None`` when there are none.  The whole value when every
+    element is installed (a scalar's refusal then names the scalar), else
+    those elements, flattened: a weight matrix whose zeros a fit left at
+    zero is asked about the entries it moved, not about zeros a ``log``
+    spec refuses and the graph was built with.
+
+    The rule of :meth:`maddening.fmi.sidecar.FmuSidecar._check_restored_params`
+    -- a value the parameter holds now, or held when the FMU was
+    instantiated, is not a new value -- taken per element: a graph runs
+    whatever its constructor was given, bounds being metadata to it, so a
+    graph built outside its bounds reloads its own checkpoint, and goes
+    back to its own value after a ``gm.params`` write moved the leaf.
+    """
+    v = np.asarray(value)
+    new = np.ones(v.shape, dtype=bool)
+    for other in held:
+        if other is None:
+            continue
+        h = np.asarray(other)
+        if h.shape != v.shape:
+            continue
+        try:
+            same = np.asarray(v == h, dtype=bool)
+            if v.dtype.kind in "fc" and h.dtype.kind in "fc":
+                same = same | (np.isnan(v) & np.isnan(h))
+        except (TypeError, ValueError):
+            continue
+        new &= ~same
+    if not new.any():
+        return None
+    return v if new.all() else v[new]
+
+
 def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
     """Why ``POST /checkpoint/load`` cannot take the parameter leaves
     *loaded* (the ``gm.params`` the load would leave) into the graph, or
-    ``None``: what ``PUT /graph/params`` refuses of the leaves the load
-    changes on each node -- a non-finite value, one outside its
-    :class:`~maddening.core.params.ParamSpec`'s bounds, then
-    :func:`_params_write_refusal` -- and a non-finite or out-of-bounds
-    interface-mapping weight.  Asked of the graph as it was before the
-    load: the constructor and the save are asked with its live values.
+    ``None``: what ``PUT /graph/params`` refuses of the values the load
+    installs (:func:`_installed_part`) on each node -- a non-finite value,
+    one outside its :class:`~maddening.core.params.ParamSpec`'s bounds --
+    then :func:`_params_write_refusal` of the leaves it changes, and a
+    non-finite or out-of-bounds interface-mapping weight it installs.
+    Asked of the graph as it was before the load: the constructor and the
+    save are asked with its live values.  ``GraphManager.load_state``
+    asks none of these (``docs/user_guide/parameters.md``).
     """
     specs = gm.param_specs()
     live_tree = gm.params
@@ -1763,12 +1802,15 @@ def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
         if not staged:
             continue
         own_specs = specs.get("nodes", {}).get(owner, {})
+        ctor = spec.node.params_pytree()
         for key, value in staged.items():
-            reason = _leaf_value_refusal(key, value, own_specs.get(key))
+            part = _installed_part(value, live[key], ctor.get(key))
+            if part is None:
+                continue
+            reason = _leaf_value_refusal(key, part, own_specs.get(key))
             if reason is not None:
                 return f"node {owner!r}, {reason}"
         changes = {k: np.asarray(v).tolist() for k, v in staged.items()}
-        ctor = spec.node.params_pytree()
         found = _params_write_refusal(
             gm, owner, changes, staged, dict(live), {**live, **staged},
             at_own_value=[k for k, v in staged.items()
@@ -1782,8 +1824,11 @@ def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
             continue
         edge_specs = specs.get("mappings", {}).get(edge, {})
         for key, value in leaves.items():
-            if key in live and not _leaf_values_equal(value, live[key]):
-                reason = _leaf_value_refusal(key, value, edge_specs.get(key))
+            if key not in live:
+                continue
+            part = _installed_part(value, live[key])
+            if part is not None:
+                reason = _leaf_value_refusal(key, part, edge_specs.get(key))
                 if reason is not None:
                     return f"mapping {edge!r}, {reason}"
     return None
@@ -3953,10 +3998,15 @@ class SimulationServer:
             (so a save after the load would not reload), one the node
             consumed when it was constructed, or one that moves the points
             a mapped edge was built from; and text or a boolean for a
-            numeric parameter.  Finiteness, the bounds and the constructor
-            are asked by ``GraphManager.load_state`` itself, the rest here;
-            every check is asked of a parameter the load changes only, so a
-            graph built outside its bounds reloads its own checkpoint.
+            numeric parameter.  Each is asked of what the load changes
+            only, and finiteness and the bounds only of a value that is
+            neither the leaf's now nor the node's own (per element, as the
+            FMU's ``set_fmu_state`` asks), so a graph built outside its
+            bounds reloads its own checkpoint.
+            ``GraphManager.load_state`` itself refuses text and booleans,
+            and asks none of the rest: a value outside a ``ParamSpec``'s
+            bounds is one Python code may hold on purpose
+            (``docs/user_guide/parameters.md``).
 
             The streams (``/ws/state``, ``/ws/state/binary``, ``/ws/render``)
             serve the loaded state at once, and their ``sim_time`` is the

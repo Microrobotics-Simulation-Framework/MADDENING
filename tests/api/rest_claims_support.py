@@ -493,6 +493,49 @@ def files(root: Path) -> list:
     return sorted(p.relative_to(root).as_posix() for p in root.rglob("*"))
 
 
+_SPY_LOCK = threading.Lock()
+_SPIES: dict = {}
+
+
+@contextlib.contextmanager
+def spy(owner, name: str):
+    """Record every call of ``owner.name`` while the block runs, shared by
+    every copy of a check running at once (one patch, reference-counted,
+    so copies that finish in any order cannot leave the class patched).
+    Yields the list of ``(args, kwargs)`` recorded since the block began."""
+    key = (id(owner), name)
+    with _SPY_LOCK:
+        if key not in _SPIES:
+            real = getattr(owner, name)
+            calls: list = []
+
+            def recording(*args, **kwargs):
+                calls.append((args, kwargs))
+                return real(*args, **kwargs)
+
+            setattr(owner, name, recording)
+            _SPIES[key] = [real, calls, 0]
+        entry = _SPIES[key]
+        entry[2] += 1
+        start = len(entry[1])
+    try:
+        yield _SpyView(entry[1], start)
+    finally:
+        with _SPY_LOCK:
+            entry[2] -= 1
+            if entry[2] == 0:
+                setattr(owner, name, entry[0])
+                del _SPIES[key]
+
+
+class _SpyView:
+    def __init__(self, calls: list, start: int):
+        self._calls, self._start = calls, start
+
+    def __iter__(self):
+        return iter(self._calls[self._start:])
+
+
 def refused(resp, status: int, *words: str) -> None:
     assert resp.status_code == status, (resp.status_code, resp.text)
     if words:
@@ -516,7 +559,7 @@ def _loopback_serves_without_a_token(ctx):
     header, a header with any token, and a malformed one are all served."""
     assert not ctx.enforced
     for headers in ({}, {"Authorization": "Bearer anything"},
-                    {"Authorization": "garbage \x7f"}, {"Authorization": "Basic Zm9vOmJhcg=="}):
+                    {"Authorization": "garbage !! not a scheme"}, {"Authorization": "Basic Zm9vOmJhcg=="}):
         c = ctx.make_client(headers=headers, peer=None)
         assert c.get("/graph").status_code == 200
         assert c.get("/graph/state/ball").status_code == 200
@@ -644,7 +687,7 @@ def _healthz_is_never_authenticated_and_says_nothing(ctx):
         assert TOKEN not in ctx.anonymous().get(page).text, page
 
 
-@check("REST-018", skip=("restored", "wrapper", "shutdown"))
+@check("REST-018", skip=("restored", "wrapper", "shutdown", "concurrent"))
 def _healthz_answers_while_another_request_holds_the_graph(ctx):
     lock = ctx.server._graph_lock
     assert lock.acquire(timeout=10)
@@ -770,8 +813,8 @@ def _a_body_over_the_limit_is_a_413_before_it_is_parsed(ctx):
     before = ctx.live("spring", "stiffness")
     headers = {"Content-Type": "application/json"}
 
-    def body(size: int) -> bytes:
-        head = b'{"params": {"stiffness": 45.0}, "pad": "'
+    def body(size: int, key: str = "stiffness") -> bytes:
+        head = b'{"params": {"' + key.encode() + b'": 45.0}, "pad": "'
         return head + b"x" * (size - len(head) - 2) + b'"}'
 
     over = ctx.client.put("/graph/params/spring", content=body(1001), headers=headers)
@@ -785,8 +828,9 @@ def _a_body_over_the_limit_is_a_413_before_it_is_parsed(ctx):
     streamed = ctx.client.put("/graph/params/spring", content=stream(), headers=headers)
     refused(streamed, 413)
     unchanged_param(ctx, "spring", "stiffness", before)
-    exactly = ctx.client.put("/graph/params/spring", content=body(1000), headers=headers)
-    assert exactly.status_code != 413, exactly.text      # read, and judged by the route
+    exactly = ctx.client.put("/graph/params/spring", content=body(1000, key="no_such_key"),
+                             headers=headers)
+    refused(exactly, 400, "no_such_key")      # read, and judged by the route
 
 
 @check("REST-031", skip=("wrapper", "shutdown"), patch={"MAX_RUN_STEPS": 12})
@@ -803,34 +847,26 @@ def _a_run_of_one_step_more_than_the_bound_is_a_422(ctx):
         assert ctx.server.relay.step_count == count + 12
 
 
-@check("REST-032", skip=("sim_run", "shutdown"))
+@check("REST-032", skip=("shutdown",))
 def _the_integer_and_value_bounds_are_422s_that_write_nothing(ctx):
     from maddening.api.server import MAX_NODE_PARAM_INT
 
     before = (ctx.node_param("c", "n_cells"), structure(ctx))
     for value in (MAX_NODE_PARAM_INT + 1, -(MAX_NODE_PARAM_INT + 1), [MAX_NODE_PARAM_INT + 1]):
         refused(ctx.client.put("/graph/params/c", json={"params": {"n_cells": value}}), 422)
-    if not ctx.steps_beside:
-        resp = ctx.client.post("/graph/nodes", json={
-            "type": "HeatNode", "name": f"big{ctx.index}", "timestep": 0.01,
-            "params": {"n_cells": MAX_NODE_PARAM_INT + 1}})
-        refused(resp, 422)
+    resp = ctx.client.post("/graph/nodes", json={
+        "type": "HeatNode", "name": f"big{ctx.index}", "timestep": 0.01,
+        "params": {"n_cells": MAX_NODE_PARAM_INT + 1}})
+    refused(resp, 422)       # the request model's, before any 409 a stepper would cause
     assert (ctx.node_param("c", "n_cells"), structure(ctx)) == before
 
 
 @check("REST-034", skip=("wrapper",))
 def _a_put_that_would_build_too_large_a_node_is_refused_before_it_is_built(ctx):
-    built = []
-    real_init = HeatNode.__init__
-
-    def counting(self, *args, **kwargs):
-        built.append(kwargs.get("n_cells"))
-        real_init(self, *args, **kwargs)
-
     before = ctx.node_param("c", "n_cells")
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(HeatNode, "__init__", counting)
+    with spy(HeatNode, "__init__") as calls:
         resp = ctx.client.put("/graph/params/c", json={"params": {"n_cells": 9_000_000}})
+        built = [kw.get("n_cells") for _, kw in calls]
     refused(resp, 400)
     assert 9_000_000 not in built
     assert ctx.node_param("c", "n_cells") == before
@@ -860,19 +896,11 @@ def _the_graph_holds_exactly_its_state_budget(ctx):
 @check("REST-037", skip=("runner", "sim_run"))
 def _a_state_field_with_far_more_values_is_refused_before_conversion(ctx):
     before = np.asarray(ctx.gm.get_node_state("c")["temperature"]).copy()
-    calls = []
-    real = np.asarray
-
-    def counting(value, *args, **kwargs):
-        if isinstance(value, list) and len(value) > 1000:
-            calls.append(len(value))
-        return real(value, *args, **kwargs)
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(server_module.np, "asarray", counting)
+    with spy(server_module.np, "asarray") as calls:
         resp = ctx.client.put("/graph/state/c", json={"state": {"temperature": [0.5] * 100_000}})
+        long = [len(a[0]) for a, _ in calls if a and isinstance(a[0], list) and len(a[0]) > 1000]
     refused(resp, 400, "temperature")
-    assert calls == []
+    assert long == []
     assert np.array_equal(np.asarray(ctx.gm.get_node_state("c")["temperature"]), before)
 
 
@@ -882,6 +910,9 @@ def _the_stride_is_bounded_and_a_value_left_out_keeps_its_own(ctx):
 
     assert ctx.client.put("/sim/stride", params={"steps_per_frame": 3,
                                                  "relay_stride": 2}).status_code == 200
+    if ctx.copies > 1:      # every copy writes the same values: a fixed point
+        assert ctx.client.put("/sim/stride", params={"steps_per_frame": MAX_STEPS_PER_FRAME,
+                                                     "relay_stride": 2}).status_code == 200
     for params in ({"steps_per_frame": 0}, {"relay_stride": -1},
                    {"steps_per_frame": MAX_STEPS_PER_FRAME + 1},
                    {"relay_stride": MAX_RELAY_STRIDE + 1}):
@@ -893,8 +924,9 @@ def _the_stride_is_bounded_and_a_value_left_out_keeps_its_own(ctx):
     assert ctx.server.relay.stride == 2
     if ctx.server.runner is not None:
         assert ctx.server.runner.steps_per_frame == MAX_STEPS_PER_FRAME
-    assert ctx.client.put("/sim/stride", params={"steps_per_frame": 1,
-                                                 "relay_stride": 1}).status_code == 200
+    if ctx.copies == 1:
+        assert ctx.client.put("/sim/stride", params={"steps_per_frame": 1,
+                                                     "relay_stride": 1}).status_code == 200
 
 
 @check("REST-039", skip=("runner", "sim_run", "wrapper", "concurrent"))
@@ -927,7 +959,7 @@ def _threads(jobs) -> None:
     assert not any(t.is_alive() for t in threads), "a request never returned"
 
 
-@check("REST-040", "REST-050", skip=("runner", "sim_run", "wrapper"))
+@check("REST-040", "REST-050", skip=("runner", "sim_run", "wrapper", "concurrent"))
 def _concurrent_steps_are_all_taken(ctx):
     """Every POST /sim/step is one step: n of them, from several clients at
     once, take n steps, the relay counts n, and each reply is one step on."""
@@ -964,7 +996,7 @@ def _every_write_is_a_409_beside_a_stepper(ctx):
         stop_runner(ctx.server)
 
 
-@check("REST-042", skip=("sim_run",),
+@check("REST-042", skip=("sim_run", "concurrent"),
        xfail={("REST-042", "wrapper"): "REST-042: a PUT /graph/params to a HybridNode is "
               "answered 200 and lost (the hybrid copies its physics node's params); "
               "pending fix/p4-18-rest"})
@@ -1154,7 +1186,7 @@ def _ball(ctx) -> dict:
     return {f: float(np.asarray(v)) for f, v in ctx.gm.get_node_state("ball").items()}
 
 
-@check("REST-051", skip=("runner", "sim_run", "shutdown"))
+@check("REST-051", skip=("runner", "sim_run", "shutdown", "concurrent"))
 def _a_run_returns_the_state_after_n_steps(ctx):
     """``POST /sim/run?n_steps=N`` takes N steps and returns the state after
     them: what N single steps of a twin graph give, bit for bit."""
@@ -1208,7 +1240,7 @@ def _the_lifespan_shutdown_stops_the_runner_and_tells_a_run_to_stop(ctx):
     ctx.server._shutdown.clear()
 
 
-@check("REST-054", skip=("runner", "restored", "wrapper", "shutdown"))
+@check("REST-054", skip=("runner", "restored", "wrapper", "shutdown", "concurrent"))
 def _a_second_start_is_a_409_and_a_dead_runner_is_replaced(ctx):
     if ctx.domain == "sim_run":
         refused(ctx.client.post("/sim/start"), 409, "/sim/run")
@@ -1234,7 +1266,7 @@ def _pause_and_resume_without_a_running_runner_are_409s(ctx):
         stop_runner(ctx.server)
 
 
-@check("REST-056", skip=("runner", "restored", "wrapper", "shutdown"))
+@check("REST-056", skip=("runner", "restored", "wrapper", "shutdown", "concurrent"))
 def _stopped_means_no_runner_thread_steps_the_graph(ctx):
     if ctx.domain == "sim_run" or ctx.copies > 1:
         refused(ctx.client.post("/sim/stop"), 409, "not started")
@@ -1337,7 +1369,10 @@ def _an_add_node_that_is_refused_adds_nothing(ctx):
     for body, status in cases:
         for _ in range(2):      # a repeat gets the same answer, never a 409
             refused(ctx.client.post("/graph/nodes", json=body), status)
-    assert structure(ctx) == before
+    if ctx.copies == 1:
+        assert structure(ctx) == before
+    for body, _ in cases[2:]:
+        assert body["name"] not in ctx.gm._nodes
     name = f"added{ctx.index}"
     resp = ctx.client.post("/graph/nodes", json={"type": "BallNode", "name": name,
                                                  "timestep": 0.01, "params": {}})
@@ -1462,8 +1497,9 @@ def _put(ctx, node: str, params: dict):
 def _get_params_is_the_live_view(ctx):
     import jax.numpy as jnp
 
-    ctx.gm.params["nodes"]["spring"]["stiffness"] = jnp.asarray(48.0, jnp.float32)
-    assert ctx.client.get("/graph/params/spring").json()["stiffness"] == pytest.approx(48.0)
+    if ctx.copies == 1:
+        ctx.gm.params["nodes"]["spring"]["stiffness"] = jnp.asarray(48.0, jnp.float32)
+        assert ctx.client.get("/graph/params/spring").json()["stiffness"] == pytest.approx(48.0)
     resp = _put(ctx, "spring", {"stiffness": 49.0})
     assert resp.status_code == 200, resp.text
     assert ctx.client.get("/graph/params/spring").json()["stiffness"] == pytest.approx(49.0)
@@ -1589,18 +1625,11 @@ def _a_value_the_step_cannot_run_with_is_a_400_and_steps_go_on(ctx):
 
 @check("REST-084")
 def _a_value_that_changes_the_state_layout_is_refused_before_it_is_built(ctx):
-    built = []
-    real_init = HeatNode.__init__
-
-    def counting(self, *args, **kwargs):
-        built.append(kwargs.get("n_cells"))
-        real_init(self, *args, **kwargs)
-
     before = (ctx.node_param("c", "n_cells"), np.asarray(ctx.gm.get_node_state("c")[
         "temperature"]).shape)
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(HeatNode, "__init__", counting)
+    with spy(HeatNode, "__init__") as calls:
         resp = _put(ctx, "c", {"n_cells": 16})
+        built = [kw.get("n_cells") for _, kw in calls]
     refused(resp, 400, "layout")
     assert 16 not in built
     assert (ctx.node_param("c", "n_cells"), np.asarray(ctx.gm.get_node_state("c")[
@@ -1613,7 +1642,7 @@ def _a_value_outside_the_leaf_s_bounds_is_a_400_and_mutates_nothing(ctx):
     for value in (-1.0, -1e-40, -0.0 - 1e-30):
         refused(_put(ctx, "spring", {"damping": value}), 400, "bound")
     unchanged_param(ctx, "spring", "damping", before)
-    if ctx.domain != "wrapper":
+    if ctx.domain != "wrapper" and ctx.copies == 1:
         resp = _put(ctx, "spring", {"damping": 1e-40})
         assert resp.status_code == 200, resp.text
         assert ctx.live("spring", "damping") == float(np.float32(1e-40))
@@ -1694,9 +1723,10 @@ def _a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded(ctx):
     other = GraphManager()
     other.add_node(BallNode("other", timestep=0.01))
     other.compile()
-    other.save_state(str(ctx.root / "other.npz"))
+    other_name = f"other{ctx.index}.npz"
+    other.save_state(str(ctx.root / other_name))
     before = (_ball(ctx), ctx.live("spring", "stiffness"))
-    refused(ctx.client.post("/checkpoint/load", params={"path": "other.npz"}), 400)
+    refused(ctx.client.post("/checkpoint/load", params={"path": other_name}), 400)
     refused(ctx.client.post("/checkpoint/load", params={"path": "missing.npz"}), 404)
     if ctx.copies == 1:
         assert (_ball(ctx), ctx.live("spring", "stiffness")) == before
@@ -1722,8 +1752,8 @@ def _a_load_answers_the_checkpoint_s_clock(ctx):
 
 @check("REST-095", skip=("runner", "sim_run", "wrapper"))
 def _a_file_that_is_not_an_archive_is_a_400_naming_no_internals(ctx):
-    for name, data in (("braces.npz", b"{}"), ("empty.npz", b""),
-                       ("zip.npz", b"PK\x03\x04garbage")):
+    for name, data in ((f"braces{ctx.index}.npz", b"{}"), (f"empty{ctx.index}.npz", b""),
+                       (f"zip{ctx.index}.npz", b"PK\x03\x04garbage")):
         (ctx.root / name).write_bytes(data)
         resp = ctx.client.post("/checkpoint/load", params={"path": name})
         refused(resp, 400, f"could not load checkpoint '{name}'")

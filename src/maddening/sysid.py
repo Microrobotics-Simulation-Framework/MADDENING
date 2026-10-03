@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
@@ -2048,7 +2049,7 @@ def _range_limited(top: float, rank_rtol: float, n_residual: int, dtype,
 
 def _device_range_limited(eigvals, rank_rtol: float, n_residual: int,
                           factor: float = _PRECISION_WARN_FACTOR, *,
-                          j_nonzero=False):
+                          j_nonzero: Any = False):
     """:func:`_range_limited` on the device, as a 0-d bool; the threshold
     is computed on the host (every operand but ``eigvals`` and
     ``j_nonzero``, a traced 0-d bool, is static)."""
@@ -3109,7 +3110,7 @@ def _adam_frame(g0):
     return pow2_frame(g0)
 
 
-def _scaled_value_and_grad(objective, argnums=0):
+def _scaled_value_and_grad(objective, argnums: Any = 0):
     """``jit((*args, cot) -> (loss, cot * gradient))``: the loss and its
     gradient with ``cot`` as the cotangent of the backward pass.
 

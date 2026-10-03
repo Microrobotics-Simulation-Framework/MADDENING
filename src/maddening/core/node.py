@@ -19,7 +19,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Optional
+from typing import Any, Callable, ClassVar, Optional, cast
 
 import jax
 import jax.numpy as jnp
@@ -616,7 +616,7 @@ class SimulationNode(ABC):
         self.geometry_source: Optional[str] = params.pop("geometry_source", None)
         # Counts its writes, so a graph can tell a write after compile from
         # an unchanged value (see ``_ParamsDict``).
-        self.params: dict = _ParamsDict(params)
+        self.params = _ParamsDict(params)
 
     @property
     def params(self) -> dict:
@@ -646,7 +646,7 @@ class SimulationNode(ABC):
         # ``copy`` and every walk of ``vars(node)`` see what they always saw.
         if isinstance(value, Mapping) and not isinstance(value, _ParamsDict):
             value = _ParamsDict(value)
-        self.__dict__["params"] = value
+        cast(dict, self.__dict__)["params"] = value
 
     # ------------------------------------------------------------------
     # Abstract interface

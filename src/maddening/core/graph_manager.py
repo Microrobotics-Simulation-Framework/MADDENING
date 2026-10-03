@@ -5352,7 +5352,7 @@ class GraphManager:
         self._params: dict = {"nodes": {}, "mappings": {}}
         # What the last sync saw of each node: its params mapping and write
         # counts.  A ``node.params`` write is what moved them since.
-        self._node_writes_seen: dict[str, tuple] = {}
+        self._node_writes_seen: dict[str, tuple[Any, Any, dict, dict]] = {}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
         # The raw (uncounted, unjitted) step of the last compile, for the
@@ -5474,8 +5474,7 @@ class GraphManager:
             seen = self._node_writes_seen.get(name)
             if seen is None:
                 continue                    # added since the last compile
-            mutated = (_mutated_keys(params, seen[3])
-                       if params is seen[0] and len(seen) > 3 else set())
+            mutated = _mutated_keys(params, seen[3]) if params is seen[0] else set()
             if params is seen[0] and getattr(params, "_writes", None) == seen[1] \
                     and not mutated:
                 continue

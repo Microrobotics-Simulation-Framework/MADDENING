@@ -23,8 +23,11 @@ float32's.
   norm's ``rtol=1``) above ``1 / tiny = 2**(maxexp - 2)``, reads ``inf``
   under every norm built on it; at exactly ``2**(maxexp - 2)`` it is
   still measured, and the mixed and interface norms measure it far
-  above.  So a field within a factor of four of its dtype's overflow
-  never converges under L2, in every dtype.
+  above.  So a field within a factor of four of overflow never converges
+  under L2.  The edge is the dtype the norms measure in, at least float32
+  (a 16-bit field is widened exactly, MADD-ANO-174): bfloat16 shares
+  float32's range and its edge, and no finite float16 value reaches it,
+  so a float16 field is measured up to its largest value.
 * CPL-044: the group scaled by ``2**-shift`` to where a one-ulp change of
   its fields is subnormal -- and further, to a few ``tiny`` -- takes the
   control's passes and reports its verdict and residual to the bit, its
@@ -231,6 +234,21 @@ def _overflow_edge(dtype) -> tuple[float, float]:
     return edge, above
 
 
+def _measured_overflow_edge(dtype):
+    """The L2 norm's overflow edge for a field of *dtype*, in that dtype, or ``None``.
+
+    The norms measure a field in at least float32 (a 16-bit field is
+    widened exactly first, MADD-ANO-174), so the edge is the measuring
+    dtype's ``1 / tiny``, with the next number of *dtype* above it.
+    bfloat16 holds float32's edge; float16's largest finite value is far
+    below it, so for float16 there is none.
+    """
+    edge, _ = _overflow_edge(jnp.promote_types(dtype, jnp.float32))
+    if edge > float(cd.finfo(dtype).max):
+        return None
+    return edge, float(jnp.nextafter(jnp.asarray(edge, dtype), jnp.asarray(jnp.inf, dtype)))
+
+
 @pytest.mark.parametrize("label", cd.DTYPES + ("vmap",))
 def test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges(label):
     """CPL-043 at each dtype's ``maxexp``, every norm.
@@ -241,7 +259,9 @@ def test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges
     ``inf`` there, and only there: the mixed and interface scales,
     ``rtol * max|v|``, stay normal.  ``2**(maxexp - 2)`` is a quarter of the
     dtype's overflow, in every dtype -- the claim's "within a factor of
-    four of overflow".
+    four of overflow".  The edge the norms apply is the measuring dtype's
+    (at least float32): a float16 field reads zero at its own edge, one ulp
+    above it and at its largest value.
     """
     d = cd.DOMAINS[label]
     with cd.entered(d):
@@ -265,7 +285,12 @@ def test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges
                 assert math.isinf(float(coupling_residual_l2(s_new, s_old, ["n"])))
                 assert math.isinf(float(coupling_residual_mixed(s_new, s_old, ["n"], 0.0, 1e-2)))
                 assert math.isinf(float(coupling_residual_interface(s_new, s_old, e, 0.0, 1e-2)))
-            for value, l2_inf in ((edge, False), (above, True)):
+            measured = _measured_overflow_edge(dtype)
+            if measured is None:        # float16, widened: measured to its largest value
+                cases = ((edge, False), (above, False), (float(cd.finfo(dtype).max), False))
+            else:
+                cases = ((measured[0], False), (measured[1], True))
+            for value, l2_inf in cases:
                 flat = {"n": {"x": jnp.asarray([value, -0.5 * value], dtype)}}
                 e = [EdgeSpec("n", "n", "x", "u")]
                 l2 = float(coupling_residual_l2(flat, flat, ["n"]))
@@ -288,11 +313,18 @@ def test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured
     on every pass, the group runs to its cap and reports ``converged=False``
     -- a field within a factor of four of overflow never converges under
     L2 -- while the mixed and interface norms still converge it.  A NaN
-    forcing reads ``inf`` and unconverged under every norm.
+    forcing reads ``inf`` and unconverged under every norm.  The edge is
+    the measuring dtype's (at least float32): a float16 group, which no
+    finite value of its own puts past it, converges at its own edge and at
+    its largest value under every norm.
     """
     d = cd.DOMAINS[label]
     with cd.entered(d):
-        edge, above = _overflow_edge(d.coarsest)
+        measured = _measured_overflow_edge(d.coarsest)
+        if measured is None:        # float16, widened: no finite value is past the edge
+            edge, above = _overflow_edge(d.coarsest)[0], float(cd.finfo(d.coarsest).max)
+        else:
+            edge, above = measured
         for norm in NORMS:
             gm = _graph(label, f"flat-{norm}", g=(0.0, 1.0), convergence_norm=norm,
                         max_iterations=6, **_criterion(d, norm, 1e-3 if norm == "l2" else 1e-2))
@@ -303,7 +335,7 @@ def test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured
             for s in at_s:
                 assert s.report["converged"] is True and s.report["residual"] == 0.0, (norm, s.report)
             for s in past_s:
-                if norm == "l2":
+                if norm == "l2" and measured is not None:
                     assert (s.report["converged"], s.report["iterations"]) == (False, 6), s.report
                     assert math.isinf(s.report["residual"]), s.report
                 else:

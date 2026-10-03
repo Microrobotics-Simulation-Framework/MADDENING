@@ -266,6 +266,17 @@ reads as exactly zero in the group's norm.
 | float16 | 0.0625 | 6.1e-5 |
 | float64 | 1.0e-292 | 2.2e-308 |
 
+A bfloat16 or float16 field is measured in float32 (the round-6 fix,
+MADD-ANO-174): its value, widened exactly, is a normal float32 number, so
+the norm reads a float16 field below 6.1e-5, and its changes, like any
+other.  At the other end, the L2 norm's overflow rule (a scale whose
+reciprocal is not a normal number reads `inf`) applies in float32 too:
+bfloat16 shares float32's range and keeps its edge, `2**126`, while no
+finite float16 value reaches it, so a float16 field is measured up to
+65,504 under every norm (it read `inf` from `2**14` up).  For the 16-bit
+rows the table describes the node's own arithmetic on the field, which
+still rounds and flushes in the field's dtype.
+
 `GraphManager` checks each coupled group on the first step after every
 `compile()` and issues one `UnderflowRangeWarning` (a
 `PrecisionLimitWarning`) per group, naming the field, its magnitude and the
@@ -329,8 +340,10 @@ the compressed Jacobian.  A coupling Jacobian's rank is at most the
 number of boundary scalars crossing the group's edges, so for a group
 with up to eight of them the Krylov space is the whole range, the
 non-zero spectrum is exact and `h_{k+1,k}` is zero; for a larger group
-the radius is an estimate from below, `spectral_usable` is false, and
-the bound carries a margin of `2 h_{k+1,k}` on the radius.
+the radius is an estimate -- from below for a normal Jacobian, from
+either side for a non-normal one (1.17 on a Jacobi ring of nine relays
+whose every eigenvalue has modulus 0.95) -- `spectral_usable` is false,
+and the bound carries a margin of `2 h_{k+1,k}` on the radius.
 
 For a *linear* map the error of any iterate is `(A − I)⁻¹` of its
 residual — no step sequence, relaxation factor or accelerator enters —
@@ -342,7 +355,31 @@ after one more pass, so the factor carries the ratio of the two weightings
 of `F(x) − x` (1 unless a field grew across the pass); without it, on a
 group still growing toward its fixed point, the bound read 0.94x the true
 distance in the returned state's weights with `spectral_usable=True`
-(round-5 audit).  `1/(1 − rho)` is that norm for a normal
+(round-5 audit).
+
+Under `convergence_norm="interface"` the "fields" are what that norm
+reads: each internal edge's source value *after* the edge's transform,
+over its own magnitude.  A transform changes the weights -- an offset (a
+unit conversion's 273.15) divides a change by a far larger magnitude, a
+selection (`"extract_last"`) by the selected entry's rather than the
+field's -- so the spectrum is taken on that reading `y = Φ(x)`.  The pass
+reads the iterate only through those edges, `F = G ∘ Φ`, so `y` iterates
+by its own map `Φ ∘ G`, whose Jacobian `A = Φ′ G′` has `dF/dx`'s non-zero
+spectrum, and for an affine map and affine transforms `Φ(x) − Φ(x*) =
+(I − A)⁻¹ (Φ(x) − Φ(F(x)))` exactly: the resolvent of `A` in the
+reading's weights carries the residual the loop measured to the distance
+in the norm it measured it in.  `A` is applied through state tangents
+(each Krylov vector is the reading of a state tangent, and the next is
+the reading of `dF/dx` applied to it), so no transform is ever inverted.
+Taken on the raw source fields instead, the bound multiplied a residual
+in one set of coordinates by a resolvent measured in another and read
+0.0014-0.098x the true distance with `spectral_usable=True` (round-6
+audit).  A transform that is not affine makes the map non-linear in the
+reading, and the bound is then asymptotic, as for a non-linear map.  The
+gradient bound below keeps the state's own analysis, in the raw fields'
+weights.
+
+In either reading `1/(1 − rho)` is the resolvent's norm for a normal
 `A`; the resolvent term is what holds when `A` is not normal, which a
 Jacobi loop between a node that responds strongly and one that
 responds weakly is measured to be.  Measured `spectral_error_bound /
@@ -434,17 +471,41 @@ group already has or measures cheaply:
    `‖δ‖`.  No Hessian is formed.  Where the residual is at its float
    resolution it carries no direction, and a floor-sized vector's
    resolvent image — the slow mode — stands in;
-4. **how far the linearisation reaches**, by Newton–Kantorovich: with
-   `h = amp · L · ‖δ‖`, `L` the Jacobian's change along `δ` per unit
-   length squared (one more pair of Jacobian-vector products), the
-   resolvent at `x*` is at most `amp / √(1 − 2h)` and a fixed point lies
-   within Kantorovich's radius, so the bound carries that factor and at
-   least that distance — and is `inf`, unusable, at `h ≥ ½`, where
-   nothing measured at `x_k` bounds the resolvent at the fixed point.
-   On a convex map at `F'(x*) = 0.99`, 0.65–4.5% short, the bound without
-   it read 0.20–0.96x the true error with the flag true; `h` there is
-   0.48–0.58, so two of those points now read `inf` and two hold at
-   3.0–3.5x.  `h` is exactly zero on an affine map.
+4. **how far the linearisation reaches**, by Newton–Kantorovich: `h` is
+   the larger of `β · L · ‖δ‖` — `β` the full resolvent norm at `x_k`, `L`
+   the Jacobian's change along `δ` per unit length — and Deuflhard's
+   affine-covariant `‖(I − J(x_k))⁻¹ (J(x_k + δ) − J(x_k))‖`, an operator
+   norm on the directions the Jacobian reads (`3k` more Jacobian-vector
+   products).  Below one half the resolvent at `x*` is at most
+   `β / √(1 − 2h)` and a fixed point lies within Kantorovich's radius
+   `t*`, so the bound carries that factor and at least that distance — and
+   is `inf`, unusable, at `h ≥ ½`, where nothing measured at `x_k` bounds
+   the resolvent at the fixed point.  On a convex map at `F'(x*) = 0.99`,
+   0.65–4.5% short, the bound without it read 0.20–0.96x the true error
+   with the flag true; `h` there is 0.48–0.58, so two of those points now
+   read `inf` and two hold at 3.3–4.0x.  Along `δ` alone the Jacobian's
+   change can be far smaller than in the directions `δ` hardly moves: on a
+   bilinear pair stopped two passes in, `h` read 0.37 along `δ` and is 0.65
+   affine-covariantly, the fixed point lay 0.568 away against a radius of
+   0.552, and the bound read 0.81x the true error, usable (round-6 audit).
+   `β` times the Jacobian's operator change would have caught it too, but
+   reads 3.5–16x the directional value on a ring whose Jacobian depends on
+   one field the Newton step barely moves, withdrawing bounds that hold;
+   the resolvent in front measures the change where it lands.  `h` is
+   exactly zero on an affine map;
+5. **what the Newton step misses**: `x* − x_k = δ + e` with `‖e‖ ≤ t* −
+   ‖δ‖`, and stretching the secant to `t*` covers only the part of `e`
+   along `δ`.  Each probe adds `β ‖G(x_k + δ) − G(x_k)‖ (t* − ‖δ‖) /
+   (‖δ‖ ‖t_k‖ √(1 − 2h))` — the change of its linearisation over the
+   missed part, at the rate its own secant shows, through the resolvent at
+   `x*` — which is zero on an affine map.  With `h` along `δ` alone and
+   without this term the bound read 0.986x the true error, usable, at
+   `max_iterations=2` (`h = 0.19`).  Once `h` takes the affine-covariant
+   form (0.22 there) the leading term alone reads 1.07x, and on 294 usable
+   drawn bilinear pairs it never fell below the true error, so no measured
+   case needs this term (it adds up to 42% of the leading term); it is
+   kept because it is the part of the argument the stretch to `t*` does
+   not cover.
 
 The bound is `amplification · distance · ‖G(x_k + δ) − G(x_k)‖ / (‖δ‖ ‖t_k‖)`,
 relative to the tangent, taken for **one probe per floating constant**
@@ -456,7 +517,7 @@ read 0.0 on the stiff spring pair while its stiffness gradient was
 the same relative amount, and the dynamics see only their ratio.  The
 tangents and `δ` come from a Woodbury solve on an eight-vector basis of
 the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
-the cost is `11 + k + 5 n_p` Jacobian-vector products per group per step
+the cost is `11 + 4k + 5 n_p` Jacobian-vector products per group per step
 (`k ≤ 8`, `n_p` the probes: every entry of a floating constant of at most
 64 entries, one for a larger one) beside the spectral bound's eight, plus
 one linearisation and `k` reverse-mode products for the full resolvent
@@ -474,13 +535,17 @@ construction:
 
 | fixture | `bound / true` |
 |---|---|
-| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.10–2.10 for `d/da`, 8.5–10.5 for `d/dg` |
-| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.12–1.16 for `d/dg`, 3.06–3.30 for `d/da` |
+| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.10–3.05 for `d/da`, 9.1–12.6 for `d/dg` |
+| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.17–1.22 for `d/dg`, 3.08–3.58 for `d/da` |
 | affine `a + g u`, `d/dg` (`d/da` is exact) | 1.35 at every cap |
 | spring pair (`k = 6000`, `c = 60`, `dt = 0.01`), stiffness and mass of each node, caps 2–6 | 1.19–1.70 |
-| two-mode, concave slow mode (`q = -0.014`), `converged=True` | 25 (with `error_estimate`'s distance: 40x short) |
+| two-mode, concave slow mode (`q = -0.014`), `converged=True` | 26 (with `error_estimate`'s distance: 40x short) |
 
-Re-measured after 0.4.0's round-5 fix (the resolvent applied exactly to
+Re-measured after 0.4.0's round-6 fix (the affine-covariant Kantorovich
+term and the Newton step's second-order miss, which raise the curved
+rows -- 1.10–2.10 and 8.5–10.5 concave, 1.12–1.16 and 3.06–3.30 convex,
+25 on the two-mode case before it -- and leave the linear ones alone).
+Measured after 0.4.0's round-5 fix (the resolvent applied exactly to
 each secant, one probe per entry, full-operator Kantorovich).  Before it
 the same table read 1.21–2.37 and 9.4–11.5 (concave), 1.29–1.36 and
 3.57–3.80 (convex), 1.81 (affine) and 83 on the two-mode case at
@@ -490,8 +555,8 @@ spring pair of the first edition (7–11x) is not in the tree, and the pair
 above, with the same stiffness-to-damping balance and stable as a coupled
 pair (MADD-ANO-098), reads 1.34–2.71x on the old bound.  The parameter
 with the larger relative error reads near the distance's own margin from
-cap 4 on, and more at cap 3 (2.10 on the concave map), where the
-Newton–Kantorovich factor below is largest; the other reads its gap to
+cap 4 on, and more at cap 3 (3.05 on the concave map), where the
+Newton–Kantorovich terms are largest; the other reads its gap to
 the worst probe as well.
 
 **What it is not — read this before using it.**  It is a statement

@@ -1,22 +1,29 @@
-"""The Kantorovich check reads ``h = beta L eta`` with ``beta`` the full resolvent norm, as CPL-095 states.
+"""The Kantorovich check reads ``h`` with ``beta`` the full resolvent norm, as CPL-095 states.
 
 ``gradient_bound_usable`` is ``False`` -- the bound ``inf`` -- where
-``h >= 1/2``, with ``beta = ||(I - J(x_k))^{-1}||`` over the whole space in
-the group's norm, ``eta`` the Newton step and ``L`` the change of the
-Jacobian along it.  Until 0.4.0's round-5 fix ``beta`` was the Arnoldi
-factor, the resolvent restricted to the Krylov space of the start vector
-and the residual (MADD-ANO-142).  On the round-5 audit's rank-one ring
-made nonlinear (``x0 <- b0 + g0 u + q u**2``) that factor is several times
-smaller than the full norm, and with it the check passed at a float64
-``h`` of 0.67-1.75: every case below that must read unusable read usable
-(bounds 0.82-187).  The verdict is checked here against ``h`` computed
-from the analytic Jacobian in float64 at the returned state.
+``h >= 1/2``.  ``h`` is the larger of ``beta L eta`` -- ``beta =
+||(I - J(x_k))^{-1}||`` over the whole space in the group's norm, ``eta``
+the Newton step and ``L`` the change of the Jacobian along it -- and, since
+0.4.0's round-6 fix, the affine-covariant ``||(I - J(x_k))^{-1} (J(x_k +
+delta) - J(x_k))||`` on the Jacobian's row space (MADD-ANO-176).  Until
+0.4.0's round-5 fix ``beta`` was the Arnoldi factor, the resolvent
+restricted to the Krylov space of the start vector and the residual
+(MADD-ANO-142).  On the round-5 audit's rank-one ring made nonlinear
+(``x0 <- b0 + g0 u + q u**2``) that factor is several times smaller than
+the full norm, and with it the check passed at a float64 ``h`` of
+0.67-1.75: every case below that must read unusable read usable (bounds
+0.82-187).  The verdict is checked here against ``h`` computed from the
+analytic Jacobian in float64 at the returned state.  On this ring the
+affine-covariant term is the larger one at every point below, so the
+verdict no longer depends on ``beta`` here;
+``test_coupling_full_resolvent_norm.py`` pins ``beta`` itself against a
+dense inverse.
 
 Two widths: one entry a node (3 coupled entries, the norm from the
 range basis's own square compression) and four (12 entries, more than
-the basis's eight vectors, so ``beta`` is assembled through the
-transposed map).  The four entries are copies of the scalar ring scaled
-by powers of two, so their ``h`` is the scalar ring's exactly.
+the basis's eight vectors, so ``beta`` and the row space are assembled
+through the transposed map).  The four entries are copies of the scalar
+ring scaled by powers of two, so their ``h`` is the scalar ring's exactly.
 """
 
 from __future__ import annotations
@@ -116,16 +123,26 @@ def _dense(q, width, x):
     delta_s = R @ (s * (F(x) - x))
     delta = delta_s / s
     jac_change = s * ((J(x + delta) - J(x)) @ delta)
-    h = np.linalg.norm(R, 2) * np.linalg.norm(jac_change) / np.linalg.norm(delta_s)
+    h_delta = np.linalg.norm(R, 2) * np.linalg.norm(jac_change) / np.linalg.norm(delta_s)
+    # The affine-covariant term: the resolvent applied to the Jacobian's
+    # change across the step, as an operator on the Jacobian's row space.
+    dJs = s[:, None] * (J(x + delta) - J(x)) / s[None, :]
+    _, sv, vt = np.linalg.svd(Js)
+    rows = vt[:int(np.sum(sv > 1e-12 * sv[0]))].T
+    h = max(h_delta, np.linalg.norm(R @ dJs @ rows, 2))
     xs = x.copy()
     for _ in range(100):
         xs = xs - np.linalg.solve(eye - J(xs), xs - F(xs))
     return h, xs, np.linalg.inv(eye - J(xs))
 
 
-#: ``(q, cap)`` and the float64 ``h`` at the returned state, for the record.
-UNUSABLE = [(-0.05, 5), (-0.10, 5), (-0.20, 4), (-0.40, 3)]     # h = 0.755, 0.674, 1.51, 0.916
-USABLE = [(-0.10, 6), (-0.20, 6), (-0.40, 5)]                    # h = 0.368, 0.199, 0.289
+#: ``(q, cap)`` and the float64 ``h`` at the returned state, for the record:
+#: the affine-covariant term, with ``beta L eta`` (round 5's ``h``) beside it.
+#: ``(-0.40, 5)`` was usable at ``beta L eta = 0.289``; its affine-covariant
+#: ``h`` is 0.642.
+UNUSABLE = [(-0.05, 5), (-0.10, 5), (-0.20, 4), (-0.40, 3),
+            (-0.40, 5)]                     # h = 0.914, 0.884, 2.30, 1.68, 0.642 (0.755, 0.674, 1.51, 0.916, 0.289)
+USABLE = [(-0.10, 7), (-0.20, 6), (-0.40, 6)]   # h = 0.297, 0.310, 0.192 (0.225, 0.199, 0.085)
 
 
 def _run(q, cap, width):

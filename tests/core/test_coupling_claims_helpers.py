@@ -65,6 +65,32 @@ def test_the_l2_tolerance_is_absolute_only_at_unit_magnitude():
     assert float(swapped) == float(big)
 
 
+def test_the_l2_tolerance_is_one_threshold_for_the_whole_group():
+    """CPL-008: the root-sum-square over every entry of every field, not a per-field threshold.
+
+    The docstring once said "an absolute threshold of tolerance * max|v| per
+    field"; two fields each inside that fail the group's test, and a field
+    of ``n`` entries each moving by ``d`` of its magnitude reads ``d sqrt(n)``.
+    """
+    tol = 1e-3
+    one = jnp.ones((1,), F32)
+    # Two fields, each moving by 0.8 tol of its own magnitude.
+    two = float(coupling_residual_l2(
+        {"A": {"x": one * (1 + 0.8 * tol)}, "B": {"y": one * 50.0 * (1 + 0.8 * tol)}},
+        {"A": {"x": one}, "B": {"y": one * 50.0}}, ["A", "B"]))
+    each = 0.8 * tol / (1 + 0.8 * tol)
+    assert two == pytest.approx(math.sqrt(2.0) * each, rel=1e-4) and two > tol
+    # One 100-entry field and ten one-entry members, every entry moving by d.
+    d = 0.5 * tol
+    many = float(coupling_residual_l2({"n": {"x": jnp.full((100,), 1 + d, F32)}},
+                                      {"n": {"x": jnp.ones((100,), F32)}}, ["n"]))
+    assert many == pytest.approx(10.0 * d / (1 + d), rel=1e-4) and many > tol
+    members = [f"N{i}" for i in range(10)]
+    ten = float(coupling_residual_l2({m: {"x": one * (1 + d)} for m in members},
+                                     {m: {"x": one} for m in members}, members))
+    assert ten == pytest.approx(math.sqrt(10.0) * d / (1 + d), rel=1e-4) and ten > tol
+
+
 # ---------------------------------------------------------------------------
 # CPL-013: what the diagnostics cost, counted
 # ---------------------------------------------------------------------------
@@ -136,15 +162,19 @@ def _count_map_evaluations(analysis):
     return counts
 
 
-def test_the_gradient_bound_costs_eleven_plus_k_plus_five_n_p_products():
-    """CPL-013: ``11 + k + 5 n_p`` Jacobian-vector products beside the spectrum's eight.
+def test_the_gradient_bound_costs_eleven_plus_four_k_plus_five_n_p_products():
+    """CPL-013: ``11 + 4 k + 5 n_p`` Jacobian-vector products beside the spectrum's eight.
 
     ``n_p`` is the number of probes: every entry of a constant of at most
     ``GRADIENT_PROBE_ENTRY_LIMIT`` entries, one for a larger constant --
     here a three-entry and a scalar constant, four probes.  Five per probe
     since 0.4.0's round-5 fix (the exact resolvent applied to each secant;
-    it was four, and the probes one per constant).  A state of at most
-    ``k`` entries needs no reverse-mode product for the resolvent norm.
+    it was four, and the probes one per constant).  ``3 k`` since round 6:
+    the Kantorovich check takes the affine-covariant constant as an operator
+    on the Jacobian's ``k`` row-space directions -- its change at both
+    points, ``2 k``, and the resolvent applied to each, ``k``.  A state of
+    at most ``k`` entries needs no reverse-mode product for the resolvent
+    norm.
     """
     def bound(step, x, consts, w):
         return _gradient_error_bound_at(step, x, consts, w, jnp.asarray(0.5, F32),
@@ -152,8 +182,8 @@ def test_the_gradient_bound_costs_eleven_plus_k_plus_five_n_p_products():
 
     counts = _count_map_evaluations(bound)
     k, n_p = 3, 4
-    assert counts["jvp"] == 11 + k + 5 * n_p, counts
-    assert counts["jvp"] <= 19 + 5 * n_p
+    assert counts["jvp"] == 11 + 4 * k + 5 * n_p, counts
+    assert counts["jvp"] <= 43 + 5 * n_p
 
 
 # ---------------------------------------------------------------------------

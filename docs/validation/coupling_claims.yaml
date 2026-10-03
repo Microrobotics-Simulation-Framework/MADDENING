@@ -1477,7 +1477,7 @@ claims:
   conditions: >-
     float fields; integer, boolean and key leaves are skipped; a bfloat16 or
     float16 field is measured, squared and summed in float32 and the entry
-    count divided in float32 (MADD-ANO-163).
+    count divided in float32 (MADD-ANO-167).
   oracle: closed form.
   tests:
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_known_value
@@ -2538,7 +2538,7 @@ claims:
     - src/maddening/core/coupling/group.py:236 (CouplingGroup, solver)
   conditions: >-
     every acceleration, both solvers, bfloat16 and float16, the norms, the
-    floor and the residual measured and held in float32 (MADD-ANO-163). Not
+    floor and the residual measured and held in float32 (MADD-ANO-167). Not
     claimed for mixed dtypes, vmap, multi-rate graphs, sub-cycled groups,
     predictors or warm starts, run_adaptive, checkpoint restarts or sharded
     graphs.
@@ -3149,7 +3149,7 @@ claims:
     under convergence_norm="interface" the fields are what that norm reads,
     each internal edge's source value after the edge's transform, with the
     transforms affine (offsets, scales, selections; a non-affine transform
-    makes the map non-linear in the reading) (MADD-ANO-164); every
+    makes the map non-linear in the reading) (MADD-ANO-168); every
     acceleration and schedule; long Gauss-Seidel chains, sub-cycled and
     multi-rate groups; float16 to float64. Not claimed for mixed dtypes.
   oracle: exact float64 fixed point of the evaluated map.
@@ -3175,7 +3175,7 @@ claims:
     The round-6 audit found the interface norm's transformed reading
     outside the analysis: with an offset or "extract_last" on an internal
     edge the bound read 0.0014-0.098x the true distance, usable
-    (MADD-ANO-164). The spectrum is now taken on the reading.
+    (MADD-ANO-168). The spectrum is now taken on the reading.
   domains:
     f32: tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
     f64:
@@ -3368,7 +3368,7 @@ claims:
     J(x_k))|| on the Jacobian's row space, and the Newton step's
     second-order miss carried at the rate each
     probe's own secant shows -- so the map changing no faster between x_k
-    and x* than across that step (MADD-ANO-165); leading-order in
+    and x* than across that step (MADD-ANO-169); leading-order in
     the distance; one probe per scalar entry of every floating constant of
     at most 64 entries (GRADIENT_PROBE_ENTRY_LIMIT); a larger constant is
     probed along one |c|-weighted fixed-seed direction and named by
@@ -3526,7 +3526,7 @@ claims:
     basis; not the Krylov-restricted factor, MADD-ANO-142), L the Jacobian's
     change along the Newton step -- and the affine-covariant
     ||(I - J(x_k))^{-1} (J(x_k + delta) - J(x_k))|| on the Jacobian's row
-    space (MADD-ANO-165); gradient_bound_usable
+    space (MADD-ANO-169); gradient_bound_usable
     is "finite and spectral_usable is True"; NaN "for "fori", for
     diagnostics=False, at max_iterations=1 ... where the fixed point responds
     to no constant, where a constant's tangent through the group is not
@@ -3555,7 +3555,7 @@ claims:
     The round-6 audit found the check passing along delta at h = 0.19
     and 0.37 with the bound 0.986x and 0.65x the true error, usable; h
     now also takes the affine-covariant constant, and the bound the
-    Newton step's second-order miss (MADD-ANO-165).
+    Newton step's second-order miss (MADD-ANO-169).
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-095]'
@@ -3658,7 +3658,7 @@ claims:
     - src/maddening/core/coupling/acceleration.py:1033 (residual_precision_floor)
   conditions: >-
     every norm; mixed dtypes; computed in at least float32 whatever the
-    fields' dtypes, each field at its own dtype's eps (MADD-ANO-163).
+    fields' dtypes, each field at its own dtype's eps (MADD-ANO-167).
   oracle: closed form.
   tests:
     - tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve

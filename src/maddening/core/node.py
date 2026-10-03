@@ -166,7 +166,7 @@ class _ParamsDict(dict):
     those values per sync, and nothing for an immutable value (a float, a
     tuple of numbers, a JAX array).  Until 0.4.0 shipped no comparison was
     made, although this docstring said one was, and such a write was lost
-    to ``gm.params`` and to every run (MADD-ANO-168).
+    to ``gm.params`` and to every run (MADD-ANO-171).
 
     Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON, a
     JAX pytree with the dict's own flattening, and a copy (``dict(p)``,
@@ -630,7 +630,7 @@ class SimulationNode(ABC):
         through ``node.params`` afterwards are seen like any other.  Until
         0.4.0 shipped the assigned ``dict`` was stored as given: the
         replacement itself was taken in, but every later write into it was
-        lost to the graph (MADD-ANO-168).  A reference to the assigned
+        lost to the graph (MADD-ANO-171).  A reference to the assigned
         object is therefore not ``node.params``: write through
         ``node.params``.
         """

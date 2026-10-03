@@ -318,7 +318,7 @@ def test_the_ladder_extension_does_not_depend_on_lam_up(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # At the float floor the verdict depends on neither a parameter's units nor
-# the sign of an on-bound gradient's rounding (MADD-ANO-167)
+# the sign of an on-bound gradient's rounding (MADD-ANO-170)
 # ---------------------------------------------------------------------------
 
 

@@ -11711,7 +11711,7 @@ anomalies:
     verification:
       - "tests/api/test_profile_endpoints.py::test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept"
     github_issue: null
-  - anomaly_id: "MADD-ANO-167"
+  - anomaly_id: "MADD-ANO-170"
     title: "fit_lm reported converged=True at a wrong point, or at its unmoved start, for a float32 residual or parameter far from unit scale; fit returned its start"
     description: >
       In float32, `fit_lm` formed its loss `0.5 * sum(r * r)`, its normal
@@ -11797,7 +11797,7 @@ anomalies:
       - "tests/core/test_sysid_claims_under_x64.py::test_float32_constants_in_an_x64_graph_converge_as_fast_as_float64_ones"
       - "tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64"
     github_issue: null
-  - anomaly_id: "MADD-ANO-168"
+  - anomaly_id: "MADD-ANO-171"
     title: "node.params writes that never reached gm.params: every write into a replaced mapping, and an in-place element write to a list or array"
     description: >
       A `node.params` write reaches the graph at the next read of
@@ -11853,7 +11853,7 @@ anomalies:
       - "tests/core/test_node_params_writes_are_observed.py::test_an_in_place_write_into_a_structural_value_recompiles"
       - "tests/core/test_node_params_writes_are_observed.py::test_an_unchanged_mutable_value_is_not_a_write"
     github_issue: null
-  - anomaly_id: "MADD-ANO-169"
+  - anomaly_id: "MADD-ANO-172"
     title: "fim and fim_core reported rank 0 silently when F = J^T J flushed to exactly zero from a Jacobian that was not"
     description: >
       `fim` flags a rank decided below the range `F` can be formed in
@@ -11900,7 +11900,7 @@ anomalies:
       - "tests/core/test_sysid_claims_edges.py::test_a_residual_that_reads_no_parameter_is_a_real_rank_zero"
       - "tests/core/test_sysid_claims_under_x64.py::test_a_fisher_matrix_flushed_to_zero_warns_under_x64"
     github_issue: null
-  - anomaly_id: "MADD-ANO-170"
+  - anomaly_id: "MADD-ANO-173"
     title: "A logit ParamSpec whose width overflows the leaf's dtype was accepted, and constrain mapped the midpoint to the upper edge and far coordinates to NaN"
     description: >
       `ParamSpec(bounds=(-3e38, 3e38), transform="logit")` was accepted --

@@ -99,11 +99,27 @@ NUMERIC_DOMAINS = (
     "multi_rate", "sub_cycled", "predictors_warm_starts",
     "adaptive", "checkpoint_restart", "sharded",
 )
+#: The domains a REST or run_pod claim can be exercised in
+#: (``testing_standards.md``, "The domain matrix", defines each): where the
+#: server is bound and whether the request must carry the token; what runs
+#: beside the request (simultaneous requests on a real loopback server, the
+#: realtime runner, an in-flight ``/sim/run``, a shutdown signal); what the
+#: request carries (sizes at and past the caps, hostile values); what it
+#: targets (a wrapper node, a graph restored from a checkpoint); and, for
+#: ``run_pod.py``, the records ``--summarise`` reads (a dry run on CPU
+#: devices, a record relabelled as a GPU run, files of several commits).
+SERVER_DOMAINS = (
+    "loopback_bind", "non_loopback_bind", "token_enforced", "no_token",
+    "concurrent", "runner_active", "sim_run_active",
+    "large_payload", "hostile_input", "shutdown",
+    "wrapper_nodes", "checkpoint_restore",
+    "dry_run_cpu", "relabelled_records", "mixed_commits",
+)
 #: Every vocabulary a file may name in its top-level ``domain_set``.  A
-#: file that names none has no matrix yet (the REST inventory's server
-#: domains are a set of their own, added here when it gets one), and its
-#: rows may not carry one.
-DOMAIN_SETS: dict[str, tuple[str, ...]] = {"numeric": NUMERIC_DOMAINS}
+#: file that names none has no matrix, and its rows may not carry one.
+DOMAIN_SETS: dict[str, tuple[str, ...]] = {"numeric": NUMERIC_DOMAINS,
+                                           "server": SERVER_DOMAINS}
+KNOWN_DOMAINS = frozenset(d for members in DOMAIN_SETS.values() for d in members)
 NOT_APPLICABLE = "n/a"
 NARROWED = "narrowed"
 #: Cells waiting on a parallel branch: an oracle that will cover them, or a
@@ -141,6 +157,64 @@ COVERING_PHRASES: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
      ("f32", "f64", "mixed_dtype", "16bit")),
     (re.compile(r"\b(?:any|every|all) graphs?\b", re.IGNORECASE), ("multi_rate", "sub_cycled")),
 )
+#: How a REST or run_pod condition names each server domain, in the same
+#: way: "non-loopback bind" is consumed before "loopback bind" is looked
+#: for, and "without the token" before "with the token".
+SERVER_SPELLINGS: tuple[tuple[str, re.Pattern], ...] = tuple(
+    (name, re.compile(pattern, re.IGNORECASE)) for name, pattern in (
+        ("non_loopback_bind", r"\bnon-loopback\b|\b0\.0\.0\.0\b|\bpublicly bound\b|"
+                              r"\bevery other bind\b"),
+        ("loopback_bind", r"\bloopback (?:binds?|bound|server|address(?:es)?|hosts?|"
+                          r"spellings?)\b|\bloopback-bound\b|\bloopback keeps\b|"
+                          r"\bloopback for\b"),
+        ("no_token", r"\bno token\b|\bwithout (?:the|a) token\b"),
+        ("token_enforced", r"\bwith the token\b|\bthe token presented\b|"
+                           r"\btoken (?:is )?(?:enforced|demanded)\b|\bfor the credential\b|"
+                           r"\bthe backstop\b|\banonymous\b|\bno Authorization header\b"),
+        ("concurrent", r"\bconcurren\w*|\bsimultaneous\w*|\b\d+ threads\b|"
+                       r"\bthreads asking\b"),
+        # run_pod's goal runners are not the realtime runner
+        ("runner_active", r"(?<!GitHub )\brunners?\b(?! replaced)(?!'s source)|\bsim/start\b"),
+        ("sim_run_active", r"/sim/run (?:in progress|in flight|whose)\b|\bmid-run\b|"
+                           r"\bin-flight /sim/run\b|"
+                           r"\b(?:beside|during|while|slices of) an? /sim/run\b"),
+        ("shutdown", r"\bSIGINT\b|\bSIGTERM\b|\bshut(?:s|ting)? ?down\b|\blifespan\b|"
+                     r"\brequest_shutdown\b"),
+        ("large_payload", r"\boversized?\b|\bthe (?:limit|bound|budget|cap)s? patched\b|"
+                          r"\bpatched (?:budget|bound|limit)s?\b|\bthe boundary\b|"
+                          r"\beach bound at its edge\b|\bstate caps\b|\bbudgets?\b|"
+                          r"\bMAX_[A-Z_]+|\bfar more values\b|\bat its bound\b|"
+                          r"\bthe bound(?: \+ 1)?\b|\bover the shipped\b|\babove 1000\b|"
+                          r"\bover the cap\b|\btoo long\b"),
+        ("hostile_input", r"\bmalformed\b|\bwrong[- ]typed?\b|\bwrong types?\b|"
+                          r"\bwrong shape\b|\bnon-finite\b|\bNaN\b|\bInfinity\b|"
+                          r"\.\. escapes|\bNUL\b|\bnon-base64\b|\bsurrogate characters\b|"
+                          r"\bdamaged\b|\btruncated\b|\btampered\b|\bcorrupt\w*|"
+                          r"\bforeign Origin\b|\brebound Host\b|\battacker\.example\b|"
+                          r"\bnegative count\b|\bhostile\b|\bnot in UTF-8\b|"
+                          r"\babsolute paths\b|\bsymlink out\b|\bnot base64\b"),
+        ("wrapper_nodes", r"\bsharded (?:wrappers?|nodes?|body|bodies)\b|\bHybridNode\b|"
+                          r"\bunstructured wrappers\b|\bwrapper nodes?\b"),
+        # a checkpoint *save* that holds the lock is not a restore
+        ("checkpoint_restore", r"\bcheckpoints?\b(?! save\b)|\bsave_state\b|\bload_state\b|"
+                               r"\brestor\w*|/checkpoint/load\b"),
+        ("dry_run_cpu", r"--dry-run\b|\bdry[- ]runs?\b|\bdry_run\b"),
+        ("relabelled_records", r"\brelabell?ed\b|\brelabell?ing\b"),
+        ("mixed_commits", r"\bcommits?\b|\bgit_commit\b"),
+    ))
+#: Phrases in a REST condition that cover several server domains at once:
+#: either bind, and the token rule a bind implies (a non-loopback bind
+#: always demands the token; a loopback bind demands none of a loopback
+#: peer).
+SERVER_COVERING_PHRASES: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
+    (re.compile(r"\b(?:any|every|both kinds of) binds?\b|\bboth binds\b", re.IGNORECASE),
+     ("loopback_bind", "non_loopback_bind", "token_enforced", "no_token")),
+    (re.compile(r"\bnon-loopback (?:bind|spelling)", re.IGNORECASE), ("token_enforced",)),
+    (re.compile(r"(?<!non-)\bloopback bind\b", re.IGNORECASE), ("no_token",)),
+)
+#: Each domain set's spellings and covering phrases.
+SPELLINGS = {"numeric": (DOMAIN_SPELLINGS, COVERING_PHRASES),
+             "server": (SERVER_SPELLINGS, SERVER_COVERING_PHRASES)}
 #: What a tested cell's test must say somewhere in its source (its node id,
 #: its decorators, its body and the definitions it names, three levels
 #: deep): the domain's own vocabulary.  A floor, not a proof.
@@ -162,7 +236,27 @@ DOMAIN_WITNESS: dict[str, re.Pattern] = {
         ("checkpoint_restart", r"checkpoint|save_state|load_state|restart|snapshot|fmu_state|"
                                r"get_state|set_state|restore|reset|window"),
         ("sharded", r"shard|mesh"),
+        # -- the server set --
+        ("non_loopback_bind", r"0\.0\.0\.0|non.?loopback|public|bind_host=|203\.0\.113"),
+        ("token_enforced", r"Bearer|Authorization|enforced"),
+        ("runner_active", r"sim/start|runner"),
+        ("sim_run_active", r"sim/run"),
+        ("large_payload", r"MAX_|limit|budget|\bcaps?\b|413|oversiz|bound|large|huge"),
+        ("hostile_input", r"malformed|\bnan\b|infinity|non.?finite|traversal|\.\./|\\x00|"
+                          r"\bNUL\b|garbage|hostile|invalid|wrong|foreign|attacker|tamper|"
+                          r"truncat|corrupt|@given|\bbool|\bstr\b|string|null"),
+        ("shutdown", r"SIGINT|SIGTERM|shutdown|signal|lifespan"),
+        ("wrapper_nodes", r"Sharded\w*Node|HybridNode|hybrid|wrapper"),
+        ("checkpoint_restore", r"checkpoint|save_state|load_state|restore"),
+        ("dry_run_cpu", r"dry.?run|virtual|\bcpu\b"),
+        ("relabelled_records", r"relabel"),
+        ("mixed_commits", r"commit"),
     )}
+#: A real server's marks, for ``concurrent``: the requests must meet on one
+#: server's socket, event loop and worker pool, not each on its own
+#: in-process client.
+_REAL_SERVER = re.compile(r"uvicorn|socket|http://127\.0\.0\.1", re.IGNORECASE)
+_SIMULTANEOUS = re.compile(r"concurren|thread|simultaneous|barrier|gather", re.IGNORECASE)
 
 
 def witnesses(domain: str, text: str) -> bool:
@@ -173,6 +267,14 @@ def witnesses(domain: str, text: str) -> bool:
     if domain == "mixed_dtype":
         return bool(re.search(r"mixed", text, re.IGNORECASE)) or bool(
             re.search(r"x64", text, re.IGNORECASE) and re.search(r"float32", text))
+    if domain == "loopback_bind":   # the default bind: anything but a non-loopback-only test
+        return bool(re.search(r"loopback|127\.0\.0\.1|localhost", text, re.IGNORECASE)) or \
+            not DOMAIN_WITNESS["non_loopback_bind"].search(text)
+    if domain == "no_token":        # the default: anything but a test that always sends one
+        return bool(re.search(r"anonymous|no.?token|without", text, re.IGNORECASE)) or \
+            not DOMAIN_WITNESS["token_enforced"].search(text)
+    if domain == "concurrent":
+        return bool(_REAL_SERVER.search(text) and _SIMULTANEOUS.search(text))
     return bool(DOMAIN_WITNESS[domain].search(text))
 
 
@@ -338,8 +440,9 @@ def row_problems(rows: list, prefixes, repo_root: Path = REPO_ROOT,
 # --------------------------------------------------------------------------
 # Rule 1b: the domain matrix of a row
 # --------------------------------------------------------------------------
-def domain_mentions(text: str) -> set[str]:
-    """The domains *text* names, by :data:`DOMAIN_SPELLINGS`, most specific first."""
+def domain_mentions(text: str, domain_set: str = "numeric") -> set[str]:
+    """The domains of *domain_set* that *text* names, by its spellings
+    (:data:`DOMAIN_SPELLINGS`, :data:`SERVER_SPELLINGS`), most specific first."""
     found: set[str] = set()
     rest = text
 
@@ -349,7 +452,7 @@ def domain_mentions(text: str) -> set[str]:
             return " " * len(m.group(0))
         return sub
 
-    for name, pattern in DOMAIN_SPELLINGS:
+    for name, pattern in SPELLINGS[domain_set][0]:
         rest = pattern.sub(blank(name), rest)
     return found
 
@@ -360,13 +463,18 @@ def split_conditions(text: str) -> tuple[str, str]:
     return (text, "") if i < 0 else (text[:i], text[i:])
 
 
-def covered_domains(text: str) -> set[str]:
+def covered_domains(text: str, domain_set: str = "numeric") -> set[str]:
     """The domains a condition (before its narrowing clause) names or covers."""
-    found = domain_mentions(text)
-    for pattern, names in COVERING_PHRASES:
+    found = domain_mentions(text, domain_set)
+    for pattern, names in SPELLINGS[domain_set][1]:
         if pattern.search(text):
             found.update(names)
     return found
+
+
+def set_of(domains: tuple[str, ...]) -> str:
+    """The name of the domain set whose domains are *domains*."""
+    return next(name for name, members in DOMAIN_SETS.items() if members == domains)
 
 
 def cell_tests(value) -> list[str] | None:
@@ -396,8 +504,9 @@ def domain_problems(row: dict, domains: tuple[str, ...] | None) -> list[str]:
         problems.append(f"{where}: {unknown} not in its file's domain set")
     conditions = row.get("conditions") if isinstance(row.get("conditions"), str) else ""
     claimed, clause = split_conditions(conditions)
-    excluded = domain_mentions(clause)
-    covered = covered_domains(claimed)
+    vocabulary = set_of(domains)
+    excluded = domain_mentions(clause, vocabulary)
+    covered = covered_domains(claimed, vocabulary)
     if clause and not excluded:
         problems.append(f"{where}: its '{NARROWING_LEAD}' clause names no domain")
     for d in domains:
@@ -689,7 +798,7 @@ def domain_witness_problems(rows: list, source=source_of_test) -> list[str]:
             text = source(target)
             if text is None:
                 problems.append(f"{row.get('id')}: domain {domain}: cannot find {target}'s source")
-            elif domain in NUMERIC_DOMAINS and not witnesses(domain, text):
+            elif domain in KNOWN_DOMAINS and not witnesses(domain, text):
                 problems.append(f"{row.get('id')}: domain {domain}: {target} never names "
                                 f"its domain (see DOMAIN_WITNESS)")
     return problems
@@ -969,10 +1078,12 @@ def test_the_domain_rule_passes_a_filled_matrix_and_reads_each_spelling():
 
 
 def test_the_file_rule_refuses_an_unknown_domain_set():
-    assert any("domain_set 'server'" in p for p in file_problems([_inv(domain_set="server")]))
+    assert any("domain_set 'gpu'" in p for p in file_problems([_inv(domain_set="gpu")]))
     assert any("domain_set 3" in p for p in file_problems([_inv(domain_set=3)]))
     assert file_problems([_inv(domain_set="numeric")]) == []
+    assert file_problems([_inv(domain_set="server")]) == []
     assert _inv(domain_set="numeric").domains == NUMERIC_DOMAINS
+    assert _inv(domain_set="server").domains == SERVER_DOMAINS
     assert _inv().domains is None
 
 

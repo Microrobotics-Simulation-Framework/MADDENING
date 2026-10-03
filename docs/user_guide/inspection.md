@@ -355,6 +355,7 @@ transform.  What each reports instead:
 | | never compiled | modified since the last compile | holding JAX tracers |
 |---|---|---|---|
 | `format_graph`, `to_mermaid`, `to_dot` | structure as registered; rate dividers and execution order "not compiled" | the last compile's schedule, marked stale | shapes and dtypes read from the tracers |
+| `print_graph_diagram` | structure as registered | structure as it stands now | structure (it reads no state) |
 | `state_summary` | the state `add_node` initialised | the state it holds now | shapes only; no values, with a note |
 | `params_table` | the values `compile()` would take, built and not stored | the live `gm.params` | `gm.params` (it is not traced) |
 | `coupling_report` | "not compiled" | the last step's report | "state holds tracers" (it does not call `coupling_diagnostics()`, which would put the graph back) |

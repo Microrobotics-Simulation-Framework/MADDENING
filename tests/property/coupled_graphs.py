@@ -318,6 +318,12 @@ def build_graph(gdef: GraphDef, group: dict, *, x0: Optional[dict] = None,
             # The multi-rate INFO notice is a UserWarning on purpose; the
             # graphs here are multi-rate on purpose.
             warnings.filterwarnings("ignore", ".*multi-rate.*")
+            # A drawn graph may close a loop through its outside driver and
+            # sink around the group (a structure, not a mistake): compile()
+            # names the edge it reads late, which the hand-unrolled
+            # references read from the same schedule.
+            warnings.filterwarnings("ignore", ".*part of a larger feedback loop.*",
+                                    UserWarning)
             gm.compile()
     return gm
 

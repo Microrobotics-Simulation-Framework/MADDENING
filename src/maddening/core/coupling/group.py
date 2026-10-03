@@ -237,7 +237,11 @@ class CouplingGroup:
         ``"linear"`` uses linear extrapolation from the last two
         converged states, ``"quadratic"`` uses quadratic extrapolation
         from the last three converged states.  Reduces iteration count
-        for smoothly varying problems.
+        for smoothly varying problems.  Only floating fields are
+        extrapolated.  The fixed point does not move; the returned
+        iterate, which starts the solve from another guess, moves within
+        the solve's tolerance (measured up to 4.5e-5 relative on a linear
+        group converged to ``tolerance=1e-4`` with ``"linear"``).
     solver : {"ift", "fori"}
         How the fixed-point iteration is solved.  ``"ift"`` (default)
         runs a ``jax.lax.while_loop`` that exits as soon as the

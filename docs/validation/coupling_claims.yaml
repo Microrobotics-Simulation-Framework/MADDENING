@@ -455,8 +455,8 @@ claims:
     predictor: ""linear" uses linear extrapolation from the last two
     converged states, "quadratic" uses quadratic extrapolation from the last
     three converged states.  Reduces iteration count for smoothly varying
-    problems"; only floating fields are extrapolated and the converged
-    answer does not move.
+    problems"; only floating fields are extrapolated; the fixed point does
+    not move, and the returned iterate moves within the solve's tolerance.
   sources:
     - src/maddening/core/coupling/group.py:223 (CouplingGroup, predictor)
     - src/maddening/core/graph_manager.py:3886 (_run_coupled_block_impl, predictor)

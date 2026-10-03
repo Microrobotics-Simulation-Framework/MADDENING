@@ -14,6 +14,8 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Coupling interaction and topology harness** (`tests/property/test_differential_coupling_{interactions,topologies}.py`): a strength-3 covering array of the group's knobs, and drawn graph shapes -- several groups, outside nodes on a group's loop, flux, mapped and additive edges -- held to a monolithic float64 reference of the step.
+  It found MADD-ANO-156 to 159 (open, since 0.1.0): a flux edge across a group's boundary or staggered in an ungrouped cycle fails to trace, a typed PRNG key fails under `ift` with Aitken or fixed relaxation, and a group joined off any cycle reads a node a step late, silently; workarounds in the release notes.
 - **Domain oracles** (`tests/property/test_differential_{precision,replay,param_acceptance,fmu}.py`, `test_metamorphic_fmu_stability_filter.py`): float32 against float64 (a worker under x64),
   replay from recorded state, every door that writes or restores a parameter (checkpoint loads, `POST /graph/nodes`, wrapper nodes), the FMU four ways across `node.params` writes, and the
   stability filter; known disagreements are strict xfails naming their finding (`testing_standards.md`, "Domains the claims cover").

@@ -439,8 +439,19 @@ class DomainRun:
     cotangent: list = dataclasses.field(default_factory=list)    # (record, g, g at 2**-40)
     strict: dict = dataclasses.field(default_factory=dict)       # {"raised", "quiet"}
     errors: dict = dataclasses.field(default_factory=dict)
+    #: Gradient families not yet computed, by name: each compiles its own
+    #: programs, so it is taken by the first check that reads it, which
+    #: spreads a domain's cost over its tests (the time budget is per test).
+    lazy: dict = dataclasses.field(default_factory=dict)
 
     def get(self, family: str):
+        if family in self.lazy:
+            fn = self.lazy.pop(family)
+            with _x64(self.cfg.x64):
+                try:
+                    setattr(self, family, fn())
+                except _UNSUPPORTED_DTYPE as exc:
+                    self.errors[family] = exc
         if family in self.errors:
             raise self.errors[family]
         return getattr(self, family)
@@ -640,12 +651,16 @@ def _strict(cfg: Config, runner, steps: int, builder) -> dict:
     return out
 
 
+#: What a linear solve in a dtype LAPACK has no kernel for raises: jaxlib's
+#: NotImplementedError, or lineax's QR refusing the dtype with a TypeError
+#: (lineax 0.1 under jax 0.11.2, CI's lane).
+_UNSUPPORTED_DTYPE = (NotImplementedError, TypeError)
+
+
 def _collect(run: DomainRun, family: str, fn):
-    """``run.<family> = fn()``, or the exception a gradient raised kept in ``errors``."""
-    try:
-        setattr(run, family, fn())
-    except NotImplementedError as exc:
-        run.errors[family] = exc
+    """``run.<family>``, computed by *fn* when a check first reads it; the
+    exception a gradient raised is kept in ``errors`` and re-raised."""
+    run.lazy[family] = fn
 
 
 def _jvp_and_cotangent(run: DomainRun, runner, plain, main_off):
@@ -730,7 +745,7 @@ def domain_run(name: str, tmp_path_factory, *, cfg: Config | None = None,
             _collect(run, "grads_single", lambda: runner.grads(single, rec["single"]))
             _jvp_and_cotangent(run, runner, plain, main_off)
         if cfg.strict:
-            run.strict = _strict(cfg, runner, steps, builder)
+            _collect(run, "strict", lambda: _strict(cfg, runner, steps, builder))
     return run
 
 # ---------------------------------------------------------------------------
@@ -926,7 +941,8 @@ def _forward_and_reverse_modes(run: DomainRun):
 @check("CPL-033")
 def _strict_convergence(run: DomainRun):
     """strict_convergence raises on a capped, unconverged solve and not on a converged one."""
-    assert run.strict == {"raised": True, "quiet": False}, run.strict
+    strict = run.get("strict")
+    assert strict == {"raised": True, "quiet": False}, strict
 
 
 @check("CPL-051")
@@ -1300,13 +1316,14 @@ ONLY: dict = {"CPL-142": {"predictors_warm_starts"}}
 #: the row's id, and the row is ``failing`` in the inventory, its finding
 #: carrying the reproducer.
 _GRAD_16 = ("jax.grad and jax.jvp through a bfloat16 coupling group raise "
-            "NotImplementedError: the IFT rule's linear solve runs in the group's "
-            "dtype, which LAPACK has no kernels for; pending fix")
+            "NotImplementedError (TypeError from lineax's QR on jax 0.11.2): the IFT "
+            "rule's linear solve runs in the group's dtype, which LAPACK has no kernels "
+            "for; pending fix")
 _ADAPTIVE_ZERO = ("jax.grad through run_adaptive_scan is exactly 0.0 under aitken or "
                   "IQN when a member carries a step-dependent field and the iterate "
                   "starts at its fixed point; pending fix")
 KNOWN_FAILING: dict = {
-    **{("16bit", row): (NotImplementedError, f"{row}: {_GRAD_16}")
+    **{("16bit", row): (_UNSUPPORTED_DTYPE, f"{row}: {_GRAD_16}")
        for row in ("CPL-030", "CPL-093", "CPL-094", "CPL-140", "CPL-141", "CPL-143",
                    "CPL-146")},
     ("16bit", "CPL-087"): (AssertionError,

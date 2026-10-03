@@ -1030,15 +1030,17 @@ claims:
   finding: >-
     16bit domain: jax.grad and jax.jvp through a coupled step raise
     NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK. The IFT rule solves (I - dF/dx) in the group's own
-    dtype -- the dense path's jnp.linalg.solve and GMRES's dense fallback --
-    and LAPACK has no 16-bit kernels; the diagnostics' analysis was widened
-    to float32 for this reason (_analysis_dtype), the adjoint was not. Loud.
-    Carried since solver='ift' arrived (0.3.0), and on the default path
-    since 0.4.0 made 'ift' the default (0.3.x's default 'fori'
-    differentiated a bfloat16 group). Reproducer: two scalar bfloat16 relays
-    x <- 0.6 u + b, each reading the other, add_coupling_group(['a', 'b'],
-    tolerance=0.25); jax.grad(lambda p: gm.run_scan(2,
+    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
+    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
+    solves (I - dF/dx) in the group's own dtype -- the dense path's
+    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
+    kernels; the diagnostics' analysis was widened to float32 for this
+    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
+    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
+    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
+    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
+    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
+    jax.grad(lambda p: gm.run_scan(2,
     params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-030]
     (strict xfail). Guess: _ift_linear_solve
@@ -3287,15 +3289,17 @@ claims:
   finding: >-
     16bit domain: jax.grad and jax.jvp through a coupled step raise
     NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK. The IFT rule solves (I - dF/dx) in the group's own
-    dtype -- the dense path's jnp.linalg.solve and GMRES's dense fallback --
-    and LAPACK has no 16-bit kernels; the diagnostics' analysis was widened
-    to float32 for this reason (_analysis_dtype), the adjoint was not. Loud.
-    Carried since solver='ift' arrived (0.3.0), and on the default path
-    since 0.4.0 made 'ift' the default (0.3.x's default 'fori'
-    differentiated a bfloat16 group). Reproducer: two scalar bfloat16 relays
-    x <- 0.6 u + b, each reading the other, add_coupling_group(['a', 'b'],
-    tolerance=0.25); jax.grad(lambda p: gm.run_scan(2,
+    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
+    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
+    solves (I - dF/dx) in the group's own dtype -- the dense path's
+    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
+    kernels; the diagnostics' analysis was widened to float32 for this
+    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
+    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
+    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
+    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
+    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
+    jax.grad(lambda p: gm.run_scan(2,
     params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-093]
     (strict xfail). Guess: _ift_linear_solve
@@ -3354,15 +3358,17 @@ claims:
   finding: >-
     16bit domain: jax.grad and jax.jvp through a coupled step raise
     NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK. The IFT rule solves (I - dF/dx) in the group's own
-    dtype -- the dense path's jnp.linalg.solve and GMRES's dense fallback --
-    and LAPACK has no 16-bit kernels; the diagnostics' analysis was widened
-    to float32 for this reason (_analysis_dtype), the adjoint was not. Loud.
-    Carried since solver='ift' arrived (0.3.0), and on the default path
-    since 0.4.0 made 'ift' the default (0.3.x's default 'fori'
-    differentiated a bfloat16 group). Reproducer: two scalar bfloat16 relays
-    x <- 0.6 u + b, each reading the other, add_coupling_group(['a', 'b'],
-    tolerance=0.25); jax.grad(lambda p: gm.run_scan(2,
+    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
+    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
+    solves (I - dF/dx) in the group's own dtype -- the dense path's
+    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
+    kernels; the diagnostics' analysis was widened to float32 for this
+    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
+    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
+    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
+    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
+    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
+    jax.grad(lambda p: gm.run_scan(2,
     params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-094]
     (strict xfail). Guess: _ift_linear_solve
@@ -4180,15 +4186,17 @@ claims:
   finding: >-
     16bit domain: jax.grad and jax.jvp through a coupled step raise
     NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK. The IFT rule solves (I - dF/dx) in the group's own
-    dtype -- the dense path's jnp.linalg.solve and GMRES's dense fallback --
-    and LAPACK has no 16-bit kernels; the diagnostics' analysis was widened
-    to float32 for this reason (_analysis_dtype), the adjoint was not. Loud.
-    Carried since solver='ift' arrived (0.3.0), and on the default path
-    since 0.4.0 made 'ift' the default (0.3.x's default 'fori'
-    differentiated a bfloat16 group). Reproducer: two scalar bfloat16 relays
-    x <- 0.6 u + b, each reading the other, add_coupling_group(['a', 'b'],
-    tolerance=0.25); jax.grad(lambda p: gm.run_scan(2,
+    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
+    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
+    solves (I - dF/dx) in the group's own dtype -- the dense path's
+    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
+    kernels; the diagnostics' analysis was widened to float32 for this
+    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
+    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
+    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
+    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
+    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
+    jax.grad(lambda p: gm.run_scan(2,
     params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-140]
     (strict xfail). Guess: _ift_linear_solve
@@ -4248,15 +4256,17 @@ claims:
   finding: >-
     16bit domain: jax.grad and jax.jvp through a coupled step raise
     NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK. The IFT rule solves (I - dF/dx) in the group's own
-    dtype -- the dense path's jnp.linalg.solve and GMRES's dense fallback --
-    and LAPACK has no 16-bit kernels; the diagnostics' analysis was widened
-    to float32 for this reason (_analysis_dtype), the adjoint was not. Loud.
-    Carried since solver='ift' arrived (0.3.0), and on the default path
-    since 0.4.0 made 'ift' the default (0.3.x's default 'fori'
-    differentiated a bfloat16 group). Reproducer: two scalar bfloat16 relays
-    x <- 0.6 u + b, each reading the other, add_coupling_group(['a', 'b'],
-    tolerance=0.25); jax.grad(lambda p: gm.run_scan(2,
+    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
+    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
+    solves (I - dF/dx) in the group's own dtype -- the dense path's
+    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
+    kernels; the diagnostics' analysis was widened to float32 for this
+    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
+    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
+    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
+    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
+    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
+    jax.grad(lambda p: gm.run_scan(2,
     params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-141]
     (strict xfail). Guess: _ift_linear_solve
@@ -4355,15 +4365,17 @@ claims:
   finding: >-
     16bit domain: jax.grad and jax.jvp through a coupled step raise
     NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK. The IFT rule solves (I - dF/dx) in the group's own
-    dtype -- the dense path's jnp.linalg.solve and GMRES's dense fallback --
-    and LAPACK has no 16-bit kernels; the diagnostics' analysis was widened
-    to float32 for this reason (_analysis_dtype), the adjoint was not. Loud.
-    Carried since solver='ift' arrived (0.3.0), and on the default path
-    since 0.4.0 made 'ift' the default (0.3.x's default 'fori'
-    differentiated a bfloat16 group). Reproducer: two scalar bfloat16 relays
-    x <- 0.6 u + b, each reading the other, add_coupling_group(['a', 'b'],
-    tolerance=0.25); jax.grad(lambda p: gm.run_scan(2,
+    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
+    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
+    solves (I - dF/dx) in the group's own dtype -- the dense path's
+    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
+    kernels; the diagnostics' analysis was widened to float32 for this
+    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
+    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
+    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
+    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
+    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
+    jax.grad(lambda p: gm.run_scan(2,
     params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-143]
     (strict xfail). Guess: _ift_linear_solve
@@ -4481,15 +4493,17 @@ claims:
   finding: >-
     16bit domain: jax.grad and jax.jvp through a coupled step raise
     NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK. The IFT rule solves (I - dF/dx) in the group's own
-    dtype -- the dense path's jnp.linalg.solve and GMRES's dense fallback --
-    and LAPACK has no 16-bit kernels; the diagnostics' analysis was widened
-    to float32 for this reason (_analysis_dtype), the adjoint was not. Loud.
-    Carried since solver='ift' arrived (0.3.0), and on the default path
-    since 0.4.0 made 'ift' the default (0.3.x's default 'fori'
-    differentiated a bfloat16 group). Reproducer: two scalar bfloat16 relays
-    x <- 0.6 u + b, each reading the other, add_coupling_group(['a', 'b'],
-    tolerance=0.25); jax.grad(lambda p: gm.run_scan(2,
+    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
+    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
+    solves (I - dF/dx) in the group's own dtype -- the dense path's
+    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
+    kernels; the diagnostics' analysis was widened to float32 for this
+    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
+    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
+    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
+    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
+    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
+    jax.grad(lambda p: gm.run_scan(2,
     params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-146]
     (strict xfail). Guess: _ift_linear_solve

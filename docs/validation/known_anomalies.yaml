@@ -10947,7 +10947,8 @@ anomalies:
       dense path, and the dense fallback behind GMRES -- runs in the group's
       own dtype, and jaxlib's LAPACK has no bfloat16 or float16 kernels, so
       `jax.grad` or `jax.jvp` through a step of a bfloat16 or float16 coupling
-      group raises `NotImplementedError` ("Unsupported dtype bfloat16").  The
+      group raises `NotImplementedError` ("Unsupported dtype bfloat16"; on
+      jax 0.11.2 with lineax 0.1, a `TypeError` from lineax's QR).  The
       diagnostics' analysis was widened to float32 for this reason
       (`_analysis_dtype`); the adjoint was not.  Carried since
       `solver="ift"` arrived in 0.3.0 (checked on the extracted 0.3.0 and

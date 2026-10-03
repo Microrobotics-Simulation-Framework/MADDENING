@@ -10902,8 +10902,6 @@ anomalies:
       - "tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance"
       - "tests/fmi/test_communication_points.py::test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside"
       - "tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance"
-    github_issue: null
-
   - anomaly_id: "MADD-ANO-150"
     title: "Under jax_enable_x64, and with float32 constants in an x64 graph, the identifiability guard missed an exact degeneracy: full excited_rank, nothing held, the fitted scale 1-2% off its start"
     description: >
@@ -11109,8 +11107,139 @@ anomalies:
       - "tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_not_a_bool_is_refused"
       - "tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_a_bool_in_any_spelling_is_read"
     github_issue: null
-
   - anomaly_id: "MADD-ANO-154"
+    title: "The IFT tangent and adjoint of a coupling group read exactly 0.0, reported successful, when the tangent or cotangent had a NaN or infinite entry"
+    description: >
+      Under `solver="ift"` the derivative of a coupling group's fixed point
+      is one linear solve, `(I - dF/dx) v = b`, with `b` the tangent in
+      forward mode (`jax.jvp`, `jacfwd`) and the cotangent in reverse mode
+      (`jax.grad`).  The matrix-free backends (lineax GMRES, the default,
+      and BiCGStab where it is reachable) posed it on `b` framed by
+      `max|b|` with the tolerance `rtol * max|b|`.  A NaN or infinite
+      entry of `b` made that tolerance NaN or `inf`, the zero initial
+      guess passed lineax's test before a single step, and the solve
+      returned zeros reported successful -- so neither the dense re-solve
+      below 50 coupled DOF nor the adjoint error above it fired, and the
+      derivative was exactly `0.0`.  On a two-relay group `A <- 1 + 0.5 u
+      + opaque(c)`, `B <- 0.5 + 0.8 u` with `opaque` a `jax.custom_jvp`
+      identity whose derivative is NaN, the tangent in `c` read `0.0`
+      under the default solve where `linear_solver="dense"` and
+      `solver="fori"` read NaN; the gradient of `sum((x_A - obs)**2)`
+      with one observation NaN (a missing value) or infinite read `0.0`
+      in the relays' gains and biases, against NaN (and `+-inf`) from
+      the dense solve; the same at 60 coupled DOF, under both iteration
+      modes.  Never in a release: at v0.3.0 and v0.3.1 (`git archive` of
+      each tag, CPU, jaxlib 0.11.0, lineax 0.0.7; lineax 0.1.1 behaves the
+      same) the adjoint's tolerance was the absolute `1e-8`, so GMRES ran
+      on the NaN and lineax raised its non-finite-output error (and
+      forward mode was a `custom_vjp`, which raised).  It came with the
+      tolerance relative to `max|b|` that 0.4.0's development introduced
+      (see MADD-ANO-113).  Found while fixing the gradient bound's
+      non-finite probe (MADD-ANO-142).  Resolved in 0.4.0: a right-hand
+      side with a non-finite entry is answered with NaN in every entry,
+      the Krylov backend being handed zeros in its place, so a non-finite
+      tangent or cotangent gives a NaN derivative on every backend.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result -- an exactly zero derivative reported as a
+      successful solve, where every other path read NaN -- which is never
+      `minor`; registered although no release carried it, because it is
+      major.  In forward mode the primal stayed finite, so an optimiser or
+      a sensitivity read a zero with nothing else amiss.  Not `critical`:
+      it needs a non-finite tangent or cotangent (a node whose derivative
+      cannot be evaluated, a NaN observation, an overflowing loss term),
+      and in reverse mode the loss itself was usually non-finite beside
+      it.  `context_dependent` because what a zero derivative does depends
+      on what is fitted with it.
+    affected_components:
+      - "maddening.core.graph_manager._ift_linear_solve"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: pass `linear_solver="dense"` for a small group, or check the
+      tangent or cotangent with `jnp.isfinite` before trusting a zero
+      derivative.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      NaN fills every entry, including any a non-finite entry cannot reach
+      (a block of the group not coupled to it), as an honest Krylov
+      iteration does; the dense solve's LU can keep such an entry finite.
+      A non-finite Jacobian of the one-pass map at a finite fixed point
+      (with a finite right-hand side) is a different case: below the dense
+      fallback's size it reads NaN through the dense re-solve, and above
+      it raises the documented adjoint error, whose message names
+      ill-conditioning.
+    verification:
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_tangent_gives_a_nan_tangent_not_zero"
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero"
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_constant_with_no_derivative_gives_a_nan_column_and_leaves_the_others_right"
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_the_private_solve_answers_a_non_finite_rhs_with_nan_on_every_backend"
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_no_krylov_backend_is_handed_a_non_finite_rhs"
+      - "tests/property/test_differential_ift_derivatives.py::test_a_non_finite_rhs_gives_a_non_finite_derivative_at_every_scale"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-155"
+    title: "sharded_cg returned zeros with converged=True for a right-hand side with a NaN or infinite entry, and ift_linear_solve returned zeros with no error"
+    description: >
+      The public Krylov solvers stopped on a test relative to the
+      right-hand side `b`, and a non-finite entry of `b` broke it.  At
+      v0.3.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0,
+      lineax 0.0.7; lineax 0.1.1 behaves the same), on a 4-unknown SPD
+      system: `sharded_cg` on its default lineax backend returned zeros
+      with `converged=True` for a NaN entry (lineax's CG test is false for
+      NaN, so it reads as met), and on the loop backend zeros with
+      `converged=True` for `+-inf` (the tolerance `rtol * ||b||` was `inf`)
+      and zeros with `converged=False` for NaN; `residual_norm` read NaN or
+      `inf` beside each.  `sharded_gmres` returned NaN with
+      `converged=False` at the tags.  `ift_linear_solve` (EXPERIMENTAL, new
+      in 0.3.1) returned zeros for the solution, its tangent and its
+      gradient with no error under `solver="cg"` and a NaN entry, under the
+      default and an explicit `atol` alike; GMRES and an infinite entry
+      raised.  0.4.0's development made the default tolerance relative to
+      `max|b|` (MADD-ANO-123 and its siblings), which turned the rest of
+      the cases into zeros too: `sharded_gmres` on lineax with
+      `converged=True`, `ift_linear_solve` under GMRES, and the tangent
+      and cotangent through `differentiable=True`.  Found with
+      MADD-ANO-154, whose mechanism it shares.  Resolved in 0.4.0: a right-hand side, tangent or
+      cotangent with a non-finite entry is answered with NaN in every
+      entry, the backend being handed zeros in its place; the sharded
+      result reads `converged=False` and a NaN `residual_norm`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result -- a zero solution reported converged -- which
+      is never `minor`.  Not `critical`: it needs a non-finite right-hand
+      side, and `residual_norm` read NaN or `inf` beside the verdict.
+      `context_dependent` because what a zero solution does depends on the
+      program that solves with it (a pressure correction, a preconditioned
+      step).
+    affected_components:
+      - "maddening.cloud.multigpu.iterative_solver.sharded_cg"
+      - "maddening.cloud.multigpu.iterative_solver.sharded_gmres"
+      - "maddening.core.solver_utils.ift_linear_solve"
+    affected_versions: ">=0.3.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: check `jnp.all(jnp.isfinite(b))` before the solve, or
+      read `residual_norm` for finiteness rather than trusting
+      `converged`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      NaN fills every entry of the answer, including any the non-finite
+      entry cannot reach, as an honest Krylov iteration does; `iters`
+      counts the trivial solve of the zeros handed to the backend.
+    verification:
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_sharded_solve_of_a_non_finite_rhs_is_nan_and_not_converged"
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_the_sharded_tangent_and_cotangent_of_a_non_finite_rhs_are_nan"
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_ift_linear_solve_answers_a_non_finite_rhs_with_nan"
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_no_krylov_backend_is_handed_a_non_finite_rhs"
+      - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_loop_cg_handed_a_non_finite_rhs_does_not_iterate_from_its_start"
+      - "tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py::test_a_non_finite_entry_in_one_shard_gives_nan_in_every_shard"
+      - "tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py::test_a_non_finite_cotangent_on_a_mesh_gives_a_nan_gradient"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-156"
     title: "POST /checkpoint/load restored parameter values PUT /graph/params refuses -- past a node's constructor limit, outside a ParamSpec's bounds -- answered 200, and left a graph whose save did not reload and whose steps diverged"
     description: >
       A checkpoint carries the graph's live parameter leaves, and the
@@ -11169,7 +11298,7 @@ anomalies:
       - "tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_new_node_outside_its_param_spec_bounds_is_refused_as_a_params_write_is"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-155"
+  - anomaly_id: "MADD-ANO-157"
     title: "A parameter write to a HybridNode was answered and then lost: the hybrid held a copy of its physics node's params, so PUT /graph/params echoed the new value and the step kept the old one"
     description: >
       `HybridNode.__init__` passed its physics node's params to
@@ -11214,7 +11343,7 @@ anomalies:
       - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_hybrid_over_a_sharded_node_changes_the_trajectory"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-156"
+  - anomaly_id: "MADD-ANO-158"
     title: "POST /sim/run that could not have the graph part-way through answered 503 'Nothing was changed; retry shortly' after it had stepped, so a client that retried stepped the graph twice; its final read waited with no timeout"
     description: >
       A run steps in slices and takes the graph lock for each.  When a slice
@@ -11258,7 +11387,7 @@ anomalies:
       - "tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_zero_step_run_behind_a_long_holder_is_a_503_that_took_nothing"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-157"
+  - anomaly_id: "MADD-ANO-159"
     title: "POST /sim/profile answered 500 for a graph that could not compile with any error but a RuntimeError"
     description: >
       The profile route caught `RuntimeError` alone around the profiler,

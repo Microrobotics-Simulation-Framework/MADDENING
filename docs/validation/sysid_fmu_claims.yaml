@@ -52,6 +52,8 @@ schema_version: 1
 
 prefixes: [SYS, FMU]
 
+domain_set: numeric
+
 claims:
 
 # ---------------------------------------------------------------------------
@@ -66,11 +68,27 @@ claims:
     T = 1 + n."
   sources:
     - src/maddening/sysid.py:163 (observations_from_history)
-  conditions: any graph and n >= 1 steps.
+  conditions: >-
+    any graph and n >= 1 steps. Not claimed for multi-rate graphs or
+    sub-cycled groups.
   oracle: the history and the initial state, element for element.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_observations_from_history_prepends_the_initial_state
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_observations_from_history_prepends_the_initial_state
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-002
   area: windowed_loss
@@ -86,6 +104,20 @@ claims:
     - tests/core/test_sysid.py::test_observation_leaves_of_unequal_length_are_refused
     - tests/core/test_sysid.py::test_a_scalar_observation_leaf_is_refused_by_name
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-003
   area: windowed_loss
@@ -102,6 +134,20 @@ claims:
     - tests/core/test_sysid_claims_edges.py::test_sample_every_and_a_one_sample_record_are_refused
     - tests/core/test_sysid.py::test_windows_must_tile_the_observations
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_a_window_lies_in_one_to_t_minus_one_and_tiles_the_record
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_sysid_claims_edges.py::test_a_window_lies_in_one_to_t_minus_one_and_tiles_the_record
+    sharded: n/a
 
 - id: SYS-004
   area: windowed_loss
@@ -110,11 +156,26 @@ claims:
     are used; gm._state is not modified."
   sources:
     - src/maddening/sysid.py:302 (windowed_loss, gm)
-  conditions: a value and a gradient.
+  conditions: >-
+    a value and a gradient. Not claimed for 16-bit floats or sharded graphs.
   oracle: every leaf of gm._state before and after, bit for bit.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_windowed_loss_leaves_the_graphs_state_untouched
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_windowed_loss_leaves_the_graphs_state_untouched
+    f64: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_in_float64[SYS-004]'
+    mixed_dtype: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_with_a_float32_node_under_x64[SYS-004]'
+    16bit: narrowed
+    jit: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_under_jit[SYS-004]'
+    grad: tests/core/test_sysid_claims_edges.py::test_windowed_loss_leaves_the_graphs_state_untouched
+    vmap: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_under_vmap[SYS-004]'
+    multi_rate: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_on_a_multirate_graph[SYS-004]'
+    sub_cycled: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_on_a_subcycled_group[SYS-004]'
+    predictors_warm_starts: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_with_a_predictor_and_a_warm_start[SYS-004]'
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_sysid_claims_edges.py::test_windowed_loss_leaves_the_graphs_state_untouched
+    sharded: narrowed
 
 - id: SYS-005
   area: windowed_loss
@@ -124,11 +185,29 @@ claims:
     ValueError for an undeclared node.field."
   sources:
     - src/maddening/sysid.py:302 (windowed_loss, external_inputs)
-  conditions: a declared input omitted, given as zero and given non-zero; an undeclared field and node.
+  conditions: >-
+    a declared input omitted, given as zero and given non-zero; an
+    undeclared field and node. Not claimed for float64 (x64), mixed dtypes,
+    16-bit floats, jit, vmap, multi-rate graphs, sub-cycled groups or
+    sharded graphs.
   oracle: the loss with the input omitted against the loss with it explicitly zero; the ValueError.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_windowed_loss_completes_and_checks_external_inputs
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_windowed_loss_completes_and_checks_external_inputs
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: narrowed
+    grad: n/a
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: narrowed
 
 - id: SYS-006
   area: windowed_loss
@@ -141,13 +220,29 @@ claims:
     - src/maddening/sysid.py:1 (module docstring)
     - src/maddening/sysid.py:302 (windowed_loss)
     - docs/user_guide/parameters.md (System identification)
-  conditions: single-rate graph; for multi-rate see SYS-011.
+  conditions: >-
+    single-rate graph; for multi-rate see SYS-011. Not claimed for 16-bit
+    floats or sharded graphs.
   oracle: the loss over the record against the sum of the losses over each window's own slice of it; zero at the truth.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows
     - tests/core/test_sysid.py::test_loss_zero_at_truth_positive_elsewhere
   status: verified
   notes: The memory claim (O(window)) is not measured here.
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
+    grad: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
+    vmap: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_under_vmap[SYS-006]'
+    multi_rate: tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_window_on_an_odd_base_step_runs_the_slow_node_on_its_own_phase
+    sub_cycled: TODO-oracle
+    predictors_warm_starts: TODO-oracle
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_sysid_claims_edges.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows
+    sharded: narrowed
 
 - id: SYS-007
   area: windowed_loss
@@ -163,6 +258,20 @@ claims:
     - tests/core/test_sysid_claims_edges.py::test_window_states_with_another_window_count_are_refused
     - tests/core/test_sysid.py::test_window_states_of_unequal_length_are_refused
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-008
   area: windowed_loss
@@ -173,12 +282,29 @@ claims:
     ||end_w - window_states[w+1]||²" (sum over every user-state leaf).
   sources:
     - src/maddening/sysid.py:302 (windowed_loss, window_states / continuity_weight)
-  conditions: window states seeded from the truth, and one start moved.
+  conditions: >-
+    window states seeded from the truth, and one start moved. Not claimed
+    for 16-bit floats, jit, gradients, vmap, multi-rate graphs, sub-cycled
+    groups or sharded graphs.
   oracle: zero at the truth; the penalty affine in its weight.
   tests:
     - tests/core/test_sysid.py::test_multiple_shooting_loss_zero_at_truth_and_penalises_gaps
     - tests/core/test_sysid_contract_examples.py::test_the_continuity_penalty_is_affine_in_its_weight_and_charges_a_bumped_start
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_multiple_shooting_loss_zero_at_truth_and_penalises_gaps
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: narrowed
+    grad: narrowed
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: TODO-oracle
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_sysid_contract_examples.py::test_the_continuity_penalty_is_affine_in_its_weight_and_charges_a_bumped_start
+    sharded: narrowed
 
 - id: SYS-009
   area: windowed_loss
@@ -194,6 +320,20 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_refuses_a_continuity_weight_its_fitter_refuses
     - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_still_takes_every_weight_its_fitter_takes
   status: verified
+  domains:
+    f32: tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_still_takes_every_weight_its_fitter_takes
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-010
   area: windowed_loss
@@ -209,6 +349,20 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_takes_a_bool_mask_unconverged
   status: verified
   notes: What the mask drops, and when it refuses a group, is CPL-160 to CPL-162.
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-011
   area: windowed_loss
@@ -221,7 +375,11 @@ claims:
   sources:
     - src/maddening/sysid.py:302 (windowed_loss, start_step)
     - docs/user_guide/parameters.md (System identification)
-  conditions: multi-rate graph with an odd first sample, even sample_every, a record starting mid-schedule; single-rate graph.
+  conditions: >-
+    multi-rate graph with an odd first sample, even sample_every, a record
+    starting mid-schedule; single-rate graph. Not claimed for float64 (x64),
+    mixed dtypes, 16-bit floats, jit, vmap, sub-cycled groups, predictors or
+    warm starts or sharded graphs.
   oracle: zero loss at the generating parameters on the right phase; non-zero and a warning on the wrong one.
   tests:
     - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_window_on_an_odd_base_step_runs_the_slow_node_on_its_own_phase
@@ -231,6 +389,20 @@ claims:
     - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_single_rate_graph_needs_no_start_step
     - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_start_step_that_is_not_a_step_is_refused
   status: verified
+  domains:
+    f32: tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_single_rate_graph_needs_no_start_step
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: narrowed
+    grad: n/a
+    vmap: narrowed
+    multi_rate: tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_window_on_an_odd_base_step_runs_the_slow_node_on_its_own_phase
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_an_even_sample_every_restarts_each_window_at_k_times_sample_every
+    sharded: narrowed
 
 - id: SYS-012
   area: windowed_loss
@@ -245,6 +417,20 @@ claims:
   tests:
     - tests/core/test_sysid.py::test_init_window_states_shape_and_values
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_init_window_states_shape_and_values
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_sysid.py::test_init_window_states_shape_and_values
+    sharded: n/a
 
 - id: SYS-013
   area: windowed_loss
@@ -254,12 +440,29 @@ claims:
     informative.
   sources:
     - src/maddening/sysid.py:1 (module docstring)
-  conditions: a jitted loss away from the truth.
+  conditions: >-
+    a jitted loss away from the truth. Not claimed for 16-bit floats,
+    multi-rate graphs, sub-cycled groups, predictors or warm starts or
+    sharded graphs.
   oracle: the gradient finite and non-zero; the recovered stiffness.
   tests:
     - tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
     - tests/core/test_sysid.py::test_recovers_stiffness_from_20_percent_perturbation
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
+    grad: tests/core/test_sysid.py::test_recovers_stiffness_from_20_percent_perturbation
+    vmap: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_under_vmap[SYS-013]'
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_sysid.py::test_recovers_stiffness_from_20_percent_perturbation
+    sharded: narrowed
 
 # ---------------------------------------------------------------------------
 # fim and FIMReport
@@ -274,12 +477,28 @@ claims:
     diagonal of the inverse.
   sources:
     - src/maddening/sysid.py:2345 (fim)
-  conditions: a smooth residual in float64; a spring rollout in float32.
+  conditions: >-
+    a smooth residual in float64; a spring rollout in float32. Not claimed
+    for 16-bit floats.
   oracle: J^T J from central differences; the inverse of the matrix.
   tests:
     - tests/core/test_sysid_contract_examples.py::test_fim_matches_a_central_finite_difference_and_its_bound_is_the_inverse
     - tests/core/test_sysid_contract_examples.py::test_fim_matches_a_finite_difference_of_a_spring_rollout
   status: verified
+  domains:
+    f32: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_finite_difference_of_a_spring_rollout
+    f64: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_central_finite_difference_and_its_bound_is_the_inverse
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_finite_difference_of_a_spring_rollout
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-021
   area: fim
@@ -289,11 +508,28 @@ claims:
   sources:
     - src/maddening/sysid.py:2345 (fim)
     - docs/user_guide/parameters.md (opening section)
-  conditions: a coupled spring pair under solver="ift", the observed node the other member.
+  conditions: >-
+    a coupled spring pair under solver="ift", the observed node the other
+    member. Not claimed for 16-bit floats, multi-rate graphs, sub-cycled
+    groups or predictors or warm starts.
   oracle: J^T J from central differences of the same coupled rollout.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_fim_reaches_through_a_coupled_step
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_fim_reaches_through_a_coupled_step
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid_claims_edges.py::test_fim_reaches_through_a_coupled_step
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-022
   area: fim
@@ -304,13 +540,29 @@ claims:
   sources:
     - src/maddening/sysid.py:640 (FIMReport)
     - src/maddening/sysid.py:2345 (fim, rank_rtol)
-  conditions: short (m <= n**2) and long residuals; a missing direction.
+  conditions: >-
+    short (m <= n**2) and long residuals; a missing direction. Not claimed
+    for 16-bit floats.
   oracle: the cutoff recomputed; the verdict for m <= n**2 bit for bit against n * eps.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_the_default_cutoff_is_max_of_n_and_sqrt_m
     - tests/core/test_sysid_degenerate_inputs.py::test_a_long_residual_does_not_make_a_missing_direction_identifiable
     - tests/core/test_sysid_degenerate_inputs.py::test_a_short_residual_verdict_is_bit_for_bit_what_it_was
   status: verified
+  domains:
+    f32: tests/core/test_sysid_degenerate_inputs.py::test_the_default_cutoff_is_max_of_n_and_sqrt_m
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-023
   area: fim
@@ -320,11 +572,27 @@ claims:
   sources:
     - src/maddening/sysid.py:640 (FIMReport)
     - docs/user_guide/parameters.md (System identification)
-  conditions: float32; sigma from 1e-15 to 1e15; full-rank and rank-deficient matrices.
+  conditions: >-
+    float32; sigma from 1e-15 to 1e15; full-rank and rank-deficient
+    matrices. Not claimed for 16-bit floats.
   oracle: rank and the +inf pattern of crb at every sigma.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-024
   area: fim
@@ -337,7 +605,9 @@ claims:
     the precision warning".
   sources:
     - src/maddening/sysid.py:2345 (fim, Warns)
-  conditions: float32 at the floor; well conditioned; exactly singular; raised and zero rank_rtol; under x64.
+  conditions: >-
+    float32 at the floor; well conditioned; exactly singular; raised and
+    zero rank_rtol; under x64. Not claimed for 16-bit floats.
   oracle: the warning and its text, or its absence; the x64 re-run's verdict.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
@@ -347,6 +617,20 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit
     - tests/core/test_sysid_degenerate_inputs.py::test_the_warning_names_the_eigenvalue_nearest_the_cutoff
   status: verified
+  domains:
+    f32: tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
+    f64: tests/core/test_sysid_degenerate_inputs.py::test_under_x64_the_warning_stops_recommending_x64
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-025
   area: fim
@@ -357,13 +641,29 @@ claims:
     0.0".
   sources:
     - src/maddening/sysid.py:640 (FIMReport, crb)
-  conditions: the spring's (k, c, m) scale degeneracy; a non-finite and a partly NaN decomposition.
+  conditions: >-
+    the spring's (k, c, m) scale degeneracy; a non-finite and a partly NaN
+    decomposition. Not claimed for 16-bit floats.
   oracle: the +inf pattern; never 0.0 or NaN.
   tests:
     - tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
     - tests/core/test_sysid_degenerate_inputs.py::test_an_eigendecomposition_that_is_not_finite_reports_no_finite_bound
     - tests/core/test_sysid_degenerate_inputs.py::test_a_partly_resolved_decomposition_with_a_nan_direction_fails_safe
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-026
   area: fim
@@ -374,12 +674,28 @@ claims:
     variance'."
   sources:
     - src/maddening/sysid.py:2345 (fim, noise_std)
-  conditions: a scalar sigma; a parameter re-expressed in units 1000x smaller, under scale=None and "relative".
+  conditions: >-
+    a scalar sigma; a parameter re-expressed in units 1000x smaller, under
+    scale=None and "relative". Not claimed for 16-bit floats.
   oracle: crb scaled by sigma**2; by c**2 for the re-expressed parameter under None, unchanged under relative.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_the_bound_is_in_the_parameters_units
     - tests/core/test_sysid.py::test_fim_noise_std_scales_information
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_the_bound_is_in_the_parameters_units
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-027
   area: fim
@@ -388,13 +704,28 @@ claims:
     exactly 0.0 ... Empty under scale=None."
   sources:
     - src/maddening/sysid.py:640 (FIMReport, zero_scaled)
-  conditions: a zero-valued parameter; none.
+  conditions: >-
+    a zero-valued parameter; none. Not claimed for 16-bit floats.
   oracle: the names; the empty tuple.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_fim_names_the_parameters_relative_scaling_zeroed
     - tests/core/test_sysid_degenerate_inputs.py::test_a_report_with_no_zero_valued_parameter_names_none
     - tests/core/test_sysid_fim_nominal_scale.py::TestAZeroValuedParameterIsJudgedOnTheData::test_linear_pair_is_zero_scaled_under_relative_and_resolved_under_nominal
   status: verified
+  domains:
+    f32: tests/core/test_sysid_degenerate_inputs.py::test_fim_names_the_parameters_relative_scaling_zeroed
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-028
   area: fim
@@ -406,7 +737,9 @@ claims:
   sources:
     - src/maddening/sysid.py:2345 (fim, scale)
     - docs/user_guide/parameters.md (System identification)
-  conditions: every row of the table; a leaf with no spec entry; a multi-element leaf.
+  conditions: >-
+    every row of the table; a leaf with no spec entry; a multi-element leaf.
+    Not claimed for 16-bit floats.
   oracle: the Jacobian columns against scale=None times the expected scale; value_scaled and zero_scaled names.
   tests:
     - tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_finite_bounds_scale_by_the_width_whatever_the_transform
@@ -416,6 +749,20 @@ claims:
     - tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_nothing_falls_back_to_one
     - tests/core/test_sysid_fim_nominal_scale.py::TestColumnScalingIsTheOnlyDifference::test_unit_widths_reproduce_scale_none_bit_for_bit
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_finite_bounds_scale_by_the_width_whatever_the_transform
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-029
   area: fim
@@ -425,7 +772,9 @@ claims:
     parameters' precision is refused by name".
   sources:
     - src/maddening/sysid.py:2345 (fim, specs / scale)
-  conditions: specs under relative and None; nominal without specs; a width that is not a float32 scale.
+  conditions: >-
+    specs under relative and None; nominal without specs; a width that is
+    not a float32 scale. Not claimed for mixed dtypes or 16-bit floats.
   oracle: the ValueError and its text.
   tests:
     - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_specs_under_another_scale_is_refused
@@ -433,6 +782,20 @@ claims:
     - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_a_width_that_is_not_a_float32_scale_is_refused_by_name
     - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_the_guard_is_applied_at_the_parameters_precision
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_a_width_that_is_not_a_float32_scale_is_refused_by_name
+    f64: tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_the_guard_is_applied_at_the_parameters_precision
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-030
   area: fim
@@ -454,6 +817,20 @@ claims:
     - tests/core/test_sysid_fim_nominal_scale.py::TestASpecsTreeMustMirrorParams::test_a_paramspec_above_a_dict_level_is_refused
     - tests/core/test_sysid_fim_nominal_scale.py::TestTheGraphsOwnSpecsAreAccepted::test_a_uniform_heat_node_graph
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-031
   area: fim
@@ -464,7 +841,9 @@ claims:
     ValueError.
   sources:
     - src/maddening/sysid.py:640 (FIMReport, integer_excluded)
-  conditions: integer and boolean leaves; a selecting mask; no float leaf; fim_core.
+  conditions: >-
+    integer and boolean leaves; a selecting mask; no float leaf; fim_core.
+    Not claimed for float64 (x64), mixed dtypes or 16-bit floats.
   oracle: the names; the report equal to the float leaves' alone; the ValueError.
   tests:
     - tests/core/test_sysid_integer_leaves.py::TestFimLeavesAnIntegerLeafOut::test_it_is_named_and_not_a_column
@@ -473,6 +852,20 @@ claims:
     - tests/core/test_sysid_integer_leaves.py::TestFimLeavesAnIntegerLeafOut::test_params_with_no_float_leaf_is_refused
     - tests/core/test_sysid_integer_leaves.py::TestFimCoreCarriesTheSameName::test_integer_excluded_is_static_metadata_that_survives_jit
   status: verified
+  domains:
+    f32: tests/core/test_sysid_integer_leaves.py::TestFimLeavesAnIntegerLeafOut::test_the_report_is_the_one_for_the_float_leaves_alone
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_sysid_integer_leaves.py::TestFimCoreCarriesTheSameName::test_integer_excluded_is_static_metadata_that_survives_jit
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-032
   area: fim
@@ -482,7 +875,10 @@ claims:
     are caught"; a pytree σ matches the residual per leaf.
   sources:
     - src/maddening/sysid.py:2345 (fim, noise_std)
-  conditions: zero, negative, non-finite and underflowing sigma, scalar and inside a pytree; fit_lm on the same path.
+  conditions: >-
+    zero, negative, non-finite and underflowing sigma, scalar and inside a
+    pytree; fit_lm on the same path. Not claimed for float64 (x64), mixed
+    dtypes or 16-bit floats.
   oracle: the ValueError; the per-leaf scaling.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_fim_rejects_a_noise_std_that_is_not_positive_at_the_residual_precision
@@ -490,6 +886,20 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_fit_lm_rejects_a_non_positive_sigma_on_the_same_path
     - tests/core/test_sysid_noise_model.py::test_fim_noise_std_pytree_dict
   status: verified
+  domains:
+    f32: tests/core/test_sysid_degenerate_inputs.py::test_fim_rejects_a_noise_std_that_is_not_positive_at_the_residual_precision
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-033
   area: fim
@@ -505,6 +915,20 @@ claims:
     - tests/core/test_sysid_claims_edges.py::test_fim_may_linearise_a_frozen_leaf
     - tests/core/test_sysid.py::test_fim_mask_restricts_to_selected_leaves
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_fim_may_linearise_a_frozen_leaf
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-034
   area: fim
@@ -513,12 +937,28 @@ claims:
     an overflowing Jacobian, a residual holding a NaN."
   sources:
     - src/maddening/sysid.py:2345 (fim, Raises)
-  conditions: a residual holding a NaN.
+  conditions: >-
+    a residual holding a NaN. Not claimed for float64 (x64), mixed dtypes or
+    16-bit floats.
   oracle: the exception.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_fim_refuses_to_report_on_a_non_finite_fisher_matrix
     - tests/core/test_sysid_fim_core.py::TestCoreFailsClosed::test_fim_still_raises_on_the_same_matrix
   status: verified
+  domains:
+    f32: tests/core/test_sysid_degenerate_inputs.py::test_fim_refuses_to_report_on_a_non_finite_fisher_matrix
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-035
   area: fim
@@ -539,6 +979,20 @@ claims:
     - tests/core/test_sysid_fim_core.py::TestTheDefaultReadsTheResidualsCurrentState::test_a_residual_reading_a_module_global_sees_it_change
     - tests/core/test_sysid_fim_core.py::TestCacheKeyIsComplete::test_scale_none_and_relative_do_not_share_an_entry
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fim_core.py::TestTheDefaultReadsTheResidualsCurrentState::test_a_residual_reading_gm_params_sees_the_new_damping
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-036
   area: fim
@@ -549,13 +1003,28 @@ claims:
   sources:
     - src/maddening/sysid.py:737 (FIMReport.least_identifiable)
     - docs/user_guide/parameters.md (System identification)
-  conditions: the spring's scale degeneracy.
+  conditions: >-
+    the spring's scale degeneracy. Not claimed for 16-bit floats.
   oracle: the eigenvector and the name.
   tests:
     - tests/core/test_sysid.py::test_an_nd_leaf_is_labelled_by_the_index_of_the_element
     - tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
     - tests/core/test_sysid_undetermined_directions.py::test_the_held_direction_is_the_one_fim_calls_least_identifiable
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-037
   area: fim
@@ -574,6 +1043,20 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_fit_result_cannot_be_built_positionally
     - tests/core/test_sysid_claims_edges.py::test_fim_core_cannot_be_built_positionally
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # fim_core and FIMCore
@@ -589,7 +1072,9 @@ claims:
   sources:
     - src/maddening/sysid.py:2247 (fim_core)
     - src/maddening/sysid.py:1630 (FIMCore)
-  conditions: with and without a noise model; jitted; branched on.
+  conditions: >-
+    with and without a noise model; jitted; branched on. Not claimed for
+    float64 (x64), mixed dtypes, 16-bit floats or vmap.
   oracle: a transfer counter on every route to the host; tree flatten / unflatten.
   tests:
     - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_fim_core_reads_nothing_back
@@ -597,6 +1082,20 @@ claims:
     - tests/core/test_sysid_fim_core.py::TestCoreIsAPytree::test_it_survives_tree_flatten_and_unflatten
     - tests/core/test_sysid_fim_core.py::TestCoreIsAPytree::test_a_gate_can_branch_on_it_without_a_transfer
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_fim_core_reads_nothing_back
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_sysid_fim_core.py::TestCoreIsAPytree::test_a_gate_can_branch_on_it_without_a_transfer
+    grad: n/a
+    vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-039
   area: fim_core
@@ -608,13 +1107,29 @@ claims:
   sources:
     - src/maddening/sysid.py:1630 (FIMCore, cond / deciding_ratio)
     - src/maddening/sysid.py:2247 (fim_core, Notes)
-  conditions: a NaN matrix; a well-resolved one.
+  conditions: >-
+    a NaN matrix; a well-resolved one. Not claimed for float64 (x64), mixed
+    dtypes or 16-bit floats.
   oracle: the fields.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_fim_core_fails_closed_on_a_nan_matrix
     - tests/core/test_sysid_fim_core.py::TestCoreFailsClosed::test_a_nan_matrix_gives_infinite_bounds_not_nan
     - tests/core/test_sysid_fim_core.py::TestCoreFailsClosed::test_the_core_makes_no_nan_on_a_zero_fisher_matrix
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_fim_core_fails_closed_on_a_nan_matrix
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_under_jit[SYS-039]'
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-040
   area: fim_core
@@ -626,13 +1141,29 @@ claims:
   sources:
     - src/maddening/sysid.py:1630 (FIMCore)
     - docs/user_guide/parameters.md (Asking the same question inside a loop)
-  conditions: the tested spread of problems, rank deficient and precision limited included.
+  conditions: >-
+    the tested spread of problems, rank deficient and precision limited
+    included. Not claimed for 16-bit floats.
   oracle: the two reports compared; a reference pipeline.
   tests:
     - tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_rank_and_crb_infinities_match_fim
     - tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_precision_limited_flag_matches_the_warning
     - tests/core/test_sysid_fim_core.py::TestFimUnchangedByJitting::test_report_is_bit_identical_to_the_pre_jit_pipeline
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_rank_and_crb_infinities_match_fim
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: tests/core/test_sysid_fim_core.py::TestFimUnchangedByJitting::test_report_is_bit_identical_to_the_pre_jit_pipeline
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-041
   area: fim_core
@@ -651,6 +1182,20 @@ claims:
     A traced sigma raises JAX's TracerArrayConversionError, not the
     ValueError fim_core's Raises section lists for a noise_std it cannot
     answer for; the restriction itself holds.
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_fim_core_takes_a_noise_model_closed_over_inside_jit
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: tests/core/test_sysid_claims_edges.py::test_fim_core_takes_a_noise_model_closed_over_inside_jit
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-042
   area: fim
@@ -670,6 +1215,20 @@ claims:
     - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_a_nominal_scale_costs_no_extra_transfer
     - tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_a_host_side_noise_model_costs_no_extra_transfer
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fim_core.py::TestNoHostSyncs::test_fim_performs_exactly_four_transfers
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-043
   area: fim_core
@@ -680,7 +1239,10 @@ claims:
     0.39% of them, never above five times the rank cutoff".
   sources:
     - docs/user_guide/parameters.md (Asking the same question inside a loop)
-  conditions: float32; a deciding eigenvalue from 0.01 to 100 times the cutoff; 3 and 6 parameters, 8 to 4096 rows.
+  conditions: >-
+    float32; a deciding eigenvalue from 0.01 to 100 times the cutoff; 3 and
+    6 parameters, 8 to 4096 rows. Not claimed for float64 (x64), mixed
+    dtypes, 16-bit floats or jit.
   oracle: the two verdicts on the same matrix; the factor at which they differ.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff
@@ -690,6 +1252,20 @@ claims:
     matrices of this population (precision band reached on 15% of them) the
     two never disagreed.  The rate depends on the population and the
     backend's Gram product; read it as the measurement it is.
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_fim_and_fim_core_disagree_only_within_five_times_the_cutoff
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: narrowed
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # The fitters: FitResult
@@ -704,11 +1280,27 @@ claims:
   sources:
     - src/maddening/sysid.py:3400 (FitResult)
     - src/maddening/sysid.py:3942 (fit_lm)
-  conditions: a log-transformed leaf, so the start round-trips through the optimiser's coordinates.
+  conditions: >-
+    a log-transformed leaf, so the start round-trips through the optimiser's
+    coordinates. Not claimed for 16-bit floats.
   oracle: the loss evaluated at the start, to the last bits the round trip moves it.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_losses_zero_is_the_starting_points_loss
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_losses_zero_is_the_starting_points_loss
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid_claims_edges.py::test_losses_zero_is_the_starting_points_loss
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-051
   area: fitters
@@ -719,12 +1311,27 @@ claims:
     passed to callback or the observers"; best_loss is None for n_iter=0.
   sources:
     - src/maddening/sysid.py:3400 (FitResult, best_iteration / best_loss)
-  conditions: a run that used its budget; n_iter=0.
+  conditions: >-
+    a run that used its budget; n_iter=0. Not claimed for 16-bit floats.
   oracle: the fields against losses and the callback's record.
   tests:
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_the_final_evaluation_is_invisible_but_for_the_best_fields
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_n_iter_zero_returns_the_start_having_evaluated_nothing
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_the_final_evaluation_is_invisible_but_for_the_best_fields
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-052
   area: fitters
@@ -737,7 +1344,9 @@ claims:
     - src/maddening/sysid.py:3400 (FitResult)
     - src/maddening/sysid.py:3625 (fit, Returns)
     - docs/user_guide/parameters.md (System identification)
-  conditions: Adam walking away from its start; ties; a non-finite final loss; tol; all three fitters.
+  conditions: >-
+    Adam walking away from its start; ties; a non-finite final loss; tol;
+    all three fitters. Not claimed for 16-bit floats.
   oracle: every evaluated iterate's loss.
   tests:
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_fit_that_walks_away_from_its_start_returns_its_start
@@ -748,6 +1357,20 @@ claims:
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_run_stopped_by_tol_returns_the_iterate_that_met_it
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_every_fitter_returns_an_iterate_no_worse_than_any_it_evaluated
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_the_returned_params_are_the_iterate_with_the_lowest_loss
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_every_fitter_returns_an_iterate_no_worse_than_any_it_evaluated
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-053
   area: fitters
@@ -759,12 +1382,28 @@ claims:
   sources:
     - src/maddening/sysid.py:3400 (FitResult, converged)
     - docs/user_guide/parameters.md (System identification)
-  conditions: a loss of exactly 0.0 under the default tol; a positive tol.
+  conditions: >-
+    a loss of exactly 0.0 under the default tol; a positive tol. Not claimed
+    for 16-bit floats.
   oracle: the flag and the iteration count.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_with_the_default_tol_fit_never_reports_converged
     - tests/core/test_sysid.py::test_fit_mask_overrides_specs_and_tol_stops_early
   status: verified
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_with_the_default_tol_fit_never_reports_converged
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-054
   area: fitters
@@ -775,13 +1414,29 @@ claims:
   sources:
     - src/maddening/sysid.py:3400 (FitResult)
     - docs/user_guide/parameters.md (System identification)
-  conditions: a log leaf, which exp(log(p)) would move by an ulp; a spec-frozen leaf under multiple shooting.
+  conditions: >-
+    a log leaf, which exp(log(p)) would move by an ulp; a spec-frozen leaf
+    under multiple shooting. Not claimed for 16-bit floats.
   oracle: bitwise equality.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_takes_no_step_returns_its_input_bit_for_bit
     - tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_does_take_a_step_still_reports_the_leaf_as_moved
     - tests/core/test_sysid_contract_examples.py::test_multiple_shooting_leaves_a_spec_frozen_leaf_bit_identical
   status: verified
+  domains:
+    f32: tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_takes_no_step_returns_its_input_bit_for_bit
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # The fitters: masks, coordinates and refusals
@@ -805,6 +1460,20 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_mask_whose_keys_differ_from_params_is_refused_by_fit
     - tests/core/test_sysid_degenerate_inputs.py::test_the_structure_error_names_the_first_path_that_differs
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_fit_mask_overrides_specs_and_tol_stops_early
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-056
   area: fitters
@@ -820,6 +1489,20 @@ claims:
     - tests/core/test_sysid_integer_leaves.py::TestTheFittersRefuseATrainableInteger::test_fit_lm_and_multiple_shooting_refuse_it_too
     - tests/core/test_sysid_integer_leaves.py::TestTheFittersRefuseATrainableInteger::test_a_frozen_integer_leaf_does_not_stop_a_fit
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-057
   area: fitters
@@ -832,12 +1515,28 @@ claims:
   sources:
     - src/maddening/sysid.py:3625 (fit)
     - docs/user_guide/parameters.md (System identification)
-  conditions: a logit leaf pushed hard either way; log and logit coordinates near their clamp.
+  conditions: >-
+    a logit leaf pushed hard either way; log and logit coordinates near
+    their clamp. Not claimed for 16-bit floats.
   oracle: the returned values strictly inside their bounds.
   tests:
     - tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_log_and_a_logit_coordinate_are_kept_where_constrain_is_not_clamped
   status: verified
+  domains:
+    f32: tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-058
   area: fitters
@@ -849,7 +1548,9 @@ claims:
   sources:
     - src/maddening/sysid.py:3942 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
-  conditions: float32 and float64; beside a log coordinate; an optimum past the bound; a coupled step.
+  conditions: >-
+    float32 and float64; beside a log coordinate; an optimum past the bound;
+    a coupled step. Not claimed for 16-bit floats.
   oracle: the recovered damping; the bound held where the optimum is past it.
   tests:
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_brings_a_clipped_coordinate_back_into_its_range
@@ -859,6 +1560,20 @@ claims:
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_fit_whose_optimum_is_past_the_bound_converges_on_the_bound
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_active_bound_is_held_out_of_the_coupled_step
   status: verified
+  domains:
+    f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_brings_a_clipped_coordinate_back_into_its_range
+    f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_brings_a_clipped_coordinate_back_into_its_range[float64]'
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_brings_a_clipped_coordinate_back_into_its_range
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-059
   area: fitters
@@ -867,12 +1582,28 @@ claims:
     the declared bounds is refused.
   sources:
     - docs/user_guide/parameters.md (System identification)
-  conditions: a loss whose gradient is NaN; a start below a bound.
+  conditions: >-
+    a loss whose gradient is NaN; a start below a bound. Not claimed for
+    float64 (x64), mixed dtypes or 16-bit floats.
   oracle: the exception.
   tests:
     - tests/core/test_sysid.py::test_fit_raises_on_non_finite_gradient
     - tests/core/test_sysid.py::test_fit_rejects_start_outside_bounds
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_fit_raises_on_non_finite_gradient
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid.py::test_fit_raises_on_non_finite_gradient
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-060
   area: fitters
@@ -889,6 +1620,20 @@ claims:
   tests:
     - tests/core/test_sysid.py::test_fit_progress_events_reach_observers
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_fit_progress_events_reach_observers
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-061
   area: fitters
@@ -906,6 +1651,20 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_fit_lm_rejects_a_hyper_parameter_with_no_reading
     - tests/core/test_sysid_degenerate_inputs.py::test_the_documented_defaults_are_inside_the_accepted_range
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # The fitters: the identifiability guard (hold_undetermined)
@@ -922,13 +1681,29 @@ claims:
   sources:
     - src/maddening/sysid.py:3625 (fit, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
-  conditions: the spring's (k, c, m) scale degeneracy with log transforms on all three; every budget and lr.
+  conditions: >-
+    the spring's (k, c, m) scale degeneracy with log transforms on all
+    three; every budget and lr. Not claimed for 16-bit floats.
   oracle: the fitted scale against the starting scale; the loss and k/m, c/m.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_fitted_scale_is_the_starting_scale_for_every_budget
     - tests/core/test_sysid_undetermined_directions.py::test_the_fitted_scale_does_not_depend_on_the_optimiser_schedule
     - tests/core/test_sysid_undetermined_directions.py::test_holding_the_scale_does_not_cost_loss_or_the_identifiable_ratios
   status: verified
+  domains:
+    f32: tests/core/test_sysid_undetermined_directions.py::test_fitted_scale_is_the_starting_scale_for_every_budget
+    f64: TODO-fix
+    mixed_dtype: TODO-fix
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid_undetermined_directions.py::test_fitted_scale_is_the_starting_scale_for_every_budget
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-063
   area: identifiability guard
@@ -942,8 +1717,8 @@ claims:
     - src/maddening/sysid.py:3400 (FitResult, hold_declined)
   conditions: >-
     a rise just inside and just outside the tolerance; a hold through a
-    bound; a non-finite held loss; an identity-transform parameter in
-    units from 1e-5 to 1e6.
+    bound; a non-finite held loss; an identity-transform parameter in units
+    from 1e-5 to 1e6. Not claimed for 16-bit floats.
   oracle: the loss at the returned params against best_loss; hold_declined; the warning naming the caller's line.
   tests:
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_that_would_raise_the_loss_is_declined_and_said_so
@@ -969,6 +1744,20 @@ claims:
     identity parameter measured relative to its own size, as
     fim(scale="relative") does, so the loss is unaffected in any units
     (MADD-ANO-135; tests/core/test_sysid_hold_in_any_units.py).
+  domains:
+    f32: tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_that_would_raise_the_loss_is_declined_and_said_so
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-064
   area: identifiability guard
@@ -981,7 +1770,9 @@ claims:
   sources:
     - src/maddening/sysid.py:3400 (FitResult, excited_rank)
     - src/maddening/sysid.py:3942 (fit_lm, hold_undetermined)
-  conditions: a well-posed four-parameter bowl; a candidate with curvature; the cutoffs.
+  conditions: >-
+    a well-posed four-parameter bowl; a candidate with curvature; the
+    cutoffs. Not claimed for 16-bit floats.
   oracle: bitwise equality with the unguarded iterate; the cutoff functions.
   tests:
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_fit_lm_on_a_well_posed_bowl_returns_the_minimum_it_reached
@@ -990,6 +1781,20 @@ claims:
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_the_gauss_newton_cutoff_is_fims_rank_rule
     - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_gets_its_iterate_back_bit_for_bit
   status: verified
+  domains:
+    f32: tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_gets_its_iterate_back_bit_for_bit
+    f64: TODO-fix
+    mixed_dtype: TODO-fix
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-065
   area: identifiability guard
@@ -1001,7 +1806,9 @@ claims:
   sources:
     - docs/user_guide/parameters.md (System identification)
     - src/maddening/sysid.py:3400 (FitResult, excited_rank)
-  conditions: each of the listed cases; all three fitters for the bool check.
+  conditions: >-
+    each of the listed cases; all three fitters for the bool check. Not
+    claimed for 16-bit floats.
   oracle: None; the ValueError.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_fewer_iterations_than_parameters_answers_none_not_full_rank
@@ -1010,6 +1817,20 @@ claims:
     - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_refuses_a_non_bool_hold_undetermined
     - tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_refuses_a_non_bool_hold_undetermined
   status: verified
+  domains:
+    f32: tests/core/test_sysid_undetermined_directions.py::test_fewer_iterations_than_parameters_answers_none_not_full_rank
+    f64: TODO-fix
+    mixed_dtype: TODO-fix
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-066
   area: identifiability guard
@@ -1022,7 +1843,9 @@ claims:
   sources:
     - src/maddening/sysid.py:3625 (fit, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
-  conditions: SpringDamperNode's identity-transform damping; directions just above and below the cutoff.
+  conditions: >-
+    SpringDamperNode's identity-transform damping; directions just above and
+    below the cutoff. Not claimed for 16-bit floats.
   oracle: excited_rank and the held displacement.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_a_rotating_null_direction_is_reported_as_full_rank
@@ -1030,6 +1853,20 @@ claims:
     - tests/core/test_sysid_undetermined_directions.py::test_a_direction_just_below_the_cutoff_is_held
     - tests/core/test_sysid_undetermined_directions.py::test_the_cutoff_is_numerical_and_keeps_a_weakly_excited_direction
   status: verified
+  domains:
+    f32: tests/core/test_sysid_undetermined_directions.py::test_a_rotating_null_direction_is_reported_as_full_rank
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-067
   area: identifiability guard
@@ -1041,7 +1878,9 @@ claims:
   sources:
     - src/maddening/sysid.py:3942 (fit_lm, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
-  conditions: the spring scale degeneracy, noiseless and noisy.
+  conditions: >-
+    the spring scale degeneracy, noiseless and noisy. Not claimed for 16-bit
+    floats.
   oracle: the scale across budgets, unguarded and guarded.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_unguarded_moves_along_the_scale_direction_but_converges
@@ -1049,6 +1888,20 @@ claims:
     - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_holding_costs_neither_loss_nor_the_identifiable_ratios
     - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_lm_gets_its_iterate_back_bit_for_bit
   status: verified
+  domains:
+    f32: tests/core/test_sysid_undetermined_directions.py::test_fit_lm_returns_the_starting_scale_for_every_budget
+    f64: TODO-fix
+    mixed_dtype: TODO-fix
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-068
   area: identifiability guard
@@ -1058,13 +1911,29 @@ claims:
     iterate as params"; its guarded scale does not depend on the schedule.
   sources:
     - src/maddening/sysid.py:4354 (fit_multiple_shooting, hold_undetermined)
-  conditions: the spring scale degeneracy under multiple shooting.
+  conditions: >-
+    the spring scale degeneracy under multiple shooting. Not claimed for
+    16-bit floats.
   oracle: the window states against the unguarded run's; the scale across schedules.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_scale_does_not_depend_on_the_schedule
     - tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_holding_the_scale_leaves_the_window_states_alone
     - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_multiple_shooting_fit_gets_its_iterate_back_bit_for_bit
   status: verified
+  domains:
+    f32: tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_scale_does_not_depend_on_the_schedule
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-069
   area: identifiability guard
@@ -1073,11 +1942,26 @@ claims:
     iterate the fitter returns, not its last.
   sources:
     - src/maddening/sysid.py:3400 (FitResult)
-  conditions: all three fitters.
+  conditions: >-
+    all three fitters. Not claimed for 16-bit floats.
   oracle: the point the guard received.
   tests:
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_each_fitter_hands_the_hold_its_selected_point
   status: verified
+  domains:
+    f32: tests/core/test_sysid_hold_never_raises_the_loss.py::test_each_fitter_hands_the_hold_its_selected_point
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # fit_multiple_shooting
@@ -1092,12 +1976,28 @@ claims:
     at the truth and walking away, it returns its start and seed states.
   sources:
     - src/maddening/sysid.py:4354 (fit_multiple_shooting)
-  conditions: a run started at the truth; a run whose loss never rose.
+  conditions: >-
+    a run started at the truth; a run whose loss never rose. Not claimed for
+    16-bit floats.
   oracle: the start and seed states; the last iterate.
   tests:
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_multiple_shooting_that_walks_away_returns_its_start_and_seed_states
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_multiple_shooting_run_whose_loss_never_rose_returns_its_last_iterate
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_multiple_shooting_that_walks_away_returns_its_start_and_seed_states
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-071
   area: fit_multiple_shooting
@@ -1109,7 +2009,7 @@ claims:
   conditions: >-
     unstated: hold_undetermined, which moves params after the selection;
     FitResult says best_loss "is the value before the hold_undetermined
-    guard".
+    guard". Not claimed for 16-bit floats.
   oracle: windowed_loss at the returned params and window states.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
@@ -1125,6 +2025,20 @@ claims:
     (60 iterations, lr 0.05): exact without the guard; with it (excited
     rank 2, drift 0.041) the recomputed loss matched to the last bit,
     which the guard's tolerance does not promise.
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-072
   area: fit_multiple_shooting
@@ -1134,11 +2048,26 @@ claims:
   sources:
     - src/maddening/sysid.py:4354 (fit_multiple_shooting)
     - docs/user_guide/parameters.md (System identification)
-  conditions: noise at the window starts.
+  conditions: >-
+    noise at the window starts. Not claimed for 16-bit floats.
   oracle: the recovered stiffness against the truth.
   tests:
     - tests/core/test_sysid.py::test_fit_multiple_shooting_recovers_from_noisy_window_starts
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_fit_multiple_shooting_recovers_from_noisy_window_starts
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid.py::test_fit_multiple_shooting_recovers_from_noisy_window_starts
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # fit_lm
@@ -1162,7 +2091,9 @@ claims:
     - src/maddening/sysid.py:3942 (fit_lm)
     - src/maddening/sysid.py:3400 (FitResult, converged)
     - docs/user_guide/parameters.md (System identification)
-  conditions: a noiseless float32 fit at its optimum; a run of rejected candidates; a residual reading nothing trainable.
+  conditions: >-
+    a noiseless float32 fit at its optimum; a run of rejected candidates; a
+    residual reading nothing trainable. Not claimed for 16-bit floats.
   oracle: the flag and the iteration it stopped on.
   tests:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
@@ -1174,6 +2105,20 @@ claims:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_run_that_never_lowered_the_loss_is_not_converged_by_the_floor_rule
     - tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_rule_never_fires_while_a_bound_coordinate_could_descend
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
+    f64: TODO-fix
+    mixed_dtype: TODO-fix
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-081
   area: fit_lm
@@ -1184,7 +2129,9 @@ claims:
     bit where it was"; measured relative to each physical parameter.
   sources:
     - src/maddening/sysid.py:3942 (fit_lm, step_tol)
-  conditions: float32 and float64; zero; an explicit value; one with no reading.
+  conditions: >-
+    float32 and float64; zero; an explicit value; one with no reading. Not
+    claimed for 16-bit floats.
   oracle: the convergence verdict at proposals either side of the tolerance.
   tests:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_the_default_step_tol_is_sixteen_ulps_of_the_parameter
@@ -1193,6 +2140,20 @@ claims:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_an_explicit_step_tol_is_relative_to_each_parameter
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_step_tol_with_no_reading_is_refused
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fit_lm_step_tol.py::test_the_default_step_tol_is_sixteen_ulps_of_the_parameter
+    f64: tests/core/test_sysid_fit_lm_step_tol.py::test_the_default_step_tol_follows_the_working_precision
+    mixed_dtype: tests/core/test_sysid_fit_lm_step_tol.py::test_the_default_step_tol_follows_the_working_precision
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-082
   area: fit_lm
@@ -1202,12 +2163,28 @@ claims:
   sources:
     - src/maddening/sysid.py:3942 (fit_lm)
     - src/maddening/sysid.py:3400 (FitResult, converged)
-  conditions: a coordinate with a descent direction into the range.
+  conditions: >-
+    a coordinate with a descent direction into the range. Not claimed for
+    16-bit floats.
   oracle: the flag; the inward-descent predicate.
   tests:
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on_the_bound
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_inward_descent_predicate
   status: verified
+  domains:
+    f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on_the_bound
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-083
   area: fit_lm
@@ -1220,7 +2197,10 @@ claims:
     - src/maddening/sysid.py:3942 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
     - docs/validation/known_anomalies.yaml (MADD-ANO-121)
-  conditions: the residual scaled from 1e-10 to 1e10; noise_std 1 and 1e8; a spring in SI units and in tonnes, float32 and float64.
+  conditions: >-
+    the residual scaled from 1e-10 to 1e10; noise_std 1 and 1e8; a spring in
+    SI units and in tonnes, float32 and float64. Not claimed for 16-bit
+    floats.
   oracle: the optimum of the unscaled problem; the iteration count.
   tests:
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual
@@ -1231,6 +2211,20 @@ claims:
     Until #203 the floor was eps times the mean of diag(JᵀJ); fit_lm's
     docstring still said so after #203 changed the code and the guide, and
     is corrected here.
+  domains:
+    f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual
+    f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system[float64]'
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-084
   area: fit_lm
@@ -1242,7 +2236,10 @@ claims:
   sources:
     - src/maddening/sysid.py:3942 (fit_lm)
     - src/maddening/sysid.py:3883 (_marquardt_step, comment)
-  conditions: one parameter of each transform in units 1e-4 and 1e4; an identity-transform parameter in units 1e-5 to 1e6; the guard off.
+  conditions: >-
+    one parameter of each transform in units 1e-4 and 1e4; an
+    identity-transform parameter in units 1e-5 to 1e6; the guard off. Not
+    claimed for 16-bit floats.
   oracle: the answer and the iteration count at unit 1.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter
@@ -1255,6 +2252,20 @@ claims:
     the floor was shared across columns.  #203 (MADD-ANO-121) made it per
     column.  With the identifiability guard on, the answer still depends on
     a parameter's units at the extremes: SYS-063 and SYS-088.
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter
+    f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system[float64]'
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-085
   area: fit_lm
@@ -1266,13 +2277,28 @@ claims:
     step no damping could make acceptable."
   sources:
     - src/maddening/sysid.py:3942 (fit_lm)
-  conditions: each way a run can end.
+  conditions: >-
+    each way a run can end. Not claimed for 16-bit floats.
   oracle: best_iteration and best_loss against losses.
   tests:
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_fit_lm_ending_on_an_accepted_step_reports_that_step
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_fit_lm_ending_on_a_rejected_step_reports_the_iterate_it_kept
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_fit_lm_stopped_by_tol_or_step_tol_reports_the_right_iterate
   status: verified
+  domains:
+    f32: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_fit_lm_ending_on_an_accepted_step_reports_that_step
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-086
   area: fit_lm
@@ -1283,13 +2309,29 @@ claims:
   sources:
     - src/maddening/sysid.py:3942 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
-  conditions: the spring with mass frozen; a per-leaf noise model.
+  conditions: >-
+    the spring with mass frozen; a per-leaf noise model. Not claimed for
+    16-bit floats.
   oracle: the truth; the iteration count against Adam's at equal budget.
   tests:
     - tests/core/test_sysid.py::test_fit_lm_recovers_k_c_in_few_iterations
     - tests/core/test_sysid.py::test_fit_lm_beats_adam_at_equal_budget
     - tests/core/test_sysid_noise_model.py::test_fit_lm_noise_std_pytree_dict
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_fit_lm_recovers_k_c_in_few_iterations
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid.py::test_fit_lm_recovers_k_c_in_few_iterations
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-087
   area: fitters
@@ -1300,11 +2342,26 @@ claims:
   sources:
     - docs/user_guide/parameters.md (System identification)
     - src/maddening/sysid.py:3625 (fit)
-  conditions: noiseless record, mass frozen.
+  conditions: >-
+    noiseless record, mass frozen. Not claimed for 16-bit floats.
   oracle: the generating values.
   tests:
     - tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec
   status: verified
+  domains:
+    f32: tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-088
   area: fit_lm
@@ -1313,7 +2370,10 @@ claims:
     answer depends neither on the residual's units nor on any parameter's".
   sources:
     - docs/user_guide/parameters.md (System identification)
-  conditions: fit_lm as called by default, hold_undetermined=True; one identity-transform parameter in units 1e-3, 1e-5 and 1e6.
+  conditions: >-
+    fit_lm as called by default, hold_undetermined=True; one
+    identity-transform parameter in units 1e-3, 1e-5 and 1e6. Not claimed
+    for 16-bit floats.
   oracle: the physical answer at unit 1.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults
@@ -1327,6 +2387,20 @@ claims:
     returned at 2.0 against 3) and at u = 1e6 (3.085), and declined with a
     RuntimeWarning at 1e-3.  Root cause SYS-063's; closed with it
     (MADD-ANO-135).
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults
+    f64: TODO-oracle
+    mixed_dtype: TODO-oracle
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # ParamSpec and the constrained coordinates
@@ -1351,6 +2425,20 @@ claims:
     - tests/core/test_param_spec_edge_cases.py::test_a_bound_that_is_not_a_real_number_is_refused
     - tests/core/test_param_spec_edge_cases.py::test_an_outward_infinity_means_exactly_none
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-101
   area: ParamSpec
@@ -1360,7 +2448,9 @@ claims:
     gives 0.5"; off its bounds the clip is jnp.clip.
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-  conditions: at, inside and outside each bound; an integer leaf; the Jacobian fit_lm forms there.
+  conditions: >-
+    at, inside and outside each bound; an integer leaf; the Jacobian fit_lm
+    forms there. Not claimed for mixed dtypes or 16-bit floats.
   oracle: the derivative; jnp.clip bit for bit off the bounds.
   tests:
     - tests/core/test_params_bounded_identity_derivative.py::test_the_derivative_at_and_around_a_bound
@@ -1368,6 +2458,20 @@ claims:
     - tests/core/test_params_bounded_identity_derivative.py::test_the_gradient_at_the_bound_is_the_derivative_into_the_range
     - tests/core/test_params_bounded_identity_derivative.py::test_the_jacobian_fit_lm_forms_at_the_bound_is_full_sized
   status: verified
+  domains:
+    f32: tests/core/test_params_bounded_identity_derivative.py::test_the_derivative_at_and_around_a_bound
+    f64: tests/core/test_params_claims_in_float64.py::test_the_clip_derivative_at_a_bound_is_one_in_float64
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_params_bounded_identity_derivative.py::test_the_gradient_at_the_bound_is_the_derivative_into_the_range
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-102
   area: ParamSpec
@@ -1377,7 +2481,9 @@ claims:
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
     - src/maddening/core/params.py:386 (ParamSpec.check)
-  conditions: a zero and a non-zero lower bound; values at and below it; large negative coordinates.
+  conditions: >-
+    a zero and a non-zero lower bound; values at and below it; large
+    negative coordinates. Not claimed for mixed dtypes or 16-bit floats.
   oracle: strict inequality and re-unconstrainability; the ValueError.
   tests:
     - tests/core/test_param_spec_edge_cases.py::test_log_constrain_is_strictly_inside_and_re_unconstrainable
@@ -1386,6 +2492,20 @@ claims:
     - tests/core/test_param_spec_edge_cases.py::test_a_log_spec_without_a_lower_bound_accepts_what_it_can_unconstrain
     - tests/core/test_param_spec_edge_cases.py::test_a_log_or_logit_transform_refuses_a_leaf_it_cannot_return
   status: verified
+  domains:
+    f32: tests/core/test_param_spec_edge_cases.py::test_log_constrain_is_strictly_inside_and_re_unconstrainable
+    f64: tests/core/test_params_claims_in_float64.py::test_a_log_spec_refuses_a_value_at_or_below_its_bound_in_float64
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-103
   area: ParamSpec
@@ -1393,12 +2513,28 @@ claims:
     transform "logit": lo < p < hi, strictly, for any coordinate.
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-  conditions: large bounds; an interval a few ulps wide.
+  conditions: >-
+    large bounds; an interval a few ulps wide. Not claimed for mixed dtypes
+    or 16-bit floats.
   oracle: strict inequality.
   tests:
     - tests/core/test_param_spec_edge_cases.py::test_logit_constrain_is_strictly_inside_for_large_bounds
     - tests/core/test_params_persistence_edge_cases.py::test_logit_clamp_strictly_inside_a_few_ulp_interval
   status: verified
+  domains:
+    f32: tests/core/test_param_spec_edge_cases.py::test_logit_constrain_is_strictly_inside_for_large_bounds
+    f64: tests/core/test_params_claims_in_float64.py::test_logit_constrain_is_strictly_inside_in_float64
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-104
   area: ParamSpec
@@ -1410,7 +2546,9 @@ claims:
     - docs/user_guide/parameters.md (ParamSpec)
     - src/maddening/core/params.py:767 (constrain)
     - docs/release_notes/v0.4.0.md (ParamSpec and the optimiser surface)
-  conditions: any coordinates, including extreme ones; list leaves.
+  conditions: >-
+    any coordinates, including extreme ones; list leaves. Not claimed for
+    mixed dtypes, 16-bit floats or vmap.
   oracle: the bounds; the round trip; jax.jit and jax.grad.
   tests:
     - tests/core/test_params_spec.py::test_constrain_inverts_unconstrain_inside_bounds
@@ -1419,6 +2557,20 @@ claims:
     - tests/core/test_params_spec.py::test_maps_are_jittable_and_differentiable
     - tests/core/test_param_spec_edge_cases.py::test_unconstrain_and_constrain_apply_the_transform_to_a_list_leaf
   status: verified
+  domains:
+    f32: tests/core/test_params_spec.py::test_constrain_lands_inside_bounds_for_any_coordinates
+    f64: tests/core/test_params_claims_in_float64.py::test_constrain_lands_inside_bounds_for_any_coordinate_in_float64
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_params_spec.py::test_maps_are_jittable_and_differentiable
+    grad: tests/core/test_params_spec.py::test_maps_are_jittable_and_differentiable
+    vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-105
   area: ParamSpec
@@ -1428,7 +2580,9 @@ claims:
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
     - src/maddening/core/graph_manager.py:6268 (check_params)
-  conditions: a leaf out of range; NaN with and without bounds; a list leaf.
+  conditions: >-
+    a leaf out of range; NaN with and without bounds; a list leaf. Not
+    claimed for mixed dtypes or 16-bit floats.
   oracle: the ValueError and the leaf it names.
   tests:
     - tests/core/test_params_spec.py::test_check_bounds_names_offending_leaf
@@ -1438,6 +2592,20 @@ claims:
     - tests/core/test_sysid_claims_edges.py::test_a_value_below_a_zero_bound_by_a_normal_amount_is_refused
   status: verified
   notes: Below a zero bound by less than the smallest normal, see SYS-109.
+  domains:
+    f32: tests/core/test_params_spec.py::test_check_bounds_names_offending_leaf
+    f64: tests/core/test_params_claims_in_float64.py::test_check_params_names_the_leaf_out_of_range_in_float64
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-106
   area: ParamSpec
@@ -1456,6 +2624,20 @@ claims:
     - tests/core/test_graph_params_api.py::test_param_specs_merge_node_declarations_and_initial_heuristic
     - tests/core/test_graph_params_api.py::test_set_param_spec_overrides_and_validates
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-107
   area: ParamSpec
@@ -1473,6 +2655,20 @@ claims:
     - tests/core/test_param_spec_edge_cases.py::test_a_spec_above_a_dict_level_is_refused_by_the_maps
     - tests/core/test_param_spec_edge_cases.py::test_a_spec_above_a_record_level_is_refused_by_the_maps
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-108
   area: ParamSpec
@@ -1490,6 +2686,20 @@ claims:
     - tests/core/test_param_spec_edge_cases.py::test_from_dict_refuses_a_bound_that_is_not_a_number
     - tests/core/test_param_spec_edge_cases.py::test_a_saved_graph_with_a_string_trainable_is_refused_on_load
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-109
   area: ParamSpec
@@ -1501,9 +2711,9 @@ claims:
     - src/maddening/core/params.py:386 (ParamSpec.check)
     - docs/user_guide/parameters.md (ParamSpec)
   conditions: >-
-    a value outside a bound of 0 by less than the smallest normal (a
-    float32 subnormal), the bound SpringDamperNode's damping and every
-    (0, None) spec has.
+    a value outside a bound of 0 by less than the smallest normal (a float32
+    subnormal), the bound SpringDamperNode's damping and every (0, None)
+    spec has. Not claimed for 16-bit floats.
   oracle: the sign of the value against the bound.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_a_value_below_a_zero_bound_is_refused_however_small
@@ -1519,6 +2729,20 @@ claims:
     log / logit a value whose distance from its bound the step's arithmetic
     flushes to zero is refused as on it (MADD-ANO-136;
     tests/core/test_bounds_checks_compare_exactly.py).
+  domains:
+    f32: tests/core/test_sysid_claims_edges.py::test_a_value_below_a_zero_bound_is_refused_however_small
+    f64: tests/core/test_params_claims_in_float64.py::test_a_value_below_a_zero_bound_by_a_float64_subnormal_is_refused
+    mixed_dtype: tests/core/test_params_claims_in_float64.py::test_a_float32_value_below_a_zero_bound_by_a_subnormal_is_refused_under_x64
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # node.params and gm.params as fitting and export see them
@@ -1533,13 +2757,29 @@ claims:
     promoted.
   sources:
     - docs/user_guide/parameters.md (Which nodes take part)
-  conditions: each kind of entry; an int-spelled trainable constant.
+  conditions: >-
+    each kind of entry; an int-spelled trainable constant. Not claimed for
+    mixed dtypes or 16-bit floats.
   oracle: the pytree's keys.
   tests:
     - tests/core/test_params_pytree_dtype.py::test_structural_entries_are_still_excluded
     - tests/core/test_params_pytree_dtype.py::test_an_integer_spelling_of_a_declared_trainable_constant_is_promoted
     - tests/core/test_params_pytree_dtype.py::test_an_integer_without_a_trainable_spec_stays_structural
   status: verified
+  domains:
+    f32: tests/core/test_params_pytree_dtype.py::test_structural_entries_are_still_excluded
+    f64: tests/core/test_params_pytree_dtype.py::test_an_integer_spelling_of_a_declared_trainable_constant_is_promoted
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-111
   area: params pytree
@@ -1558,6 +2798,20 @@ claims:
     - tests/core/test_params_pytree_dtype.py::test_an_array_parameter_keeps_the_floating_dtype_it_was_given
     - tests/core/test_params_pytree_dtype.py::test_a_compiled_graph_carries_the_working_precision_into_gm_params
   status: verified
+  domains:
+    f32: tests/core/test_params_pytree_dtype.py::test_the_default_precision_is_unchanged_without_x64
+    f64: tests/core/test_params_pytree_dtype.py::test_a_parameter_keeps_float64_when_the_user_asked_for_x64
+    mixed_dtype: tests/core/test_params_pytree_dtype.py::test_an_array_parameter_keeps_the_floating_dtype_it_was_given
+    16bit: tests/core/test_params_pytree_dtype.py::test_an_array_parameter_keeps_the_floating_dtype_it_was_given
+    jit: tests/core/test_params_pytree_dtype.py::test_a_compiled_graph_carries_the_working_precision_into_gm_params
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-112
   area: params pytree
@@ -1577,6 +2831,20 @@ claims:
     - tests/core/test_graph_params_api.py::test_unknown_node_and_unknown_key_are_errors
     - tests/core/test_graph_params_api.py::test_adaptive_path_validates_too
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: tests/core/test_graph_params_api.py::test_adaptive_path_validates_too
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: SYS-113
   area: params pytree
@@ -1589,7 +2857,11 @@ claims:
     the edit.
   sources:
     - docs/user_guide/parameters.md (Which nodes take part)
-  conditions: a declared baked leaf; an initial condition; a leaf only this graph does not exercise; a REST-style write.
+  conditions: >-
+    a declared baked leaf; an initial condition; a leaf only this graph does
+    not exercise; a REST-style write. Not claimed for float64 (x64), mixed
+    dtypes, 16-bit floats, multi-rate graphs, sub-cycled groups,
+    run_adaptive or sharded graphs.
   oracle: the ValueError at each surface; nothing serialised.
   tests:
     - tests/core/test_params_baked_leaf_refusal.py::test_a_declared_baked_leaf_edit_is_refused_by_name
@@ -1600,6 +2872,20 @@ claims:
     - tests/core/test_params_baked_leaf_refusal.py::test_a_traced_leaf_is_not_compared
     - tests/core/test_params_baked_leaf_refusal.py::test_reset_params_is_the_way_back
   status: verified
+  domains:
+    f32: tests/core/test_params_baked_leaf_refusal.py::test_a_declared_baked_leaf_edit_is_refused_by_name
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_params_baked_leaf_refusal.py::test_a_traced_leaf_is_not_compared
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: narrowed
+    checkpoint_restart: tests/core/test_params_baked_leaf_refusal.py::test_the_refused_edit_is_never_serialised
+    sharded: narrowed
 
 - id: SYS-114
   area: params pytree
@@ -1612,7 +2898,10 @@ claims:
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - src/maddening/core/graph_manager.py:5359 (reset_params)
-  conditions: an added edge; a replaced node; the profiler's recompile; a removed node; load before compile.
+  conditions: >-
+    an added edge; a replaced node; the profiler's recompile; a removed
+    node; load before compile. Not claimed for float64 (x64), mixed dtypes,
+    16-bit floats, multi-rate graphs, sub-cycled groups or sharded graphs.
   oracle: the live values; the warning.
   tests:
     - tests/core/test_params_contract_completeness.py::test_recompile_keeps_live_params
@@ -1622,6 +2911,20 @@ claims:
     - tests/core/test_params_contract_completeness.py::test_load_state_before_compile_keeps_params
     - tests/core/test_params_contract_completeness.py::test_remove_node_discards_its_params_without_warning
   status: verified
+  domains:
+    f32: tests/core/test_params_contract_completeness.py::test_recompile_keeps_live_params
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_params_contract_completeness.py::test_load_state_before_compile_keeps_params
+    sharded: narrowed
 
 - id: SYS-115
   area: params pytree
@@ -1636,7 +2939,10 @@ claims:
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - docs/validation/known_anomalies.yaml (MADD-ANO-122)
-  conditions: every mutation through the mapping; each reader and entry point; a structural write.
+  conditions: >-
+    every mutation through the mapping; each reader and entry point; a
+    structural write. Not claimed for float64 (x64), mixed dtypes, 16-bit
+    floats, vmap, predictors or warm starts, run_adaptive or sharded graphs.
   oracle: each reader's and entry point's result against gm.step's.
   tests:
     - tests/core/test_node_params_writes_are_observed.py::test_every_mutation_through_the_mapping_counts
@@ -1651,6 +2957,20 @@ claims:
     Rewritten for #203, which replaced "takes effect at the next run of any
     entry point ... or at the next compile()" with a sync on every read of
     gm.params (MADD-ANO-122).
+  domains:
+    f32: tests/core/test_node_params_writes_are_observed.py::test_a_leaf_write_reaches_every_entry_point_too
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/property/test_differential_entry_points_after_a_node_write.py::test_every_reader_reads_the_written_model
+    grad: tests/property/test_differential_entry_points_after_a_node_write.py::test_every_reader_reads_the_written_model
+    vmap: narrowed
+    multi_rate: TODO-oracle
+    sub_cycled: TODO-oracle
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: tests/core/test_node_params_writes_are_observed.py::test_load_state_supersedes_an_earlier_node_write
+    sharded: narrowed
 
 - id: SYS-116
   area: params pytree
@@ -1665,7 +2985,11 @@ claims:
     no recompile.
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-  conditions: disagreeing and agreeing writes in both orders; gm.params assigned whole; a compile that raises.
+  conditions: >-
+    disagreeing and agreeing writes in both orders; gm.params assigned
+    whole; a compile that raises. Not claimed for float64 (x64), mixed
+    dtypes, 16-bit floats, multi-rate graphs, sub-cycled groups or sharded
+    graphs.
   oracle: the value the graph runs; the compile count.
   tests:
     - tests/core/test_node_params_write_after_compile.py::test_the_later_of_two_disagreeing_writes_wins
@@ -1677,6 +3001,20 @@ claims:
   notes: >-
     Rewritten for #203: until then, two disagreeing writes since one
     compile kept gm.params' value and compile() warned.
+  domains:
+    f32: tests/core/test_node_params_write_after_compile.py::test_the_later_of_two_disagreeing_writes_wins
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: narrowed
 
 - id: SYS-117
   area: params pytree
@@ -1685,12 +3023,29 @@ claims:
     it] too"; a structural value a checkpoint does not hold stays written.
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-  conditions: a leaf write and a structural write before a load.
+  conditions: >-
+    a leaf write and a structural write before a load. Not claimed for
+    float64 (x64), mixed dtypes, 16-bit floats, multi-rate graphs,
+    sub-cycled groups or sharded graphs.
   oracle: the restored value; the pending structural write.
   tests:
     - tests/core/test_node_params_writes_are_observed.py::test_load_state_supersedes_an_earlier_node_write
     - tests/core/test_node_params_writes_are_observed.py::test_load_state_leaves_a_structural_write_it_cannot_restore_pending
   status: verified
+  domains:
+    f32: tests/core/test_node_params_writes_are_observed.py::test_load_state_supersedes_an_earlier_node_write
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_node_params_writes_are_observed.py::test_load_state_leaves_a_structural_write_it_cannot_restore_pending
+    sharded: narrowed
 
 - id: SYS-118
   area: params pytree
@@ -1701,12 +3056,29 @@ claims:
     pytree instead of guessing."
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
-  conditions: a calibrated live leaf missing from the partial pytree.
+  conditions: >-
+    a calibrated live leaf missing from the partial pytree. Not claimed for
+    float64 (x64), mixed dtypes, 16-bit floats, multi-rate graphs,
+    sub-cycled groups or sharded graphs.
   oracle: the calibrated value used; the refusal.
   tests:
     - tests/core/test_params_contract_completeness.py::test_partial_params_complete_from_live_values_through_step
     - tests/core/test_params_contract_completeness.py::test_raw_compiled_step_refuses_an_incomplete_pytree
   status: verified
+  domains:
+    f32: tests/core/test_params_contract_completeness.py::test_partial_params_complete_from_live_values_through_step
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_params_contract_completeness.py::test_raw_compiled_step_refuses_an_incomplete_pytree
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: narrowed
 
 - id: SYS-119
   area: params pytree
@@ -1716,13 +3088,30 @@ claims:
     through coupling groups too"; injected params reach flux edges.
   sources:
     - docs/user_guide/parameters.md (opening section)
-  conditions: Python-float leaves; a flux edge; a flux edge inside a coupling group.
+  conditions: >-
+    Python-float leaves; a flux edge; a flux edge inside a coupling group.
+    Not claimed for float64 (x64), mixed dtypes, 16-bit floats, vmap,
+    multi-rate graphs or sub-cycled groups.
   oracle: no retrace; finite differences of the flux.
   tests:
     - tests/core/test_params_persistence_edge_cases.py::test_python_float_params_leaves_do_not_retrace_and_survive_recompile
     - tests/core/test_params_contract_completeness.py::test_gradient_through_flux_edge_matches_finite_differences
     - tests/core/test_params_contract_completeness.py::test_flux_edge_inside_a_coupling_group_uses_injected_stiffness
   status: verified
+  domains:
+    f32: tests/core/test_params_persistence_edge_cases.py::test_python_float_params_leaves_do_not_retrace_and_survive_recompile
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: tests/core/test_params_persistence_edge_cases.py::test_python_float_params_leaves_do_not_retrace_and_survive_recompile
+    grad: tests/core/test_params_contract_completeness.py::test_gradient_through_flux_edge_matches_finite_differences
+    vmap: narrowed
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: tests/cloud/multigpu/test_sharded_params.py::test_gradient_wrt_viscosity_through_sharded_step
 
 - id: SYS-120
   area: params pytree
@@ -1733,7 +3122,10 @@ claims:
     trainable mask.
   sources:
     - docs/user_guide/parameters.md (Persistence and FMI)
-  conditions: a calibrated leaf and an override; no override.
+  conditions: >-
+    a calibrated leaf and an override; no override. Not claimed for float64
+    (x64), mixed dtypes, 16-bit floats, multi-rate graphs, sub-cycled groups
+    or sharded graphs.
   oracle: the reloaded graph's params and mask.
   tests:
     - tests/core/test_graph_params_serialization.py::test_effective_params_overlay_live_values
@@ -1741,6 +3133,20 @@ claims:
     - tests/core/test_graph_params_serialization.py::test_no_overrides_means_no_param_specs_key
     - tests/core/test_params_persistence_edge_cases.py::test_load_state_before_compile_equals_compile_then_load
   status: verified
+  domains:
+    f32: tests/core/test_graph_params_serialization.py::test_to_dict_from_dict_round_trip_calibrated_values_and_overrides
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_params_persistence_edge_cases.py::test_load_state_before_compile_equals_compile_then_load
+    sharded: narrowed
 
 - id: SYS-121
   area: params pytree
@@ -1750,12 +3156,29 @@ claims:
     a checkpoint stores the weights themselves.
   sources:
     - docs/user_guide/parameters.md (Mapping weights)
-  conditions: two mapped edges on one field pair; a checkpoint.
+  conditions: >-
+    two mapped edges on one field pair; a checkpoint. Not claimed for
+    float64 (x64), mixed dtypes, 16-bit floats, multi-rate graphs,
+    sub-cycled groups or sharded graphs.
   oracle: separate slots; the restored weights.
   tests:
     - tests/core/test_params_contract_completeness.py::test_two_mapped_edges_on_same_field_pair_get_their_own_weights
     - tests/core/test_params_persistence_edge_cases.py::test_checkpoint_carries_mapping_weights
   status: verified
+  domains:
+    f32: tests/core/test_params_contract_completeness.py::test_two_mapped_edges_on_same_field_pair_get_their_own_weights
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/core/test_params_persistence_edge_cases.py::test_checkpoint_carries_mapping_weights
+    sharded: narrowed
 
 - id: SYS-122
   area: params pytree
@@ -1774,6 +3197,20 @@ claims:
   notes: >-
     Rewritten for #203; the first edition's claim -- gm.params keeps the
     compiled value until the next compile -- is what MADD-ANO-122 changed.
+  domains:
+    f32: tests/core/test_node_params_write_after_compile.py::test_a_node_params_write_after_compile_takes_effect_at_the_next_compile
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # FMU: the package and the model description
@@ -1795,6 +3232,20 @@ claims:
     - tests/fmi/test_c_wrapper.py::test_binary_builds_and_exports_the_fmi3_symbols
     - tests/fmi/test_c_unit.py::test_wrapper_compiles_clean_with_strict_warnings
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-002
   area: packaging
@@ -1805,7 +3256,11 @@ claims:
     round-off"; FMPy's validate_fmu reports no problems.
   sources:
     - docs/user_guide/fmu_export.md (Verification)
-  conditions: a C compiler and FMPy; a single-rate graph with a set parameter and a driven input; a multi-rate graph whose timesteps do not divide (0.02 / 0.03) and a sub-cycled one.
+  conditions: >-
+    a C compiler and FMPy; a single-rate graph with a set parameter and a
+    driven input; a multi-rate graph whose timesteps do not divide (0.02 /
+    0.03) and a sub-cycled one. Not claimed for 16-bit floats or sharded
+    graphs.
   oracle: gm.run_scan / gm.run over the same simulated time.
   tests:
     - tests/fmi/test_c_wrapper.py::test_fmpy_drives_the_compiled_fmu_against_the_graph
@@ -1813,6 +3268,20 @@ claims:
     - tests/fmi/test_c_wrapper.py::test_bridge_handler_set_get_step_matches_graph
     - tests/fmi/test_fmu_claims_edges.py::test_the_compiled_fmu_is_the_graph_on_a_multi_rate_and_a_sub_cycled_graph
   status: verified
+  domains:
+    f32: tests/fmi/test_c_wrapper.py::test_fmpy_drives_the_compiled_fmu_against_the_graph
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_an_x64_graph_served_by_the_bridge_is_the_graph
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_node_in_an_x64_graph_served_by_the_bridge_is_the_graph
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: tests/fmi/test_fmu_claims_edges.py::test_the_compiled_fmu_is_the_graph_on_a_multi_rate_and_a_sub_cycled_graph
+    sub_cycled: tests/fmi/test_fmu_claims_edges.py::test_the_compiled_fmu_is_the_graph_on_a_multi_rate_and_a_sub_cycled_graph
+    predictors_warm_starts: tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: narrowed
 
 - id: FMU-003
   area: model description
@@ -1829,6 +3298,20 @@ claims:
     - tests/fmi/test_model_description.py::TestStabilityGating::test_stable_surfaces_always_included
     - tests/fmi/test_params_the_step_cannot_read.py::test_an_experimental_node_exports_no_parameter_and_lists_every_leaf_as_fixed
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-004
   area: model description
@@ -1841,7 +3324,9 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Building and packaging, Variables)
     - docs/user_guide/parameters.md (Persistence and FMI)
-  conditions: a graph with state fields, an external input and parameters; include_parameters=False.
+  conditions: >-
+    a graph with state fields, an external input and parameters;
+    include_parameters=False. Not claimed for 16-bit floats.
   oracle: the variables and their attributes; the token with and without parameters.
   tests:
     - tests/fmi/test_model_description.py::TestBuildModelDescription::test_outputs_include_state_fields
@@ -1850,6 +3335,20 @@ claims:
     - tests/fmi/test_params_causality.py::TestModelDescription::test_parameters_can_be_left_out_and_change_the_token
     - tests/fmi/test_params_causality.py::TestBoundsThroughFMI::test_model_description_emits_min_max_from_param_spec
   status: verified
+  domains:
+    f32: tests/fmi/test_params_causality.py::TestModelDescription::test_every_params_leaf_the_step_reads_is_a_tunable_parameter
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_an_x64_graph_exports_float64_variables_with_float64_bounds
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_node_in_an_x64_graph_keeps_float32_variables
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-005
   area: model description
@@ -1861,7 +3360,9 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Variables)
     - src/maddening/fmi/model_description.py:83 (FMIVariable, start)
-  conditions: Boolean, integer and float variables; a hand-built start in float form; FMPy and the FMI 3.0 schema.
+  conditions: >-
+    Boolean, integer and float variables; a hand-built start in float form;
+    FMPy and the FMI 3.0 schema. Not claimed for 16-bit floats.
   oracle: the XML attributes; schema validation; simulate_fmu with its default validation.
   tests:
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
@@ -1870,6 +3371,20 @@ claims:
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_simulate_fmu_with_its_default_validation_runs_the_fmu
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_hand_built_start_in_float_form_is_written_in_the_types_form
   status: verified
+  domains:
+    f32: tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_every_float64_start_and_bound_round_trips_through_its_lexical_form
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_node_in_an_x64_graph_keeps_float32_variables
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-006
   area: model description
@@ -1893,6 +3408,20 @@ claims:
     - tests/core/test_mapping_point_reference_writes.py::test_an_fmu_does_not_export_a_length_a_mapping_was_built_from
     - tests/core/test_mapping_point_reference_writes.py::test_an_fmu_of_unmapped_rods_still_exports_their_lengths
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-007
   area: model description
@@ -1914,6 +3443,20 @@ claims:
     - tests/fmi/test_params_the_step_cannot_read.py::test_the_bridge_set_state_refuses_an_archive_that_changes_a_fixed_parameter
     - tests/fmi/test_params_the_step_cannot_read.py::test_the_compiled_fmu_returns_fmi3_error_for_such_an_archive
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-008
   area: model description
@@ -1934,6 +3477,20 @@ claims:
     - tests/fmi/test_a_node_name_holding_params_has_settable_parameters.py::test_its_parameter_is_set_and_read_back
     - tests/fmi/test_a_node_name_holding_params_has_settable_parameters.py::test_the_bridge_uses_the_pair_the_variable_carries_not_the_name
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-009
   area: model description
@@ -1950,6 +3507,20 @@ claims:
     - tests/fmi/test_non_finite_json_tokens.py::test_a_model_name_spelling_a_non_finite_token_is_refused_at_build_time
     - tests/fmi/test_non_finite_json_tokens.py::test_a_model_name_that_only_looks_like_a_token_is_accepted
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-010
   area: model description
@@ -1971,6 +3542,20 @@ claims:
     - tests/fmi/test_the_token_covers_what_the_description_advertises.py::test_an_fmu_with_other_start_values_does_not_instantiate_against_the_bridge
     - tests/fmi/test_fmu_claims_edges.py::test_the_token_covers_value_references_and_shapes
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-011
   area: model description
@@ -1990,6 +3575,20 @@ claims:
     - tests/fmi/test_default_step_is_one_graph_step.py::test_an_explicit_default_step_size_still_wins
     - tests/fmi/test_default_step_is_one_graph_step.py::test_a_sub_cycled_member_is_on_its_groups_clock
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: tests/fmi/test_default_step_is_one_graph_step.py::test_the_default_step_is_one_graph_step
+    sub_cycled: tests/fmi/test_default_step_is_one_graph_step.py::test_a_sub_cycled_member_is_on_its_groups_clock
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-012
   area: model description
@@ -2020,6 +3619,20 @@ claims:
     each other; otherwise the default step is their GCD (nodes at 0.02 and
     0.03 run on a 0.01 step under clocks of 0.02 and 0.03).
   notes: The guide and build_model_description's docstring disagree; the docstring is right.
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: tests/fmi/test_multi_clock.py::test_one_clock_per_distinct_timestep_and_outputs_tagged
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-013
   area: model description
@@ -2042,6 +3655,20 @@ claims:
     stepSize, default-exported parameters); the model_description
     docstrings and the release notes said the single-clock surface was
     "unchanged".  Reworded here.
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: tests/fmi/test_fmu_claims_edges.py::test_a_single_clock_export_carries_no_clock
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-014
   area: model description
@@ -2053,7 +3680,10 @@ claims:
   sources:
     - src/maddening/fmi/model_description.py:683 (build_model_description, selected_inputs)
     - docs/user_guide/fmu_export.md (Variables)
-  conditions: an undeclared name; an omitted input; a restore; an importer driving the partial FMU.
+  conditions: >-
+    an undeclared name; an omitted input; a restore; an importer driving the
+    partial FMU. Not claimed for float64 (x64), mixed dtypes, multi-rate
+    graphs or sub-cycled groups.
   oracle: held_inputs; the warning; the graph stepped with the input at zero.
   tests:
     - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_description_lists_the_inputs_it_holds_at_zero
@@ -2062,6 +3692,20 @@ claims:
     - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_held_inputs_are_not_in_the_fmu_state_and_a_restore_keeps_them_at_zero
     - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_an_importer_driving_the_partial_fmu_reproduces_the_graph
   status: verified
+  domains:
+    f32: tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_bridge_holds_an_unexported_input_at_zero_like_the_graph
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_held_inputs_are_not_in_the_fmu_state_and_a_restore_keeps_them_at_zero
+    sharded: n/a
 
 - id: FMU-015
   area: model description
@@ -2072,7 +3716,9 @@ claims:
     the bounds.
   sources:
     - docs/user_guide/fmu_export.md (Variables, The trust boundary)
-  conditions: a parameter started below its lower bound; a legal set; a forged archive.
+  conditions: >-
+    a parameter started below its lower bound; a legal set; a forged
+    archive. Not claimed for float64 (x64), mixed dtypes or 16-bit floats.
   oracle: the start; the restore on both paths; the refusals.
   tests:
     - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_the_fixture_starts_outside_the_declared_bound
@@ -2080,6 +3726,20 @@ claims:
     - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_set_params_still_holds_a_set_value_to_the_bounds
     - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_both_restore_paths_judge_a_forged_value_alike
   status: verified
+  domains:
+    f32: tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_the_fixture_starts_outside_the_declared_bound
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_the_instantiation_snapshot_restores_after_a_legal_set
+    sharded: n/a
 
 - id: FMU-016
   area: model description
@@ -2089,7 +3749,9 @@ claims:
     advertised as the nearest representable value inside it.
   sources:
     - src/maddening/fmi/model_description.py:83 (FMIVariable, min / max)
-  conditions: log with a zero and a non-zero lower bound; logit; inclusive identity bounds; no bounds.
+  conditions: >-
+    log with a zero and a non-zero lower bound; logit; inclusive identity
+    bounds; no bounds. Not claimed for 16-bit floats.
   oracle: the advertised attribute against the float32 envelope.
   tests:
     - tests/fmi/test_advertised_bounds.py::test_log_leaf_with_zero_bound_advertises_smallest_normal
@@ -2098,6 +3760,20 @@ claims:
     - tests/fmi/test_advertised_bounds.py::test_inclusive_identity_bounds_are_unchanged
     - tests/fmi/test_advertised_bounds.py::test_a_parameter_the_description_bounds_nowhere_stays_unbounded
   status: verified
+  domains:
+    f32: tests/fmi/test_advertised_bounds.py::test_log_leaf_with_zero_bound_advertises_smallest_normal
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_an_open_bound_is_advertised_as_the_nearest_float64_inside_it
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_parameter_in_an_x64_graph_advertises_the_float32_envelope
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-017
   area: model description
@@ -2128,6 +3804,20 @@ claims:
   notes: >-
     The C stub's fmi3Error is in maddening_fmu.c (fmi3GetDirectionalDerivative);
     no test calls it.
+  domains:
+    f32: tests/fmi/test_params_causality.py::TestDirectionalDerivativeWrtParameter::test_forward_mode_wrt_stiffness_matches_grad
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: tests/fmi/test_params_causality.py::TestDirectionalDerivativeWrtParameter::test_forward_mode_wrt_stiffness_matches_grad
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-018
   area: model description
@@ -2145,6 +3835,20 @@ claims:
     - tests/fmi/test_c_unit.py::test_c_unit_tests
     - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_the_clock_functions_are_refused_for_any_value_reference
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # FMU: the bridge's stepping and time
@@ -2160,7 +3864,11 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Building and packaging)
     - src/maddening/fmi/tcp_bridge.py:762 (FmuTcpBridge, master_dt)
-  conditions: uniform, multi-rate not dividing (0.02 / 0.03), multi-rate dividing, sub-cycled; a coarser advertised step; a multi-clock description; a hand-built one.
+  conditions: >-
+    uniform, multi-rate not dividing (0.02 / 0.03), multi-rate dividing,
+    sub-cycled; a coarser advertised step; a multi-clock description; a
+    hand-built one. Not claimed for 16-bit floats, predictors or warm starts
+    or checkpoint restarts.
   oracle: gm.run over the same simulated time; the ValueError.
   tests:
     - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_a_master_dt_other_than_the_graph_step_is_refused
@@ -2171,6 +3879,20 @@ claims:
     - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_master_dt_must_be_a_positive_finite_number
     - tests/fmi/test_bridge_security_and_stepping.py::test_step_must_be_a_whole_multiple_of_master_dt
   status: verified
+  domains:
+    f32: tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_at_the_graph_step_the_fmu_is_the_graph_at_the_time_it_reports
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_an_x64_graph_served_by_the_bridge_is_the_graph
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_node_in_an_x64_graph_served_by_the_bridge_is_the_graph
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_at_the_graph_step_the_fmu_is_the_graph_at_the_time_it_reports
+    sub_cycled: tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_at_the_graph_step_the_fmu_is_the_graph_at_the_time_it_reports
+    predictors_warm_starts: narrowed
+    adaptive: n/a
+    checkpoint_restart: narrowed
+    sharded: n/a
 
 - id: FMU-021
   area: bridge stepping
@@ -2188,6 +3910,20 @@ claims:
     - tests/fmi/test_one_step_request_is_bounded_and_stoppable.py::test_a_long_step_stops_at_the_first_graph_step_after_stop
     - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_max_steps_per_request_must_be_a_positive_integer
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-022
   area: bridge stepping
@@ -2201,7 +3937,10 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Instances and time)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Instances)
-  conditions: a second connection; reset; a refused second connection; an in-process caller; FMPy twice.
+  conditions: >-
+    a second connection; reset; a refused second connection; an in-process
+    caller; FMPy twice. Not claimed for float64 (x64), mixed dtypes or
+    16-bit floats.
   oracle: the start values; the warning; identical runs.
   tests:
     - tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_a_connection_that_claims_the_slot_starts_from_the_start_values
@@ -2210,6 +3949,20 @@ claims:
     - tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_a_sidecar_configured_away_from_the_description_starts_at_the_description
     - tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_simulate_fmu_twice_with_the_same_arguments_gives_the_same_result
   status: verified
+  domains:
+    f32: tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_a_connection_that_claims_the_slot_starts_from_the_start_values
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_a_new_instance_starts_at_the_start_values.py::test_reset_and_a_new_instance_land_on_the_same_point
+    sharded: n/a
 
 - id: FMU-023
   area: bridge stepping
@@ -2223,7 +3976,11 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Instances and time)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Instances)
-  conditions: a jump; a point inside the tolerance; rounded points over a long run; step sizes either side of the tolerance; a restore; the compiled wrapper.
+  conditions: >-
+    a jump; a point inside the tolerance; rounded points over a long run;
+    step sizes either side of the tolerance; a restore; the compiled
+    wrapper. Not claimed for mixed dtypes, 16-bit floats, multi-rate graphs
+    or sub-cycled groups.
   oracle: the time variable and the state.
   tests:
     - tests/fmi/test_communication_points.py::test_a_discontinuous_communication_point_is_refused_and_advances_nothing
@@ -2235,6 +3992,20 @@ claims:
     - tests/fmi/test_communication_points.py::test_a_step_outside_the_tolerance_is_refused_and_advances_nothing
     - tests/fmi/test_communication_points.py::test_the_wrapper_reports_the_start_time_and_refuses_a_jump
   status: verified
+  domains:
+    f32: tests/fmi/test_communication_points.py::test_a_point_within_the_tolerance_is_adopted
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_communication_points_of_an_x64_graph_are_held_to_the_same_tolerance
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_communication_points.py::test_restoring_an_fmu_state_moves_the_clock_to_the_snapshot
+    sharded: n/a
 
 - id: FMU-025
   area: bridge stepping
@@ -2254,6 +4025,20 @@ claims:
     - tests/fmi/test_a_terminated_instance_only_reads_until_reset.py::test_reset_and_a_new_instance_start_it_again
     - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_a_terminated_instance_refuses_to_step_set_and_initialize_until_reset
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # FMU: values, types and the write doors
@@ -2272,7 +4057,8 @@ claims:
     - src/maddening/fmi/tcp_bridge.py:723 (checked_value)
   conditions: >-
     a value past FLT_MAX; a non-zero value below a float32's smallest
-    subnormal, of either sign; a value that rounds to a subnormal.
+    subnormal, of either sign; a value that rounds to a subnormal. Not
+    claimed for 16-bit floats.
   oracle: the reply and the value read back.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_a_float32_value_beyond_its_range_at_either_end_is_refused
@@ -2286,6 +4072,20 @@ claims:
     FmuSidecar.set_params, and REST's twin of it, refuse a non-zero value
     whose cast is +-0.  "Representable" cannot mean exact (0.1 is not a
     float32); the guide now says "in range".
+  domains:
+    f32: tests/fmi/test_fmu_claims_edges.py::test_a_float32_value_beyond_its_range_at_either_end_is_refused
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_a_float64_variable_is_checked_in_its_own_type
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_variable_of_an_x64_graph_is_still_checked_as_float32
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 - id: FMU-026
   area: values
   claim: >-
@@ -2297,7 +4097,9 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Variables, Float64 on the wire)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Types)
-  conditions: JSON and binary sets; gets; the compiled wrapper.
+  conditions: >-
+    JSON and binary sets; gets; the compiled wrapper. Not claimed for 16-bit
+    floats.
   oracle: the refusal with nothing written.
   tests:
     - tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_set_of_another_type_is_refused_and_writes_nothing
@@ -2308,6 +4110,20 @@ claims:
     - tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_clock_takes_no_numeric_set
     - tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_each_variable_is_read_only_through_the_getter_of_its_type
   status: verified
+  domains:
+    f32: tests/fmi/test_an_fmi_call_addresses_only_variables_of_its_type.py::test_a_set_of_another_type_is_refused_and_writes_nothing
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_a_float64_variable_is_addressed_only_as_float64
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_variable_of_an_x64_graph_is_still_checked_as_float32
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-027
   area: values
@@ -2325,6 +4141,20 @@ claims:
     - tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_an_archive_with_a_fraction_in_a_boolean_member_does_not_restore
     - tests/fmi/test_a_boolean_takes_true_false_or_exactly_0_1.py::test_set_params_holds_a_boolean_parameter_to_the_same_rule
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-028
   area: values
@@ -2342,6 +4172,20 @@ claims:
     - tests/fmi/test_the_fmu_takes_numbers_only.py::test_step_refuses_a_time_that_is_not_a_number
     - tests/fmi/test_the_fmu_takes_numbers_only.py::test_set_params_refuses_what_set_refuses
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-029
   area: values
@@ -2359,6 +4203,20 @@ claims:
     - tests/fmi/test_bridge_inputs_and_robustness.py::test_failed_sub_step_leaves_state_and_time_untouched
     - tests/fmi/test_bridge_inputs_and_robustness.py::test_unset_input_is_the_advertised_zero_like_the_graph
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-030
   area: sidecar
@@ -2369,7 +4227,9 @@ claims:
     GraphManager.step cannot serve -- it takes no state".
   sources:
     - src/maddening/fmi/sidecar.py:364 (SidecarConfig, step_fn)
-  conditions: a sidecar on gm._compiled_step with params; one on gm.step.
+  conditions: >-
+    a sidecar on gm._compiled_step with params; one on gm.step. Not claimed
+    for float64 (x64), mixed dtypes or 16-bit floats.
   oracle: gm.step's state after one step; the TypeError.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_a_sidecar_on_the_compiled_step_steps_as_the_graph_does
@@ -2378,6 +4238,20 @@ claims:
     Failing in the first edition: the docstring said "Typically
     GraphManager.step bound to a particular graph", which raises TypeError
     at the first step.  Reworded here.
+  domains:
+    f32: tests/fmi/test_fmu_claims_edges.py::test_a_sidecar_on_the_compiled_step_steps_as_the_graph_does
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-031
   area: sidecar
@@ -2397,6 +4271,20 @@ claims:
     - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_a_configured_resolver_is_kept_by_the_bridge
     - tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_a_sidecar_without_a_resolver_steps_with_what_it_is_given
   status: verified
+  domains:
+    f32: tests/fmi/test_unexported_inputs_are_held_at_zero.py::test_the_sidecar_with_the_graphs_resolver_steps_like_the_graph
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-032
   area: sidecar
@@ -2410,7 +4298,9 @@ claims:
   sources:
     - src/maddening/fmi/sidecar.py:596 (FmuSidecar.set_params)
     - docs/user_guide/parameters.md (Persistence and FMI)
-  conditions: each refused value; a multi-entry update with one bad entry; no params config.
+  conditions: >-
+    each refused value; a multi-entry update with one bad entry; no params
+    config. Not claimed for 16-bit floats.
   oracle: the refusal with nothing written; the next step against the graph's.
   tests:
     - tests/fmi/test_params_causality.py::TestSidecar::test_set_params_changes_next_step_without_recompile
@@ -2420,6 +4310,20 @@ claims:
     - tests/fmi/test_params_causality.py::TestBoundsThroughFMI::test_set_params_rejects_out_of_bounds_atomically
     - tests/fmi/test_params_causality.py::TestSidecar::test_set_params_without_params_config_errors
   status: verified
+  domains:
+    f32: tests/fmi/test_params_causality.py::TestSidecar::test_set_params_refuses_values_the_leaf_cannot_hold
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_set_params_holds_a_float64_leaf_to_float64
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_set_params_holds_a_float32_leaf_of_an_x64_graph_to_float32
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-033
   area: sidecar
@@ -2432,13 +4336,29 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Variables)
     - src/maddening/fmi/sidecar.py:364 (SidecarConfig, param_specs)
-  conditions: a sidecar without param_specs behind a bridge; one with its own specs.
+  conditions: >-
+    a sidecar without param_specs behind a bridge; one with its own specs.
+    Not claimed for float64 (x64), mixed dtypes or 16-bit floats.
   oracle: the refusal; the specs object untouched.
   tests:
     - tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs
     - tests/fmi/test_advertised_bounds.py::test_the_sidecars_own_specs_are_kept_and_not_written_into
     - tests/fmi/test_params_causality.py::TestBoundsThroughFMI::test_sidecar_without_specs_keeps_old_behaviour
   status: verified
+  domains:
+    f32: tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-034
   area: FMU state
@@ -2450,7 +4370,10 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (The trust boundary)
     - src/maddening/fmi/sidecar.py:675 (FmuSidecar.set_fmu_state)
-  conditions: archives with an out-of-bounds parameter, a non-finite field or input, a value the dtype cannot hold, new mapping weights; the sidecar's restore.
+  conditions: >-
+    archives with an out-of-bounds parameter, a non-finite field or input, a
+    value the dtype cannot hold, new mapping weights; the sidecar's restore.
+    Not claimed for float64 (x64), mixed dtypes or 16-bit floats.
   oracle: the refusal with nothing committed; a healthy snapshot round-tripping.
   tests:
     - tests/fmi/test_fmu_state_archive_values.py::test_an_archive_cannot_set_a_parameter_outside_its_declared_bounds
@@ -2462,6 +4385,20 @@ claims:
     - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_the_sidecars_own_restore_door_refuses_the_same_weights
     - tests/fmi/test_params_causality.py::TestSnapshotValues::test_set_fmu_state_refuses_what_the_bridge_set_state_refuses
   status: verified
+  domains:
+    f32: tests/fmi/test_fmu_state_archive_values.py::test_no_archive_can_install_a_parameter_value_that_set_would_refuse
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_fmu_state_archive_values.py::test_a_refused_archive_commits_nothing_at_all
+    sharded: n/a
 
 - id: FMU-035
   area: FMU state
@@ -2483,6 +4420,20 @@ claims:
     - tests/fmi/test_fmu_restores_a_parameter_started_outside_its_bounds.py::test_a_field_that_became_non_finite_still_does_not_restore
     - tests/fmi/test_params_causality.py::TestSnapshotValues::test_set_fmu_state_refuses_a_snapshot_whose_keys_differ_as_the_bridge_does
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_an_fmu_state_archive_carries_every_pending_input.py::test_an_archive_missing_an_input_member_is_refused_and_restores_nothing
+    sharded: n/a
 
 - id: FMU-036
   area: FMU state
@@ -2504,6 +4455,20 @@ claims:
     - tests/fmi/test_bridge_security_and_stepping.py::test_set_state_round_trip_still_passes_the_directory_check
     - tests/fmi/test_bridge_inputs_and_robustness.py::test_state_member_larger_than_the_model_is_refused_before_loading
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_bridge_security_and_stepping.py::test_set_state_never_unpickles
+    sharded: n/a
 
 - id: FMU-037
   area: FMU state
@@ -2528,6 +4493,20 @@ claims:
     - tests/fmi/test_fmu_state.py::TestNoPickle::test_a_non_string_key_is_refused_at_snapshot_time
     - tests/fmi/test_params_causality.py::TestSidecar::test_fmu_state_round_trip_carries_params
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_fmu_state.py::TestRoundTrip::test_basic_round_trip
+    sharded: n/a
 
 - id: FMU-038
   area: FMU state
@@ -2543,6 +4522,20 @@ claims:
     - tests/fmi/test_binary_frames.py::test_binary_state_round_trip_carries_raw_npz
     - tests/fmi/test_binary_frames.py::test_json_only_client_sees_protocol_one_behaviour_unchanged
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_binary_frames.py::test_binary_state_round_trip_carries_raw_npz
+    sharded: n/a
 
 - id: FMU-039
   area: values
@@ -2556,7 +4549,7 @@ claims:
     - src/maddening/fmi/sidecar.py:596 (FmuSidecar.set_params)
   conditions: >-
     a value below an advertised min of 0 by less than the smallest normal
-    float32.
+    float32. Not claimed for 16-bit floats.
   oracle: the reply, and the value read back against the advertised min.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal
@@ -2567,6 +4560,20 @@ claims:
     -1e-40 answered ok and read back -9.99995e-41, because the sidecar's
     bounds check, ParamSpec.check, compared through jnp and so flushed the
     subnormal to zero (SYS-109).  Closed with it (MADD-ANO-136).
+  domains:
+    f32: tests/fmi/test_fmu_claims_edges.py::test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_a_float64_parameter_cannot_be_set_below_its_min_by_a_float64_subnormal
+    mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_parameter_of_an_x64_graph_cannot_be_set_below_its_min_by_a_float32_subnormal
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-040
   area: graph agreement
@@ -2578,7 +4585,10 @@ claims:
     - docs/user_guide/fmu_export.md (Verification)
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - docs/validation/known_anomalies.yaml (MADD-ANO-122)
-  conditions: a node.params write pending since the last compile when the description and the sidecar are built.
+  conditions: >-
+    a node.params write pending since the last compile when the description
+    and the sidecar are built. Not claimed for float64 (x64), mixed dtypes,
+    16-bit floats, predictors or warm starts or checkpoint restarts.
   oracle: gm.run over the same simulated time; the start the description advertises.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs
@@ -2589,6 +4599,20 @@ claims:
     the bridge ran it (0.52176 after five steps) while gm.run ran the
     written 60 (0.54321).  #203's sync on reading gm.params (MADD-ANO-122)
     closed it.
+  domains:
+    f32: tests/fmi/test_fmu_claims_edges.py::test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: TODO-oracle
+    sub_cycled: TODO-oracle
+    predictors_warm_starts: narrowed
+    adaptive: n/a
+    checkpoint_restart: narrowed
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # FMU: transport
@@ -2613,6 +4637,20 @@ claims:
     - tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_an_fmu_state_frame_over_the_limit_is_refused_and_the_instance_lives
     - tests/fmi/test_c_wrapper.py::test_wire_framing_over_a_real_socket
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-042
   area: transport
@@ -2633,6 +4671,20 @@ claims:
     - tests/fmi/test_binary_frames.py::test_binary_frame_before_a_binary_hello_is_refused
     - tests/fmi/test_binary_frames.py::test_json_only_client_sees_protocol_one_behaviour_unchanged
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-043
   area: transport
@@ -2644,7 +4696,10 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Float64 on the wire)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring)
-  conditions: any float64 payload; a diverged model's get; a pre-0.4.0 peer's frame; the compiled wrapper over JSON.
+  conditions: >-
+    any float64 payload; a diverged model's get; a pre-0.4.0 peer's frame;
+    the compiled wrapper over JSON. Not claimed for mixed dtypes or 16-bit
+    floats.
   oracle: bitwise round trips; strict JSON; the wrapper's values.
   tests:
     - tests/fmi/test_binary_frames.py::test_binary_set_get_round_trip_matches_the_json_path
@@ -2653,6 +4708,20 @@ claims:
     - tests/fmi/test_non_finite_json_tokens.py::test_a_frame_from_a_pre_040_peer_still_decodes
     - tests/fmi/test_non_finite_json_tokens.py::test_the_compiled_wrapper_reads_a_diverged_get_over_json
   status: verified
+  domains:
+    f32: tests/fmi/test_binary_frames.py::test_binary_set_get_round_trip_matches_the_json_path
+    f64: tests/fmi/test_fmu_claims_in_float64.py::test_an_x64_graphs_values_cross_the_wire_bit_for_bit
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-044
   area: transport
@@ -2672,6 +4741,20 @@ claims:
     - tests/fmi/test_bridge_inputs_and_robustness.py::test_malformed_request_gets_an_error_reply_not_a_disconnect
     - tests/fmi/test_binary_frames_properties.py::test_every_binary_request_gets_a_reply_and_the_connection_survives
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-045
   area: transport
@@ -2692,6 +4775,20 @@ claims:
     - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_an_importer_under_a_comma_decimal_locale_steps_the_fmu
     - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_a_refused_step_after_a_restore_reports_the_restored_time
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-046
   area: transport
@@ -2708,6 +4805,20 @@ claims:
     - tests/fmi/test_bridge_value_references.py::test_get_refuses_a_value_reference_that_is_not_an_integer
     - tests/fmi/test_bridge_value_references.py::test_integer_value_references_are_still_served
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-047
   area: FMU state
@@ -2723,6 +4834,20 @@ claims:
     - tests/fmi/test_fmu_state_nodes_without_fields.py::test_the_sidecar_restores_a_snapshot_of_a_node_without_fields
     - tests/fmi/test_fmu_state_nodes_without_fields.py::test_a_snapshot_that_omits_a_node_without_fields_still_restores_it
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: tests/fmi/test_fmu_state_nodes_without_fields.py::test_the_bridge_restores_its_own_snapshot_of_a_node_without_fields
+    sharded: n/a
 
 # ---------------------------------------------------------------------------
 # FMU: the trust boundary
@@ -2749,6 +4874,20 @@ claims:
     - tests/fmi/test_bridge_connection_lifecycle.py::test_a_peer_that_dribbles_a_frame_is_dropped_at_the_frame_deadline
     - tests/fmi/test_bridge_connection_lifecycle.py::test_an_established_connection_that_goes_silent_is_dropped
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-051
   area: trust boundary
@@ -2771,6 +4910,20 @@ claims:
     - tests/fmi/test_bridge_security_and_stepping.py::test_second_instance_on_one_bridge_is_refused_not_blocked
     - tests/fmi/test_bridge_security_and_stepping.py::test_a_reconnecting_instance_waits_out_the_previous_ones_hand_over
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-052
   area: trust boundary
@@ -2792,6 +4945,20 @@ claims:
     - tests/fmi/test_bridge_stop_commits_nothing.py::test_a_step_still_running_when_stop_returns_commits_nothing
     - tests/fmi/test_bridge_stop_commits_nothing.py::test_a_stopped_bridge_refuses_every_op_that_would_change_the_model
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-053
   area: trust boundary
@@ -2809,6 +4976,20 @@ claims:
     - tests/fmi/test_bridge_connection_lifecycle.py::test_idle_timeout_none_keeps_a_silent_connection
     - tests/fmi/test_bridge_connection_lifecycle.py::test_idle_timeout_must_be_a_positive_number_or_none
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-054
   area: trust boundary
@@ -2826,6 +5007,20 @@ claims:
     - tests/fmi/test_bridge_unauthenticated_access.py::test_the_default_bind_is_loopback
     - tests/fmi/test_bridge_unauthenticated_access.py::test_an_unrelated_local_process_reads_writes_and_steps_the_model_with_no_secret
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-055
   area: trust boundary
@@ -2841,6 +5036,20 @@ claims:
   tests:
     - tests/fmi/test_sidecar.py::TestWireProtocol::test_the_pickled_rpc_protocol_is_refused_unless_opted_into
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-056
   area: trust boundary
@@ -2859,6 +5068,20 @@ claims:
     - tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_a_deadline_that_is_not_a_number_of_seconds_fails_instantiation
     - tests/fmi/test_c_unit.py::test_c_unit_tests
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-057
   area: directional derivatives
@@ -2869,7 +5092,9 @@ claims:
   sources:
     - src/maddening/fmi/directional_derivatives.py:55 (get_directional_derivative)
     - src/maddening/fmi/sidecar.py:364 (SidecarConfig, unknown_fn)
-  conditions: dense functions and pytrees, both modes; no unknown_fn.
+  conditions: >-
+    dense functions and pytrees, both modes; no unknown_fn. Not claimed for
+    float64 (x64), mixed dtypes or 16-bit floats.
   oracle: the dense Jacobian; the two modes against each other.
   tests:
     - tests/fmi/test_directional_derivatives.py::TestForwardMode::test_jvp_matches_dense_jacobian_product
@@ -2878,6 +5103,20 @@ claims:
     - tests/fmi/test_directional_derivatives.py::TestErrors::test_unknown_kind_rejected
     - tests/fmi/test_sidecar.py::TestGetDirectionalDerivative::test_get_dd_without_unknown_fn_raises
   status: verified
+  domains:
+    f32: tests/fmi/test_directional_derivatives.py::TestForwardMode::test_jvp_matches_dense_jacobian_product
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: tests/fmi/test_directional_derivatives.py::TestRoundTrip::test_forward_and_reverse_agree
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
 
 - id: FMU-058
   area: model description
@@ -2894,3 +5133,17 @@ claims:
     - tests/fmi/test_model_description.py::TestFMIVariable::test_invalid_variability_rejected
     - tests/fmi/test_model_description.py::TestFMIVariable::test_invalid_dtype_rejected
   status: verified
+  domains:
+    f32: n/a
+    f64: n/a
+    mixed_dtype: n/a
+    16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a

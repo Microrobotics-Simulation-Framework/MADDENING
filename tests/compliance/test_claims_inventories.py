@@ -106,6 +106,11 @@ NUMERIC_DOMAINS = (
 DOMAIN_SETS: dict[str, tuple[str, ...]] = {"numeric": NUMERIC_DOMAINS}
 NOT_APPLICABLE = "n/a"
 NARROWED = "narrowed"
+#: Cells waiting on a parallel branch: an oracle that will cover them, or a
+#: fix PR whose tests will.  Temporary while those branches are open; the
+#: matrix is complete only when none is left (PENDING_ALLOWED False).
+PENDING = ("TODO-oracle", "TODO-fix")
+PENDING_ALLOWED = True
 #: A narrowed domain is excluded by a clause that starts with this and runs
 #: to the end of the row's ``conditions``.
 NARROWING_LEAD = "Not claimed for"
@@ -137,14 +142,18 @@ COVERING_PHRASES: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
     (re.compile(r"\b(?:any|every|all) graphs?\b", re.IGNORECASE), ("multi_rate", "sub_cycled")),
 )
 #: What a tested cell's test must say somewhere in its source (its node id,
-#: its decorators, its body and the definitions it names, two levels
+#: its decorators, its body and the definitions it names, three levels
 #: deep): the domain's own vocabulary.  A floor, not a proof.
 DOMAIN_WITNESS: dict[str, re.Pattern] = {
     name: re.compile(pattern, re.IGNORECASE) for name, pattern in (
-        ("f64", r"x64|float64"),
+        # float64 state exists only under x64; "float64" alone is usually an
+        # oracle's precision, not the domain under test.
+        ("f64", r"x64"),
         ("16bit", r"float16|bfloat16|sixteen"),
         ("jit", r"jit|compile|run_scan|\.step\(|\.run\(|lax\.|while_loop|fori_loop"),
-        ("grad", r"grad|jvp|vjp|jacfwd|jacrev|jacobian|hessian|linearize|derivative|\bfit\w*\("),
+        # The fitters and fim differentiate the loss or residual they are given.
+        ("grad", r"grad|jvp|vjp|jacfwd|jacrev|jacobian|hessian|linearize|derivative|"
+                 r"\bfit\w*\(|\bfim\w*\("),
         ("vmap", r"vmap|run_sweep"),
         ("multi_rate", r"multi.?rate|rate.?divider|start_step"),
         ("sub_cycled", r"sub.?cycl"),
@@ -396,7 +405,8 @@ def domain_problems(row: dict, domains: tuple[str, ...] | None) -> list[str]:
             continue
         value = cells[d]
         narrowed = value == NARROWED
-        if not (narrowed or value == NOT_APPLICABLE or cell_tests(value) is not None):
+        pending = PENDING_ALLOWED and value in PENDING
+        if not (narrowed or pending or value == NOT_APPLICABLE or cell_tests(value) is not None):
             problems.append(f"{where}: domain {d}: {value!r} is not a node id, a list of them, "
                             f"'{NARROWED}' or '{NOT_APPLICABLE}'")
         if narrowed and d not in excluded:
@@ -577,10 +587,18 @@ def _module(rel: str, repo_root: Path = REPO_ROOT):
             for t in targets:
                 if isinstance(t, ast.Name):
                     defs[t.id] = (rel, stmt)
-        elif isinstance(stmt, ast.ImportFrom) and stmt.module and stmt.module.startswith("tests."):
-            other = stmt.module.replace(".", "/") + ".py"
+        elif isinstance(stmt, ast.ImportFrom) and stmt.module and stmt.module.startswith("tests"):
             for alias in stmt.names:
-                defs.setdefault(alias.asname or alias.name, (other, alias.name))
+                as_module = f"{stmt.module}.{alias.name}".replace(".", "/") + ".py"
+                if (repo_root / as_module).is_file():     # from tests.x import module
+                    defs.setdefault(alias.asname or alias.name, (as_module, None))
+                else:
+                    defs.setdefault(alias.asname or alias.name,
+                                    (stmt.module.replace(".", "/") + ".py", alias.name))
+        elif isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                if alias.name.startswith("tests.") and alias.asname:
+                    defs.setdefault(alias.asname, (alias.name.replace(".", "/") + ".py", None))
     return text, tree, defs
 
 
@@ -593,6 +611,8 @@ def _segment(text: str, node) -> str:
 def _resolve(entry, repo_root: Path):
     """A definition entry ``(file, node)`` or an import ``(file, name)`` -> ``(text, node)``."""
     rel, node = entry
+    if node is None:                    # a module alias: nothing to read by itself
+        return None
     if isinstance(node, str):           # imported from another test module
         mod = _module(rel, repo_root)
         if mod is None or node not in mod[2] or isinstance(mod[2][node][1], str):
@@ -602,12 +622,13 @@ def _resolve(entry, repo_root: Path):
     return None if mod is None else (mod[0], node, mod[2])
 
 
-def source_of_test(nodeid: str, repo_root: Path = REPO_ROOT, depth: int = 2) -> str | None:
+def source_of_test(nodeid: str, repo_root: Path = REPO_ROOT, depth: int = 3) -> str | None:
     """The text a tested cell's witness is looked for in, or None if the test
     cannot be found: the node id, the test with its decorators (and its
     class's), the module's ``pytestmark``, and every module-level definition
     the test names -- a helper, a fixture, a constant, one imported from
-    another test module -- and the ones those name, *depth* levels deep."""
+    another test module, ``alias.name`` of a test module imported as
+    ``alias`` -- and the ones those name, *depth* levels deep."""
     rel, *names = nodeid.split("[", 1)[0].split("::")
     mod = _module(rel, repo_root)
     if mod is None or not names:
@@ -621,25 +642,41 @@ def source_of_test(nodeid: str, repo_root: Path = REPO_ROOT, depth: int = 2) -> 
     if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or len(names) > 2:
         return None
     pieces = [nodeid, _segment(text, func)]
+    scope, members = defs, {}
     if owner is not None:
         pieces += [ast.unparse(d) for d in owner.decorator_list]
+        # The class's own helpers and fixtures, reached as ``self.name`` or
+        # by a fixture argument, shadow the module's.
+        members = {s.name: (rel, s) for s in owner.body
+                   if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        scope = {**defs, **members}
     if "pytestmark" in defs and not isinstance(defs["pytestmark"][1], str):
         pieces.append(_segment(text, defs["pytestmark"][1]))
     seen: set[int] = {id(func)}
-    frontier = [(text, func, defs)]
+    frontier = [(text, func, scope)]
     for _ in range(depth):
         nxt = []
         for src, node, scope in frontier:
             names_used = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
             names_used |= {a.arg for a in ast.walk(node) if isinstance(a, ast.arg)}
-            for name in sorted(names_used):
-                entry = scope.get(name)
+            entries = [scope.get(name) for name in sorted(names_used)]
+            # ``alias.name`` where ``alias`` is a test module imported here,
+            # and ``self.name`` / ``cls.name`` for a method of the test's class
+            for n in ast.walk(node):
+                if not (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)):
+                    continue
+                if scope.get(n.value.id, (None, 0))[1] is None:
+                    entries.append((scope[n.value.id][0], n.attr))
+                elif n.value.id in ("self", "cls"):
+                    entries.append(scope.get(n.attr))
+            for entry in entries:
                 got = _resolve(entry, repo_root) if entry else None
                 if got is None or id(got[1]) in seen:
                     continue
                 seen.add(id(got[1]))
                 pieces.append(_segment(got[0], got[1]))
-                nxt.append(got)
+                # a method of the test's class keeps the class's scope
+                nxt.append((got[0], got[1], scope) if entry in members.values() else got)
         frontier = nxt
     return "\n".join(pieces)
 
@@ -978,21 +1015,24 @@ def test_the_witness_rule_wants_each_domain_named_in_its_test():
 def test_the_source_reader_follows_the_names_a_test_uses(tmp_path):
     (tmp_path / "tests" / "core").mkdir(parents=True)
     (tmp_path / "tests" / "core" / "support.py").write_text(
-        "def farther():\n    return 'jax.vmap'\n\ndef far():\n    return farther()\n\n"
-        "def helper():\n    return far()\n")
+        "def farthest():\n    return 'jax.vmap'\n\ndef farther():\n    return farthest()\n\n"
+        "def far():\n    return farther()\n\ndef helper():\n    return far()\n\n"
+        "def by_alias():\n    return 'shard_map'\n")
     (tmp_path / "tests" / "core" / "test_y.py").write_text(
         "from tests.core.support import helper\n"
+        "import tests.core.support as sup\n"
         "import pytest\n\n"
         "def _deep():\n    return 'run_adaptive'\n\n"
         "def _build():\n    return _deep()\n\n"
         "@pytest.fixture\ndef graph():\n    return 'subcycling=True'\n\n"
         "@pytest.mark.parametrize('n', [1])\n"
-        "def test_one(graph, n):\n    _build(); helper()\n\n"
+        "def test_one(graph, n):\n    _build(); helper(); sup.by_alias()\n\n"
         "class TestK:\n    def test_two(self):\n        pass\n")
     one = source_of_test("tests/core/test_y.py::test_one[1]", repo_root=tmp_path)
     assert "subcycling=True" in one and "run_adaptive" in one and "parametrize" in one
-    assert "helper()" in one and "return far()" in one
-    assert "jax.vmap" not in one   # three levels away: not read
+    assert "helper()" in one and "return far()" in one and "return farther()" in one
+    assert "shard_map" in one      # sup.by_alias, through the module alias
+    assert "jax.vmap" not in one   # four levels away: not read
     assert source_of_test("tests/core/test_y.py::TestK::test_two", repo_root=tmp_path)
     assert source_of_test("tests/core/test_y.py::test_none", repo_root=tmp_path) is None
     assert source_of_test("tests/core/test_nope.py::test_one", repo_root=tmp_path) is None

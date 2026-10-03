@@ -10916,7 +10916,9 @@ anomalies:
       (1e-12 s at t = 1 s, where an ulp of the time is 2.2e-4 of a step) a
       biased importer can still gather what float64 cannot tell from an
       honest running sum.  A restore starts the count again from the
-      restored time.
+      restored time.  At a large enough ratio of time to master step those
+      ulps were more than a whole step, and whole steps of drift were
+      admitted: MADD-ANO-168, which caps every slack at a tenth of a step.
     verification:
       - "tests/fmi/test_communication_points.py::test_the_tolerance_is_a_millionth_of_the_master_step_at_any_step"
       - "tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance"
@@ -11710,6 +11712,167 @@ anomalies:
       None known.
     verification:
       - "tests/api/test_profile_endpoints.py::test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept"
+  - anomaly_id: "MADD-ANO-167"
+    title: "A ParamSpec changed between the FMU description and its sidecar was enforced in place of the advertised min / max: the bridge accepted values its XML forbids, or refused values it declares settable"
+    description: >
+      `GraphManager.set_param_spec` changes a parameter's spec without
+      dirtying the graph, so neither the description's compile check nor
+      the sidecar's saw it.  A description built before such a change
+      advertised the old `min` / `max` (and its instantiation token covered
+      them), while a sidecar built after it with
+      `param_specs=gm.param_specs()` -- as the user guide builds it --
+      enforced the new ones: `FmuSidecar._adopt_advertised_bounds` kept a
+      spec the sidecar already had (`setdefault`), on the assumption that it
+      was the declaration the description had been built from, and nothing
+      compared the two.  With `damping` advertised in `[1, 5]` and the
+      sidecar's spec widened to `[0, inf)`, `set` of 0.5 and 7.0 answered
+      ok; narrowed the other way, 0.5 and 7.0 inside an advertised
+      `[0, inf)` were refused.  A hand-made `param_specs` tree did the same.
+      Found by the B1 round-8 audit of the sysid and FMU claims inventory
+      (finding M3, rows FMU-016, FMU-033 and FMU-039, on d2429a6).  No
+      tagged release carried it: the bridge and its advertised-bounds
+      contract are new in 0.4.0 (v0.3.x had no bridge, and its sidecar no
+      `param_specs`).
+      Resolved in 0.4.0: the bridge refuses to start when an exported
+      parameter's spec in the description's graph no longer gives the
+      advertised `min`, `max` or `unit`, or when the sidecar's own spec for
+      one enforces another envelope (read as the description reads it);
+      and every write and restore is held to the advertised bounds as well
+      as to the sidecar's spec, their intersection.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the FMU computed with a parameter outside the envelope its
+      `modelDescription.xml` advertises, and answered fmi3OK, or refused an
+      importer a value the XML declares settable.  Graded `major` under the
+      0.4.0 severity definition (a silent wrong result).  Not `critical`:
+      it needed a spec changed between building the description and the
+      sidecar, or a hand-made spec tree.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+      - "maddening.fmi.sidecar.FmuSidecar"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The stale check compares what the description derives from a spec
+      (`min`, `max`, `unit`); a change to a spec's `trainable` flag or
+      description text is not a change to the FMU and is not refused.  A
+      description built by hand, or whose graph has been collected, has no
+      graph to compare; the sidecar-envelope check and the intersection
+      still hold it to its advertised bounds.
+    verification:
+      - "tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_a_spec_changed_after_the_description_is_refused_when_the_bridge_is_built"
+      - "tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_a_unit_changed_after_the_description_is_refused_when_the_bridge_is_built"
+      - "tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_a_sidecar_spec_that_enforces_another_envelope_is_refused"
+      - "tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_the_advertised_bounds_hold_even_when_the_sidecars_own_spec_admits_more"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-168"
+    title: "At a large ratio of time to master step the FMU bridge's ulp slacks exceeded a master step: a doStep a whole step ahead was adopted, and a clock running 40% fast was never refused"
+    description: >
+      MADD-ANO-149's fix made the bridge's rounding slacks ulps of the times
+      involved -- 16 for a communication point (`_COMM_POINT_ULPS`), 4 more
+      per step for the drift from the simulated time
+      (`_DRIFT_ULPS_PER_STEP`) -- with no cap.  At a large ratio of time to
+      master step an ulp is itself a sizeable part of a step: at 1000 s it
+      is 0.11 of a 1e-12 s step, so the communication point's slack was 1.8
+      steps and the drift slack grew by 0.45 of a step per step.  A doStep
+      one whole master step ahead of the FMU's time was adopted, and an
+      importer whose clock ran 40% fast was never refused: after 1000 graph
+      steps the FMU reported a time 364 master steps ahead of its physics
+      (430 at a 1.7e9 s start with 1e-6 s steps).  Below that, at 16 s and
+      1e-12 s, a clock a hundredth of a step late per step was never
+      refused either, and ran ten steps ahead in a thousand.  Found by the
+      B1 round-8 audit (finding M4, rows FMU-023 and FMU-050, on d2429a6).
+      No tagged release carried it: the bridge's communication-point
+      checks are new in 0.4.0.
+      Resolved in 0.4.0: every rounding slack is capped at a tenth of a
+      master step (`_ROUNDING_SLACK_MAX`), so the reported time stays within
+      a millionth plus a tenth of a master step of the simulated time; and a
+      time at which 16 ulps exceed that tenth (32 s and beyond at a 1e-12 s
+      master step) is refused at `initialize`, at a step that would reach it
+      and at `set_state`, naming the ratio and the largest time the master
+      step resolves.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the FMU labelled its state with a time its physics had not
+      reached, and answered fmi3OK.  Graded `major` as MADD-ANO-149 is.  Not
+      `critical`: it needed a time more than about 10^12 master steps from
+      zero, or an importer whose clock was biased within the slack.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The cap is the price of the guarantee: an importer that keeps a
+      running sum of its step sizes gathers up to half an ulp of the time
+      per step, and is refused once that passes a tenth of a master step --
+      after about 1.2 million steps from 1 s at a 1e-9 s step; from a start
+      of 0, not before about forty million steps at any master step.  One
+      that computes `start + k * h`, as FMPy does, is not refused.
+    verification:
+      - "tests/fmi/test_communication_points.py::test_a_start_time_the_clock_cannot_resolve_against_the_master_step_is_refused"
+      - "tests/fmi/test_communication_points.py::test_the_resolution_limit_is_where_sixteen_ulps_pass_a_tenth_of_the_master_step"
+      - "tests/fmi/test_communication_points.py::test_a_step_that_would_end_past_the_resolution_limit_is_refused"
+      - "tests/fmi/test_communication_points.py::test_a_restored_time_the_clock_cannot_resolve_is_refused"
+      - "tests/fmi/test_communication_points.py::test_at_a_large_accepted_ratio_a_biased_clock_is_stopped_within_a_tenth_of_a_step"
+      - "tests/fmi/test_communication_points.py::test_an_honest_running_sum_is_refused_once_its_rounding_passes_a_tenth_of_a_step"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-169"
+    title: "One in-limit get frame drove the FMU bridge past 6 GB and held the instance for about 45 s before its reply was refused"
+    description: >
+      `FmuTcpBridge._get` built one small float64 array per value
+      reference before concatenating them, and nothing bounded a get's
+      element count by what a reply frame can carry.  A 64 MiB JSON
+      request -- within the frame limit -- naming one scalar output 33.5
+      million times held the connection's worker, and the FMU's only
+      instance, for 42-46 s and grew the process from 0.5 to 6.3-7.1 GB
+      before the reply-size check could refuse anything; under an 8 GB
+      address-space cap it ended in `MemoryError`.  Measured scaling: a
+      million entries took +280 MB.  A repeated value reference, which a
+      `set` refuses, was read again for every occurrence.  Found by the B1
+      round-8 audit (finding M5, rows FMU-041 and FMU-050, on d2429a6;
+      reproduced under a 10 GB scope and an 8 GB address cap, CPU, jaxlib
+      0.11.0).  No tagged release carried it: the bridge is new in 0.4.0.
+      Resolved in 0.4.0: a get naming more value references, or variables
+      holding more values, than a binary reply frame carries (8 388 480) is
+      refused before anything is read; each distinct variable is read once
+      and copied into a preallocated reply, so a repeated reference costs
+      eight bytes; a JSON reply is encoded a chunk at a time and abandoned
+      as soon as it passes the frame limit.  The audit's frame is now
+      refused at once; the largest get answered takes about 0.4 s.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A denial of service from the untrusted side of the trust boundary,
+      never a wrong result, so not `critical`.  Graded `major` as
+      MADD-ANO-086 is: the process's memory, and the host's with it,
+      followed the request, and the OOM killer picks the largest process,
+      which need not be the bridge.  `context_dependent`: what else the
+      host runs is the deployment's.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Parsing a 64 MiB JSON request is the transport's own cost, before any
+      op is dispatched: about 6 s and a few hundred MB for one of 33.5
+      million integers, for any op.  A binary reply at the cap is built
+      whole (about three frames of memory) before it is sent.
+    verification:
+      - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_get_of_more_references_than_a_reply_frame_holds_is_refused_before_anything_is_read"
+      - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_get_whose_variables_hold_more_values_than_a_reply_frame_is_refused_before_reading"
+      - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_repeated_reference_is_answered_in_place_from_one_read"
+      - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_json_reply_too_long_to_send_is_abandoned_while_it_is_encoded"
     github_issue: null
   - anomaly_id: "MADD-ANO-170"
     title: "fit_lm reported converged=True at a wrong point, or at its unmoved start, for a float32 residual or parameter far from unit scale; fit returned its start"

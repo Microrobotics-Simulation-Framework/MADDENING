@@ -4346,15 +4346,27 @@ claims:
   area: model description
   claim: >-
     min / max "come from ParamSpec.bounds, so an importer sees the same
-    envelope the sidecar enforces": an open log or logit bound is
-    advertised as the nearest representable value inside it.
+    envelope the sidecar enforces: an open log / logit bound is advertised
+    as the outermost value inside it that ParamSpec.check accepts in the
+    leaf's dtype -- the next float in, unless the transform's arithmetic
+    rounds that onto the bound".
   sources:
-    - src/maddening/fmi/model_description.py:83 (FMIVariable, min / max)
+    - src/maddening/fmi/model_description.py:147 (FMIVariable, min / max)
+    - src/maddening/fmi/model_description.py:648 (_advertised_bound)
+    - docs/user_guide/fmu_export.md (Variables)
   conditions: >-
     log with a zero, a non-zero and no lower bound (float32 and float64);
-    logit; inclusive identity bounds; no bounds. Not claimed for 16-bit
-    floats.
-  oracle: the advertised attribute against the float32 envelope.
+    logit on (0, 1), (0.5, 2), and on (-1, 1) and (-10, 10), where the next
+    float in has no finite coordinate (float32, and (-10, 10) in float64);
+    open bounds in float32's subnormal-spacing band (log at TINY and 1e-35,
+    logit on (-1, -1e-35)); each advertised bound accepted and the next
+    float outside it refused, with and without param_specs, and through
+    FMPy and the compiled wrapper; inclusive identity bounds; no bounds.
+    Not claimed for 16-bit floats.
+  oracle: >-
+    the advertised attribute against the float32 envelope; ParamSpec.check
+    of the advertised bound and of the next float outward; the bridge's
+    reply to each.
   tests:
     - tests/fmi/test_advertised_bounds.py::test_a_log_leaf_without_a_lower_bound_advertises_the_smallest_normal
     - tests/fmi/test_advertised_bounds.py::test_log_leaf_with_zero_bound_advertises_smallest_normal
@@ -4362,13 +4374,26 @@ claims:
     - tests/fmi/test_advertised_bounds.py::test_logit_leaf_advertises_both_open_bounds
     - tests/fmi/test_advertised_bounds.py::test_inclusive_identity_bounds_are_unchanged
     - tests/fmi/test_advertised_bounds.py::test_a_parameter_the_description_bounds_nowhere_stays_unbounded
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_every_advertised_open_bound_is_settable_and_the_next_float_out_is_not
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_an_open_bound_is_advertised_as_the_outermost_value_its_check_accepts
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_the_wrapper_sets_a_logit_parameter_to_its_advertised_max
+    - tests/fmi/test_fmu_claims_in_float64.py::test_a_float64_logit_parameters_advertised_bounds_are_settable_with_and_without_specs
   status: verified
   notes: >-
     Failing on 04bc3e5 (B1 round 7): a log leaf with no lower bound, which
     ParamSpec measures from 0, was advertised with no min (MADD-ANO-148).
+    Failing on d2429a6 (B1 round 8, L1): a float32 logit leaf under (-1, 1)
+    or (-10, 10) advertised max = nextafter(hi, -inf), whose (p - lo) /
+    (hi - lo) rounds to 1, so a sidecar with param_specs -- and FMPy through
+    the compiled wrapper -- refused the FMU's own advertised max, while one
+    without took it; and a bound in the subnormal-spacing band was
+    advertised one flushed distance inside (the acceptance oracle's N2).
+    Loud (a refusal) and never released, so minor and no registry entry.
   domains:
     f32: tests/fmi/test_advertised_bounds.py::test_log_leaf_with_zero_bound_advertises_smallest_normal
-    f64: tests/fmi/test_fmu_claims_in_float64.py::test_an_open_bound_is_advertised_as_the_nearest_float64_inside_it
+    f64:
+      - tests/fmi/test_fmu_claims_in_float64.py::test_an_open_bound_is_advertised_as_the_nearest_float64_inside_it
+      - tests/fmi/test_fmu_claims_in_float64.py::test_a_float64_logit_parameters_advertised_bounds_are_settable_with_and_without_specs
     mixed_dtype: tests/fmi/test_fmu_claims_in_float64.py::test_a_float32_parameter_in_an_x64_graph_advertises_the_float32_envelope
     16bit: narrowed
     jit: n/a
@@ -4584,18 +4609,40 @@ claims:
     the tolerance of the start time plus the master steps taken since, plus
     a few ulps of the time per step ... An importer whose every step size
     is a little long is refused, with nothing advanced, once its errors add
-    up past the tolerance."
+    up past the tolerance."; "No rounding slack is ever more than a tenth of
+    a master step, so the time the FMU reports stays within a millionth plus
+    a tenth of a step of the time it has simulated ... a time whose 16 ulps
+    pass a tenth of the master step ... is refused, at
+    fmi3EnterInitializationMode, at a doStep that would reach it and at
+    fmi3SetFMUState ... An importer that computes each point as start + k *
+    h ... is never refused below that time.  One that keeps a running sum
+    ... is refused ... once that passes a tenth of a step".
   sources:
     - docs/user_guide/fmu_export.md (Instances and time)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Instances)
+    - src/maddening/fmi/tcp_bridge.py:368 (_ROUNDING_SLACK_MAX)
   conditions: >-
-    a jump; a point inside the tolerance; rounded points over a long run;
-    step sizes either side of the tolerance at master steps of 1e-2, 1e-9
-    and 1e-12 s; an importer biased by a third of the tolerance per step; an
-    honest running sum and start + k * h over a million steps, from starts
-    of 0, 1 and 1000 s; a restore; the compiled wrapper. Not claimed for
-    mixed dtypes or 16-bit floats.
-  oracle: the time variable and the state; the bridge's drift tolerance against the importer's clock.
+    Times whose 16 ulps are at most a tenth of the master step -- below 32 s
+    at 1e-12 s, 32768 s at 1e-9 s, 3.4e10 s at 1e-3 s -- which is the domain
+    the bridge serves: a start, a step's end or a restored time beyond it
+    is refused, the limit pinned at master steps of 1e-12, 1e-9, 1e-6 and
+    1e-3 s and at the audit's 1000 s / 1e-12 s and 1.7e9 s / 1e-6 s.  Inside
+    it: a jump; a point inside the tolerance; rounded points over a long
+    run; step sizes either side of the tolerance at master steps of 1e-2,
+    1e-9 and 1e-12 s; an importer biased by a third of the tolerance per
+    step; one a hundredth of a step late per step at 16 s and 1e-12 s
+    (refused within a tenth of a step); an honest running sum and start + k
+    * h over a million steps, from starts of 0, 1 and 1000 s, and the
+    running sum's refusal past the cap (about 1.2 million steps from 1 s at
+    1e-9 s); a restore; the compiled wrapper. The tolerance is a millionth
+    of a master step wherever 16 ulps of the time are below that (times
+    under about 2.8e8 master steps from 0); above it the ulp slack, capped
+    at a tenth of a step, is the larger part. Not claimed for mixed dtypes
+    or 16-bit floats.
+  oracle: >-
+    the time variable and the state; the bridge's drift tolerance against
+    the importer's clock; the refusal and its message; an independent
+    search for the resolution limit.
   tests:
     - tests/fmi/test_communication_points.py::test_a_discontinuous_communication_point_is_refused_and_advances_nothing
     - tests/fmi/test_communication_points.py::test_a_point_within_the_tolerance_is_adopted
@@ -4609,8 +4656,20 @@ claims:
     - tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance
     - tests/fmi/test_communication_points.py::test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside
     - tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance
+    - tests/fmi/test_communication_points.py::test_a_start_time_the_clock_cannot_resolve_against_the_master_step_is_refused
+    - tests/fmi/test_communication_points.py::test_the_resolution_limit_is_where_sixteen_ulps_pass_a_tenth_of_the_master_step
+    - tests/fmi/test_communication_points.py::test_a_step_that_would_end_past_the_resolution_limit_is_refused
+    - tests/fmi/test_communication_points.py::test_a_restored_time_the_clock_cannot_resolve_is_refused
+    - tests/fmi/test_communication_points.py::test_at_a_large_accepted_ratio_a_biased_clock_is_stopped_within_a_tenth_of_a_step
+    - tests/fmi/test_communication_points.py::test_an_honest_running_sum_is_refused_once_its_rounding_passes_a_tenth_of_a_step
   status: verified
   notes: >-
+    Failing on d2429a6 (B1 round 8, M4) at a large ratio of time to master
+    step: the uncapped ulp slacks were 1.8 master steps at 1000 s and 1e-12
+    s, a doStep a whole step ahead was adopted, and a clock running 40% fast
+    reported a time 364 steps ahead of its physics after 1000 steps (430 at
+    1.7e9 s and 1e-6 s) (MADD-ANO-168).  "Stays inside however long it runs"
+    was true of the uncapped slack only, and is restated for a running sum.
     Failing on 04bc3e5 (B1 round 7) below a master step of about 1e-9 s,
     where an absolute floor on the rounding slack was the tolerance (8.9e-4
     of a 1e-12 s step accepted), and for a biased importer, whose reported
@@ -4628,7 +4687,9 @@ claims:
     sub_cycled: 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_on_sequences_with_node_params_writes[subcycled]'
     predictors_warm_starts: n/a
     adaptive: n/a
-    checkpoint_restart: tests/fmi/test_communication_points.py::test_restoring_an_fmu_state_moves_the_clock_to_the_snapshot
+    checkpoint_restart:
+      - tests/fmi/test_communication_points.py::test_restoring_an_fmu_state_moves_the_clock_to_the_snapshot
+      - tests/fmi/test_communication_points.py::test_a_restored_time_the_clock_cannot_resolve_is_refused
     sharded: n/a
 
 - id: FMU-025
@@ -4973,22 +5034,53 @@ claims:
     "Setting a parameter is held to the min / max the description
     advertises, whether or not the sidecar was built with param_specs.  The
     bridge adds a bounds-only spec for every exported parameter its sidecar
-    has no spec for"; the sidecar's own specs are kept and not written
-    into.
+    has no spec for, and holds a parameter its sidecar has a spec for to
+    that spec and to the advertised bounds both ... The bridge refuses to
+    start when the two would disagree: when a parameter's ParamSpec in the
+    description's graph has changed since the description was built ... so
+    that its min, max or unit is no longer the advertised one, or when the
+    sidecar's own spec for an exported parameter enforces another
+    envelope"; the sidecar's own specs are kept and not written into.
   sources:
     - docs/user_guide/fmu_export.md (Variables)
-    - src/maddening/fmi/sidecar.py:364 (SidecarConfig, param_specs)
+    - src/maddening/fmi/sidecar.py:445 (SidecarConfig, param_specs)
+    - src/maddening/fmi/tcp_bridge.py:1890 (FmuTcpBridge._check_sidecar_envelope)
   conditions: >-
     a sidecar without param_specs behind a bridge; one with its own specs; a
-    log leaf with no lower bound, either way. Not claimed for float64 (x64),
-    mixed dtypes or 16-bit floats.
-  oracle: the refusal; the specs object untouched.
+    log leaf with no lower bound, either way; a spec widened, narrowed or
+    opened (identity to logit) by set_param_spec after the description; a
+    unit changed after it; a spec change that leaves the envelope alone
+    (trainable, description text) and one changed back, not refused; a
+    hand-made sidecar spec that is unbounded, capped, raised or open where
+    the advertised bound is inclusive, refused, and one with the advertised
+    envelope (an infinite bound pointing outward read as none) kept; the
+    sidecar's own spec widened after the bridge started, held to the
+    advertised bounds on set, set_params and set_state. No precondition
+    remains: a configuration whose enforced envelope would differ from the
+    advertised one does not start. Not claimed for float64 (x64), mixed
+    dtypes or 16-bit floats.
+  oracle: >-
+    the refusal and the parameter it names; the specs object untouched; the
+    reply to a value outside the advertised bounds on each door.
   tests:
     - tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs
     - tests/fmi/test_advertised_bounds.py::test_no_bridge_takes_a_log_leaf_to_zero_or_below
     - tests/fmi/test_advertised_bounds.py::test_the_sidecars_own_specs_are_kept_and_not_written_into
     - tests/fmi/test_params_causality.py::TestBoundsThroughFMI::test_sidecar_without_specs_keeps_old_behaviour
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_a_spec_changed_after_the_description_is_refused_when_the_bridge_is_built
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_a_unit_changed_after_the_description_is_refused_when_the_bridge_is_built
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_a_spec_change_that_leaves_the_advertised_envelope_alone_is_not_refused
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_a_sidecar_spec_that_enforces_another_envelope_is_refused
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_a_sidecar_spec_with_the_advertised_envelope_is_accepted_and_kept
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_the_advertised_bounds_hold_even_when_the_sidecars_own_spec_admits_more
   status: verified
+  notes: >-
+    Failing on d2429a6 (B1 round 8, M3): a spec changed with set_param_spec
+    between building the description and the sidecar (which dirties
+    nothing) was enforced in place of the advertised bounds -- the bridge
+    kept the sidecar's spec by setdefault -- so damping 0.5 and 7.0 were
+    accepted against an advertised [1, 5], or refused inside an advertised
+    [0, inf) (MADD-ANO-167).
   domains:
     f32: tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs
     f64: narrowed
@@ -5194,19 +5286,27 @@ claims:
   conditions: >-
     a value below an advertised min of 0 by less than the smallest normal
     float32; -1, 0 and a negative subnormal for a log leaf with no lower
-    bound, through set and set_state, with and without param_specs. Not
-    claimed for 16-bit floats.
+    bound, through set and set_state, with and without param_specs; the
+    next float outside each advertised open log / logit bound, with and
+    without param_specs; a value outside the advertised bounds that the
+    sidecar's own (widened) spec admits, through set, set_params and
+    set_state. A spec changed between the description and the sidecar is
+    FMU-033's: the bridge does not start. Not claimed for 16-bit floats.
   oracle: the reply, and the value read back against the advertised min.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal
     - tests/fmi/test_advertised_bounds.py::test_no_bridge_takes_a_log_leaf_to_zero_or_below
     - tests/fmi/test_a_value_its_type_rounds_to_zero_is_refused.py::test_a_parameter_cannot_be_set_below_its_bound_by_a_subnormal
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_every_advertised_open_bound_is_settable_and_the_next_float_out_is_not
+    - tests/fmi/test_the_bridge_enforces_the_envelope_its_description_advertises.py::test_the_advertised_bounds_hold_even_when_the_sidecars_own_spec_admits_more
   status: verified
   notes: >-
     Failing in the first edition: a set of s0.params.damping (min="0.0") to
     -1e-40 answered ok and read back -9.99995e-41, because the sidecar's
     bounds check, ParamSpec.check, compared through jnp and so flushed the
-    subnormal to zero (SYS-109).  Closed with it (MADD-ANO-136).
+    subnormal to zero (SYS-109).  Closed with it (MADD-ANO-136).  Failing
+    on d2429a6 (B1 round 8, M3) for a spec changed between the description
+    and the sidecar, which the sidecar enforced instead (MADD-ANO-167).
   domains:
     f32: tests/fmi/test_fmu_claims_edges.py::test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal
     f64: tests/fmi/test_fmu_claims_in_float64.py::test_a_float64_parameter_cannot_be_set_below_its_min_by_a_float64_subnormal
@@ -5293,17 +5393,45 @@ claims:
     for both kinds: the bridge drops a connection that announces a longer
     request ..., answers a get / get_state whose reply would be longer with
     a JSON error instead ..., and the C wrapper refuses to read a longer
-    frame".
+    frame"; "A get naming more value references, or variables holding more
+    values, than a binary reply frame carries (8 388 480) is refused before
+    anything is read ... A get may name a value reference more than once,
+    and each occurrence gets the value ... A JSON get reply that would pass
+    the limit is abandoned while it is encoded."
   sources:
     - docs/user_guide/fmu_export.md (Wire protocol)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Frame limit)
-  conditions: a reply over the limit; the compiled wrapper with a state frame over the limit.
-  oracle: no frame over the limit is sent; the instance survives.
+    - src/maddening/fmi/tcp_bridge.py:2336 (FmuTcpBridge._get)
+  conditions: >-
+    a reply over the limit; the compiled wrapper with a state frame over the
+    limit; a get of 8 388 609 references to a scalar (plain integers, and
+    ending in an entry the entry-by-entry check refuses) and one of a
+    1000-value array named past the cap; the largest get answered, sent as
+    one binary frame; repeated references of scalars and arrays, and of
+    another type; a JSON reply past the limit, and its chunked encoding
+    against the whole reply's bytes.
+  oracle: >-
+    no frame over the limit is sent; the instance survives; the refusal
+    with next to no memory allocated (tracemalloc); the values against the
+    state.
   tests:
     - tests/fmi/test_binary_frames.py::test_bridge_never_sends_a_frame_over_the_limit
     - tests/fmi/test_c_wrapper_refuses_what_it_used_to_coerce.py::test_an_fmu_state_frame_over_the_limit_is_refused_and_the_instance_lives
     - tests/fmi/test_c_wrapper.py::test_wire_framing_over_a_real_socket
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_the_cap_is_what_a_binary_reply_frame_carries
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_get_of_more_references_than_a_reply_frame_holds_is_refused_before_anything_is_read
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_get_whose_variables_hold_more_values_than_a_reply_frame_is_refused_before_reading
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_repeated_reference_is_answered_in_place_from_one_read
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_bad_reference_is_named_in_request_order
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_repeated_reference_of_another_type_is_refused
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_json_get_reply_is_the_bytes_the_whole_reply_encodes_to
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_json_reply_too_long_to_send_is_abandoned_while_it_is_encoded
+    - tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_reply_at_the_cap_goes_out_as_one_binary_frame
   status: verified
+  notes: >-
+    Failing on d2429a6 (B1 round 8, M5) in the sense the trust boundary
+    needs: one in-limit 64 MiB get naming a scalar 33.5 million times took
+    about 45 s and over 6 GB before its reply was refused (MADD-ANO-169).
   domains:
     f32: n/a
     f64: n/a
@@ -5532,7 +5660,11 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (The trust boundary)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Connection lifetime)
-  conditions: the defaults; the communication point at master steps of 1e-2, 1e-9 and 1e-12 s.
+  conditions: >-
+    the defaults; the communication point at master steps of 1e-2, 1e-9 and
+    1e-12 s from a start of 0, where its ulp slack is far below a millionth
+    of a step (at larger times the slack, at most a tenth of a step, and the
+    refusal of a time it cannot resolve are FMU-023's).
   oracle: the module's constants; the behaviour at shortened budgets.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_the_bridges_waits_and_limits_are_the_documented_numbers
@@ -5545,7 +5677,10 @@ claims:
   notes: >-
     "a communication point within a millionth of a master step" failed on
     04bc3e5 (B1 round 7) below a master step of about 1e-9 s, where an
-    absolute floor on the rounding slack was the tolerance (MADD-ANO-149).
+    absolute floor on the rounding slack was the tolerance (MADD-ANO-149),
+    and on d2429a6 (B1 round 8) at 1000 s with a 1e-12 s step, where the
+    uncapped slack was 1.8 steps (MADD-ANO-168); the conditions now say
+    where the millionth holds.
   domains:
     f32: n/a
     f64: n/a

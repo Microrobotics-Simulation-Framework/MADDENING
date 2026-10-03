@@ -79,6 +79,7 @@ from maddening.fmi.fmu_state import (
     deserialize_fmu_state,
     serialize_fmu_state,
 )
+from maddening.fmi.model_description import _graph_changed_since
 
 
 def _copy_tree(tree: Any) -> Any:
@@ -365,6 +366,47 @@ def _declared_inputs_resolver(
     return resolve
 
 
+def _step_compile(step_fn: Any) -> Optional[tuple[Any, int]]:
+    """``(graph, generation)`` when ``step_fn`` is a ``GraphManager``'s
+    compiled step (``gm._compiled_step``), which ``compile`` tags with the
+    graph and the compile it is; ``None`` for any other callable."""
+    tag = getattr(step_fn, "_maddening_compile", None)
+    if not (isinstance(tag, tuple) and len(tag) == 2 and callable(tag[0])):
+        return None
+    return tag[0](), tag[1]
+
+
+def _refuse_a_step_its_graph_has_left(step_fn: Any) -> None:
+    """Refuse a graph's compiled step once that graph has changed or been
+    compiled again.
+
+    The step bakes in every structural value it reads when it is traced,
+    so a sidecar built on it after a structural ``node.params`` write (or
+    any other change that makes the graph recompile) ran the old model --
+    or the new one, if the step had not been traced yet -- while every
+    graph entry point ran the new one.  A step that is not a graph's
+    compiled step (a wrapper, a test double) is not judged.
+
+    Raises
+    ------
+    ValueError
+        If the step's graph has changed since the compile that built it.
+    """
+    owner = _step_compile(step_fn)
+    if owner is None or owner[0] is None:
+        return
+    graph, generation = owner
+    stale = _graph_changed_since(graph, generation)
+    if stale is not None:
+        raise ValueError(
+            f"SidecarConfig.step_fn is the compiled step of compile {generation} of a "
+            f"graph, and {stale}.  The sidecar would run a model the graph does not "
+            "runs.  Call compile() on the graph, then build the model description and "
+            "the sidecar from it (step_fn=gm._compiled_step, initial_state=gm._state, "
+            "params=gm.params) without changing it in between."
+        )
+
+
 @stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class SidecarConfig:
@@ -381,7 +423,12 @@ class SidecarConfig:
         ``step_fn(state, external_inputs, params)`` when ``params`` is
         given: the graph's compiled step, ``GraphManager._compiled_step``.
         :meth:`GraphManager.step` cannot serve -- it takes no state and
-        advances the graph's own.
+        advances the graph's own.  Build the sidecar from a graph that is
+        unchanged since its last ``compile()``: :class:`FmuSidecar` refuses
+        a graph's compiled step once that graph has changed (a structural
+        ``node.params`` write, a node or edge added, ...) or been compiled
+        again, because the step bakes in what it reads when it is traced
+        and would run a model the graph no longer runs.
     initial_state : dict
         The seed state at FMU instantiation time.
     unknown_fn : callable, optional
@@ -464,9 +511,17 @@ class FmuSidecar:
     importer's, behind :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge`;
     tests instantiate it directly and call :meth:`handle` to exercise the
     protocol without involving a real socket.
+
+    Raises
+    ------
+    ValueError
+        If ``config.step_fn`` is a graph's compiled step and that graph has
+        changed or been compiled again since (see
+        :attr:`SidecarConfig.step_fn`).
     """
 
     def __init__(self, config: SidecarConfig) -> None:
+        _refuse_a_step_its_graph_has_left(config.step_fn)
         self._config = config
         self._state = dict(config.initial_state)
         self._params = (

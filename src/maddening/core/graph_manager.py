@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import warnings
+import weakref
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, NamedTuple, Optional, Sequence, cast
@@ -2316,7 +2317,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
     ``inf`` and lineax passed its test at the zero initial guess, so a
     non-finite tangent or cotangent came back as an exactly zero
     derivative, reported successful, where ``"dense"`` and
-    ``solver="fori"`` read NaN (MADD-ANO-147).  NaN everywhere is also
+    ``solver="fori"`` read NaN (MADD-ANO-150).  NaN everywhere is also
     what an honest Krylov iteration produces -- its first basis vector
     is ``b / ||b||`` -- and ``"dense"`` agrees wherever its LU
     propagates the entry.  Memory is
@@ -2436,7 +2437,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # itself, ``max|b|`` made ``atol`` NaN or ``inf``, the zero initial
         # guess passed lineax's test at once and the solve returned zeros
         # reported successful: a NaN tangent or cotangent came back as an
-        # exactly zero derivative (MADD-ANO-147).  The zeros keep the
+        # exactly zero derivative (MADD-ANO-150).  The zeros keep the
         # Krylov loop from iterating on NaN, and a non-finite rhs is
         # neither "failed" (no dense re-solve, no adjoint error above
         # the fallback's size) nor "zero".
@@ -7775,6 +7776,15 @@ class GraphManager:
             return step_fn(full_state, external_inputs, params)
 
         compiled_step = jax.jit(_counted_step)
+        # Which graph, and which of its compiles, this step is.  The step
+        # outlives the graph's next compile wherever it was handed out
+        # (``SidecarConfig(step_fn=gm._compiled_step)``), and it bakes in
+        # every structural value it reads when it is traced, so the FMU
+        # sidecar and bridge refuse it once the graph it came from has
+        # changed or been compiled again
+        # (``maddening.fmi.model_description._graph_changed_since``).
+        setattr(compiled_step, "_maddening_compile",  # noqa: B010 - not a typed attribute
+                (weakref.ref(self), self._compile_generation + 1))
 
         # Snapshot static_data hashes so we can detect drift.
         # ``static_data_hash`` is a node-supplied method, so this is the

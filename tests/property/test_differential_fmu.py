@@ -210,6 +210,10 @@ class Model:
             # selected_inputs that hold an input at zero say so; expected here
             warnings.filterwarnings("ignore", message=".*will be held at zero",
                                     category=UserWarning)
+            # and so does an input of a node the FMU does not export (a drawn
+            # graph may hold an EVOLVING node), which is held at zero as well
+            warnings.filterwarnings("ignore", message=".*feed node.s. this FMU does not export",
+                                    category=UserWarning)
             md = build_model_description(ref, model_name="Diff",
                                          model_identifier=MODEL_IDENTIFIER, **md_kw)
         direct = factory()

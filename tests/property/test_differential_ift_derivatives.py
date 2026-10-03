@@ -35,7 +35,7 @@ The same oracle holds the non-finite right-hand side: a tangent seed or an
 observation with a NaN or infinite entry made the default solve's
 tolerance NaN or ``inf``, and the derivative came back exactly zero,
 reported successful, where ``"dense"`` and ``"fori"`` read NaN
-(MADD-ANO-147).  At every scale the default path is now NaN in every entry,
+(MADD-ANO-150).  At every scale the default path is now NaN in every entry,
 so in particular wherever either reference is not finite.
 """
 

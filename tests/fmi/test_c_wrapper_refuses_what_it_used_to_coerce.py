@@ -71,6 +71,9 @@ class _Wrapper:
         lib.fmi3EnterInitializationMode.restype = ctypes.c_int
         lib.fmi3EnterInitializationMode.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_double,
                                                     ctypes.c_double, ctypes.c_bool, ctypes.c_double]
+        for name in ("fmi3ExitInitializationMode", "fmi3EnterStepMode"):
+            getattr(lib, name).restype = ctypes.c_int
+            getattr(lib, name).argtypes = [ctypes.c_void_p]
         lib.fmi3DeserializeFMUState.restype = ctypes.c_int
         lib.fmi3DeserializeFMUState.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t,
                                                 ctypes.POINTER(ctypes.c_void_p)]
@@ -83,6 +86,14 @@ class _Wrapper:
         return self.lib.fmi3InstantiateCoSimulation(
             b"i", token.encode(), b"", False, True, False, False, None, 0, None,
             self._log_cb, None)
+
+    def to_step_mode(self, inst, start: float = 0.0) -> None:
+        """Initialize the instance and enter Step Mode, where FMI 3.0 allows
+        reading, writing and stepping (the wrapper refuses a call its state
+        does not allow)."""
+        assert self.lib.fmi3EnterInitializationMode(inst, False, 0.0, start, False, 0.0) == OK, \
+            self.logs[-1:]
+        assert self.lib.fmi3ExitInitializationMode(inst) == OK, self.logs[-1:]
 
     def call(self, op: str, fmi_type: str, inst, vrs, values):
         ctype = self.ctypes_of[fmi_type]
@@ -111,12 +122,14 @@ def gm():
 
 @pytest.fixture
 def instance(wrapper, gm, monkeypatch):
-    """One instance of the wrapper against a started bridge over the plant."""
+    """One instance of the wrapper against a started bridge over the plant,
+    initialized and in Step Mode."""
     md, bridge = _bridge(gm)
     bridge.start()
     monkeypatch.setenv("MADDENING_FMU_ENDPOINT", bridge.endpoint)
     inst = wrapper.instantiate(md.instantiation_token)
     assert inst, wrapper.logs
+    wrapper.to_step_mode(inst)
     yield md, bridge, inst
     wrapper.lib.fmi3FreeInstance(inst)
     bridge.stop()
@@ -161,6 +174,7 @@ def test_a_boolean_variable_is_set_and_read_through_the_boolean_functions(wrappe
         inst = wrapper.instantiate(md.instantiation_token)
         assert inst, wrapper.logs
         try:
+            wrapper.to_step_mode(inst)
             gate = _vr(md, "gate.open")
             assert wrapper.call("Set", "Boolean", inst, [gate], [True])[0] == OK
             assert wrapper.call("Get", "Boolean", inst, [gate], [False]) == (OK, [True])
@@ -187,13 +201,12 @@ def test_a_numeric_setter_cannot_write_a_clock(wrapper, gm, monkeypatch):
 def test_a_step_size_off_by_more_than_the_tolerance_is_refused_not_the_step_after(wrapper,
                                                                                     instance):
     md, bridge, inst = instance
-    assert wrapper.lib.fmi3EnterInitializationMode(inst, False, 0.0, 0.0, False, 0.0) == OK
     assert wrapper.step(inst, 0.0, 3 * DT * (1 + 5e-7))[0] == ERROR
     assert "is not a whole multiple" in wrapper.logs[-1]
     h = 3 * DT + 0.9e-6 * DT                       # inside the one tolerance
     status, last = wrapper.step(inst, 0.0, h)
     assert status == OK and last == h
-    assert wrapper.step(inst, last, h)[0] == OK    # the next legal point: accepted
+    assert wrapper.step(inst, last, 3 * DT)[0] == OK   # the next legal point: accepted
 
 
 def _fmu_state(wrapper, inst, blob: bytes):

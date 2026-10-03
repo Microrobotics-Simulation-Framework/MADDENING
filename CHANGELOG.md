@@ -194,7 +194,7 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
-- **A Krylov solve answers a right-hand side with a NaN or infinite entry with NaN, not zeros** (MADD-ANO-147, 148): the IFT tangent and adjoint of a coupling group read exactly 0.0, reported successful, for a NaN or `+-inf` tangent or cotangent (never released; dense and fori read NaN),
+- **A Krylov solve answers a right-hand side with a NaN or infinite entry with NaN, not zeros** (MADD-ANO-150, 151): the IFT tangent and adjoint of a coupling group read exactly 0.0, reported successful, for a NaN or `+-inf` tangent or cotangent (never released; dense and fori read NaN),
   and `sharded_cg` (since 0.3.0, mostly with `converged=True`) and `ift_linear_solve`'s CG (since 0.3.1) returned zeros, as did every GMRES path on this cycle's relative tolerance.  Every Krylov path (`_ift_linear_solve`, `ift_linear_solve`, both `sharded_*` backends, tangents and cotangents included) now answers NaN in every entry; a sharded result reads `converged=False` and a NaN `residual_norm`.
   Action: none for a finite right-hand side (its path is unchanged); a solve or derivative that read 0.0 from a non-finite input now reads NaN -- check the input with `jnp.isfinite`.
 - **The surrogate-training routes and the state streams are experimental in 0.4.0** (`/surrogate/train`, `/surrogate/status`, `/surrogate/activate`, `/surrogate/deactivate`; `/ws/state`, `/ws/state/binary`, `/ws/render`; `StateRelay`): they are to be hardened in 0.5.0 and may change in any minor release until then.
@@ -354,6 +354,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **FMU export, round-7 audit fixes** (MADD-ANO-147 to 149, never released): `build_model_description`, `FmuSidecar` and `FmuTcpBridge` refuse a graph changed since its `compile()` (an FMU built over a pending structural `node.params` write ran the old model); a `log` parameter without a lower bound advertises the smallest normal as `min`; the bridge's time tolerance is a millionth of the master step at any step, and the reported time stays within it of the simulated time;
+  an input of a node the FMU does not export is held at zero, not exported; the C wrapper holds FMI 3.0's co-simulation state machine (no `fmi3DoStep` before initialization, no set once terminated, no `fmi3EnterStepMode`, configuration mode or `fmi3SetTime`).  FMU-012 and -017's wording is fixed.
+  Action: `compile()` before exporting; initialize an FMU instance before reading or stepping it; re-package an FMU whose graph has a `log` parameter without a lower bound (its token changed).
 - **Coupling round-5 audit fixes** (MADD-ANO-142 to 146; new, resolved): the gradient bound applies the exact resolvent to each secant (it read 5.2x below the true error, usable), probes each entry of an array constant, and certifies Kantorovich with the full resolvent norm; the spectral bound is in the returned state's weights;
   a group is one block in the schedule (an outside node between its members read it a step late, since 0.1.0) and compile() warns when a group is part of a larger loop; CouplingGroup refuses out-of-range counts and thresholds (waveform_iterations=0 froze a sub-cycling group, since 0.1.0).
   Action: re-read diagnostics=True bounds; expect a UserWarning for a group inside a larger feedback loop; fix any out-of-range CouplingGroup knob.

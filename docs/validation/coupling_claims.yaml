@@ -2422,7 +2422,7 @@ claims:
     - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
   status: verified
   notes: >-
-    It lied for a non-finite cotangent until 0.4.0's fix (MADD-ANO-147):
+    It lied for a non-finite cotangent until 0.4.0's fix (MADD-ANO-150):
     the gradient read exactly 0.0, reported successful, where dense and
     fori read NaN.  The generated cotangents of the property test are
     finite; the non-finite case is CPL-185's.
@@ -2450,7 +2450,7 @@ claims:
     - tests/property/test_differential_ift_derivatives.py::test_a_non_finite_rhs_gives_a_non_finite_derivative_at_every_scale
   status: verified
   notes: >-
-    Failing until 0.4.0's fix (MADD-ANO-147, never in a release): the solve
+    Failing until 0.4.0's fix (MADD-ANO-150, never in a release): the solve
     was posed on b framed by max|b| with the tolerance rtol * max|b|, which
     a non-finite entry made NaN or inf, and the zero initial guess passed
     lineax's test at once -- the derivative read 0.0 at both sizes and in

@@ -9,8 +9,8 @@ guess passed lineax's test (and the loop CG's) before a single step, and the
 solve returned zeros reported successful.  So a NaN tangent or cotangent
 came back as an exactly zero derivative under the default
 ``linear_solver="gmres"``, where ``"dense"`` and ``solver="fori"`` read NaN
-(MADD-ANO-147), and the public solvers returned zeros, ``sharded_cg``
-mostly with ``converged=True`` (MADD-ANO-148).
+(MADD-ANO-150), and the public solvers returned zeros, ``sharded_cg``
+mostly with ``converged=True`` (MADD-ANO-151).
 
 Now each solve answers NaN in every entry (an honest Krylov iteration does
 the same: its first basis vector is ``b / ||b||``), its backend is handed

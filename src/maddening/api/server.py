@@ -1602,9 +1602,14 @@ def _params_write_refusal(gm: GraphManager, owner: str, changes: dict[str, Any],
     (:meth:`~maddening.core.graph_manager.GraphManager._unused_node_write_reason`).
 
     The keys in *at_own_value* hold the node's own value (the one it was
-    built with) and are asked only in the combined checks: a load that
-    puts a calibrated leaf back to it writes no new value.  (``PUT`` drops
-    such a key before it asks.)
+    built with) and are asked only in the combined checks -- the size of
+    what the checks build, and the graph a save would reload, with every
+    other key's live value: the node was built with the value, so the
+    per-key checks have nothing to ask of it, but the graph's other live
+    leaves (a fit, a load) may not take it.  A load that puts a calibrated
+    leaf back to it and a ``PUT`` that writes it back both pass such a
+    key here; each counts a key as changed when it differs from the live
+    leaf, never from the node's own value.
     """
     leaf_keys = set(leaf_keys)
     spec = gm._nodes[owner]
@@ -3717,15 +3722,30 @@ class SimulationServer:
                         raise HTTPException(status_code=400, detail=str(exc))
                 staged[key] = new
             # What the write would store in node.params, for every key that
-            # changes; an unchanged key has nothing to refuse.
+            # changes; an unchanged key has nothing to refuse.  A leaf
+            # changes when it differs from the value the graph runs with now
+            # -- the live leaf -- not from the node's own: after a fit, or a
+            # POST /checkpoint/load (which moves gm.params, not
+            # node.params), the two differ, and a leaf written back to the
+            # node's own value used to be dropped here.  The combined checks
+            # below were then asked with its old live value: a HeatNode
+            # rod's ``length`` and ``thermal_diffusivity`` went past its
+            # Fourier limit together with a 200, ran to NaN, and saved a
+            # graph that did not reload.  Such a key is asked as
+            # ``at_own_value``, as a load asks it: the node was built with
+            # it, so the per-key checks have nothing to ask, and the
+            # combined ones take it with every other key's live value.
             ctor = node.params_pytree() if staged else {}
             changes: dict[str, Any] = {}
+            at_own_value: list[str] = []
             for key, value in req.params.items():
                 if key in staged:
-                    ref = ctor.get(key, live.get(key))
-                    if ref is not None and _leaf_values_equal(staged[key], ref):
+                    if _leaf_values_equal(staged[key], live[key]):
                         continue
                     changes[key] = np.asarray(staged[key]).tolist()
+                    own_leaf = ctor.get(key)
+                    if own_leaf is not None and _leaf_values_equal(staged[key], own_leaf):
+                        at_own_value.append(key)
                 else:
                     value = structural[key]
                     if key in node.params and _same_param_value(node.params[key], value):
@@ -3759,7 +3779,8 @@ class SimulationServer:
             found = _params_write_refusal(
                 self.gm, node_name, changes, staged,
                 dict(live) if accepts else None,
-                {**live, **staged} if accepts else None)
+                {**live, **staged} if accepts else None,
+                at_own_value=at_own_value)
             if found is not None:
                 keys, reason, reported = found
                 raise refused(keys, reason, reported=reported)

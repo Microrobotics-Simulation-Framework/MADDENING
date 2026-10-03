@@ -575,6 +575,70 @@ def _xs_bound(bound: float, dtype: str, side: int) -> Optional[str]:
     return str(value)
 
 
+_BOUND_SEARCH_DOUBLINGS = 2200
+"""How many times :func:`_accepted_inside` may double its distance from an
+open bound looking for a value ``ParamSpec.check`` accepts: enough to cross
+float64's whole range from its smallest subnormal spacing (2**-1074 to
+2**1024 is about 2100 doublings), so the search never stops short of the
+interval's middle for want of steps."""
+
+
+def _accepted_inside(spec, b: float, side: int, dt: np.dtype,
+                     first: Any) -> Optional[Any]:
+    """The outermost value of dtype ``dt`` at or inside ``first`` (which
+    lies inside the open bound ``b``) that ``spec.check`` accepts, or
+    ``None`` when none does on this side of the interval's middle.
+
+    ``check`` decides with the transform's own arithmetic, so a value one
+    float inside an open bound may still be refused: a float32 ``logit``
+    under ``(-1, 1)`` computes ``(p - lo) / (hi - lo)`` as exactly 1 for
+    ``nextafter(1, 0)``, and a bound whose float spacing is subnormal
+    (``TINY <= |b| < 2**-102`` in float32) is one flushed distance from its
+    neighbour.  Acceptance is monotone moving inward from a bound, so the
+    search doubles the distance from ``b`` until a value is accepted, then
+    bisects between that and the last refused one.
+    """
+    t = dt.type
+    inward = 1.0 if side == 0 else -1.0
+
+    def accepts(x) -> bool:
+        try:
+            spec.check(np.asarray(x, dtype=dt))
+        except ValueError:
+            return False
+        return True
+
+    if accepts(first):
+        return first
+    other = spec.bounds[1 - side]
+    middle = (0.5 * (b + float(other)) if other is not None
+              else inward * float(np.finfo(dt).max))
+    refused, accepted = first, None
+    distance = abs(float(first) - b)
+    for _ in range(_BOUND_SEARCH_DOUBLINGS):
+        distance *= 2.0
+        with np.errstate(over="ignore"):
+            candidate = t(b + inward * distance)
+        if not np.isfinite(candidate) or inward * (float(candidate) - middle) > 0:
+            return None
+        if inward * (float(candidate) - float(refused)) <= 0:
+            continue                                  # rounded back to the last one
+        if accepts(candidate):
+            accepted = candidate
+            break
+        refused = candidate
+    if accepted is None:
+        return None
+    while True:
+        mid = t(0.5 * (float(refused) + float(accepted)))
+        if mid == refused or mid == accepted:
+            return accepted
+        if accepts(mid):
+            accepted = mid
+        else:
+            refused = mid
+
+
 def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     """``ParamSpec.bounds[side]`` as the FMI ``min`` / ``max`` attribute.
 
@@ -587,6 +651,20 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     zero bound's neighbour is a float32 subnormal, which XLA:CPU flushes
     to zero (``jnp.asarray(1e-45) <= 0.0`` is ``True``), so the margin
     is never smaller than the smallest normal.
+
+    That neighbour is advertised only if ``ParamSpec.check`` accepts it in
+    the leaf's dtype; otherwise the outermost value further in that it
+    accepts is (:func:`_accepted_inside`).  ``check`` judges a ``log`` /
+    ``logit`` value by the transform's own arithmetic, and the neighbour
+    used to be advertised regardless: a float32 ``logit`` leaf under
+    ``(-1, 1)`` advertised ``max = nextafter(1, 0)``, whose ``(p - lo) /
+    (hi - lo)`` rounds to 1, so a sidecar with ``param_specs`` -- and FMPy
+    through the compiled wrapper -- refused the FMU's own advertised max;
+    and a bound in float32's subnormal-spacing band (``TINY <= |b| <
+    2**-102``) advertised a neighbour one flushed distance away.  When no
+    value on the bound's side of the interval passes (a ``logit`` range
+    with no float inside it), the neighbour is advertised as before, and
+    the bridge refuses a description whose ``min`` exceeds its ``max``.
     """
     if spec is None:
         return None
@@ -613,7 +691,63 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     m = np.nextafter(dt.type(b), towards)
     if abs(m) < fi.tiny:
         m = dt.type(fi.tiny if side == 0 else -fi.tiny)
-    return float(m)
+    import jax  # noqa: PLC0415 - the dtype JAX would hold a leaf of this dtype in
+
+    if jax.dtypes.canonicalize_dtype(dt) != dt:
+        # A float64 variable without x64: no leaf of this dtype exists in
+        # this process for ``check`` to judge (JAX would hold it as float32).
+        return float(m)
+    accepted = _accepted_inside(spec, float(b), side, dt, m)
+    return float(m if accepted is None else accepted)
+
+
+def _envelope(lo: Optional[float], hi: Optional[float]) -> tuple[Optional[float], Optional[float]]:
+    """``(min, max)`` for comparison: an infinite bound pointing outward is
+    no bound (``ParamSpec`` reads ``-inf`` / ``inf`` there as ``None``, and
+    :meth:`ModelDescription.to_xml` leaves such an attribute out)."""
+    return (None if lo is None or float(lo) == -math.inf else float(lo),
+            None if hi is None or float(hi) == math.inf else float(hi))
+
+
+def _parameter_envelope(spec, dtype: str) -> tuple[Optional[float], Optional[float], str]:
+    """``(min, max, unit)`` a parameter variable of ``dtype`` advertises
+    under ``spec`` (``None`` for no spec): what
+    :func:`build_model_description` writes, and what the bridge compares
+    the graph's current declaration with (:func:`_specs_changed_since`)."""
+    return (_advertised_bound(spec, 0, dtype), _advertised_bound(spec, 1, dtype),
+            (spec.units if spec is not None else "") or "")
+
+
+def _specs_changed_since(md: "ModelDescription", graph_manager: Any) -> Optional[str]:
+    """Why the parameter envelope ``md`` advertises is no longer the one
+    ``graph_manager`` declares, or ``None``.
+
+    ``GraphManager.set_param_spec`` changes a parameter's ``ParamSpec``
+    without dirtying the graph (specs are metadata to the step), so neither
+    the compile generation nor the dirty flag sees it.  A description built
+    before such a change advertises the old ``min`` / ``max`` / ``unit``,
+    while a sidecar built after it from ``gm.param_specs()`` enforces the
+    new ones: a bridge then accepted values outside the bounds its XML (and
+    its instantiation token) advertise, or refused values inside them.
+    Each exported parameter's envelope is derived again from the graph's
+    current spec, exactly as the description derived it, and compared.
+    """
+    specs_fn = getattr(graph_manager, "param_specs", None)
+    if not callable(specs_fn):
+        return None
+    declared = (specs_fn() or {}).get("nodes", {}) or {}
+    for var in md.variables:
+        if var.causality != "parameter" or var.node is None or not var.field:
+            continue
+        spec = (declared.get(var.node) or {}).get(var.field)
+        now = _parameter_envelope(spec, var.dtype)
+        then = (var.min, var.max, var.unit or "")
+        if (*_envelope(now[0], now[1]), now[2]) != (*_envelope(then[0], then[1]), then[2]):
+            return (f"the ParamSpec of {var.name!r} has changed since "
+                    f"(GraphManager.set_param_spec): the description advertises "
+                    f"min={then[0]!r}, max={then[1]!r}, unit={then[2]!r}, and the graph "
+                    f"now declares min={now[0]!r}, max={now[1]!r}, unit={now[2]!r}")
+    return None
 
 
 @dataclass(frozen=True)
@@ -1196,6 +1330,7 @@ def build_model_description(
                 shape = tuple(getattr(leaf, "shape", ()) or ())
                 flat = np.asarray(leaf).ravel()
                 start = " ".join(_xs_value(x, dtype) for x in flat)
+                lo, hi, unit = _parameter_envelope(spec, dtype)
                 variables.append(FMIVariable(
                     name=name,
                     value_reference=next_vr,
@@ -1211,11 +1346,11 @@ def build_model_description(
                         (spec.description if spec is not None and spec.description else "")
                         or f"Parameter {key!r} of node {node_name!r}"
                     ),
-                    unit=(spec.units if spec is not None else "") or "",
+                    unit=unit,
                     shape=shape or None,
                     start=start,
-                    min=_advertised_bound(spec, 0, dtype),
-                    max=_advertised_bound(spec, 1, dtype),
+                    min=lo,
+                    max=hi,
                 ))
                 next_vr += 1
 

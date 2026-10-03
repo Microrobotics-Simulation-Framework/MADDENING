@@ -458,7 +458,12 @@ class SidecarConfig:
         into the parameter tree is wider than another.  A bridge holds
         its sidecar to the ``min`` / ``max`` its model description
         advertises whether or not this was given: for an exported
-        parameter with no spec here it adds one carrying those bounds.
+        parameter with no spec here it adds one carrying those bounds, and
+        one with a spec here is held to that spec and to the advertised
+        bounds both.  A spec here that enforces another envelope than the
+        description advertises -- a ``gm.set_param_spec`` between building
+        the description and this config, or a hand-made tree -- makes the
+        bridge refuse to start, naming the parameter.
     fixed_params : mapping of str to str, optional
         ``{"<node>.params.<key>": reason}`` for parameters the compiled step
         cannot read -- pass :attr:`ModelDescription.fixed_parameters
@@ -539,6 +544,11 @@ class FmuSidecar:
         # (``_adopt_advertised_bounds``, ``_adopt_input_resolver``) and must
         # never write into the caller's config.
         self._param_specs: Optional[dict] = _copy_specs(config.param_specs)
+        #: ``{(node, key): ParamSpec}`` of the ``min`` / ``max`` a bridge's
+        #: model description advertises (``_adopt_advertised_bounds``),
+        #: checked on every write and restore alongside this sidecar's own
+        #: spec, so the accepted values are the intersection of the two.
+        self._advertised: dict[tuple[str, str], Any] = {}
         self._input_resolver = config.input_resolver
 
     def _refuse_new_values_for(self, fixed: Mapping[str, str]) -> None:
@@ -548,16 +558,35 @@ class FmuSidecar:
             self._fixed.setdefault(name, reason)
 
     def _adopt_advertised_bounds(self, specs: Mapping[tuple[str, str], Any]) -> None:
-        """Add a ``ParamSpec`` for every ``(node, key)`` in ``specs`` that
-        has none yet (the bridge's model-description contract: the ``min``
-        / ``max`` it advertises hold however this sidecar was configured).
-        A spec the sidecar already has is kept: it is the graph's own
-        declaration, which the description was built from."""
+        """Hold every write and restore of ``(node, key)`` to ``specs``
+        (the bridge's model-description contract: the ``min`` / ``max`` it
+        advertises hold however this sidecar was configured).
+
+        A parameter with no spec of its own gets the advertised one in
+        :attr:`param_specs`.  One with a spec keeps it there, and is held
+        to *both*: the sidecar's spec and the advertised bounds, the
+        intersection.  The bridge first refuses a sidecar whose spec
+        enforces another envelope than the description advertises
+        (``FmuTcpBridge._check_sidecar_envelope``); the intersection keeps
+        a value outside the advertised bounds out even so.  It used to keep
+        the sidecar's spec alone, assuming it was the declaration the
+        description had been built from, and a spec changed in between
+        (``gm.set_param_spec``) let a bridge accept values its XML forbids.
+        """
         tree = self._param_specs if self._param_specs is not None else {}
         nodes = tree.setdefault("nodes", {})
         for (node, key), spec in specs.items():
             nodes.setdefault(node, {}).setdefault(key, spec)
+            self._advertised[(node, key)] = spec
         self._param_specs = tree
+
+    def _check_advertised(self, node: str, key: str, value: Any, own: Any) -> None:
+        """Refuse ``value`` for ``(node, key)`` outside the bounds a bridge's
+        description advertises (:meth:`_adopt_advertised_bounds`), unless
+        those bounds are the sidecar's own spec ``own``, already checked."""
+        advertised = self._advertised.get((node, key))
+        if advertised is not None and advertised is not own:
+            advertised.check(value, name=f"{node}.params.{key}")
 
     def _adopt_input_resolver(self, resolver: Callable[[Optional[dict]], dict]) -> None:
         """Use ``resolver`` before every step unless the sidecar was
@@ -713,6 +742,7 @@ class FmuSidecar:
             spec = spec_nodes.get(node, {}).get(key)
             if spec is not None:
                 spec.check(new, name=name)
+            self._check_advertised(node, key, new, spec)
             staged.append((node, key, new))
         for node, key, new in staged:
             nodes[node][key] = new
@@ -888,6 +918,11 @@ class FmuSidecar:
                         continue
                     installed.setdefault(section, {}).setdefault(owner, {})[key] = value
         check_bounds(installed, self._param_specs or {})
+        own_nodes = (self._param_specs or {}).get("nodes", {}) or {}
+        for owner, leaves in (installed.get("nodes") or {}).items():
+            for key, value in leaves.items():
+                self._check_advertised(owner, key, value,
+                                       (own_nodes.get(owner) or {}).get(key))
 
     # -- Wire-level RPC -----------------------------------------------------
 

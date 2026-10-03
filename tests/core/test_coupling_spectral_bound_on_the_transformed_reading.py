@@ -314,11 +314,16 @@ def _cached_graph(ab, ba, mode, acceleration, cap):
 
 
 def test_a_usable_bound_holds_on_a_transformed_pair():
-    """One drawn pair per structure, every transform kind on the A -> B edge."""
+    """A selection, a scale and an offset on one edge, a selection on the other.
+
+    One compiled structure, three drawn pairs; the property below draws
+    every structure.
+    """
     rng = np.random.default_rng(11)
-    for ab, ba in (("offset", "last"), ("unit-of-first", "none"), ("scale", "offset")):
+    ab, ba = "unit-of-first", "last"
+    gm = _cached_graph(ab, ba, "jacobi", "none", 3)
+    for _ in range(3):
         values = _values(rng, ab, ba, 0.9)
-        gm = _cached_graph(ab, ba, "jacobi", "none", 3)
         d = _run(gm, values)
         _x, true = _exact_and_distance(gm, ab, ba, values)
         assert d["spectral_usable"], (ab, ba, dict(d))

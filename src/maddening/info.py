@@ -60,7 +60,7 @@ EXTRAS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("network", ("zmq",)),
     ("streaming", ("gi", "websockets")),
     ("surrogates", ("equinox", "optax")),
-    ("terminal", ("rich",)),
+    ("terminal", ("rich", "termaid")),
     ("tpu", ("libtpu",)),
     ("usd", ("pxr",)),
     ("verify", ("hypothesis",)),

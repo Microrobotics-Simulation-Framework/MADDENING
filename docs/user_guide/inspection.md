@@ -22,9 +22,10 @@ prints the same text on every machine, wrapped at `width` characters
 (default 100) rather than at the terminal's width.  Pass `rich=True` to
 any `print_*` method to render it with the optional
 [rich](https://github.com/Textualize/rich) package
-(`pip install maddening[terminal]`); that is the only way `rich` is
-used, and without the package it raises an `ImportError` naming the
-extra.
+(`pip install maddening[terminal]`); that is the only way those methods
+use `rich`, and without the package it raises an `ImportError` naming
+the extra.  The one exception to plain text is `print_graph_diagram()`
+(at the end of this page), a drawing that needs the same extra.
 
 ## The graph at a glance
 
@@ -154,7 +155,9 @@ assert dot.startswith("digraph maddening {") and "subgraph cluster_g0" in dot
 Path("graph.dot").write_text(dot)
 ```
 
-and render it with `dot -Tsvg graph.dot -o graph.svg`.
+and render it with `dot -Tsvg graph.dot -o graph.svg`.  To draw the
+structure in the terminal instead, see "Drawing the graph in the
+terminal" at the end of this page.
 
 ## Tables: state, parameters, memory and coupling
 
@@ -352,6 +355,7 @@ transform.  What each reports instead:
 | | never compiled | modified since the last compile | holding JAX tracers |
 |---|---|---|---|
 | `format_graph`, `to_mermaid`, `to_dot` | structure as registered; rate dividers and execution order "not compiled" | the last compile's schedule, marked stale | shapes and dtypes read from the tracers |
+| `print_graph_diagram` | structure as registered | structure as it stands now | structure (it reads no state) |
 | `state_summary` | the state `add_node` initialised | the state it holds now | shapes only; no values, with a note |
 | `params_table` | the values `compile()` would take, built and not stored | the live `gm.params` | `gm.params` (it is not traced) |
 | `coupling_report` | "not compiled" | the last step's report | "state holds tracers" (it does not call `coupling_diagnostics()`, which would put the graph back) |
@@ -445,3 +449,61 @@ FIMReport: rank 2 of 2 parameters (all determined); cond 6.854
     ['c']  1.25
     ['k']  0.25
 ```
+
+## Drawing the graph in the terminal
+
+`print_graph_diagram()` draws a graph's structure -- what `to_mermaid()`
+exports -- as boxes and arrows in the terminal, with the optional
+[termaid](https://pypi.org/project/termaid/) package
+(`pip install "maddening[terminal]"`).  Each node is a box reading
+`name :: Type`, a coupling group is a titled frame, edges carry their
+`field→input` labels, and a flux edge or external input is drawn dotted.
+With `rich` installed (the same extra) a terminal gets colour:
+`theme=` picks one of termaid's themes (`"default"`, `"terra"`, `"neon"`,
+`"mono"`, `"amber"`, `"phosphor"`, `"gruvbox"`, `"monokai"`, `"dracula"`,
+`"nord"`, `"solarized"`), and a file or pipe gets the same drawing as
+plain text.  `direction="TB"` stacks a wide graph vertically, and
+`use_ascii=True` draws without Unicode box characters.  The diagram is
+for reading: the few characters termaid cannot carry in a label (a
+double quote, a backtick, `%%`, `:::`) are drawn as look-alikes, while
+`to_mermaid()` and `format_graph()` keep every name exact.
+
+<!-- snippet: requires: termaid -->
+```python
+from maddening import GraphManager
+from maddening.nodes import HeatNode
+
+rods = GraphManager()
+for name in ("rod_a", "rod_b"):
+    rods.add_node(HeatNode(name, 1e-4, n_cells=8, thermal_diffusivity=0.1,
+                           initial_temperature=300.0))
+rods.add_edge("rod_a", "rod_b", "temperature", "left_temperature",
+              transform="extract_last")
+rods.add_edge("rod_b", "rod_a", "temperature", "right_temperature",
+              transform="extract_first")
+rods.add_coupling_group(["rod_a", "rod_b"])
+rods.add_external_input("rod_a", "left_temperature")
+rods.print_graph_diagram()
+```
+
+prints
+
+<!-- output -->
+```text
+
+                         ┌──────────────────────────────────────────────────────────────────────────────────────────────┐
+                         │ coupling group rod_a+rod_b                                                                   │
+                         │                                                                                              │
+                         │                                                                                              │
+/────────────────────/   │ ┌─────────────────────┐                                              ┌─────────────────────┐ │
+│                    │   │ │                     │                                              │                     │ │
+│     external:      │   │ │  rod_a :: HeatNode  │ temperature→left_temperature (extract_last)  │  rod_b :: HeatNode  │ │
+│  left_temperature  ├┄┄┄┼►│                     ├─────────────────────────────────────────────►│                     │ │
+│                    │   │ │                     │                                              │                     │ │
+/────────────────────/   │ └─────────────────────┘                                              └──────────┬──────────┘ │
+                         │            ▲temperature→right_temperature (extract_first)                       │            │
+                         └────────────┴────────────────────────────────────────────────────────────────────┴────────────┘
+```
+
+Like the rest of this page it is read-only and compiles nothing; without
+`termaid` it raises an `ImportError` naming the extra.

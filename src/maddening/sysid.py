@@ -52,7 +52,7 @@ from maddening.core.coupling.acceleration import (
     convergence_criterion,
     estimated_error,
 )
-from maddening.core._pow2_frame import pow2_frame
+from maddening.core._pow2_frame import pow2_exponent, pow2_frame, pow2_rescale
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 # ``_resolve_specs`` is the one walk that decides which ParamSpec governs
@@ -3199,7 +3199,7 @@ def _gradient_lift(scaled, grads, loss):
         budget -= 1
     if t is None or t == 0.0:
         return None
-    framed = min(exponent - math.frexp(t)[1], widest)
+    framed = min(exponent - pow2_exponent(t), widest)
     if framed <= 0:
         return None
     t2 = probe(framed)
@@ -4718,13 +4718,6 @@ def _column_frame(J):
     return pow2_frame(jnp.max(jnp.abs(J), axis=0), mode="entrywise")
 
 
-def _pow2_exponent(frame):
-    """``k`` with ``frame == 2**k`` (an integer array), for unframing by
-    :func:`jax.numpy.ldexp`: exact, and with no intermediate that can
-    overflow or flush where the unframed result itself does not."""
-    return jnp.frexp(frame)[1] - 1
-
-
 def _half_squared_norm(r) -> float:
     """``0.5 * ||r||²`` as a Python float, computed on ``r`` framed by a
     power of two (its largest entry into ``[0.5, 1)``) and unframed in
@@ -4781,7 +4774,8 @@ def _marquardt_step(th, r, J, lam, lo, hi, held):
     **The solve is equilibrated and framed.**  ``J``'s columns are each
     multiplied by the power of two that brings their largest entry into
     ``[0.5, 1)`` and ``r`` by the one that brings its own there, and the
-    step is unframed by the same powers (:func:`jax.numpy.ldexp`, exact).
+    step is unframed by the same powers
+    (:func:`~maddening.core._pow2_frame.pow2_rescale`, exact).
     Forming ``A = JᵀJ`` and ``g = Jᵀr`` bare in the working precision
     flushed to zero or overflowed for a residual or a parameter far from
     unit scale -- XLA's CPU backend flushes a subnormal product -- and in
@@ -4834,7 +4828,7 @@ def _marquardt_step(th, r, J, lam, lo, hi, held):
     floor = jnp.where(d > 0, jnp.finfo(A.dtype).eps * d, 1.0)
     A_damped = A + jnp.diag(lam * d + floor + (1.0 - free))
     dh = jnp.linalg.solve(A_damped, g)
-    delta = jnp.ldexp(dh, _pow2_exponent(c) - _pow2_exponent(f))
+    delta = pow2_rescale(dh, c, f)
     live = jnp.any(J != 0.0, axis=0) & ~hold
     representable = ~jnp.any(live & ~(jnp.isfinite(d) & (d > 0.0)))
     return jnp.clip(th - delta, lo, hi), representable
@@ -4874,7 +4868,7 @@ def _gauss_newton_step(th, r, J, lo, hi, held):
     usable = (norms > 0) & jnp.isfinite(norms)
     scale = jnp.where(usable & ~hold, 1.0 / jnp.where(usable, norms, 1.0), 0.0)
     y = jnp.linalg.lstsq(Jc * scale[None, :], -(r * f))[0]
-    step = jnp.ldexp(scale * y, _pow2_exponent(c) - _pow2_exponent(f))
+    step = pow2_rescale(scale * y, c, f)
     live = jnp.any(J != 0.0, axis=0) & ~hold
     representable = ~jnp.any(live & ~usable)
     return jnp.clip(th + step, lo, hi), representable

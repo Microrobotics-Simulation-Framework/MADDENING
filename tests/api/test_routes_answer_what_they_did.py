@@ -416,3 +416,31 @@ def test_a_trace_past_its_time_budget_is_stopped_without_waiting_for_a_step(
     time.sleep(0.05)
     status = client.get("/sim/profile/jax/status").json()
     assert status["active"] is False, status
+
+
+# ---------------------------------------------------------------------------
+# The small end of a float32, on both write routes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", [1e-50, -1e-50, 1e-46])
+def test_a_state_value_float32_flushes_to_zero_is_refused_and_nothing_is_written(value):
+    """The REST twin of the FMU's value check, on ``PUT /graph/state``: a
+    non-zero value its type stores as 0 is refused in the overflow's words."""
+    server, client = _ball_server()
+    before = client.get("/graph/state/ball").json()
+    resp = client.put("/graph/state/ball", json={"state": {"position": value, "velocity": 0.0}})
+    assert resp.status_code == 400, resp.text
+    assert "does not fit its type float32" in resp.json()["detail"]
+    assert client.get("/graph/state/ball").json() == before
+
+
+@pytest.mark.parametrize("value", [1e-45, -1e-40, 1e-38])
+def test_a_value_that_rounds_to_a_subnormal_keeps_its_sign_and_magnitude_on_both_routes(value):
+    server, client = _ball_server()
+    want = float(np.float32(value))
+    resp = client.put("/graph/state/ball", json={"state": {"position": value, "velocity": 0.0}})
+    assert resp.status_code == 200, resp.text
+    assert client.get("/graph/state/ball").json()["position"] == want != 0.0
+    resp = client.put("/graph/params/ball", json={"params": {"gravity": value}})
+    assert resp.status_code == 200, resp.text
+    assert client.get("/graph/params/ball").json()["gravity"] == want != 0.0

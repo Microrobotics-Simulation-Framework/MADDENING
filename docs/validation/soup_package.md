@@ -79,7 +79,7 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-013 | Several nodes pin a float64 quantity to float32: HeartPumpNode's backpressure, and the rigid-body and HeatNode parameter and initial_state casts | `minor` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-014 | Every explicit integrator converges at 1st order when a time-varying boundary input is supplied once per step, including the one named 4th-order | `major` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-016 | cloud/_skypilot.py was written against a SkyPilot API older than the supported floor | `major` | `not_safety_relevant` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
-| MADD-ANO-017 | Under jax_enable_x64 a scan-shaped path refuses a float32 carry: implicit_euler_step in every release, and GraphManager's scans on a freshly compiled graph from 0.4.0 | `minor` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-017 | Under jax_enable_x64 a scan-shaped path refuses a float32 carry: implicit_euler_step in every release, and GraphManager's scans on a freshly compiled graph from 0.4.0 | `minor` | `context_dependent` | `partially_resolved` (in 0.4.0) | >=0.1.0 |
 | MADD-ANO-018 | A calibrated params value reaches update() and cannot reach derivatives(), implicit_residual() or integrate_node() | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-019 | A coupling iteration that diverged to a non-finite state was reported residual=0.0, converged=True | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-020 | LBMNode's Zou-He pressure boundary imposed rho_p + S_K instead of the prescribed density | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
@@ -236,8 +236,12 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-171 | save_state cannot write a typed PRNG key leaf | `minor` | `not_safety_relevant` | `open` | >=0.1.0 |
 | MADD-ANO-172 | reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform | `minor` | `not_safety_relevant` | `open` | >=0.4.0.dev0 |
 | MADD-ANO-173 | run_adaptive never returns once its step-doubling error norm is NaN | `major` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-174 | fit_lm reported converged=True at a wrong point, or at its unmoved start, for a float32 residual or parameter far from unit scale; fit returned its start | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-175 | node.params writes that never reached gm.params: every write into a replaced mapping, and an in-place element write to a list or array | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-176 | fim and fim_core reported rank 0 silently when F = J^T J flushed to exactly zero from a Jacobian that was not | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-177 | A logit ParamSpec whose width overflows the leaf's dtype was accepted, and constrain mapped the midpoint to the upper edge and far coordinates to NaN | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 
-*173 anomalies registered.  36 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 28 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*177 anomalies registered.  36 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 27 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

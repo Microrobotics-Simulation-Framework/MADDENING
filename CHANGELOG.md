@@ -207,6 +207,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **Assigning `node.params` stores a counting mapping; `SpringDamperNode` seeds its state in its constants' dtype** (MADD-ANO-175, MADD-ANO-017): writes made through `node.params` after `node.params = {...}` now reach `gm.params` (they were lost), so a reference to the assigned dict is no longer `node.params`; under x64 a spring with Python-float constants seeds float64, so its graph scans (it raised; 0.3.x ran it in float32).
+  Action: write through `node.params` after assigning it; give a spring float32 constants to keep a float32 state under x64.
 - **REST refusals agree with `PUT /graph/params`, and the runner routes stay off the shared workers**: `POST /checkpoint/load` and `POST /graph/nodes` refuse a parameter value `PUT` refuses (outside its `ParamSpec` bounds, a boolean or text for a number; on a load also non-finite or refused by the constructor), `GraphManager.load_state` refuses text and booleans for a number, and `PUT` refuses a numeric string (it stored `"1.5"` as 1.5); an integer is bounded at 10^7 only for an integer parameter (an integral JSON number for a float one is a float); a token with surrounding whitespace and an `allowed_hosts` entry that is not a host name raise at construction.
   Start, stop, pause, resume and reset run on pools of their own with deadlines from arrival (`PUT /sim/stride` on the event loop); `run_pod.py` takes no option abbreviations and writes schema 7 (`requested_cells`; a synthetic grid holds at least the requested cells).
   Action: keep parameters inside their bounds; strip the token; spell `run_pod.py` options out; re-run a session recorded at schema 6.
@@ -370,6 +372,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **sysid round-8 fixes** (MADD-ANO-174 to 177, never released): `fit_lm`'s loss and solves are framed by powers of two, so a float32 residual or parameter from `1e-30` to `1e30` no longer reports `converged=True` at a wrong point or its start, and `fit` lifts a flushed gradient; `fim`/`fim_core` flag an `F` flushed to zero; in-place and replaced-mapping `node.params` writes reach `gm.params`;
+  a `log`/`logit` spec the leaf's dtype cannot hold is refused; float32 leaves in an x64 graph no longer creep; `fit_lm`'s floor verdict no longer follows units or an on-bound gradient's rounding; counts read integers in every spelling.
+  Action: none; an ordinary `fit_lm` run moves in its last bits (the equilibrated solve's pivots).  SYS-131 and SYS-132 are new.
 - **FMU export, round-8 audit fixes** (MADD-ANO-167 to 169, never released): the bridge refuses to start when a `set_param_spec` since the description (or a sidecar spec) would enforce another `min` / `max` than the XML advertises, and holds every write to the advertised bounds too; a start, step end or restored time whose 16 ulps pass a tenth of the master step is refused, and no time slack exceeds a tenth of a step;
   a `get` past what one reply frame carries is refused before anything is read (one 64 MiB frame took 6 GB), a repeated reference is read once; an open `log` / `logit` bound is advertised as the outermost value `ParamSpec.check` accepts (a float32 `logit(-1, 1)` max was refused).
   Action: build the description, sidecar and bridge after the last `set_param_spec`; start an FMU at a time its master step resolves; compute communication points as `start + k * h`; re-package an FMU with a float32 `logit` leaf (its token may change).

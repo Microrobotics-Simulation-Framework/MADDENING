@@ -67,7 +67,9 @@ from maddening.core.coupling.acceleration import (
 )
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import SimulationNode, _method_accepts_params
+from maddening.core.node import (
+    SimulationNode, _method_accepts_params, _mutable_snapshot, _mutated_keys,
+)
 from maddening.core.params import (
     ParamSpec,
     check_bounds as _check_bounds,
@@ -5350,7 +5352,7 @@ class GraphManager:
         self._params: dict = {"nodes": {}, "mappings": {}}
         # What the last sync saw of each node: its params mapping and write
         # counts.  A ``node.params`` write is what moved them since.
-        self._node_writes_seen: dict[str, tuple] = {}
+        self._node_writes_seen: dict[str, tuple[Any, Any, dict, dict]] = {}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
         # The raw (uncounted, unjitted) step of the last compile, for the
@@ -5454,9 +5456,14 @@ class GraphManager:
         takes the node write in, so that write wins in turn.  (Only a leaf
         written through a reference held across the node write, with no
         read in between, loses to it.)  A write is a counted write to the
-        node's ``_ParamsDict``, or the mapping replaced, so a write of the
-        value the node already held counts.  Never compiles, so it is safe
-        from a getter and from :meth:`compile`; node values are taken under
+        node's ``_ParamsDict``, the mapping replaced (which the node stores
+        as a new ``_ParamsDict``), or a value changed in place -- an element
+        of a list or a NumPy array, which no method of the mapping sees --
+        found by comparing each such value with its copy from the last sync
+        (:func:`~maddening.core.node._mutated_keys`); so a write of the
+        value the node already held counts, and one into a list is not lost
+        (MADD-ANO-175).  Never compiles, so it is safe from a getter and
+        from :meth:`compile`; node values are taken under
         ``jax.ensure_compile_time_eval``, so a sync inside a trace stores
         concrete arrays.
         """
@@ -5467,7 +5474,9 @@ class GraphManager:
             seen = self._node_writes_seen.get(name)
             if seen is None:
                 continue                    # added since the last compile
-            if params is seen[0] and getattr(params, "_writes", None) == seen[1]:
+            mutated = _mutated_keys(params, seen[3]) if params is seen[0] else set()
+            if params is seen[0] and getattr(params, "_writes", None) == seen[1] \
+                    and not mutated:
                 continue
             key_writes = getattr(params, "_key_writes", None)
             if params is not seen[0] or key_writes is None:
@@ -5475,7 +5484,7 @@ class GraphManager:
             else:
                 counts = seen[2]
                 written = {k for k in set(key_writes) | set(counts)
-                           if key_writes.get(k, 0) != counts.get(k, 0)}
+                           if key_writes.get(k, 0) != counts.get(k, 0)} | mutated
             live = nodes_live.get(name)
             values: dict = {}
             if written and live is not None:
@@ -5489,17 +5498,21 @@ class GraphManager:
                 with jax.ensure_compile_time_eval():
                     live[key] = jnp.asarray(values[key], dtype=jnp.asarray(live[key]).dtype)
             self._node_writes_seen[name] = (params, getattr(params, "_writes", None),
-                                            dict(key_writes or {}))
+                                            dict(key_writes or {}),
+                                            _mutable_snapshot(params))
         if marked:
             self._dirty = True
         return marked
 
     def _record_param_sync(self) -> None:
-        """After a compile commits: every node's mapping and write counts, as
-        of now, are what the next sync compares against."""
+        """After a compile commits: every node's mapping, write counts and
+        in-place-mutable values (a copy of each list or array,
+        :func:`~maddening.core.node._mutable_snapshot`), as of now, are what
+        the next sync compares against."""
         self._node_writes_seen = {
             name: (spec.node.params, getattr(spec.node.params, "_writes", None),
-                   dict(getattr(spec.node.params, "_key_writes", None) or {}))
+                   dict(getattr(spec.node.params, "_key_writes", None) or {}),
+                   _mutable_snapshot(spec.node.params))
             for name, spec in self._nodes.items()
         }
 

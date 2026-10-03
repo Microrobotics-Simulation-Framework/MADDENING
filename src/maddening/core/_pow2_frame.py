@@ -58,6 +58,9 @@ which the callers' own guards then handle.  :func:`pow2_rescue` is the fixed
 factor ``1 / finfo.tiny`` the convergence norm applies, under a ``where``,
 to a field whose scale or one-ulp change is below the normal range
 (``maddening.core.coupling.acceleration._scaled_change``).
+:func:`pow2_rescale` unframes a result by two such factors on its exponent,
+and :func:`pow2_exponent` reads a host number's exponent, so that no module
+outside this one calls ``frexp`` or ``ldexp`` itself.
 
 **The expressions are kept verbatim.**  Each mode is the exact sequence of
 operations its call sites evaluated before they shared this module (Aitken
@@ -131,6 +134,31 @@ def pow2_frame(*arrays, mode: str = "common"):
         _, want = np.frexp(float(info.tiny) / float(info.eps))
         return jnp.ldexp(jnp.ones((), dtype), jnp.maximum(int(want) - have, 0))
     raise ValueError(f"pow2_frame: mode must be one of {_MODES}, got {mode!r}")
+
+
+def pow2_rescale(x, up, down):
+    """``x * up / down`` for powers of two ``up`` and ``down`` (factors
+    :func:`pow2_frame` returned), exactly, applied to ``x``'s exponent.
+
+    The unframing of a framed computation: ``fit_lm``'s Marquardt step is
+    solved on columns framed by ``c`` and a residual framed by ``f`` and
+    unframed as ``dh * c / f``.  Formed as products, ``c / f`` can overflow
+    (a tiny Jacobian column, ``c`` near ``2**126``, beside a large residual)
+    or flush where ``x * c / f`` itself is a normal number; on the exponents
+    (``ldexp``) the only rounding is the result's own.  Broadcasts like a
+    product.
+    """
+    _, up_exponent = jnp.frexp(up)
+    _, down_exponent = jnp.frexp(down)
+    return jnp.ldexp(x, up_exponent - down_exponent)
+
+
+def pow2_exponent(value: float) -> int:
+    """``e`` with ``abs(value) == m * 2**e`` and ``m`` in ``[0.5, 1)``: the
+    exponent :func:`pow2_frame` frames a host number by (``2**-e``), for a
+    Python float; ``0`` for zero.  Read where a frame is chosen on the host
+    (``sysid._gradient_lift``'s cotangent)."""
+    return int(np.frexp(float(value))[1])
 
 
 def pow2_rescue(dtype):

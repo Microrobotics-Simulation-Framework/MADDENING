@@ -83,6 +83,12 @@ def _wait_status(client, job_id, *, until=lambda s: s != "running", timeout=120.
 # Memory
 # ---------------------------------------------------------------------------
 
+def _surrogate_threads() -> set:
+    """The live threads the server starts for training jobs (it names them
+    ``maddening-surrogate-<job id>``)."""
+    return {t for t in threading.enumerate() if t.name.startswith("maddening-surrogate-")}
+
+
 def test_a_job_over_the_memory_budget_is_refused_before_anything_is_built(monkeypatch):
     """The audited request: a 25 000-cell rod at the defaults.  Refused from
     the estimate, without a sweep, a dataset or a thread."""
@@ -95,13 +101,16 @@ def test_a_job_over_the_memory_budget_is_refused_before_anything_is_built(monkey
         gm.compile()
     server = SimulationServer({}, graph_manager=gm)
     client = TestClient(server.create_app(), raise_server_exceptions=False)
-    threads = threading.active_count()
+    before = _surrogate_threads()
     resp = client.post("/surrogate/train", json={"node_name": "rod", "n_epochs": 1,
                                                  "hidden_sizes": [8], "batch_size": 64})
     assert resp.status_code == 400, resp.text
     assert "nothing was started" in resp.json()["detail"]
-    assert server._surrogate_jobs == {}
-    assert threading.active_count() == threads
+    assert server._surrogate_jobs == {} and server._surrogate_threads == {}
+    # No job thread was started.  Counted by the server's own thread name,
+    # not by threading.active_count(): the server's worker pool and JAX
+    # start and stop threads of their own, which made that count flaky.
+    assert _surrogate_threads() - before == set()
 
 
 def test_the_estimate_is_the_boundary_of_the_refusal(monkeypatch):
@@ -139,6 +148,60 @@ def test_the_estimate_grows_with_the_sweep_the_dataset_and_the_network():
     assert est(gm, "rod", base.model_copy(update={"n_data_steps": 10**5})) == \
         est(gm, "rod", base.model_copy(update={"n_data_steps": 200}))
     assert est(gm, "rod", base.model_copy(update={"hidden_sizes": [512, 512]})) > small
+
+
+def test_a_node_added_between_the_request_and_the_sweep_is_counted(monkeypatch):
+    """The estimate a request is admitted on is taken under the graph lock,
+    and the job's sweep takes the lock again in its own thread.  A
+    ``POST /graph/nodes`` queued behind the request is served first (the
+    lock is first come, first served, and the worker does not exist yet),
+    so the sweep ran over a graph the estimate never saw: a 2-scalar
+    graph's 0.5 MiB admitted a 2.15 GiB sweep.  The worker estimates again
+    on the graph it sweeps, and ends the job ``error``, naming the budget,
+    before sweeping anything."""
+    gm, server, client = _ball()
+    server.registry["HeatNode"] = HeatNode
+    small = server_module._surrogate_training_bytes(gm, "ball", TrainSurrogateRequest(**QUICK))
+    monkeypatch.setattr(server_module, "MAX_SURROGATE_TRAIN_BYTES", small * 4)
+    _no_job_may_start(monkeypatch)
+    replies: dict = {}
+
+    def call(key, method, url, **kw):
+        replies[key] = getattr(TestClient(client.app), method)(url, **kw)
+
+    lock = server._graph_lock
+    assert lock.acquire()                    # a long holder of the graph
+    try:
+        train = threading.Thread(target=call, args=("train", "post", "/surrogate/train"),
+                                 kwargs={"json": QUICK})
+        train.start()
+        assert _until(lambda: len(lock._queue) == 1)
+        add = threading.Thread(target=call, args=("add", "post", "/graph/nodes"), kwargs={
+            "json": {"type": "HeatNode", "name": "rod", "timestep": 0.01,
+                     "params": {"n_cells": 2000, "length": 2000.0}}})
+        add.start()
+        assert _until(lambda: len(lock._queue) == 2)
+    finally:
+        lock.release()
+    train.join(60)
+    add.join(60)
+    assert replies["train"].status_code == 200, replies["train"].text
+    assert replies["add"].status_code == 201, replies["add"].text
+    assert replies["train"].json()["estimated_bytes"] == small
+    status = _wait_status(client, replies["train"].json()["job_id"])
+    assert status["status"] == "error", status
+    assert "MAX_SURROGATE_TRAIN_BYTES" in status["error"], status["error"]
+    assert "nothing was swept" in status["error"]
+    assert status["estimated_bytes"] > small * 4
+
+
+def _until(predicate, timeout=20.0) -> bool:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.002)
+    return False
 
 
 @pytest.mark.parametrize("hidden, ok", [

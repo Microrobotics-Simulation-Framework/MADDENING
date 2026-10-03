@@ -658,3 +658,66 @@ def test_summarise_exits_4_when_one_file_records_no_commit(rp, recorded, tmp_pat
     _write(tmp_path, docs)
     assert rp.summarise(tmp_path) == 4
     assert "WARNING: MIXED COMMITS" in capsys.readouterr().out
+
+
+# --- a commit the runner can trust, and a file an older runner wrote -----------
+
+
+def _runner_in(directory: Path):
+    import shutil
+
+    shutil.copy(_RUNNER, directory / "run_pod.py")
+    spec = importlib.util.spec_from_file_location(f"run_pod_in_{directory.name}",
+                                                  directory / "run_pod.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_repository_with_no_commit_records_no_commit(tmp_path):
+    """``git rev-parse HEAD`` in a repository with no commit yet prints
+    ``HEAD`` and exits 128; the runner recorded ``"HEAD"`` as the commit,
+    and the commit gate took it as one session's."""
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    rp_here = _runner_in(tmp_path)
+    assert rp_here._git_commit() is None
+    subprocess.run(["git", "-C", str(tmp_path), "add", "run_pod.py"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-q", "-m", "c"], check=True)
+    sha = rp_here._git_commit()
+    assert isinstance(sha, str) and len(sha) == 40 and int(sha, 16) >= 0
+
+
+def test_a_recorded_commit_that_is_not_a_sha_is_no_commit(rp, recorded, tmp_path, capsys):
+    docs = _as_real_gpu_run(recorded)
+    for goal_docs in docs.values():
+        for doc in goal_docs:
+            doc["environment"]["git_commit"] = "HEAD"
+    assert rp._commit_of(docs["halo"][0]) is None
+    status = {i: s for i, (s, _) in rp.checklist_status(docs).items()}
+    assert all(s.startswith("open: no git commit recorded") for s in status.values()), status
+    _write(tmp_path, docs)
+    assert rp.summarise(tmp_path) == 4
+    assert "no file in this directory records a git commit" in capsys.readouterr().out
+
+
+def test_summarise_reads_an_older_runners_file_invalid_instead_of_stopping(rp, recorded,
+                                                                          tmp_path, capsys):
+    """The README's own scenario -- the runner changed between the session
+    and the summary: a schema-5 file without a key schema 6 added.  Its
+    tables stopped the summary with a KeyError traceback (exit 1, which
+    means "no goal JSON"); it reads INVALID and exits 3."""
+    docs = copy.deepcopy(recorded)
+    old = docs["indivisible"][0]
+    old["schema_version"] = 5
+    for r in old["results"]:
+        r.pop("stencil_axis1", None)
+    _write(tmp_path, docs)
+    assert rp.summarise(tmp_path) == 3
+    out = capsys.readouterr().out
+    assert next(ln for ln in out.splitlines() if ln.startswith("indivisible ")).endswith("INVALID")
+    assert "Tables leave out 1 file(s)" in out and "indivisible.json: KeyError" in out
+    # The other files' tables are still printed.
+    assert "Halo exchange vs NumPy" in out

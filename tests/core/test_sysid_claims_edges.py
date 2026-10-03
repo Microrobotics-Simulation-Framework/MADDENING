@@ -349,7 +349,7 @@ def test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter(unit):
 
 
 #: 1e-5 and 1e6 were held at a loss of 13.9 and 0.1 against 1e-11 while the guard asked
-#: its questions in the optimiser's coordinates (SYS-063, MADD-ANO-131).
+#: its questions in the optimiser's coordinates (SYS-063, MADD-ANO-135).
 _GUARD_UNITS = [pytest.param(1e-3, id="1e-3"), pytest.param(1e-5, id="1e-5"),
                 pytest.param(1e6, id="1e6")]
 
@@ -365,7 +365,7 @@ def test_the_hold_leaves_the_loss_where_the_fit_left_it_in_any_units(unit):
 
 
 #: Damping came back at 2 (its start) and 3.085 against 3 at 1e-5 and 1e6 while the
-#: guard asked its questions in the optimiser's coordinates (SYS-088, MADD-ANO-131).
+#: guard asked its questions in the optimiser's coordinates (SYS-088, MADD-ANO-135).
 _ANSWER_UNITS = [pytest.param(1e-3, id="1e-3"), pytest.param(1e-5, id="1e-5"),
                  pytest.param(1e6, id="1e6")]
 
@@ -463,7 +463,7 @@ def test_a_value_below_a_zero_bound_is_refused_however_small(value):
     """SYS-109: ``check`` raises "if a concrete value ... violates bounds", and
     ``gm.check_params`` names "the first leaf out of range".  A negative float32 subnormal
     is below the lower bound 0 of ``SpringDamperNode``'s ``damping``.  (It passed while
-    ``check`` compared through ``jnp``, which flushes it to zero on CPU: MADD-ANO-132.)"""
+    ``check`` compared through ``jnp``, which flushes it to zero on CPU: MADD-ANO-136.)"""
     with pytest.raises(ValueError, match="below bound"):
         ParamSpec(bounds=(0.0, None)).check(np.float32(value), name="damping")
 

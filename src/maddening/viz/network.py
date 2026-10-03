@@ -292,7 +292,7 @@ class NetworkRelay:
         if event != "step":
             return
         self._step_count += 1
-        self._timestep = _step_advance(self._gm, self._timestep)
+        self._timestep = _step_advance(self._gm, self._timestep, data)
         self._elapsed += self._timestep
         sim_time = self._elapsed
 

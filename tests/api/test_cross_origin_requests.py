@@ -402,3 +402,22 @@ def test_a_malformed_host_where_a_token_is_demanded_is_a_401_not_a_500(host):
     with pytest.raises(Exception):
         with client.websocket_connect("/ws/state", headers={"Host": host}):
             pass
+
+
+@pytest.mark.parametrize("method, path, body", [
+    ("DELETE", "/graph/nodes/spring", None),
+    ("DELETE", "/graph/edges", {"source_node": "spring", "target_node": "spring",
+                                "source_field": "position", "target_field": "anchor_position"}),
+])
+def test_a_cross_origin_delete_is_refused_and_removes_nothing(method, path, body):
+    """DELETE is one of the state-changing methods the Origin check covers:
+    a page on another origin cannot remove a node or an edge."""
+    server = SimulationServer(node_registry=REGISTRY, graph_manager=_graph(),
+                              bind_host="127.0.0.1")
+    client = TestClient(server.create_app(), raise_server_exceptions=False)
+    nodes, edges = list(server.gm._nodes), list(server.gm._edges)
+    response = client.request(method, path, json=body, headers={"Origin": EVIL})
+    assert response.status_code == 403, response.text
+    assert list(server.gm._nodes) == nodes and list(server.gm._edges) == edges
+    # The same request with no Origin (a script, not a page) goes through.
+    assert client.request("DELETE", "/graph/nodes/spring").status_code == 200

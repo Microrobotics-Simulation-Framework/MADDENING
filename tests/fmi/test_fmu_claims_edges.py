@@ -167,7 +167,7 @@ def test_a_float32_value_beyond_its_range_at_either_end_is_refused():
     ``FLT_MAX`` is refused, and so is a non-zero one the type flushes to 0 (below its
     smallest subnormal), with nothing written; one that rounds to a subnormal keeps its sign
     and magnitude -- representable means in range, not exact.  (The underflow read back as
-    0.0 until the maintainer ruled it refused: MADD-ANO-133.)"""
+    0.0 until the maintainer ruled it refused: MADD-ANO-137.)"""
     gm = _springs(0.01, external=True)
     md = build_model_description(gm, model_name="m")
     bridge = _bridge(gm, md)
@@ -208,7 +208,7 @@ def test_the_bridges_waits_and_limits_are_the_documented_numbers():
 def test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal():
     """FMU-039: "Setting a parameter is held to the min / max the description advertises".
     ``damping`` advertises ``min="0.0"``; a negative float32 subnormal is below it.  (It was
-    accepted while ``ParamSpec.check`` compared through ``jnp``: MADD-ANO-132.)"""
+    accepted while ``ParamSpec.check`` compared through ``jnp``: MADD-ANO-136.)"""
     gm = _springs(0.01)
     md = build_model_description(gm, model_name="m")
     bridge = _bridge(gm, md)

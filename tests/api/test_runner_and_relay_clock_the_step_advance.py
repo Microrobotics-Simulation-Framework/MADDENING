@@ -227,7 +227,8 @@ def test_the_network_relay_stamps_each_message_with_the_real_advance():
 def test_a_server_reset_restarts_the_frames_clock():
     """The REST server's WebSocket frames carry the relay's ``sim_time``:
     after ``POST /sim/run`` it is the run's simulated time, and ``POST
-    /sim/reset`` sets it back to zero with the state."""
+    /sim/reset`` sets it back to zero with the state -- and publishes the
+    reset state at that time, so the streams show it at once."""
     gm = _subcycled()
     gm.compile()
     server = SimulationServer({}, graph_manager=gm)
@@ -235,11 +236,83 @@ def test_a_server_reset_restarts_the_frames_clock():
     resp = client.post("/sim/run", params={"n_steps": 5})
     assert resp.status_code == 200, resp.text
     assert server.relay.latest_snapshot()[0] == pytest.approx(5 * 0.02, rel=1e-9)
-    assert client.post("/sim/reset").status_code == 200
-    assert server.relay.latest_snapshot() == (0.0, None)
+    reset = client.post("/sim/reset")
+    assert reset.status_code == 200
+    sim_time, snapshot = server.relay.latest_snapshot()
+    assert sim_time == 0.0 and server.relay.step_count == 0
+    assert {node: {f: float(v) for f, v in fields.items()}
+            for node, fields in snapshot.items()} == {
+        node: {f: float(v) for f, v in fields.items()}
+        for node, fields in reset.json()["state"].items() if node != "_meta"}
     assert client.post("/sim/run", params={"n_steps": 2}).status_code == 200
     assert server.relay.latest_snapshot()[0] == pytest.approx(2 * 0.02, rel=1e-9)
 
 
 def test_the_renderers_graph_info_carries_the_step():
     assert GraphInfo.from_graph_manager(_subcycled()).timestep == pytest.approx(0.02)
+
+
+# ---------------------------------------------------------------------------
+# run_adaptive: steps of varying dt (MADD-ANO-096's adaptive residual)
+# ---------------------------------------------------------------------------
+
+def _adaptive_counter() -> GraphManager:
+    """Unit velocity, no gravity: position is the simulated time, and the
+    Euler step is exact, so the adaptive step grows to dt_max."""
+    from maddening.nodes import BallNode
+
+    gm = GraphManager()
+    gm.add_node(BallNode("c", timestep=1.0 / 64.0, initial_position=0.0,
+                         initial_velocity=1.0, gravity=0.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+    return gm
+
+
+def test_the_relay_clocks_run_adaptives_steps_by_their_dt():
+    """``run_adaptive`` notifies each accepted step, and the relay added the
+    graph's fixed step for each: twelve adaptive steps to t = 1 s of a
+    1/64 s graph streamed 0.1875 s.  The event carries the step's dt now."""
+    gm = _adaptive_counter()
+    relay = StateRelay()
+    relay.attach(gm)
+    seen = []
+    gm.add_observer(lambda event, data: seen.append(data) if event == "step" else None)
+    final, info = gm.run_adaptive(t_end=1.0, dt_initial=0.01, dt_max=0.1)
+    sim_time, snapshot = relay.latest_snapshot()
+    assert info["n_steps"] > 2
+    assert sim_time == pytest.approx(info["t_history"][-1], rel=1e-12)
+    assert sim_time == pytest.approx(float(final["c"]["position"]), rel=1e-6)
+    assert relay.step_count == info["n_steps"]
+    # The event is still the state an observer reads as a dict.
+    assert isinstance(seen[-1], dict) and set(seen[-1]) == {"c"}
+    # ... and a fixed step after it adds the graph's step again.
+    gm.step()
+    assert relay.latest_snapshot()[0] == pytest.approx(sim_time + 1.0 / 64.0, rel=1e-12)
+
+
+def test_the_network_relay_stamps_run_adaptives_messages_with_their_dt():
+    pytest.importorskip("zmq", reason="the ZMQ relay needs pyzmq")
+    from maddening.viz.network import NetworkRelay
+
+    class _Recorder:
+        def __init__(self, socket):
+            self.socket, self.sent = socket, []
+
+        def send(self, payload, flags=0):
+            self.sent.append(json.loads(payload))
+
+        def close(self):
+            self.socket.close()
+
+    relay = NetworkRelay(address="tcp://127.0.0.1:*")
+    relay._socket = _Recorder(relay._socket)        # noqa: SLF001
+    try:
+        gm = _adaptive_counter()
+        relay.attach(gm)
+        _final, info = gm.run_adaptive(t_end=1.0, dt_initial=0.01, dt_max=0.1)
+        times = [m["t"] for m in relay._socket.sent]  # noqa: SLF001
+        assert times == pytest.approx(info["t_history"], rel=1e-12)
+    finally:
+        relay.close()

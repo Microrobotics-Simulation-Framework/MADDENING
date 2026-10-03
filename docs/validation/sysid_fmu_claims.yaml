@@ -968,7 +968,7 @@ claims:
     units.  It now makes every test, the hold and the tolerance with each
     identity parameter measured relative to its own size, as
     fim(scale="relative") does, so the loss is unaffected in any units
-    (MADD-ANO-131; tests/core/test_sysid_hold_in_any_units.py).
+    (MADD-ANO-135; tests/core/test_sysid_hold_in_any_units.py).
 
 - id: SYS-064
   area: identifiability guard
@@ -1326,7 +1326,7 @@ claims:
     identifiability guard held the damping direction at u = 1e-5 (damping
     returned at 2.0 against 3) and at u = 1e6 (3.085), and declined with a
     RuntimeWarning at 1e-3.  Root cause SYS-063's; closed with it
-    (MADD-ANO-131).
+    (MADD-ANO-135).
 
 # ---------------------------------------------------------------------------
 # ParamSpec and the constrained coordinates
@@ -1517,7 +1517,7 @@ claims:
     inputs to zero.  check now compares on the host, exactly, with the
     value and the bound rounded to the dtype JAX compares them in; under
     log / logit a value whose distance from its bound the step's arithmetic
-    flushes to zero is refused as on it (MADD-ANO-132;
+    flushes to zero is refused as on it (MADD-ANO-136;
     tests/core/test_bounds_checks_compare_exactly.py).
 
 # ---------------------------------------------------------------------------
@@ -2282,7 +2282,7 @@ claims:
   notes: >-
     Ambiguous in the first edition: a float32 set to 1e-50 was accepted
     and read back as 0.0.  The maintainer ruled it refused, mirroring the
-    refusal of 1e308 (MADD-ANO-133): the value check, on set, set_state and
+    refusal of 1e308 (MADD-ANO-137): the value check, on set, set_state and
     FmuSidecar.set_params, and REST's twin of it, refuse a non-zero value
     whose cast is +-0.  "Representable" cannot mean exact (0.1 is not a
     float32); the guide now says "in range".
@@ -2566,7 +2566,7 @@ claims:
     Failing in the first edition: a set of s0.params.damping (min="0.0") to
     -1e-40 answered ok and read back -9.99995e-41, because the sidecar's
     bounds check, ParamSpec.check, compared through jnp and so flushed the
-    subnormal to zero (SYS-109).  Closed with it (MADD-ANO-132).
+    subnormal to zero (SYS-109).  Closed with it (MADD-ANO-136).
 
 - id: FMU-040
   area: graph agreement

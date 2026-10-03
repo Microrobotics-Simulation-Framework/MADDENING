@@ -441,3 +441,39 @@ def test_a_stop_that_arrives_as_the_runner_is_granted_the_lock_costs_no_step():
     runner._thread.join(10)
     assert not runner.is_alive
     assert relay.step_count == 0
+
+
+def test_a_write_queued_before_a_run_began_is_refused_once_it_has_the_lock():
+    """``_graph_access`` asks whether something steps the graph twice: before
+    waiting for the lock, and again once it holds it.  The second answer
+    is the one that counts: a state write that asked while nothing ran, and
+    queued behind a ``POST /sim/run``, gets the lock between the run's start
+    and its first slice -- and must be refused there, not written into the
+    run.  (The lock is first come, first served, so the order is fixed.)"""
+    gm, server, flight = _server()
+    app = server.create_app()
+    replies: dict = {}
+
+    def call(key, method, url, **kw):
+        replies[key] = TestClient(app, raise_server_exceptions=False).request(method, url, **kw)
+
+    lock = server._graph_lock
+    assert lock.acquire()                       # a long holder of the graph
+    try:
+        run = threading.Thread(target=call, args=("run", "POST", "/sim/run"),
+                               kwargs={"params": {"n_steps": 20}})
+        run.start()
+        assert _wait_for(lambda: len(lock._queue) == 1)
+        write = threading.Thread(target=call, args=("write", "PUT", "/graph/state/ball"),
+                                 kwargs={"json": {"state": {"position": 5.0, "velocity": 0.0}}})
+        write.start()
+        assert _wait_for(lambda: len(lock._queue) == 2)
+    finally:
+        lock.release()
+    run.join(60)
+    write.join(60)
+    assert replies["run"].status_code == 200, replies["run"].text
+    assert replies["write"].status_code == 409, replies["write"].text
+    assert "POST /sim/run is in progress" in replies["write"].json()["detail"]
+    want, _ = _serial(20)
+    assert replies["run"].json()["ball"]["position"] == float(want["position"])

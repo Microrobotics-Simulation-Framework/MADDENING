@@ -81,6 +81,8 @@ import numpy as np
 
 try:
     from fastapi import FastAPI, HTTPException, Query, WebSocket
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.exceptions import RequestValidationError
     from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field, field_validator
     from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -201,6 +203,52 @@ def _unrepresentable(value: Any, dtype: Any) -> Optional[str]:
     if bool(np.any(np.isfinite(wide) & ~np.isfinite(narrow))) \
             or bool(np.any((wide != 0) & (narrow == 0))):
         return f"value does not fit its type {dt}"
+    return None
+
+
+def _state_value_refusal(value: Any, dtype: Any) -> Optional[str]:
+    """Why a JSON *value* (a number, or nested lists of them) cannot be
+    written into a state field of *dtype*, or ``None``; asked of every
+    element before anything is cast.
+
+    The rule every other write surface applies (``PUT /graph/params``,
+    ``POST /checkpoint/load`` through ``checkpoint._checked_cast``, the
+    FMU): text, a boolean for a numeric field, ``null`` and anything that
+    is not a number are refused; an integer field takes only integral
+    values inside its dtype's range; a boolean field takes booleans, or 0
+    and 1.  ``PUT /graph/state`` cast with ``jnp.asarray`` alone: ``"1.5"``,
+    ``" 2 "`` and ``true`` were parsed as numbers, 0.5 and 1.7 were
+    truncated to 0 and 1 in LBMNode's ``uint8`` wall mask, and 256, -1 or
+    1e10 there were a 500 (``OverflowError``).  A float field's range is
+    :func:`_unrepresentable`'s to say, and its finiteness the route's.
+    """
+    dt = np.dtype(dtype)
+    stack = [value]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, (list, tuple)):
+            stack.extend(v)
+            continue
+        if isinstance(v, bool):
+            if dt.kind == "b":
+                continue
+            return "expected a number, got a boolean"
+        if v is None:
+            return "expected a number, got null"
+        if isinstance(v, str):
+            return "expected a number, got a string"
+        if not isinstance(v, (int, float)):
+            return f"expected a number, got {type(v).__name__}"
+        if dt.kind == "b":
+            if v not in (0, 1):
+                return f"value {v!r} is not a boolean (true, false, 0 or 1)"
+        elif dt.kind in "iu":
+            if isinstance(v, float) and not v.is_integer():
+                return f"value {v!r} is not an integer, and the field holds {dt}"
+            info = np.iinfo(dt)
+            if not info.min <= v <= info.max:
+                return (f"value {v!r} is outside the range of {dt} "
+                        f"[{info.min}, {info.max}]")
     return None
 
 
@@ -551,7 +599,10 @@ def _oversized_new_node_param(cls: Any, params: dict[str, Any]) -> Optional[str]
 class AddNodeRequest(BaseModel):
     type: str
     name: str
-    timestep: float
+    # A finite number > 0: NaN or Infinity added the node and then answered
+    # 500 (its reply could not be encoded), every step a 400 until it was
+    # deleted; 0 or a negative value stepped it not at all, or backwards.
+    timestep: float = Field(gt=0, allow_inf_nan=False)
     params: dict[str, Any] = {}
 
     @field_validator("params")
@@ -3133,6 +3184,17 @@ class SimulationServer:
         # ExceptionGroup that FastAPI answers as "There was an error
         # parsing the body" (400).  No middleware or route reads a body
         # before it either way.
+        # A 422 echoes the value it refused, and FastAPI's own handler hands
+        # that to a JSON encoder that refuses NaN and the infinities: a
+        # request whose refused field held one (``"timestep": NaN``) was a
+        # 500.  The same body, encoded as every reply is (_json_reply).
+        @app.exception_handler(RequestValidationError)
+        async def _request_validation_error(_request, exc):
+            return JSONResponse(
+                status_code=422,
+                content=_json_reply({"detail": jsonable_encoder(exc.errors())}),
+            )
+
         app.add_middleware(_RequestBodyLimitMiddleware)
         app.add_middleware(
             _WebSocketAuthMiddleware,
@@ -3382,7 +3444,10 @@ class SimulationServer:
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
                 self._publish_state()
-                return {"status": "ok", "node": node.to_dict()}
+                # Through the reply encoder every other route uses: a
+                # non-finite value in the node's dict is written as its
+                # quoted token, never a 500 after the node was added.
+                return _json_reply({"status": "ok", "node": node.to_dict()})
 
         @app.delete("/graph/nodes/{name}", tags=["graph"], response_model=None)
         def remove_node(name: str) -> dict[str, str]:
@@ -3494,7 +3559,10 @@ class SimulationServer:
         def set_node_state(node_name: str, req: SetNodeStateRequest) -> dict[str, str]:
             """Replace a node's state.  Every field is required, coerced to
             the live leaf's dtype, and must match its shape and be finite;
-            a 400 names the field and writes nothing.  Each field's value
+            a 400 names the field and writes nothing.  Text, a boolean for
+            a numeric field and ``null`` are refused, and an integer field
+            takes only integral values inside its dtype's range
+            (:func:`_state_value_refusal`).  Each field's value
             count is checked against the live field before anything is
             converted to an array."""
             with self._graph_access("write a node's state", write=True):
@@ -3521,12 +3589,22 @@ class SimulationServer:
                 staged = {}
                 for field, value in req.state.items():
                     want = jnp.asarray(live[field])
+                    # Text, booleans, non-integral or out-of-range integers:
+                    # refused as every other write surface refuses them.
+                    problem = _state_value_refusal(value, want.dtype)
+                    if problem is not None:
+                        raise HTTPException(status_code=400, detail=f"{field}: {problem}")
                     # As for PUT /graph/params: refused before the cast warns.
                     problem = _unrepresentable(value, want.dtype)
                     if problem is not None:
                         raise HTTPException(status_code=400, detail=f"{field}: {problem}")
                     try:
                         arr = jnp.asarray(value, dtype=want.dtype)
+                    except OverflowError:
+                        # An integer past float64 for a float field (10**400).
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{field}: value does not fit its type {want.dtype}")
                     except (TypeError, ValueError) as exc:
                         raise HTTPException(status_code=400, detail=f"{field}: {exc}")
                     if arr.shape != want.shape:
@@ -4313,7 +4391,8 @@ class SimulationServer:
             """Start the runner.  Answered within about one graph-lock
             timeout of its arrival, a 503 past it: run on the runner routes'
             own threads, so it does not wait for a worker behind requests
-            waiting for the graph."""
+            waiting for the graph.  A graph with no nodes is a 409: there is
+            nothing to run."""
             return await on_runner_pool(sim_start_blocking)
 
         def sim_start_blocking(deadline: float) -> dict[str, str]:
@@ -4331,6 +4410,16 @@ class SimulationServer:
                 if self._runner_started:
                     raise HTTPException(status_code=409, detail="Runner is already started.")
                 with self._graph_access("start the runner", write=True, deadline=deadline):
+                    if not self.gm._nodes:
+                        # The runner's thread read gm.timestep on its first
+                        # frame and died ("No nodes registered.") after the
+                        # route had answered "started".
+                        raise HTTPException(
+                            status_code=409,
+                            detail=("The graph has no nodes, so there is nothing to "
+                                    "run. Add a node (POST /graph/nodes), then start "
+                                    "the runner."),
+                        )
                     runner = self._ensure_runner()
                     try:
                         runner.start()

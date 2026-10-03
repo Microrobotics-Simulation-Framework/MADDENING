@@ -158,7 +158,7 @@ not loopback; `/healthz` and `/viz/*` never do.
 |--------|------|-------------|
 | GET | `/graph/state` | Get state of all nodes, `_meta` included |
 | GET | `/graph/state/{node_name}` | Get state of one node |
-| PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`). A value the field's dtype cannot hold (`1e39` into float32) or a non-finite one is a 400, and nothing is written. The streams are sent the written state, at their clock |
+| PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`). A value the field's dtype cannot hold (`1e39` into float32; for an integer field, a non-integral value or one outside its range: `0.5` or `256` into uint8), a non-finite one, text, `null` or a boolean for a numeric field is a 400 naming the field, and nothing is written. The streams are sent the written state, at their clock |
 
 A non-finite number in any reply -- a diverged state, a coupling
 diagnostic not yet filled (`diagnostics=True` seeds its spectral `_meta`

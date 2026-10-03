@@ -462,21 +462,43 @@ def test_healthz_answers_while_every_worker_waits_for_the_graph(tmp_path):
         assert resp.status_code == 200 and elapsed < 2.0, (resp.status_code, elapsed)
 
 
-_POOL = ("the runner routes ran on the worker pool every graph read waits in, so behind "
-         "more queued reads than anyio has workers they waited for the reads; pending "
+_POOL = ("ran on the worker pool every graph read waits in, so behind more queued reads than "
+         "anyio has workers it waited for a worker before its own deadline began; pending "
          "fix/p4-18-rest")
+#: The graph-lock timeout of the saturated-pool test, and how many reads it
+#: queues behind a held graph: three times anyio's 40 workers, so a route
+#: that needs a worker waits two waves of timed-out reads for one.
+LOCK_TIMEOUT = 1.0
+QUEUED = 120
+#: Runner routes behind a saturated worker pool: (route, the row, the
+#: runner running?, what it must answer, within how many lock timeouts).
+_ROUTES = [
+    ("POST", "/sim/stop", "REST-045", True, (200, 503), 0.5),
+    ("PUT", "/sim/stride?steps_per_frame=2", "REST-105", True, (200,), 0.5),
+    ("POST", "/sim/start", "REST-044", False, (503,), 1.6),
+    ("POST", "/sim/reset", "REST-046", True, (503,), 1.6),
+]
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=f"REST-045: {_POOL}")
-def test_stop_is_answered_at_once_while_every_worker_waits_for_the_graph(tmp_path):
-    """REST-045 (and REST-044, REST-105 behind it): the runner running and
-    the graph held by a long request, 48 reads queued for it -- more than
-    anyio's 40 workers -- then POST /sim/stop and PUT /sim/stride: each
-    answered within a second, not after the reads."""
-    with S.loopback_server(_ANY, tmp_path) as (server, base):
-        with _client(base, server) as c:
-            assert c.post("/sim/start").status_code == 200
-        assert S.wait_for(lambda: server.relay.step_count > 1)
+@pytest.mark.parametrize("method, url, row, running, want, timeouts", [
+    pytest.param(*r, marks=pytest.mark.xfail(strict=True, raises=AssertionError,
+                                             reason=f"{r[2]}: {r[0]} {r[1].split('?')[0]} {_POOL}"),
+                 id=r[1].split("?")[0].rsplit("/", 1)[1]) for r in _ROUTES])
+def test_a_runner_route_answers_in_time_while_every_worker_waits_for_the_graph(
+        tmp_path, method, url, row, running, want, timeouts):
+    """REST-044, REST-045, REST-046, REST-105 on a real server: the graph held
+    by a long request and 120 reads queued for it -- three times anyio's 40
+    workers, every one of them waiting -- then a runner route arrives: stop
+    and stride answer at once (well inside one lock timeout), start and a
+    reset that stopped the runner answer their 503 within about one timeout
+    of their arrival, not after a worker freed up."""
+    chk = S.Check(fn=None, rows=(), bind="any", contexts=frozenset(), server_kw={},
+                  patch={"_GRAPH_LOCK_TIMEOUT": LOCK_TIMEOUT}, xfail={})
+    with S.loopback_server(chk, tmp_path) as (server, base):
+        if running:
+            with _client(base, server) as c:
+                assert c.post("/sim/start").status_code == 200
+            assert S.wait_for(lambda: server.relay.step_count > 1)
         lock = server._graph_lock
         assert lock.acquire(timeout=20)
         threads = []
@@ -485,29 +507,25 @@ def test_stop_is_answered_at_once_while_every_worker_waits_for_the_graph(tmp_pat
                 with _client(base, server) as c:
                     c.get("/graph/state")
 
-            threads = [threading.Thread(target=read) for _ in range(48)]
+            threads = [threading.Thread(target=read) for _ in range(QUEUED)]
             for t in threads:
                 t.start()
-            # every worker waiting for the graph (the runner's thread queues too)
-            assert S.wait_for(lambda: len(lock._queue) >= 41, 20), len(lock._queue)
-            timings = {}
-            for label, method, url, kw in (("stride", "PUT", "/sim/stride",
-                                            {"params": {"steps_per_frame": 2}}),
-                                           ("stop", "POST", "/sim/stop", {})):
-                with _client(base, server) as c:
-                    t0 = time.monotonic()
-                    try:
-                        resp = c.request(method, url, timeout=5.0, **kw)
-                        timings[label] = (time.monotonic() - t0, resp.status_code)
-                    except httpx.TimeoutException:
-                        timings[label] = (time.monotonic() - t0, None)
+            # every worker waiting for the graph (a running runner queues too)
+            assert S.wait_for(lambda: len(lock._queue) >= 40 + running, 20), len(lock._queue)
+            with _client(base, server) as c:
+                t0 = time.monotonic()
+                try:
+                    resp = c.request(method, url, timeout=10.0)
+                    status = resp.status_code
+                except httpx.TimeoutException:
+                    status = None
+                elapsed = time.monotonic() - t0
         finally:
             lock.release()
             for t in threads:
                 t.join(60)
             S.stop_runner(server)
-        for label, (elapsed, status) in timings.items():
-            assert status is not None and elapsed < 1.0, (label, elapsed, status)
+    assert status in want and elapsed < timeouts * LOCK_TIMEOUT, (row, status, elapsed)
 
 
 def test_simultaneous_websocket_handshakes_need_the_credential(tmp_path):

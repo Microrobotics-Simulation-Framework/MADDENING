@@ -722,7 +722,7 @@ def _a_websocket_handshake_needs_the_credential(ctx):
         assert ws.accepted_subprotocol is None
 
 
-@check("REST-013", bind="public", skip=("restored", "wrapper", "shutdown", "sim_run"))
+@check("REST-013", bind="public", skip=("restored", "wrapper", "shutdown"))
 def _the_interactive_docs_are_not_served_where_the_token_is_enforced(ctx):
     for path in ("/docs", "/redoc", "/openapi.json"):
         assert ctx.client.get(path).status_code == 404, path
@@ -877,6 +877,10 @@ def _a_body_over_the_limit_is_a_413_before_it_is_parsed(ctx):
 
     streamed = ctx.client.put("/graph/params/spring", content=stream(), headers=headers)
     refused(streamed, 413)
+    # Hostile content changes nothing: a malformed body past the limit is
+    # refused for its size before anything tries to parse it.
+    malformed = b"{\"params\": [[[" + b"\xff" * 1200
+    refused(ctx.client.put("/graph/params/spring", content=malformed, headers=headers), 413)
     unchanged_param(ctx, "spring", "stiffness", before)
     exactly = ctx.client.put("/graph/params/spring", content=body(1000, key="no_such_key"),
                              headers=headers)
@@ -904,6 +908,10 @@ def _the_integer_and_value_bounds_are_422s_that_write_nothing(ctx):
     before = (ctx.node_param("c", "n_cells"), structure(ctx))
     for value in (MAX_NODE_PARAM_INT + 1, -(MAX_NODE_PARAM_INT + 1), [MAX_NODE_PARAM_INT + 1]):
         refused(ctx.client.put("/graph/params/c", json={"params": {"n_cells": value}}), 422)
+    # A boolean is not counted as an integer (nor taken for one): wrong-typed,
+    # it is refused, and nothing is written either way.
+    resp = ctx.client.put("/graph/params/c", json={"params": {"n_cells": True}})
+    assert resp.status_code in (400, 422), resp.text
     resp = ctx.client.post("/graph/nodes", json={
         "type": "HeatNode", "name": f"big{ctx.index}", "timestep": 0.01,
         "params": {"n_cells": MAX_NODE_PARAM_INT + 1}})
@@ -956,6 +964,9 @@ def _a_state_field_with_far_more_values_is_refused_before_conversion(ctx):
 
 @check("REST-038", "REST-099", skip=("restored", "wrapper", "shutdown"))
 def _the_stride_is_bounded_and_a_value_left_out_keeps_its_own(ctx):
+    """Zero, a negative stride and one past each bound are 422s that keep
+    the values in force; the largest is taken and echoed as applied; a value
+    left out of the query keeps its own."""
     from maddening.api.server import MAX_RELAY_STRIDE, MAX_STEPS_PER_FRAME
 
     assert ctx.client.put("/sim/stride", params={"steps_per_frame": 3,
@@ -981,6 +992,7 @@ def _the_stride_is_bounded_and_a_value_left_out_keeps_its_own(ctx):
 
 @check("REST-039", skip=("runner", "sim_run", "wrapper", "concurrent"))
 def _the_profile_step_count_is_clamped_not_refused(ctx):
+    """A zero or negative step count is clamped to one, not refused."""
     for n in (0, -5):
         resp = ctx.client.post("/sim/profile", params={"n_steps": n})
         assert resp.status_code == 200, resp.text
@@ -1448,6 +1460,8 @@ def _removing_a_node_removes_every_edge_that_touches_it(ctx):
 
 @check("REST-068", skip=("runner", "sim_run", "wrapper"))
 def _an_edge_names_nodes_and_fields_that_exist(ctx):
+    """An edge naming a missing node is a 404, a missing source field a 400,
+    and a DELETE of an edge the graph does not have a 404; nothing changes."""
     before = structure(ctx)
     refused(ctx.client.post("/graph/edges", json={
         "source_node": "nope", "target_node": "ball", "source_field": "position",

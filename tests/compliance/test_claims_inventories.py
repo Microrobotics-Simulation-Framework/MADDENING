@@ -238,17 +238,22 @@ DOMAIN_WITNESS: dict[str, re.Pattern] = {
         ("sharded", r"shard|mesh"),
         # -- the server set --
         ("non_loopback_bind", r"0\.0\.0\.0|non.?loopback|public|bind_host=|203\.0\.113"),
-        ("token_enforced", r"Bearer|Authorization|enforced"),
+        # a non-loopback bind always demands the token, and a 401 is its refusal
+        ("token_enforced", r"Bearer|Authorization|enforced|0\.0\.0\.0|\b401\b"),
         ("runner_active", r"sim/start|runner"),
         ("sim_run_active", r"sim/run"),
-        ("large_payload", r"MAX_|limit|budget|\bcaps?\b|413|oversiz|bound|large|huge"),
+        ("large_payload", r"MAX_|limit|budget|\bcaps?\b|413|oversiz|bound|large|huge|"
+                          r"too.?long|NAME_MAX|\d+(?:_000){2,}"),
         ("hostile_input", r"malformed|\bnan\b|infinity|non.?finite|traversal|\.\./|\\x00|"
                           r"\bNUL\b|garbage|hostile|invalid|wrong|foreign|attacker|tamper|"
-                          r"truncat|corrupt|@given|\bbool|\bstr\b|string|null"),
+                          r"truncat|corrupt|@given|\bbool|\bstr\b|string|null|base64|"
+                          r"cross.?origin|not.?a.?host|negative|out.?of.?range|missing|"
+                          r"unknown|fraction|flush|subnormal|empty"),
         ("shutdown", r"SIGINT|SIGTERM|shutdown|signal|lifespan"),
         ("wrapper_nodes", r"Sharded\w*Node|HybridNode|hybrid|wrapper"),
         ("checkpoint_restore", r"checkpoint|save_state|load_state|restore"),
-        ("dry_run_cpu", r"dry.?run|virtual|\bcpu\b"),
+        # run_pod_record/ is a real --dry-run's output, read as _RECORD
+        ("dry_run_cpu", r"dry.?run|virtual|\bcpu\b|run_pod_record|_RECORD\b"),
         ("relabelled_records", r"relabel"),
         ("mixed_commits", r"commit"),
     )}
@@ -271,7 +276,9 @@ def witnesses(domain: str, text: str) -> bool:
         return bool(re.search(r"loopback|127\.0\.0\.1|localhost", text, re.IGNORECASE)) or \
             not DOMAIN_WITNESS["non_loopback_bind"].search(text)
     if domain == "no_token":        # the default: anything but a test that always sends one
-        return bool(re.search(r"anonymous|no.?token|without", text, re.IGNORECASE)) or \
+        return bool(re.search(r"anonymous|no.?token|without|not.?challenged|"
+                              r"enforced\s*(?:is\s*False|==)|loopback|127\.0\.0\.1",
+                              text, re.IGNORECASE)) or \
             not DOMAIN_WITNESS["token_enforced"].search(text)
     if domain == "concurrent":
         return bool(_REAL_SERVER.search(text) and _SIMULTANEOUS.search(text))

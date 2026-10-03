@@ -256,3 +256,23 @@ def test_a_second_relabelled_file_of_one_goal_from_another_commit_keeps_its_item
     status = _status(rp, docs)
     assert all(status[i] != "CLOSED" for i in decided), status
     assert {i for i, s in status.items() if s == "CLOSED"} == _ITEMS - decided
+
+
+@pytest.mark.parametrize("a2a_ms, ppermute_ms, want", [
+    (1.05, 1.0, "ppermute"), (1.0499, 1.0, "tie"), (1.0, 1.0, "tie"), (1.0, 1.0001, "all_to_all"),
+], ids=["exactly-the-margin", "just-under-it", "even", "just-slower"])
+def test_the_recommendation_thresholds_hold_on_a_relabelled_exchange_record(
+        rp, recorded, a2a_ms, ppermute_ms, want):
+    """RPD-023 on the evidence a pod session brings back: the exchange record
+    relabelled as a real 4-GPU run, every row's medians set so ppermute is
+    exactly the margin faster, just under it, level, or just slower -- the
+    decision the thresholds give, from a record that is still valid."""
+    docs = copy.deepcopy(_as_real_gpu_run(recorded)["exchange"])
+    for r in docs[0]["results"]:
+        r["methods"]["all_to_all"]["median_ms"] = a2a_ms
+        r["methods"]["ppermute"]["median_ms"] = ppermute_ms
+        r["ppermute_speedup_median"] = a2a_ms / ppermute_ms
+    assert rp.record_problems(docs[0]) == []
+    rec = rp.recommend(docs, min_cells=0)
+    assert rec["deciding_rows"] == len(docs[0]["results"])
+    assert rec["decision"] == want, rec

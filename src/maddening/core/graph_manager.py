@@ -11243,6 +11243,14 @@ class GraphManager:
         """Load node states from an ``.npz`` file.
 
         See :func:`maddening.core.simulation.checkpoint.load_state` for details.
+        The parameter leaves are restored as a ``gm.params`` write is taken:
+        not checked against a ``ParamSpec``'s bounds or a reload, which
+        ``POST /checkpoint/load`` asks as ``PUT /graph/params`` does.  This
+        is by decision: bounds are metadata to a graph, Python code may hold
+        a value outside them on purpose (a ``gm.params`` write is not
+        checked either), and a graph so written must resume its own
+        checkpoint into a freshly built graph.  Text and booleans for a
+        numeric leaf are refused, as values no save writes.
         """
         from maddening.core.simulation.checkpoint import load_state
         self._recover_from_escaped_tracers()

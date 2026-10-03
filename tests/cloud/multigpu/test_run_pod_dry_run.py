@@ -90,7 +90,7 @@ def dry_run_dir(tmp_path_factory):
 def _load(directory: Path, goal: str) -> dict:
     with open(directory / f"{goal}.json", encoding="utf-8") as f:
         doc = json.load(f)
-    assert doc["schema_version"] == 6
+    assert doc["schema_version"] == 7
     assert doc["goal"] == goal
     assert doc["dry_run"] is True
     assert doc["allow_fewer_devices"] is False
@@ -519,8 +519,8 @@ def _exchange_doc(platform: str, rows: list[tuple[int, float, float]], *, dry_ru
     results = []
     for cells, a2a, ppm in rows:
         results.append({
-            "cells": cells, "n_devices": n_devices, "bit_identical": True,
-            "input_presharded": True,
+            "cells": cells, "requested_cells": cells, "n_devices": n_devices,
+            "bit_identical": True, "input_presharded": True,
             "ppermute_speedup_median": (a2a / ppm) if ppm else None,
             "methods": {
                 "all_to_all": {"median_ms": a2a, "min_ms": a2a, "bytes_total": 8 * 4 * 4},
@@ -701,7 +701,7 @@ def test_neighbour_and_slab_tables_agree_with_the_layout():
     from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
 
     rp = _runner_module()
-    n, edges = rp.grid_edges(30)                      # 5x5 lattice
+    n, edges = rp.grid_edges(25)                      # 5x5 lattice
     assert n == 25
     tbl = rp.neighbour_table(n, edges)
     assert tbl.shape == (25, 4)

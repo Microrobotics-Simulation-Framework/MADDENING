@@ -43,34 +43,48 @@ Documented differences, which the oracle allows and nothing else:
 * **D3 -- the instantiation value.**  A snapshot restores a parameter at
   the value the FMU was instantiated with (or holds now) whatever its
   bounds (``FmuSidecar.set_fmu_state``), so ``set_state`` of exactly that
-  value is accepted where the bounds would refuse it.
-* **D4 -- REST bounds an integer.**  The route's request model refuses a
-  JSON integer above ``MAX_NODE_PARAM_INT`` in magnitude (422) whatever the
-  leaf it is for, as ``POST /graph/nodes`` does: a node may turn an integer
-  into an array dimension.  The other doors take ``2**24 + 1`` and store
-  the float32 it rounds to.
+  value is accepted where the bounds would refuse it.  ``POST
+  /checkpoint/load`` likewise asks nothing of a value that is the leaf's
+  now or the node's own, so a graph built outside its bounds reloads its
+  own checkpoint.
+* **D4** (retired) -- the REST route's request model used to refuse a JSON
+  integer above ``MAX_NODE_PARAM_INT`` in magnitude (422) whatever the leaf;
+  the bound is now the route's, for an integer parameter only, so every
+  door takes ``2**24 + 1`` for a float leaf and stores the float32 it
+  rounds to.
+* **D5 -- the constructor.**  ``PUT /graph/params`` and ``POST
+  /checkpoint/load`` ask the node's constructor whether it takes the value
+  (a graph saved with it must reload), and refuse a ``HeatNode``
+  diffusivity past its Fourier limit; ``check_params``, the sidecar and the
+  bridge do not ask, and take it (``MADD-ANO-047``'s residual: a parameter
+  write outside REST is not checked against a reload, deferred to 0.5.0).
+* **D6 -- ``load_state`` is a Python door.**  ``GraphManager.load_state``
+  restores any number the leaf's dtype holds -- outside its bounds,
+  non-finite, refused by the constructor -- as a ``gm.params`` write takes
+  it: bounds are metadata to a graph, and a graph whose parameters Python
+  moved outside them must resume its own checkpoint into a freshly built
+  graph.  It refuses what no save writes (text, a boolean) and what the
+  dtype cannot hold, as every door does.  A decision, recorded in
+  ``MADD-ANO-163``.
 
-Known disagreements, pinned as strict xfails:
+No known disagreement is pinned.
 
-* **N1** -- the REST route stores a numeric string (``"1.5"``) in a float
-  leaf as the number, while every FMU door refuses a string and the
-  route's own comment says a string is a 400.
-* **N2** (fixed in 0.4.0) -- a ``log`` / ``logit`` bound in the band where
-  a float32's spacing is subnormal (``TINY <= |b| < 2**-102``) was advertised
-  one float inside it, a distance XLA flushes to zero, where
-  ``ParamSpec.check`` refuses; a bridge whose sidecar has no specs took it.
-  The description now advertises the first value inside the bound the spec
-  accepts (``model_description._first_accepted``).
-
-The restore and construction doors and the wrapper nodes (the end of the
-module) add: **B2-H1** -- a checkpoint load (``load_state``,
-``POST /checkpoint/load``) restores what PUT refuses: out of bounds,
-non-finite, a boolean, a value the constructor refuses; **B2-L10** --
-``POST /graph/nodes`` applies no ``ParamSpec`` bounds; **B2-H2** -- a write
-to a ``HybridNode`` is lost; **N3** -- ``POST /graph/nodes`` takes a boolean
-for a float constant; **N4** -- the FMU doors and ``check_params`` take a
-value the node's constructor refuses (a ``HeatNode`` past its Fourier
-limit).  The sharded wrappers agree.
+Fixed, and run as tests: **N2** -- a ``log`` / ``logit`` bound in the band
+where a float32's spacing is subnormal (``TINY <= |b| < 2**-102``) was
+advertised one float inside it, a distance XLA flushes to zero, which
+``ParamSpec.check`` refuses and a bridge whose sidecar has no specs took;
+so was a ``logit`` edge whose neighbour's coordinate rounds onto the bound
+(``max = -TINY`` under ``(-1, 0)``).  The description now advertises the
+first value inside each bound the spec accepts
+(``model_description._first_accepted``).  **N1** -- the REST route stored a numeric string
+(``"1.5"``) in a float leaf as the number; **B2-H1** -- ``POST
+/checkpoint/load`` restored what PUT refuses: out of bounds, non-finite, a
+boolean, a numeric string, a value the constructor refuses
+(``MADD-ANO-163``), and ``load_state`` a boolean and a numeric string (the
+rest of what it takes is D6); **B2-L10** -- ``POST /graph/nodes`` applied no
+``ParamSpec`` bounds, and **N3** -- took a boolean for a float constant;
+**B2-H2** -- a write to a ``HybridNode`` was lost (``MADD-ANO-164``).  The
+sharded wrappers agree.
 
 Tolerance: none.  Acceptance is a yes or no, and a stored value is compared
 bit for bit.
@@ -463,15 +477,9 @@ def check_acceptance(s: Subject, spec: Optional[ParamSpec], value, *, restore: b
             assert check[0] is expected, (
                 f"check_params of the cast {held!r} answered {check[0]}, "
                 f"ParamSpec.check {expected}")
-    if isinstance(value, int) and not isinstance(value, bool) \
-            and abs(value) > MAX_NODE_PARAM_INT:
-        # D4: the REST request model bounds every JSON integer, whatever the
-        # leaf it is for (``SetNodeParamsRequest``: a node may turn one into
-        # an array dimension), so it is a 422 there.
-        for door in ("REST PUT", "POST /graph/nodes"):
-            if door in compared:
-                ok, _, message = compared.pop(door)
-                assert not ok and message.startswith("422"), (door, message)
+    # (D4, a 422 from the REST request model for any JSON integer past
+    # MAX_NODE_PARAM_INT, is retired: the route bounds an integer parameter
+    # only, so a float leaf takes one at every door.)
     if is_number(value) and math.isfinite(value) and not lost_in_the_dtype(value) \
             and np.float32(value) == s.initial_value:
         # D3: a snapshot restores a parameter at the value the FMU was
@@ -480,6 +488,19 @@ def check_acceptance(s: Subject, spec: Optional[ParamSpec], value, *, restore: b
             if door in compared:
                 ok, _, message = compared.pop(door)
                 assert ok or "refused to start" in message, (door, message)
+        # ... and POST /checkpoint/load asks nothing of a value the graph
+        # holds (here the initial one): a graph built outside its bounds
+        # reloads its own checkpoint.
+        if "POST /checkpoint/load" in compared:
+            ok, stored, message = compared.pop("POST /checkpoint/load")
+            assert ok and stored.tobytes() == s.initial_value.tobytes(), message
+    if "load_state" in compared and is_number(value) and not lost_in_the_dtype(value):
+        # D6: load_state restores any number the leaf's dtype holds, as a
+        # gm.params write takes it.
+        ok, stored, message = compared.pop("load_state")
+        assert ok, ("load_state", message)
+        assert np.array_equal(stored, np.asarray(value, dtype=LEAF_DTYPE), equal_nan=True), (
+            f"load_state holds {stored!r} after restoring {value!r}")
     verdicts = {door: ok for door, (ok, _, _) in compared.items()}
     assert verdicts, "no door was compared"
     assert len(set(verdicts.values())) == 1, (
@@ -707,19 +728,24 @@ def test_a_logit_range_no_value_can_enter_is_refused_by_every_door(doors, value)
 
 
 @pytest.mark.parametrize("value", ["1.5", "30", " 2.0 ", "1e3"])
-@pytest.mark.xfail(strict=True, reason=(
-    "N1: PUT /graph/params stores a numeric string in a float leaf as the number "
-    "(server.py set_node_params_locked: jnp.asarray(value, dtype) parses it), while every "
-    "FMU door refuses a string; pending fix"))
 def test_a_numeric_string_is_refused_by_every_door(doors, value):
-    check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value)
+    """N1, fixed: ``PUT /graph/params`` stored a numeric string in a float
+    leaf as the number (``jnp.asarray(value, dtype)`` parses it), while
+    every FMU door refuses a string; the restore and construction doors
+    refuse one too."""
+    assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value, restore=True,
+                            construct=True) == "refused"
 
 
-def test_a_large_integer_is_refused_by_the_rest_route_alone(doors):
-    """D4, per push (the broad draw found it): ``2**24 + 1`` is stored as
-    the float32 it rounds to by every door but the REST route, whose
-    request model bounds a JSON integer whatever the leaf."""
-    assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), 2 ** 24 + 1) == "accepted"
+@pytest.mark.parametrize("value", [2 ** 24 + 1, MAX_NODE_PARAM_INT + 1, 20_000_000])
+def test_a_large_integer_is_taken_by_every_door_as_the_float32_it_rounds_to(doors, value):
+    """D4 retired, per push (the broad draw found it): a JSON integer past
+    ``MAX_NODE_PARAM_INT`` for a float leaf -- a browser's
+    ``JSON.stringify(2e7)`` is ``20000000`` -- is taken by every door, the
+    REST route and ``POST /graph/nodes`` included, as the float32 it
+    rounds to.  The route used to refuse it with a 422."""
+    assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value,
+                            construct=True) == "accepted"
 
 
 def test_a_number_written_as_text_is_refused_by_the_fmu_doors(doors):
@@ -745,23 +771,6 @@ def test_a_number_written_as_text_is_refused_by_the_fmu_doors(doors):
 # load -- must leave every node's params, every ``gm.params`` leaf, the whole
 # state and the dirty flag where they were.
 
-_B2_H1 = ("B2-H1: GraphManager.load_state and POST /checkpoint/load restore a parameter "
-          "value PUT /graph/params refuses -- outside its ParamSpec bounds, non-finite, a "
-          "boolean, a numeric string, or one the node's constructor refuses -- and answer "
-          "200; pending fix")
-_B2_L10 = ("B2-L10: POST /graph/nodes builds a node with a parameter outside its class's "
-           "ParamSpec bounds (it applies none); pending fix")
-_B2_H2 = ("B2-H2: a write to a HybridNode is lost: PUT /graph/params answers 200, and the "
-          "next read of gm.params syncs the wrapped node's unchanged value over it "
-          "(HybridNode copies its physics node's params at construction); pending fix")
-_N3 = ("N3: POST /graph/nodes builds a node with a boolean for a float constant, which "
-       "then drops out of the params pytree (structural), where PUT refuses a boolean "
-       "and every FMU door takes numbers only; pending fix")
-_N4 = ("N4: check_params, FmuSidecar.set_params and the bridge's set and set_state accept "
-       "a value the node's constructor refuses (a HeatNode thermal_diffusivity past its "
-       "Fourier limit, so the rod diverges), which PUT /graph/params refuses; pending fix")
-
-
 @pytest.mark.parametrize("value", [45.0, 0.5, float(INITIAL_VALUE)])
 def test_a_restore_door_takes_what_every_write_door_takes(doors, value):
     """A checkpoint carrying a value every write door takes restores it,
@@ -779,16 +788,45 @@ def test_a_restore_door_refuses_what_no_door_takes_with_nothing_changed(doors, v
                             restore=True) == "refused"
 
 
-# (A numeric string is left to N1's test: PUT takes one too, so it could not
-# show B2-H1's fix.)
-@pytest.mark.parametrize("value", [-1.0, -5.0, math.nan, math.inf, True],
-                         ids=["below-bound", "damping-like", "nan", "inf", "bool"])
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H1)
+@pytest.mark.parametrize("value", [-1.0, -5.0, math.nan, math.inf, True, "1.5"],
+                         ids=["below-bound", "damping-like", "nan", "inf", "bool", "string"])
 def test_a_restore_door_refuses_what_the_write_doors_refuse(doors, value):
-    check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value, restore=True)
+    """B2-H1, fixed for ``POST /checkpoint/load`` (``MADD-ANO-163``); and
+    ``load_state`` refuses the boolean and the string (it takes the numbers,
+    D6)."""
+    assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value,
+                            restore=True) == "refused"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H1)
+@pytest.mark.parametrize("value", [-5.0, math.nan, math.inf], ids=["below-bound", "nan", "inf"])
+def test_load_state_restores_any_number_its_leaf_holds(doors, value):
+    """D6, pinned: ``load_state`` restores a number every other door refuses
+    -- the route's load included -- as a ``gm.params`` write takes it."""
+    outcomes = every_door(doors, ParamSpec(bounds=(0.0, None)), value, restore=True)
+    ok, stored, message = outcomes.pop("load_state")
+    assert ok and np.array_equal(stored, np.float32(value), equal_nan=True), message
+    assert not any(o[0] for o in outcomes.values()), outcomes
+
+
+@pytest.mark.parametrize("bounds", [(50.0, None), (None, 10.0)], ids=["below", "above"])
+def test_a_restore_door_takes_back_the_value_the_graph_holds_whatever_its_bounds(doors, bounds):
+    """D3 for the restore doors: a graph whose stiffness (30) is outside the
+    bounds declared on it holds that value by construction, and a checkpoint
+    carrying it -- its own -- loads through both doors, where every write
+    door refuses the value as a new one.  The value one float past it is
+    refused by every door, the route's load included (``load_state`` takes
+    it, D6)."""
+    spec = ParamSpec(bounds=bounds)
+    outcomes = every_door(doors, spec, float(INITIAL_VALUE), restore=True)
+    for door, (ok, _, message) in outcomes.items():
+        if door in RESTORE_DOORS or door.startswith("bridge.set_state"):
+            assert ok, (door, message)
+        else:
+            assert not ok and "bound" in message, (door, message)
+    step = np.nextafter(INITIAL_VALUE, np.float32(0 if bounds[0] else 100))
+    assert check_acceptance(doors, spec, float(step), restore=True) == "refused"
+
+
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
 def test_every_restore_door_agrees_with_the_write_doors(doors, data):
@@ -818,17 +856,26 @@ def test_a_stable_diffusivity_is_taken_by_every_door(rod):
     assert check_acceptance(rod, None, 0.06, restore=True) == "accepted"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H1)
 def test_a_restore_door_refuses_a_diffusivity_the_constructor_refuses(rod):
-    """B2-H1's second case: the loads against PUT alone (the FMU doors'
-    answer to the same value is N4's)."""
-    check_acceptance(rod, None, 0.4, restore=True,
-                     only=("REST PUT", "load_state", "POST /checkpoint/load"))
+    """B2-H1's second case, fixed: the route's load against PUT (the other
+    write doors' answer to the same value is D5's, ``load_state``'s D6)."""
+    assert check_acceptance(rod, None, 0.4, restore=True,
+                            only=("REST PUT", "POST /checkpoint/load")) == "refused"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_N4)
-def test_every_write_door_refuses_a_diffusivity_the_constructor_refuses(rod):
-    check_acceptance(rod, None, 0.4)
+def test_the_doors_that_ask_no_constructor_take_a_diffusivity_it_refuses(rod):
+    """D5, a documented difference (``MADD-ANO-047``'s residual, deferred to
+    0.5.0): ``check_params``, the sidecar and the bridge do not ask the
+    node's constructor, and take a diffusivity past the rod's Fourier limit
+    that PUT and the route's load refuse (``load_state`` takes it too, D6).
+    Pinned so a change to either side shows."""
+    outcomes = every_door(rod, None, 0.4, restore=True)
+    asks = ("REST PUT", "POST /checkpoint/load")
+    for door, (ok, _, message) in outcomes.items():
+        if door in asks:
+            assert not ok and "constructor refuses" in message, (door, message)
+        else:
+            assert ok, (door, message)
 
 
 # -- construction ---------------------------------------------------------------
@@ -852,17 +899,17 @@ def test_a_node_is_not_built_with_a_value_no_door_takes(own_specs, value):
 
 
 @pytest.mark.parametrize("value", [-5.0, -1e-30])
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_L10)
 def test_a_node_is_not_built_with_a_value_outside_its_bounds(own_specs, value):
-    check_acceptance(own_specs, None, value, construct=True)
+    """B2-L10, fixed."""
+    assert check_acceptance(own_specs, None, value, construct=True) == "refused"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_N3)
-def test_a_node_is_not_built_with_a_boolean_for_a_float_constant(own_specs):
-    check_acceptance(own_specs, None, True, construct=True)
+@pytest.mark.parametrize("value", [True, False])
+def test_a_node_is_not_built_with_a_boolean_for_a_float_constant(own_specs, value):
+    """N3, fixed."""
+    assert check_acceptance(own_specs, None, value, construct=True) == "refused"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_L10)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
 def test_every_construction_door_agrees_with_the_write_doors(own_specs, data):
@@ -977,9 +1024,10 @@ def test_a_wrapper_node_refuses_a_value_outside_its_bounds_with_nothing_changed(
     assert check_acceptance(wrapped(label, wrapper_root), None, -1.0) == "refused"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H2)
 def test_a_hybrid_node_holds_a_write_every_door_takes(wrapper_root):
-    check_acceptance(wrapped("hybrid", wrapper_root), None, 45.0)
+    """B2-H2, fixed (``MADD-ANO-164``)."""
+    assert check_acceptance(wrapped("hybrid", wrapper_root), None, 45.0,
+                            restore=True) == "accepted"
 
 
 @pytest.mark.parametrize("label", ["sharded-stencil", "sharded-unstructured"])
@@ -992,7 +1040,6 @@ def test_a_sharded_wrapper_takes_a_parameter_write_as_every_door_does(wrapper_ro
     check_acceptance(s, spec, data.draw(values(spec), label="value"))
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H2)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
 def test_a_hybrid_node_takes_a_parameter_write_as_every_door_does(wrapper_root, data):

@@ -112,6 +112,32 @@ class TestSimProfile:
 # ---------------------------------------------------------------------------
 
 
+def test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept():
+    """``/sim/profile`` caught a ``RuntimeError`` only: an edge between
+    fields of mismatched shapes -- which ``POST /graph/edges`` accepts --
+    makes the compile raise an ``ExceptionGroup``, and the profile answered
+    500 where ``/sim/step`` and ``/graph/compile`` answer 400."""
+    from maddening.nodes.heat import HeatNode
+    from maddening.nodes.spring import SpringDamperNode
+
+    gm = GraphManager()
+    gm.add_node(HeatNode("h", 0.01, n_cells=10, length=1.0, thermal_diffusivity=0.01))
+    gm.add_node(SpringDamperNode("s", 0.01))
+    server = SimulationServer(node_registry={}, graph_manager=gm)
+    client = TestClient(server.create_app(), raise_server_exceptions=False)
+    assert client.post("/graph/edges", json={
+        "source_node": "h", "target_node": "s", "source_field": "temperature",
+        "target_field": "anchor_position"}).status_code == 201
+    before = client.get("/graph/state").json()
+    step = client.post("/sim/step")
+    resp = client.post("/sim/profile", params={"n_steps": 2, "n_warmup": 0})
+    assert step.status_code == 400
+    assert resp.status_code == 400, resp.text
+    assert "edge validation failed" in resp.json()["detail"]
+    assert "nothing was stepped" in resp.json()["detail"]
+    assert client.get("/graph/state").json() == before
+
+
 class TestJaxTraceEndpoints:
     def test_start_returns_log_dir(self, loaded_client):
         client, _ = loaded_client

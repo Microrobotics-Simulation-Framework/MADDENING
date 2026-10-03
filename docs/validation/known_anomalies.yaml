@@ -11107,7 +11107,7 @@ anomalies:
       - "tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_not_a_bool_is_refused"
       - "tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_a_bool_in_any_spelling_is_read"
     github_issue: null
-  - anomaly_id: "MADD-ANO-154"
+  - anomaly_id: "MADD-ANO-156"
     title: "A flux edge that crosses a coupling group's boundary -- from an outside producer into a member, or from a member to an outside reader -- fails to trace with a bare KeyError"
     description: >
       A flux is a value `compute_boundary_fluxes` returns, not a field of
@@ -11126,7 +11126,7 @@ anomalies:
       same group read `g1.q -> sink`; `KeyError: 'q'` at the first step.
       A flux edge inside a group, and one between two outside nodes read
       forward, step.  Found by the coupling topology harness
-      (`tests/property/test_differential_coupling_topologies.py`, CPL-185),
+      (`tests/property/test_differential_coupling_topologies.py`, CPL-186),
       whose generator draws edge kinds across group boundaries that no
       earlier generator drew.
     severity: "minor"
@@ -11148,7 +11148,7 @@ anomalies:
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_an_outside_node_into_a_group_member_steps"
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps"
     github_issue: null
-  - anomaly_id: "MADD-ANO-155"
+  - anomaly_id: "MADD-ANO-157"
     title: "A flux edge that an ungrouped cycle reads from the previous step fails to trace with a bare KeyError, so whether the graph runs depends on the order its nodes were added"
     description: >
       A cycle of nodes outside every coupling group is staggered: the edge
@@ -11164,7 +11164,7 @@ anomalies:
       tag, CPU, jaxlib 0.11.0) and on the 0.4.0 development tree.  The
       adaptive steppers refuse the same edge with a `ValueError` that names
       it (`_build_dt_step_fn`).  Found by the coupling topology harness
-      (CPL-185).
+      (CPL-186).
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -11181,7 +11181,7 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps"
     github_issue: null
-  - anomaly_id: "MADD-ANO-156"
+  - anomaly_id: "MADD-ANO-158"
     title: "A typed PRNG key in a coupling group member fails to trace under solver='ift' with acceleration='aitken' or 'fixed'"
     description: >
       `CouplingGroup.accelerated_fields` documents that only floating
@@ -11218,7 +11218,7 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation"
     github_issue: null
-  - anomaly_id: "MADD-ANO-157"
+  - anomaly_id: "MADD-ANO-159"
     title: "A coupling group whose members are joined only through an outside node, on no cycle, reads that node one step late with no warning"
     description: >
       `CouplingGroup` documents that its members "form (part of) a cycle";
@@ -11235,7 +11235,7 @@ anomalies:
       v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag,
       CPU, jaxlib 0.11.0) and on the 0.4.0 development tree: `b = 0.25`
       after one step where reading `c` this step gives `2.75`.  Found by
-      the coupling topology harness (CPL-186).
+      the coupling topology harness (CPL-187).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >

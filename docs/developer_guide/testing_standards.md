@@ -985,8 +985,8 @@ is not exactly one group, and three or more additive edges into one port.
 | strict == report | the row with `strict_convergence` against without | It raises on exactly the steps reported unconverged. With `waveform_iterations > 1` it also raises where an earlier sweep hit the cap (CPL-052). Where it does not raise, bitwise | A raise that happens to fall on a step that is also unconverged |
 | usable bounds | `spectral_error_bound` against the distance in the returned state's weights; `gradient_relative_error_bound` against central differences of the exact fixed point in every member's gains and biases (slow) | None: the bound must be at least the truth | Constants outside the group |
 
-The harness found MADD-ANO-154 to 157, which are strict xfails naming
-CPL-003, CPL-185 and CPL-186.  Each oracle was mutation-tested against a
+The harness found MADD-ANO-156 to 159, which are strict xfails naming
+CPL-003, CPL-186 and CPL-187.  Each oracle was mutation-tested against a
 scratch copy of `src/` with a seeded fault, and the PR that added the
 harness lists them:
 

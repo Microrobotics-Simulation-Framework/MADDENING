@@ -433,7 +433,7 @@ def _steps_like_its_reference(topo, knobs=None, node_order=None):
 
 
 @pytest.mark.xfail(strict=True, raises=KeyError, reason=(
-    "CPL-185: a flux edge from an outside node into a coupling group member fails to "
+    "CPL-186: a flux edge from an outside node into a coupling group member fails to "
     "trace with a bare KeyError naming the flux; pending fix"))
 def test_a_flux_edge_from_an_outside_node_into_a_group_member_steps():
     """The flux an outside producer computes earlier in the step reaches a member.
@@ -451,7 +451,7 @@ def test_a_flux_edge_from_an_outside_node_into_a_group_member_steps():
 
 
 @pytest.mark.xfail(strict=True, raises=KeyError, reason=(
-    "CPL-185: a flux edge from a coupling group member to an outside reader fails to "
+    "CPL-186: a flux edge from a coupling group member to an outside reader fails to "
     "trace with a bare KeyError naming the flux; pending fix"))
 def test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps():
     """A member's flux reaches a reader outside the group.
@@ -482,7 +482,7 @@ def test_a_flux_edge_read_forward_in_an_ungrouped_cycle_steps():
 
 
 @pytest.mark.xfail(strict=True, raises=KeyError, reason=(
-    "CPL-185: a flux edge an ungrouped cycle reads from the previous step fails to trace "
+    "CPL-186: a flux edge an ungrouped cycle reads from the previous step fails to trace "
     "with a bare KeyError naming the flux; pending fix"))
 def test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps():
     """Built ``b, a``, the cycle is staggered on the flux edge, which then fails.
@@ -553,7 +553,7 @@ def _joined_through_an_outside_node():
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "CPL-186: a group whose members are joined only through an outside node, on no "
+    "CPL-187: a group whose members are joined only through an outside node, on no "
     "cycle, reads that node a step late with no warning; pending fix"))
 def test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late():
     """The group runs as one block, so ``c -> b`` is read from the previous step -- silently.

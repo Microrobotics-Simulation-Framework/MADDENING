@@ -12,10 +12,12 @@ scalar constant's gradient, in the group's norm at the returned state
 (each field divided by its own ``max|field|`` there):
 ``||D (g_k - t*)|| <= bound * ||D g_k||``.
 
-Drawn here: gains and biases of a three-relay group (6 coupled DOF) at
-caps 2, 3 and 5, under both iteration modes, from dense, rank-one (a pure
-cycle with one rank-one gain, so the coupling Jacobian has rank one) and
-strongly non-normal draws.  Rank-one and non-normal maps are where the
+Drawn here: gains and biases of a three-relay group (6 coupled DOF, and
+12 on the wide cycle -- more than the range basis's eight vectors, so the
+full resolvent norm goes through the transposed map) at caps 2, 3 and 5,
+under both iteration modes, from dense, rank-one (a pure cycle with one
+rank-one gain, so the coupling Jacobian has rank one) and strongly
+non-normal draws.  Rank-one and non-normal maps are where the
 Arnoldi resolvent, measured on the Krylov space of the start vector and
 the residual, falls short of the full resolvent the secant needs: the
 bound read 0.19x the true error there before 0.4.0's round-5 fix applied
@@ -43,6 +45,10 @@ _STRUCTURES = {
     "chord": cg._cycle(3, 2, chords=((0, 2),), leaves=(), outside=False, beta=0.0),
     # A pure cycle: ``drawn_values(rank_one=True)`` makes its Jacobian rank one.
     "cycle": cg._cycle(3, 2, leaves=(), outside=False, beta=0.0),
+    # The same at four entries a node: 12 coupled DOF, more than the
+    # eight-vector range basis, so the full resolvent norm the
+    # Kantorovich check takes is computed through the transposed map.
+    "wide-cycle": cg._cycle(3, 4, leaves=(), outside=False, beta=0.0),
 }
 
 
@@ -126,7 +132,7 @@ def assert_the_bound_covers_every_scalar_constant(structure, cap, mode, values):
 
 @st.composite
 def _draws(draw, structure):
-    rank_one = structure == "cycle"
+    rank_one = structure in ("cycle", "wide-cycle")
     rho = draw(st.sampled_from([0.5, 0.8, 0.95]))
     seed = draw(st.integers(0, 2 ** 32 - 1))
     nonnormal = draw(st.booleans())

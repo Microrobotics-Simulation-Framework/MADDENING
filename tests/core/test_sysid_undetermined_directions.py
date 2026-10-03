@@ -34,6 +34,7 @@ job.  The cases where it must decline, and the ones where 0.4.0-dev held
 directions the data determined, are ``test_sysid_hold_never_raises_the_loss.py``.
 """
 
+import contextlib
 import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -698,3 +699,281 @@ def test_the_cutoff_is_numerical_and_keeps_a_weakly_excited_direction():
     rank, projector = _tracker_with_second_direction(
         1e-3 / _CUTOFF_N2_T100_F32).projector()
     assert rank == 2 and projector is None
+
+
+# ---------------------------------------------------------------------------
+# Under jax_enable_x64, and with float32 constants in an x64 graph
+# ---------------------------------------------------------------------------
+#
+# x64 is a supported mode -- ``fim`` recommends it for an ill-conditioned
+# problem -- and the guard used to miss the scale degeneracy there in most
+# runs (audit_040_p4_8/fmu-sysid/repro_hold_x64.py): the tracker decomposed
+# ``G = sum g g^T`` with ``eigh``, which resolves ``G``'s eigenvalues only to
+# about ``eps64`` of the largest, while an exactly null direction of float64
+# gradients carries ``eps64**2`` of it.  It came back at ``5e-17`` against a
+# cutoff of ``4e-31``: ``excited_rank=3``, nothing held, the scale 1-2% off
+# its start.  A float32 constant in an x64 graph failed in every run
+# (repro_hold_x64_mixed_dtypes.py), because the tracker and the curvature
+# tests took ``eps`` from the raveled vector -- float64 -- while the
+# gradient of a float32 leaf carries float32 rounding.
+#
+# The graph's scans refuse a float32 seed state under x64 (MADD-ANO-017),
+# so these records start from the seed cast to float64 and are made with
+# the step function directly, which leaves the graph's state alone.
+
+
+@contextlib.contextmanager
+def _x64():
+    """Run the body in double precision, restoring the global setting."""
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
+#: ``"float64"``: every constant at x64's canonical precision.  ``"mixed"``:
+#: ``(k, c, m)`` given as float32 values, which keep their dtype in an x64
+#: graph while ``rest_length`` and the state are float64.
+_PRECISIONS = ["float64", "mixed"]
+
+#: How close to its start a held scale must land: rounding of the held
+#: point in the trainable leaves' own precision, with room.
+_HELD = {"float64": 1e-12, "mixed": 1e-5}
+
+
+def _spring_x64(leaves, freeze_mass=False):
+    """``_spring()`` built under x64 (call inside ``_x64()``)."""
+    constants = (TRUTH if leaves == "float64"
+                 else {k: np.float32(v) for k, v in TRUTH.items()})
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", DT, rest_length=1.0, initial_position=0.5,
+                                 **constants))
+    gm.compile()
+    gm.set_param_spec("s", "rest_length", ParamSpec(trainable=False, units="m"))
+    gm.set_param_spec("s", "damping", ParamSpec(
+        bounds=(0.0, None), transform="log", units="N*s/m"))
+    if freeze_mass:
+        gm.set_param_spec("s", "mass", ParamSpec(trainable=False, units="kg"))
+    want = jnp.float64 if leaves == "float64" else jnp.float32
+    for key in TRUTH:
+        assert jnp.result_type(gm.params["nodes"]["s"][key]) == want, key
+    return gm
+
+
+def _with_x64(gm, values):
+    """``_with`` keeping each leaf's own dtype."""
+    p = jax.tree.map(lambda x: x, gm.params)
+    for k, v in values.items():
+        p["nodes"]["s"][k] = jnp.asarray(v, dtype=jnp.result_type(p["nodes"]["s"][k]))
+    return p
+
+
+def _observations_x64(gm, noisy):
+    step_fn = gm._build_step_fn()                     # noqa: SLF001
+    ext = gm._default_external_inputs()               # noqa: SLF001
+    init = {n: {k: jnp.asarray(v, jnp.float64) for k, v in gm.get_node_state(n).items()}
+            for n in gm.node_names}
+    truth = _with_x64(gm, TRUTH)
+
+    def body(state, _):
+        state = step_fn(state, ext, truth)
+        return state, state
+
+    _, hist = jax.lax.scan(body, init, None, length=N_STEPS)
+    obs = observations_from_history(init, hist)
+    if noisy:
+        rng = np.random.default_rng(20260920)
+        draw = rng.normal(0.0, NOISE_STD, size=obs["s"]["position"].shape)
+        obs["s"]["position"] = obs["s"]["position"] + jnp.asarray(draw, jnp.float64)
+    return obs
+
+
+def _start_scale_x64(gm):
+    s = _with_x64(gm, START)["nodes"]["s"]
+    return float(np.cbrt(float(s["stiffness"]) * float(s["damping"]) * float(s["mass"])))
+
+
+@pytest.mark.parametrize("leaves", _PRECISIONS)
+def test_fit_holds_the_scale_under_x64(leaves):
+    """The schedules the audit found unheld under x64 (``lr=0.01`` at 10
+    and 200 iterations, ``lr=0.2`` at every budget) and the mixed graph's.
+    The ``hold_undetermined=False`` half shows the drift the guard removes
+    is there, so a guard that stopped running could not pass."""
+    with _x64():
+        gm = _spring_x64(leaves)
+        loss = _loss(gm, _observations_x64(gm, noisy=True))
+        start, s0 = _with_x64(gm, START), _start_scale_x64(gm)
+        drift = []
+        for lr, n_iter in [(0.01, 10), (0.2, 50), (0.2, 200)]:
+            res = fit(gm, loss, params=start, n_iter=n_iter, lr=lr, notify_every=0)
+            assert res.excited_rank == 2, (leaves, lr, n_iter, res.excited_rank)
+            assert res.hold_declined is False, (leaves, lr, n_iter)
+            assert abs(_scale(res.params) / s0 - 1.0) < _HELD[leaves], (
+                leaves, lr, n_iter, _scale(res.params) / s0 - 1.0)
+            raw = fit(gm, loss, params=start, n_iter=n_iter, lr=lr, notify_every=0,
+                      hold_undetermined=False)
+            drift.append(abs(_scale(raw.params) / s0 - 1.0))
+        assert max(drift) > 1e-3, (leaves, drift, "no drift for the guard to remove")
+
+
+@pytest.mark.parametrize("leaves", _PRECISIONS)
+@pytest.mark.parametrize("noisy", [False, True])
+def test_fit_lm_holds_the_scale_under_x64(leaves, noisy):
+    """Noiselessly the audit's x64 ``fit_lm`` reached loss ``4e-30`` with
+    ``excited_rank=3`` and the scale 0.98% off its start."""
+    with _x64():
+        gm = _spring_x64(leaves)
+        residual = _lm_residual(gm, _observations_x64(gm, noisy=noisy))
+        s0 = _start_scale_x64(gm)
+        for n_iter in (10, 60):
+            res = fit_lm(gm, residual, params=_with_x64(gm, START), n_iter=n_iter,
+                         notify_every=0)
+            assert res.excited_rank == 2, (leaves, noisy, n_iter, res.excited_rank)
+            assert res.hold_declined is False, (leaves, noisy, n_iter)
+            assert res.undetermined_drift is not None and res.undetermined_drift > 1e-3
+            assert abs(_scale(res.params) / s0 - 1.0) < _HELD[leaves], (
+                leaves, noisy, n_iter, _scale(res.params) / s0 - 1.0)
+
+
+@pytest.mark.parametrize("leaves", _PRECISIONS)
+def test_multiple_shooting_holds_the_scale_under_x64(leaves):
+    with _x64():
+        gm = _spring_x64(leaves)
+        obs = _observations_x64(gm, noisy=True)
+        s0 = _start_scale_x64(gm)
+        kw = dict(observations=obs, obs_fn=lambda h: h["s"]["position"],
+                  window=WINDOW, params=_with_x64(gm, START), notify_every=0,
+                  n_iter=200, lr=0.2)
+        held, _ = fit_multiple_shooting(gm, **kw)
+        assert held.excited_rank == 2 and held.hold_declined is False, held
+        assert held.undetermined_drift > 1e-3, held.undetermined_drift
+        assert abs(_scale(held.params) / s0 - 1.0) < _HELD[leaves], (
+            leaves, _scale(held.params) / s0 - 1.0)
+
+
+@pytest.mark.parametrize("leaves", _PRECISIONS)
+def test_a_well_posed_fit_under_x64_gets_its_iterate_back_bit_for_bit(leaves):
+    """The other side of the tracker change: with ``mass`` frozen nothing
+    is undetermined, so a guard resolving float64 spectra more finely must
+    still find full rank and return the unguarded bits -- for ``fit`` and
+    ``fit_lm``."""
+    with _x64():
+        gm = _spring_x64(leaves, freeze_mass=True)
+        obs = _observations_x64(gm, noisy=True)
+        start = _with_x64(gm, START)
+        for runner, objective, kw in (
+                (fit, _loss(gm, obs), dict(n_iter=300, lr=0.1)),
+                (fit_lm, _lm_residual(gm, obs), dict(n_iter=40))):
+            held = runner(gm, objective, params=start, notify_every=0, **kw)
+            raw = runner(gm, objective, params=start, notify_every=0,
+                         hold_undetermined=False, **kw)
+            assert held.excited_rank == 2, (runner.__name__, held.excited_rank)
+            assert held.undetermined_drift == 0.0 and held.hold_declined is False
+            for key, value in held.params["nodes"]["s"].items():
+                assert float(value) == float(raw.params["nodes"]["s"][key]), (
+                    runner.__name__, key)
+
+
+def test_fit_lm_holds_a_float32_residuals_degeneracy_in_an_x64_process():
+    """The curvature test reads its precision from the leaves too.  A
+    residual simulated in float32 from float32 constants has a Jacobian whose
+    null combination is float32 rounding -- ``||J v|| = 8e-8`` of ``||J||``
+    here, the force's ``k * x`` divided by ``m`` -- so by the float64 cutoff
+    of the promoted vector it is not flat and the degeneracy went unheld;
+    by float32's it is.  (The graph's own scans need a float64 state under
+    x64, MADD-ANO-017, which puts the spring's arithmetic in float64; this
+    residual is the spring's update, written out in float32.)"""
+    def simulate(k, c, m):
+        dt = jnp.float32(DT)
+
+        def body(state, _):
+            x, v = state
+            a = (-k * (x - jnp.float32(1.0)) - c * v) / m
+            v = v + dt * a
+            x = x + dt * v
+            return (x, v), x
+
+        _, xs = jax.lax.scan(body, (jnp.float32(0.5), jnp.float32(0.0)), None,
+                             length=60)
+        return xs
+
+    with _x64():
+        gm = _spring_x64("mixed")
+        data = simulate(*(jnp.float32(TRUTH[k]) for k in ("stiffness", "damping", "mass")))
+
+        def residual(p):
+            s = p["nodes"]["s"]
+            return simulate(s["stiffness"], s["damping"], s["mass"]) - data
+
+        assert residual(gm.params).dtype == jnp.float32
+        s0 = _start_scale_x64(gm)
+        res = fit_lm(gm, residual, params=_with_x64(gm, START), n_iter=30,
+                     notify_every=0)
+        raw = fit_lm(gm, residual, params=_with_x64(gm, START), n_iter=30,
+                     notify_every=0, hold_undetermined=False)
+    assert res.excited_rank == 2 and res.hold_declined is False, res
+    assert abs(_scale(res.params) / s0 - 1.0) < _HELD["mixed"], _scale(res.params) / s0 - 1.0
+    assert abs(_scale(raw.params) / s0 - 1.0) > 1e-3, "no drift for the guard to remove"
+
+
+def _orthogonal_gradients(dtype, n_grad=20):
+    """``n_grad`` gradients exactly orthogonal to ``(1, 1, 1)`` in exact
+    arithmetic, rounded to ``dtype`` (which leaves ``~eps`` along it)."""
+    rng = np.random.default_rng(0)
+    null = np.ones(3) / np.sqrt(3.0)
+    out = []
+    for _ in range(n_grad):
+        g = rng.normal(size=3)
+        out.append((g - null * (null @ g)).astype(dtype))
+    return out
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_the_tracker_resolves_an_exact_null_direction_at_either_precision(dtype):
+    """The mechanism on the tracker alone.  The ``eigh`` of ``G`` put the
+    null energy of float64 gradients at ``5e-17`` of the largest against a
+    cutoff of ``1e-30`` and reported 3 of 3; the factor's singular values
+    put it at about one ``eps`` of the largest singular value, under the
+    cutoff of ``max(n, sqrt(T)) * eps``, at both precisions."""
+    tracker = _ExcitationTracker(3, np.dtype(dtype))
+    for g in _orthogonal_gradients(dtype):
+        tracker.observe(g)
+    split = tracker.split()
+    assert split is not None
+    evecs, excited = split
+    assert int(excited.sum()) == 2, excited
+    held = evecs[:, ~excited][:, 0]
+    assert abs(float(held @ (np.ones(3) / np.sqrt(3.0)))) > 1 - 1e-9, held
+
+
+def test_the_tracker_folds_a_long_run_without_moving_its_verdict():
+    """Past the fold buffer the gradients are folded into the triangular
+    factor by QR; the verdict and the spanned subspace must be those of the
+    whole stack, decomposed at once."""
+    grads = _orthogonal_gradients(np.float64, n_grad=1000)
+    tracker = _ExcitationTracker(3, np.dtype(np.float64))
+    for g in grads:
+        tracker.observe(g)
+    evecs, excited = tracker.split()
+    assert int(excited.sum()) == 2
+    stack = np.stack(grads)
+    np.testing.assert_allclose(tracker._gram, stack.T @ stack, rtol=1e-12,  # noqa: SLF001
+                               atol=1e-12 * float(np.abs(stack.T @ stack).max()))
+    np.testing.assert_allclose(tracker.gradient_scale(),
+                               np.linalg.norm(stack, axis=0), rtol=1e-12)
+
+
+def test_the_guard_reads_its_precision_from_the_coarsest_trainable_leaf():
+    """``ravel_pytree`` promotes a float32 leaf beside a float64 one, but the
+    gradient of the float32 leaf carries float32 rounding: the guard's
+    ``eps`` is the coarsest *trainable* leaf's, and a float32 leaf outside
+    the trainable set does not coarsen it.  (Under x64: without it there is
+    no float64 leaf to be finer than float32.)"""
+    with _x64():
+        tree = {"a": np.zeros(2, np.float64), "b": np.float32(1.0), "c": np.float64(2.0)}
+        coarsest = sysid._coarsest_dtype                      # noqa: SLF001
+        assert coarsest(tree, np.arange(4)) == np.float32
+        assert coarsest(tree, np.array([0, 1, 3])) == np.float64
+        assert coarsest(tree, np.array([2])) == np.float32

@@ -468,3 +468,90 @@ def test_a_spec_above_a_record_level_is_refused_by_the_maps(record):
     for tree_map in (trainable_mask, unconstrain, constrain, check_bounds):
         with pytest.raises(ValueError, match=refusal):
             tree_map(params, specs)
+
+
+# ---------------------------------------------------------------------------
+# check computes the coordinate it vouches for
+# ---------------------------------------------------------------------------
+
+
+def _below(x):
+    return np.nextafter(np.float32(x), np.float32(-np.inf))
+
+
+@pytest.mark.parametrize("bounds, value", [
+    ((-1.0, 1.0), _below(1.0)),
+    ((-100.0, 1.0), _below(1.0)),
+    ((-1e6, 1e6), _below(1e6)),
+    ((0.0, 1e30), np.float32(1e-10)),
+], ids=["upper-unit", "upper-wide-below", "upper-large", "lower-flushed-t"])
+def test_check_refuses_a_logit_value_whose_coordinate_rounds_onto_a_bound(bounds, value):
+    """The value is strictly inside its bounds, but ``logit``'s coordinate
+    is computed from ``t = (p - lo) / (hi - lo)``, and both steps round: a
+    float32 ``nextafter(1, 0)`` under ``(-1, 1)`` has ``p - lo == 2.0`` and
+    ``t == 1`` (coordinate ``+inf``), and ``1e-10`` under ``(0, 1e30)`` has a
+    subnormal ``t`` that the arithmetic flushes to 0 (``-inf``).  ``check``
+    passed all four (audit_040_p4_8/fmu-sysid/repro_logit_check_coordinate.py)."""
+    spec = ParamSpec(bounds=bounds, transform="logit")
+    assert not np.isfinite(float(spec.to_unconstrained(jnp.asarray(value))))
+    with pytest.raises(ValueError, match="no finite logit coordinate"):
+        spec.check(value)
+    with pytest.raises(ValueError, match="no finite logit coordinate"):
+        check_bounds({"x": jnp.asarray(value)}, {"x": spec})
+
+
+@pytest.mark.parametrize("bounds, value", [
+    ((0.0, 1.0), _below(1.0)),
+    ((0.0, 1e30), np.float32(1e-7)),
+    ((-1.0, 1.0), np.float32(0.9999)),
+], ids=["upper-unit-interval", "lower-normal-t", "inside"])
+def test_check_accepts_a_value_whose_logit_coordinate_is_finite(bounds, value):
+    """Non-vacuity: the refusal is the coordinate's, not the distance's.
+    ``nextafter(1, 0)`` under ``(0, 1)`` has a finite coordinate (16.6), as
+    has ``1e-7`` under ``(0, 1e30)`` (``t`` is a normal number)."""
+    spec = ParamSpec(bounds=bounds, transform="logit")
+    spec.check(value)
+    assert np.isfinite(float(spec.to_unconstrained(jnp.asarray(value))))
+
+
+@given(
+    lo=st.sampled_from([-1e6, -100.0, -1.0, 0.0, 0.5, 1e3]),
+    width=st.sampled_from([1.0, 101.0, 2e6, 1e30]),
+    edge=st.sampled_from(["lo", "hi"]),
+    ulps=st.integers(1, 40),
+)
+@settings(**SETTINGS)
+def test_check_accepts_a_logit_value_exactly_when_its_coordinate_is_finite(
+        lo, width, edge, ulps):
+    """Within a few ulps of either bound -- where the coordinate stops
+    existing -- ``check`` passes a float32 value if and only if
+    ``unconstrain`` gives it a finite coordinate.  (Every interval drawn
+    holds float32 values; a bound the cast rounds outward is stepped past,
+    not filtered.  Above a bound of 0 the walk starts at the smallest
+    normal: JAX's arithmetic leaves the process flushing subnormals, under
+    which ``float()`` reads every one of them as 0 and a walk through them
+    takes 2**23 steps.)"""
+    hi = lo + width
+    spec = ParamSpec(bounds=(lo, hi), transform="logit")
+    v = np.float32(lo if edge == "lo" else hi)
+    if v == 0.0:
+        v = np.float32(np.finfo(np.float32).tiny)
+    toward = np.float32(np.inf if edge == "lo" else -np.inf)
+
+    def inside(x):
+        return float(lo) < float(x) < float(hi)
+
+    while not inside(v):                  # a bound the cast rounded outward
+        v = np.nextafter(v, toward)
+    for _ in range(ulps - 1):             # never past the other bound: the
+        step = np.nextafter(v, toward)    # interval (-1e6, -999999) holds 16
+        if not inside(step):              # float32 values
+            break
+        v = step
+    finite = bool(np.isfinite(float(spec.to_unconstrained(jnp.asarray(v)))))
+    try:
+        spec.check(v)
+        accepted = True
+    except ValueError:
+        accepted = False
+    assert accepted == finite, (lo, hi, float(v), accepted, finite)

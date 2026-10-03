@@ -1280,3 +1280,13 @@ def test_the_witness_rule_reads_the_server_vocabulary():
         assert witnesses(domain, f"def test_x():\n    {yes}"), domain
         assert not witnesses(domain, f"def test_x():\n    {no}"), domain
     assert {d for d in SERVER_DOMAINS} <= KNOWN_DOMAINS
+    # ... and the rule asks it of every server cell, as of every numeric one
+    row = _srow(concurrent="tests/api/test_x.py::test_c", shutdown="tests/api/test_x.py::test_s")
+    sources = {"tests/api/test_x.py::test_c": in_process,
+               "tests/api/test_x.py::test_s": "def test_s(): client.post('/sim/step')"}
+    problems = domain_witness_problems([row], source=sources.get)
+    assert any("domain concurrent" in p for p in problems), problems
+    assert any("domain shutdown" in p for p in problems), problems
+    sources["tests/api/test_x.py::test_c"] = real
+    sources["tests/api/test_x.py::test_s"] = "def test_s(): signal.raise_signal(SIGTERM)"
+    assert domain_witness_problems([row], source=sources.get) == []

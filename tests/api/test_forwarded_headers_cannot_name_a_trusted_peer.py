@@ -302,6 +302,34 @@ def test_a_forwarding_header_makes_even_a_loopback_peer_present_the_token(header
     assert not auth._required_for_request("127.0.0.1", {"x-real-thing": "1"})
 
 
+def test_the_handlers_own_websocket_check_asks_the_same_rule():
+    """Every stream handler asks ``_authorise_ws`` as well as the WebSocket
+    middleware (two independent checks): a forwarded handshake from a
+    loopback peer is refused by it too, and the token still serves it."""
+    from starlette.datastructures import Headers
+
+    server = SimulationServer({"BallNode": BallNode}, graph_manager=_graph(),
+                              bind_host="127.0.0.1", api_token=TOKEN)
+    closed = []
+
+    class FakeSocket:
+        def __init__(self, headers):
+            self.scope = {"path": "/ws/state", "subprotocols": []}
+            self.headers = Headers(headers)
+            self.client = type("Peer", (), {"host": "127.0.0.1"})()
+
+        async def close(self, code, reason=""):
+            closed.append(code)
+
+    def ask(headers):
+        return asyncio.run(server._authorise_ws(FakeSocket(headers)))
+
+    assert ask({"x-forwarded-for": "x"}) == (False, None) and closed == [1008]
+    assert ask({"forwarded": "for=127.0.0.1"}) == (False, None)
+    assert ask({"x-forwarded-for": "x", "authorization": f"Bearer {TOKEN}"}) == (True, None)
+    assert ask({}) == (True, None)
+
+
 # ---------------------------------------------------------------------------
 # The library's own launch paths
 # ---------------------------------------------------------------------------

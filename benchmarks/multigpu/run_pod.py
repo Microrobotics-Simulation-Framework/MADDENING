@@ -117,7 +117,14 @@ import JAX, so it works on a laptop without a usable jaxlib.
 
 With ``--keep-going`` a goal that raises is recorded -- one failed ``goal
 raised`` check, the exception under ``raised`` -- and the run goes on to
-the next goal; without it the exception ends the run as before.
+the next goal; without it the exception ends the run, with its traceback
+and exit status ``EXIT_CRASHED`` (5).  A run this runner refuses (more
+devices than are visible, a device count the checklist or the exchange
+cannot use, a ``--mesh`` it cannot partition) ends with the reason as its
+last line and exit status ``EXIT_REFUSED`` (2, as for an option it does
+not take).  So a goal's exit status says which happened: 0 no check
+failed, 1 a check failed (a ``CHECK FAILED`` line names it), 2 refused,
+5 crashed; ``--summarise``'s statuses (0, 1, 3, 4) are its own.
 
 Every timed callable receives inputs that were placed on the device mesh
 once, with the ``NamedSharding`` the compiled executable expects, outside
@@ -203,6 +210,14 @@ def _pre_import_setup(argv: list[str]) -> None:
 _pre_import_setup(sys.argv)
 
 SCHEMA_VERSION = 7
+
+#: Exit status of a run this runner refused before a check decided anything
+#: (argparse's own status for an option it does not take).
+EXIT_REFUSED = 2
+
+#: Exit status of a run that a goal's uncaught exception ended (without
+#: ``--keep-going``).  It used to be 1, the status of a failed check.
+EXIT_CRASHED = 5
 METHODS = ("all_to_all", "ppermute")
 MESH_AXIS = "devices"
 GPU_CELLS = (100_000, 300_000, 1_000_000)
@@ -2771,9 +2786,78 @@ def _load_results(directory: Path, goal: str) -> list[dict]:
                        f"its name says goal {goal!r}, but it records goal "
                        f"{doc.get('goal')!r}: a file this runner would not have written"),
                    "results": [], "checks": [], "passed": False}
+        else:
+            # A JSON object of another shape -- a field of another type --
+            # read INVALID too.  It used to end the summary on a traceback
+            # (exit 1, "no goal JSON"): ``environment: null``, a check that is
+            # a string, a value past the float range, ``n_devices: [4]``.
+            why = _shape_problem(doc) or _verdict_problem(goal, doc)
+            if why is not None:
+                doc = {"goal": goal, "_unreadable": why, "results": [], "checks": [],
+                       "passed": False}
         doc["_file"] = path.name              # for the reader; never part of a record
         docs.append(doc)
     return docs
+
+
+def _kind(value) -> str:
+    return "null" if value is None else f"a JSON {type(value).__name__}"
+
+
+def _shape_problem(doc: dict) -> str | None:
+    """Why *doc* -- a goal file read as a JSON object -- has a field of a
+    type the summary cannot read, or ``None``.  Absent fields are left to
+    :func:`record_problems`, which says what a record lacks."""
+    env = doc.get("environment", {})
+    if not isinstance(env, dict):
+        return f"its environment is {_kind(env)}, not an object"
+    for key in ("platform", "jax", "jaxlib"):
+        if key in env and not isinstance(env[key], str):
+            return f"its environment's {key} is {_kind(env[key])}, not a string"
+    kinds = env.get("device_kinds", [])
+    if not (isinstance(kinds, list) and all(isinstance(k, str) for k in kinds)):
+        return "its environment's device_kinds is not a list of strings"
+    cfg = doc.get("config", {})
+    if not isinstance(cfg, dict):
+        return f"its config is {_kind(cfg)}, not an object"
+    for where, value in (("n_devices", doc.get("n_devices")),
+                         ("config's n_devices", cfg.get("n_devices"))):
+        if value is not None and not _is_count(value):
+            return f"its {where} is {value!r}, not a device count"
+    for key in ("checks", "results"):
+        if key in doc and not isinstance(doc[key], list):
+            return f"its {key} is {_kind(doc[key])}, not a list"
+    for i, c in enumerate(doc.get("checks") or []):
+        if not isinstance(c, dict):
+            return f"its check {i} is {_kind(c)}, not a record"
+        for key in ("value", "limit"):
+            v = c.get(key)
+            if _is_count(v):
+                try:
+                    float(v)
+                except OverflowError:
+                    return f"its check {c.get('name')!r} has a {key} past the float range"
+    for i, r in enumerate(doc.get("results") or []):
+        if not isinstance(r, dict):
+            return f"its result {i} is {_kind(r)}, not a record"
+    return None
+
+
+def _verdict_problem(goal: str, doc: dict) -> str | None:
+    """Why the summary's own reading of *doc* -- its verdict, its line in
+    the run table, whether it closes the CPU gap -- raises, or ``None``:
+    the net under :func:`_shape_problem` for a shape it does not name, so
+    that a file of any shape reads INVALID rather than ending the summary
+    on a traceback."""
+    try:
+        record_problems(doc)
+        goal_verdict([doc])
+        _run_line(goal, doc)
+        closes_the_gap(doc)
+        _commit_of(doc)
+    except _UNREADABLE as exc:
+        return f"the summary cannot read it ({type(exc).__name__}: {exc})"
+    return None
 
 
 # --- record integrity -------------------------------------------------------
@@ -3026,7 +3110,7 @@ def record_problems(doc: dict) -> list[str]:
                         f"{', '.join(measured_on)}")
     try:
         want, got = case_keys(goal, doc)
-    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+    except _UNREADABLE as exc:
         return problems + [f"its results or config cannot be read ({type(exc).__name__}: {exc})"]
     if want != got:
         missing, extra = want - got, got - want
@@ -3038,7 +3122,7 @@ def record_problems(doc: dict) -> list[str]:
                             + _fmt_few(_fmt_case(k) for k in extra))
     try:
         derived = GOAL_CHECKS[goal](results, n_dev)
-    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+    except _UNREADABLE as exc:
         return problems + [f"its results cannot be read ({type(exc).__name__}: {exc})"]
     if not all(isinstance(c, dict) for c in checks):
         return problems + ["a recorded check is not a record"]
@@ -3246,7 +3330,10 @@ def goal_verdict(docs: list) -> str:
     if not docs:
         return "not run"
     if any("checks" not in d for d in docs):
-        return "no checks"          # schema 2 files recorded none
+        # A file with no checks (what a schema-2 runner wrote) is no evidence
+        # this runner would have written: INVALID, not "no checks", so the
+        # summary counts it and exits 3.  It used to exit 0.
+        return "INVALID" if any(record_problems(d) for d in docs) else "no checks"
     statuses = [check_status(c) for d in docs for c in d["checks"]]
     if ("failed" in statuses or "inconsistent" in statuses
             or not all(_file_flag_consistent(d) for d in docs)):
@@ -3363,6 +3450,20 @@ def _print_mixed_commits(docs_by_goal: dict) -> bool:
     return True
 
 
+def _run_line(goal: str, doc: dict) -> str:
+    """One file's line in the run table."""
+    env = doc.get("environment", {})
+    checks = doc.get("checks")
+    statuses = [check_status(c) for c in checks or []]
+    n_ok = "-" if checks is None else f"{statuses.count('passed')}/{len(checks)}"
+    n_dev = doc.get("n_devices") or doc.get("config", {}).get("n_devices", "?")
+    kinds = ",".join(env.get("device_kinds", [])) or "?"
+    return (f"{goal:<12} {env.get('platform', '?'):<8} {n_dev:>3}  {kinds[:26]:<26} "
+            f"{env.get('jax', '?') + ' / ' + env.get('jaxlib', '?'):<17} "
+            f"{'yes' if doc.get('dry_run') else 'no':<7} {n_ok:>7}  "
+            f"{_short_commit(_commit_of(doc)):<12}  {goal_verdict([doc])}")
+
+
 def _print_runs_and_checklist(docs_by_goal: dict) -> int:
     """The per-file run table, the checklist verdict, every record that
     cannot decide, every failed check and every check not run.  Returns the
@@ -3375,16 +3476,9 @@ def _print_runs_and_checklist(docs_by_goal: dict) -> int:
     failed, not_run, bad_files = [], [], []
     for goal in ALL_GOALS:
         for doc in docs_by_goal.get(goal, []):
-            env = doc.get("environment", {})
             checks = doc.get("checks")
             statuses = [check_status(c) for c in checks or []]
-            n_ok = "-" if checks is None else f"{statuses.count('passed')}/{len(checks)}"
-            n_dev = doc.get("n_devices") or doc.get("config", {}).get("n_devices", "?")
-            kinds = ",".join(env.get("device_kinds", [])) or "?"
-            print(f"{goal:<12} {env.get('platform', '?'):<8} {n_dev:>3}  {kinds[:26]:<26} "
-                  f"{env.get('jax', '?') + ' / ' + env.get('jaxlib', '?'):<17} "
-                  f"{'yes' if doc.get('dry_run') else 'no':<7} {n_ok:>7}  "
-                  f"{_short_commit(_commit_of(doc)):<12}  {goal_verdict([doc])}")
+            print(_run_line(goal, doc))
             for c, s in zip(checks or [], statuses):
                 if s in ("failed", "inconsistent"):
                     failed.append((goal, c))
@@ -3400,8 +3494,10 @@ def _print_runs_and_checklist(docs_by_goal: dict) -> int:
         commits = _item_commits(deciding)
         print(f"{item}  {CHECKLIST[item][0]:<74} {status}  [{detail}]"
               + (f"  {commits}" if commits else ""))
+    # Every file, a file with no checks included: it used to be left out
+    # here, so it was neither listed nor counted and the summary exited 0.
     invalid = [(goal, doc, record_problems(doc)) for goal in ALL_GOALS
-               for doc in docs_by_goal.get(goal, []) if "checks" in doc]
+               for doc in docs_by_goal.get(goal, [])]
     invalid = [(goal, doc, problems) for goal, doc, problems in invalid if problems]
     mixed = [(item, item_problems([d for g in goals for d in docs_by_goal.get(g, [])]))
              for item, (_claim, goals) in CHECKLIST.items()]
@@ -3568,7 +3664,7 @@ def _print_timing_tables(docs_by_goal: dict) -> None:
 
 #: What reading a record of another runner's shape raises.
 _UNREADABLE = (KeyError, TypeError, ValueError, IndexError, AttributeError,
-               ZeroDivisionError)
+               ZeroDivisionError, OverflowError)
 
 
 def _readable_for_tables(docs_by_goal: dict) -> tuple[dict, list[str]]:
@@ -3614,9 +3710,11 @@ def summarise(directory: Path) -> int:
     _print_checklist_goal_tables(readable)
     _print_timing_tables(readable)
     if left_out:
-        # Their verdict lines above read INVALID (the runner cannot read
-        # them), so this summary already exits 3; their tables used to stop
-        # it with a traceback instead.
+        # A file whose results the tables cannot read mostly reads INVALID
+        # above as well (its checks are derived from those results), and
+        # the summary exits 3; one whose unreadable field is a timing no
+        # check reads keeps its verdict.  Their tables used to stop the
+        # summary with a traceback instead.
         print(f"\nTables leave out {len(left_out)} file(s) whose results this runner "
               "cannot read:")
         for line in left_out:
@@ -3793,5 +3891,25 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def exit_status(argv: list[str] | None = None) -> int:
+    """:func:`main`'s status, with a refusal and a crash told apart from a
+    failed check.  A refusal -- ``SystemExit`` with a message -- prints the
+    message and is ``EXIT_REFUSED``; any other exception prints its
+    traceback and is ``EXIT_CRASHED``.  Both used to exit 1, which the
+    runbook reads as "a check failed"."""
+    try:
+        return main(argv)
+    except SystemExit as exc:
+        if exc.code is None or isinstance(exc.code, int):
+            raise                       # argparse's 2, an explicit status
+        print(exc.code, file=sys.stderr)
+        return EXIT_REFUSED
+    except Exception:  # noqa: BLE001 - every crash gets the one status
+        traceback.print_exc()
+        print(f"CRASHED: the run raised (exit {EXIT_CRASHED}); nothing after it ran",
+              file=sys.stderr)
+        return EXIT_CRASHED
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(exit_status())

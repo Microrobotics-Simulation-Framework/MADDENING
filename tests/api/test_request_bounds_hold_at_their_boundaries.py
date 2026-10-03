@@ -93,6 +93,43 @@ def test_a_body_of_exactly_the_limit_is_read_and_one_byte_more_is_a_413(monkeypa
     assert client.get("/graph/state/spring").json() == before
 
 
+@pytest.mark.parametrize("declared, refused", [(LIMIT, False), (LIMIT + 1, True),
+                                               (LIMIT + 2, True)])
+def test_a_declared_length_over_the_limit_is_a_413_before_a_byte_is_read(monkeypatch,
+                                                                        declared, refused):
+    """"A Content-Length over the limit is refused without reading a byte of
+    the body": asked of the middleware itself at the declared length's
+    boundary, with a ``receive`` that records every read.  (One byte over
+    is also caught by the count of the bytes the route reads, so only a
+    read that never happens tells the two apart.)"""
+    import asyncio
+
+    monkeypatch.setattr(server_module, "MAX_REQUEST_BODY_BYTES", LIMIT)
+    reads, reached, sent = [], [], []
+
+    async def inner(scope, receive, send):
+        reached.append(scope["path"])
+        await receive()
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():
+        reads.append(True)
+        return {"type": "http.request", "body": b"x" * declared, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "PUT", "path": "/graph/state/spring",
+             "headers": [(b"content-length", str(declared).encode())]}
+    asyncio.run(server_module._RequestBodyLimitMiddleware(inner)(scope, receive, send))
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    if refused:
+        assert status == 413 and reads == [] and reached == []
+    else:
+        assert status == 204 and reads and reached
+
+
 # ---------------------------------------------------------------------------
 # POST /sim/run
 # ---------------------------------------------------------------------------

@@ -603,3 +603,38 @@ def test_an_abbreviated_dry_run_exits_2_before_running_anything(tmp_path):
     assert proc.returncode == 2, proc.stderr
     assert "unrecognized arguments: --dry" in proc.stderr
     assert not (tmp_path / "out").exists()
+
+
+# ---------------------------------------------------------------------------
+# Guards an audit's mutants passed through
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", [float("-inf"), float("inf"), float("nan")])
+def test_a_non_finite_value_fails_a_less_or_equal_check(rp, value):
+    """``-inf <= limit`` is true, so a ``<=`` check that asked only "not
+    NaN" passed a measurement of ``-inf``; the rule is a finite number no
+    greater than the limit, on the recording side and in the summary."""
+    assert rp.check("x", value, 1e-5)["passed"] is False
+    assert rp.expected_pass({"value": value, "limit": 1e-5, "sense": "<="}) is False
+    assert rp.check_status({"value": value, "limit": 1e-5, "sense": "<=",
+                            "passed": True}) == "inconsistent"
+
+
+@pytest.mark.parametrize("sha, kept", [
+    ("0" * 40, True), ("ab" * 32, True), ("0" * 39, False), ("0" * 41, False),
+    ("0" * 12, False), ("0" * 7, False), ("0" * 63, False), ("0" * 65, False),
+    ("A" * 40, False), ("g" * 40, False), (" " + "0" * 40, False),
+])
+def test_only_a_full_sha_counts_as_a_recorded_commit(rp, sha, kept):
+    """RPD-011: a recorded commit is a full SHA-1 (40) or SHA-256 (64) in
+    lowercase hex; an abbreviation names no one commit and counts as none."""
+    assert (rp._commit_of({"environment": {"git_commit": sha}}) == sha) is kept
+
+
+def test_a_row_measured_one_cell_short_of_its_request_never_decides(rp):
+    doc = _relabelled_real_exchange(rp, [(100_000, 2.0, 1.0)], synthetic="grid")
+    (row,) = rp.recommend([doc])["rows"]
+    for cells, excluded in ((99_999, True), (100_000, False)):
+        why = rp._excluded_because({**row, "cells": cells, "record": "PASS"},
+                                   min_cells=100_000, min_devices=4)
+        assert (why == f"measured {cells} cells, fewer than the 100000 requested") is excluded

@@ -248,8 +248,12 @@ Optional: `pip install pymetis` for a real graph partition of the mesh.
 
 Run one command at a time and read its exit status (`echo $?`) before the
 next: **0** = no check failed, go on; **1** = a check failed (the log
-names it on a `CHECK FAILED` line); **124** = the time box ran out;
-anything else = a crash.  Anything but 0 is the stop condition in
+names it on a `CHECK FAILED` line); **2** = the runner refused the run
+(an option it does not take, more devices than are visible, a device
+count or a `--mesh` it cannot use; the reason is the last line);
+**5** = a goal raised (its traceback, then a `CRASHED` line);
+**124** = the time box ran out; anything else = the process was killed
+(137 for an out-of-memory kill).  Anything but 0 is the stop condition in
 section 3.  A `CHECK NOT RUN` line is a case this device count cannot
 express (the 2-D pencil cases need an even count of at least 4; a halo
 from the wrong neighbour shows only on a mesh axis of three or more
@@ -349,8 +353,9 @@ estimate; if the cap binds, the larger sizes of `stencil`, `hybrid` and
 (section 4) as soon as any of these happens — do not debug on a metered
 pod:
 
-* a goal exits non-zero: `1` (a check failed), `124` (its time box ran
-  out), or anything else (a crash, an out-of-memory);
+* a goal exits non-zero: `1` (a check failed), `2` (the runner refused
+  the run), `5` (a goal raised), `124` (its time box ran out), or anything
+  else (the process was killed: an out-of-memory);
 * `nvidia-smi -L` lists fewer than four GPUs, or `jax.devices()` does
   not list four CUDA devices;
 * `git status --porcelain` prints anything, or `maddening.__file__` is not

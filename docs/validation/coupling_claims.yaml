@@ -500,9 +500,10 @@ claims:
     - src/maddening/core/coupling/group.py:89 (CouplingGroup, atol)
     - src/maddening/core/coupling/acceleration.py:65 (_scaled_change)
   conditions: >-
-    all three norms. Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, vmap, multi-rate graphs, sub-cycled groups, predictors or warm
-    starts, run_adaptive, checkpoint restarts or sharded graphs.
+    all three norms. atol is compared after rounding to each field's own
+    dtype, so the band's edge is drawn at that dtype's resolution: a field
+    at exactly atol leaves the norm and one ulp above it stays. Not claimed
+    for run_adaptive or sharded graphs.
   oracle: closed-form norm values; distance to the fixed point of the kept field.
   tests:
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_ignores_a_field_inside_the_dead_band
@@ -513,17 +514,27 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[f64]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[mixed_dtype]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[float16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[float16]'
     jit: tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[vmap]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[vmap]'
+    multi_rate: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[checkpoint_restart]'
     sharded: narrowed
 
 - id: CPL-012
@@ -1568,10 +1579,8 @@ claims:
   conditions: >-
     the non-finite rule under every norm; the overflow rule is "only
     reachable under the L2 norm's rtol=1.0" -- the mixed and interface
-    scales rtol * max|v| stay normal far above it. Not claimed for float64
-    (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled
-    groups, predictors or warm starts, run_adaptive, checkpoint restarts or
-    sharded graphs.
+    scales rtol * max|v| stay normal far above it. Not claimed for
+    run_adaptive or sharded graphs.
   oracle: closed form; a constant field (an exact fixed point) near overflow.
   tests:
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_is_active_and_contributes_inf
@@ -1581,17 +1590,27 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[f64]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[mixed_dtype]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[float16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[float16]'
     jit: tests/core/test_coupling_non_finite_state.py::test_a_non_finite_state_never_reads_as_converged
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[vmap]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[vmap]'
+    multi_rate: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[checkpoint_restart]'
     sharded: narrowed
 
 - id: CPL-044
@@ -1608,9 +1627,7 @@ claims:
     - src/maddening/core/coupling/acceleration.py:138 (_scaled_change)
   conditions: >-
     all three norms, both solvers; acceleration="none" (the accelerators:
-    CPL-010). Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    CPL-010). Not claimed for run_adaptive or sharded graphs.
   oracle: the same group scaled by 2**-shift against its normal-range control, bit for bit.
   tests:
     - tests/core/test_coupling_non_finite_state.py::test_a_field_whose_scale_underflows_is_still_measured
@@ -1619,17 +1636,19 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[f64]'
+    mixed_dtype: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[float16]'
     jit: tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[vmap]'
+    multi_rate: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[checkpoint_restart]'
     sharded: narrowed
 
 - id: CPL-045
@@ -3197,9 +3216,7 @@ claims:
     - src/maddening/core/graph_manager.py:451 (_spectral_rate_at)
   conditions: >-
     a repeated eigenvalue; a dead-banded field on the loop. Not claimed for
-    float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
-    restarts or sharded graphs.
+    run_adaptive or sharded graphs.
   oracle: exact fixed point; the matrix's spectrum.
   tests:
     - tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space
@@ -3209,17 +3226,35 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[f64]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[mixed_dtype]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[float16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[float16]'
     jit: tests/core/test_coupling_spectral_bound_certificate.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[vmap]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[vmap]'
+    multi_rate:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[multi_rate]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[multi_rate]'
+    sub_cycled:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[sub_cycled]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[sub_cycled]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[predictors_warm_starts]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[checkpoint_restart]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[checkpoint_restart]'
     sharded: narrowed
 
 - id: CPL-091

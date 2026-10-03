@@ -1170,3 +1170,113 @@ def test_a_pending_cell_is_accepted_only_while_pending_cells_are(monkeypatch):
     assert any("domain vmap: 'TODO-fix'" in p for p in problems), problems
     # a pending cell carries no test, so nothing is collected for it
     assert domain_targets(row) == [("f32", _T)]
+
+
+# --------------------------------------------------------------------------
+# Self-tests of the server domain set
+# --------------------------------------------------------------------------
+def _srow(conditions="k", **changes):
+    cells = {d: NOT_APPLICABLE for d in SERVER_DOMAINS}
+    cells.update(changes)
+    return _row(id="REST-900", conditions=conditions, domains=cells)
+
+
+@pytest.mark.parametrize("text, names", [
+    ("a non-loopback bind", {"non_loopback_bind"}),
+    ("a loopback bind and a non-loopback bind", {"loopback_bind", "non_loopback_bind"}),
+    ("without and with the token", {"token_enforced"}),
+    ("loopback bind with no token", {"loopback_bind", "no_token"}),
+    ("every runner replaced by a recorder; the runner's source", set()),
+    ("the GitHub runners have it", set()),
+    ("a checkpoint save slowed to 1.5 s", set()),
+    ("a checkpoint saved at a known clock", {"checkpoint_restore"}),
+    ("beside a /sim/run whose first slice is held open", {"sim_run_active"}),
+    ("GET /graph/state, /sim/run, /sim/reset", set()),
+    ("the surrogate routes are out of scope", set()),
+    ("surrogate characters", {"hostile_input"}),
+    ("virtual CPU devices", set()),
+    ("--goal all --dry-run", {"dry_run_cpu"}),
+    ("the relabelled record with one goal from another commit",
+     {"relabelled_records", "mixed_commits"}),
+    ("sharded wrappers; a HybridNode", {"wrapper_nodes"}),
+    ("SIGINT to a uvicorn process", {"shutdown"}),
+    ("8 threads x 25 steps", {"concurrent"}),
+])
+def test_the_server_spellings_name_each_domain_and_only_it(text, names):
+    """What a REST condition names: the specific spelling first ("non-
+    loopback" before "loopback", "without the token" before "with the
+    token"), and run_pod's goal runners, a checkpoint save, a route list and
+    the surrogate routes name nothing."""
+    assert domain_mentions(text, "server") == names
+
+
+@pytest.mark.parametrize("row, fragment", [
+    (_srow("a non-loopback bind"), "domain non_loopback_bind is n/a, but its conditions cover it"),
+    (_srow("a non-loopback bind", non_loopback_bind=_T),
+     "domain token_enforced is n/a, but its conditions cover it"),
+    (_srow("any bind", loopback_bind=_T, non_loopback_bind=_T, token_enforced=_T),
+     "domain no_token is n/a, but its conditions cover it"),
+    (_srow("k. Not claimed for simultaneous requests."), "its conditions exclude concurrent"),
+    (_srow("k", concurrent=NARROWED), "domain concurrent is narrowed, but its conditions do not"),
+    (_srow("k. Not claimed for the weather.", shutdown=NARROWED), "names no domain"),
+    (_srow("k. Not claimed for float64.", shutdown=NARROWED), "names no domain"),
+    (_row(id="REST-900", domains={d: NOT_APPLICABLE for d in NUMERIC_DOMAINS}),
+     "says nothing about"),
+], ids=["named-but-na", "bind-implies-token", "any-bind", "excluded-not-narrowed",
+        "narrowed-not-excluded", "empty-clause", "numeric-word-in-a-server-clause",
+        "numeric-matrix-in-a-server-file"])
+def test_the_domain_rule_fires_on_each_defect_of_a_server_matrix(row, fragment):
+    problems = row_problems([row], ["REST"], domains=SERVER_DOMAINS)
+    assert any(fragment in p for p in problems), problems
+
+
+def test_the_domain_rule_passes_a_filled_server_matrix():
+    narrowed = ("loopback_bind", "non_loopback_bind", "token_enforced", "no_token",
+                "concurrent", "runner_active", "sim_run_active", "large_payload",
+                "hostile_input", "shutdown", "wrapper_nodes", "checkpoint_restore",
+                "dry_run_cpu", "relabelled_records", "mixed_commits")
+    clause = ("k. Not claimed for a loopback bind, a non-loopback bind, a request the token is "
+              "demanded of, a request no token is demanded of, simultaneous requests, the "
+              "runner running, an in-flight /sim/run, oversized requests, hostile input, a "
+              "server shutting down, wrapper nodes, a graph restored from a checkpoint, dry "
+              "runs, relabelled records or mixed commits.")
+    assert row_problems([_srow(clause, **{d: NARROWED for d in narrowed})], ["REST"],
+                        domains=SERVER_DOMAINS) == []
+    assert row_problems([_srow("a loopback bind", loopback_bind=_T, no_token=_T)], ["REST"],
+                        domains=SERVER_DOMAINS) == []
+    # a numeric file reads "checkpoint" as checkpoint_restart, never the server's word
+    assert domain_mentions("a checkpoint", "numeric") == {"checkpoint_restart"}
+    assert domain_mentions("a checkpoint", "server") == {"checkpoint_restore"}
+
+
+def test_the_witness_rule_reads_the_server_vocabulary():
+    real = ("def test_c():\n    with S.loopback_server(chk, root) as s:  # uvicorn\n"
+            "        simultaneously([job] * 4)  # threads")
+    in_process = "def test_c():\n    threads = [threading.Thread(target=TestClient(app).get)]"
+    assert witnesses("concurrent", real)
+    assert not witnesses("concurrent", in_process), "TestClient threads are no real server"
+    assert not witnesses("concurrent", "def test_c():\n    uvicorn.run(app)  # one request")
+    # loopback and no token are the defaults: anything but a test that only
+    # runs on another bind / always presents the token
+    assert witnesses("loopback_bind", "def test_a(): client.get('/graph')")
+    assert not witnesses("loopback_bind", "def test_a(): _server('0.0.0.0')")
+    assert witnesses("loopback_bind", "def test_a(): _server('0.0.0.0'); _server('127.0.0.1')")
+    assert witnesses("no_token", "def test_a(): client.get('/graph')")
+    assert not witnesses("no_token", "def test_a(): c.get('/', headers={'Authorization': x})")
+    assert witnesses("no_token", "def test_an_anonymous_caller(): headers={'Authorization': x}")
+    assert witnesses("token_enforced", "def test_a(): SimulationServer(bind_host='0.0.0.0')")
+    assert not witnesses("token_enforced", "def test_a(): client.get('/graph')")
+    for domain, yes, no in (
+            ("runner_active", "client.post('/sim/start')", "client.post('/sim/step')"),
+            ("sim_run_active", "client.post('/sim/run')", "client.post('/sim/step')"),
+            ("shutdown", "signal.raise_signal(signal.SIGTERM)", "client.post('/sim/stop')"),
+            ("wrapper_nodes", "HybridNode(spring, f)", "SpringDamperNode('s', 0.01)"),
+            ("checkpoint_restore", "post('/checkpoint/load')", "post('/sim/reset')"),
+            ("dry_run_cpu", "main(['--goal', 'all', '--dry-run'])", "rp.recommend(docs)"),
+            ("relabelled_records", "_as_real_gpu_run(recorded)  # relabelled", "docs"),
+            ("mixed_commits", "doc['environment']['git_commit'] = 'f' * 40", "doc['goal']"),
+            ("large_payload", "MAX_REQUEST_BODY_BYTES", "client.get('/graph')"),
+            ("hostile_input", "Origin: evil.example  # foreign", "client.get('/graph')")):
+        assert witnesses(domain, f"def test_x():\n    {yes}"), domain
+        assert not witnesses(domain, f"def test_x():\n    {no}"), domain
+    assert {d for d in SERVER_DOMAINS} <= KNOWN_DOMAINS

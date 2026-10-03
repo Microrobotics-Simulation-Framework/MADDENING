@@ -143,6 +143,36 @@ def test_the_error_norm_has_a_finite_derivative_where_the_estimates_agree():
     assert np.isclose(float(g["n"]["x"][0]), fd, rtol=1e-2), (g, fd)
 
 
+def _unguarded_norm(fine, coarse, atol, rtol):
+    """The norm as it was before the guard: the plain square root."""
+    sum_sq, count = 0.0, 0
+    for f, c in zip(jax.tree.leaves(fine), jax.tree.leaves(coarse)):
+        diff = jnp.abs(f - c)
+        scale = atol + rtol * jnp.maximum(jnp.abs(f), jnp.abs(c))
+        live = scale > 0
+        scaled = jnp.where(live, diff / jnp.where(live, scale, 1.0), 0.0)
+        sum_sq = sum_sq + jnp.sum(scaled ** 2)
+        count += scaled.size
+    return jnp.sqrt(sum_sq / max(count, 1))
+
+
+@pytest.mark.parametrize("other", [[1.0, 2.0], [1.0, 2.5], [1.0, np.nan], [1.0, np.inf],
+                                   [np.inf, 2.0], [-np.inf, np.inf]],
+                         ids=["same", "differs", "nan", "inf", "both-inf", "opposite-inf"])
+def test_the_guard_changes_the_value_of_no_estimate(other):
+    """The guard changes the derivative at zero only, never a value: against
+    the plain square root on agreeing, differing and non-finite estimates.
+    Guarded with ``> 0`` a NaN norm (``inf - inf`` in an entry) read 0.0 --
+    an attempt with a non-finite state taken as exact and accepted."""
+    atol, rtol = 1e-6, 1e-3
+    a = {"n": {"x": jnp.array([1.0, 2.0] if other[0] != np.inf else [np.inf, 2.0],
+                              jnp.float32)}}
+    b = {"n": {"x": jnp.array(other, jnp.float32)}}
+    got = float(_tree_error_norm(a, b, atol, rtol))
+    want = float(_unguarded_norm(a, b, atol, rtol))
+    assert (np.isnan(got) and np.isnan(want)) or got == want, (got, want)
+
+
 def test_the_adaptive_scan_gradient_of_a_group_at_its_fixed_point_is_the_coupled_sensitivity(
         aitken_pair, aitken_gradient):
     """MADD-ANO-160's reproducer: ``1 / (1 - 0.36)`` under ``"aitken"``, as

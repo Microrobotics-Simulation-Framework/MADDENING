@@ -152,7 +152,10 @@ def _tree_error_norm(state_fine, state_coarse, atol, rtol):
     # controller's ``max(error_norm, 1e-10)`` sends back: NaN in every
     # gradient through the scan.  The double ``where`` keeps the value and
     # gives the zero-error case the zero derivative of ``max``'s flat side.
-    nonzero = mean_sq > 0
+    # ``!= 0``, not ``> 0``: a NaN error (a non-finite estimate) must stay NaN
+    # -- ``NaN > 0`` is False, and the norm read 0.0, so the steppers took a
+    # NaN attempt as exact and accepted it.
+    nonzero = mean_sq != 0
     return jnp.where(nonzero, jnp.sqrt(jnp.where(nonzero, mean_sq, 1.0)), 0.0)
 
 

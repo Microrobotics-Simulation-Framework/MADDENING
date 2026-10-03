@@ -352,6 +352,7 @@ def _as_four_gpus(docs: dict) -> dict:
     return docs
 
 
+# Per push: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault
 @pytest.mark.slow
 def test_the_checklist_goals_pass_on_the_scratch_copy_of_the_library(tmp_path):
     """The control: the scratch copy with no seed passes every goal, so a
@@ -363,6 +364,7 @@ def test_the_checklist_goals_pass_on_the_scratch_copy_of_the_library(tmp_path):
         g: "PASS" for g in rp.CHECKLIST_GOALS}, log
 
 
+# Per push: tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_one_step_of_the_stencil_goals_node_shows_each_seeded_fault
 @pytest.mark.slow
 @pytest.mark.parametrize("name", sorted(_SEEDS))
 def test_a_seeded_wrapper_fault_fails_every_goal_that_runs_the_wrapper(name, tmp_path):

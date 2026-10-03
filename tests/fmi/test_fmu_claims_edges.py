@@ -162,10 +162,12 @@ def test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs():
     assert fmu == pytest.approx(graph, rel=1e-6), (fmu, graph)
 
 
-def test_a_float32_value_beyond_its_range_is_refused_and_one_below_it_rounds_to_zero():
+def test_a_float32_value_beyond_its_range_at_either_end_is_refused():
     """FMU-024: values are checked "in the variable's own type": a float32 input past
-    ``FLT_MAX`` is refused, and one below the smallest subnormal is accepted and reads back
-    as 0.0 -- representable means in range, not exact."""
+    ``FLT_MAX`` is refused, and so is a non-zero one the type flushes to 0 (below its
+    smallest subnormal), with nothing written; one that rounds to a subnormal keeps its sign
+    and magnitude -- representable means in range, not exact.  (The underflow read back as
+    0.0 until the maintainer ruled it refused: MADD-ANO-137.)"""
     gm = _springs(0.01, external=True)
     md = build_model_description(gm, model_name="m")
     bridge = _bridge(gm, md)
@@ -181,7 +183,10 @@ def test_a_float32_value_beyond_its_range_is_refused_and_one_below_it_rounds_to_
     refused = put(3.5e38)
     assert not refused["ok"] and "does not fit its type float32" in refused["error"]
     assert get() == pytest.approx(3.4e38, rel=1e-7)          # nothing written
-    assert put(1e-50)["ok"] and get() == 0.0
+    for tiny in (1e-50, -1e-50):
+        refused = put(tiny)
+        assert not refused["ok"] and "does not fit its type float32" in refused["error"]
+        assert get() == pytest.approx(3.4e38, rel=1e-7)      # nothing written
     assert put(1e-40)["ok"] and 0.0 < get() < 1.2e-38        # a subnormal is kept
 
 
@@ -200,13 +205,10 @@ def test_the_bridges_waits_and_limits_are_the_documented_numbers():
     assert tcp_bridge._COMM_POINT_TOLERANCE == 1e-6
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "FMU-039: the bounds check behind set and set_state goes through ParamSpec.check, which "
-    "flushes a subnormal to zero, so a parameter can be set below an advertised min of 0; "
-    "pending fix"))
 def test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal():
     """FMU-039: "Setting a parameter is held to the min / max the description advertises".
-    ``damping`` advertises ``min="0.0"``; a negative float32 subnormal is below it."""
+    ``damping`` advertises ``min="0.0"``; a negative float32 subnormal is below it.  (It was
+    accepted while ``ParamSpec.check`` compared through ``jnp``: MADD-ANO-136.)"""
     gm = _springs(0.01)
     md = build_model_description(gm, model_name="m")
     bridge = _bridge(gm, md)

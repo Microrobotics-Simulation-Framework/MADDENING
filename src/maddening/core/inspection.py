@@ -1082,22 +1082,36 @@ def _effective_params(gm: "GraphManager", status: _Status) -> tuple[dict, Option
 
 def _bound_violation(spec: Any, leaf: Any) -> Optional[str]:
     """What :meth:`ParamSpec.check` would refuse, on the host; ``None`` when
-    the value passes."""
+    the value passes.  The comparisons are ``check``'s own
+    (:func:`~maddening.core.params._bound_operands`): the value and the
+    bound rounded to the dtype JAX compares them in, then compared exactly,
+    and under a ``log`` / ``logit`` transform a distance from the bound
+    that the step's arithmetic flushes to zero counts as on it."""
+    from maddening.core.params import _bound_operands, _step_gap  # noqa: PLC0415
+
     arr = np.asarray(leaf)
     if arr.dtype.kind not in "biufc" and not jnp.issubdtype(arr.dtype, jnp.floating):
         return None
-    if jnp.issubdtype(arr.dtype, jnp.floating) and arr.dtype.kind != "f":
-        arr = arr.astype(np.float32)
-    if arr.dtype.kind in "fc" and not np.all(np.isfinite(arr)):
+    if arr.dtype.kind == "c":
+        if not np.all(np.isfinite(arr)):
+            return "not finite"
+        arr = np.real(arr)
+    if jnp.issubdtype(arr.dtype, jnp.floating) and not np.all(np.isfinite(arr.astype(np.float64))):
         return "not finite"
     lo, hi = spec.bounds
     strict = spec.transform in ("log", "logit")
-    if lo is None and spec.transform == "log" and np.any(arr <= 0.0):
-        return "at or below 0 (transform='log' without a lower bound is measured from 0)"
-    if lo is not None and (np.any(arr <= lo) if strict else np.any(arr < lo)):
-        return f"below the lower bound {_cell(float(lo))}"
-    if hi is not None and (np.any(arr >= hi) if strict else np.any(arr > hi)):
-        return f"above the upper bound {_cell(float(hi))}"
+    if lo is None and spec.transform == "log":
+        a, b, tiny = _bound_operands(arr, 0.0)
+        if np.any(_step_gap(a, b, tiny) <= 0.0):
+            return "at or below 0 (transform='log' without a lower bound is measured from 0)"
+    if lo is not None:
+        a, b, tiny = _bound_operands(arr, lo)
+        if np.any(_step_gap(a, b, tiny) <= 0.0) if strict else np.any(a < b):
+            return f"below the lower bound {_cell(float(lo))}"
+    if hi is not None:
+        a, b, tiny = _bound_operands(arr, hi)
+        if np.any(_step_gap(b, a, tiny) <= 0.0) if strict else np.any(a > b):
+            return f"above the upper bound {_cell(float(hi))}"
     return None
 
 

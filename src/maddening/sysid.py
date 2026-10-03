@@ -1224,11 +1224,12 @@ class _CoordinateBounds:
 
     def __init__(self, gm, start: dict, idx, dtype) -> None:
         specs = _resolve_specs(start, gm.param_specs())
-        los, his, p_los, p_his = [], [], [], []
+        los, his, p_los, p_his, transformed = [], [], [], [], []
         for leaf, spec in zip(jax.tree.leaves(start), specs):
             n = _leaf_size(leaf)
             lo, hi = -np.inf, np.inf
             p_lo, p_hi = -np.inf, np.inf
+            transformed.append(np.full(n, spec.transform is not None))
             if spec.trainable and _is_differentiable(leaf):
                 p_lo, p_hi = _physical_edges(spec, jnp.result_type(leaf))
                 # A ``log`` / ``logit`` coordinate is unbounded in principle,
@@ -1248,6 +1249,12 @@ class _CoordinateBounds:
         #: The physical values the edges of each coordinate's range map to.
         self.p_lo = (np.concatenate(p_los) if p_los else np.zeros(0))[idx]
         self.p_hi = (np.concatenate(p_his) if p_his else np.zeros(0))[idx]
+        #: Whether each coordinate is a ``log`` / ``logit`` one (dimensionless,
+        #: a relative change of the parameter) rather than the parameter in
+        #: its own units: the identifiability guard measures the latter
+        #: relative to the parameter's value (:func:`_relative_scale`).
+        self.transformed = (np.concatenate(transformed) if transformed
+                            else np.zeros(0, dtype=bool))[idx]
         #: Whether any coordinate is bounded at all; when not, every method
         #: here is the identity and costs nothing.
         self.active = bool(np.isfinite(lo_np).any() or np.isfinite(hi_np).any())
@@ -2385,7 +2392,17 @@ def fim(
         parameter's value, i.e. sensitivities to *relative* changes, so
         parameters in different units are comparable and the condition
         number is not dominated by units.  ``None`` uses raw
-        sensitivities.  A parameter whose value is exactly ``0.0`` has
+        sensitivities, and with them every verdict that compares one
+        column with another depends on the parameters' units: ``rank``
+        (the cutoff is relative to the largest eigenvalue), the
+        parameters ``crb`` calls ``+inf``, ``cond`` and
+        ``least_identifiable``.  A parameter written in units ``1e-5``
+        has a column ``1e-5`` the size of the others' and reads as
+        unresolved under ``None`` however well the data determine it;
+        under ``"relative"`` or ``"nominal"`` the report is the same in
+        any units.  :func:`fit_lm`'s identifiability guard reads its
+        curvature as ``"relative"`` does, for that reason
+        (:func:`_relative_scale`).  A parameter whose value is exactly ``0.0`` has
         no relative scale: its column vanishes and it reads as
         unidentifiable however well the data determine it.  Those
         parameters are named in :attr:`FIMReport.zero_scaled`; ask
@@ -2945,7 +2962,15 @@ class _ExcitationTracker:
         self._gram += np.outer(gv, gv)
         self.count += 1
 
-    def split(self) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    def gradient_scale(self) -> np.ndarray:
+        """``sqrt(diag(G))``: each coordinate's accumulated gradient
+        magnitude, which scales with the coordinate's units as a Jacobian
+        column does (:func:`_relative_scale` uses it where a coordinate
+        has no value of its own to be relative to)."""
+        return np.sqrt(np.maximum(np.diag(self._gram), 0.0))
+
+    def split(self, scale: Optional[np.ndarray] = None
+              ) -> Optional[tuple[np.ndarray, np.ndarray]]:
         """``(eigvecs, excited)`` of ``G``, or ``None`` if it cannot say.
 
         ``eigvecs`` are ``G``'s orthonormal eigenvectors in ascending order
@@ -2953,17 +2978,27 @@ class _ExcitationTracker:
         described in :meth:`projector`; the rest are the directions no
         gradient of the run pointed along.  ``None`` under the same two
         conditions :meth:`projector` answers ``(None, None)``.
+
+        With ``scale`` (``c``, one positive entry per coordinate), ``G`` is
+        read in the coordinates ``zeta = c * theta``: its gradients are
+        ``g / c``, so the matrix decomposed is ``G / outer(c, c)`` and the
+        eigenvectors are directions of ``zeta``.  A cutoff relative to the
+        largest eigenvalue compares coordinates with each other, so it is
+        only invariant to their units in coordinates that are
+        (:func:`_relative_scale`); without ``scale``, ``theta``'s own.
         """
         if self.count < self.n:
             return None
-        evals, evecs = np.linalg.eigh(self._gram)
+        gram = self._gram if scale is None else self._gram / np.outer(scale, scale)
+        evals, evecs = np.linalg.eigh(gram)
         top = float(evals[-1])
         if not np.isfinite(top) or top <= 0.0:
             return None
         cutoff = (max(self.n, math.sqrt(self.count)) * self.eps) ** 2 * top
         return evecs, np.asarray(evals > cutoff)
 
-    def projector(self) -> tuple[Optional[int], Optional[np.ndarray]]:
+    def projector(self, scale: Optional[np.ndarray] = None
+                  ) -> tuple[Optional[int], Optional[np.ndarray]]:
         """``(rank, P)`` for the excited subspace, or ``(None, None)``.
 
         ``P`` is the orthogonal projector onto the span of the directions
@@ -2988,8 +3023,11 @@ class _ExcitationTracker:
         statistical question -- "is this parameter determined *well enough*"
         -- is :attr:`FIMReport.crb`'s, and answering it here would silently
         discard real, if weak, information.
+
+        ``scale`` as for :meth:`split`: ``P`` is then a projector in the
+        scaled coordinates.
         """
-        split = self.split()
+        split = self.split(scale)
         if split is None:
             return None, None
         evecs, keep = split
@@ -3059,19 +3097,87 @@ class _SelectedObjective:
     ``reference()``
         ``(loss, gradient)`` at the selected iterate, the loss by the same
         function as ``loss`` so that the check compares like with like.
-    ``flatness(candidates, excited)``
-        The curvature test: ``(W, flat, scale)`` with ``W`` an orthogonal
+    ``flatness(candidates, excited, scale)``
+        The curvature test, in the coordinates ``zeta = scale * theta``
+        (:func:`_relative_scale`) the candidate and excited columns are
+        directions of: ``(W, flat, curvature)`` with ``W`` an orthogonal
         ``k x k`` rotation of the candidate columns, ``flat`` flagging the
         rotated directions along which the objective has no curvature,
-        and ``scale`` the curvature the tolerance's quantisation term uses;
-        or ``None`` when there is no curvature to ask (a Hessian-vector
-        product JAX cannot form, or a non-finite one; see
-        :func:`_no_curvature`).
+        and ``curvature`` the largest curvature in those coordinates, which
+        the tolerance's quantisation term uses; or ``None`` when there is
+        no curvature to ask (a Hessian-vector product JAX cannot form, or a
+        non-finite one; see :func:`_no_curvature`).
+    ``transformed``
+        Per coordinate, whether it is a ``log`` / ``logit`` coordinate
+        (:attr:`_CoordinateBounds.transformed`).  ``None`` reads every
+        coordinate as one, which leaves ``theta`` unscaled.
+    ``columns()``
+        Per coordinate, a magnitude that scales with its units as a
+        Jacobian column does -- ``||J[:, i]||`` for :func:`fit_lm`,
+        :meth:`_ExcitationTracker.gradient_scale` for the other two --
+        called only for an identity coordinate whose start and selected
+        values are both exactly 0 (:func:`_relative_scale`).
     """
 
     loss: Callable[[Any], float]
     reference: Callable[[], tuple[float, Optional[np.ndarray]]]
-    flatness: Callable[[np.ndarray, np.ndarray], Optional[tuple]]
+    flatness: Callable[[np.ndarray, np.ndarray, np.ndarray], Optional[tuple]]
+    transformed: Optional[np.ndarray] = None
+    columns: Optional[Callable[[], np.ndarray]] = None
+
+
+def _relative_scale(theta0, selected, transformed, columns=None) -> np.ndarray:
+    """``c``, one positive entry per coordinate, such that the guard's
+    coordinates ``zeta = c * theta`` do not depend on any parameter's units.
+
+    A ``log`` or ``logit`` coordinate already does not: a change of units
+    multiplies a ``log`` parameter by a constant, which shifts ``theta``
+    without scaling it, and a ``logit`` coordinate is dimensionless.  Its
+    ``c`` is 1.  An identity coordinate *is* the parameter in its own
+    units, so ``c = 1 / max(|theta0|, |selected|)``: ``zeta`` is then the
+    parameter's change relative to its own size, the quantity a ``log``
+    coordinate measures, and what :func:`fim`'s default
+    ``scale="relative"`` puts in a Jacobian column.  Every test the guard
+    makes -- which gradients the run pointed along, which directions the
+    objective is flat in, where the hold puts the held point and how much
+    loss rounding it may cost -- compares coordinates with each other, so
+    each is invariant to the parameters' units in ``zeta`` and in no
+    coordinates that are not.  Measured in ``theta`` (0.4.0 development
+    builds), a damping in units 1e-5 had a gradient and a Jacobian column
+    1e-5 the size of the others': both tests called a direction the data
+    determines undetermined, the hold put it back at its start, and the
+    loss went from 1.6e-11 to 13.9.
+
+    An identity coordinate with no size of its own -- start and selected
+    value both exactly 0 -- has nothing to be relative to.  ``columns()``
+    then gives each coordinate a magnitude that scales with its units
+    (``||J[:, i]||``), and ``c`` makes that coordinate's scaled magnitude
+    equal the largest of the others', which is invariant too.  A
+    coordinate whose magnitude is 0 -- the objective does not read it --
+    keeps ``c = 1``: every matrix the guard reads is zero in its row and
+    column whatever ``c`` is, so nothing depends on it.  ``transformed``
+    of ``None`` reads every coordinate as transformed: ``c`` is all ones
+    and ``zeta`` is ``theta`` bit for bit.
+    """
+    t0 = np.abs(np.asarray(theta0, dtype=np.float64)).reshape(-1)
+    ts = np.abs(np.asarray(selected, dtype=np.float64)).reshape(-1)
+    c = np.ones_like(t0)
+    if transformed is None:
+        return c
+    identity = ~np.asarray(transformed, dtype=bool).reshape(-1)
+    ref = np.maximum(t0, ts)
+    sized = identity & np.isfinite(ref) & (ref > 0.0)
+    c[sized] = 1.0 / ref[sized]
+    unsized = identity & ~sized
+    if unsized.any() and columns is not None:
+        mag = np.asarray(columns(), dtype=np.float64).reshape(-1)
+        usable = np.isfinite(mag) & (mag > 0.0)
+        others = usable & ~unsized
+        if others.any():
+            top = float(np.max(mag[others] / c[others]))
+            fill = unsized & usable
+            c[fill] = mag[fill] / top
+    return c
 
 
 def _rotation_by_singular_values(M, k: int):
@@ -3102,17 +3208,24 @@ def _no_curvature(method: str, k: int, why: str) -> None:
     return None
 
 
-def _gauss_newton_flatness(J, candidates, dtype, method: str = "fit_lm"):
+def _gauss_newton_flatness(J, candidates, dtype, method: str = "fit_lm",
+                           scale: Optional[np.ndarray] = None):
     """The curvature test for :func:`fit_lm`, from ``J`` at the selected
     iterate.
 
     ``F = JᵀJ`` is the Gauss-Newton matrix Levenberg-Marquardt steps with
     and, weighted by ``noise_std``, the Fisher information :func:`fim`
-    reports.  A direction ``u`` of the candidate span is flat when
-    ``uᵀFu = ||Ju||²`` is at or below ``rtol * max(eig(F))`` with
-    :func:`fim`'s own rank cutoff ``rtol = max(n, sqrt(m)) * eps``, so
-    :func:`fit_lm` holds a direction only if :func:`fim`, asked at the
-    point it returned and in its coordinates, would call it unresolved.
+    reports.  It is read in the guard's coordinates ``zeta = scale *
+    theta`` (:func:`_relative_scale`), whose Jacobian is ``J / scale``
+    column by column, and the candidates are directions of ``zeta``.  A
+    direction ``u`` of the candidate span is flat when ``uᵀFu = ||Ju||²``
+    is at or below ``rtol * max(eig(F))`` with :func:`fim`'s own rank
+    cutoff ``rtol = max(n, sqrt(m)) * eps``, so :func:`fit_lm` holds a
+    direction only if :func:`fim`, asked at the point it returned with its
+    default ``scale="relative"``, would call it unresolved -- in any units.
+    In ``theta`` itself (0.4.0 development builds), an identity coordinate
+    in units 1e-5 had a column 1e-5 the size of the others' and was flat
+    by this test however well the data determined it.
 
     The quadratic form rather than ``||Fu||``: ``J``'s entries carry the
     working precision's rounding, which leaves ``||Fv||`` of an exactly
@@ -3129,18 +3242,26 @@ def _gauss_newton_flatness(J, candidates, dtype, method: str = "fit_lm"):
     k = candidates.shape[1]
     if not np.all(np.isfinite(Jd)):
         return _no_curvature(method, k, "the Jacobian at the selected iterate is not finite")
+    if scale is not None:
+        Jd = Jd / np.asarray(scale, dtype=np.float64)[None, :]
     W, s = _rotation_by_singular_values(Jd @ candidates, k)
-    scale = float(np.linalg.norm(Jd, 2)) ** 2
+    curvature = float(np.linalg.norm(Jd, 2)) ** 2
     rtol = _resolve_rank_rtol(dtype, n, None, n_residual=m)
-    return W, s * s <= rtol * scale, scale
+    return W, s * s <= rtol * curvature, curvature
 
 
-def _hessian_flatness(hvp, candidates, excited, dtype, method: str):
+def _hessian_flatness(hvp, candidates, excited, dtype, method: str,
+                      scale: Optional[np.ndarray] = None):
     """The curvature test for :func:`fit` and :func:`fit_multiple_shooting`.
 
     Their objective is a scalar, so there is no ``J`` to ask; the Hessian
     at the selected iterate is.  ``hvp(V)`` returns ``H V`` for the columns
-    of ``V``.  A direction ``u`` of the candidate span is flat when
+    of ``V``, in ``theta``; the test reads the Hessian in the guard's
+    coordinates ``zeta = scale * theta`` (:func:`_relative_scale`), which
+    is ``H / outer(scale, scale)``, so each direction is divided by
+    ``scale`` on the way in and its product on the way out, and the
+    candidates are directions of ``zeta``.  A direction ``u`` of the
+    candidate span is flat when
     ``||Hu|| <= sqrt(eps) * scale``, ``scale`` being the largest singular
     value of ``H`` over the candidates and the
     :data:`_HOLD_SCALE_DIRECTIONS` most-excited directions -- a lower bound
@@ -3170,18 +3291,22 @@ def _hessian_flatness(hvp, candidates, excited, dtype, method: str):
     """
     k = candidates.shape[1]
     top = excited[:, ::-1][:, :_HOLD_SCALE_DIRECTIONS]
+    V = np.concatenate([candidates, top], axis=1)
+    inv = (None if scale is None
+           else 1.0 / np.asarray(scale, dtype=np.float64)[:, None])
     try:
-        HV = np.asarray(hvp(np.concatenate([candidates, top], axis=1)),
-                        dtype=np.float64)
+        HV = np.asarray(hvp(V if inv is None else V * inv), dtype=np.float64)
     except Exception as exc:   # noqa: BLE001 - any failure means "no curvature"
         return _no_curvature(
             method, k, f"its Hessian-vector product raised {type(exc).__name__}: {exc}")
     if not np.all(np.isfinite(HV)):
         return _no_curvature(method, k, "its Hessian-vector product is not finite")
-    scale = float(np.linalg.norm(HV, 2))
+    if inv is not None:
+        HV = HV * inv
+    curvature = float(np.linalg.norm(HV, 2))
     W, s = _rotation_by_singular_values(HV[:, :k], k)
-    cutoff = math.sqrt(float(np.finfo(dtype).eps)) * scale
-    return W, s <= cutoff, scale
+    cutoff = math.sqrt(float(np.finfo(dtype).eps)) * curvature
+    return W, s <= cutoff, curvature
 
 
 def _hvp_columns(grad_fn, theta, extra, V):
@@ -3203,14 +3328,29 @@ def _hvp_columns(grad_fn, theta, extra, V):
     return np.asarray(jax.jit(products)(theta, extra, tangents), dtype=np.float64).T
 
 
-def _hold_tolerance(loss_sel: float, grad_sel, scale: float, held, eps: float) -> float:
+def _hold_tolerance(loss_sel: float, grad_sel, curvature: float, held, eps: float,
+                    *, scale: Optional[np.ndarray] = None,
+                    floor: Optional[np.ndarray] = None) -> float:
     """How far the loss may rise for the hold to count as not raising it.
 
-    ``2**10 * eps * |L| + ||g|| * d + scale * d**2 / 2``, with ``L`` and
-    ``g`` the loss and gradient at the selected iterate, ``d`` the length of
-    a perturbation of :data:`_HOLD_LOSS_ROUNDINGS` roundings,
-    ``eps * max(1, |u|)`` each, in every coordinate ``u`` of the held point,
-    and ``scale`` the objective's largest curvature.
+    ``2**10 * eps * |L| + ||g|| * d + curvature * d**2 / 2``, with ``L``
+    and ``g`` the loss and gradient at the selected iterate, ``d`` the
+    length of a perturbation of :data:`_HOLD_LOSS_ROUNDINGS` roundings in
+    every coordinate ``u`` of the held point, and ``curvature`` the
+    objective's largest curvature -- all three in the guard's coordinates
+    ``zeta = scale * theta`` (:func:`_relative_scale`), where ``g`` is
+    ``g / scale`` and a rounding of ``u`` has length ``scale *`` itself.
+    One rounding is ``eps * max(floor, |u|)``: ``floor`` is 1 for a
+    ``log`` / ``logit`` coordinate and 0 for an identity one (all 1 when
+    ``floor`` is ``None``).
+
+    The quantisation term pairs the largest curvature with the rounding of
+    every coordinate, so it is only invariant to the parameters' units in
+    coordinates that are.  In ``theta`` (0.4.0 development builds) it was
+    not: a damping in units 1e-5 is a coordinate of 3e5, whose rounding
+    the curvature of the others turned into a tolerance that admitted a
+    loss of 13.9 against 1.6e-11; in units 1e6 it is 3e-6, and the floor of
+    1 claimed a rounding of 4% of it, which admitted 0.1 against 3.1e-12.
 
     The guard moves only along directions both of its tests call flat, so
     in exact arithmetic the loss does not move at all; what the tolerance
@@ -3234,9 +3374,10 @@ def _hold_tolerance(loss_sel: float, grad_sel, scale: float, held, eps: float) -
     point ``2.5e-13``, a factor of 20 that is all rounding.  A coordinate
     rounds when it is stored, when its transform maps it (``exp`` and the
     logistic round to ``eps`` of their result, which in ``log``
-    coordinates is ``eps`` absolute -- hence the floor of 1, without which
-    ``log 1 = 0`` would claim a denormal's rounding), and again in the
-    model's first use of it: four roundings.  Over the degenerate holds of
+    coordinates is ``eps`` absolute -- hence the floor of 1 there, without
+    which ``log 1 = 0`` would claim a denormal's rounding; an identity
+    coordinate's value rounds relative to itself, so it has none), and
+    again in the model's first use of it: four roundings.  Over the degenerate holds of
     the spring fixtures (``fit``, ``fit_lm`` and ``fit_multiple_shooting``,
     noiseless and σ = 0.02, 60 and 120 steps) the largest rise this term
     alone had to admit was 0.43 of *one* rounding per coordinate, so four
@@ -3251,12 +3392,16 @@ def _hold_tolerance(loss_sel: float, grad_sel, scale: float, held, eps: float) -
     0.0 to 1.2e-4, and ten Adam steps from 0.32342 to 0.32367 -- a relative
     rise of 7.7e-4, six times the relative term.
     """
-    held64 = np.asarray(held).astype(np.float64)
-    rounding = eps * np.maximum(1.0, np.abs(held64))
-    d = _HOLD_LOSS_ROUNDINGS * float(np.linalg.norm(rounding))
-    g = 0.0 if grad_sel is None else float(np.linalg.norm(grad_sel))
+    held64 = np.asarray(held).astype(np.float64).reshape(-1)
+    lower = 1.0 if floor is None else np.asarray(floor, dtype=np.float64).reshape(-1)
+    rounding = eps * np.maximum(lower, np.abs(held64))
+    c = (np.ones_like(held64) if scale is None
+         else np.asarray(scale, dtype=np.float64).reshape(-1))
+    d = _HOLD_LOSS_ROUNDINGS * float(np.linalg.norm(c * rounding))
+    g = (0.0 if grad_sel is None
+         else float(np.linalg.norm(np.asarray(grad_sel, dtype=np.float64).reshape(-1) / c)))
     return (_HOLD_LOSS_RTOL_EPS * eps * abs(loss_sel)
-            + g * d + 0.5 * max(scale, 0.0) * d * d)
+            + g * d + 0.5 * max(curvature, 0.0) * d * d)
 
 
 def _hold_undetermined_directions(tracker, theta, theta0, objective: _SelectedObjective,
@@ -3299,15 +3444,32 @@ def _hold_undetermined_directions(tracker, theta, theta0, objective: _SelectedOb
     curvature is degenerate any basis of it is as good as another, so
     "hold some of them" names no particular subset.
 
+    **Every test, the hold and the tolerance are made in the coordinates
+    ``zeta = c * theta`` of :func:`_relative_scale`**: a ``log`` or
+    ``logit`` coordinate as it is, an identity one relative to the
+    parameter's own size.  Each of them compares coordinates with each
+    other, so each is invariant to the parameters' units in ``zeta`` and
+    in no coordinates that are not; in ``theta`` (0.4.0 development
+    builds) a damping in units 1e-5 or 1e6 was held, against data that
+    determined it, at a loss of 13.9 or 0.1 where the fit had reached
+    1e-11, and declined with a warning in units 1e-4 to 1e-2 and 1e4.  The
+    hold removes the undetermined component of the move orthogonally in
+    ``zeta``, which holds the same combination of the parameters at its
+    start whatever their units.  :attr:`FitResult.undetermined_drift` is
+    still reported in ``theta``, the optimiser's coordinates, as
+    documented.
+
     ``theta`` comes back untouched, and therefore bit for bit, whenever no
     direction passes both tests or the question could not be answered.
-    When every candidate of test 1 passes test 2 the hold is computed
-    exactly as the 0.4.0 development builds computed it, so a degenerate
-    fit they held correctly is held to the same bits.
+    When every coordinate is a ``log`` / ``logit`` one ``zeta`` is
+    ``theta``, and when every candidate of test 1 also passes test 2 the
+    hold is then computed exactly as the 0.4.0 development builds computed
+    it, so a degenerate fit they held correctly is held to the same bits.
     """
     if tracker is None:
         return theta, None, None, None
-    split = tracker.split()
+    c = _relative_scale(theta0, theta, objective.transformed, objective.columns)
+    split = tracker.split(c)
     if split is None:
         return theta, None, None, None
     evecs, excited = split
@@ -3316,24 +3478,25 @@ def _hold_undetermined_directions(tracker, theta, theta0, objective: _SelectedOb
         return theta, n, 0.0, False
     candidates, spanned = evecs[:, ~excited], evecs[:, excited]
     k = candidates.shape[1]
-    probe = objective.flatness(candidates, spanned)
+    probe = objective.flatness(candidates, spanned, c)
     if probe is None:
-        W, flat, scale = np.eye(k), np.ones(k, dtype=bool), 0.0
+        W, flat, curvature = np.eye(k), np.ones(k, dtype=bool), 0.0
     else:
-        W, flat, scale = probe
+        W, flat, curvature = probe
         flat = np.asarray(flat, dtype=bool)
     n_flat = int(np.count_nonzero(flat))
     if n_flat == 0:
         return theta, n, 0.0, False
     moved = (np.asarray(theta, dtype=np.float64)
              - np.asarray(theta0, dtype=np.float64))
+    moved_z = c * moved
     if n_flat == k:
         # Every candidate is flat: the projector onto the spanned
         # directions, formed and applied as 0.4.0-dev formed it.
-        kept = (spanned @ spanned.T) @ moved
+        kept = ((spanned @ spanned.T) @ moved_z) / c
     else:
         undetermined = candidates @ W[:, flat]
-        kept = moved - undetermined @ (undetermined.T @ moved)
+        kept = (moved_z - undetermined @ (undetermined.T @ moved_z)) / c
     drift = float(np.linalg.norm(moved - kept))
     # ``theta0 + kept``, not ``kept`` alone: the guard holds the
     # undetermined directions at the values they *started* at, which
@@ -3341,7 +3504,10 @@ def _hold_undetermined_directions(tracker, theta, theta0, objective: _SelectedOb
     held = theta0 + jnp.asarray(kept, dtype=theta0.dtype)
     loss_sel, grad_sel = objective.reference()
     loss_held = objective.loss(held)
-    tol = _hold_tolerance(loss_sel, grad_sel, scale, held, tracker.eps)
+    floor = (None if objective.transformed is None
+             else np.where(np.asarray(objective.transformed, dtype=bool), 1.0, 0.0))
+    tol = _hold_tolerance(loss_sel, grad_sel, curvature, held, tracker.eps,
+                          scale=c, floor=floor)
     if math.isfinite(loss_held) and loss_held <= loss_sel + tol:
         return held, n - n_flat, drift, False
     warnings.warn(
@@ -3546,6 +3712,11 @@ class FitResult:
         objective has no curvature along it at the selected iterate
         (``JᵀJ`` for :func:`fit_lm`, by :func:`fim`'s rank rule; the
         loss's Hessian for :func:`fit` and :func:`fit_multiple_shooting`).
+        Both are asked with each identity-transform parameter measured
+        relative to its own size, as :func:`fim`'s default
+        ``scale="relative"`` measures it, so the count is the same in any
+        units (in the optimiser's own coordinates a damping in units 1e-4
+        read as undetermined, 2 of 3).
         Earlier 0.4.0 development builds counted the first test alone,
         which on a short or fast-converging run names directions the data
         determines perfectly well: ``fit_lm`` on a four-parameter bowl
@@ -3902,15 +4073,17 @@ def fit(
         loss_sel, g_sel = value_and_grad(selected)
         return float(loss_sel), np.asarray(g_sel, dtype=np.float64)
 
-    def _flatness(candidates, spanned):
+    def _flatness(candidates, spanned, scale):
         return _hessian_flatness(
             lambda V: _hvp_columns(lambda t: value_and_grad(t)[1], selected, (), V),
-            candidates, spanned, selected.dtype, "fit")
+            candidates, spanned, selected.dtype, "fit", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,
         _SelectedObjective(loss=lambda th: float(value_and_grad(th)[0]),
-                           reference=_reference, flatness=_flatness),
+                           reference=_reference, flatness=_flatness,
+                           transformed=bounds.transformed,
+                           columns=None if tracker is None else tracker.gradient_scale),
         "fit")
 
     final = to_params(theta)
@@ -4378,12 +4551,17 @@ def fit_lm(
         r_sel, J_sel = _rj_selected()
         return _loss(selected), np.asarray(J_sel.T @ r_sel, dtype=np.float64)
 
-    def _flatness(candidates, spanned):
-        return _gauss_newton_flatness(_rj_selected()[1], candidates, selected.dtype)
+    def _flatness(candidates, spanned, scale):
+        return _gauss_newton_flatness(_rj_selected()[1], candidates, selected.dtype,
+                                      scale=scale)
+
+    def _columns():
+        return np.linalg.norm(np.asarray(_rj_selected()[1], dtype=np.float64), axis=0)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,
-        _SelectedObjective(loss=_loss, reference=_reference, flatness=_flatness),
+        _SelectedObjective(loss=_loss, reference=_reference, flatness=_flatness,
+                           transformed=bounds.transformed, columns=_columns),
         "fit_lm")
 
     final = to_params(theta)
@@ -4588,19 +4766,21 @@ def fit_multiple_shooting(
         loss_sel, (g_sel, _) = value_and_grad(selected, ws)
         return float(loss_sel), np.asarray(g_sel, dtype=np.float64)
 
-    def _flatness(candidates, spanned):
+    def _flatness(candidates, spanned, scale):
         # The parameter block's Hessian at the selected window states, held
         # fixed: the guard moves only ``theta``, and does so with ``ws``
         # where the optimiser left them.
         return _hessian_flatness(
             lambda V: _hvp_columns(lambda t, w: value_and_grad(t, w)[1][0],
                                    selected, (ws,), V),
-            candidates, spanned, selected.dtype, "fit_multiple_shooting")
+            candidates, spanned, selected.dtype, "fit_multiple_shooting", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,
         _SelectedObjective(loss=lambda th: float(value_and_grad(th, ws)[0]),
-                           reference=_reference, flatness=_flatness),
+                           reference=_reference, flatness=_flatness,
+                           transformed=bounds.transformed,
+                           columns=None if tracker is None else tracker.gradient_scale),
         "fit_multiple_shooting")
 
     final = to_params(theta)

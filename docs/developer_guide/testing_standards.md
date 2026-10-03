@@ -732,6 +732,7 @@ audit area that a user could rely on:
 |------|----------|--------|
 | `coupling_claims.yaml` | `CPL` | coupling groups, their solvers, schedules and accelerations; sub-cycling, multi-rate groups and the adaptive steppers on coupled graphs; `coupling_diagnostics()`, `coupling_report()` and `strict_convergence`; the precision floor and every bound and `*_usable` flag; IFT gradients; the profiler's coupling statistics; `windowed_loss`'s convergence mask |
 | `sysid_fmu_claims.yaml` | `SYS`, `FMU` | `maddening.sysid` (`windowed_loss`, `fim`, `fim_core`, the three fitters and their results, truth recovery and units); `ParamSpec` bounds and transforms; `node.params` and `gm.params` as fitting and export see them; the FMI 3.0 export: model description, TCP bridge, sidecar, FMU state, C wrapper, conformance, refusals, timeouts, tokens and the terminated state |
+| `rest_runpod_claims.yaml` | `REST`, `RPD` | the HTTP API: authentication, the `Host` and `Origin` rules, request bounds and budgets, the graph lock and its 409/503, `/graph/*`, `/sim/*`, `/checkpoint/*`, shutdown and the runner behind `/sim/start` (not the experimental surrogate and streaming endpoints); `benchmarks/multigpu/run_pod.py`, its runbook, records, verdicts and exit codes |
 
 Each row records:
 
@@ -812,6 +813,15 @@ add a small constant to the numerical core:
   (`tests/core/test_linear_solvers_in_any_units.py`,
   `test_sysid_adam_in_any_units.py`, `test_multirate_in_any_units.py`).
   A decimal scale changes the inputs' rounding; a power of two does not.
+- **Compare coordinates only where no units move them.**  A cutoff relative
+  to the largest eigenvalue, a norm over several parameters or a projection
+  is a constant in disguise when its coordinates carry units: the fitters'
+  identifiability guard held a determined parameter written in units of
+  `1e-5` until it made its tests relative to each parameter's size
+  (`tests/core/test_sysid_hold_in_any_units.py` runs it over decades).
+- **Compare a value against a bound on the host.**  XLA's CPU backend
+  flushes subnormal operands, so a `jnp` comparison passed float32 `-1e-40`
+  as `>= 0` (`tests/core/test_bounds_checks_compare_exactly.py`).
 - **Build a power-of-two frame with `maddening.core._pow2_frame`.**  It is
   the one place the coupling runtime, the solvers and the fitters build
   their frames.  `tests/core/test_pow2_frame.py` refuses a `frexp` or
@@ -908,7 +918,7 @@ Two oracles; each was mutation-tested against a scratch copy of `src/`
 
 | Oracle | Paths compared | Covers | Cannot see |
 |---|---|---|---|
-| Truth recovery (`tests/property/test_sysid_truth_recovery.py`) | A fit's `converged=True` against the truth it was generated from: noiseless data, a truth drawn anywhere inside the bounds (near them too), a start anywhere in the box. The fit must recover the truth to 1e-3 of the coordinate's range, or say `converged=False`; and the same fit with one parameter measured in a unit 1e4 times larger or smaller must give the same answer in about as many iterations | `fit_lm` per push on a closed-form problem whose only constrained stationary point is the truth (one strictly monotone, non-saturating block of residuals per coordinate, nonlinear so that a Gauss-Newton step overshoots), over every transform: a clipped `transform=None` leaf, `log`, `logit`. In the slow lane, more draws, `fit` (Adam with a `tol`), and all three fitters on the spring graph | A problem with a second stationary point (a plateau where the model saturates is one, and a fit may stop there); the size of a fit's error when it says `converged=False` |
+| Truth recovery (`tests/property/test_sysid_truth_recovery.py`) | A fit's `converged=True` against the truth it was generated from: noiseless data, a truth drawn anywhere inside the bounds (near them too), a start anywhere in the box. The fit must recover the truth to 1e-3 of the coordinate's range, or say `converged=False`; and the same fit with one parameter measured in a unit up to 1e6 times larger or smaller must give the same answer -- the same returned point, `excited_rank` and `hold_declined` -- in about as many iterations | `fit_lm` per push on a closed-form problem whose only constrained stationary point is the truth (one strictly monotone, non-saturating block of residuals per coordinate, nonlinear so that a Gauss-Newton step overshoots), over every transform: a clipped `transform=None` leaf, `log`, `logit`. In the slow lane, more draws, `fit` (Adam with a `tol`), and all three fitters on the spring graph | A problem with a second stationary point (a plateau where the model saturates is one, and a fit may stop there); the size of a fit's error when it says `converged=False` |
 | Entry points and readers agree after a `node.params` write (`tests/property/test_differential_entry_points_after_a_node_write.py`) | `gm.step`, `gm.run`, `gm.run_scan` at a length traced before the write and at a new one, `gm.run_scan_with_history` and `sysid.windowed_loss`, each from one fixed state, after a write with no compile and again after `compile()`: all must run the model the write leaves. Readers likewise, with nothing run first: `gm.params`, a `jax.jit` and a `jax.grad` of a sysid loss handed `gm.params`, `to_dict` reloaded, a checkpoint, `GET /graph/params` (the FMU export: `tests/core/test_node_params_writes_are_observed.py`) | A constant of a three-argument node, a structural `int` and a `gm.params` leaf of a params-taking node; two writes in a row | An entry point that keeps its own copy of the compiled step (an FMU sidecar built before the write runs the step it was given) |
 
 ### Sharding wrappers

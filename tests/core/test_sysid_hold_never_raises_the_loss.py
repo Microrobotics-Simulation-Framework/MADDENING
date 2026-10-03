@@ -290,18 +290,22 @@ def test_a_flat_hold_is_made_and_keeps_the_determined_combination(fitter):
 
 def test_a_hold_through_a_bound_is_declined():
     """``damping`` is the identity clipped at 0.  The fit reads only
-    ``d = log k - 2c``; it ends with ``c`` near 0.05, and holding the flat
-    direction would put ``c`` at -0.04, which ``constrain`` clips to 0 --
-    moving ``d``, which the data determines.  The loss check sees the
-    clipped point, because it evaluates the same ``constrain`` the
-    returned parameters go through, and refuses.  0.4.0-dev returned the
-    clipped point."""
-    gm = _spring(damping=0.2)
-    d0 = float(jnp.log(gm.params["nodes"]["s"]["stiffness"]) - 0.4)
+    ``d = 0.1 log k - 0.5 c``, from ``c = 0.5``, and moves ``d`` by 0.4; it
+    ends with ``c`` near 0.1.  The guard measures ``c`` relative to its
+    size (0.5) and ``log k`` as it is, and in those coordinates holding the
+    flat direction at its start puts ``c`` at about -0.19, which
+    ``constrain`` clips to 0 -- moving ``d``, which the data determines.
+    The loss check sees the clipped point, because it evaluates the same
+    ``constrain`` the returned parameters go through, and refuses.
+    0.4.0-dev returned the clipped point (of ``d = log k - 2c`` from 0.2,
+    which held in ``theta`` crossed the bound and held relative to ``c``
+    does not)."""
+    gm = _spring(damping=0.5)
+    d0 = float(0.1 * jnp.log(gm.params["nodes"]["s"]["stiffness"]) - 0.25)
 
     def residual(p):
         s = p["nodes"]["s"]
-        return jnp.stack([jnp.log(s["stiffness"]) - 2.0 * s["damping"] - (d0 + 0.6)])
+        return jnp.stack([0.1 * jnp.log(s["stiffness"]) - 0.5 * s["damping"] - (d0 + 0.4)])
 
     kw = dict(mask=_only(gm, "stiffness", "damping"), n_iter=10)
     with pytest.warns(RuntimeWarning, match="would raise the loss"):
@@ -353,7 +357,7 @@ def _helper_case(loss_held, *, loss_sel=1.0, grad_sel=None, scale=2.0):
     objective = _SelectedObjective(
         loss=lambda th: loss_held,
         reference=lambda: (loss_sel, grad_sel),
-        flatness=lambda candidates, spanned: (np.eye(1), np.array([True]), scale),
+        flatness=lambda candidates, spanned, _c: (np.eye(1), np.array([True]), scale),
     )
     return theta, theta0, _hold_undetermined_directions(
         tracker, theta, theta0, objective, "test")
@@ -407,7 +411,7 @@ def test_when_every_candidate_is_flat_the_hold_is_the_excited_projector_bit_for_
     theta = jnp.asarray([0.7, -0.2, 1.4], dtype=jnp.float32)
     objective = _SelectedObjective(
         loss=lambda th: 0.0, reference=lambda: (0.0, None),
-        flatness=lambda c, s: (np.eye(c.shape[1]), np.ones(c.shape[1], bool), 1.0))
+        flatness=lambda c, s, _c: (np.eye(c.shape[1]), np.ones(c.shape[1], bool), 1.0))
     out, rank, _, declined = _hold_undetermined_directions(
         tracker, theta, theta0, objective, "test")
     assert rank == 2 and declined is False
@@ -428,7 +432,7 @@ def test_a_candidate_with_curvature_is_neither_held_nor_counted():
     objective = _SelectedObjective(
         loss=lambda th: calls.append("loss") or 0.0,
         reference=lambda: calls.append("reference") or (0.0, None),
-        flatness=lambda c, s: (np.eye(1), np.array([False]), 2.0),
+        flatness=lambda c, s, _c: (np.eye(1), np.array([False]), 2.0),
     )
     out, rank, drift, declined = _hold_undetermined_directions(
         tracker, theta, jnp.asarray([1.0, 1.0], jnp.float32), objective, "test")

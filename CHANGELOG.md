@@ -14,6 +14,8 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **REST and run_pod claims inventory** (`docs/validation/rest_runpod_claims.yaml`, prefixes `REST`, `RPD`): every documented claim about the HTTP API and the multi-GPU session runner with its conditions, oracle and a test that can fail -- 143 rows, 132 verified, 5 failing (strict xfails), 5 ambiguous, 1 untested; the surrogate and streaming endpoints are out of scope (experimental).
+  Read the failing and ambiguous rows before relying on those claims; a new REST or `run_pod.py` claim gets a row in the same change (`testing_standards.md`).
 - **System identification and FMU claims inventory** (`docs/validation/sysid_fmu_claims.yaml`, `SYS-NNN` / `FMU-NNN`): every documented `sysid`, `ParamSpec` and FMU-export claim with its conditions, oracle and a test that can fail -- 147 rows, 139 verified, 4 failing (strict xfails), 4 ambiguous.
   `tests/compliance/test_coupling_claims.py` becomes `test_claims_inventories.py`, which checks every `docs/validation/*_claims.yaml` (each declares the id `prefixes` it owns).
 - **Coupling claims inventory** (`docs/validation/coupling_claims.yaml`): every documented coupling claim with its conditions, oracle and a test that can fail -- 130 rows, 114 verified, 6 failing (strict xfails), 10 ambiguous -- checked by `tests/compliance/test_coupling_claims.py`.
@@ -352,6 +354,9 @@ guidance; the itemized changes follow.
 - **Coupling round-5 audit fixes** (MADD-ANO-XH1, XM1, XM2, XM3, XL2; new, resolved): the gradient bound applies the exact resolvent to each secant (it read 5.2x below the true error, usable), probes each entry of an array constant, and certifies Kantorovich with the full resolvent norm; the spectral bound is in the returned state's weights;
   a group is one block in the schedule (an outside node between its members read it a step late, since 0.1.0) and compile() warns when a group is part of a larger loop; CouplingGroup refuses out-of-range counts and thresholds (waveform_iterations=0 froze a sub-cycling group, since 0.1.0).
   Action: re-read diagnostics=True bounds; expect a UserWarning for a group inside a larger feedback loop; fix any out-of-range CouplingGroup knob.
+- **The identifiability guard decides the same in any units** (MADD-ANO-135, never released): its tests, hold and tolerance measure an identity parameter relative to its size, as `fim(scale="relative")` does;
+  **bounds checks compare exactly** (MADD-ANO-136): a float32 `-1e-40` no longer passes a `(0, None)` bound through XLA's subnormal flush; **a value its type flushes to 0 is refused** (MADD-ANO-137) like one it overflows.
+  Action: none; a `fit_lm` with an identity parameter in units far from 1 may return a different (correct) point.  The sysid/FMU inventory's SYS-063, -088, -109, FMU-024 and -039 are verified (144 of 147 rows).
 - **REST round-6 audit fixes** (MADD-ANO-131 to 134; 096 completed): a surrogate job re-checks its memory budget on the graph it sweeps; `POST /sim/profile` restores the live state and keeps the streams out; a reset, a state write, a node edit and a surrogate swap publish to the streams (the relay adds `run_adaptive`'s `dt`); a JAX trace stops itself at 10 000 steps or 600 s;
   `/sim/run` reports `steps_run` when a step raises; runner routes answer within one lock timeout and say when they left the runner stopped; checkpoint saves are atomic; past the stream cap a client gets 1013, not 403; `run_pod.py` records only a real commit and `--summarise` survives older files.
   Action: none; read `GET /sim/profile/jax/status` if a long trace ends early.

@@ -665,6 +665,36 @@ def test_every_door_agrees_on_an_open_bound_in_the_flushed_band(doors, data):
     check_acceptance(doors, spec, data.draw(values(spec, kinds=("near_bound",)), label="value"))
 
 
+#: ``logit`` ranges whose edge's neighbour has no finite coordinate: next to a
+#: bound of zero the neighbour is ``-TINY`` (or ``TINY``), and ``(p - lo) /
+#: (hi - lo)`` rounds onto 1 (or 0).  The spec refuses it; the description
+#: advertised it, and a bridge whose sidecar had no specs took it.
+_LOGIT_EDGE_CASES = [
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), -TINY),
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), -2.0 ** -25),
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), -2.0 ** -24),
+    (ParamSpec(bounds=(0.0, 1.0), transform="logit"), 1.0 - 2.0 ** -24),
+    (ParamSpec(bounds=(-1.0, 1.0), transform="logit"), 1.0 - 2.0 ** -24),
+    (ParamSpec(bounds=(-1.0, 1.0), transform="logit"), -1.0 + 2.0 ** -23),
+]
+
+
+@pytest.mark.parametrize("spec, value", _LOGIT_EDGE_CASES,
+                         ids=["upper-0-at-minus-TINY", "upper-0-at-minus-2**-25",
+                              "upper-0-at-minus-2**-24", "upper-1-at-its-neighbour",
+                              "symmetric-upper", "symmetric-lower"])
+def test_a_logit_edge_whose_neighbour_has_no_coordinate_is_held_by_every_door(doors, spec,
+                                                                             value):
+    """The advertised ``min`` and ``max`` are the bounds ``ParamSpec.check``
+    accepts, at both ends: ``(-1, 0)`` advertised ``max = -TINY``, whose
+    coordinate rounds onto the bound, so the spec refused it and a bridge
+    over a sidecar with no specs -- which holds only the advertised
+    envelope -- accepted it.  Drawn by
+    ``test_every_door_accepts_or_refuses_a_parameter_value_together_broadly``
+    when Hypothesis injects the constant."""
+    check_acceptance(doors, spec, value)
+
+
 @pytest.mark.parametrize("value", [0.0, TINY, -TINY, 1e-40, 0.5])
 def test_a_logit_range_no_value_can_enter_is_refused_by_every_door(doors, value):
     """``logit`` on ``(0, 1e-40)``: both ends flush to zero in the step's

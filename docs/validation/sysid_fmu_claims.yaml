@@ -4136,9 +4136,9 @@ claims:
     - src/maddening/fmi/model_description.py:578 (_advertised_bound)
   conditions: >-
     log with a zero, a non-zero and no lower bound (float32 and float64);
-    logit; a bound whose spacing is below the smallest normal (TINY <= |b|
-    < 2**-102 in float32); inclusive identity bounds; no bounds. Not
-    claimed for 16-bit floats.
+    logit, at bounds of zero and one included; a bound whose spacing is
+    below the smallest normal (TINY <= |b| < 2**-102 in float32);
+    inclusive identity bounds; no bounds. Not claimed for 16-bit floats.
   oracle: the advertised attribute against the float32 envelope.
   tests:
     - tests/fmi/test_advertised_bounds.py::test_a_log_leaf_without_a_lower_bound_advertises_the_smallest_normal
@@ -4150,6 +4150,7 @@ claims:
     - tests/fmi/test_advertised_bounds.py::test_an_open_bound_advertises_the_first_value_its_spec_accepts
     - tests/fmi/test_advertised_bounds.py::test_a_flushed_band_bound_is_held_by_the_graph_and_the_description_alike
     - tests/property/test_differential_param_acceptance.py::test_an_open_bound_in_the_flushed_band_is_held_by_every_door
+    - tests/property/test_differential_param_acceptance.py::test_a_logit_edge_whose_neighbour_has_no_coordinate_is_held_by_every_door
   status: verified
   notes: >-
     Failing on 04bc3e5 (B1 round 7): a log leaf with no lower bound, which
@@ -4157,7 +4158,10 @@ claims:
     And on d2429a6 (the acceptance oracle's N2): a bound with TINY <= |b| <
     2**-102 was advertised one float inside, a distance the step's
     arithmetic flushes to zero, which ParamSpec.check refused and a bridge
-    without specs took; the first accepted value is advertised now.
+    without specs took; and a logit edge whose neighbour has no finite
+    coordinate, such as max = -TINY under (-1, 0), which a bridge without
+    specs took the same way. The first accepted value is advertised now, at
+    both ends.
   domains:
     f32: tests/fmi/test_advertised_bounds.py::test_log_leaf_with_zero_bound_advertises_smallest_normal
     f64: tests/fmi/test_fmu_claims_in_float64.py::test_an_open_bound_is_advertised_as_the_nearest_float64_inside_it

@@ -629,6 +629,12 @@ class GraphRecipe:
             # edge read late, are the same on every call.
             warnings.filterwarnings("ignore", message=".*part of a larger feedback loop.*",
                                     category=UserWarning)
+            # Likewise a drawn group whose members are joined only through
+            # nodes outside it, on no cycle: compile() names the edge its
+            # block reads a step late (MADD-ANO-159) -- a structure the
+            # serialisation round trips must carry, not a mistake in the draw.
+            warnings.filterwarnings("ignore", message=".*no cycle runs through it.*",
+                                    category=UserWarning)
             gm.compile()
         for node_name, key, factor in self.param_overrides:
             leaf = gm.params["nodes"][node_name][key]

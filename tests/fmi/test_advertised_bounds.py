@@ -108,12 +108,17 @@ _FIRST_ACCEPTED = [
     (ParamSpec(bounds=(-1.0, -1e-35), transform="logit"), 1),
     (ParamSpec(bounds=(-1.5 * float(F32.tiny), None), transform="log"), 0),
     (ParamSpec(bounds=(-1.0, 1.0), transform="logit"), 1),
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), 1),
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), 0),
+    (ParamSpec(bounds=(0.0, 1.0), transform="logit"), 0),
 ]
 
 
 @pytest.mark.parametrize("spec, side", _FIRST_ACCEPTED,
                          ids=["log-at-TINY", "log-at-1e-35", "logit-lower-in-band",
-                              "logit-upper-in-band", "log-below-zero", "logit-coordinate"])
+                              "logit-upper-in-band", "log-below-zero", "logit-coordinate",
+                              "logit-upper-at-zero", "logit-lower-at-minus-one",
+                              "logit-lower-at-zero"])
 def test_an_open_bound_advertises_the_first_value_its_spec_accepts(spec, side):
     """FMI's ``min`` / ``max`` are inclusive, so the advertised value must be one
     the spec accepts, and the float just outside it one the spec refuses: then
@@ -121,7 +126,9 @@ def test_an_open_bound_advertises_the_first_value_its_spec_accepts(spec, side):
     takes exactly what the graph takes.  One float inside the bound was
     advertised, which in the band ``TINY <= |b| < 2**-102`` is a distance the
     step's arithmetic flushes to zero: ``ParamSpec.check`` refused it and such
-    a bridge took it (the acceptance oracle's N2)."""
+    a bridge took it (the acceptance oracle's N2).  So, at a ``logit`` bound
+    of zero, was ``-TINY`` under ``(-1, 0)``, whose coordinate rounds onto the
+    bound: the advertised ``max`` is now ``-2**-25``."""
     from maddening.fmi.model_description import _advertised_bound
 
     m = np.float32(_advertised_bound(spec, side, "float32"))

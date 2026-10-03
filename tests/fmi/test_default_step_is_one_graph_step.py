@@ -14,6 +14,7 @@ the same scheduled timesteps.
 
 from __future__ import annotations
 
+import warnings
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -35,7 +36,13 @@ def _springs(*dts, subcycled=(), outside=()):
     if subcycled:
         gm.add_coupling_group([f"s{i}" for i in subcycled], max_iterations=20,
                               tolerance=1e-6, subcycling=True)
-    gm.compile()
+    with warnings.catch_warnings():
+        # A group of two springs in a ring of three is part of a larger loop
+        # through the third, and compile() says so (CPL-181); the clocks are
+        # this file's point, not which edge closes that loop.
+        warnings.filterwarnings("ignore", message=".*part of a larger feedback loop.*",
+                                category=UserWarning)
+        gm.compile()
     return gm
 
 

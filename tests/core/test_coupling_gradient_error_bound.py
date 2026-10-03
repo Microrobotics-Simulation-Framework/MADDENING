@@ -549,8 +549,9 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt():
     per-constant probe sees that where a curvature of ``F`` in the state
     alone would read zero.  On this map the secant is exact (the change
     is linear in the distance), so the ratio is the two conservative
-    factors alone and does not move with the cap: measured 1.814 at
-    every cap from 2 to 14 (jaxlib 0.11.0).
+    factors alone and does not move with the cap: measured 1.347 at
+    every cap from 2 to 14 (1.814 before 0.4.0's round-5 fix applied the
+    resolvent to the secant exactly; jaxlib 0.11.0).
     """
     _, exact = _analytic_curved("affine")
     for m in (3, 6):
@@ -564,8 +565,8 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt():
         true = abs(float(g_k["g"]) - exact["g"]) / abs(float(g_k["g"]))
         assert true > 0.5, "fixture premise: the multiplicative one is far off"
         ratio = d["gradient_relative_error_bound"] / true
-        assert 1.0 <= ratio <= 1.814 * 1.1, (
-            f"m={m}: bound / true = {ratio:.4f}; recorded 1.814")
+        assert 1.0 <= ratio <= 1.347 * 1.1, (
+            f"m={m}: bound / true = {ratio:.4f}; recorded 1.347")
 
 
 def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap():
@@ -584,7 +585,7 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap(
     true = abs(float(g_k["g"]) - exact["g"]) / abs(float(g_k["g"]))
     assert true > 0.5, "fixture premise: the multiplicative one is far off"
     ratio = d["gradient_relative_error_bound"] / true
-    assert 1.0 <= ratio <= 1.814 * 1.1, f"bound / true = {ratio:.4f}; recorded 1.814"
+    assert 1.0 <= ratio <= 1.347 * 1.1, f"bound / true = {ratio:.4f}; recorded 1.347"
 
 
 # ---------------------------------------------------------------------------
@@ -592,7 +593,11 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap(
 # ---------------------------------------------------------------------------
 
 #: The hidden-slow-mode map with a concave slow mode: ``F'(x*) = 0.99866``.
-_HIDDEN_Q = -0.02
+#: The slow mode's curvature.  -0.02 until 0.4.0's round-5 fix: the
+#: Kantorovich check there passed only on the Krylov-restricted resolvent
+#: norm (h = 0.48); with the full norm it is 0.56, no certified bound, so
+#: the fixture now sits where the check holds (h below one half).
+_HIDDEN_Q = -0.014
 
 
 # Slow-marked: its reference is two gradients through 20 000 passes, 10-12 s
@@ -605,7 +610,7 @@ def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
     ``error_estimate`` reads the fast mode's rate off the residual
     sequence and puts the forward ~100x closer to the fixed point than
     it is (``converged=True`` all the same).  The slow mode is where the
-    curvature is, so the gradient is ~25% off.  The bound holds because
+    curvature is, so the gradient is ~20% off.  The bound holds because
     its distance is ``spectral_error_bound``, which sees the slow mode;
     the same arithmetic with ``error_estimate`` as the distance -- the
     bound is linear in it -- would read two orders of magnitude short.
@@ -635,10 +640,10 @@ def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound():
 def test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient():
     """The test above, per push, with the float64 fixed point's gradient
     as the reference in place of the two arms of twenty thousand passes,
-    which match it to 1e-4 (the gradient here is ~25% off).  The gradient
+    which match it to 1e-4 (the gradient here is ~20% off).  The gradient
     is taken without diagnostics, which leave the returned iterate
     bit-identical (``tests/core/test_coupling_diagnostics_leave_the_state_alone.py``),
-    and so the gradient at it: measured equal to the last bit (997.6342)."""
+    and so the gradient at it: measured equal to the last bit (998.3466)."""
     q = _HIDDEN_Q
     gm = _two_mode_graph(q)
     gm.step()
@@ -722,11 +727,12 @@ def _stiff_fixed_point():
 def test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes(
     start, cap, certified,
 ):
-    """``h = amp * L * ||delta|| < 1/2``, or no bound.
+    """``h = beta * L * ||delta|| < 1/2``, or no bound.
 
     Newton-Kantorovich is the check that the linearisation at the
     returned iterate says anything about the fixed point: below one half
-    it bounds the resolvent there (``amp / sqrt(1 - 2h)``) and the
+    it bounds the resolvent there (``beta / sqrt(1 - 2h)``, ``beta`` the
+    full resolvent norm at ``x_k``) and the
     distance, above it nothing measured at ``x_k`` does.  So the bound
     is ``inf`` and unusable where it fails, and where it passes it holds
     -- on the four points where the uncorrected bound read 0.20-0.96x

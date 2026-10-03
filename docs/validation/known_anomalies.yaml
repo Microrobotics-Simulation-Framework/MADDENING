@@ -455,7 +455,13 @@ anomalies:
       convex map, 1.2-2.4x the true error for the parameter whose error is
       the larger (up to 11x for the other, which reads its gap to the worst
       probe), and 83x on a hidden slow mode where error_estimate's distance
-      would have made it 12x short.  It is a statement about the
+      would have made it 12x short.  (Those figures are the first
+      edition's; after 0.4.0's round-5 fix to the bound -- the resolvent
+      applied exactly to each secant, one probe per entry, full-operator
+      Kantorovich, MADD-ANO-142 -- the same maps read 1.1-2.1x and up to
+      10.5x, and the hidden slow mode, moved to a curvature the
+      full-operator check certifies, 25x, with error_estimate's distance
+      40x short.)  It is a statement about the
       gradient, not the solve: on an affine map with additive parameters
       the IFT gradient is exact wherever the forward stops, so it reads
       0.0 while the state is 1.1e-2 from the fixed point with
@@ -10490,4 +10496,263 @@ anomalies:
       - "tests/api/test_routes_answer_what_they_did.py::test_a_save_whose_manifest_name_is_taken_by_a_directory_writes_nothing"
       - "tests/api/test_routes_answer_what_they_did.py::test_a_save_whose_manifest_cannot_be_moved_says_the_checkpoint_was_written"
       - "tests/api/test_routes_answer_what_they_did.py::test_no_checkpoint_refusal_names_an_absolute_server_path"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-142"
+    title: "gradient_relative_error_bound read up to 5.2x below the true gradient error with gradient_bound_usable=True: the resolvent applied to each secant was the Krylov-restricted Arnoldi factor, and Newton-Kantorovich used it too"
+    description: >
+      The gradient bound is, per probe, the resolvent applied to the change
+      of the one-pass map's Jacobian-vector product between the returned
+      iterate and the fixed point, over the tangent.  It took that resolvent
+      as `amplification * ||secant||`, with `amplification` the factor
+      `spectral_error_bound` applies to a residual: the Arnoldi norm
+      `||(I - H)^{-1}||`, which is `(I - J)^{-1}` restricted to the Krylov
+      space `span(v0, r)`.  The residual lies in that space by construction;
+      a secant need not.  On an affine scalar Gauss-Seidel ring of three
+      relays (a rank-one Jacobian) stopped at three passes the restricted
+      norm was 8.57 where the full one is 45.2, and the bound read 3.65
+      against a true relative error of 19.0 in the gradient with respect
+      to one relay's gain (5.2x short) with `gradient_bound_usable=True`;
+      1.2-5.1x short across the audit's designs at caps 3 and 5.  The
+      Newton-Kantorovich check `h = beta L eta` took the same restricted
+      factor as `beta`, and passed with it at a float64 `h` of 0.67-1.75 on
+      the same ring made nonlinear (`x0 <- b0 + g0 u + q u**2`), where no
+      bound is certified.  Found by the round-5 audit of the merged 0.4.0
+      tree, against the coupling claims inventory (CPL-093, CPL-095).
+      Resolved in 0.4.0: the resolvent is applied exactly to each probe's
+      secant through the range basis (`resolvent_apply`, one more JVP per
+      probe), the distance is never below the Newton step, `beta` is the
+      full-operator resolvent norm (exact from the range basis: the
+      identity plus a rank-k term, its norm read off a `2k x 2k`
+      compression; `k` reverse-mode products where the state has more
+      entries than the basis), each probe's response is brought to the
+      state's relative size by an exact power of two so a probe sized by
+      its constant cannot overflow a node's derivative, and a probe whose
+      tangent is still not finite makes the bound NaN (unusable) where it
+      used to drop out of the maximum.  A new differential
+      oracle draws dense, rank-one and non-normal linear groups of 6 and 12
+      coupled entries at caps 2-5 under both modes and checks every scalar
+      gain and bias entry against exact float64 tangents; twelve of its
+      fifteen cases fail on the base.  The full-operator norm is checked
+      against a dense inverse on wide, rank-deficient and non-normal maps.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below the quantity it bounds with its usability flag set is a
+      silent wrong result, never `minor`; registered although no release
+      carried it (the gradient bound is new in 0.4.0's development),
+      because it is major.  Not `critical`: it needs a forward stopped
+      short of its fixed point (a cap, or a loose tolerance) on a group
+      whose secant falls outside the Krylov space -- a rank-one or
+      non-normal coupling -- and the gradient itself is what the IFT rule
+      always returned.  `context_dependent` because whether the bound gates
+      anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager._gradient_error_bound_body"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: run the forward to convergence before reading the gradient
+      bound, or multiply it by the full resolvent norm over the Arnoldi
+      factor.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Leading-order in the distance, as before: the curvature is measured
+      along the Newton step and extrapolated linearly.  A group whose range
+      the eight-vector basis does not capture reports no bound (NaN).  The
+      full-operator `beta` needs a reverse-mode product of the one-pass map
+      where the state has more entries than the basis; a map that cannot be
+      differentiated in reverse mode then has a certified bound only where
+      its Jacobian does not move.  The cost is `11 + k + 5 n_p` JVPs per
+      group per step, `n_p` the probes.
+    verification:
+      - "tests/core/test_coupling_gradient_bound_applies_the_full_resolvent.py::test_a_usable_gradient_bound_covers_every_gain_of_a_rank_one_ring"
+      - "tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit"
+      - "tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_every_cap"
+      - "tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes"
+      - "tests/core/test_coupling_full_resolvent_norm.py::test_the_full_resolvent_norm_matches_the_dense_inverse"
+      - "tests/core/test_coupling_kantorovich_takes_the_full_resolvent.py::test_the_bound_is_unusable_where_the_full_norm_puts_h_above_one_half"
+      - "tests/core/test_coupling_kantorovich_takes_the_full_resolvent.py::test_the_bound_is_usable_and_holds_where_the_full_norm_puts_h_below_one_half"
+      - "tests/core/test_coupling_gradient_bound_poisoned_by_a_non_finite_tangent.py::test_a_constant_with_no_finite_tangent_leaves_no_usable_bound"
+      - "tests/core/test_coupling_bounds_in_any_units.py::test_a_nonlinear_group_never_reports_a_usable_bound_its_control_disowns"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-143"
+    title: "For an array-valued constant the gradient bound covered one |c|-weighted random direction, not each entry: the gradient in a small entry read 23.6x above the bound, usable"
+    description: >
+      `gradient_relative_error_bound` is documented as a bound for "the
+      gradient with respect to one scalar constant", and an entry of an
+      array parameter is one.  The bound probed each floating constant
+      along a single fixed-seed direction weighted by its magnitudes, which
+      the constant's large entries dominate.  On a two-node group stopped
+      early, a 1x2 gain `[1.0, 0.9]` whose second entry multiplies a field
+      still far from its fixed point: the gradient with respect to
+      `G[0, 1]` was 28.5x off (relative) and the bound read 1.2, usable --
+      23.6x short at a cap of 24, 1.6-1.7x at caps 20 and 30, 5.1x on a
+      converged case of the audit's battery.  Found by the round-5 audit
+      (CPL-093).  Resolved in 0.4.0: every scalar entry of a floating
+      constant of at most 64 entries (`GRADIENT_PROBE_ENTRY_LIMIT`) is its
+      own probe; a larger constant is probed as a whole, and
+      `coupling_report()` names it and says the bound covers that
+      directional derivative only.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A usable bound below the error it is documented to bound is a silent
+      wrong result, never `minor`; registered although no release carried
+      it, because it is major.  Not `critical`: it needs an array-valued
+      constant whose entries' gradients differ in accuracy, at an early
+      exit, and the gradient itself is what the IFT rule always returned.
+      `context_dependent` because whether the bound gates anything is the
+      program's choice.
+    affected_components:
+      - "maddening.core.graph_manager._gradient_error_bound_body"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: split an array parameter into scalar parameters before
+      reading the bound, or run the forward to convergence.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A constant of more than 64 entries -- a field-sized parameter, or a
+      pre-step state of a grid node -- is still probed along one direction;
+      the report names each such constant.  Five JVPs per probe, so a group
+      reading many small array parameters pays for each entry.
+    verification:
+      - "tests/core/test_coupling_gradient_bound_applies_the_full_resolvent.py::test_each_entry_of_an_array_gain_is_its_own_probe"
+      - "tests/core/test_coupling_gradient_bound_applies_the_full_resolvent.py::test_a_constant_above_the_entry_limit_is_probed_whole_and_named"
+      - "tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-144"
+    title: "An outside node added between two members of a coupling group that is part of a larger feedback loop read the group one step late"
+    description: >
+      The step runs a coupling group as one block at its first member's
+      place in the schedule.  Where the group is only part of a larger
+      feedback loop -- its members and some outside nodes form one strongly
+      connected component -- the schedule keeps that component in
+      `add_node` order, so an outside node added between two members was
+      scheduled between them.  It ran after the whole group all the same,
+      but back edges were decided over the node order, so its read of a
+      later member was staggered to the previous step although the member
+      had already run: the same graph built with the outside nodes added
+      in another order stepped differently, with no warning.  Measured
+      identically at v0.1.0, v0.2.0, v0.3.0 and v0.3.1 (`git archive` of
+      each tag, CPU, jaxlib 0.11.0) on a group `{A, B}` closed into a loop
+      through `D` and `E` (`B -> D -> E -> A`): added `A, D, B, E`, the
+      states after three steps were `A = 5.05`, `D = 6.47` where `A, B, D,
+      E` gives `6.73` and `9.32`.  Found by the round-5 audit (CPL-181,
+      extending CPL-025).  Resolved in 0.4.0: the schedule places each
+      group's members together at the first member's place -- the block
+      order the step runs -- and back edges are decided over it, so an
+      outside node between the members reads the group this step.  What
+      stays order-dependent is inherent: such a loop is closed by some edge
+      read from the previous step, and which follows the build order;
+      `compile()` now warns (`UserWarning`) naming the group, the outside
+      nodes and the edge read late.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a value read one step late, chosen by the order of
+      `add_node` calls, with no warning.  Never `minor`.  Not `critical`:
+      it needs a group that is only part of a larger loop and an outside
+      node added between its members.  `context_dependent` because what a
+      one-step lag does depends on the model.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+      - "maddening.core.schedule.identify_back_edges"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: add a group's members consecutively, or put every node
+      of the loop in the group.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A loop through outside nodes is still closed by one edge read from
+      the previous step, chosen by the build order; compile() warns and
+      names it.  Adding the outside nodes to the group iterates the whole
+      loop.
+    verification:
+      - "tests/core/test_coupling_block_schedule.py::test_an_outside_node_added_between_the_members_reads_the_group_this_step"
+      - "tests/core/test_coupling_block_schedule.py::test_a_group_inside_a_larger_loop_warns_naming_the_edge_read_late"
+      - "tests/core/test_coupling_block_schedule.py::test_two_groups_on_one_loop_each_warn"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-145"
+    title: "CouplingGroup accepted waveform_iterations <= 0, which ran no sweep and froze a sub-cycling group, and other out-of-range counts and thresholds"
+    description: >
+      A sub-cycling group with `waveform_iterations=0` (or negative) ran
+      no waveform sweep at all: its members never stepped, the state stayed
+      at its initial value, and `coupling_diagnostics()` had no entry --
+      with no error or warning.  Measured identically at v0.1.0, v0.2.0,
+      v0.3.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib 0.11.0) on
+      a pair at timesteps 0.1 and 0.05: both states 0.0 after every step.
+      The other numeric knobs had the same gap: a `max_iterations` below
+      one, a negative `jacobian_reuse`, a negative or non-finite
+      `tolerance`, `rtol` or `atol`, and a zero, negative or non-finite
+      `relaxation` were all accepted.  Found by the round-5 audit.
+      Resolved in 0.4.0: `CouplingGroup` refuses each at construction with
+      a `ValueError` naming the knob and its range -- counts are integers
+      (a bool is not one) `>= 1` (`jacobian_reuse >= 0`), thresholds finite
+      and `>= 0`, `relaxation` finite and `> 0`.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a frozen group reported nothing and raised nothing.  Never
+      `minor`.  Not `critical`: it needs a value outside every meaningful
+      range.  `context_dependent` because what a frozen coupled pair does
+      depends on the model.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: pass `waveform_iterations >= 1` and the other knobs in
+      range.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known: every numeric field is checked at construction.
+    verification:
+      - "tests/core/test_coupling_group_refuses_out_of_range_numbers.py::test_an_out_of_range_number_is_refused_naming_its_knob"
+      - "tests/core/test_coupling_group_refuses_out_of_range_numbers.py::test_a_sub_cycling_group_with_no_waveform_sweep_is_refused_before_it_freezes"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-146"
+    title: "spectral_error_bound read 0.94x the true distance in the norm it documents (the returned state's weights) on a group still growing toward its fixed point, spectral_usable=True"
+    description: >
+      `spectral_error_bound` is documented as a bound on `||x - x*||` in
+      the group's norm at the returned state.  It is `residual` times a
+      resolvent factor measured in those weights -- each field divided by
+      its own `max|field|` at the returned state -- but `residual` divides
+      each field by the larger of that and its magnitude after one more
+      pass (the pair the pass compared).  On a linear pair still growing
+      toward its fixed point the two differ by `max|F(x)| / max|x|`, and
+      the bound read 0.943x the true distance in the returned state's
+      weights with `spectral_usable=True` (gain 0.999 and 0.9 at a cap of
+      two), while it held in the pair's weights.  Found by the round-5
+      audit (CPL-088).  Resolved in 0.4.0: the spectral rate measures the
+      ratio of the two weightings of `r = F(x) - x` (exact, field by
+      field) and the stored factor carries it, so the bound holds in the
+      returned state's weights -- 1.35-1.41x on the same cases.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it
+      (the spectral bound is new in 0.4.0's development), because it is
+      major.  Not `critical`: the shortfall is the factor by which a field
+      grew across one pass, and the bound held in the pair's weights.
+      `context_dependent` because whether the bound gates anything is the
+      program's choice.
+    affected_components:
+      - "maddening.core.graph_manager._spectral_rate_at"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: read the bound in the weights `1 / max(|x|, |F(x)|)`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The norm's scale still drifts with the iterate, as it does for
+      `residual`; the bound is in the weights of the state it reports.
+    verification:
+      - "tests/core/test_coupling_spectral_bound_in_returned_weights.py::test_the_bound_holds_in_the_returned_states_weights_on_a_growing_group"
     github_issue: null

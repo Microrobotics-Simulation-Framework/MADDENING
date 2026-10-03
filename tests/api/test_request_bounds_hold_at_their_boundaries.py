@@ -350,3 +350,21 @@ def test_a_boolean_for_a_numeric_parameter_is_refused_on_construction(key, value
     ok = client.post("/graph/nodes", json={"type": "Counted", "name": "b", "timestep": 0.01,
                                            "params": {"flag": True}})
     assert ok.status_code == 201, ok.text
+
+
+@pytest.mark.parametrize("value", [1e-50, -1e-50, 1e39])
+def test_a_value_the_leaf_cannot_hold_is_refused_on_construction_as_on_a_write(value):
+    """``POST /graph/nodes`` built a spring with ``damping: 1e-50`` as 0.0
+    (float32 flushes it) and ``1e39`` as an infinity, where ``PUT`` refuses
+    both as "does not fit its type"; the route refuses them too now, and
+    builds nothing.  The smallest normal float32 still builds."""
+    server, client = _client()
+    put = client.put("/graph/params/spring", json={"params": {"damping": value}})
+    assert put.status_code == 400 and "does not fit its type" in put.text, put.text
+    resp = client.post("/graph/nodes", json={"type": "SpringDamperNode", "name": "s2",
+                                             "timestep": 0.01, "params": {"damping": value}})
+    assert resp.status_code == 400 and "does not fit its type" in resp.text, resp.text
+    assert "s2" not in server.gm._nodes
+    ok = client.post("/graph/nodes", json={"type": "SpringDamperNode", "name": "s3",
+                                           "timestep": 0.01, "params": {"damping": 1.2e-38}})
+    assert ok.status_code == 201, ok.text

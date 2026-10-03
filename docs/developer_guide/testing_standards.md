@@ -855,6 +855,19 @@ over `float64` (every leaf float64) and `mixed` (float32 leaves in the x64
 process, where the fitters' coordinates are promoted to float64 around
 them) and sits at float64's own edge where the claim has one.
 
+A claim the batteries' affine pair cannot state is lifted with
+`tests/core/coupling_domains.py`: `pair(domain, ...)` builds a memoryless
+two-member group in a domain (`f64`, `mixed_dtype`, `bfloat16`, `float16`,
+`vmap`, `multi_rate`, `sub_cycled`, `predictors_warm_starts`,
+`checkpoint_restart`, `adaptive`, `sharded`) and `run` / `run_sequence` step
+it as that domain does, so the claim is written once and parametrised over
+`EVERY` (`test_coupling_{norm_edges,accelerations,configuration,groups,nonfloat_leaves}_in_every_domain.py`;
+the sharded cells call the same bodies from
+`tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py`),
+and the topology harness runs its invariances in the same domains
+(`DOMAINS` in `test_differential_coupling_topologies.py`).  A claim about a
+dtype's edges is held at that dtype's own `tiny`, `eps` and `maxexp`.
+
 The cross-cutting oracles fill cells too, and a narrowed cell is
 re-examined whenever one lands: if it now runs the claim in that domain,
 the cell cites it and the domain leaves the row's clause. A parametrized

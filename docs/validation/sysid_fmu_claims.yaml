@@ -1968,6 +1968,33 @@ claims:
     Rewritten for #203; the first edition's claim -- gm.params keeps the
     compiled value until the next compile -- is what MADD-ANO-122 changed.
 
+- id: SYS-123
+  area: params pytree
+  claim: >-
+    load_state raises ValueError if the checkpoint "holds a value the live
+    leaf's dtype cannot hold: a finite value that would overflow to inf, a
+    non-zero one that would flush to 0, an integer that would wrap (... a
+    value that rounds to a subnormal loads, and one already inf or NaN loads
+    as it was)"; a refused load leaves the graph as it was.
+  sources:
+    - src/maddening/core/simulation/checkpoint.py:132 (load_state, Raises)
+    - docs/validation/known_anomalies.yaml (the load_state cast entry)
+  conditions: a float64 checkpoint into float32 state and params at +-1e39, +-1e-50, +-1e-40, 3.4e38, +-0, inf and NaN; an int64 2**40, a fraction and NaN into an int32 field; through POST /checkpoint/load.
+  oracle: the ValueError naming the leaf; the graph's state and params bit for bit; the loaded subnormal's sign.
+  tests:
+    - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused
+    - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_value_float32_holds_loads_a_subnormal_with_its_sign
+    - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_value_that_was_already_non_finite_loads_as_it_was
+    - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_params_leaf_is_held_to_the_same_rule
+    - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_an_integer_that_would_wrap_is_refused_and_one_that_fits_loads
+    - tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_the_rest_route_answers_the_refusal_naming_no_path
+  status: verified
+  notes: >-
+    From v0.1.0 to v0.3.1 load_state narrowed a float64 checkpoint with
+    jnp.array, and the 0.4.0 tree cast it to the live dtype, both with no
+    check: 1e39 loaded as inf and -1e-50 as -0.0, silently (reproduced at
+    every tag).  The rule is the FMU's (MADD-ANO-137).
+
 # ---------------------------------------------------------------------------
 # FMU: the package and the model description
 # ---------------------------------------------------------------------------

@@ -422,7 +422,16 @@ def windowed_loss(
         ``diagnostics=True``: a group with no such slots would never be
         masked, so it is refused (``ValueError``) rather than silently
         skipped.  On a multi-rate graph a group's slots hold its most
-        recent applied solve between the base steps it fires on.  Must be
+        recent applied solve between the base steps it fires on.  On a
+        sub-cycling group with ``waveform_iterations > 1`` the slots
+        hold the *last* sweep's solve, so a window in which an earlier
+        sweep exited at ``max_iterations`` unconverged while the last
+        one converged is **kept** -- the same step on which
+        ``strict_convergence=True``, which checks every sweep, raises,
+        and on which ``coupling_diagnostics()`` reads
+        ``iterations == max_iterations`` beside ``converged=True``.  To
+        mask such a window, run the group at ``waveform_iterations=1``
+        or with a ``max_iterations`` no sweep exhausts.  Must be
         a ``bool``: a truthy non-bool (``"no"``, ``1``, an array) used to
         turn masking on, so it is refused (``ValueError``).
     window_states : pytree, optional

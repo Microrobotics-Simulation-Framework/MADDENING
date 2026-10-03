@@ -200,8 +200,12 @@ Before 0.4.0 such a write answered 200, was served by `GET`, was ignored by
 every step (even after `POST /graph/compile`) and was saved by `to_dict()`
 and `save_state()`, so the reloaded graph ran a different model.  The check
 runs the node's code on a shallow copy that reads the new value, never on
-the node itself; when no faithful copy can be made (a node holding a method
-bound to itself) or the code raises, nothing is refused.  It detects "no
+the node itself.  When no faithful copy can be made (a node holding a
+method bound to itself) the write is refused, with a 400 saying so.  When
+the copy's code raises with the new value where it does not with the
+current one, the write is refused as one the step cannot run with; when it
+raises with both, or needs a concrete value, that question decides
+nothing.  It detects "no
 path at all": a value a node consumes at construction *and* reads again
 later passes, so a node that bakes a parameter should declare it in
 `static_data_deps`, which refuses it on every surface.  Likewise

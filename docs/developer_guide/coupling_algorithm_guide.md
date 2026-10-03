@@ -335,7 +335,14 @@ the bound carries a margin of `2 h_{k+1,k}` on the radius.
 For a *linear* map the error of any iterate is `(A − I)⁻¹` of its
 residual — no step sequence, relaxation factor or accelerator enters —
 so `residual · ‖(I − A)⁻¹‖` bounds the distance to the fixed point
-whatever the iteration did.  `1/(1 − rho)` is that norm for a normal
+whatever the iteration did, with both factors in one set of weights:
+each field divided by its own `max|field|` at the returned state.  The
+loop's `residual` divides by the larger of that and the field's magnitude
+after one more pass, so the factor carries the ratio of the two weightings
+of `F(x) − x` (1 unless a field grew across the pass); without it, on a
+group still growing toward its fixed point, the bound read 0.94x the true
+distance in the returned state's weights with `spectral_usable=True`
+(round-5 audit).  `1/(1 − rho)` is that norm for a normal
 `A`; the resolvent term is what holds when `A` is not normal, which a
 Jacobi loop between a node that responds strongly and one that
 responds weakly is measured to be.  Measured `spectral_error_bound /
@@ -410,12 +417,16 @@ so the error is the resolvent applied to how much the linearisation
 moves between the two points.  Each factor is bounded by something the
 group already has or measures cheaply:
 
-1. **the distance** `‖x_k − x*‖` is `spectral_error_bound` — not the
-   residual and never `error_estimate`, which reads 100x short on a
-   hidden slow mode where this bound holds;
-2. **the resolvent** is bounded by the factor `spectral_error_bound`
-   applies to a residual, the larger of `‖(I − H)⁻¹‖₂` and
-   `1/(1 − rho_spectral)`;
+1. **the distance** `‖x_k − x*‖` is `spectral_error_bound`, never below
+   the Newton step `‖δ‖` — not the residual and never `error_estimate`,
+   which reads 100x short on a hidden slow mode where this bound holds;
+2. **the resolvent** is applied exactly to each probe's secant through
+   the range basis (`resolvent_apply`); until 0.4.0's round-5 fix it was
+   bounded by the factor `spectral_error_bound` applies to a residual,
+   the Arnoldi `‖(I − H)⁻¹‖₂`, which is the resolvent restricted to the
+   Krylov space `span(v0, r)` and read 8.57 where the full norm is 45.2 on
+   a three-relay ring whose secant lies outside that space (the bound was
+   0.19x the true error, usable; MADD-ANO-142);
 3. **the curvature** is a directional second difference of the
    adjoint's own matvec: `G` evaluated by the same Jacobian-vector
    product at `x_k` and at `x_k + δ`, `δ = (I − J)⁻¹ (F(x_k) − x_k)` the
@@ -445,9 +456,16 @@ read 0.0 on the stiff spring pair while its stiffness gradient was
 the same relative amount, and the dynamics see only their ratio.  The
 tangents and `δ` come from a Woodbury solve on an eight-vector basis of
 the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
-the cost is `11 + k + 4 n_c` Jacobian-vector products per group per step
-(`k ≤ 8`, `n_c` the floating constants) beside the spectral bound's
-eight — which is why it shares its gate.
+the cost is `11 + k + 5 n_p` Jacobian-vector products per group per step
+(`k ≤ 8`, `n_p` the probes: every entry of a floating constant of at most
+64 entries, one for a larger one) beside the spectral bound's eight, plus
+one linearisation and `k` reverse-mode products for the full resolvent
+norm where the state has more than `k` entries — which is why it shares
+its gate.  Since 0.4.0's round-5 fix the resolvent is applied exactly to
+each probe's secant (one more JVP per probe) rather than bounded by the
+Arnoldi factor, which is the resolvent restricted to the Krylov space and
+read the bound 0.19x the true error on a ring whose secant falls outside
+it; and Newton-Kantorovich takes the full-operator resolvent norm.
 
 Measured `bound / true` (jaxlib 0.11.0, float32), the fixed point's
 gradient from tight `ift` and `fori` arms that agree, every point a
@@ -456,17 +474,25 @@ construction:
 
 | fixture | `bound / true` |
 |---|---|
-| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.21–2.37 for `d/da`, 9.4–11.5 for `d/dg` |
-| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.29–1.36 for `d/dg`, 3.57–3.80 for `d/da` |
-| affine `a + g u`, `d/dg` (`d/da` is exact) | 1.81 at every cap |
-| stiff spring pair, stiffness and mass, caps 2–6 | 7–11 |
-| two-mode, concave slow mode, `converged=True` | 83 (with `error_estimate`'s distance: 12x short) |
+| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.10–2.10 for `d/da`, 8.5–10.5 for `d/dg` |
+| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.12–1.16 for `d/dg`, 3.06–3.30 for `d/da` |
+| affine `a + g u`, `d/dg` (`d/da` is exact) | 1.35 at every cap |
+| spring pair (`k = 6000`, `c = 60`, `dt = 0.01`), stiffness and mass of each node, caps 2–6 | 1.19–1.70 |
+| two-mode, concave slow mode (`q = -0.014`), `converged=True` | 25 (with `error_estimate`'s distance: 40x short) |
 
-The parameter with the larger relative error reads near the product of
-the two conservative factors (the distance 1.1x, the relay's resolvent
-1.22x) from cap 4 on, and more at cap 3 (2.37 on the concave map),
-where the Newton–Kantorovich factor below is largest; the other reads
-its gap to the worst probe as well.
+Re-measured after 0.4.0's round-5 fix (the resolvent applied exactly to
+each secant, one probe per entry, full-operator Kantorovich).  Before it
+the same table read 1.21–2.37 and 9.4–11.5 (concave), 1.29–1.36 and
+3.57–3.80 (convex), 1.81 (affine) and 83 on the two-mode case at
+`q = -0.02` -- which the full-operator Kantorovich check no longer
+certifies (`h = 0.56`), so the fixture moved to `q = -0.014`; the stiff
+spring pair of the first edition (7–11x) is not in the tree, and the pair
+above, with the same stiffness-to-damping balance and stable as a coupled
+pair (MADD-ANO-098), reads 1.34–2.71x on the old bound.  The parameter
+with the larger relative error reads near the distance's own margin from
+cap 4 on, and more at cap 3 (2.10 on the concave map), where the
+Newton–Kantorovich factor below is largest; the other reads its gap to
+the worst probe as well.
 
 **What it is not — read this before using it.**  It is a statement
 about the gradient, not about the solve.  On a map affine in its state
@@ -1344,6 +1370,20 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   components; before, a node downstream of a group that had been added
   before the group's members was scheduled ahead of them and read their
   previous-step output, silently.
+* **A group is one block in the schedule.**  Its members are placed
+  together at the first member's place, which is where the step runs the
+  group, and back edges are decided over that order.  Before 0.4.0's
+  round-5 fix an outside node added between two members of a group that
+  is only part of a larger loop was scheduled between them, ran after the
+  whole group all the same, and read the later member one step late
+  (MADD-ANO-144).
+* **A loop through outside nodes is closed where the build order puts
+  it.**  When a group's members and some outside nodes form one feedback
+  loop, the group does not iterate the outside part, so one of the loop's
+  edges outside the group is read from the previous step -- and which one
+  follows the order the nodes were added.  `compile()` warns
+  (`UserWarning`), naming the group, the outside nodes and the edge read
+  late; add those nodes to the group to iterate the whole loop.
 * **The edges' order does not reach a norm.**  The interface norm sums
   its terms in an order the group fixes -- by each edge's source's place
   in the sweep, then its target's -- which is the order the L2 and mixed
@@ -1358,8 +1398,11 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   input is not a rounding matter: it replaces whatever the edges before
   it delivered, so an input fed by both kinds depends on their order
   outright.)
-* **The gradient bound's probe directions follow the build order**, so
-  its number does, while it stays a bound in every order (see
+* **The gradient bound probes each entry**, so its number follows the
+  build order only by rounding -- except for a constant of more than 64
+  entries, probed along one fixed-seed direction drawn per constant in
+  the order the map reads its constants, which follows the build order;
+  it stays a bound in every order (see
   [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
 
 ## Invariants

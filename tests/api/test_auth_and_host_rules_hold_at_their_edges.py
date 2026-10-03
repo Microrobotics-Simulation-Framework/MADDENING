@@ -20,7 +20,7 @@ handful of routes.  These go to the edges:
   oversized body is a 401, not a 413;
 * ``/healthz`` answers while another request holds the graph;
 * the generated token's file is the owner's alone even when the file
-  already existed (a strict xfail: it is not).
+  already existed, and even for a reader who had the old file open.
 
 Nothing here can reach a cloud provider: ``HOME`` is an empty directory,
 cloud credentials are unset and every launcher raises
@@ -266,9 +266,6 @@ def test_a_new_token_file_is_written_with_mode_0600(tmp_path, monkeypatch):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-016: a token file that already exists keeps its mode; "
-                          "pending fix")
 def test_a_token_file_that_already_existed_is_left_readable_by_its_owner_only(
         tmp_path, monkeypatch):
     """The README: "point MADDENING_API_TOKEN_FILE at a path on a mounted
@@ -285,3 +282,61 @@ def test_a_token_file_that_already_existed_is_left_readable_by_its_owner_only(
     assert auth.announce(8000) is True
     assert path.read_text() == auth.token + "\n"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600, oct(stat.S_IMODE(path.stat().st_mode))
+
+
+def test_a_reader_who_had_the_old_token_file_open_cannot_read_the_new_token(tmp_path, monkeypatch):
+    """REST-016: the token goes into a new 0600 file moved over the path, not into the
+    old one.  A ``chmod`` of the old file would leave a reader who opened it while it was
+    world-readable able to read whatever is written into it next."""
+    path = tmp_path / "token"
+    path.write_text("the last run's token\n")
+    path.chmod(0o644)
+    with open(path, encoding="utf-8") as reader:          # opened while 0644
+        monkeypatch.setenv(TOKEN_FILE_ENV, str(path))
+        auth = APIAuth(bind_host="0.0.0.0", environ={})
+        assert auth.announce(8000) is True
+        assert reader.read() == "the last run's token\n"
+    assert path.read_text() == auth.token + "\n"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_a_token_file_path_that_is_a_link_writes_where_it_points(tmp_path, monkeypatch):
+    """REST-016: a symbolic link at the path is followed -- a volume's path stays where
+    the operator pointed it -- and the file it names becomes the owner's alone."""
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    real = volume / "token"
+    real.write_text("old\n")
+    real.chmod(0o664)
+    link = tmp_path / "token"
+    link.symlink_to(real)
+    monkeypatch.setenv(TOKEN_FILE_ENV, str(link))
+    auth = APIAuth(bind_host="0.0.0.0", environ={})
+    auth.announce(8000)
+    assert link.is_symlink() and real.read_text() == auth.token + "\n"
+    assert stat.S_IMODE(real.stat().st_mode) == 0o600
+    assert not [p for p in volume.iterdir() if p.name != "token"], "a temporary file was left"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes into a read-only directory")
+def test_a_token_file_that_cannot_be_written_is_left_alone_and_logged(tmp_path, monkeypatch,
+                                                                      caplog):
+    """REST-016: "The server does not fail if it cannot write that file; it logs the
+    failure and carries on" -- and writes the token into nothing it could not make the
+    owner's alone."""
+    directory = tmp_path / "ro"
+    directory.mkdir()
+    path = directory / "token"
+    path.write_text("old\n")
+    path.chmod(0o644)
+    directory.chmod(0o555)
+    try:
+        monkeypatch.setenv(TOKEN_FILE_ENV, str(path))
+        auth = APIAuth(bind_host="0.0.0.0", environ={})
+        with caplog.at_level("WARNING", logger="maddening.api.auth"):
+            assert auth.announce(8000) is True
+        assert path.read_text() == "old\n"
+        assert any("Could not write the generated API token" in r.getMessage()
+                   for r in caplog.records)
+    finally:
+        directory.chmod(0o755)

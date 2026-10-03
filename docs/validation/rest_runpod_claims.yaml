@@ -57,7 +57,7 @@
 #   reason      required for untested: why no test can fail.
 #   notes       optional.
 #
-# Line numbers are those of release/0.4.0 at f4edf19, the tree the first
+# Line numbers are those of release/0.4.0 at 6bb092d, the tree the first
 # edition was verified on; the section name beside each makes it findable
 # when they move.  fix/p4-13-rest was open and changing server.py and
 # run_pod.py when this edition was written; the rows it affects say so.
@@ -1090,7 +1090,7 @@ claims:
     - src/maddening/api/README.md:155 (Simulation Control)
     - src/maddening/api/server.py:3396 (sim_run)
     - src/maddening/api/server.py:2350 (SimulationServer.request_shutdown)
-    - CHANGELOG.md:362 (a 503 from /sim/run names the steps it took)
+    - CHANGELOG.md:364 (a 503 from /sim/run names the steps it took)
   conditions: request_shutdown() mid-run in-process; SIGINT to a uvicorn process on loopback mid-run (slow lane).
   oracle: 503 body, the graph's step count equal to steps_run, the process exits within seconds.
   tests:
@@ -1478,7 +1478,7 @@ claims:
   sources:
     - src/maddening/api/README.md:128 (State)
     - src/maddening/api/server.py:140 (_json_reply)
-    - CHANGELOG.md:394 (State and IO, from the differential harness)
+    - CHANGELOG.md:396 (State and IO, from the differential harness)
   conditions: GET /graph/state, GET /graph/state/{node}, /sim/step, /sim/run, /sim/reset, /checkpoint/load, GET /graph/params.
   oracle: strict JSON parse of every reply; json_codec.loads round trip.
   tests:
@@ -1650,7 +1650,7 @@ claims:
     numeric leaf is a 400.
   sources:
     - src/maddening/api/server.py:2973 (set_node_params_locked)
-    - CHANGELOG.md:653 (REST API)
+    - CHANGELOG.md:655 (REST API)
   conditions: a bad key after good ones; unknown keys; wrong types.
   oracle: 400, and node.params and gm.params unchanged.
   tests:
@@ -1747,7 +1747,7 @@ claims:
   sources:
     - src/maddening/api/server.py:2956 (set_node_params_locked)
     - src/maddening/api/server.py:3184 (set_node_params_locked, the write)
-    - CHANGELOG.md:653 (PUT /graph/params echoes what it wrote)
+    - CHANGELOG.md:655 (PUT /graph/params echoes what it wrote)
   conditions: the same writes before the first compile and after; a float and an integer written for float leaves.
   oracle: the reply's params equal the next GET; the same status both ways.
   tests:
@@ -1764,7 +1764,7 @@ claims:
     MADD-ANO-004).
   sources:
     - docs/validation/known_anomalies.yaml (MADD-ANO-004)
-    - CHANGELOG.md:592 (Sharded pointwise nodes honour parameter writes again)
+    - CHANGELOG.md:594 (Sharded pointwise nodes honour parameter writes again)
   conditions: pointwise, stencil and unstructured wrappers on virtual CPU devices.
   oracle: the trajectory changes as the unsharded node's does; out-of-bounds refused by name.
   tests:
@@ -1807,7 +1807,7 @@ claims:
     as the graph its save reloads; one refused (4xx) leaves every node's
     params, every gm.params leaf, the state and the dirty flag unchanged.
   sources:
-    - docs/developer_guide/testing_standards.md:839 (Differential tests, State and I/O)
+    - docs/developer_guide/testing_standards.md:845 (Differential tests, State and I/O)
   conditions: every cheap built-in node per push with valid, boundary, out-of-bounds, non-finite, oversized, wrong-type, unknown, initial-condition, structural and cross-parameter writes; costly nodes and generated graphs in the slow lane.
   oracle: bit-identity with a to_dict/from_dict reload plus checkpoint.
   tests:
@@ -1826,7 +1826,7 @@ claims:
     changes nothing"; "the graph the server reports is a faithful recipe".
   sources:
     - tests/property/test_stateful_api.py:1 (module docstring, what the surface promises)
-    - CHANGELOG.md:191 (Property-test coverage for the REST surface, stateful machines)
+    - CHANGELOG.md:193 (Property-test coverage for the REST surface, stateful machines)
   conditions: >-
     generated sequences of graph, state, params, sim and checkpoint requests
     over a small scalar node vocabulary; short sequences per push, long
@@ -2443,7 +2443,7 @@ claims:
     - benchmarks/multigpu/run_pod.py:108 (module docstring)
     - benchmarks/multigpu/run_pod.py:3219 (_print_mixed_commits)
     - benchmarks/multigpu/README.md:412 (5. Read the result)
-    - CHANGELOG.md:361 (--summarise exits 4 when no file records a commit)
+    - CHANGELOG.md:363 (--summarise exits 4 when no file records a commit)
   conditions: the relabelled record with one goal from another commit, with no commit in one file or in all, and with a failure as well.
   oracle: exit codes, the warning and the per-item commit lines.
   tests:

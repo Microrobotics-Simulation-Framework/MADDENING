@@ -738,7 +738,9 @@ def _specs_changed_since(md: "ModelDescription", graph_manager: Any) -> Optional
     Each exported parameter's envelope is derived again from the graph's
     current spec, exactly as the description derived it, and compared.
     """
-    specs_fn = getattr(graph_manager, "param_specs", None)
+    # Declared callable so the guard narrows to something whose return is
+    # ``Any`` (as in build_model_description).
+    specs_fn: Callable[..., Any] | None = getattr(graph_manager, "param_specs", None)
     if not callable(specs_fn):
         return None
     declared = (specs_fn() or {}).get("nodes", {}) or {}

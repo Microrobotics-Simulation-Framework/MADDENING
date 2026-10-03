@@ -500,9 +500,9 @@ claims:
     - src/maddening/core/coupling/group.py:89 (CouplingGroup, atol)
     - src/maddening/core/coupling/acceleration.py:65 (_scaled_change)
   conditions: >-
-    all three norms. Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, vmap, multi-rate graphs, sub-cycled groups, predictors or warm
-    starts, run_adaptive, checkpoint restarts or sharded graphs.
+    all three norms. atol is compared after rounding to each field's own
+    dtype, so the band's edge is drawn at that dtype's resolution: a field
+    at exactly atol leaves the norm and one ulp above it stays.
   oracle: closed-form norm values; distance to the fixed point of the kept field.
   tests:
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_ignores_a_field_inside_the_dead_band
@@ -513,18 +513,28 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[f64]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[mixed_dtype]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[float16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[float16]'
     jit: tests/core/test_coupling_error_bound.py::test_the_dead_band_excludes_a_field_only_when_the_caller_declares_it
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_dead_band_is_drawn_at_each_fields_own_resolution[vmap]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[vmap]'
+    multi_rate: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[adaptive]'
+    checkpoint_restart: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-011]'
 
 - id: CPL-012
   area: configuration
@@ -603,9 +613,7 @@ claims:
   sources:
     - src/maddening/core/coupling/group.py:195 (CouplingGroup, jacobian_reuse)
   conditions: >-
-    acceleration="iqn-imvj", both solvers. Not claimed for float64 (x64),
-    mixed dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled groups,
-    run_adaptive or sharded graphs.
+    acceleration="iqn-imvj", both solvers.
   oracle: bit-identity with acceleration="iqn-ils" over several steps.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_imvj_without_reuse_is_iqn_ils
@@ -613,18 +621,20 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_imvj_without_reuse_is_iqn_ils
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64: 'tests/core/test_coupling_configuration_in_every_domain.py::test_imvj_without_reuse_is_iqn_ils[f64]'
+    mixed_dtype: 'tests/core/test_coupling_configuration_in_every_domain.py::test_imvj_without_reuse_is_iqn_ils[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_imvj_without_reuse_is_iqn_ils[bfloat16]'
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_imvj_without_reuse_is_iqn_ils[float16]'
     jit: tests/core/test_coupling_claims_graphs.py::test_imvj_without_reuse_is_iqn_ils
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
+    vmap: 'tests/core/test_coupling_configuration_in_every_domain.py::test_imvj_without_reuse_is_iqn_ils[vmap]'
+    multi_rate: 'tests/core/test_coupling_configuration_in_every_domain.py::test_imvj_without_reuse_is_iqn_ils[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_configuration_in_every_domain.py::test_imvj_without_reuse_is_iqn_ils[sub_cycled]'
     predictors_warm_starts: tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve
-    adaptive: narrowed
+    adaptive: 'tests/core/test_coupling_configuration_in_every_domain.py::test_imvj_without_reuse_is_iqn_ils[adaptive]'
     checkpoint_restart: 'tests/property/test_differential_replay.py::test_a_checkpoint_mid_adaptive_run_resumes_it[iqn-imvj-warm-start]'
-    sharded: narrowed
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-014]'
 
 - id: CPL-015
   area: configuration
@@ -635,8 +645,7 @@ claims:
     - src/maddening/core/coupling/group.py:131 (CouplingGroup, relaxation)
     - src/maddening/core/coupling/acceleration.py:1910 (fixed_relaxation)
   conditions: >-
-    acceleration="fixed". Not claimed for float64 (x64), mixed dtypes or
-    16-bit floats.
+    acceleration="fixed".
   oracle: closed form; bit-identity with "none" at relaxation=1.
   tests:
     - tests/core/test_coupling_convergence.py::TestFixedRelaxation::test_fixed_relaxation_unit
@@ -645,9 +654,17 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_convergence.py::TestFixedRelaxation::test_fixed_relaxation_unit
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_fixed_relaxation_is_the_documented_combination_in_every_dtype[f64]'
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_relaxation_one_is_no_relaxation[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_fixed_relaxation_is_the_documented_combination_in_every_dtype[mixed_dtype]'
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_relaxation_one_is_no_relaxation[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_fixed_relaxation_is_the_documented_combination_in_every_dtype[bfloat16]'
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_fixed_relaxation_is_the_documented_combination_in_every_dtype[float16]'
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_relaxation_one_is_no_relaxation[bfloat16]'
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_relaxation_one_is_no_relaxation[float16]'
     jit: tests/core/test_coupling_convergence.py::TestFixedRelaxation::test_fixed_relaxation_default_noop
     grad: n/a
     vmap: n/a
@@ -668,8 +685,7 @@ claims:
     - src/maddening/core/coupling/group.py:137 (CouplingGroup, iteration_mode)
   conditions: >-
     both solvers; the sweep order is the compiled schedule. Not claimed for
-    mixed dtypes, 16-bit floats, vmap, multi-rate graphs, run_adaptive,
-    checkpoint restarts or sharded graphs.
+    run_adaptive.
   oracle: one pass against the float64 Gauss-Seidel and Jacobi sweep of a linear group.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_one_pass_reads_the_iterate_its_mode_documents
@@ -679,12 +695,14 @@ claims:
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_one_pass_reads_the_iterate_its_mode_documents
     f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
-    mixed_dtype: narrowed
-    16bit: narrowed
+    mixed_dtype: 'tests/core/test_coupling_configuration_in_every_domain.py::test_one_pass_reads_the_iterate_its_mode_documents[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_one_pass_reads_the_iterate_its_mode_documents[bfloat16]'
+      - 'tests/core/test_coupling_configuration_in_every_domain.py::test_one_pass_reads_the_iterate_its_mode_documents[float16]'
     jit: tests/core/test_coupling_claims_graphs.py::test_one_pass_reads_the_iterate_its_mode_documents
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
+    vmap: 'tests/core/test_coupling_configuration_in_every_domain.py::test_one_pass_reads_the_iterate_its_mode_documents[vmap]'
+    multi_rate: 'tests/core/test_coupling_configuration_in_every_domain.py::test_one_pass_reads_the_iterate_its_mode_documents[multi_rate]'
     sub_cycled:
       - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r06]'
       - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r18]'
@@ -692,8 +710,8 @@ claims:
       - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r05]'
       - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r22]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_configuration_in_every_domain.py::test_one_pass_reads_the_iterate_its_mode_documents[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-016]'
 
 - id: CPL-017
   area: configuration
@@ -1568,10 +1586,7 @@ claims:
   conditions: >-
     the non-finite rule under every norm; the overflow rule is "only
     reachable under the L2 norm's rtol=1.0" -- the mixed and interface
-    scales rtol * max|v| stay normal far above it. Not claimed for float64
-    (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled
-    groups, predictors or warm starts, run_adaptive, checkpoint restarts or
-    sharded graphs.
+    scales rtol * max|v| stay normal far above it.
   oracle: closed form; a constant field (an exact fixed point) near overflow.
   tests:
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_is_active_and_contributes_inf
@@ -1581,18 +1596,28 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[f64]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[mixed_dtype]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[float16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[float16]'
     jit: tests/core/test_coupling_non_finite_state.py::test_a_non_finite_state_never_reads_as_converged
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges[vmap]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[vmap]'
+    multi_rate: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[adaptive]'
+    checkpoint_restart: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-043]'
 
 - id: CPL-044
   area: norms
@@ -1608,9 +1633,7 @@ claims:
     - src/maddening/core/coupling/acceleration.py:138 (_scaled_change)
   conditions: >-
     all three norms, both solvers; acceleration="none" (the accelerators:
-    CPL-010). Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    CPL-010).
   oracle: the same group scaled by 2**-shift against its normal-range control, bit for bit.
   tests:
     - tests/core/test_coupling_non_finite_state.py::test_a_field_whose_scale_underflows_is_still_measured
@@ -1619,18 +1642,20 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[f64]'
+    mixed_dtype: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[float16]'
     jit: tests/core/test_coupling_non_finite_state.py::test_the_verdict_does_not_change_below_the_scale_underflow
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[vmap]'
+    multi_rate: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[adaptive]'
+    checkpoint_restart: 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-044]'
 
 - id: CPL-045
   area: norms
@@ -1771,9 +1796,12 @@ claims:
     - docs/release_notes/v0.4.0.md#the-error-estimate-and-the-flag-that-does-not-certify-it
   conditions: >-
     acceleration="fixed", past the first loop pass (the first pass:
-    CPL-050). Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    CPL-050). On a 16-bit group, at a rate and criterion whose residual
+    ratio the dtype resolves; a stalled iterate rejects the ratio and the
+    raw residual test stands in (CPL-054). Not claimed for run_adaptive,
+    whose report takes the estimate from the second kept half step and
+    iterations from the larger half, so the pass the estimate is from
+    cannot be read.
   oracle: distance to the exact float64 fixed point.
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor
@@ -1781,18 +1809,20 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_error_bound.py::test_the_estimate_is_invariant_to_the_relaxation_factor
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[f64]'
+    mixed_dtype: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[bfloat16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[float16]'
     jit: tests/property/test_differential_fixed_point.py::test_the_estimate_is_the_distance_for_fixed_relaxation_past_the_first_pass
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[vmap]'
+    multi_rate: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_estimate_is_the_distance_for_fixed_relaxation[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-049]'
 
 - id: CPL-050
   area: criterion
@@ -1805,10 +1835,9 @@ claims:
     - src/maddening/core/coupling/acceleration.py:547 (first_pass_relaxed_amplification)
     - docs/validation/known_anomalies.yaml (MADD-ANO-073)
   conditions: >-
-    acceleration="fixed", relaxation < 1, the first loop pass. Not claimed
-    for float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
-    restarts or sharded graphs.
+    acceleration="fixed", relaxation < 1, the first loop pass. On a 16-bit
+    group, where its ratio is usable (a stalled iterate rejects it:
+    CPL-054).
   oracle: distance to the exact fixed point; both solvers' pass and verdict.
   tests:
     - tests/core/test_coupling_first_pass_relaxed_rate.py::test_converged_is_within_the_threshold_under_under_relaxation
@@ -1818,18 +1847,20 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_first_pass_relaxed_rate.py::test_converged_is_within_the_threshold_under_under_relaxation
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[f64]'
+    mixed_dtype: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[bfloat16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[float16]'
     jit: tests/core/test_coupling_first_pass_relaxed_rate.py::test_both_solvers_stop_on_the_same_pass_and_report_the_same_verdict
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[vmap]'
+    multi_rate: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[adaptive]'
+    checkpoint_restart: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-050]'
 
 - id: CPL-051
   area: criterion
@@ -2112,19 +2143,19 @@ claims:
   area: loop
   claim: >-
     "Aitken must meet the threshold twice": it "stops only when two
-    consecutive passes are at or below threshold", the first member of the
-    streak being the pass before the loop, so "the guard costs at most one
-    extra pass"; IQN is deliberately not on the list and stops on its first
-    sub-threshold pass.
+    consecutive passes are at or below threshold" -- the pass held to its
+    error estimate, its predecessor to its raw residual -- the first member
+    of the streak being the pass before the loop; IQN is deliberately not on
+    the list and stops on its first sub-threshold pass.  (The guide's "so the
+    guard costs at most one extra pass" is CPL-062's claim, which fails:
+    MADD-ANO-170.)
   sources:
     - src/maddening/core/graph_manager.py:1452 (_fixed_point_while)
     - src/maddening/core/graph_manager.py:1311 (_TWO_PASS_EXIT)
     - docs/developer_guide/coupling_algorithm_guide.md#the-finding-that-matters-most
   conditions: >-
     acceleration="aitken" (the guard); every other acceleration (no guard);
-    both solvers, every cap. Not claimed for float64 (x64), mixed dtypes,
-    16-bit floats, vmap, multi-rate graphs, sub-cycled groups, predictors or
-    warm starts, run_adaptive, checkpoint restarts or sharded graphs.
+    both solvers, every cap.
   oracle: pass counts on constructed residual sequences.
   tests:
     - tests/core/test_coupling_convergence_reporting.py::test_aitken_needs_two_consecutive_passes_to_stop
@@ -2134,18 +2165,48 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_convergence_reporting.py::test_aitken_needs_two_consecutive_passes_to_stop
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[f64-aitken-7]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[f64-iqn-ils-3]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[f64]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[mixed_dtype-aitken-7]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[mixed_dtype-iqn-ils-3]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[mixed_dtype]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[bfloat16-aitken-7]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[float16-aitken-7]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[bfloat16-iqn-ils-3]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[float16-iqn-ils-3]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[bfloat16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[float16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[bfloat16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[float16]'
     jit: tests/core/test_coupling_convergence_reporting.py::test_the_aitken_guard_is_answerable_at_every_cap
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[vmap-aitken-7]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_aitken_needs_two_consecutive_passes_in_every_dtype[vmap-iqn-ils-3]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[vmap]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[vmap]'
+    multi_rate:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[multi_rate]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[multi_rate]'
+    sub_cycled:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[sub_cycled]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[sub_cycled]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[predictors_warm_starts]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[predictors_warm_starts]'
+    adaptive:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[adaptive]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[adaptive]'
+    checkpoint_restart:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit[checkpoint_restart]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-061]'
 
 - id: CPL-062
   area: loop
@@ -2159,30 +2220,45 @@ claims:
     - src/maddening/core/graph_manager.py:1311 (_TWO_PASS_EXIT)
   conditions: >-
     acceleration="aitken", solver="ift" (the fori path latches by the same
-    rule). Not claimed for float64 (x64), mixed dtypes, 16-bit floats, vmap,
-    multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    rule). Not claimed for 16-bit floats, run_adaptive or sharded graphs.
   oracle: the same group compiled with _TWO_PASS_EXIT emptied, one step from the same state.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_the_two_pass_guard_adds_at_most_one_pass_to_aitkens_exit
     - tests/core/test_coupling_convergence_reporting.py::test_the_aitken_guard_is_answerable_at_every_cap
-  status: verified
+    - tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit
+  status: failing
+  finding: >-
+    The guard can hold Aitken two passes past its own exit, not at most one.
+    It holds the pass to its error estimate and the predecessor to its raw
+    residual (_fixed_point_while's _met), and an Aitken estimate can rise
+    back above the threshold on the pass after Aitken's own exit without any
+    dip in the residuals.  Three independent modes, x_a <- g_a x_b + c,
+    x_b <- s x_a entry by entry with g_a = (-0.02, 0.92, 0.53),
+    s = (-1, -1, 1), c = (1.82, 1.27, 1.02), Gauss-Seidel, tolerance=1e-4,
+    float32: without the guard Aitken stops at pass 9 (estimate 6.9e-5);
+    pass 8's raw residual is 9.2e-4, pass 10's estimate is 1.9e-4 (its raw
+    residual 4.6e-5), and the guard stops at pass 11.  The state returned is converged
+    and nearer the fixed point; what fails is the documented cost.
+    Reproducer: tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[f32]
+    (src/maddening/core/graph_manager.py:2036, _met).  MADD-ANO-170; the
+    guide's sentence is to be reworded, or the guard's rule changed, in 0.5.0.
   notes: >-
     Ambiguous until 0.4.0's claims fix ("Budget one pass over the unaccelerated
-    exit, not a floor of four").  Reworded.
+    exit, not a floor of four").  Reworded.  The f32 test above holds on its six
+    triangle draws; three-mode pairs reach two extra passes on two draws in four.
   domains:
-    f32: tests/core/test_coupling_claims_graphs.py::test_the_two_pass_guard_adds_at_most_one_pass_to_aitkens_exit
-    f64: narrowed
-    mixed_dtype: narrowed
+    f32: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[f32]'
+    f64: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[f64]'
+    mixed_dtype: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[mixed_dtype]'
     16bit: narrowed
     jit: tests/core/test_coupling_claims_graphs.py::test_the_two_pass_guard_adds_at_most_one_pass_to_aitkens_exit
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[vmap]'
+    multi_rate: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[checkpoint_restart]'
     sharded: narrowed
 
 - id: CPL-063
@@ -2558,9 +2634,10 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#invariants
     - docs/developer_guide/coupling_algorithm_guide.md#where-the-measurement-contradicted-the-theory
   conditions: >-
-    stiff-pair-1.2. Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, vmap, multi-rate graphs, sub-cycled groups, predictors or warm
-    starts, run_adaptive, checkpoint restarts or sharded graphs.
+    stiff-pair-1.2; in every other domain two memoryless members at gains
+    1.2 (Gauss-Seidel eigenvalue +1.44, Jacobi +-1.2). Not claimed for
+    run_adaptive, where a diverging group's step-doubling error goes NaN
+    and the stepper never returns (MADD-ANO-173).
   oracle: the report at the cap; IQN's converged fixed point.
   tests:
     - tests/core/test_coupling_fixture_invariants.py::test_divergent_group_reports_unconverged_rather_than_truncating
@@ -2568,18 +2645,36 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_fixture_invariants.py::test_divergent_group_reports_unconverged_rather_than_truncating
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[f64]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[mixed_dtype]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[bfloat16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[float16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[bfloat16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[float16]'
     jit: tests/core/test_coupling_fixture_invariants.py::test_quasi_newton_converges_where_the_fixed_point_iteration_diverges
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[vmap]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[vmap]'
+    multi_rate:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[multi_rate]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[multi_rate]'
+    sub_cycled:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[sub_cycled]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[sub_cycled]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[predictors_warm_starts]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    checkpoint_restart:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_a_contraction_above_one_is_reported_unconverged[checkpoint_restart]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-073]'
 
 - id: CPL-074
   area: loop
@@ -2590,27 +2685,27 @@ claims:
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#invariants
   conditions: >-
-    one accelerated scalar. Not claimed for float64 (x64), mixed dtypes,
-    16-bit floats, vmap, multi-rate graphs, sub-cycled groups, predictors or
-    warm starts, run_adaptive, checkpoint restarts or sharded graphs.
+    one accelerated scalar.
   oracle: plain iteration over a driven trajectory, scaled by its amplitude.
   tests:
     - tests/core/test_coupling_fixture_invariants.py::test_iqn_on_a_single_dof_interface_agrees_with_plain_iteration
   status: verified
   domains:
     f32: tests/core/test_coupling_fixture_invariants.py::test_iqn_on_a_single_dof_interface_agrees_with_plain_iteration
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[f64]'
+    mixed_dtype: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[bfloat16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[float16]'
     jit: tests/core/test_coupling_fixture_invariants.py::test_iqn_on_a_single_dof_interface_agrees_with_plain_iteration
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[vmap]'
+    multi_rate: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[adaptive]'
+    checkpoint_restart: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-074]'
 
 - id: CPL-075
   area: loop
@@ -2655,9 +2750,7 @@ claims:
     - src/maddening/core/graph_manager.py:2606 (_run_coupled_block_impl, jacobi_flux_sweeps)
     - docs/validation/known_anomalies.yaml (MADD-ANO-071)
   conditions: >-
-    flux edges inside a group. Not claimed for float64 (x64), mixed dtypes,
-    16-bit floats, vmap, multi-rate graphs, sub-cycled groups, predictors or
-    warm starts, run_adaptive, checkpoint restarts or sharded graphs.
+    flux edges inside a group.
   oracle: the Gauss-Seidel fixed point; per-pass flux evaluation counts.
   tests:
     - tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point
@@ -2666,18 +2759,24 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_jacobi_flux_seed.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[f64]'
+    mixed_dtype: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[bfloat16]'
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[float16]'
     jit: tests/core/test_coupling_jacobi_flux_seed.py::test_a_jacobi_pass_seeds_in_two_sweeps_only_where_a_producer_reads_a_flux
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[vmap]'
+    multi_rate:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[multi_rate]'
+      - tests/core/test_coupling_jacobi_flux_seed.py::test_a_multirate_jacobi_group_of_flux_readers_fires_and_holds
+    sub_cycled:
+      - 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[sub_cycled]'
+      - tests/core/test_coupling_jacobi_flux_seed.py::test_a_subcycled_jacobi_group_of_flux_readers_steps_to_the_fixed_point
+    predictors_warm_starts: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[predictors_warm_starts]'
+    adaptive: tests/core/test_coupling_jacobi_flux_seed.py::test_the_adaptive_steppers_run_a_jacobi_group_of_flux_readers
+    checkpoint_restart: 'tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-076]'
 
 - id: CPL-077
   area: loop
@@ -2726,9 +2825,11 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     iteration_mode="jacobi"; the members' build order varied, everything
-    else fixed. Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    else fixed. In float64, 16-bit floats, vmap, multi-rate graphs,
+    sub-cycled groups, with a predictor and after a checkpoint restart the
+    constant-iterator statement is held: the states bit for bit, the
+    verdicts equal, the residual to round-off. Not claimed for mixed dtypes,
+    run_adaptive or sharded graphs.
   oracle: >-
     bit-identity of the states (constant iterators); for the accelerators,
     the forward error of each node's sum over the same four passes,
@@ -2754,17 +2855,33 @@ claims:
     passes).  Stated in the guide and the coupling_diagnostics docstring.
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_jacobi_states_do_not_depend_on_the_build_order_under_a_constant_iterator
-    f64: narrowed
+    f64:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[f64-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[f64-star-and-ungrouped-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[bfloat16-star-and-ungrouped-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[float16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[float16-star-and-ungrouped-ring]'
     jit: tests/core/test_coupling_claims_graphs.py::test_jacobi_states_agree_to_round_off_under_aitken_and_iqn_whatever_the_build_order
     grad: tests/core/test_coupling_claims_graphs.py::test_the_gradient_bound_holds_in_every_build_order
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[vmap-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[vmap-star-and-ungrouped-ring]'
+    multi_rate:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[multi_rate-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[multi_rate-star-and-ungrouped-ring]'
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[sub_cycled-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[sub_cycled-star-and-ungrouped-ring]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[predictors_warm_starts-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[predictors_warm_starts-star-and-ungrouped-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[checkpoint_restart-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[checkpoint_restart-star-and-ungrouped-ring]'
     sharded: narrowed
 
 - id: CPL-079
@@ -2776,10 +2893,11 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#start-here
     - docs/developer_guide/coupling_algorithm_guide.md#invariants
   conditions: >-
-    two groups of different modes. Not claimed for float64 (x64), mixed
-    dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled groups,
-    predictors or warm starts, run_adaptive, checkpoint restarts or sharded
-    graphs.
+    two groups of different modes. Under run_adaptive one controller chooses
+    the step for the whole graph from every field's step-doubling error, so
+    an under-converged group's iterate moves the steps the other is given;
+    with both converged the groups keep to themselves there too. Not claimed
+    for sharded graphs.
   oracle: the counterfactual with one group's mode flipped.
   tests:
     - tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_gives_each_group_its_own_schedule
@@ -2790,17 +2908,35 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_groups_keep_independent_iteration_counts
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[f64]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[mixed_dtype]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[bfloat16]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[float16]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[bfloat16]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[float16]'
     jit: tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_steps_deterministically
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
+    vmap:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[vmap]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[vmap]'
+    multi_rate:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[multi_rate]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[multi_rate]'
+    sub_cycled:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[sub_cycled]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[sub_cycled]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[predictors_warm_starts]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[adaptive]'
+    checkpoint_restart:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[checkpoint_restart]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[checkpoint_restart]'
     sharded: narrowed
 
 # ---------------------------------------------------------------------------
@@ -3117,7 +3253,7 @@ claims:
     returned state -- each field divided by its own max|field| at the
     returned state, the residual put in those weights (MADD-ANO-146); every
     acceleration and schedule; long Gauss-Seidel chains, sub-cycled and
-    multi-rate groups; float16 to float64. Not claimed for mixed dtypes.
+    multi-rate groups; float16 to float64.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
@@ -3136,7 +3272,7 @@ claims:
     f64:
       - tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
       - tests/property/test_differential_precision.py::test_the_coupling_report_agrees_across_precisions
-    mixed_dtype: narrowed
+    mixed_dtype: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_float32_member_under_x64[CPL-088]'
     16bit:
       - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-088]'
@@ -3196,10 +3332,7 @@ claims:
     - src/maddening/core/graph_manager.py:7945 (coupling_diagnostics, spectral_error_bound)
     - src/maddening/core/graph_manager.py:451 (_spectral_rate_at)
   conditions: >-
-    a repeated eigenvalue; a dead-banded field on the loop. Not claimed for
-    float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
-    restarts or sharded graphs.
+    a repeated eigenvalue; a dead-banded field on the loop.
   oracle: exact fixed point; the matrix's spectrum.
   tests:
     - tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space
@@ -3209,18 +3342,38 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_spectral_bound_certificate.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[f64]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[mixed_dtype]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[float16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[bfloat16]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[float16]'
     jit: tests/core/test_coupling_spectral_bound_certificate.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    vmap:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[vmap]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[vmap]'
+    multi_rate:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[multi_rate]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[multi_rate]'
+    sub_cycled:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[sub_cycled]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[sub_cycled]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[predictors_warm_starts]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[predictors_warm_starts]'
+    adaptive:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[adaptive]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[adaptive]'
+    checkpoint_restart:
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space[checkpoint_restart]'
+      - 'tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-090]'
 
 - id: CPL-091
   area: report
@@ -4373,27 +4526,26 @@ claims:
     - src/maddening/core/graph_manager.py:1740 (_ift_solve_impl)
     - src/maddening/core/graph_manager.py:2048 (_ift_solve_jvp)
   conditions: >-
-    solver="ift". Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, jit, vmap, multi-rate graphs, sub-cycled groups, run_adaptive,
-    checkpoint restarts or sharded graphs.
+    solver="ift". Not claimed for 16-bit floats or run_adaptive (a 16-bit
+    group's IFT rule raises in its LAPACK solve: MADD-ANO-161).
   oracle: the jvp of _ift_solve with tangents on x0 and first_res only.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_ift_solve_gives_the_initial_guess_a_zero_derivative
   status: verified
   domains:
     f32: tests/core/test_coupling_claims_helpers.py::test_the_ift_solve_gives_the_initial_guess_a_zero_derivative
-    f64: narrowed
-    mixed_dtype: narrowed
+    f64: 'tests/core/test_coupling_configuration_in_every_domain.py::test_the_initial_guess_gets_a_zero_derivative[f64]'
+    mixed_dtype: 'tests/core/test_coupling_configuration_in_every_domain.py::test_the_initial_guess_gets_a_zero_derivative[mixed_dtype]'
     16bit: narrowed
-    jit: narrowed
+    jit: 'tests/core/test_coupling_configuration_in_every_domain.py::test_the_initial_guess_gets_a_zero_derivative[jit]'
     grad: tests/core/test_coupling_claims_helpers.py::test_the_ift_solve_gives_the_initial_guess_a_zero_derivative
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
+    vmap: 'tests/core/test_coupling_configuration_in_every_domain.py::test_the_initial_guess_gets_a_zero_derivative[vmap]'
+    multi_rate: 'tests/core/test_coupling_configuration_in_every_domain.py::test_the_initial_guess_gets_a_zero_derivative[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_configuration_in_every_domain.py::test_the_initial_guess_gets_a_zero_derivative[sub_cycled]'
     predictors_warm_starts: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_predictor_and_a_warm_start[CPL-142]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_configuration_in_every_domain.py::test_the_initial_guess_gets_a_zero_derivative[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-142]'
 
 - id: CPL-143
   area: ift gradients
@@ -4468,9 +4620,11 @@ claims:
     - docs/release_notes/v0.4.0.md#coupling-and-solvers
     - src/maddening/core/graph_manager.py:1745 (_ift_solve_impl)
   conditions: >-
-    solver="ift". Not claimed for mixed dtypes, 16-bit floats, vmap,
-    multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    solver="ift". In the mixed, vmap, multi-rate, sub-cycled, predictor and
+    restart domains the cell is the battery's CPL-030 check: jax.jvp and
+    jax.grad through the step, one custom_jvp, agree and are the IFT rule at
+    the iterate. Not claimed for 16-bit floats, run_adaptive or sharded
+    graphs.
   oracle: forward against reverse; the FMI derivative kinds; the Hessian against fori.
   tests:
     - tests/core/test_coupling_ift_forward_mode.py::TestFMIDirectionalDerivative::test_forward_kind_through_ift_step
@@ -4483,16 +4637,16 @@ claims:
     f64:
       - tests/property/test_differential_precision.py::test_an_ift_gradient_agrees_across_precisions
       - tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
-    mixed_dtype: narrowed
+    mixed_dtype: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_float32_member_under_x64[CPL-030]'
     16bit: narrowed
     jit: tests/core/test_coupling_ift_forward_mode.py::TestFMIDirectionalDerivative::test_forward_kind_through_ift_step
     grad: tests/core/test_coupling_claims_graphs.py::test_jax_hessian_runs_through_an_ift_step
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_for_each_member_of_a_vmapped_step[CPL-030]'
+    multi_rate: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_multirate_graph[CPL-030]'
+    sub_cycled: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_subcycled_group[CPL-030]'
+    predictors_warm_starts: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_predictor_and_a_warm_start[CPL-030]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_a_checkpoint_restart[CPL-030]'
     sharded: narrowed
 
 - id: CPL-145
@@ -4506,10 +4660,13 @@ claims:
     - docs/release_notes/v0.4.0.md#non-float-leaves-through-the-adjoint
     - src/maddening/core/coupling/acceleration.py:1514 (float_image)
   conditions: >-
-    solver="ift", reverse and forward mode through run_scan. Not claimed for
-    float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
-    restarts or sharded graphs.
+    solver="ift", reverse and forward mode through run_scan (under vmap,
+    through a lax.scan of the raw step). After a checkpoint restart, the
+    integer and boolean leaves only: save_state cannot write a typed PRNG
+    key (MADD-ANO-171). With a predictor, the run is reset outside the
+    differentiated function (inside it the second transform raises:
+    MADD-ANO-172). Not claimed for 16-bit floats, run_adaptive or sharded
+    graphs.
   oracle: bit-exact leaves; finite gradients equal to the leafless graph's.
   tests:
     - tests/core/test_cross_feature_edge_cases.py::test_int_leaf_in_coupling_group_reverse_and_forward_mode_through_scan
@@ -4519,17 +4676,17 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_cross_feature_edge_cases.py::test_int_leaf_in_coupling_group_reverse_and_forward_mode_through_scan
-    f64: narrowed
-    mixed_dtype: narrowed
+    f64: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[f64]'
+    mixed_dtype: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[mixed_dtype]'
     16bit: narrowed
     jit: tests/core/test_coupling_non_float_leaves.py::test_gradient_still_flows_with_wide_integer_leaves_in_the_group
     grad: tests/core/test_cross_feature_edge_cases.py::test_int_leaf_in_coupling_group_reverse_and_forward_mode_through_scan
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_vmap_of_the_gradient_through_a_scan_with_non_float_leaves
+    multi_rate: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_from_a_checkpoint_restart_with_non_float_leaves
     sharded: narrowed
 
 - id: CPL-146
@@ -5059,9 +5216,9 @@ claims:
     - src/maddening/core/graph_manager.py:928 (_refuse_colliding_group_keys)
   conditions: >-
     both solvers, both schedules, every acceleration and norm, diagnostics
-    on. Not claimed for float64 (x64), mixed dtypes, 16-bit floats, vmap,
-    multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    on. A checkpoint restart runs on the structures without their typed PRNG
+    key leaves, which save_state cannot write (MADD-ANO-171). Not claimed
+    for mixed dtypes, run_adaptive or sharded graphs.
   oracle: bit-identity against the run under the original names.
   tests:
     - tests/property/test_coupling_invariances.py::test_renaming_every_node_changes_nothing_but_the_keys
@@ -5071,17 +5228,19 @@ claims:
   status: verified
   domains:
     f32: tests/property/test_coupling_invariances.py::test_renaming_every_node_changes_nothing_but_the_keys
-    f64: narrowed
+    f64: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[f64-chain-into-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[float16-chain-into-ring]'
     jit: tests/property/test_coupling_invariances.py::test_renaming_is_invariant_on_generated_graphs
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[vmap-chain-into-ring]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[multi_rate-chain-into-ring]'
+    sub_cycled: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[sub_cycled-chain-into-ring]'
+    predictors_warm_starts: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[predictors_warm_starts-chain-into-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[checkpoint_restart-chain-into-ring]'
     sharded: narrowed
 
 - id: CPL-181
@@ -5103,10 +5262,10 @@ claims:
     closed by an edge read from the previous step, which follows the build
     order, and compile() warns naming it.  An outside node added between two
     members is scheduled after the group and reads it this step (a group is
-    one block in the schedule; MADD-ANO-144). Not claimed for float64 (x64),
-    mixed dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled groups,
-    predictors or warm starts, run_adaptive, checkpoint restarts or sharded
-    graphs.
+    one block in the schedule; MADD-ANO-144). A checkpoint restart runs on
+    the structures without their typed PRNG key leaves, which save_state
+    cannot write (MADD-ANO-171). Not claimed for mixed dtypes, run_adaptive
+    or sharded graphs.
   oracle: bit-identity against the original build order.
   tests:
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
@@ -5137,17 +5296,19 @@ claims:
     ungrouped-cycle test pins the dependence.
   domains:
     f32: tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
-    f64: narrowed
+    f64: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[f64-chain-into-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[float16-chain-into-ring]'
     jit: tests/property/test_coupling_invariances.py::test_the_build_order_is_invariant_on_generated_graphs
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[vmap-chain-into-ring]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[multi_rate-chain-into-ring]'
+    sub_cycled: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[sub_cycled-chain-into-ring]'
+    predictors_warm_starts: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[predictors_warm_starts-chain-into-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[checkpoint_restart-chain-into-ring]'
     sharded: narrowed
 
 - id: CPL-182
@@ -5162,10 +5323,10 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     convergence_norm="interface", any acceleration and solver; two edges
-    with the same endpoints keep their relative order. Not claimed for
-    float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
-    restarts or sharded graphs.
+    with the same endpoints keep their relative order. A checkpoint restart
+    runs on the structures without their typed PRNG key leaves, which
+    save_state cannot write (MADD-ANO-171). Not claimed for mixed dtypes,
+    run_adaptive or sharded graphs.
   oracle: states and reports against the same graph with its edges added in reverse, and with its nodes renamed, bit for bit.
   tests:
     - tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
@@ -5179,17 +5340,19 @@ claims:
     (CPL-180) fail under this norm instead.
   domains:
     f32: tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
-    f64: narrowed
+    f64: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[f64-chain-into-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[float16-chain-into-ring]'
     jit: tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[vmap-chain-into-ring]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[multi_rate-chain-into-ring]'
+    sub_cycled: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[sub_cycled-chain-into-ring]'
+    predictors_warm_starts: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[predictors_warm_starts-chain-into-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[checkpoint_restart-chain-into-ring]'
     sharded: narrowed
 
 - id: CPL-183
@@ -5216,9 +5379,13 @@ claims:
     stagnate (capped at 400 passes at rate 0.9 where the relay-free group
     stopped at 278 through the raw-residual fallback) -- the documented
     failure of Aitken's single-mode assumption on a Jacobi spectrum, not
-    rounding. Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    rounding. In float64, sub-cycled groups and with a predictor both
+    statements are held (the second against the monolithic reference's exact
+    solve, under IQN-ILS and Jacobi); in 16-bit floats, vmap, multi-rate
+    graphs and after a checkpoint restart, the first. A checkpoint restart
+    runs on the structures without their typed PRNG key leaves, which
+    save_state cannot write (MADD-ANO-171). Not claimed for mixed dtypes,
+    run_adaptive or sharded graphs.
   oracle: bit-identity; the exact float64 fixed point and the operator norm of (I - M)^-1.
   tests:
     - tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_no_bit_under_a_gauss_seidel_constant_iterator
@@ -5230,17 +5397,25 @@ claims:
   status: verified
   domains:
     f32: tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_no_bit_under_a_gauss_seidel_constant_iterator
-    f64: narrowed
+    f64:
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[f64-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_domain[f64-chain-into-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[float16-chain-into-ring]'
     jit: tests/property/test_coupling_invariances.py::test_an_identity_relay_keeps_the_verdict
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[vmap-chain-into-ring]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[multi_rate-chain-into-ring]'
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[sub_cycled-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_domain[sub_cycled-chain-into-ring]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[predictors_warm_starts-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_domain[predictors_warm_starts-chain-into-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[checkpoint_restart-chain-into-ring]'
     sharded: narrowed
 
 # ---------------------------------------------------------------------------

@@ -440,8 +440,8 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("W12", _XF, f"\n\ndef {_LM}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_LM}():", SLOW_RULE,
        "the named witness skip-marked: it is collected and never runs"),
     # --- K: the claims inventories' domain matrix, tests/compliance/test_claims_inventories.py
-    _M("K1", CPL, "    multi-rate groups; float16 to float64. Not claimed for mixed dtypes.\n",
-       "    multi-rate groups; float16 to float64.\n", CLAIMS,
+    _M("K1", CPL, "    float32, a rate near 1. Not claimed for float64 (x64), mixed dtypes,\n",
+       "    float32, a rate near 1. Not claimed for float64 (x64),\n", CLAIMS,
        "a narrowed domain whose conditions no longer exclude it: the row reads as claimed there"),
     _M("K2", CPL, "    f64: tests/core/test_coupling_accelerators_under_x64.py::"
        "test_a_float64_group_keeps_float64_carries_under_x64\n",

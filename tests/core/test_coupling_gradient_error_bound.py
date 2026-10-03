@@ -727,11 +727,12 @@ def _stiff_fixed_point():
 def test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes(
     start, cap, certified,
 ):
-    """``h = amp * L * ||delta|| < 1/2``, or no bound.
+    """``h = beta * L * ||delta|| < 1/2``, or no bound.
 
     Newton-Kantorovich is the check that the linearisation at the
     returned iterate says anything about the fixed point: below one half
-    it bounds the resolvent there (``amp / sqrt(1 - 2h)``) and the
+    it bounds the resolvent there (``beta / sqrt(1 - 2h)``, ``beta`` the
+    full resolvent norm at ``x_k``) and the
     distance, above it nothing measured at ``x_k`` does.  So the bound
     is ``inf`` and unusable where it fails, and where it passes it holds
     -- on the four points where the uncorrected bound read 0.20-0.96x

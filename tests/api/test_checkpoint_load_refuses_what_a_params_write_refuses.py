@@ -168,6 +168,23 @@ def test_a_checkpoint_that_puts_a_leaf_back_to_the_nodes_own_value_loads(tmp_pat
     assert float(gm.params["nodes"]["s"]["damping"]) == 1.0
 
 
+def test_a_load_that_puts_a_baked_leaf_back_to_the_nodes_own_value_loads(tmp_path):
+    """A leaf the step does not read (``initial_position``), edited in
+    ``gm.params`` from Python -- which the graph refuses at its next run --
+    is put back by the load to the value the node was built with: a repair,
+    not a new value, so it is not asked whether anything reads it (asked,
+    the node's own value would be refused as "nothing reads it")."""
+    gm_src = _graph(_spring(1.0))
+    gm_src.save_state(str(tmp_path / "clean.npz"))
+    gm = _graph(_spring(1.0))
+    gm.params["nodes"]["s"]["initial_position"] = jnp.asarray(3.0, jnp.float32)
+    _server, client = _client(gm, tmp_path)
+    load = client.post("/checkpoint/load", params={"path": "clean.npz"})
+    assert load.status_code == 200, load.text
+    assert float(gm.params["nodes"]["s"]["initial_position"]) == SPRING["initial_position"]
+    assert client.post("/sim/step").status_code == 200
+
+
 @pytest.mark.parametrize("node, key, value", [
     (lambda: _spring(1.0), "damping", -5.0),
     (lambda: _spring(1.0), "damping", -1e-30),

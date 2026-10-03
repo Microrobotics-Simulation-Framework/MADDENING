@@ -1967,6 +1967,7 @@ claims:
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_non_finite_parameter_in_a_checkpoint_is_not_loaded
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_every_check_takes_still_loads_and_runs
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_checkpoint_that_puts_a_leaf_back_to_the_nodes_own_value_loads
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_that_puts_a_baked_leaf_back_to_the_nodes_own_value_loads
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_and_a_params_write_give_the_same_verdict_on_every_value
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_graph_manager_load_state_does_not_apply_the_rest_checks
   status: verified

@@ -355,30 +355,32 @@ claims:
   area: auth
   claim: >-
     "Point MADDENING_API_TOKEN_FILE at a path on a mounted volume and the
-    generated token is written there with mode 0600."
+    generated token is written there with mode 0600: into a new file moved
+    over the path, so a file already there -- of any mode, or held open by
+    another reader -- never holds it."
   sources:
     - src/maddening/api/README.md:55 (The token)
     - src/maddening/api/auth.py:41 (module docstring)
     - src/maddening/api/auth.py:499 (APIAuth._write_token_file)
     - docs/release_notes/v0.4.0.md:4220 (The API authenticates when it is not bound to loopback)
-  conditions: >-
-    a generated token on a non-loopback bind; the path absent (passes) or a
-    file that already exists with another mode, e.g. 0644 (fails).
-  oracle: stat.S_IMODE of the file after announce().
+  conditions: a generated token on a non-loopback bind; the path absent, a file already there with mode 0644, the same file held open by a reader, a symbolic link at the path, a directory the server cannot write.
+  oracle: stat.S_IMODE of the file after announce(); what the earlier reader reads; the file untouched and the warning where it cannot be written.
   tests:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_new_token_file_is_written_with_mode_0600
     - tests/api/test_bearer_auth.py::test_a_generated_token_can_be_written_to_a_file
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_file_that_already_existed_is_left_readable_by_its_owner_only
-  status: failing
-  finding: >-
-    os.open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o600) applies the mode only
-    to a file it creates: a file already at the path keeps its mode, so the
-    new token lands in a world-readable file and the log says "written ...
-    (mode 0600)".  Reproducer: touch t; chmod 644 t;
-    MADDENING_API_TOKEN_FILE=t; APIAuth(bind_host="0.0.0.0",
-    environ={}).announce() -> stat t is 0644.  Guess:
-    src/maddening/api/auth.py:505 (fchmod the descriptor, or write a 0600
-    temporary file and rename it over the path).
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_reader_who_had_the_old_token_file_open_cannot_read_the_new_token
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_file_path_that_is_a_link_writes_where_it_points
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_file_that_cannot_be_written_is_left_alone_and_logged
+  status: verified
+  notes: >-
+    Failing in the first edition: os.open(path, O_CREAT | O_TRUNC, 0o600)
+    applied the mode only to a file it created, so a file already at the
+    path (0644) received the token.  Fixed in 0.4.0 by a
+    mkstemp file (0600) in the destination's directory, moved over the path;
+    a chmod of the old file would have left a reader who opened it
+    beforehand able to read the token.  Never in a release (auth.py is new
+    in 0.4.0).
 
 - id: REST-017
   area: auth
@@ -689,34 +691,32 @@ claims:
 - id: REST-033
   area: bounds
   claim: >-
-    "Request sizes are bounded (n_steps <= 100000, node integer parameters <=
-    10000000 and <= 20000000 state elements per node, bounded
-    surrogate-training arguments; see /openapi.json) ... Over-size is a
-    422"; the release notes: the limits "now live on the request models --
-    ... <= 2*10^7 state elements per node ... -- so they appear in
-    /openapi.json and a violation is a 422 naming the field".
-  sources:
-    - src/maddening/api/README.md:88 (What the token does not do)
-    - docs/release_notes/v0.4.0.md:4281 (One unauthenticated request can no longer name unbounded work)
-    - src/maddening/api/server.py:1090 (_allocation_refusal)
-    - src/maddening/api/server.py:2866 (add_node, state cap)
-  conditions: >-
-    a node whose state would hold more than MAX_NODE_STATE_ELEMENTS
-    (exercised at a patched cap of 100), told from its class's estimate or
-    from the state it built.
-  oracle: the route's status code.
-  tests:
-    - tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_dimensions_that_multiply_are_caught_by_the_state_cap
-    - tests/api/test_node_size_refused_before_construction.py::test_post_refuses_an_oversized_node_before_constructing_it
-  status: ambiguous
-  proposed_wording: >-
-    An integer parameter over 10^7, more than 10^6 values in one request's
+    "An integer parameter over 10^7, more than 10^6 values in one request's
     params, n_steps over 100000 or an out-of-range training argument is a
     422 from the request model, published in /openapi.json.  A node whose
     state would exceed 2*10^7 elements, or whose build would exceed 2 GiB,
     or that would take the graph past 10^8 state elements, is a 400 naming
-    the size; those caps are server constants, not part of the schema.
-  notes: The state-element cap is not on any request model and is answered 400 on both routes; the two documents call every over-size a 422.
+    the size: those caps are server constants".
+  sources:
+    - src/maddening/api/README.md:88 (What the token does not do)
+    - docs/release_notes/v0.4.0.md:4281 (One unauthenticated request can no longer name unbounded work)
+    - src/maddening/api/server.py:1090 (_allocation_refusal)
+  conditions: each bound at its edge; the state caps at patched values.
+  oracle: the route's status code at the bound and one past it.
+  tests:
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_run_of_exactly_the_step_bound_runs_and_one_more_is_a_422
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_the_integer_bound_is_a_422_on_both_routes
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_exactly_the_value_bound_is_taken_and_one_value_more_is_refused
+    - tests/api/test_request_bounds.py::TestTrainSurrogateIsBounded::test_out_of_range_training_arguments_are_422
+    - tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_dimensions_that_multiply_are_caught_by_the_state_cap
+    - tests/api/test_node_size_refused_before_construction.py::test_post_refuses_an_oversized_node_before_constructing_it
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_node_that_fills_the_graph_budget_exactly_is_added_and_one_more_element_is_refused
+  status: verified
+  notes: >-
+    Ambiguous in the first edition: the README and the release notes called
+    every over-size a 422, and the state and build caps answer 400.  The
+    code is right (those caps are not request-model fields); the documents
+    are reworded.
 
 - id: REST-034
   area: bounds
@@ -1775,28 +1775,26 @@ claims:
   area: params
   claim: >-
     "The check runs the node's code on a shallow copy that reads the new
-    value, never on the node itself; when no faithful copy can be made (a
-    node holding a method bound to itself) or the code raises, nothing is
-    refused."
-  sources:
-    - docs/user_guide/parameters.md:203 (Writing parameters over REST)
-    - src/maddening/api/server.py:1072 (_probe_pair_with)
-  conditions: a node no copy can be made of; a write whose new trace raises where the current one does not.
-  oracle: the route's status code.
-  tests:
-    - tests/api/test_params_endpoint_constructed_values.py::test_a_node_no_copy_can_be_made_of_is_refused_rather_than_assumed_to_use_the_write
-    - tests/api/test_params_endpoint_constructed_values.py::test_the_probe_copy_never_mutates_the_node
-    - tests/api/test_params_writes_the_step_cannot_run_with.py::test_a_constraint_the_step_cannot_run_with_is_refused_and_steps_go_on
-  status: ambiguous
-  proposed_wording: >-
-    The check runs the node's code on a shallow copy that reads the new
     value, never on the node itself.  When no faithful copy can be made (a
     node holding a method bound to itself) the write is refused, with a 400
     saying so.  When the copy's code raises with the new value where it
     does not with the current one, the write is refused as one the step
     cannot run with; when it raises with both, or needs a concrete value,
-    that question decides nothing.
-  notes: The guide's sentence predates MADD-ANO-087's refusal and the "cannot tell is a refusal" change; the tests pin a 400 in both cases.
+    that question decides nothing."
+  sources:
+    - docs/user_guide/parameters.md:203 (Writing parameters over REST)
+    - src/maddening/api/server.py:1072 (_probe_pair_with)
+  conditions: a node no copy can be made of; a write whose new trace raises where the current one does not.
+  oracle: the route's status code; the node unmutated; later steps.
+  tests:
+    - tests/api/test_params_endpoint_constructed_values.py::test_a_node_no_copy_can_be_made_of_is_refused_rather_than_assumed_to_use_the_write
+    - tests/api/test_params_endpoint_constructed_values.py::test_the_probe_copy_never_mutates_the_node
+    - tests/api/test_params_writes_the_step_cannot_run_with.py::test_a_constraint_the_step_cannot_run_with_is_refused_and_steps_go_on
+  status: verified
+  notes: >-
+    Ambiguous in the first edition: the guide said "when no faithful copy
+    can be made ... or the code raises, nothing is refused", which predates
+    MADD-ANO-087's refusal.  The code is right; the guide is reworded.
 
 - id: REST-089
   area: params
@@ -1927,26 +1925,27 @@ claims:
   area: checkpoint
   claim: >-
     "Load errors no longer echo parser internals" ("could not load
-    checkpoint <path>").
+    checkpoint <path>"): a file that is not an .npz archive of plain arrays
+    is a 400 "could not load checkpoint '<path>': it is not an .npz archive
+    of plain arrays saved by this API".
   sources:
     - docs/release_notes/v0.4.0.md:4201 (REST checkpoint endpoints are confined to a directory)
     - src/maddening/api/server.py:3541 (checkpoint_load, except)
-  conditions: a file that is not a zip archive (passes); a file NumPy refuses with a ValueError, e.g. "{}" read as a pickle (fails).
-  oracle: the 400's detail is exactly "could not load checkpoint '<name>'"; nothing loaded.
+    - src/maddening/core/simulation/checkpoint.py:132 (load_state, Raises)
+  conditions: a damaged zip; "{}", an empty file and an .npy magic NumPy refuses as a pickle or EOF; an archive member holding Python objects.
+  oracle: the 400's detail -- the client's name, no word of NumPy's or zipfile's own message, no absolute path; nothing loaded.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_that_is_not_an_archive_is_a_400_naming_no_internals
     - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_numpy_refuses_as_a_pickle_is_a_400_naming_no_internals
-  status: failing
-  finding: >-
-    checkpoint_load answers every ValueError with its own message (the
-    branch meant for load_state's mismatch messages), and numpy.load raises
-    ValueError for a file it would have to unpickle: a checkpoint file
-    containing "{}" is answered 400 "This file contains pickled (object)
-    data. If you trust the file you can load it unsafely using the
-    allow_pickle= keyword argument or pickle.load()".  Reproducer: write
-    "{}" to <root>/text.npz; POST /checkpoint/load?path=text.npz.  Guess:
-    src/maddening/api/server.py:3539 (pass only load_state's own
-    validation errors through; answer the rest with the generic message).
+    - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_with_a_member_holding_python_objects_is_refused_by_name
+  status: verified
+  notes: >-
+    Failing in the first edition: NumPy's ValueError for "{}" ("This file
+    contains pickled (object) data. If you trust the file you can load it
+    unsafely ...") went out as the detail, through the branch meant for
+    load_state's mismatch messages.  load_state now reads the archive
+    through _read_checkpoint_archive, which turns NumPy's and zipfile's
+    refusals into CheckpointFormatError.
 
 - id: REST-096
   area: checkpoint
@@ -2013,22 +2012,22 @@ claims:
 - id: REST-099
   area: bounds
   claim: >-
-    PUT /sim/stride: "steps_per_frame: Physics steps batched per wall-clock
-    frame in the runner ... Applied to the running runner, and kept for the
-    one a later POST /sim/start creates"; "relay_stride: Only capture every
-    Nth step in the relay".  What a call that names only one of them does to
-    the other is unstated.
+    PUT /sim/stride: "A value left out of the query keeps its current value,
+    so a call that changes one leaves the other as it was"; each value is 1
+    to its MAX_ (0 is a 422).
   sources:
-    - src/maddening/api/server.py:3801 (sim_set_stride, Parameters)
-  conditions: a call naming steps_per_frame alone after both were set.
-  oracle: the reply and relay.stride.
+    - src/maddening/api/server.py:3801 (sim_set_stride)
+    - src/maddening/api/README.md (Simulation Control)
+  conditions: a call naming steps_per_frame alone after both were set; relay_stride alone; neither; 0 for either.
+  oracle: the reply, relay.stride and the server's steps per frame.
   tests:
-    - tests/api/test_routes_answer_what_they_did.py::test_a_stride_call_that_names_one_value_sets_the_other_to_one
-  status: ambiguous
-  proposed_wording: >-
-    Each call sets both values: one left out of the query is set to its
-    default, 1 -- send both to change one and keep the other.
-  notes: The bundled app sends both; a script that sends one resets the other without a word.
+    - tests/api/test_routes_answer_what_they_did.py::test_a_stride_call_that_names_one_value_keeps_the_other
+  status: verified
+  notes: >-
+    Ambiguous in the first edition (what an omitted value means was
+    unstated): each defaulted to 1, so a call naming one reset the other.
+    Judged a defect and fixed in 0.4.0: an omitted value
+    keeps the current one.  Shipped from v0.1.0 (registered).
 
 - id: REST-100
   area: sim
@@ -2076,31 +2075,32 @@ claims:
 - id: REST-102
   area: checkpoint
   claim: >-
-    A save refused on the way is a 400 "could not save checkpoint, nothing
-    was written".
+    A save: "Both are written under temporary names and moved into place
+    after both exist, the checkpoint first and its manifest last: a save
+    refused before that (400, "nothing was written") leaves any earlier file
+    of either name as it was, and a name that is not a file is refused
+    before anything is written.  If only the manifest's move fails, the 400
+    says the checkpoint was written without it ...  No 4xx detail names the
+    server's absolute paths."
   sources:
     - src/maddening/api/README.md:147 (Checkpoints)
     - src/maddening/api/server.py:3467 (checkpoint_save)
-  conditions: >-
-    a save refused at its manifest (passes); a save refused at the final
-    move, its name a directory a save of d.npz/inner.npz made through the
-    API (fails).
-  oracle: the checkpoint root's listing before and after.
+  conditions: a save refused at its manifest; the checkpoint's name a directory (a save of d.npz/inner.npz); the manifest's name a directory; the manifest's own move refused; names outside the root, with a NUL, too long or a directory, on both routes.
+  oracle: the checkpoint root's listing and bytes before and after; the detail's words and the absence of the root, the working directory and the server's paths from it.
   tests:
     - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_refused_at_its_manifest_writes_no_new_checkpoint
     - tests/api/test_routes_answer_what_they_did.py::test_a_save_refused_at_its_final_move_writes_nothing
-  status: failing
-  finding: >-
-    checkpoint_save writes the manifest beside the target before
-    os.replace(partial, target); when the move fails (the target name is a
-    directory) the 400 says "nothing was written" and d.npz.manifest.json
-    has been written -- over an earlier manifest of that name, if there was
-    one.  Reproducer: POST /checkpoint/save?path=d.npz/inner.npz, then
-    POST /checkpoint/save?path=d.npz -> 400 and a new d.npz.manifest.json
-    in the root.  The detail also names the server's absolute paths.  Guess:
-    src/maddening/api/server.py:3495 (refuse a target that is not a file
-    before writing anything, or write the manifest under a temporary name
-    and move both).
+    - tests/api/test_routes_answer_what_they_did.py::test_a_save_whose_manifest_name_is_taken_by_a_directory_writes_nothing
+    - tests/api/test_routes_answer_what_they_did.py::test_a_save_whose_manifest_cannot_be_moved_says_the_checkpoint_was_written
+    - tests/api/test_routes_answer_what_they_did.py::test_no_checkpoint_refusal_names_an_absolute_server_path
+  status: verified
+  notes: >-
+    Failing in the first edition: the manifest was written beside the target
+    before the checkpoint's move, so a save refused at the move answered
+    "nothing was written" having written (or replaced) the manifest; and
+    the details carried the checkpoint root (the refusal of a path outside
+    it) and OSError texts with absolute paths.  The 200 reply's "path" is
+    still the absolute path written.
 
 - id: REST-103
   area: sim
@@ -2132,29 +2132,27 @@ claims:
   area: sim
   claim: >-
     A JAX trace runs "for at most ... MAX_JAX_TRACE_SECONDS (600 s): past
-    [it] it stops itself and writes its files"; "It now stops after 10 000
-    steps or 600 s, writing its files".
+    [it] it stops itself and writes its files.  The time budget has its own
+    timer, so an idle trace stops at it too"; the status says what stopped
+    it.
   sources:
     - src/maddening/api/README.md:163 (Simulation Control)
     - src/maddening/api/server.py:361 (MAX_JAX_TRACE_SECONDS)
+    - src/maddening/api/server.py:2442 (_stop_trace_if_out_of_time)
     - docs/release_notes/v0.4.0.md:4721 (A JAX trace stops itself)
-  conditions: >-
-    the budget patched to 0 s: a step recorded after it (passes); no step
-    after the start, the status read 50 ms later (fails).
-  oracle: the status route's active.
+  conditions: the budget patched to 0 s and 0.1 s; a step after it; no step and no request; a timer that never fires (the status and stop routes' own check); a timer left from an earlier trace.
+  oracle: jax_trace_active() with nothing asking; the status route's active and stopped_by; the second trace still active.
   tests:
     - tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_time_budget
     - tests/api/test_routes_answer_what_they_did.py::test_a_trace_past_its_time_budget_is_stopped_without_waiting_for_a_step
-  status: failing
-  finding: >-
-    The elapsed time is compared with MAX_JAX_TRACE_SECONDS only in
-    _count_traced_step, i.e. when a step is recorded, so a trace started on
-    an idle simulation runs on past its time budget until the next step (or
-    for ever).  Reproducer: patch MAX_JAX_TRACE_SECONDS to 0,
-    POST /sim/profile/jax/start, GET /sim/profile/jax/status -> active
-    true.  Guess: src/maddening/api/server.py:2442 (also check the time on
-    the status and stop routes and on a timer, or document the budget as
-    counted at each recorded step).
+    - tests/api/test_routes_answer_what_they_did.py::test_the_time_budget_stops_a_trace_with_no_request_at_all
+    - tests/api/test_routes_answer_what_they_did.py::test_a_status_read_stops_a_trace_whose_timer_has_not_fired
+    - tests/api/test_routes_answer_what_they_did.py::test_a_timer_left_from_an_earlier_trace_stops_nothing
+  status: verified
+  notes: >-
+    Failing in the first edition: the elapsed time was compared with the
+    budget only when a step was recorded, so a trace started on an idle
+    simulation ran on until the next step, or for ever.
 
 - id: REST-105
   area: sim
@@ -2353,35 +2351,27 @@ claims:
 - id: RPD-009
   area: run_pod-summary
   claim: >-
-    --summarise "exits 0 when no recorded check failed and every file records
-    one commit, 3 when any check failed or a file cannot decide, 4 when
-    nothing failed but the files come from more than one commit, ... and 1
-    when the directory holds no goal JSON"; a file it cannot read is not
-    evidence.
+    --summarise "exits 0 when no recorded check failed and every file
+    records one commit, 3 when any check failed or a file cannot decide, 4
+    when nothing failed but the files come from more than one commit, ...
+    and 1 when the directory holds no goal JSON"; a file it cannot read is
+    not evidence: it reads INVALID.
   sources:
     - benchmarks/multigpu/README.md:379 (5. Read the result)
     - benchmarks/multigpu/run_pod.py:3483 (summarise)
     - benchmarks/multigpu/run_pod.py:2719 (_load_results)
-  conditions: >-
-    a goal file a killed run left truncated (the runbook runs every goal
-    under timeout, which kills the process wherever it is), and a goal file
-    that is valid JSON but not an object.
-  oracle: summarise's return value.
+  conditions: a goal file a killed run left truncated; one that is valid JSON but a list, null or a string; an empty file; one not in UTF-8.
+  oracle: summarise's return value and the file named as unreadable in its output.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_truncated_goal_file_reads_invalid_and_the_summary_exits_3
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_goal_file_that_is_not_an_object_reads_invalid_and_the_summary_exits_3
-  status: failing
-  finding: >-
-    _load_results calls json.load and doc.get on every goal*.json with no
-    guard: a truncated file raises json.JSONDecodeError and a JSON list
-    raises AttributeError out of summarise, so the summary ends on a
-    traceback with exit status 1 -- the code the runbook gives for "no goal
-    JSON" -- instead of reading the file INVALID (exit 3).  Reproducer:
-    copy tests/cloud/multigpu/run_pod_record, cut halo.json in half,
-    run_pod.py --summarise DIR.  Guess: benchmarks/multigpu/run_pod.py:2722
-    (record an unreadable file as a doc that record_problems reads
-    INVALID).
-  notes: Not addressed by fix/p4-13-rest, whose summarise guard covers the tables of a readable file.
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_any_goal_file_that_is_not_a_json_object_reads_invalid_naming_the_file
+  status: verified
+  notes: >-
+    Failing in the first edition: json.load and doc.get were called on every
+    goal file with no guard, so a truncated file or a JSON list ended the
+    summary on a traceback with exit status 1, the code for "no goal JSON".
+    run_pod.py is not in any release.
 
 - id: RPD-010
   area: run_pod-summary
@@ -2471,24 +2461,24 @@ claims:
 - id: RPD-014
   area: run_pod-records
   claim: >-
-    A check not run is "not a failure (it exits 0 for it)", and
-    finish_checks: "no checks is not a pass, and neither is a check not
-    run".
+    A check not run "does not fail its goal when another check of the goal
+    ran and passed (the run exits 0 for it and the goal reads INCOMPLETE),
+    but a goal none of whose checks ran is counted as failed and the run
+    exits 1, as for a goal with no checks"; finish_checks: "no checks is
+    not a pass, and neither is a check not run".
   sources:
     - benchmarks/multigpu/run_pod.py:1089 (check_not_run)
     - benchmarks/multigpu/run_pod.py:3653 (main, the exit status)
     - benchmarks/multigpu/run_pod.py:1097 (finish_checks)
-  conditions: a goal every one of whose checks was not run.
+  conditions: a goal every one of whose checks was not run; one with a check that ran.
   oracle: main's exit status.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_goal_whose_every_check_was_not_run_exits_1_and_one_with_a_check_run_exits_0
-  status: ambiguous
-  proposed_wording: >-
-    A check not run does not fail its goal when at least one other check of
-    the goal ran and passed (the run exits 0, the goal reads INCOMPLETE).
-    A goal none of whose checks ran is counted as failed and the run exits
-    1, like a goal with no checks.
-  notes: No goal of 0.4.0 can record only checks not run on a count the runner accepts, so the edge is latent.
+  status: verified
+  notes: >-
+    Ambiguous in the first edition: "not a failure (it exits 0 for it)" was
+    stated without the condition the code applies.  The code is right;
+    run_pod.py's docstrings are reworded.
 
 - id: RPD-015
   area: run_pod-cli
@@ -2685,27 +2675,21 @@ claims:
   area: run_pod-goals
   claim: >-
     "Each of the wrapper goals must fail on a stencil wrapper broken in any
-    of seven ways ...: tests/cloud/multigpu/test_run_pod_seeded_faults.py
-    seeds each"; the runbook: the test "holds the seven faults as seeds of
-    sharded_node.py and halo.py".
+    of eight ways (... domain integrals summed over the first mesh axis only
+    ...)"; the runbook: test_run_pod_seeded_faults.py "holds eight faults as
+    seeds of sharded_node.py and halo.py".
   sources:
     - benchmarks/multigpu/run_pod.py:87 (module docstring)
     - benchmarks/multigpu/README.md:94 (What a broken wrapper does to the goals)
   conditions: the seeded-fault test as it stands.
-  oracle: the seed names.
+  oracle: the count both documents give against the seeds, and the eighth named in both.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_every_seeded_fault_the_runbook_names_is_a_seed
     - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_every_seed_applies_once_to_the_wrapper_as_it_stands
-  status: ambiguous
-  proposed_wording: >-
-    Each of the wrapper goals must fail on a stencil wrapper broken in any
-    of eight ways (a static's halos NaN, grid-shaped inputs zeroed, domain
-    integrals halved, domain integrals summed over the first mesh axis
-    only, sharded axes after the first zero-filled at the global edges,
-    halos taken from the wrong neighbour along spatial axis 1, shard_info's
-    extent divided by the first mesh axis's size or read off spatial axis
-    0); test_run_pod_seeded_faults.py holds the eight as seeds.
-  notes: The test holds eight seeds; both documents count seven and omit domain_integrals_summed_over_the_first_mesh_axis_only.
+  status: verified
+  notes: >-
+    Ambiguous in the first edition: both documents counted seven and left
+    out domain_integrals_summed_over_the_first_mesh_axis_only.  Reworded.
 
 - id: RPD-025
   area: run_pod-goals

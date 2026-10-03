@@ -255,6 +255,26 @@ class Ctx:
         value = self.gm.get_node(node).params.get(key)
         return np.asarray(value).tolist() if value is not None else None
 
+    @contextlib.contextmanager
+    def under_test(self):
+        """Mark the request(s) the claim is about: in the shutdown domain
+        SIGTERM meets the first of them to take the graph, not a request
+        that only sets the scene.  (A server that has been signalled takes
+        no new request, so a check stops after it there: see
+        :attr:`signalled`.)"""
+        self.extra["auto_arm"] = False
+        self.extra["armed"] = True
+        try:
+            yield
+        finally:
+            self.extra["armed"] = False
+
+    @property
+    def signalled(self) -> bool:
+        """Whether SIGTERM has been raised: uvicorn takes no new request after
+        it, so a check sends none either."""
+        return bool(self.extra.get("signalled"))
+
     @property
     def steps_beside(self) -> bool:
         """Whether something else steps the graph during the check."""
@@ -402,9 +422,12 @@ def mid_request_sigterm(chk: Check, ctx: Ctx) -> None:
     entered, fired = threading.Event(), threading.Event()
     main = threading.main_thread()
 
+    ctx.extra["auto_arm"] = True
+
     def acquire(*args, **kwargs):
         got = real_acquire(*args, **kwargs)
-        if got and not fired.is_set() and threading.current_thread() is not main:
+        armed = ctx.extra.get("armed") or ctx.extra.get("auto_arm")
+        if got and armed and not fired.is_set() and threading.current_thread() is not main:
             entered.set()
             fired.wait(10)
         return got
@@ -431,6 +454,7 @@ def mid_request_sigterm(chk: Check, ctx: Ctx) -> None:
         if reached:
             signal.raise_signal(signal.SIGTERM)
             shut = server._shutdown.is_set()
+            ctx.extra["signalled"] = True
         fired.set()
         worker.join(120)
     finally:
@@ -922,7 +946,7 @@ def _concurrent_steps_are_all_taken(ctx):
         assert ctx.server.relay.step_count == start + per * clients
 
 
-@check("REST-041", "REST-096", "REST-063", only=("public", "restored", "shutdown"))
+@check("REST-041", "REST-096", only=("public", "restored", "shutdown"))
 def _every_write_is_a_409_beside_a_stepper(ctx):
     from tests.api.test_graph_lock_refusals_cover_every_route import WRITES
 
@@ -1112,3 +1136,614 @@ def _while_the_runner_is_still_stopping_writes_and_start_are_503s(ctx):
             release.set()
             gm._compiled_step = real
     assert wait_for(lambda: ctx.server.runner is None or not ctx.server.runner.is_alive)
+
+
+# ===========================================================================
+# /sim/*: stepping, running, the runner (REST-050 to REST-064)
+# ===========================================================================
+
+def advance(ctx, n: int) -> None:
+    """Set the scene with *n* single steps (a ``/sim/run`` is what a
+    shutdown interrupts, REST-052)."""
+    for _ in range(n):
+        resp = ctx.client.post("/sim/step")
+        assert resp.status_code == 200, resp.text
+
+
+def _ball(ctx) -> dict:
+    return {f: float(np.asarray(v)) for f, v in ctx.gm.get_node_state("ball").items()}
+
+
+@check("REST-051", skip=("runner", "sim_run", "shutdown"))
+def _a_run_returns_the_state_after_n_steps(ctx):
+    """``POST /sim/run?n_steps=N`` takes N steps and returns the state after
+    them: what N single steps of a twin graph give, bit for bit."""
+    twin = build_graph(wrapped=(ctx.domain == "wrapper"))
+    twin.set_node_state("ball", ctx.gm.get_node_state("ball"))
+    start = ctx.server.relay.step_count
+    resp = ctx.client.post("/sim/run", params={"n_steps": 7})
+    assert resp.status_code == 200, resp.text
+    for _ in range(7):
+        twin.step()
+    got = resp.json()["ball"]
+    for field, value in twin.get_node_state("ball").items():
+        assert float(np.asarray(got[field])) == float(np.asarray(value)), field
+    if ctx.copies == 1:
+        assert ctx.server.relay.step_count == start + 7
+
+
+@check("REST-052", only=("public",))
+def _a_run_stops_at_its_next_slice_when_the_server_shuts_down(ctx):
+    gm = ctx.gm
+    real = gm._compiled_step
+
+    def slow(*args):
+        time.sleep(0.001)
+        return real(*args)
+
+    gm._compiled_step = slow
+    out: dict = {}
+    t = threading.Thread(target=lambda: out.setdefault("r", ctx.client.post(
+        "/sim/run", params={"n_steps": 100_000})))
+    t.start()
+    assert wait_for(lambda: ctx.server.relay.step_count > 20)
+    ctx.server.request_shutdown()
+    t.join(30)
+    ctx.server._shutdown.clear()
+    resp = out["r"]
+    assert resp.status_code == 503, resp.text
+    body = resp.json()
+    assert body["status"] == "interrupted" and 0 < body["steps_run"] < 100_000
+    assert ctx.server.relay.step_count == body["steps_run"]
+
+
+@check("REST-053", only=("public",))
+def _the_lifespan_shutdown_stops_the_runner_and_tells_a_run_to_stop(ctx):
+    with TestClient(ctx.app, headers=dict(BEARER)) as client:
+        assert not ctx.server._shutdown.is_set()
+        assert client.post("/sim/start").status_code == 200
+        assert wait_for(lambda: ctx.server.relay.step_count > 2)
+    assert ctx.server._shutdown.is_set()
+    assert ctx.server.runner is None
+    ctx.server._shutdown.clear()
+
+
+@check("REST-054", skip=("runner", "restored", "wrapper", "shutdown"))
+def _a_second_start_is_a_409_and_a_dead_runner_is_replaced(ctx):
+    if ctx.domain == "sim_run":
+        refused(ctx.client.post("/sim/start"), 409, "/sim/run")
+        return
+    try:
+        assert ctx.client.post("/sim/start").status_code == 200
+        refused(ctx.client.post("/sim/start"), 409, "already started")
+    finally:
+        stop_runner(ctx.server)
+
+
+@check("REST-055", skip=("runner", "restored", "wrapper", "shutdown", "concurrent"))
+def _pause_and_resume_without_a_running_runner_are_409s(ctx):
+    for route in ("/sim/pause", "/sim/resume"):
+        refused(ctx.client.post(route), 409, "not")
+    if ctx.domain == "sim_run":
+        return
+    try:
+        assert ctx.client.post("/sim/start").status_code == 200
+        assert ctx.client.post("/sim/pause").json()["status"] == "paused"
+        assert ctx.client.post("/sim/resume").json()["status"] == "resumed"
+    finally:
+        stop_runner(ctx.server)
+
+
+@check("REST-056", skip=("runner", "restored", "wrapper", "shutdown"))
+def _stopped_means_no_runner_thread_steps_the_graph(ctx):
+    if ctx.domain == "sim_run" or ctx.copies > 1:
+        refused(ctx.client.post("/sim/stop"), 409, "not started")
+        if ctx.domain == "sim_run":
+            return
+    if ctx.copies > 1:
+        return
+    assert ctx.client.post("/sim/start").status_code == 200
+    assert wait_for(lambda: ctx.server.relay.step_count > 1)
+    runner = ctx.server.runner
+    resp = ctx.client.post("/sim/stop")
+    assert resp.status_code == 200 and resp.json()["status"] == "stopped", resp.text
+    assert not runner.is_alive
+    refused(ctx.client.post("/sim/stop"), 409, "not started")
+
+
+@check("REST-057", skip=("runner", "sim_run"))
+def _a_reset_puts_every_node_back_and_restarts_the_clock(ctx):
+    fresh = build_graph(wrapped=(ctx.domain == "wrapper"))
+    initial = {f: float(np.asarray(v)) for f, v in fresh.get_node_state("ball").items()}
+    if ctx.copies == 1:
+        advance(ctx, 4)
+    with ctx.under_test():
+        resp = ctx.client.post("/sim/reset")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["was_running"] is False
+    if ctx.copies == 1:
+        assert {f: float(v) for f, v in resp.json()["state"]["ball"].items()
+                if f in initial} == initial
+        assert _ball(ctx) == initial
+        assert ctx.server.relay.step_count == 0 and ctx.server.relay.elapsed == 0.0
+
+
+@check("REST-058", skip=("runner", "sim_run", "concurrent"))
+def _a_graph_that_cannot_step_is_a_400_naming_why_and_nothing_is_stepped(ctx):
+    edge = {"source_node": "c", "target_node": "ball", "source_field": "temperature",
+            "target_field": "table_position"}
+    assert ctx.client.post("/graph/edges", json=edge).status_code == 201
+    before, count = _ball(ctx), ctx.server.relay.step_count
+    try:
+        for method, url, kw in (("POST", "/sim/run", {"params": {"n_steps": 3}}),
+                                ("POST", "/sim/step", {})):
+            if ctx.signalled:
+                break
+            with ctx.under_test():
+                resp = ctx.client.request(method, url, **kw)
+            refused(resp, 400)
+            assert _ball(ctx) == before and ctx.server.relay.step_count == count
+    finally:
+        assert ctx.client.request("DELETE", "/graph/edges", json=edge).status_code == 200
+
+
+@check("REST-063", "REST-100", skip=("runner", "sim_run", "concurrent"))
+def _a_profile_is_a_trace_and_leaves_the_live_simulation_where_it_was(ctx):
+    if ctx.copies == 1:
+        advance(ctx, 3)
+    before, count = _ball(ctx), ctx.server.relay.step_count
+    stiffness = ctx.live("spring", "stiffness")
+    with ctx.under_test():
+        resp = ctx.client.post("/sim/profile", params={"n_steps": 4})
+    assert resp.status_code == 200, resp.text
+    trace = resp.json()
+    assert isinstance(trace["traceEvents"], list) and trace["traceEvents"]
+    assert _ball(ctx) == before and ctx.server.relay.step_count == count
+    assert ctx.live("spring", "stiffness") == stiffness
+
+
+@check("REST-064", only=("public",))
+def _one_jax_trace_at_a_time(ctx):
+    resp = ctx.client.post("/sim/profile/jax/start")
+    assert resp.status_code == 200, resp.text
+    try:
+        refused(ctx.client.post("/sim/profile/jax/start"), 409)
+        assert ctx.client.post("/sim/step").status_code == 200
+        assert ctx.client.get("/sim/profile/jax/status").json()["active"] is True
+    finally:
+        stop = ctx.client.post("/sim/profile/jax/stop")
+    assert stop.status_code == 200, stop.text
+    refused(ctx.client.post("/sim/profile/jax/stop"), 409)
+
+
+# ===========================================================================
+# Graph structure and state (REST-065 to REST-072)
+# ===========================================================================
+
+@check("REST-065", "REST-066", skip=("runner", "sim_run", "wrapper"))
+def _an_add_node_that_is_refused_adds_nothing(ctx):
+    before = structure(ctx)
+    cases = [
+        ({"type": "NoSuchNode", "name": "x", "timestep": 0.01, "params": {}}, 400),
+        ({"type": "BallNode", "name": "ball", "timestep": 0.01, "params": {}}, 409),
+        ({"type": "SpringDamperNode", "name": "bad", "timestep": 0.01,
+          "params": {"stiffness": "stiff"}}, 400),
+        ({"type": "BallNode", "name": "a/b", "timestep": 0.01, "params": {}}, 400),
+        ({"type": "BallNode", "name": "", "timestep": 0.01, "params": {}}, 400),
+        ({"type": "BallNode", "name": "NaN", "timestep": 0.01, "params": {}}, 400),
+        ({"type": "HeatNode", "name": "fast", "timestep": 10.0,
+          "params": {"n_cells": 8, "thermal_diffusivity": 1.0}}, 400),
+    ]
+    for body, status in cases:
+        for _ in range(2):      # a repeat gets the same answer, never a 409
+            refused(ctx.client.post("/graph/nodes", json=body), status)
+    assert structure(ctx) == before
+    name = f"added{ctx.index}"
+    resp = ctx.client.post("/graph/nodes", json={"type": "BallNode", "name": name,
+                                                 "timestep": 0.01, "params": {}})
+    assert resp.status_code == 201, resp.text
+    assert name in [n["name"] for n in ctx.client.get("/graph").json()["nodes"]]
+
+
+@check("REST-067", skip=("runner", "sim_run", "wrapper"))
+def _removing_a_node_removes_every_edge_that_touches_it(ctx):
+    name = f"hub{ctx.index}"
+    assert ctx.client.post("/graph/nodes", json={"type": "BallNode", "name": name,
+                                                 "timestep": 0.01, "params": {}}).status_code == 201
+    for edge in ({"source_node": name, "target_node": "ball", "source_field": "position",
+                  "target_field": "table_position"},
+                 {"source_node": "ball", "target_node": name, "source_field": "position",
+                  "target_field": "table_position"}):
+        assert ctx.client.post("/graph/edges", json=edge).status_code == 201
+    assert ctx.client.delete(f"/graph/nodes/{name}").status_code == 200
+    assert all(name not in str(e) for e in ctx.gm._edges)
+    refused(ctx.client.delete(f"/graph/nodes/{name}"), 404)
+    assert ctx.client.post("/sim/step").status_code == 200
+
+
+@check("REST-068", skip=("runner", "sim_run", "wrapper"))
+def _an_edge_names_nodes_and_fields_that_exist(ctx):
+    before = structure(ctx)
+    refused(ctx.client.post("/graph/edges", json={
+        "source_node": "nope", "target_node": "ball", "source_field": "position",
+        "target_field": "table_position"}), 404)
+    refused(ctx.client.post("/graph/edges", json={
+        "source_node": "ball", "target_node": "ball", "source_field": "no_field",
+        "target_field": "table_position"}), 400)
+    refused(ctx.client.request("DELETE", "/graph/edges", json={
+        "source_node": "ball", "target_node": "spring", "source_field": "position",
+        "target_field": "table_position"}), 404)
+    assert structure(ctx) == before
+
+
+@check("REST-069", skip=("concurrent",))
+def _compile_returns_the_schedule_and_validate_the_issues(ctx):
+    resp = ctx.client.post("/graph/compile")
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()["schedule"]) == set(ctx.gm._nodes)
+    resp = ctx.client.post("/graph/validate")
+    assert resp.status_code == 200, resp.text
+    assert "issues" in resp.json()
+
+
+@check("REST-070")
+def _the_state_is_every_node_and_meta_and_an_unknown_node_is_a_404(ctx):
+    resp = ctx.client.get("/graph/state")
+    assert resp.status_code == 200, resp.text
+    assert set(resp.json()) - {"_meta"} == set(ctx.gm._nodes)
+    assert ("_meta" in resp.json()) == ("_meta" in ctx.gm._state)
+    assert set(ctx.client.get("/graph/state/ball").json()) == {"position", "velocity"}
+    refused(ctx.client.get("/graph/state/nope"), 404)
+
+
+@check("REST-071", skip=("runner", "sim_run"))
+def _a_state_write_the_field_cannot_hold_is_a_400_and_nothing_is_written(ctx):
+    before = _ball(ctx)
+    for state in ({"position": 1.0}, {"position": 1.0, "velocity": 0.0, "extra": 1.0},
+                  {"position": [1.0, 2.0], "velocity": 0.0}, {"position": "NaN", "velocity": 0.0},
+                  {"position": 1e39, "velocity": 0.0}, {"position": None, "velocity": 0.0}):
+        resp = ctx.client.put("/graph/state/ball", json={"state": state})
+        assert resp.status_code in (400, 422), (state, resp.status_code, resp.text)
+        if ctx.copies == 1:
+            assert _ball(ctx) == before, state
+    big = float(np.finfo(np.float32).max)
+    resp = ctx.client.put("/graph/state/ball", json={"state": {"position": big, "velocity": 0.0}})
+    assert resp.status_code == 200, resp.text
+    assert _ball(ctx)["position"] == big
+
+
+@check("REST-072", skip=("concurrent", "wrapper"))
+def _a_non_finite_reply_is_written_as_tokens(ctx):
+    """A diverged state answers strict JSON, the non-finite values written as
+    the quoted tokens."""
+    big = float(np.finfo(np.float32).max)
+    if ctx.domain in ("runner", "sim_run"):
+        # The state cannot be written beside a stepper; a parameter an
+        # in-process write left non-finite is, and every reply reading it --
+        # and the state it then drives -- is tokenised.
+        import jax.numpy as jnp
+
+        ctx.gm.params["nodes"]["spring"]["damping"] = jnp.float32(np.nan)
+        resp = ctx.client.get("/graph/params/spring")
+        assert resp.status_code == 200, resp.text
+        assert json.loads(resp.text, parse_constant=lambda c: pytest.fail(
+            f"bare {c} in the reply"))["damping"] == "NaN"
+        assert wait_for(lambda: '"NaN"' in ctx.client.get("/graph/state/spring").text)
+        json.loads(ctx.client.get("/graph/state").text,
+                   parse_constant=lambda c: pytest.fail(f"bare {c} in the state"))
+        return
+    resp = ctx.client.put("/graph/state/ball", json={"state": {"position": big,
+                                                               "velocity": big}})
+    assert resp.status_code == 200, resp.text
+    assert ctx.client.put("/graph/params/ball", json={"params": {"gravity": -1e30}}).status_code \
+        == 200
+    for _ in range(4):
+        resp = ctx.client.post("/sim/step")
+        assert resp.status_code == 200, resp.text
+    for url in ("/graph/state", "/graph/state/ball"):
+        text = ctx.client.get(url).text
+        json.loads(text, parse_constant=lambda c: pytest.fail(f"bare {c} in {url}"))
+        assert '"Infinity"' in text or '"-Infinity"' in text or '"NaN"' in text, text
+
+
+# ===========================================================================
+# Parameters: PUT/GET /graph/params (REST-073 to REST-090, REST-106, REST-107)
+# ===========================================================================
+
+_HYBRID_LOST = ("a PUT /graph/params to a HybridNode is answered 200 and lost (the hybrid "
+                "copies its physics node's params); pending fix/p4-18-rest")
+
+
+def _put(ctx, node: str, params: dict):
+    return ctx.client.put(f"/graph/params/{node}", json={"params": params})
+
+
+@check("REST-073", xfail={("REST-073", "wrapper"): f"REST-073: {_HYBRID_LOST}"})
+def _get_params_is_the_live_view(ctx):
+    import jax.numpy as jnp
+
+    ctx.gm.params["nodes"]["spring"]["stiffness"] = jnp.asarray(48.0, jnp.float32)
+    assert ctx.client.get("/graph/params/spring").json()["stiffness"] == pytest.approx(48.0)
+    resp = _put(ctx, "spring", {"stiffness": 49.0})
+    assert resp.status_code == 200, resp.text
+    assert ctx.client.get("/graph/params/spring").json()["stiffness"] == pytest.approx(49.0)
+    assert float(np.asarray(ctx.gm.get_node("spring").params["stiffness"])) == 49.0
+    refused(ctx.client.get("/graph/params/nope"), 404)
+
+
+@check("REST-074", xfail={("REST-074", "wrapper"): f"REST-074: {_HYBRID_LOST}"})
+def _a_leaf_the_step_reads_takes_effect_on_the_next_step(ctx):
+    """The spring's stiffness, written over REST, is what the next steps
+    compute with, without a recompile: a twin graph built with the value
+    steps the same, bit for bit, from the same state."""
+    compiles = ctx.gm._compile_count if hasattr(ctx.gm, "_compile_count") else None
+    resp = _put(ctx, "spring", {"stiffness": 80.0})
+    assert resp.status_code == 200, resp.text
+    assert not ctx.gm._dirty
+    node = ctx.gm.get_node("spring")
+    physics = getattr(node, "physics_node", node)
+    assert float(np.asarray(physics.params["stiffness"])) == 80.0
+    if not ctx.steps_beside and ctx.domain != "wrapper":
+        twin = build_graph()
+        twin.params["nodes"]["spring"]["stiffness"] = 80.0
+        twin.set_node_state("spring", ctx.gm.get_node_state("spring"))
+        assert ctx.client.post("/sim/step").status_code == 200
+        twin.step()
+        for f, v in twin.get_node_state("spring").items():
+            assert float(np.asarray(ctx.gm.get_node_state("spring")[f])) == \
+                float(np.asarray(v)), f
+    if compiles is not None:
+        assert ctx.gm._compile_count == compiles
+
+
+@check("REST-075", only=("public", "restored"))
+def _a_structural_value_recompiles_and_an_initial_condition_waits_for_the_reset(ctx):
+    resp = _put(ctx, "legacy", {"k": 4.0})
+    assert resp.status_code == 200, resp.text
+    assert ctx.gm._dirty
+    resp = _put(ctx, "spring", {"initial_position": 0.25})
+    assert resp.status_code == 200, resp.text
+    assert ctx.client.post("/sim/reset").status_code == 200
+    assert float(np.asarray(ctx.gm.get_node_state("spring")["position"])) == 0.25
+
+
+@check("REST-076", skip=("wrapper",))
+def _a_value_the_running_node_cannot_use_is_a_400_and_nothing_is_written(ctx):
+    before = (ctx.node_param("legacy", "baked"), ctx.node_param("legacy", "k"))
+    resp = _put(ctx, "legacy", {"k": 4.0, "baked": 5.0})
+    refused(resp, 400, "baked")
+    assert (ctx.node_param("legacy", "baked"), ctx.node_param("legacy", "k")) == before
+
+
+@check("REST-077")
+def _a_value_the_constructor_refuses_with_the_live_values_is_a_400(ctx):
+    before = ctx.live("c", "thermal_diffusivity")
+    resp = _put(ctx, "c", {"thermal_diffusivity": 50.0})    # Fourier number 32: unstable
+    refused(resp, 400, "thermal_diffusivity")
+    assert "unstable" in resp.json()["detail"]
+    unchanged_param(ctx, "c", "thermal_diffusivity", before)
+
+
+@check("REST-078")
+def _a_value_a_reload_would_build_differently_is_a_400(ctx):
+    grid = [0.0, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 0.9, 1.0]
+    before = ctx.node_param("c", "grid_points")
+    resp = _put(ctx, "c", {"grid_points": grid})
+    refused(resp, 400, "grid_points")
+    assert ctx.node_param("c", "grid_points") == before
+    assert ctx.client.get("/graph/params/c").json()["grid_points"] is None
+
+
+@check("REST-079")
+def _a_write_that_moves_a_mapping_s_points_is_a_400(ctx):
+    before = ctx.live("a", "length")
+    refused(_put(ctx, "a", {"length": 2.0}), 400, "length")
+    unchanged_param(ctx, "a", "length", before)
+    resp = _put(ctx, "a", {"thermal_diffusivity": 0.004})   # a calibration of the mapped rod
+    assert resp.status_code == 200, resp.text
+
+
+@check("REST-080")
+def _a_non_finite_or_unrepresentable_value_is_a_400_before_anything_is_written(ctx):
+    before = (ctx.live("spring", "stiffness"), ctx.live("spring", "damping"))
+    for body in ('{"params": {"stiffness": NaN}}', '{"params": {"stiffness": Infinity}}',
+                 '{"params": {"damping": -Infinity}}', '{"params": {"stiffness": 1e39}}',
+                 '{"params": {"damping": 0.7, "stiffness": NaN}}',
+                 '{"params": {"stiffness": 1' + "0" * 400 + '}}'):
+        resp = ctx.client.put("/graph/params/spring", content=body,
+                              headers={"Content-Type": "application/json"})
+        assert resp.status_code in (400, 422), (body[:60], resp.status_code, resp.text)
+    assert (ctx.live("spring", "stiffness"), ctx.live("spring", "damping")) == before
+
+
+@check("REST-081")
+def _the_whole_request_is_validated_before_anything_is_written(ctx):
+    before = (ctx.live("spring", "stiffness"), ctx.live("spring", "damping"))
+    resp = _put(ctx, "spring", {"stiffness": 51.0, "no_such_key": 1.0})
+    refused(resp, 400, "no_such_key")
+    assert "stiffness" in resp.json()["detail"]      # it lists the keys there are
+    for bad in ("stiff", None, [1.0, 2.0], True, {"x": 1}):
+        refused(_put(ctx, "spring", {"stiffness": 51.0, "damping": bad}), 400)
+    assert (ctx.live("spring", "stiffness"), ctx.live("spring", "damping")) == before
+
+
+@check("REST-082", only=("public", "restored"))
+def _a_structural_value_is_stored_in_the_parameter_s_own_type(ctx):
+    resp = _put(ctx, "c", {"n_cells": 8.0})
+    assert resp.status_code == 200, resp.text
+    assert type(ctx.gm.get_node("c").params["n_cells"]) is int
+    refused(_put(ctx, "c", {"n_cells": 8.5}), 400)
+    assert ctx.gm.get_node("c").params["n_cells"] == 8
+
+
+@check("REST-083", skip=("wrapper",))
+def _a_value_the_step_cannot_run_with_is_a_400_and_steps_go_on(ctx):
+    for value in ({"w": 0.0}, {"y": {"finite": True}}, {"z": "high"}):
+        resp = _put(ctx, "body", {"constraints": value})
+        refused(resp, 400, "constraints")
+        assert "step cannot run with it" in resp.json()["detail"]
+    assert ctx.gm.get_node("body").params["constraints"] == {}
+    if not ctx.steps_beside:
+        assert ctx.client.post("/sim/step").status_code == 200
+
+
+@check("REST-084")
+def _a_value_that_changes_the_state_layout_is_refused_before_it_is_built(ctx):
+    built = []
+    real_init = HeatNode.__init__
+
+    def counting(self, *args, **kwargs):
+        built.append(kwargs.get("n_cells"))
+        real_init(self, *args, **kwargs)
+
+    before = (ctx.node_param("c", "n_cells"), np.asarray(ctx.gm.get_node_state("c")[
+        "temperature"]).shape)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(HeatNode, "__init__", counting)
+        resp = _put(ctx, "c", {"n_cells": 16})
+    refused(resp, 400, "layout")
+    assert 16 not in built
+    assert (ctx.node_param("c", "n_cells"), np.asarray(ctx.gm.get_node_state("c")[
+        "temperature"]).shape) == before
+
+
+@check("REST-085", "REST-107")
+def _a_value_outside_the_leaf_s_bounds_is_a_400_and_mutates_nothing(ctx):
+    before = ctx.live("spring", "damping")
+    for value in (-1.0, -1e-40, -0.0 - 1e-30):
+        refused(_put(ctx, "spring", {"damping": value}), 400, "bound")
+    unchanged_param(ctx, "spring", "damping", before)
+    if ctx.domain != "wrapper":
+        resp = _put(ctx, "spring", {"damping": 1e-40})
+        assert resp.status_code == 200, resp.text
+        assert ctx.live("spring", "damping") == float(np.float32(1e-40))
+        assert _put(ctx, "spring", {"damping": before}).status_code == 200
+
+
+@check("REST-086", xfail={("REST-086", "wrapper"): f"REST-086: {_HYBRID_LOST}"})
+def _the_reply_is_what_a_get_then_reads(ctx):
+    resp = _put(ctx, "spring", {"stiffness": 52})
+    assert resp.status_code == 200, resp.text
+    got = ctx.client.get("/graph/params/spring").json()
+    assert resp.json()["params"]["stiffness"] == got["stiffness"] == 52.0
+    node = ctx.gm.get_node("spring")
+    physics = getattr(node, "physics_node", node)
+    assert float(np.asarray(physics.params["stiffness"])) == 52.0
+
+
+@check("REST-088", skip=("wrapper",))
+def _a_node_no_faithful_copy_can_be_made_of_is_refused(ctx):
+    before = ctx.node_param("selfbound", "k")
+    resp = _put(ctx, "selfbound", {"k": 4.0})
+    refused(resp, 400, "no copy of _SelfBound")
+    assert ctx.node_param("selfbound", "k") == before
+
+
+@check("REST-106")
+def _a_value_its_type_flushes_to_zero_is_refused(ctx):
+    before = ctx.live("spring", "stiffness")
+    for value in (1e-50, -1e-50, 1e-46):
+        refused(_put(ctx, "spring", {"stiffness": value}), 400, "does not fit its type float32")
+    unchanged_param(ctx, "spring", "stiffness", before)
+    if not ctx.steps_beside:
+        state = _ball(ctx)
+        refused(ctx.client.put("/graph/state/ball", json={"state": {
+            "position": 1e-50, "velocity": 0.0}}), 400, "does not fit its type float32")
+        assert _ball(ctx) == state
+
+
+# ===========================================================================
+# Checkpoints (REST-091 to REST-095, REST-101, REST-102)
+# ===========================================================================
+
+def _manifest_ok(root: Path, name: str) -> dict:
+    path = root / name
+    manifest = json.loads((root / f"{name}.manifest.json").read_text())
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert digest in json.dumps(manifest), (digest, manifest)
+    return manifest
+
+
+@check("REST-091")
+def _a_save_writes_the_file_and_a_manifest_that_hashes_to_it(ctx):
+    name = f"saved{ctx.index}.npz"
+    resp = ctx.client.post("/checkpoint/save", params={"path": name})
+    assert resp.status_code == 200, resp.text
+    assert {"status", "path", "sim_time"} <= set(resp.json())
+    _manifest_ok(ctx.root, name)
+
+
+@check("REST-092")
+def _a_checkpoint_path_is_a_file_inside_the_root(ctx):
+    outside = ctx.root.parent / f"outside-{ctx.root.name}"
+    outside.mkdir(exist_ok=True)
+    before = files(outside)
+    for path in ("", ".", "sub/..", "../x.npz", str(outside / "x.npz"),
+                 f"../{outside.name}/x.npz", "a\x00b.npz"):
+        for route in ("/checkpoint/save", "/checkpoint/load"):
+            resp = ctx.client.post(route, params={"path": path})
+            # Beside a stepper a load is refused before its path is read (REST-096).
+            want = (400, 409) if route.endswith("load") and ctx.domain in (
+                "runner", "sim_run") else (400,)
+            assert resp.status_code in want, (route, path, resp.status_code, resp.text)
+    assert files(outside) == before
+
+
+@check("REST-093", skip=("runner", "sim_run"))
+def _a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded(ctx):
+    other = GraphManager()
+    other.add_node(BallNode("other", timestep=0.01))
+    other.compile()
+    other.save_state(str(ctx.root / "other.npz"))
+    before = (_ball(ctx), ctx.live("spring", "stiffness"))
+    refused(ctx.client.post("/checkpoint/load", params={"path": "other.npz"}), 400)
+    refused(ctx.client.post("/checkpoint/load", params={"path": "missing.npz"}), 404)
+    if ctx.copies == 1:
+        assert (_ball(ctx), ctx.live("spring", "stiffness")) == before
+
+
+@check("REST-094", skip=("runner", "sim_run"))
+def _a_load_answers_the_checkpoint_s_clock(ctx):
+    name = f"clock{ctx.index}.npz"
+    if ctx.copies == 1:
+        advance(ctx, 3)
+    saved = ctx.client.post("/checkpoint/save", params={"path": name})
+    assert saved.status_code == 200, saved.text
+    sim_time = saved.json()["sim_time"]
+    with ctx.under_test():
+        resp = ctx.client.post("/checkpoint/load", params={"path": name})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sim_time"] == sim_time and resp.json()["sim_time_from_checkpoint"]
+    (ctx.root / f"{name}.manifest.json").unlink()
+    resp = ctx.client.post("/checkpoint/load", params={"path": name})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["sim_time"] == 0.0 and not resp.json()["sim_time_from_checkpoint"]
+
+
+@check("REST-095", skip=("runner", "sim_run", "wrapper"))
+def _a_file_that_is_not_an_archive_is_a_400_naming_no_internals(ctx):
+    for name, data in (("braces.npz", b"{}"), ("empty.npz", b""),
+                       ("zip.npz", b"PK\x03\x04garbage")):
+        (ctx.root / name).write_bytes(data)
+        resp = ctx.client.post("/checkpoint/load", params={"path": name})
+        refused(resp, 400, f"could not load checkpoint '{name}'")
+        detail = resp.json()["detail"]
+        assert "pickle" not in detail and str(ctx.root) not in detail, detail
+
+
+@check("REST-101", "REST-102")
+def _a_save_refused_on_the_way_leaves_the_earlier_checkpoint(ctx):
+    name = f"keep{ctx.index}.npz"
+    assert ctx.client.post("/checkpoint/save", params={"path": name}).status_code == 200
+    digest = hashlib.sha256((ctx.root / name).read_bytes()).hexdigest()
+    manifest = ctx.root / f"{name}.manifest.json"
+    manifest.unlink()
+    manifest.mkdir()                     # the manifest's name taken by a directory
+    try:
+        resp = ctx.client.post("/checkpoint/save", params={"path": name})
+        refused(resp, 400, "nothing was written")
+        assert str(ctx.root) not in resp.json()["detail"]
+        assert hashlib.sha256((ctx.root / name).read_bytes()).hexdigest() == digest
+        assert not [p for p in ctx.root.rglob("*partial*")]
+    finally:
+        manifest.rmdir()

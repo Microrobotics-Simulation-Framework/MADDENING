@@ -65,7 +65,7 @@ Documented differences, which the oracle allows and nothing else:
   moved outside them must resume its own checkpoint into a freshly built
   graph.  It refuses what no save writes (text, a boolean) and what the
   dtype cannot hold, as every door does.  A decision, recorded in
-  ``MADD-ANO-160``.
+  ``MADD-ANO-163``.
 
 Known disagreements, pinned as strict xfails:
 
@@ -78,10 +78,10 @@ Fixed, and run as tests: **N1** -- the REST route stored a numeric string
 (``"1.5"``) in a float leaf as the number; **B2-H1** -- ``POST
 /checkpoint/load`` restored what PUT refuses: out of bounds, non-finite, a
 boolean, a numeric string, a value the constructor refuses
-(``MADD-ANO-160``), and ``load_state`` a boolean and a numeric string (the
+(``MADD-ANO-163``), and ``load_state`` a boolean and a numeric string (the
 rest of what it takes is D6); **B2-L10** -- ``POST /graph/nodes`` applied no
 ``ParamSpec`` bounds, and **N3** -- took a boolean for a float constant;
-**B2-H2** -- a write to a ``HybridNode`` was lost (``MADD-ANO-161``).  The
+**B2-H2** -- a write to a ``HybridNode`` was lost (``MADD-ANO-164``).  The
 sharded wrappers agree.
 
 Tolerance: none.  Acceptance is a yes or no, and a stored value is compared
@@ -764,7 +764,7 @@ def test_a_restore_door_refuses_what_no_door_takes_with_nothing_changed(doors, v
 @pytest.mark.parametrize("value", [-1.0, -5.0, math.nan, math.inf, True, "1.5"],
                          ids=["below-bound", "damping-like", "nan", "inf", "bool", "string"])
 def test_a_restore_door_refuses_what_the_write_doors_refuse(doors, value):
-    """B2-H1, fixed for ``POST /checkpoint/load`` (``MADD-ANO-160``); and
+    """B2-H1, fixed for ``POST /checkpoint/load`` (``MADD-ANO-163``); and
     ``load_state`` refuses the boolean and the string (it takes the numbers,
     D6)."""
     assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value,
@@ -998,7 +998,7 @@ def test_a_wrapper_node_refuses_a_value_outside_its_bounds_with_nothing_changed(
 
 
 def test_a_hybrid_node_holds_a_write_every_door_takes(wrapper_root):
-    """B2-H2, fixed (``MADD-ANO-161``)."""
+    """B2-H2, fixed (``MADD-ANO-164``)."""
     assert check_acceptance(wrapped("hybrid", wrapper_root), None, 45.0,
                             restore=True) == "accepted"
 

@@ -11387,7 +11387,7 @@ anomalies:
       - "tests/property/test_differential_coupling_topologies.py::test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-160"
+  - anomaly_id: "MADD-ANO-163"
     title: "POST /checkpoint/load restored parameter values PUT /graph/params refuses -- past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string -- answered 200, and left a graph whose save did not reload and whose steps diverged"
     description: >
       A checkpoint carries the graph's live parameter leaves, and the
@@ -11470,7 +11470,7 @@ anomalies:
       - "tests/property/test_differential_param_acceptance.py::test_load_state_restores_any_number_its_leaf_holds"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-161"
+  - anomaly_id: "MADD-ANO-164"
     title: "A parameter write to a HybridNode was answered and then lost: the hybrid held a copy of its physics node's params, so PUT /graph/params echoed the new value and the step kept the old one"
     description: >
       `HybridNode.__init__` passed its physics node's params to
@@ -11515,7 +11515,7 @@ anomalies:
       - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_hybrid_over_a_sharded_node_changes_the_trajectory"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-162"
+  - anomaly_id: "MADD-ANO-165"
     title: "POST /sim/run that could not have the graph part-way through answered 503 'Nothing was changed; retry shortly' after it had stepped, so a client that retried stepped the graph twice; its final read waited with no timeout"
     description: >
       A run steps in slices and takes the graph lock for each.  When a slice
@@ -11559,7 +11559,7 @@ anomalies:
       - "tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_zero_step_run_behind_a_long_holder_is_a_503_that_took_nothing"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-163"
+  - anomaly_id: "MADD-ANO-166"
     title: "POST /sim/profile answered 500 for a graph that could not compile with any error but a RuntimeError"
     description: >
       The profile route caught `RuntimeError` alone around the profiler,

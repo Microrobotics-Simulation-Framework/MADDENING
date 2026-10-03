@@ -1815,7 +1815,7 @@ claims:
     - tests/property/test_differential_param_acceptance.py::test_a_hybrid_node_takes_a_parameter_write_as_every_door_does
   status: verified
   notes: >-
-    Failing in the round-7 audit (MADD-ANO-161): HybridNode held a copy of
+    Failing in the round-7 audit (MADD-ANO-164): HybridNode held a copy of
     its physics node's params, so a write to a hybrid was echoed and lost
     (at every tag from v0.1.0 too).  The hybrid shares the dict now.
 
@@ -1992,7 +1992,7 @@ claims:
     - tests/property/test_differential_param_acceptance.py::test_load_state_restores_any_number_its_leaf_holds
   status: verified
   notes: >-
-    Failing in the round-7 audit (MADD-ANO-160): the load checked shapes,
+    Failing in the round-7 audit (MADD-ANO-163): the load checked shapes,
     dtypes and baked leaves only, so it restored a Fourier-unstable
     diffusivity and a damping below its bound with a 200.  Fixed by asking
     the archive's changed leaves what PUT asks, through the shared
@@ -3071,7 +3071,7 @@ claims:
     - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_run_with_the_graph_free_answers_its_state
   status: verified
   notes: >-
-    Failing in the round-7 audit (MADD-ANO-162): a slice's timeout answered
+    Failing in the round-7 audit (MADD-ANO-165): a slice's timeout answered
     "Nothing was changed; retry shortly" after 240 steps, and the final read
     waited with no timeout.
 

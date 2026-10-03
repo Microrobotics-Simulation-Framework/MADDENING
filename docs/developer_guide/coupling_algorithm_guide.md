@@ -269,8 +269,13 @@ reads as exactly zero in the group's norm.
 A bfloat16 or float16 field is measured in float32 (the round-6 fix,
 MADD-ANO-174): its value, widened exactly, is a normal float32 number, so
 the norm reads a float16 field below 6.1e-5, and its changes, like any
-other.  For the 16-bit rows the table describes the node's own arithmetic
-on the field, which still rounds and flushes in the field's dtype.
+other.  At the other end, the L2 norm's overflow rule (a scale whose
+reciprocal is not a normal number reads `inf`) applies in float32 too:
+bfloat16 shares float32's range and keeps its edge, `2**126`, while no
+finite float16 value reaches it, so a float16 field is measured up to
+65,504 under every norm (it read `inf` from `2**14` up).  For the 16-bit
+rows the table describes the node's own arithmetic on the field, which
+still rounds and flushes in the field's dtype.
 
 `GraphManager` checks each coupled group on the first step after every
 `compile()` and issues one `UnderflowRangeWarning` (a

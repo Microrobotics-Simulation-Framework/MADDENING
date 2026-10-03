@@ -12152,7 +12152,9 @@ anomalies:
       `optimization_barrier`, so the value measured is the rounded one the
       state holds), the sums start from a float32 zero, a 16-bit group's
       residual, loop carries and `_meta` slots are float32, and
-      `strict_convergence` decides "non-finite state" from the state.
+      `strict_convergence` decides "non-finite state" from the state.  The
+      L2 norm's overflow rule (CPL-043) applies in float32 too, so a float16
+      field is measured up to 65,504 where it read `inf` from `2**14` up.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -12183,6 +12185,7 @@ anomalies:
       - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_norm_at_the_default_rtol_is_finite_on_a_finite_change"
       - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_is_four_eps_over_rtol"
       - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_the_cap_on_a_finite_float16_state"
+      - "tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges"
     github_issue: null
   - anomaly_id: "MADD-ANO-175"
     title: "spectral_error_bound under convergence_norm='interface' with a transform on an internal edge read 0.0014-0.098x the true distance, spectral_usable=True"

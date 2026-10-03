@@ -2339,6 +2339,12 @@ def _fixed_point_while(
     def body(carry):
         x, _x_meas, res_prev, res_prev2, _res_prev3, i, acc = carry
         x_raw, res = step_pure(x, *consts)
+        # The residual carry is at least float32 (the seed below); a step
+        # that hands back a narrower residual -- a 16-bit iterate's own
+        # dtype -- is widened, exactly.  The graph's own step already
+        # returns it at least float32 (``_group_residual_dtype``), so this
+        # is the identity there.
+        res = jnp.asarray(res).astype(acc_dt)
         if idx is None:
             x_new, acc = accelerate(x, x_raw, acc, i)
         else:
@@ -2387,7 +2393,7 @@ def _fixed_point_while(
     loop_res = final_res
 
     def _measure_at_cap(_x):
-        r = step_pure(_x, *consts)[1]
+        r = jnp.asarray(step_pure(_x, *consts)[1]).astype(acc_dt)   # as the body's
         return r, amplification(r, loop_res, res_prev)
 
     # ``final_amp`` has to describe the pair that ends on the state

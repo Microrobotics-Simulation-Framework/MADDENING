@@ -1565,7 +1565,11 @@ claims:
   conditions: >-
     the non-finite rule under every norm; the overflow rule is "only
     reachable under the L2 norm's rtol=1.0" -- the mixed and interface
-    scales rtol * max|v| stay normal far above it.
+    scales rtol * max|v| stay normal far above it.  The dtype is the one
+    the norms measure in, at least float32: a bfloat16 or float16 field is
+    widened exactly first (MADD-ANO-174), so bfloat16 keeps float32's edge
+    and no finite float16 value reaches it -- a float16 field is measured
+    up to 65,504.
   oracle: closed form; a constant field (an exact fixed point) near overflow.
   tests:
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_is_active_and_contributes_inf
@@ -1573,6 +1577,11 @@ claims:
     - tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf
     - tests/core/test_coupling_claims_helpers.py::test_only_the_l2_norm_fails_a_field_near_overflow
   status: verified
+  notes: >-
+    The round-6 coupling fix widens a 16-bit field to float32 before any
+    norm forms from it (MADD-ANO-174); the float16 cells, which read inf
+    from float16's own 2**14 up, now pin it measured at that edge, one ulp
+    above and at 65,504.
   domains:
     f32: tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf
     f64:

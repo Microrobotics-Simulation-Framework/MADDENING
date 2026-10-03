@@ -363,7 +363,7 @@ claims:
     - src/maddening/api/auth.py:41 (module docstring)
     - src/maddening/api/auth.py:499 (APIAuth._write_token_file)
     - docs/release_notes/v0.4.0.md:4220 (The API authenticates when it is not bound to loopback)
-  conditions: a generated token on a non-loopback bind; the path absent, a file already there with mode 0644, the same file held open by a reader, a symbolic link at the path, a directory the server cannot write.
+  conditions: a generated token on a non-loopback bind; the path absent, a file already there with mode 0644, the same file held open by a reader, a symbolic link at the path, a directory the server cannot write; the path given in APIAuth(environ=) and not in os.environ, and the reverse.
   oracle: stat.S_IMODE of the file after announce(); what the earlier reader reads; the file untouched and the warning where it cannot be written.
   tests:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_new_token_file_is_written_with_mode_0600
@@ -372,6 +372,7 @@ claims:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_reader_who_had_the_old_token_file_open_cannot_read_the_new_token
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_file_path_that_is_a_link_writes_where_it_points
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_file_that_cannot_be_written_is_left_alone_and_logged
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_the_token_file_is_read_from_the_environment_the_instance_was_given
   status: verified
   notes: >-
     Failing in the first edition: os.open(path, O_CREAT | O_TRUNC, 0o600)
@@ -550,12 +551,14 @@ claims:
   sources:
     - src/maddening/api/server.py:1975 (SimulationServer, allowed_hosts)
     - src/maddening/api/server.py:1675 (_normalised_hosts)
-  conditions: an entry with a port and a request naming another port or none; a malformed entry.
+  conditions: an entry with a port and a request naming another port or none; a malformed entry -- a scheme, a space, a wildcard, a path, user info, a query or fragment, whitespace around it, a non-ASCII or over-long label -- and valid names, IP literals and labels with underscores.
   oracle: 200; ValueError.
   tests:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_an_allowed_host_is_matched_whatever_port_either_side_names
     - tests/api/test_cross_origin_requests.py::test_an_operator_can_name_more_hosts
     - tests/api/test_cross_origin_requests.py::test_an_allowed_hosts_entry_that_is_not_a_host_is_refused
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_an_allowed_hosts_entry_that_is_not_a_host_name_is_refused
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_an_allowed_hosts_entry_that_is_a_host_name_is_taken
   status: verified
 
 - id: REST-027
@@ -664,9 +667,13 @@ claims:
 - id: REST-032
   area: bounds
   claim: >-
-    "Node integer parameters <= 10000000" and at most MAX_NODE_PARAM_ELEMENTS
-    (10^6) values in one request's params, on POST /graph/nodes and
-    PUT /graph/params alike, a 422 from the request model; "Floats are not
+    An integer over MAX_NODE_PARAM_INT (10^7) for an integer parameter is a
+    422 from the route, on POST /graph/nodes and PUT /graph/params alike,
+    which reads the parameter's type (the running node's value on PUT, the
+    constructor's default on POST, a parameter with neither bounded as
+    written), so an integral JSON number for a float parameter is a float
+    and not bounded; at most MAX_NODE_PARAM_ELEMENTS (10^6) values in one
+    request's params, a 422 from the request model; "Floats are not
     bounded"; an integer too large to be a float is the 400 "value must be
     finite", not the 422.
   sources:
@@ -675,18 +682,29 @@ claims:
     - src/maddening/api/server.py:392 (_oversized_param)
     - src/maddening/api/server.py:477 (SetNodeParamsRequest)
   conditions: >-
-    the boundary: +/-10^7 accepted and +/-(10^7 + 1) refused, top-level and
-    nested; exactly 10^6 values accepted and one more refused; booleans not
-    counted as integers; an integral float on PUT bounded as an integer.
+    the boundary: +/-10^7 accepted and +/-(10^7 + 1) refused for an integer
+    parameter and inside an integer list, on both routes, written as an
+    integer and as an integral float; 20000000, 20000000.0 and 2e7 for a
+    float parameter (structural and a pytree leaf) taken on both routes; a
+    parameter with no default bounded; exactly 10^6 values accepted and one
+    more refused; booleans not counted as integers.
   oracle: pydantic ValidationError; route status.
   tests:
-    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_an_integer_of_exactly_the_bound_is_taken_and_one_more_is_refused
     - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_exactly_the_value_bound_is_taken_and_one_value_more_is_refused
     - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_the_integer_bound_is_a_422_on_both_routes
     - tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_an_integer_too_large_to_be_a_float_stays_a_400_not_finite
     - tests/api/test_request_bounds.py::TestAddNodeIsBounded::test_a_large_float_is_not_treated_as_a_dimension
     - tests/api/test_params_writes_the_step_cannot_run_with.py::test_an_integral_float_past_the_integer_bound_is_bounded_like_an_integer
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_an_integer_parameter_takes_exactly_the_bound_and_refuses_one_more
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_an_integral_number_for_a_float_parameter_is_a_float_on_both_routes
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_float_leaf_takes_an_integral_json_number_past_the_integer_bound
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_parameter_whose_default_says_nothing_is_bounded_as_written
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_the_request_models_bound_the_value_count_not_an_integers_magnitude
   status: verified
+  notes: >-
+    Failing in the round-7 audit: the request models bounded every JSON
+    integer, so a browser's JSON.stringify(2e7) for a float stiffness was a
+    422.  The bound moved to the routes, where the parameter's type is known.
 
 - id: REST-033
   area: bounds
@@ -900,18 +918,23 @@ claims:
   area: lock
   claim: >-
     "A request waits at most _GRAPH_LOCK_TIMEOUT (30 s) for the lock and then
-    answers 503": "Nothing was changed; retry shortly", with Retry-After.
+    answers 503": "Nothing was changed; retry shortly", with Retry-After --
+    except a /sim/run that had stepped, which answers REST-108's
+    interrupted 503.
   sources:
     - src/maddening/api/README.md:210 (Concurrency, limits and shutdown)
     - src/maddening/api/server.py:336 (_GRAPH_LOCK_TIMEOUT)
     - src/maddening/api/server.py:2250 (SimulationServer._graph_access)
   conditions: >-
     a route that takes only the graph lock (reads, PUT /graph/state,
-    PUT /graph/params, /sim/step), the lock held throughout, the timeout
-    patched to 0.2 s.  The runner routes are REST-044.
+    PUT /graph/params, /sim/step, and /sim/run's every wait), the lock held
+    throughout, the timeout patched to 0.2 s.  The runner routes are
+    REST-044.
   oracle: 503 with Retry-After 1 after about the timeout, and nothing written.
   tests:
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_a_request_that_cannot_have_the_graph_in_time_is_a_503_that_writes_nothing
+    - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_the_final_state_read_is_bounded_and_says_every_step_was_taken
+    - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_zero_step_run_behind_a_long_holder_is_a_503_that_took_nothing
   status: verified
 
 - id: REST-044
@@ -931,17 +954,27 @@ claims:
   conditions: >-
     a long holder of the graph lock, a POST /sim/start waiting for it, then
     runner routes (two resets; start, three resets, stride and stop) arriving
-    20 ms apart; the timeout patched to 0.25 s.  The surrogate routes are
-    out of scope.
-  oracle: each request answered within 1.6 timeouts of its arrival.
+    20 ms apart; the timeout patched to 0.25 s; and every worker thread of
+    the shared pool waiting for the graph (48 queued reads on one event
+    loop) when start, stop, pause, resume, reset or stride arrives, the
+    timeout patched to 1.5 s.  The surrogate routes are out of scope (they
+    still run on the shared pool).
+  oracle: each request answered within 1.6 timeouts of its arrival; stop, pause, resume and stride within half a timeout while the reads are still queued.
   tests:
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout
     - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_each_request_behind_a_long_holder_answers_within_about_one_timeout
+    - tests/api/test_runner_routes_do_not_wait_for_a_worker.py::test_a_runner_route_that_needs_no_graph_answers_at_once
+    - tests/api/test_runner_routes_do_not_wait_for_a_worker.py::test_a_runner_route_that_waits_for_the_graph_answers_within_one_timeout
   status: verified
   notes: >-
     failing until fix/p4-13-rest (#205): the runner lock was taken with no
     timeout while /sim/start and /sim/reset waited for the graph inside it,
     so the k-th request answered after about k timeouts.
+    Failing in the round-7 audit: the routes ran on the shared worker
+    pool, so behind a queue of requests waiting for the graph a stop
+    waited for a worker before its deadline started (5.6 s behind 240
+    reads at a 1 s timeout).  They run on pools of their own now, with
+    deadlines counted from arrival.
 
 - id: REST-045
   area: lock
@@ -957,7 +990,8 @@ claims:
     - src/maddening/viz/runner.py:47 (RealtimeRunner, lock)
   conditions: >-
     at once: the long holder is a request that is not a runner route (a
-    checkpoint save slowed to 1.5 s) while the runner runs.  Within one
+    checkpoint save slowed to 1.5 s) while the runner runs; and with every
+    worker thread of the shared pool waiting for the graph.  Within one
     timeout: a POST /sim/start is waiting for the graph when the stop
     arrives (it holds the runner lock until it gives up), timeout patched
     to 0.25 s.
@@ -965,6 +999,7 @@ claims:
   tests:
     - tests/api/test_concurrent_requests_are_serialised.py::test_stop_is_answered_while_another_request_holds_the_graph
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_stop_behind_a_start_waiting_for_the_graph_answers_within_one_lock_timeout
+    - tests/api/test_runner_routes_do_not_wait_for_a_worker.py::test_a_runner_route_that_needs_no_graph_answers_at_once
   status: verified
   notes: >-
     Behind a /sim/start that is waiting for the graph the stop is not
@@ -973,6 +1008,11 @@ claims:
     guide state.  The round-5 sentence's "at once" holds for a long holder
     that is not a runner route.  Until fix/p4-13-rest (#205) the wait was
     unbounded by any deadline of the stop's own.
+    Failing in the round-7 audit: the routes ran on the shared worker
+    pool, so behind a queue of requests waiting for the graph a stop
+    waited for a worker before its deadline started (5.6 s behind 240
+    reads at a 1 s timeout).  They run on pools of their own now, with
+    deadlines counted from arrival.
 
 - id: REST-046
   area: lock
@@ -981,7 +1021,9 @@ claims:
     after, within about one graph-lock timeout of the request in all; when
     the graph cannot be had in time the 503 (or a 409) says that the runner
     it stopped stays stopped, with was_running"; a 503 with nothing reset
-    when the runner's thread will not stop in time.
+    when the runner's thread will not stop in time, saying the runner was
+    told to stop and stays stopped, with was_running (a stop's own 503
+    too).
   sources:
     - src/maddening/api/server.py:3760 (sim_reset)
     - src/maddening/api/server.py:2304 (SimulationServer._after_stopping_the_runner)
@@ -997,6 +1039,7 @@ claims:
     - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_a_reset_that_cannot_have_the_graph_says_it_stopped_the_runner
     - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_a_reset_without_a_runner_says_only_that_nothing_was_reset
     - tests/api/test_runner_stop_and_stride.py::test_a_reset_whose_stop_times_out_resets_nothing
+    - tests/api/test_runner_stop_and_stride.py::test_a_stop_that_times_out_says_the_runner_stays_stopped
   status: verified
   notes: failing until fix/p4-13-rest (#205), whose reply said "Nothing was changed" of a runner it had just stopped.
 
@@ -1303,17 +1346,19 @@ claims:
   area: sim
   claim: >-
     POST /sim/profile returns "a Perfetto-loadable JSON trace", refused (409)
-    like every write while the runner runs or a /sim/run is in progress.
+    like every write while the runner runs or a /sim/run is in progress; a
+    graph that cannot step is a 400, as on /sim/step.
   sources:
     - src/maddening/api/server.py:4226 (sim_profile)
     - src/maddening/api/README.md:213 (Concurrency, limits and shutdown)
-  conditions: a compiled graph; the runner running; a /sim/run in progress.
+  conditions: a compiled graph; the runner running; a /sim/run in progress; an edge of mismatched shapes (an ExceptionGroup from the compile).
   oracle: the trace's structure; 409.
   tests:
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_returns_perfetto_json
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_includes_node_events
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_runner_running_returns_409
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_every_write_is_a_409_while_a_run_is_in_progress
+    - tests/api/test_profile_endpoints.py::test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept
   status: verified
   notes: That the profile leaves the live state where it was is REST-100.
 
@@ -1578,6 +1623,8 @@ claims:
     - tests/api/test_params_endpoint_reload_agreement.py::test_two_values_each_acceptable_alone_are_refused_together
     - tests/api/test_params_endpoint_reload_agreement.py::test_the_constructor_is_asked_with_the_live_values_a_save_would_carry
     - tests/api/test_params_writes_are_checked_together.py::test_a_combination_the_constructor_refuses_is_refused_naming_its_keys
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_the_constructor_refuses_at_this_timestep_is_not_loaded
+    - tests/core/test_hybrid_node.py::test_a_rest_write_to_a_hybrid_is_checked_against_the_node_it_wraps
   status: verified
   notes: MADD-ANO-048 is partially_resolved; its residual risk (a write that does not come through the route) is outside this inventory.
 
@@ -1679,6 +1726,7 @@ claims:
     - tests/api/test_params_writes_the_step_cannot_run_with.py::test_on_the_legacy_contract_an_integer_for_a_float_is_stored_as_a_float
     - tests/api/test_params_writes_the_step_cannot_run_with.py::test_the_coercion_rule
     - tests/api/test_params_endpoint_live_view.py::test_put_json_int_keeps_constructor_type_and_next_step_works
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_an_integral_number_for_a_float_parameter_is_a_float_on_both_routes
   status: verified
 
 - id: REST-083
@@ -1728,11 +1776,13 @@ claims:
     outside the leaf's ParamSpec bounds is refused and mutates nothing.
   sources:
     - src/maddening/api/server.py:3163 (set_node_params_locked)
-  conditions: a bounded leaf; plain and sharded nodes.
+  conditions: a bounded leaf; plain and sharded nodes; the same values on POST /graph/nodes and in a checkpoint POST /checkpoint/load restores.
   oracle: 400 and the params unchanged.
   tests:
     - tests/api/test_api.py::TestParamsEndpoint::test_put_out_of_bounds_is_400_and_mutates_nothing
     - tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_outside_a_sharded_nodes_bounds_is_refused_by_name
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_new_node_outside_its_param_spec_bounds_is_refused_as_a_params_write_is
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_outside_its_bounds_is_not_loaded
   status: verified
 
 - id: REST-086
@@ -1746,13 +1796,20 @@ claims:
     - src/maddening/api/server.py:3145 (set_node_params_locked)
     - src/maddening/api/server.py:3373 (set_node_params_locked, the write)
     - CHANGELOG.md:663 (PUT /graph/params echoes what it wrote)
-  conditions: the same writes before the first compile and after; a float and an integer written for float leaves.
+  conditions: the same writes before the first compile and after; a float and an integer written for float leaves; a HybridNode, plain and over a sharded node.
   oracle: the reply's params equal the next GET; the same status both ways.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_params_reply_is_what_a_get_then_reads
     - tests/api/test_params_endpoint_live_view.py::test_put_before_first_compile_is_validated_like_after
     - tests/property/test_stateful_api.py::test_a_param_write_before_the_first_compile_echoes_what_it_wrote
+    - tests/core/test_hybrid_node.py::test_a_rest_params_write_to_a_hybrid_node_is_kept
+    - tests/core/test_hybrid_node.py::test_a_node_params_write_on_a_hybrid_reaches_the_step
+    - tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_hybrid_over_a_sharded_node_changes_the_trajectory
   status: verified
+  notes: >-
+    Failing in the round-7 audit (MADD-ANO-151): HybridNode held a copy of
+    its physics node's params, so a write to a hybrid was echoed and lost
+    (at every tag from v0.1.0 too).  The hybrid shares the dict now.
 
 - id: REST-087
   area: params
@@ -1832,6 +1889,7 @@ claims:
     - tests/property/test_stateful_api.py::test_short_rest_sequences_keep_the_server_and_the_model_in_step
     - tests/property/test_stateful_api.py::test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step
     - tests/property/test_stateful_api.py::test_params_written_before_the_first_compile_survive_a_reset
+    - tests/api/test_profile_endpoints.py::test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept
   status: verified
   notes: The promise is stated in the test module, not in a user document; the row is here so the next audit attacks it with the rest.
 
@@ -1884,14 +1942,18 @@ claims:
   area: checkpoint
   claim: >-
     "POST /checkpoint/load?path=: Restore them.  A checkpoint that does not
-    fit this graph -- including one whose parameters carry another value of
-    one a node consumed at construction -- is a 400, and nothing is loaded";
-    a missing file is a 404.
+    fit this graph is a 400, and nothing is loaded: other node or field
+    names, a field or parameter of another shape, a value its dtype cannot
+    hold, or a parameter value PUT /graph/params would refuse on the node as
+    it stands -- non-finite, outside its ParamSpec bounds, refused by the
+    node's constructor with the graph's other values, one a node consumed at
+    construction, one that moves a mapped edge's points (asked only of a
+    parameter the load changes)"; a missing file is a 404.
   sources:
     - src/maddening/api/README.md:148 (Checkpoints)
     - src/maddening/api/server.py:3505 (checkpoint_load)
     - docs/user_guide/parameters.md:208 (Writing parameters over REST)
-  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a missing path.
+  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a leaf put back to the node's own value (loads); for a dozen values, the same verdict as PUT /graph/params; a missing path.
   oracle: 400 or 404, and the state and params unchanged.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded
@@ -1900,7 +1962,21 @@ claims:
     - tests/core/test_mapping_point_reference_writes.py::test_the_checkpoint_route_refuses_and_undoes_a_moved_length
     - tests/property/test_stateful_api.py::test_checkpoint_load_of_a_stale_structure_is_a_4xx_not_a_partial_restore
     - tests/api/test_checkpoint_paths_stay_inside_the_root.py::test_a_missing_checkpoint_is_a_404
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_the_constructor_refuses_at_this_timestep_is_not_loaded
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_outside_its_bounds_is_not_loaded
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_non_finite_parameter_in_a_checkpoint_is_not_loaded
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_every_check_takes_still_loads_and_runs
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_checkpoint_that_puts_a_leaf_back_to_the_nodes_own_value_loads
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_and_a_params_write_give_the_same_verdict_on_every_value
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_graph_manager_load_state_does_not_apply_the_rest_checks
   status: verified
+  notes: >-
+    Failing in the round-7 audit (MADD-ANO-150): the load checked shapes,
+    dtypes and baked leaves only, so it restored a Fourier-unstable
+    diffusivity and a damping below its bound with a 200.  Fixed by asking
+    the archive's changed leaves what PUT asks, through the shared
+    _params_write_refusal.  GraphManager.load_state does not ask them, by
+    decision (pinned by the last test).
 
 - id: REST-094
   area: checkpoint
@@ -2085,7 +2161,7 @@ claims:
   sources:
     - src/maddening/api/README.md:147 (Checkpoints)
     - src/maddening/api/server.py:3467 (checkpoint_save)
-  conditions: a save refused at its manifest; the checkpoint's name a directory (a save of d.npz/inner.npz); the manifest's name a directory; the manifest's own move refused; names outside the root, with a NUL, too long or a directory, on both routes.
+  conditions: a save refused at its manifest; the checkpoint's name a directory (a save of d.npz/inner.npz); the manifest's name a directory; the manifest's own move refused; names outside the root, with a NUL, too long or a directory, on both routes; the longest name whose manifest fits (saved and loaded), a name, a directory or a manifest name over NAME_MAX (refused before any directory is made), and a save refused after its directories were made (they are removed).
   oracle: the checkpoint root's listing and bytes before and after; the detail's words and the absence of the root, the working directory and the server's paths from it.
   tests:
     - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_refused_at_its_manifest_writes_no_new_checkpoint
@@ -2093,6 +2169,9 @@ claims:
     - tests/api/test_routes_answer_what_they_did.py::test_a_save_whose_manifest_name_is_taken_by_a_directory_writes_nothing
     - tests/api/test_routes_answer_what_they_did.py::test_a_save_whose_manifest_cannot_be_moved_says_the_checkpoint_was_written
     - tests/api/test_routes_answer_what_they_did.py::test_no_checkpoint_refusal_names_an_absolute_server_path
+    - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_every_name_the_filesystem_holds_saves_with_its_manifest
+    - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_name_too_long_is_refused_before_any_directory_is_made
+    - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_refused_after_its_directories_were_made_removes_them
   status: verified
   notes: >-
     Failing in the first edition: the manifest was written beside the target
@@ -2236,11 +2315,17 @@ claims:
   sources:
     - benchmarks/multigpu/run_pod.py:134 (module docstring)
     - benchmarks/multigpu/run_pod.py:179 (_pre_import_setup)
-  conditions: JAX_PLATFORMS unset, cpu, cuda; XLA_FLAGS empty, other flags, a device count of its own; without --dry-run.
+  conditions: JAX_PLATFORMS unset, cpu, cuda; XLA_FLAGS empty, other flags, a device count of its own; without --dry-run; an abbreviation of --dry-run (refused by the parser, so the two readers agree).
   oracle: the environment after _pre_import_setup.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_dry_run_pins_the_cpu_backend_with_four_devices_unless_told_otherwise
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_dry_run_is_pinned_whenever_the_parser_reads_one
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_an_abbreviated_dry_run_exits_2_before_running_anything
   status: verified
+  notes: >-
+    Failing in the round-7 audit: argparse took --dry as --dry-run, which
+    the pre-import pin (literal --dry-run) did not see, so such a dry run
+    used the GPUs.  The parser takes no abbreviations now (RPD-038).
 
 - id: RPD-003
   area: run_pod-cli
@@ -2291,7 +2376,9 @@ claims:
     visible is refused before anything runs; sizes default to the hardware:
     "on GPUs the cell counts are 1e5, 3e5, 1e6; on CPU (or with --dry-run)
     they are a few hundred cells", with 1 warmup, 3 repeats, 3 steps and a
-    300-iteration CG cap on a dry run.
+    300-iteration CG cap on a dry run; a synthetic mesh never has fewer
+    cells than requested (a grid is the smallest square holding them), so
+    every default GPU size can decide the transport (RPD-037).
   sources:
     - benchmarks/multigpu/run_pod.py:131 (module docstring, sizes)
     - benchmarks/multigpu/run_pod.py:3539 (parse_args, --n-devices)
@@ -2305,6 +2392,8 @@ claims:
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_dry_run_runs_every_goal_in_order_at_small_sizes
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_more_devices_than_are_visible_are_refused_before_any_goal_runs
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_synthetic_mesh_never_has_fewer_cells_than_requested
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_every_default_gpu_size_decides_and_all_to_all_faster_at_1e5_keeps_the_default
   status: verified
 
 - id: RPD-007
@@ -2360,12 +2449,13 @@ claims:
     - benchmarks/multigpu/README.md:379 (5. Read the result)
     - benchmarks/multigpu/run_pod.py:3483 (summarise)
     - benchmarks/multigpu/run_pod.py:2719 (_load_results)
-  conditions: a goal file a killed run left truncated; one that is valid JSON but a list, null or a string; an empty file; one not in UTF-8.
+  conditions: a goal file a killed run left truncated; one that is valid JSON but a list, null or a string; an empty file; one not in UTF-8; a goal-named file (halo_rerun.json) holding {}, an object with no goal, or another goal's record.
   oracle: summarise's return value and the file named as unreadable in its output.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_truncated_goal_file_reads_invalid_and_the_summary_exits_3
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_goal_file_that_is_not_an_object_reads_invalid_and_the_summary_exits_3
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_any_goal_file_that_is_not_a_json_object_reads_invalid_naming_the_file
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_goal_named_file_that_records_another_goal_reads_invalid
   status: verified
   notes: >-
     Failing in the first edition: json.load and doc.get were called on every
@@ -2632,13 +2722,15 @@ claims:
     "The recommendation only counts rows from a real accelerator run (not
     --dry-run) on at least MIN_DECIDING_DEVICES (4) devices; with
     --allow-fewer-devices ... a 2- or 3-device run may decide.  A single
-    device performs no exchange and never decides"; a row decides only at
-    >= 1e5 cells, from a file that reads PASS, with a finite speedup.
+    device performs no exchange and never decides"; a row decides only when
+    it was requested at >= 1e5 cells and measured at no fewer, from a file
+    that reads PASS, with a finite speedup derived from its two medians (the
+    file's ppermute_speedup_median is not read).
   sources:
     - benchmarks/multigpu/run_pod.py:125 (module docstring)
     - benchmarks/multigpu/run_pod.py:3044 (recommend)
     - benchmarks/multigpu/README.md:470 (5. Read the result)
-  conditions: rows at 99 999 and 100 000 cells; 1, 2, 3, 4 devices with and without the flag; cpu and dry-run rows; a zero median; a file that fails.
+  conditions: rows at 99 999 and 100 000 cells; 1, 2, 3, 4 devices with and without the flag; cpu and dry-run rows; a zero median; a file that fails; a row requested at 99 999 measured at 100 489; one measured below its request; one with no requested_cells; a recorded speedup of inf, NaN or one its medians contradict; non-finite or negative medians and an overflowing ratio.
   oracle: each row's deciding flag and the decision.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_row_decides_only_at_enough_cells_and_devices
@@ -2646,7 +2738,13 @@ claims:
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_recommendation_requires_four_devices_unless_fewer_are_allowed
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_recommendation_survives_zero_median
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_transport_ranking_uses_only_a_file_that_passes
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_row_decides_on_its_requested_size_measured_at_no_fewer_cells
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_the_speedup_is_rederived_from_the_medians_and_must_be_finite
   status: verified
+  notes: >-
+    Failing in the round-7 audit: with the default --synthetic grid the
+    "1e5" row measured 316**2 = 99 856 cells and never decided, and an
+    infinite or NaN recorded speedup decided (or tied).
 
 - id: RPD-023
   area: run_pod-recommendation
@@ -2655,7 +2753,8 @@ claims:
     least margin [1.05] at every deciding row; all_to_all keeps the default
     when it is faster at any such row; anything in between is a tie.
     Without a deciding row the result is undecided and reason says what each
-    row lacked."
+    row lacked"; with one, the reason counts the rows that do not decide and
+    --summarise lists each under "Rows that do not decide" with why.
   sources:
     - benchmarks/multigpu/run_pod.py:3053 (recommend)
     - benchmarks/multigpu/README.md:461 (5. Read the result)
@@ -2665,6 +2764,8 @@ claims:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_the_recommendation_at_its_thresholds
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_recommendation_rule
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_recommendation_uses_only_the_deciding_rows_of_mixed_docs
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_every_default_gpu_size_decides_and_all_to_all_faster_at_1e5_keeps_the_default
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_the_summary_lists_every_row_that_does_not_decide
   status: verified
 
 # ---------------------------------------------------------------------------
@@ -2794,7 +2895,7 @@ claims:
 - id: RPD-030
   area: run_pod-records
   claim: >-
-    "Schema of the JSON (schema_version 6)": the common keys (goal, dry_run,
+    "Schema of the JSON (schema_version 7)": the common keys (goal, dry_run,
     allow_fewer_devices, n_devices, environment with hostname ...
     git_commit, config, wall_s, results, checks {name, value, limit, sense,
     passed}, passed) on every file.
@@ -2916,4 +3017,87 @@ claims:
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_coupled_json_compares_forward_and_adjoint_under_both_solvers
     - tests/cloud/multigpu/test_coupling_group_with_sharded_and_replicated_members.py::test_the_forward_rollout_matches_the_group_with_the_unsharded_inner_node
     - tests/cloud/multigpu/test_coupling_group_with_sharded_and_replicated_members.py::test_the_forward_rollout_is_the_implicitly_coupled_step
+  status: verified
+
+- id: REST-108
+  area: sim
+  claim: >-
+    POST /sim/run: "Every graph-lock wait is bounded by _GRAPH_LOCK_TIMEOUT,
+    the final state's read and an n_steps=0 compile included.  One that
+    runs out answers the same 503 interrupted body, steps_run saying how many
+    steps were taken and stored: retry the whole run only when it is 0 (the
+    reply then carries Retry-After); otherwise the detail says how many
+    remain."
+  sources:
+    - src/maddening/api/server.py:4030 (sim_run)
+    - src/maddening/api/README.md:161 (Simulation Control)
+  conditions: >-
+    the timeout patched to 0.25 s; the test thread taking the lock between
+    two slices of a 100 000-step run, between a 1-step run's slice and its
+    final read, and between an n_steps=0 run's first access and its compile;
+    the graph free (the control).
+  oracle: 503 with status interrupted, steps_run equal to the steps the graph took, the remaining count in the detail, Retry-After only at 0; answered at about the timeout.
+  tests:
+    - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_run_that_cannot_have_the_graph_between_slices_says_how_many_steps_it_took
+    - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_the_final_state_read_is_bounded_and_says_every_step_was_taken
+    - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_zero_step_run_behind_a_long_holder_is_a_503_that_took_nothing
+    - tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_run_with_the_graph_free_answers_its_state
+  status: verified
+  notes: >-
+    Failing in the round-7 audit (MADD-ANO-152): a slice's timeout answered
+    "Nothing was changed; retry shortly" after 240 steps, and the final read
+    waited with no timeout.
+
+- id: REST-109
+  area: auth
+  claim: >-
+    A token with whitespace before or after it raises, from the token=
+    argument and from MADDENING_API_TOKEN alike: "a client's Authorization
+    header is read stripped, so no client could ever present it".
+  sources:
+    - src/maddening/api/README.md:49 (The token)
+    - src/maddening/api/auth.py:33 (module docstring, Where the token comes from)
+    - src/maddening/api/auth.py:370 (APIAuth.__init__)
+  conditions: a trailing space, a leading space, a trailing newline, a leading tab, on token= and in the environment; whitespace inside a token (taken, and presented).
+  oracle: ValueError naming the whitespace; 200 with the inner-space token.
+  tests:
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_with_whitespace_around_it_is_refused_at_construction
+  status: verified
+  notes: Found by the round-7 audit, where such a token locked out every client with a 401 and nothing said at start-up.
+
+- id: RPD-037
+  area: run_pod-recommendation
+  claim: >-
+    A synthetic mesh never has fewer cells than requested ("a grid, the
+    smallest square holding at least that many cells -- 317² = 100 489,
+    548² = 300 304 and 1000²"); an exchange row records requested_cells
+    (schema 7), and the runner's own record of a requested size is the only
+    one that matches its case.
+  sources:
+    - benchmarks/multigpu/run_pod.py:452 (_grid_side, synthetic_cells)
+    - benchmarks/multigpu/README.md:277 (Defaults on GPUs)
+    - benchmarks/multigpu/run_pod.py:2825 (case_keys)
+  conditions: requested counts 1 to 1 000 001 around perfect squares and the GPU sizes; both synthetic kinds; a row recorded at the old rounded size.
+  oracle: the side is ceil(sqrt(n)) and at least 2; grid_edges builds what synthetic_cells predicts; record_problems names the rounded row.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_synthetic_mesh_never_has_fewer_cells_than_requested
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_row_decides_on_its_requested_size_measured_at_no_fewer_cells
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_every_default_gpu_size_decides_and_all_to_all_faster_at_1e5_keeps_the_default
+  status: verified
+
+- id: RPD-038
+  area: run_pod-cli
+  claim: >-
+    "Spell every option out: the runner takes no abbreviations (--dry is
+    refused with exit 2), because the CPU pin of a dry run reads the
+    literal --dry-run before the options are parsed."
+  sources:
+    - benchmarks/multigpu/README.md:145 (0. Before spending anything)
+    - benchmarks/multigpu/run_pod.py:3575 (_parser)
+  conditions: every proper prefix (3 characters and more) of every option; --dry as a subprocess that never imports JAX.
+  oracle: SystemExit 2 and "unrecognized arguments"; nothing written.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_the_cli_takes_no_abbreviations
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_an_abbreviated_dry_run_exits_2_before_running_anything
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_dry_run_is_pinned_whenever_the_parser_reads_one
   status: verified

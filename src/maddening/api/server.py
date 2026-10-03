@@ -2445,28 +2445,28 @@ class SimulationServer:
             else:
                 self._stop_trace_if_out_of_time()
 
-    def _stop_trace_if_out_of_time(self, started: Optional[float] = None) -> None:
+    def _stop_trace_if_out_of_time(self) -> None:
         """Stop the trace if it has run :data:`MAX_JAX_TRACE_SECONDS`;
-        call it holding the trace lock.  *started* is the start time of the
-        trace a timer was set for: a timer left over from an earlier trace
-        stops nothing.
+        call it holding the trace lock.  The elapsed time is read here, so
+        a timer left over from an earlier trace -- which a stop cancels, but
+        which may already be firing -- stops a later one only once that one
+        is out of time too.
 
         The time used to be read only when a step was recorded, so a trace
         started on an idle simulation ran past its budget until the next
         step, or for ever.  It is now read by a timer set when the trace
         starts, and again by every status, stop and step, whichever comes
         first."""
-        if self._trace_started is None or (started is not None
-                                           and started != self._trace_started):
+        if self._trace_started is None:
             return
         budget = MAX_JAX_TRACE_SECONDS
         if time.monotonic() - self._trace_started >= budget:
             self._stop_trace(f"its time budget, {budget:g} s")
 
-    def _trace_time_is_up(self, started: float) -> None:
-        """The time budget's timer: stop the trace it was set for."""
+    def _trace_time_is_up(self) -> None:
+        """The time budget's timer: stop the trace if it is out of time."""
         with self._trace_lock:
-            self._stop_trace_if_out_of_time(started)
+            self._stop_trace_if_out_of_time()
 
     def _stop_trace(self, by: str) -> Optional[str]:
         """Stop the JAX trace this server started, holding the trace lock;
@@ -4383,9 +4383,8 @@ class SimulationServer:
                     raise HTTPException(status_code=400, detail=str(exc))
                 self._trace_steps = 0
                 self._trace_stopped_by = None
-                started = self._trace_started = time.monotonic()
-                timer = threading.Timer(MAX_JAX_TRACE_SECONDS, self._trace_time_is_up,
-                                        args=(started,))
+                self._trace_started = time.monotonic()
+                timer = threading.Timer(MAX_JAX_TRACE_SECONDS, self._trace_time_is_up)
                 timer.daemon = True
                 self._trace_timer = timer
                 timer.start()

@@ -1827,3 +1827,131 @@ def _a_save_refused_on_the_way_leaves_the_earlier_checkpoint(ctx):
         assert not [p for p in ctx.root.rglob("*partial*")]
     finally:
         manifest.rmdir()
+
+
+# ===========================================================================
+# More rows: REST-033, REST-036, REST-087, REST-103, REST-104
+# ===========================================================================
+
+@check("REST-033", skip=("wrapper", "shutdown"),
+       patch={"MAX_RUN_STEPS": 12, "MAX_NODE_STATE_ELEMENTS": 8})
+def _each_bound_is_a_422_or_a_400_naming_the_size_at_its_edge(ctx):
+    """The request-model bounds are 422s (``n_steps`` one past its bound, an
+    integer one past its bound) whatever runs beside the request; a node
+    whose state would pass the per-node cap (patched to eight elements) is a
+    400 naming the size, and nothing is added."""
+    from maddening.api.server import MAX_NODE_PARAM_INT
+
+    refused(ctx.client.post("/sim/run", params={"n_steps": 13}), 422, "n_steps")
+    refused(_put(ctx, "c", {"n_cells": MAX_NODE_PARAM_INT + 1}), 422)
+    if ctx.domain in ("runner", "sim_run"):
+        return          # a node cannot be added beside a stepper (REST-041's 409)
+    before = structure(ctx)
+    resp = ctx.client.post("/graph/nodes", json={
+        "type": "HeatNode", "name": f"wide{ctx.index}", "timestep": 0.01,
+        "params": {"n_cells": 9, "thermal_diffusivity": 0.001}})
+    refused(resp, 400)
+    assert "9" in resp.json()["detail"]
+    if ctx.copies == 1:
+        assert structure(ctx) == before
+    assert f"wide{ctx.index}" not in ctx.gm._nodes
+
+
+@check("REST-036", only=("loopback", "public", "restored", "shutdown"))
+def _nodes_are_built_one_at_a_time(ctx):
+    """Four POST /graph/nodes from four clients at once: every node is
+    added, and no two constructors ever ran at the same time."""
+    running, overlaps = [0], [0]
+    guard = threading.Lock()
+    real_init = SpringDamperNode.__init__
+
+    def counting(self, *args, **kwargs):
+        with guard:
+            running[0] += 1
+            overlaps[0] += running[0] > 1
+        try:
+            time.sleep(0.02)
+            real_init(self, *args, **kwargs)
+        finally:
+            with guard:
+                running[0] -= 1
+
+    codes: list = []
+
+    def add(i):
+        def job():
+            c = ctx.make_client(headers=dict(BEARER) if ctx.enforced else {}, peer=None)
+            codes.append(c.post("/graph/nodes", json={
+                "type": "SpringDamperNode", "name": f"n{i}", "timestep": 0.01,
+                "params": {}}).status_code)
+        return job
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(SpringDamperNode, "__init__", counting)
+        _threads([add(i) for i in range(4)])
+    assert codes == [201] * 4
+    assert overlaps[0] == 0, f"{overlaps[0]} constructors ran beside another"
+
+
+@check("REST-087", bind="public", only=("wrapper",))
+def _a_write_to_a_sharded_node_reaches_the_physics(ctx):
+    """On a server told it is bound to 0.0.0.0 (every request with the
+    token), a REST write to the rod a ``ShardedStencilNode`` wraps (``a``,
+    whose temperatures vary along it) changes its next step exactly as the
+    same write changes the unwrapped rod's, and unlike no write at all."""
+    assert ctx.enforced
+    start = ctx.gm.get_node_state("a")
+    plain, unwritten = build_graph(), build_graph()
+    for twin in (plain, unwritten):
+        twin.set_node_state("a", start)
+    resp = _put(ctx, "a", {"thermal_diffusivity": 0.02})
+    assert resp.status_code == 200, resp.text
+    plain.params["nodes"]["a"]["thermal_diffusivity"] = 0.02
+    assert ctx.client.post("/sim/step").status_code == 200
+    plain.step()
+    unwritten.step()
+    got = np.asarray(ctx.gm.get_node_state("a")["temperature"])
+    np.testing.assert_allclose(got, np.asarray(plain.get_node_state("a")["temperature"]),
+                               rtol=1e-6)
+    assert not np.allclose(got, np.asarray(unwritten.get_node_state("a")["temperature"]),
+                           rtol=1e-7, atol=0.0), "the write changed nothing the step reads"
+
+
+def _stop_any_trace() -> None:
+    from maddening.core.simulation import profiler
+
+    if profiler.jax_trace_active():
+        profiler.stop_jax_trace()
+
+
+@check("REST-103", only=("public", "restored"), patch={"MAX_JAX_TRACE_STEPS": 4})
+def _a_trace_stops_itself_at_its_step_budget(ctx):
+    advance(ctx, 1)                       # compiled before tracing
+    try:
+        resp = ctx.client.post("/sim/profile/jax/start")
+        assert resp.status_code == 200, resp.text
+        advance(ctx, 3)
+        assert ctx.client.get("/sim/profile/jax/status").json()["active"] is True
+        advance(ctx, 3)
+        status = ctx.client.get("/sim/profile/jax/status").json()
+        assert status["active"] is False and status["steps"] == 4
+        assert "step budget" in status["stopped_by"]
+        refused(ctx.client.post("/sim/profile/jax/stop"), 409, "stopped itself after 4 steps")
+    finally:
+        _stop_any_trace()
+
+
+@check("REST-104", only=("public", "restored"), patch={"MAX_JAX_TRACE_SECONDS": 0.1})
+def _a_trace_stops_itself_at_its_time_budget(ctx):
+    from maddening.core.simulation import profiler
+
+    advance(ctx, 1)
+    try:
+        resp = ctx.client.post("/sim/profile/jax/start")
+        assert resp.status_code == 200, resp.text
+        assert wait_for(lambda: not profiler.jax_trace_active(), 20), \
+            "an idle trace did not stop at its time budget"
+        status = ctx.client.get("/sim/profile/jax/status").json()
+        assert status["active"] is False and "time budget" in status["stopped_by"]
+    finally:
+        _stop_any_trace()

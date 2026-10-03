@@ -66,8 +66,10 @@ def test_the_token_is_an_exact_identity_on_every_value(mesh, dtype):
                         float(fi.eps)], dtype)
     vals = jnp.concatenate([vals, vals[:4]])        # sixteen: four per device
     x = jax.device_put(vals, NamedSharding(mesh, P("devices")))
-    out = jax.jit(lambda v: _strict_error_if(
-        {"v": v, "n": jnp.int32(3)}, jnp.asarray(False), "never", mesh))(x)
+    # The verdict is an argument, as a step's is: a constant ``False`` lets
+    # the compiler fold the check and the token away.
+    out = jax.jit(lambda v, p: _strict_error_if(
+        {"v": v, "n": jnp.int32(3)}, p, "never", mesh))(x, jnp.asarray(False))
     assert np.array_equal(_bits(out["v"]), _bits(vals))
     assert int(out["n"]) == 3
 

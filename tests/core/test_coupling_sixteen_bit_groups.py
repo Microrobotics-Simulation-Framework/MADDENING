@@ -236,23 +236,58 @@ def test_the_ift_gradient_of_a_sixteen_bit_group_is_its_coupled_sensitivity(dtyp
     assert abs(fwd - want) <= tol, (fwd, want, tol)
 
 
+class _Mixing(SimulationNode):
+    """``x <- G @ u + b``: a dense coupling, so the adjoint's Krylov space has no
+    shortcut (every entry reads every other)."""
+
+    def __init__(self, name, G, b, dtype):
+        super().__init__(name, 1.0, G=jnp.asarray(G, dtype), b=jnp.asarray(b, dtype))
+        self._n, self._dtype = len(b), dtype
+
+    def initial_state(self):
+        return {"x": jnp.zeros((self._n,), self._dtype)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(self._n,), dtype=self._dtype,
+                                       default=jnp.zeros((self._n,), self._dtype))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": (p["G"] @ boundary_inputs["u"] + p["b"]).astype(self._dtype)}
+
+
 @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16])
 def test_a_sixteen_bit_group_above_the_dense_fallback_differentiates_by_gmres(dtype):
     """128 coupled entries, above the 50 at which a failed GMRES re-solves
-    densely: the float32 GMRES must meet its criterion on the 16-bit operator
-    by itself.  A float32 criterion (100 float32 ``eps``) is unreachable on an
-    operator whose products are rounded to 16 bits, and raised "the coupling
-    adjoint solve did not converge"; the criterion is four units of the
-    dtype's roundoff, and the gradient is the dense answer's to the dtype's
-    resolution."""
+    densely, so the float32 GMRES must meet its criterion on the 16-bit
+    operator by itself.  ``a <- diag(g) u + b_a`` reads a dense ``b <- G u + b_b``
+    (radius 0.5).  A float32 criterion (100 float32 ``eps``) is unreachable on
+    an operator whose products are rounded to 16 bits and raised "the coupling
+    adjoint solve did not converge"; a criterion of 100 units of the 16-bit
+    dtype (0.78 in bfloat16) stopped GMRES at its first iterate.  The gradient
+    of ``sum(x_a)`` in ``b_a`` is ``1^T (I - diag(g) G)^{-1}`` of the gains as
+    the dtype holds them, to two ``eps`` of the dtype in norm -- the 16-bit
+    output's own resolution."""
     n = 64
-    gm = _affine_pair(dtype, n)
+    rng = np.random.default_rng(7)
+    g = rng.uniform(0.3, 0.7, n)
+    G = rng.standard_normal((n, n))
+    G *= 0.5 / np.max(np.abs(np.linalg.eigvals(np.diag(g) @ G)))
+    gm = GraphManager()
+    gm.add_node(_Affine("a", g, 1.0, n, dtype))
+    gm.add_node(_Mixing("b", G, rng.uniform(-1, 1, n), dtype))
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_coupling_group(["a", "b"], tolerance=1e-2, max_iterations=200)
+    gm.compile()
     p = jax.tree.map(lambda v: v, gm.params)
-    want = _sensitivity(gm, dtype)
-    g = np.asarray(jax.grad(_xa_total(gm))(p)["nodes"]["a"]["b"], np.float64)
-    assert g.shape == (n,) and np.all(np.isfinite(g)), g
+    got = np.asarray(jax.grad(_xa_total(gm))(p)["nodes"]["a"]["b"], np.float64)
+    r = lambda v: np.asarray(jnp.asarray(v, dtype), np.float64)  # noqa: E731
+    want = np.linalg.solve((np.eye(n) - np.diag(r(g)) @ r(G)).T, np.ones(n))
     eps = float(jnp.finfo(dtype).eps)
-    assert np.max(np.abs(g - want)) <= 4 * eps * want * want, (g, want)
+    assert np.all(np.isfinite(got)), got
+    assert np.linalg.norm(got - want) <= 2 * eps * np.linalg.norm(want), (
+        np.linalg.norm(got - want) / np.linalg.norm(want))
 
 
 _SPECTRAL_SLOTS = ("rho_spectral", "spectral_residual", "spectral_amplification",

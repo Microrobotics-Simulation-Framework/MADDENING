@@ -8923,8 +8923,10 @@ class GraphManager:
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1``; ``inf``
               or NaN where ``"spectral_error_bound"`` is; NaN where the
-              fixed point responds to no constant and where the returned
-              state is not finite.  Costs
+              fixed point responds to no constant, where a constant's
+              tangent through the group is not finite (that constant
+              has no gradient to bound) and where the returned state is
+              not finite.  Costs
               ``11 + k + 5 n_p`` Jacobian-vector products per group per
               step beside the spectral bound's eight (plus one
               linearisation and ``k`` reverse-mode products where the

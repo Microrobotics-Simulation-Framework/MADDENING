@@ -132,11 +132,17 @@ def test_a_usable_gradient_bound_covers_every_gain_of_a_rank_one_ring(design, ca
     assert d["gradient_relative_error_bound"] >= worst, (d["gradient_relative_error_bound"], worst)
 
 
-def _field_pair(cap):
-    """The audit's two-node group: ``A <- G_A @ x_B`` with a 1x2 gain, ``B`` relays ``A``."""
+def _field_pair(cap, width=2):
+    """The audit's two-node group: ``A <- G_A @ x_B`` with a 1x2 gain, ``B`` relays ``A``.
+
+    ``width`` pads ``x_B``, ``G_A``, ``G_B`` and ``b_B`` with zeros to that
+    many entries; the fixed point and the two gradients are the same.
+    """
+    pad = [0.0] * (width - 2)
     gm = GraphManager()
-    gm.add_node(_Lin("A", 0.0, [[1.0, 0.9]], [0.0], [0.0]))
-    gm.add_node(_Lin("B", 0.0, [[0.0], [1.0]], [100.0, -99.0], [0.0, 0.0]))
+    gm.add_node(_Lin("A", 0.0, [[1.0, 0.9] + pad], [0.0], [0.0]))
+    gm.add_node(_Lin("B", 0.0, [[0.0], [1.0]] + [[0.0]] * (width - 2), [100.0, -99.0] + pad,
+                     [0.0] * width))
     gm.add_edge("B", "A", "x", "u")
     gm.add_edge("A", "B", "x", "u")
     gm.add_coupling_group(["A", "B"], max_iterations=cap, tolerance=1e-7, diagnostics=True)
@@ -144,17 +150,22 @@ def _field_pair(cap):
     return gm
 
 
-@pytest.mark.parametrize("cap", [20, 24, 40])
-def test_each_entry_of_an_array_gain_is_its_own_probe(cap):
-    """``d x / d G_A[0, 1]``: 1.6-23.6x the old one-direction bound; covered now."""
-    gm = _field_pair(cap)
+@pytest.mark.parametrize("cap, width", [(20, 2), (24, 2), (40, 2),
+                                        (24, GRADIENT_PROBE_ENTRY_LIMIT)])
+def test_each_entry_of_an_array_gain_is_its_own_probe(cap, width):
+    """``d x / d G_A[0, 1]``: 1.6-23.6x the old one-direction bound; covered now.
+
+    At ``GRADIENT_PROBE_ENTRY_LIMIT`` entries too: a constant at the limit
+    is still probed entry by entry.
+    """
+    gm = _field_pair(cap, width)
     step, st0, ext, params = gm._compiled_step, gm._state, gm._default_external_inputs(), gm.params
     out = step(st0, ext, params)
     gm._store_state(out)
     d = gm.coupling_diagnostics()["A+B"]
     xa, xb = (np.asarray(out[m]["x"], np.float64) for m in ("A", "B"))
     xs_b = np.array([100.0, 10.0])        # the fixed point of B: (100, x_A* - 99) with x_A* = 109
-    w = np.concatenate([1.0 / np.abs(xa), 1.0 / np.max(np.abs(xb)) * np.ones(2)])
+    w = np.concatenate([1.0 / np.abs(xa), 1.0 / np.max(np.abs(xb)) * np.ones(width)])
     worst = 0.0
     for j in range(2):
         tang = jax.tree.map(jnp.zeros_like, params)
@@ -164,7 +175,7 @@ def test_each_entry_of_an_array_gain_is_its_own_probe(cap):
         # d x*/d G_A[0, j] = (I - M)^{-1} e_A x_B*[j]; with M's loop gain 0.9 (A reads B[1]
         # with 0.9, B[1] reads A with 1): the A entry is x_B*[j] / (1 - 0.9), B[1] the same.
         val = xs_b[j] / (1.0 - float(np.float32(0.9)))
-        t_star = np.array([val, 0.0, val])
+        t_star = np.array([val, 0.0, val] + [0.0] * (width - 2))
         worst = max(worst, float(np.linalg.norm(w * (g_k - t_star)) / np.linalg.norm(w * g_k)))
     assert d["gradient_bound_usable"], dict(d)
     assert d["gradient_relative_error_bound"] >= worst, (d["gradient_relative_error_bound"], worst)

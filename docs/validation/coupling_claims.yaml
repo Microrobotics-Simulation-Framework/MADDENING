@@ -1856,7 +1856,8 @@ claims:
     not the Krylov-restricted factor, MADD-ANO-XH1); gradient_bound_usable
     is "finite and spectral_usable is True"; NaN "for "fori", for
     diagnostics=False, at max_iterations=1 ... where the fixed point responds
-    to no constant and where the returned state is not finite".
+    to no constant, where a constant's tangent through the group is not
+    finite ... and where the returned state is not finite".
   sources:
     - src/maddening/core/graph_manager.py:8057 (coupling_diagnostics, gradient_relative_error_bound)
     - src/maddening/core/graph_manager.py:8141 (coupling_diagnostics, gradient_bound_usable)
@@ -1865,6 +1866,11 @@ claims:
   oracle: the flag and value against each condition; the helper's conventions.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes
+    - tests/core/test_coupling_full_resolvent_norm.py::test_the_full_resolvent_norm_matches_the_dense_inverse
+    - tests/core/test_coupling_full_resolvent_norm.py::test_without_a_transpose_a_wide_basis_has_no_norm_and_a_square_one_needs_none
+    - tests/core/test_coupling_kantorovich_takes_the_full_resolvent.py::test_the_bound_is_unusable_where_the_full_norm_puts_h_above_one_half
+    - tests/core/test_coupling_kantorovich_takes_the_full_resolvent.py::test_the_bound_is_usable_and_holds_where_the_full_norm_puts_h_below_one_half
+    - tests/core/test_coupling_gradient_bound_poisoned_by_a_non_finite_tangent.py::test_a_constant_with_no_finite_tangent_leaves_no_usable_bound
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_reads_nan_and_unusable_where_nothing_was_computed
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_gradient_bound_usable_requires_a_settled_spectrum
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_range_larger_than_the_basis_reports_no_gradient_bound

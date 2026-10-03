@@ -1370,6 +1370,20 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   components; before, a node downstream of a group that had been added
   before the group's members was scheduled ahead of them and read their
   previous-step output, silently.
+* **A group is one block in the schedule.**  Its members are placed
+  together at the first member's place, which is where the step runs the
+  group, and back edges are decided over that order.  Before 0.4.0's
+  round-5 fix an outside node added between two members of a group that
+  is only part of a larger loop was scheduled between them, ran after the
+  whole group all the same, and read the later member one step late
+  (MADD-ANO-XM2).
+* **A loop through outside nodes is closed where the build order puts
+  it.**  When a group's members and some outside nodes form one feedback
+  loop, the group does not iterate the outside part, so one of the loop's
+  edges outside the group is read from the previous step -- and which one
+  follows the order the nodes were added.  `compile()` warns
+  (`UserWarning`), naming the group, the outside nodes and the edge read
+  late; add those nodes to the group to iterate the whole loop.
 * **The edges' order does not reach a norm.**  The interface norm sums
   its terms in an order the group fixes -- by each edge's source's place
   in the sweep, then its target's -- which is the order the L2 and mixed
@@ -1384,8 +1398,11 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   input is not a rounding matter: it replaces whatever the edges before
   it delivered, so an input fed by both kinds depends on their order
   outright.)
-* **The gradient bound's probe directions follow the build order**, so
-  its number does, while it stays a bound in every order (see
+* **The gradient bound probes each entry**, so its number follows the
+  build order only by rounding -- except for a constant of more than 64
+  entries, probed along one fixed-seed direction drawn per constant in
+  the order the map reads its constants, which follows the build order;
+  it stays a bound in every order (see
   [`gradient_relative_error_bound`](#gradient_relative_error_bound-the-gradient-not-the-solve)).
 
 ## Invariants

@@ -76,6 +76,24 @@ claims:
     - tests/core/test_coupling_group_validation.py::test_acceleration_valid
   status: verified
 
+- id: CPL-184
+  area: configuration
+  claim: >-
+    CouplingGroup refuses a count or a threshold outside the range it has a
+    meaning in, with ValueError naming the knob: max_iterations and
+    waveform_iterations integers >= 1, jacobian_reuse an integer >= 0 (a
+    bool is not an integer), tolerance, rtol and atol finite and >= 0,
+    relaxation finite and > 0.
+  sources:
+    - src/maddening/core/coupling/group.py (CouplingGroup._refuse_out_of_range_numbers)
+  conditions: at construction, every field named.
+  oracle: exception type and message; every in-range value accepted.
+  tests:
+    - tests/core/test_coupling_group_refuses_out_of_range_numbers.py::test_an_out_of_range_number_is_refused_naming_its_knob
+    - tests/core/test_coupling_group_refuses_out_of_range_numbers.py::test_every_value_in_range_is_accepted
+    - tests/core/test_coupling_group_refuses_out_of_range_numbers.py::test_a_sub_cycling_group_with_no_waveform_sweep_is_refused_before_it_freezes
+  status: verified
+
 - id: CPL-002
   area: configuration
   claim: >-
@@ -1673,8 +1691,10 @@ claims:
   conditions: >-
     F linear; solver="ift", diagnostics=True; at most eight independent
     interface scalars (spectral_usable); the group's own norm at the
-    returned state; every acceleration and schedule; long Gauss-Seidel
-    chains, sub-cycled and multi-rate groups; float16 to float32.
+    returned state -- each field divided by its own max|field| at the
+    returned state, the residual put in those weights (MADD-ANO-XL2); every
+    acceleration and schedule; long Gauss-Seidel chains, sub-cycled and
+    multi-rate groups; float16 to float32.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
@@ -1685,6 +1705,7 @@ claims:
     - tests/property/test_coupling_error_bound.py::test_the_spectral_bound_holds_on_random_normal_contractions
     - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
     - tests/core/test_coupling_claims_graphs.py::test_a_usable_bound_holds_on_a_stalled_subcycled_or_multirate_group
+    - tests/core/test_coupling_spectral_bound_in_returned_weights.py::test_the_bound_holds_in_the_returned_states_weights_on_a_growing_group
   status: verified
 
 - id: CPL-089
@@ -1789,8 +1810,12 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#gradient_relative_error_bound-the-gradient-not-the-solve
   conditions: >-
     solver="ift", diagnostics=True; gradient_bound_usable; leading-order in
-    the distance; one probe per floating constant (a field-valued constant
-    along one random direction).
+    the distance; one probe per scalar entry of every floating constant of
+    at most 64 entries (GRADIENT_PROBE_ENTRY_LIMIT); a larger constant is
+    probed along one |c|-weighted fixed-seed direction and named by
+    coupling_report(), and for it the bound covers that directional
+    derivative only.  The resolvent is applied exactly to each probe's
+    secant (MADD-ANO-XH1; per-entry probes MADD-ANO-XM1).
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep
@@ -1799,6 +1824,11 @@ claims:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient
     - tests/core/test_coupling_precision_floor.py::test_a_stalled_nonlinear_iterate_does_not_read_its_gradient_as_exact
     - tests/core/test_coupling_gradient_bound_through_a_vmapped_step.py::test_the_gradient_bound_holds_for_each_member_of_a_vmapped_batch
+    - tests/core/test_coupling_gradient_bound_applies_the_full_resolvent.py::test_a_usable_gradient_bound_covers_every_gain_of_a_rank_one_ring
+    - tests/core/test_coupling_gradient_bound_applies_the_full_resolvent.py::test_each_entry_of_an_array_gain_is_its_own_probe
+    - tests/core/test_coupling_gradient_bound_applies_the_full_resolvent.py::test_a_constant_above_the_entry_limit_is_probed_whole_and_named
+    - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit
+    - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_every_cap
   status: verified
 
 - id: CPL-094
@@ -1821,7 +1851,9 @@ claims:
   claim: >-
     The gradient bound "carries a Newton-Kantorovich check ... the bound is
     multiplied by 1 / sqrt(1 - 2h) ... and is inf -- unusable -- at
-    h >= 1/2 ... h is exactly zero on an affine map"; gradient_bound_usable
+    h >= 1/2 ... h is exactly zero on an affine map", with h = beta L eta
+    and beta the full-operator resolvent norm (exact from the range basis;
+    not the Krylov-restricted factor, MADD-ANO-XH1); gradient_bound_usable
     is "finite and spectral_usable is True"; NaN "for "fori", for
     diagnostics=False, at max_iterations=1 ... where the fixed point responds
     to no constant and where the returned state is not finite".
@@ -1837,6 +1869,7 @@ claims:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_gradient_bound_usable_requires_a_settled_spectrum
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_range_larger_than_the_basis_reports_no_gradient_bound
     - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_helper_never_reports_a_number_where_none_was_computed
+    - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit
   status: verified
 
 - id: CPL-096
@@ -2461,7 +2494,11 @@ claims:
     pass."
   sources:
     - src/maddening/sysid.py:348 (windowed_loss, mask_unconverged)
-  conditions: any group that records a verdict.
+  conditions: >-
+    any group that records a verdict.  On a sub-cycling group with
+    waveform_iterations > 1 the verdict is the last sweep's: a window in
+    which an earlier sweep exhausted max_iterations while the last
+    converged is kept (documented in the docstring since the round-5 audit).
   oracle: the masked loss and gradient against the sum over the other windows.
   tests:
     - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_a_diverged_window_leaves_a_finite_gradient_of_the_other_windows
@@ -2469,6 +2506,7 @@ claims:
     - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_multiple_shooting_drops_a_diverged_window_and_its_continuity_term
     - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_the_verdict_reads_every_coupling_group
     - tests/core/test_sysid_mask_cuts_unconverged_windows.py::test_the_mask_drops_the_window_the_report_calls_unconverged
+    - tests/core/test_sysid_mask_reads_the_last_waveform_sweep.py::test_a_window_whose_first_sweep_hit_its_cap_is_kept_by_the_mask
   status: verified
 
 - id: CPL-161
@@ -2631,11 +2669,19 @@ claims:
     both solvers, both schedules, every acceleration and norm; the group's
     members keep their relative order (a Gauss-Seidel sweep follows it by
     design: CPL-077); no input fed by three or more additive edges (their
-    sum follows the build order, documented).
+    sum follows the build order, documented); no group that is a strict
+    subset of a feedback loop through outside nodes -- there the loop is
+    closed by an edge read from the previous step, which follows the
+    build order, and compile() warns naming it.  An outside node added
+    between two members is scheduled after the group and reads it this
+    step (a group is one block in the schedule; MADD-ANO-XM2).
   oracle: bit-identity against the original build order.
   tests:
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
     - tests/property/test_coupling_invariances.py::test_the_build_order_is_invariant_on_generated_graphs
+    - tests/core/test_coupling_block_schedule.py::test_an_outside_node_added_between_the_members_reads_the_group_this_step
+    - tests/core/test_coupling_block_schedule.py::test_a_group_inside_a_larger_loop_warns_naming_the_edge_read_late
+    - tests/core/test_coupling_block_schedule.py::test_two_groups_on_one_loop_each_warn
   status: verified
 
 - id: CPL-182

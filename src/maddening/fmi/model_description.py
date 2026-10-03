@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 import warnings
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 import xml.etree.ElementTree as ET
@@ -300,6 +301,16 @@ class ModelDescription:
     # ``default_step_size`` advertises; the bridge's ``master_dt`` must be
     # it.  ``None`` for a hand-built description (not written to the XML).
     graph_timestep: Optional[float] = None
+    # The graph the description was built from (a weak reference) and which
+    # of its compiles (``GraphManager._compile_generation``).  Set by
+    # ``build_model_description``, ``None`` for a hand-built description;
+    # not written to the XML.  ``FmuTcpBridge`` refuses to serve the
+    # description once that graph has changed or been compiled again, or
+    # with a sidecar running another compile's step.
+    _graph: Optional[Callable[[], Any]] = field(
+        default=None, init=False, repr=False, compare=False)
+    _graph_generation: Optional[int] = field(
+        default=None, init=False, repr=False, compare=False)
 
     def clocks(self) -> list[FMIVariable]:
         """The ``<Clock>`` variables (empty for a single-clock FMU)."""
@@ -640,6 +651,38 @@ def _node_timesteps(graph_manager: Any) -> dict[str, float]:
     return {name: float(dt) for name, dt in _scheduled_timesteps(nodes, groups).items()}
 
 
+def _graph_changed_since(graph_manager: Any,
+                         generation: Optional[int] = None) -> Optional[str]:
+    """Why ``graph_manager``'s compiled step is not the model the graph
+    runs next -- or is not its compile ``generation`` -- or ``None``.
+
+    Takes in every pending ``node.params`` write first, with the sync each
+    graph entry point runs (``_check_static_data_dirty``), so a structural
+    write -- a value the step bakes in when it is traced, such as
+    ``HeatNode``'s ``stencil_order`` -- is seen as the change it is.  An
+    object without that machinery (a duck-typed view, which has no
+    compiled step to disagree with) gives ``None``.
+    """
+    check = getattr(graph_manager, "_check_static_data_dirty", None)
+    if not callable(check):
+        return None
+    check()
+    if getattr(graph_manager, "_compiled_step", None) is None:
+        return "the graph has not been compiled"
+    if getattr(graph_manager, "_dirty", False):
+        return ("the graph has changed since its last compile() -- a structural "
+                "node.params write (a value the compiled step bakes in when it is "
+                "traced, such as HeatNode's stencil_order), a node, edge, external "
+                "input or coupling group added or removed, or a node's static_data "
+                "-- so its next run recompiles, and its compiled step is the old "
+                "model")
+    current = getattr(graph_manager, "_compile_generation", None)
+    if generation is not None and current != generation:
+        return (f"the graph has been compiled again since (its compile {current}, "
+                f"not {generation})")
+    return None
+
+
 def _master_timestep(graph_manager: Any) -> float:
     """One step of the graph: the simulated time one sidecar step advances.
 
@@ -705,8 +748,15 @@ def build_model_description(
     Parameters
     ----------
     graph_manager : GraphManager
-        A *compiled* graph.  The structure (nodes, edges, external
-        inputs) is read at build time.
+        A *compiled* graph, unchanged since its last ``compile()``.  The
+        structure (nodes, edges, external inputs) is read at build time.
+        Every pending ``node.params`` write is taken in first, as every
+        graph entry point takes it in; one the compiled step bakes in (a
+        structural value, such as ``HeatNode``'s ``stencil_order``) leaves
+        the graph needing a recompile, and is refused with the rest (see
+        Raises).  The description remembers the graph and its compile, and
+        :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge` refuses to serve it
+        once the graph has changed or been compiled again.
     model_name : str
         Identifier the FMU will be called by.  Becomes ``modelName``
         in the XML.
@@ -796,6 +846,14 @@ def build_model_description(
     Raises
     ------
     ValueError
+        If *graph_manager* has never been compiled, or has changed since
+        its last ``compile()``: a structural ``node.params`` write, a node,
+        edge, external input or coupling group added or removed, or a
+        node's ``static_data``.  The FMU's sidecar runs the compiled step,
+        so the description would describe a model the FMU does not run
+        (until 0.4.0's fix an FMU built over a pending structural write ran
+        the old model while ``gm.run`` ran the new one).  Call
+        ``compile()`` first.
         If *model_name* is exactly ``"NaN"``, ``"Infinity"`` or
         ``"-Infinity"``.  The name goes back to the importer in the
         bridge's ``hello`` reply, where the JSON codec refuses it
@@ -827,6 +885,24 @@ def build_model_description(
             f"string cannot be written as unambiguous JSON.  Name the model "
             f"something else (a different spelling, such as "
             f"{model_name.lower()!r}, is fine)."
+        )
+    # The FMU's sidecar runs the graph's *compiled* step
+    # (``step_fn=gm._compiled_step``), so the description must describe the
+    # model that step computes.  A structural node.params write pending since
+    # the last compile is taken into the graph only as "dirty" (the next
+    # entry point recompiles), and an FMU built over it ran the old model --
+    # or the new one, if the step had not been traced yet -- while every
+    # graph entry point ran the new one.  Refused rather than compiled here:
+    # an export is an artefact, and compiling inside it would hide which
+    # model it froze.
+    stale = _graph_changed_since(graph_manager)
+    if stale is not None:
+        raise ValueError(
+            f"build_model_description: {stale}.  The FMU's sidecar runs the graph's "
+            "compiled step (step_fn=graph_manager._compiled_step), so this "
+            "description would describe a model the FMU does not run.  Call "
+            "graph_manager.compile(), then build the description, the sidecar and "
+            "the bridge from the compiled graph without changing it in between."
         )
     # Inputs: read external-input edges from the graph manager.  The
     # graph manager exposes them via ``_external_input_specs`` (an
@@ -1186,7 +1262,7 @@ def build_model_description(
         f"step:{default_step_size}",
     ])
 
-    return ModelDescription(
+    md = ModelDescription(
         model_name=model_name,
         instantiation_token=token,
         variables=variables,
@@ -1196,6 +1272,12 @@ def build_model_description(
         held_inputs=held_inputs,
         graph_timestep=graph_timestep,
     )
+    generation = getattr(graph_manager, "_compile_generation", None)
+    if callable(getattr(graph_manager, "_check_static_data_dirty", None)) \
+            and isinstance(generation, int):
+        md._graph = weakref.ref(graph_manager)
+        md._graph_generation = generation
+    return md
 
 
 __all__ = [

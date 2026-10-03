@@ -159,6 +159,7 @@ from maddening.fmi.model_description import (
     FMIVariable,
     ModelDescription,
     _fmi_kind,
+    _graph_changed_since,
     _parse_xs_value,
 )
 from maddening.fmi.sidecar import (
@@ -167,6 +168,7 @@ from maddening.fmi.sidecar import (
     _declared_inputs_resolver,
     _key_set_error,
     _restored_leaf,
+    _step_compile,
 )
 from maddening.serialization.json_codec import decode_non_finite
 from maddening.serialization.json_codec import dumps as _json_dumps
@@ -797,8 +799,10 @@ class FmuTcpBridge:
         If ``master_dt`` is not a positive finite number, differs from the
         graph step the description records, or does not divide the
         description's ``default_step_size`` into a whole number of steps
-        no larger than ``max_steps_per_request``; if
-        ``max_steps_per_request`` is not a positive integer; or if
+        no larger than ``max_steps_per_request``; if the graph the
+        description was built from, or the graph whose compiled step is
+        the sidecar's ``step_fn``, has changed or been compiled again
+        since; if ``max_steps_per_request`` is not a positive integer; or if
         ``idle_timeout`` is neither ``None`` nor a positive finite number.
     """
 
@@ -831,6 +835,7 @@ class FmuTcpBridge:
         if self._dt <= 0:
             raise ValueError(f"master_dt must be positive, got {master_dt!r}")
         self._check_master_dt(model_description)
+        self._check_one_compile(model_description, sidecar)
         self._vars: dict[int, FMIVariable] = {
             v.value_reference: v for v in model_description.variables
         }
@@ -1589,6 +1594,44 @@ class FmuTcpBridge:
                 f"{exc}; an importer steps at the advertised size "
                 "(canHandleVariableCommunicationStepSize is false), and every doStep "
                 "would be refused") from None
+
+    @staticmethod
+    def _check_one_compile(md: ModelDescription, sidecar: FmuSidecar) -> None:
+        """Refuse a description or a sidecar step whose graph has changed, or
+        been compiled again, since it was built.
+
+        The FMU advertises the description and runs the sidecar's step, so
+        each must still be the model its graph runs.  The description
+        records its graph and compile (``build_model_description``), and a
+        graph's compiled step carries its own (``GraphManager.compile``);
+        either may be missing -- a hand-built description, a step that is
+        not a graph's -- and is then not judged.  Both built from one graph
+        and both current means both are its current compile.  An FMU whose
+        graph took a structural ``node.params`` write between the
+        description and the bridge used to run the old model while the
+        graph ran the new one.
+        """
+        owner = _step_compile(getattr(getattr(sidecar, "_config", None), "step_fn", None))
+        if owner is not None and owner[0] is not None:
+            stale = _graph_changed_since(owner[0], owner[1])
+            if stale is not None:
+                raise ValueError(
+                    f"the sidecar's step_fn is compile {owner[1]} of its graph, and "
+                    f"{stale}.  The FMU would run a model the graph does not run.  Call "
+                    "compile() on the graph and build the description, the sidecar and "
+                    "the bridge again")
+        ref = getattr(md, "_graph", None)
+        graph = ref() if ref is not None else None
+        if graph is None:
+            return
+        generation = getattr(md, "_graph_generation", None)
+        stale = _graph_changed_since(graph, generation)
+        if stale is not None:
+            raise ValueError(
+                f"the model description was built from compile {generation} of its "
+                f"graph, and {stale}.  The FMU would advertise a model the graph does "
+                "not run.  Call compile() on the graph and build the description, the "
+                "sidecar and the bridge again")
 
     # ------------------------------------------------- the description's contract
     @staticmethod

@@ -185,7 +185,9 @@ def _pre_import_setup(argv: list[str]) -> None:
 
     ``--dry-run`` with no accelerator backend requested (``JAX_PLATFORMS``
     unset or ``cpu``) pins the CPU backend and gives it four virtual
-    devices unless ``XLA_FLAGS`` already sets a device count.
+    devices unless ``XLA_FLAGS`` already sets a device count.  It matches
+    the literal ``--dry-run`` only, which is why :func:`parse_args` takes
+    no abbreviations.
     """
     if "--dry-run" not in argv:
         return
@@ -200,7 +202,7 @@ def _pre_import_setup(argv: list[str]) -> None:
 
 _pre_import_setup(sys.argv)
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 METHODS = ("all_to_all", "ppermute")
 MESH_AXIS = "devices"
 GPU_CELLS = (100_000, 300_000, 1_000_000)
@@ -446,12 +448,22 @@ def ring_edges(n: int) -> np.ndarray:
 
 
 def _grid_side(n: int) -> int:
-    return max(int(round(np.sqrt(n))), 2)
+    """The side of the smallest square grid holding at least ``n`` cells (and
+    at least 2 x 2).  It used to round ``sqrt(n)`` to the nearest integer,
+    which put the session's "1e5-cell" exchange row at 316**2 = 99 856
+    cells, below the 1e5 cells :func:`recommend` needs, so that row could
+    never decide the transport."""
+    side = math.isqrt(max(int(n), 0))
+    if side * side < n:
+        side += 1
+    return max(side, 2)
 
 
 def synthetic_cells(kind: str, n: int) -> int:
-    """The cell count :func:`synthetic_mesh` builds for ``n`` (a grid rounds
-    to a square), without building it."""
+    """The cell count :func:`synthetic_mesh` builds for ``n``, without
+    building it: ``n`` for a ring, and for a grid the smallest square
+    holding at least ``n`` cells (``ceil(sqrt(n))**2``), so a synthetic mesh
+    never has fewer cells than were asked for."""
     if kind == "ring":
         return n
     if kind == "grid":
@@ -460,7 +472,8 @@ def synthetic_cells(kind: str, n: int) -> int:
 
 
 def grid_edges(n: int) -> tuple[int, np.ndarray]:
-    """4-neighbour lattice with about ``n`` cells (rounded to a square)."""
+    """4-neighbour lattice of at least ``n`` cells (the smallest square
+    holding them, :func:`synthetic_cells`)."""
     side = _grid_side(n)
     ids = np.arange(side * side, dtype=np.int32).reshape(side, side)
     horiz = np.stack([ids[:, :-1].ravel(), ids[:, 1:].ravel()], axis=1)
@@ -1304,8 +1317,8 @@ def run_exchange(args, out: dict) -> dict:
     D = args.n_devices
     trailing = (args.fields,) if args.fields > 1 else ()
     results = []
-    for n in args.cells:
-        n, edges = synthetic_mesh(args.synthetic, n)
+    for requested in args.cells:
+        n, edges = synthetic_mesh(args.synthetic, requested)
         pa, how = _partition_for(args, args.synthetic, n, edges, None, D)
         t0 = time.perf_counter()
         layout = build_unstructured_partition(partition_assignment=pa, edges=edges, n_devices=D)
@@ -1316,7 +1329,8 @@ def run_exchange(args, out: dict) -> dict:
         values = rng.standard_normal((n,) + trailing).astype(np.float32)
         slab = exchange_input(values, layout, mesh)
         entry = {
-            "cells": n, "mesh": args.synthetic, "partition": how,
+            "cells": n, "requested_cells": int(requested), "mesh": args.synthetic,
+            "partition": how,
             "n_devices": D, "fields_per_cell": args.fields,
             "n_local_max": layout.n_local_max, "n_ghost_max": layout.n_ghost_max,
             "layout_build_s": layout_s, "traffic_cells_per_shard": traffic,
@@ -2723,7 +2737,7 @@ def check_checklist_device_count(n_devices: int) -> None:
 
 
 def _load_results(directory: Path, goal: str) -> list[dict]:
-    """Every ``<goal>*.json`` under *directory* that records *goal*.
+    """Every ``<goal>*.json`` under *directory*.
 
     A file that cannot be read as a JSON object -- one ``timeout`` killed the
     runner in the middle of writing, an empty one, one holding a list -- is
@@ -2731,7 +2745,8 @@ def _load_results(directory: Path, goal: str) -> list[dict]:
     (``_unreadable``): :func:`record_problems` reads it ``INVALID``, so the
     summary says which file and exits 3.  It used to end the summary on the
     ``JSONDecodeError`` (or ``AttributeError``) with exit status 1, the one
-    the runbook gives for "no goal JSON".
+    the runbook gives for "no goal JSON".  A file named for *goal* that
+    records another goal, or none, is kept the same way (``_misfiled``).
     """
     docs = []
     for path in sorted(directory.glob(f"{goal}*.json")):
@@ -2747,9 +2762,17 @@ def _load_results(directory: Path, goal: str) -> list[dict]:
             # passed, so every verdict below lands on INVALID for it.
             doc = {"goal": goal, "_unreadable": why, "results": [], "checks": [],
                    "passed": False}
-        if doc.get("goal") == goal:
-            doc["_file"] = path.name          # for the reader; never part of a record
-            docs.append(doc)
+        elif doc.get("goal") != goal:
+            # A file named for this goal that records another goal, or none
+            # (an empty object, a re-run saved under a goal's name): kept the
+            # same way, so it reads INVALID and the summary exits 3.  It used
+            # to be dropped without a word, and the summary exited 0.
+            doc = {"goal": goal, "_misfiled": (
+                       f"its name says goal {goal!r}, but it records goal "
+                       f"{doc.get('goal')!r}: a file this runner would not have written"),
+                   "results": [], "checks": [], "passed": False}
+        doc["_file"] = path.name              # for the reader; never part of a record
+        docs.append(doc)
     return docs
 
 
@@ -2811,8 +2834,12 @@ def case_keys(goal: str, doc: dict) -> tuple[Counter, Counter]:
     want: Counter = Counter()
     got: Counter = Counter()
     if goal == "exchange":
-        want.update((synthetic_cells(cfg["synthetic"], n), methods) for n in cells)
-        got.update((r["cells"], tuple(sorted(r["methods"]))) for r in results)
+        # The requested size too: recommend() decides on it (and on the
+        # measured count reaching it), so a row must record the one it was
+        # measured for.
+        want.update((synthetic_cells(cfg["synthetic"], n), n, methods) for n in cells)
+        got.update((r["cells"], r["requested_cells"], tuple(sorted(r["methods"])))
+                   for r in results)
     elif goal in ("forward", "gradient"):
         file_mesh = bool(cfg.get("mesh"))
         sizes = [cells[-1]] if file_mesh else cells
@@ -2950,6 +2977,8 @@ def record_problems(doc: dict) -> list[str]:
     if "_unreadable" in doc:
         return [f"the file cannot be read as a JSON object ({doc['_unreadable']}): "
                 "a run killed while writing it leaves one like this"]
+    if "_misfiled" in doc:
+        return [doc["_misfiled"]]
     goal = doc.get("goal")
     if goal not in GOAL_CHECKS:
         return [f"unknown goal {goal!r}"]
@@ -3058,15 +3087,24 @@ def _excluded_because(row: dict, *, min_cells: int, min_devices: int) -> str | N
     if row["record"] != "PASS":
         return (f"its file reads {row['record']}, not PASS (a failed check, or a record "
                 "--summarise lists under 'Records that cannot decide')")
-    if row["cells"] < min_cells:
-        return f"{row['cells']} cells < {min_cells}"
+    requested = row["requested_cells"]
+    if not _is_count(requested):
+        return (f"records no requested cell count ({requested!r}): written by another "
+                "version of this runner")
+    if requested < min_cells:
+        return f"{requested} cells requested < {min_cells}"
+    if row["cells"] < requested:
+        return f"measured {row['cells']} cells, fewer than the {requested} requested"
     if row["n_devices"] < MIN_DEVICES_WITH_ESCAPE:
         return f"n_devices={row['n_devices']}: no exchange happens on one device"
     if row["n_devices"] < min_devices and not row["allow_fewer_devices"]:
         return (f"n_devices={row['n_devices']} < {min_devices} "
                 "(re-run with --allow-fewer-devices to let it decide)")
     if row["speedup_median"] is None:
-        return "ppermute median is 0 ms (below timer resolution); speedup undefined"
+        if row["ppermute_median_ms"] == 0:
+            return "ppermute median is 0 ms (below timer resolution); speedup undefined"
+        return (f"speedup undefined: medians all_to_all {row['a2a_median_ms']!r} ms, ppermute "
+                f"{row['ppermute_median_ms']!r} ms are not finite with ppermute's above 0")
     return None
 
 
@@ -3077,14 +3115,18 @@ def recommend(exchange_docs: list[dict], *, min_cells: int = 100_000,
     A row *decides* only when it comes from a real accelerator run (not
     ``--dry-run``) whose file reads ``PASS`` (:func:`goal_verdict`: every
     check passed, and the record is one this runner would have written),
-    has ``cells >= min_cells``, ran on ``n_devices >= min_devices`` (or
-    ``>= 2`` when that run recorded ``allow_fewer_devices``), and has a
-    finite speedup.  ``ppermute`` wins
-    when its median exchange time beats ``all_to_all`` by at least
-    ``margin`` at every deciding row; ``all_to_all`` keeps the default
-    when it is faster at any such row; anything in between is a tie.
-    Without a deciding row the result is ``undecided`` and ``reason``
-    says what each row lacked.
+    was requested at ``requested_cells >= min_cells`` and measured at no
+    fewer cells than requested (a synthetic grid is the smallest square
+    holding the requested count, :func:`synthetic_cells`), ran on
+    ``n_devices >= min_devices`` (or ``>= 2`` when that run recorded
+    ``allow_fewer_devices``), and has a finite speedup, re-derived from
+    the two medians (:func:`_speedup_of`), not read from the file.
+    ``ppermute`` wins when its median exchange time beats ``all_to_all``
+    by at least ``margin`` at every deciding row; ``all_to_all`` keeps the
+    default when it is faster at any such row; anything in between is a
+    tie.  Without a deciding row the result is ``undecided`` and
+    ``reason`` says what each row lacked; with one, a row that does not
+    decide is counted in ``reason`` and listed by ``--summarise``.
     """
     rows = []
     for doc in exchange_docs:
@@ -3096,13 +3138,15 @@ def recommend(exchange_docs: list[dict], *, min_cells: int = 100_000,
         for r in doc["results"]:
             a, p = r["methods"]["all_to_all"], r["methods"]["ppermute"]
             row = {
-                "cells": r["cells"], "hardware": hw, "n_devices": r["n_devices"],
+                "cells": r["cells"], "requested_cells": r.get("requested_cells"),
+                "hardware": hw, "n_devices": r["n_devices"],
                 "allow_fewer_devices": allow_fewer,
                 "device_kinds": env["device_kinds"],
                 "a2a_median_ms": a["median_ms"], "ppermute_median_ms": p["median_ms"],
                 "a2a_min_ms": a["min_ms"], "ppermute_min_ms": p["min_ms"],
                 "a2a_bytes_total": a["bytes_total"], "ppermute_bytes_total": p["bytes_total"],
-                "speedup_median": r["ppermute_speedup_median"],
+                "speedup_median": _speedup_of(a["median_ms"], p["median_ms"]),
+                "recorded_speedup_median": r.get("ppermute_speedup_median"),
                 "bit_identical": r["bit_identical"],
                 "record": record,
             }
@@ -3131,9 +3175,33 @@ def recommend(exchange_docs: list[dict], *, min_cells: int = 100_000,
         decision = "tie"
         reason = (f"ppermute is faster but by less than {margin:.2f}x somewhere; keep "
                   "all_to_all the default (fewer collectives) unless the byte savings matter")
+    excluded = len(rows) - len(deciding)
+    if excluded:
+        # A decision on fewer rows than were measured says so in its own
+        # line: the 1e5-cell row once dropped out silently.
+        reason += (f" -- decided on {len(deciding)} of {len(rows)} row(s); {excluded} "
+                   "excluded (listed under 'Rows that do not decide')")
     return {"rows": rows, "decision": decision, "reason": reason,
             "min_speedup": min(speedups), "max_speedup": max(speedups),
             "deciding_rows": len(deciding)}
+
+
+def _speedup_of(a2a_median_ms, ppermute_median_ms) -> float | None:
+    """``all_to_all``'s median over ``ppermute``'s, or ``None`` unless both
+    are finite non-negative numbers, ppermute's is above zero, and the
+    ratio is finite.  :func:`recommend` derives the speedup from the
+    medians rather than trusting the file's ``ppermute_speedup_median``:
+    a hand-edited speedup, or a NaN or infinite one, used to decide the
+    transport (``NaN >= 1.05`` and ``NaN < 1.0`` are both false, so a NaN
+    row read as a tie)."""
+    vals = (a2a_median_ms, ppermute_median_ms)
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+        return None
+    a2a, ppm = (float(v) for v in vals)
+    if not (math.isfinite(a2a) and math.isfinite(ppm)) or a2a < 0 or ppm <= 0:
+        return None
+    ratio = a2a / ppm
+    return ratio if math.isfinite(ratio) else None
 
 
 def _fmt_speedup(s) -> str:
@@ -3442,15 +3510,30 @@ def _print_timing_tables(docs_by_goal: dict) -> None:
     rec = recommend(exchange_docs)
     if exchange_docs:
         print("\nExchange ranking (all_to_all vs ppermute), median / min ms per exchange")
-        print(f"{'cells':>9} {'dev':>4} {'hw':>3} {'a2a med':>9} {'ppm med':>9} {'a2a min':>9} "
-              f"{'ppm min':>9} {'speedup':>8} {'a2a MB':>8} {'ppm MB':>8} {'same':>5} {'decides':>7}")
+        print(f"{'cells':>9} {'asked':>9} {'dev':>4} {'hw':>3} {'a2a med':>9} {'ppm med':>9} "
+              f"{'a2a min':>9} {'ppm min':>9} {'speedup':>8} {'a2a MB':>8} {'ppm MB':>8} "
+              f"{'same':>5} {'decides':>7}")
         for r in rec["rows"]:
-            print(f"{r['cells']:>9} {r['n_devices']:>4} {'gpu' if r['hardware'] else 'cpu':>3} "
+            asked = r["requested_cells"] if _is_count(r["requested_cells"]) else "?"
+            print(f"{r['cells']:>9} {asked:>9} {r['n_devices']:>4} "
+                  f"{'gpu' if r['hardware'] else 'cpu':>3} "
                   f"{r['a2a_median_ms']:9.3f} {r['ppermute_median_ms']:9.3f} "
                   f"{r['a2a_min_ms']:9.3f} {r['ppermute_min_ms']:9.3f} "
                   f"{_fmt_speedup(r['speedup_median'])} {r['a2a_bytes_total'] / 1e6:8.2f} "
                   f"{r['ppermute_bytes_total'] / 1e6:8.2f} {'yes' if r['bit_identical'] else 'NO':>5} "
                   f"{'yes' if r['deciding'] else 'no':>7}")
+        excluded = [r for r in rec["rows"] if not r["deciding"]]
+        if excluded:
+            # Every row that does not decide, and why, on a line of its own:
+            # the decision rule is "at every point >= 1e5 cells", and a row
+            # dropped from it in silence once let two of three points decide.
+            print("Rows that do not decide (the recommendation below ignores them)")
+            for r in excluded:
+                asked = r["requested_cells"] if _is_count(r["requested_cells"]) else "?"
+                print(f"  {'WARNING: ' if r['hardware'] else ''}{r['cells']} cells "
+                      f"(requested {asked}) on {r['n_devices']} "
+                      f"{'GPU' if r['hardware'] else 'CPU / dry-run'} device(s): "
+                      f"{r['excluded_because']}")
         print(f"Recommendation: {rec['decision']} -- {rec['reason']}")
     if forward_docs:
         print("\nForward run (ms per step; wrapper = public update(), device = compiled step)")
@@ -3550,7 +3633,11 @@ def summarise(directory: Path) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # No abbreviations: _pre_import_setup() runs before argparse and pins the
+    # CPU backend only for the literal ``--dry-run``, so an accepted
+    # ``--dry`` used to start a "dry run" on whatever accelerator was there.
+    ap = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--goal", choices=ALL_GOALS + ("checklist", "all"))
     ap.add_argument("--out", type=Path, help="directory for the JSON results")
     ap.add_argument("--summarise", type=Path, metavar="DIR",

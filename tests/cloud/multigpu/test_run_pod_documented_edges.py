@@ -126,7 +126,7 @@ def test_a_file_the_runner_can_read_but_would_not_write_exits_3_with_its_tables(
     path.write_text(json.dumps(doc), encoding="utf-8")
     assert rp.summarise(directory) == 3
     out = capsys.readouterr().out
-    assert "schema_version 5, not 6" in out
+    assert "schema_version 5, not 7" in out
     assert "Halo exchange vs NumPy" in out
 
 
@@ -354,8 +354,8 @@ def _exchange_doc(rp, rows, *, n_devices=4, allow_fewer=False):
     results = []
     for cells, a2a, ppm in rows:
         results.append({
-            "cells": cells, "n_devices": n_devices, "bit_identical": True,
-            "input_presharded": True, "ppermute_speedup_median": a2a / ppm,
+            "cells": cells, "requested_cells": cells, "n_devices": n_devices,
+            "bit_identical": True, "input_presharded": True, "ppermute_speedup_median": a2a / ppm,
             "methods": {"all_to_all": {"median_ms": a2a, "min_ms": a2a, "bytes_total": 1},
                         "ppermute": {"median_ms": ppm, "min_ms": ppm, "bytes_total": 1}}})
     doc = {"schema_version": rp.SCHEMA_VERSION, "goal": "exchange", "dry_run": False,

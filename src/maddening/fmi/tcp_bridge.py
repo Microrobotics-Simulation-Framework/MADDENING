@@ -42,7 +42,14 @@ few ulps of the time per step, the rounding an importer's running sum of
 step sizes gathers (``_DRIFT_ULPS_PER_STEP``): an importer whose every step
 size is a little long is refused once its errors add up past the tolerance,
 where the reported time used to move ahead of the physics without bound.
-Every tolerance is relative to the master step, at any master step.  ``t``,
+Every tolerance is relative to the master step, at any master step, and no
+rounding slack is ever more than a tenth of one (``_ROUNDING_SLACK_MAX``):
+the reported time stays within a millionth plus a tenth of a master step of
+the simulated time.  A time at which 16 ulps exceed that tenth -- 32 s and
+beyond at a 1e-12 s master step, about 3.4e10 s at 1e-3 s -- is refused at
+``initialize``, at a step that would reach it and at ``set_state``: the
+float64 clock cannot place a communication point there (the uncapped slacks
+used to admit whole master steps of drift).  ``t``,
 ``h`` and every entry of ``values`` must be JSON numbers: a string or a
 boolean is refused, not parsed.
 
@@ -51,7 +58,8 @@ boolean is refused, not parsed.
 ...); the C wrapper always sends it, and a variable of another type is
 refused with nothing read or written, as FMI 3.0 requires.  A Boolean
 variable takes ``0`` or ``1``.  A ``set`` that names a value reference twice
-is refused, and so is a numeric set of a ``<Clock>`` variable.
+is refused, and so is a numeric set of a ``<Clock>`` variable; a ``get`` may
+name one twice, and every occurrence gets the value.
 
 **Steps.**  ``master_dt`` is one step of the graph and must equal the step
 the model description records (``ModelDescription.graph_timestep``); one
@@ -73,7 +81,10 @@ else is refused, and the FMU advertises a fixed communication step).  A
 ``set`` is atomic: parameters are bounds-checked by the sidecar and inputs
 are committed only when every value in the request was valid.  The bounds
 are the ``min`` / ``max`` the model description advertises, whether or not
-the sidecar was built with ``param_specs``, and a declared external input
+the sidecar was built with ``param_specs`` (a sidecar spec is enforced
+beside them, and one that enforces another envelope -- or a description
+whose graph's specs changed since it was built -- makes the bridge refuse
+to start), and a declared external input
 the description does not export (``held_inputs``) is held at zero on every
 step, as ``GraphManager.step`` holds an input its caller omits.
 
@@ -99,10 +110,14 @@ this bridge does not know is refused at hello.
 
 **Frame limit.**  A frame is at most 64 MiB (``_MAX_MESSAGE``) in both
 directions: a longer request drops the connection (its length is not to
-be trusted), and a reply that would be longer (a ``get`` of more than
-about 8 M values, a huge state) is replaced by a JSON error reply, so the
+be trusted), and a reply that would be longer (a huge state, a ``get``
+whose JSON text passes the limit) is replaced by a JSON error reply, so the
 connection stays in sync and the C wrapper, which refuses to read a
-longer frame, never sees one from this bridge.
+longer frame, never sees one from this bridge.  A ``get`` naming more
+value references, or variables holding more values, than a binary reply
+frame carries (``_MAX_GET_VALUES``, 8 388 480) is refused before anything
+is read: one 64 MiB request naming a scalar 33.5 million times used to
+take about 45 s and 6 GB before its reply was refused.
 
 **Connection lifetime.**  A connection holds the bridge's single FMU
 instance for as long as it lives, so no wait on it is unbounded: a peer
@@ -165,9 +180,12 @@ from maddening.fmi.model_description import (
     _DTYPE_TO_FMI_TYPE,
     FMIVariable,
     ModelDescription,
+    _advertised_bound,
+    _envelope,
     _fmi_kind,
     _graph_changed_since,
     _parse_xs_value,
+    _specs_changed_since,
 )
 from maddening.fmi.sidecar import (
     FmuSidecar,
@@ -185,6 +203,16 @@ logger = logging.getLogger(__name__)
 _HEADER = struct.Struct(">I")
 _MAX_MESSAGE = 64 * 1024 * 1024
 """Frame limit in bytes, both directions and both frame kinds (the C wrapper's FRAME_MAX)."""
+_MAX_GET_VALUES = (_MAX_MESSAGE - 1024) // 8
+"""The most values one ``get`` may ask for: what a binary reply frame holds
+as raw float64 beside its header (8 388 480).  A larger ``get`` is refused
+before anything is read (``FmuTcpBridge._get``); its reply could only
+exceed the frame limit.  A JSON reply takes four to twenty-five bytes a
+value, so one near this count may still exceed the limit, and is answered
+with an error once its encoding passes it."""
+_JSON_VALUES_CHUNK = 65536
+"""Values encoded at a time for a ``get``'s JSON reply, which is abandoned
+as soon as it passes the frame limit (``FmuTcpBridge._json_values_body``)."""
 _BINARY_FLAG = 0x80000000
 _LENGTH_MASK = 0x7FFFFFFF
 _NPY_SLACK = 4096
@@ -337,6 +365,22 @@ per step (half an ulp of the time), and may hold the step size itself an
 ulp or so off the master step.  A clock biased by more than that per step
 gathers drift faster than the slack grows, and is refused once the drift
 passes :data:`_COMM_POINT_TOLERANCE` of a master step plus the slack."""
+_ROUNDING_SLACK_MAX = 0.1
+"""The most any rounding slack may add to a time tolerance, as a fraction of
+the master step.
+
+Each slack above is in ulps of the times involved, which is the importer's
+rounding at ordinary times; at a large ratio of time to master step an ulp
+is itself a sizeable part of a step, and uncapped they admitted whole
+master steps (16 ulps of 1000 s are 1.8 steps of 1e-12 s, and the drift
+slack grew by 0.45 of a step per step).  So the reported time never sits
+more than this (plus :data:`_COMM_POINT_TOLERANCE`) of a master step from
+the time the FMU has simulated: less than half a step, so it always names
+the master step the physics is at.  And a time so large that the
+communication point's own slack (:data:`_COMM_POINT_ULPS` ulps) would pass
+it is refused outright (``FmuTcpBridge._check_time_resolution``): the
+clock cannot place a communication point there, whatever the importer
+does."""
 _MASTER_DT_RTOL = 1e-9
 """How far ``master_dt`` may sit from the graph step the model description
 records, relatively: a different spelling of the same step (``0.01``
@@ -820,7 +864,11 @@ class FmuTcpBridge:
         no larger than ``max_steps_per_request``; if the graph the
         description was built from, or the graph whose compiled step is
         the sidecar's ``step_fn``, has changed or been compiled again
-        since; if ``max_steps_per_request`` is not a positive integer; or if
+        since; if a parameter's ``ParamSpec`` in the description's graph
+        has changed since (``set_param_spec``) so that its ``min``, ``max``
+        or ``unit`` is no longer the one advertised, or the sidecar's own
+        spec for an exported parameter enforces another ``min`` / ``max``;
+        if ``max_steps_per_request`` is not a positive integer; or if
         ``idle_timeout`` is neither ``None`` nor a positive finite number.
     """
 
@@ -902,7 +950,10 @@ class FmuTcpBridge:
         # sidecar enforces a ParamSpec it was given; one built without
         # ``param_specs`` (the default) enforced nothing, so the XML said
         # ``elasticity`` in [0, 1] and a ``set`` of 1.5 -- or an archive
-        # installing -3.0 -- answered ok.
+        # installing -3.0 -- answered ok.  A sidecar spec that enforces
+        # another envelope than the XML advertises is refused here, and the
+        # advertised bounds are enforced alongside the sidecar's own specs.
+        self._check_sidecar_envelope(model_description, sidecar)
         sidecar._adopt_advertised_bounds(                 # noqa: SLF001
             self._advertised_bounds(model_description, sidecar))
         # And for the inputs: the sidecar completes and checks each step's
@@ -1329,6 +1380,19 @@ class FmuTcpBridge:
             if len(body) <= _MAX_MESSAGE:
                 conn.sendall(_HEADER.pack(_BINARY_FLAG | len(body)) + body)
                 return True
+        elif reply.get("ok") and "values" in reply and set(reply) == {"ok", "values"}:
+            # A get's JSON reply is encoded a chunk at a time and abandoned
+            # as soon as it passes the limit, so a reply too long to send
+            # costs no more memory than a frame (the whole list, its copy
+            # and its text used to be built first: ~0.5 GB at 8 M values).
+            values_body = self._json_values_body(reply["values"])
+            if values_body is not None:
+                conn.sendall(_HEADER.pack(len(values_body)) + values_body)
+                return False
+            send_message(conn, {"ok": False, "error": f"reply of more than {_MAX_MESSAGE} "
+                                                       f"bytes exceeds the {_MAX_MESSAGE}-byte "
+                                                       "frame limit"})
+            return False
         else:
             body = _json_dumps(self._jsonify(reply), separators=(",", ":")).encode("utf-8")
             if len(body) <= _MAX_MESSAGE:
@@ -1337,6 +1401,25 @@ class FmuTcpBridge:
         send_message(conn, {"ok": False, "error": f"reply of {len(body)} bytes exceeds the "
                                                    f"{_MAX_MESSAGE}-byte frame limit"})
         return False
+
+    @staticmethod
+    def _json_values_body(values: Any) -> Optional[bytes]:
+        """``{"ok":true,"values":[...]}`` for a ``get`` on a JSON connection,
+        byte for byte what encoding the whole reply writes, or ``None`` once
+        it would pass the frame limit -- found while encoding, a chunk of
+        :data:`_JSON_VALUES_CHUNK` values at a time."""
+        arr = np.asarray(values, dtype=np.float64).ravel()
+        head, tail = b'{"ok":true,"values":[', b"]}"
+        size = len(head) + len(tail)
+        pieces: list[bytes] = []
+        for start in range(0, arr.size, _JSON_VALUES_CHUNK):
+            text = _json_dumps(arr[start:start + _JSON_VALUES_CHUNK].tolist(),
+                               separators=(",", ":")).encode("utf-8")[1:-1]
+            size += len(text) + (1 if pieces else 0)
+            if size > _MAX_MESSAGE:
+                return None
+            pieces.append(text)
+        return head + b",".join(pieces) + tail
 
     @staticmethod
     def _unencodable_reply(exc: BaseException) -> dict:
@@ -1465,6 +1548,12 @@ class FmuTcpBridge:
                 # permanently, and nothing on the wire says so.
                 t0 = (_real_number(req["t"], "communication point") if "t" in req
                       else self._time)
+                # At a time whose ulps are a sizeable part of a master step no
+                # tolerance can tell rounding from a skipped step; refused as
+                # such (the point, and the end the FMU would report), before
+                # the tolerance checks below would misname it.
+                self._check_time_resolution(t0, "communication point")
+                self._check_time_resolution(t0 + h, "end of the step (t + h)")
                 # And it must be where the FMU is (_COMM_POINT_TOLERANCE).  A
                 # point that jumped -- 0.01 to 100, say -- used to be
                 # accepted: the physics advanced one master step and ``time``
@@ -1523,6 +1612,7 @@ class FmuTcpBridge:
                 # wrapper used to keep startTime to itself, so ``time`` read
                 # 0.0 until the first step.
                 t_start = _real_number(req.get("t"), "start time")
+                self._check_time_resolution(t_start, "start time")
                 if self._stepped:
                     raise ValueError(
                         "initialize after the instance has stepped: FMI enters "
@@ -1570,18 +1660,27 @@ class FmuTcpBridge:
         return out
 
     # ------------------------------------------------------------------- time
+    def _slack(self, ulps: float, biggest: float) -> float:
+        """``ulps`` ulps of ``biggest``, capped at :data:`_ROUNDING_SLACK_MAX`
+        of a master step."""
+        return min(ulps * float(np.spacing(biggest)), _ROUNDING_SLACK_MAX * self._dt)
+
     def _time_tolerance(self, *times: float, ulps: int) -> float:
         """The bridge's one tolerance on time (:data:`_COMM_POINT_TOLERANCE`
-        of a master step), plus ``ulps`` ulps of the largest of ``times``.
+        of a master step), plus ``ulps`` ulps of the largest of ``times``,
+        never more than :data:`_ROUNDING_SLACK_MAX` of a master step.
 
         Relative to the master step all the way down: the rounding slack is
         in ulps of the times involved, with no floor.  It used to be in ulps
         of ``max(|t|, 1.0)``, an absolute ~3.6e-15 s, so below a master step
         of about 1e-9 s the tolerance was that floor, not a millionth of a
-        step: 8.9e-4 of a 1e-12 s step was accepted.
+        step: 8.9e-4 of a 1e-12 s step was accepted.  And with no cap, at a
+        large ratio of time to master step it was more than a step: 16 ulps
+        of 1000 s are 1.8 steps of 1e-12 s, and a ``doStep`` one whole
+        master step ahead of the FMU's time was adopted.
         """
         biggest = max(abs(t) for t in times)
-        return _COMM_POINT_TOLERANCE * self._dt + ulps * float(np.spacing(biggest))
+        return _COMM_POINT_TOLERANCE * self._dt + self._slack(ulps, biggest)
 
     def _drift_tolerance(self, t: float, steps: int) -> float:
         """How far the importer's clock ``t`` may sit from the simulated time
@@ -1589,12 +1688,60 @@ class FmuTcpBridge:
         tolerance (:data:`_COMM_POINT_TOLERANCE` of a master step plus
         :data:`_COMM_POINT_ULPS` ulps), plus :data:`_DRIFT_ULPS_PER_STEP` ulps
         of the times involved for every graph step since the reference point
-        -- the rounding an importer's running sum of step sizes gathers,
-        which an honest importer stays inside however long it runs."""
+        -- the rounding an importer's running sum of step sizes gathers --
+        with the ulps together never more than :data:`_ROUNDING_SLACK_MAX` of
+        a master step.
+
+        Uncapped, the slack outgrew a master step at a large ratio of time
+        to step (by 0.45 of a 1e-12 s step per step at 1000 s), and an
+        importer whose clock ran 40% fast was never refused.  Capped, an
+        importer that keeps a running sum is accepted while the rounding it
+        has gathered stays under the cap -- at most half an ulp of the time
+        per step, so from a start of 0 for at least about forty million
+        steps at any master step, from 1 s at a 1e-9 s step for about a
+        million -- and refused, with nothing advanced, past it; one that
+        computes ``start + k * h`` rounds once per point and is never
+        refused."""
         simulated = self._t_ref + steps * self._dt
         biggest = max(abs(t), abs(simulated), abs(self._t_ref), steps * self._dt)
         ulps = _COMM_POINT_ULPS + _DRIFT_ULPS_PER_STEP * steps
-        return _COMM_POINT_TOLERANCE * self._dt + ulps * float(np.spacing(biggest))
+        return _COMM_POINT_TOLERANCE * self._dt + self._slack(ulps, biggest)
+
+    def _check_time_resolution(self, t: float, what: str) -> None:
+        """Refuse a time at which the FMU's float64 clock cannot place a
+        communication point to within :data:`_ROUNDING_SLACK_MAX` of a
+        master step: one where :data:`_COMM_POINT_ULPS` ulps of ``t`` exceed
+        it.
+
+        At 1000 s one ulp is 0.11 of a 1e-12 s master step, and at 1.7e9 s
+        (an epoch-like start) 0.24 of a 1e-6 s one: an importer's own
+        rounding there is a sizeable part of a step, so no tolerance can
+        tell an honest clock from one that has skipped a step.  The bridge
+        used to widen its tolerance with the ulp and admit whole master
+        steps of drift; it now refuses the configuration, loudly, at the
+        start time (``initialize``), at the step that would reach such a
+        time, and at a restored one.
+
+        Raises
+        ------
+        ValueError
+            Naming the time, the master step, the ratio and the largest
+            time this master step resolves; nothing is written.
+        """
+        ulp = float(np.spacing(abs(t)))
+        if _COMM_POINT_ULPS * ulp <= _ROUNDING_SLACK_MAX * self._dt:
+            return
+        # The largest power-of-two binade whose spacing still passes.
+        limit = _ROUNDING_SLACK_MAX * self._dt / _COMM_POINT_ULPS
+        largest = 2.0 ** (np.floor(np.log2(limit)) + 53)
+        raise ValueError(
+            f"the {what} {t!r} is too large for the master step {self._dt!r}: one "
+            f"float64 ulp of it is {ulp / self._dt:.3g} of a master step, so the FMU's "
+            f"clock cannot place a communication point to within "
+            f"{_ROUNDING_SLACK_MAX:g} of a step there, and the time it reports could "
+            f"leave its physics by whole steps.  This master step resolves times below "
+            f"about {largest:.3g} s; start nearer 0 (fmi3EnterInitializationMode), or "
+            "serve a graph with a larger timestep.  Nothing was written")
 
     def _check_drift(self, t0: float, h: float, n: int) -> None:
         """Refuse a step whose point ``t0``, or whose end on the importer's
@@ -1615,9 +1762,12 @@ class FmuTcpBridge:
                     f"from the time the FMU has simulated, {simulated!r} (tolerance "
                     f"{tolerance:.3g}): every step size this importer sent was within "
                     f"{_COMM_POINT_TOLERANCE:g} of a master step, but their errors add up, "
-                    "and the time the FMU reports would leave the physics behind.  Step "
-                    "at whole multiples of the master step (the description's stepSize); "
-                    "nothing was advanced")
+                    "and the time the FMU reports would leave the physics behind.  A "
+                    "running sum of step sizes gathers up to half an ulp of the time per "
+                    f"step, and past {_ROUNDING_SLACK_MAX:g} of a master step the bridge "
+                    "refuses rather than drift.  Step at whole multiples of the master "
+                    "step (the description's stepSize), computing each point as start + "
+                    "k * h; nothing was advanced")
 
     def _master_steps(self, h: float, what: str) -> int:
         """The number of master steps ``h`` is, refused unless it is a whole
@@ -1712,6 +1862,17 @@ class FmuTcpBridge:
                 f"graph, and {stale}.  The FMU would advertise a model the graph does "
                 "not run.  Call compile() on the graph and build the description, the "
                 "sidecar and the bridge again")
+        # A ParamSpec changed with set_param_spec dirties nothing (specs are
+        # metadata to the step), so the generation cannot see it -- but the
+        # description advertises the old envelope while a sidecar built from
+        # gm.param_specs() since enforces the new one.
+        changed = _specs_changed_since(md, graph)
+        if changed is not None:
+            raise ValueError(
+                f"the model description was built from compile {generation} of its "
+                f"graph, and {changed}.  The FMU would advertise bounds the graph no "
+                "longer declares.  Build the description, the sidecar and the bridge "
+                "again from the graph as it is now")
 
     # ------------------------------------------------- the description's contract
     @staticmethod
@@ -1725,6 +1886,51 @@ class FmuTcpBridge:
         for node, field, shape, dtype in (getattr(md, "held_inputs", {}) or {}).values():
             declared.setdefault((node, field), jnp.zeros(tuple(shape), dtype=dtype))
         return declared
+
+    @staticmethod
+    def _check_sidecar_envelope(md: ModelDescription, sidecar: FmuSidecar) -> None:
+        """Refuse a sidecar whose own ``ParamSpec`` for an exported parameter
+        enforces another envelope than the description advertises.
+
+        The envelope a spec enforces is read as the description reads it
+        (:func:`~maddening.fmi.model_description._advertised_bound`: an open
+        ``log`` / ``logit`` bound as the outermost value inside it that
+        ``ParamSpec.check`` accepts), and an infinite bound pointing outward
+        is no bound.  The bridge used to keep a sidecar spec as it found it,
+        on the assumption that the description had been built from it; a
+        ``gm.set_param_spec`` between the two broke that, and the bridge
+        accepted values its XML forbids, or refused values it declares
+        settable.  A parameter the sidecar has no spec for takes the
+        advertised bounds (:meth:`FmuSidecar._adopt_advertised_bounds`).
+
+        Raises
+        ------
+        ValueError
+            Naming the parameter and both envelopes.
+        """
+        leaves = (sidecar.params or {}).get("nodes") or {}
+        own = (sidecar.param_specs or {}).get("nodes") or {}
+        for var in md.variables:
+            if var.causality != "parameter":
+                continue
+            node, key = _param_owner(var)
+            if key not in leaves.get(node, {}):
+                continue
+            spec = (own.get(node) or {}).get(key)
+            if spec is None:
+                continue
+            enforced = (_advertised_bound(spec, 0, var.dtype),
+                        _advertised_bound(spec, 1, var.dtype))
+            if _envelope(*enforced) != _envelope(var.min, var.max):
+                raise ValueError(
+                    f"the sidecar's ParamSpec for {var.name!r} enforces min="
+                    f"{enforced[0]!r}, max={enforced[1]!r}, but the model description "
+                    f"advertises min={var.min!r}, max={var.max!r}: the FMU would accept "
+                    "values its modelDescription.xml forbids, or refuse values it "
+                    "declares settable.  Build the sidecar with "
+                    "param_specs=gm.param_specs() from the graph the description was "
+                    "built from, without changing a spec (set_param_spec) in between -- "
+                    "or build the description again")
 
     @staticmethod
     def _advertised_bounds(md: ModelDescription,
@@ -2030,6 +2236,10 @@ class FmuTcpBridge:
             t = float(stamp)
             if not np.isfinite(t):
                 raise ValueError("FMU state carries a non-finite time")
+            # A time the clock cannot step from: every step after the restore
+            # would be refused.  None of this FMU's own snapshots holds one
+            # (no step reaches such a time, nor does initialize).
+            self._check_time_resolution(t, "FMU state's time")
         if new_params is not None:
             # A parameter the step cannot read may not change through the
             # archive either (``set`` cannot address it at all), and the
@@ -2126,36 +2336,91 @@ class FmuTcpBridge:
     def _get(self, vrs: list[int], fmi_type: Any = None) -> np.ndarray:
         """The values of ``vrs``, flat, as float64; a request carrying a
         ``type`` may only name variables of that FMI type
-        (:func:`_check_access_type`)."""
+        (:func:`_check_access_type`).
+
+        Bounded by what one reply frame can carry before anything is built:
+        a request naming more value references than :data:`_MAX_GET_VALUES`,
+        or whose variables hold more values than that in total, is refused
+        -- its reply would exceed the frame limit, so it could only ever be
+        an error.  A value reference may be named more than once (FMI 3.0
+        does not forbid it, and the answer is not ambiguous, as a repeated
+        ``set``'s is); each distinct variable is read once and copied into
+        a preallocated reply.  One 64 MiB frame naming a scalar output 33.5
+        million times used to build a small array per entry before the
+        reply-size check could refuse anything, holding the instance for
+        about 45 s and the process past 6 GB.
+        """
         if not isinstance(vrs, (list, tuple)):
             raise ValueError("vr must be a list of value references")
         fmi_type = _requested_type(fmi_type)
-        parts: list[np.ndarray] = []
-        params = self._sidecar.get_params()
-        for vr in vrs:
-            var = self._vars.get(_value_reference(vr))
-            if var is None:
-                raise KeyError(f"unknown value reference {vr}")
-            _check_access_type(var, fmi_type, "Get")
-            if var.causality == "independent":
-                parts.append(np.asarray([self._time], dtype=np.float64))
-            elif var.causality == "parameter":
-                parts.append(np.asarray(params[var.name], dtype=np.float64).ravel())
-            elif var.causality == "input":
-                node, field = var.node_field()
-                val = self._inputs.get(node, {}).get(field)
-                if val is None:
-                    val = np.zeros(var.shape or (), dtype=np.float64)
-                parts.append(np.asarray(val, dtype=np.float64).ravel())
-            elif var.is_clock:
-                parts.append(np.zeros(1, dtype=np.float64))
-            else:
-                node, field = var.node_field()
-                parts.append(np.asarray(self._sidecar.state[node][field],
-                                        dtype=np.float64).ravel())
-        if not parts:
-            return np.zeros(0, dtype=np.float64)
-        return np.concatenate(parts)
+        if len(vrs) > _MAX_GET_VALUES:
+            raise ValueError(
+                f"a get of {len(vrs)} value references cannot be answered: a reply "
+                f"frame carries at most {_MAX_GET_VALUES} values ({_MAX_MESSAGE} "
+                "bytes of float64); split it into several gets.  Nothing was read")
+        # Every entry a plain JSON integer (the C wrapper's requests): the
+        # references are the entries.  Anything else is checked entry by
+        # entry, in order, so the first bad one is the one named.
+        refs: Any = vrs if {type(v) for v in vrs} <= {int} else None
+        named: dict[int, FMIVariable] = {}
+        if refs is None:
+            refs = []
+            for vr in vrs:
+                ref = _value_reference(vr)
+                if ref not in named:
+                    named[ref] = self._get_variable(ref, vr, fmi_type)
+                refs.append(ref)
+        else:
+            for ref in dict.fromkeys(refs):          # each distinct one, in order
+                named[ref] = self._get_variable(ref, ref, fmi_type)
+        sizes = {ref: _size(var) for ref, var in named.items()}
+        scalars = all(size == 1 for size in sizes.values())
+        total = len(refs) if scalars else sum(map(sizes.__getitem__, refs))
+        if total > _MAX_GET_VALUES:
+            raise ValueError(
+                f"a get whose variables hold {total} values cannot be answered: a reply "
+                f"frame carries at most {_MAX_GET_VALUES} ({_MAX_MESSAGE} bytes of "
+                "float64); split it into several gets.  Nothing was read")
+        params = self._sidecar.get_params() if any(
+            v.causality == "parameter" for v in named.values()) else {}
+        values = {ref: self._value_of(var, params) for ref, var in named.items()}
+        if scalars:
+            one = {ref: float(v[0]) for ref, v in values.items()}
+            return np.fromiter(map(one.__getitem__, refs), dtype=np.float64, count=total)
+        out = np.empty(total, dtype=np.float64)
+        pos = 0
+        for ref in refs:
+            chunk = values[ref]
+            out[pos:pos + chunk.size] = chunk
+            pos += chunk.size
+        return out
+
+    def _get_variable(self, ref: int, vr: Any, fmi_type: Optional[str]) -> FMIVariable:
+        """The variable a ``get`` names by ``ref`` (``vr`` as the request
+        spelled it, for the message), checked against the call's type."""
+        var = self._vars.get(ref)
+        if var is None:
+            raise KeyError(f"unknown value reference {vr}")
+        _check_access_type(var, fmi_type, "Get")
+        return var
+
+    def _value_of(self, var: FMIVariable, params: dict) -> np.ndarray:
+        """``var``'s current value, flat, as float64 (``params``: the
+        sidecar's :meth:`~FmuSidecar.get_params`, read once per ``get``)."""
+        if var.causality == "independent":
+            return np.asarray([self._time], dtype=np.float64)
+        if var.causality == "parameter":
+            return np.asarray(params[var.name], dtype=np.float64).ravel()
+        if var.causality == "input":
+            node, field = var.node_field()
+            val = self._inputs.get(node, {}).get(field)
+            if val is None:
+                val = np.zeros(var.shape or (), dtype=np.float64)
+            return np.asarray(val, dtype=np.float64).ravel()
+        if var.is_clock:
+            return np.zeros(1, dtype=np.float64)
+        node, field = var.node_field()
+        return np.asarray(self._sidecar.state[node][field], dtype=np.float64).ravel()
 
 
 __all__ = ["FmuTcpBridge", "PROTOCOL_VERSION", "checked_value", "decode_binary",

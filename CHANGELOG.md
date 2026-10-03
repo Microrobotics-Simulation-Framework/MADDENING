@@ -14,6 +14,8 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **The coupling inventory's narrowed domain cells lifted** (`tests/core/coupling_domains.py`: one claim run over a memoryless pair in float64, mixed, bfloat16, float16, vmap, multi-rate, sub-cycled, predictor, restart, `run_adaptive` and sharded domains; the topology harness's invariances in eight): 188 cells in 24 rows, 350 still narrowed.
+  It found MADD-ANO-167 to 170 (open, deferred to 0.5.0): the Aitken guard can cost two passes over its own exit (CPL-062 `failing`), `save_state` refuses a typed PRNG key, `reset_state()` inside a differentiated loss raises on a predictor group, and `run_adaptive` hangs on a NaN error norm.
 - **Terminal diagram of the graph** (experimental): `GraphManager.print_graph_diagram(theme=, direction=, use_ascii=, file=)` draws the structure `to_mermaid` exports as boxes and arrows (a frame per coupling group, dotted flux edges and external inputs), coloured by a termaid theme under `rich`.
   The `terminal` extra gains `termaid>=0.9,<1` (MIT, pure Python); `pip install "maddening[terminal]"` to use it. Read-only, like the rest of the inspection API.
 - **A domain matrix in the coupling and sysid+FMU claims inventories** (`domain_set: numeric`, a `domains:` mapping per row): for float32, float64, mixed dtypes, 16-bit, jit, gradients, vmap, multi-rate, sub-cycling, predictors and warm starts, `run_adaptive`, checkpoint restarts and sharding, each row names the test that exercises its claim there, `narrowed` (its conditions now exclude the domain) or `n/a`; `test_claims_inventories.py` checks it.

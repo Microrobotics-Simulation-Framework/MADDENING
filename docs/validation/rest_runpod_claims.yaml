@@ -3734,7 +3734,7 @@ claims:
     - src/maddening/api/README.md:79 (What the token does not do)
     - src/maddening/api/server.py:42 (module docstring, Security)
   conditions: any bind.
-  oracle: none -- a statement that a feature is absent.
+  oracle: the server's own bytes on its socket -- a plain HTTP status line and the state in the clear, and no TLS record answering a ClientHello.
   tests:
     - 'tests/api/test_rest_claims_at_their_domain_edges.py::test_the_server_speaks_plain_http_and_the_token_crosses_in_cleartext'
   status: verified
@@ -3940,8 +3940,8 @@ claims:
   conditions: >-
     the budget patched to 4 and 5 steps: three steps leave it running, the
     fourth stops it and later steps are not counted; a run of 12 past a budget
-    of 5; a stop by request after 3 steps. Not claimed for simultaneous
-    requests or a server shutting down.
+    of 5; a stop by request after 3 steps. Not claimed for a server shutting
+    down.
   oracle: the status route's active, steps and stopped_by; the trace directory holds files; the stop route's 409 names the directory.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_trace_records_exactly_its_step_budget
@@ -3954,7 +3954,7 @@ claims:
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-103]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-103]'
     no_token: tests/api/test_routes_answer_what_they_did.py::test_a_trace_records_exactly_its_step_budget
-    concurrent: narrowed
+    concurrent: tests/api/test_rest_claims_under_concurrent_requests.py::test_a_trace_counts_exactly_its_step_budget_under_simultaneous_steps
     runner_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_the_runner_runs[REST-103]'
     sim_run_active: tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_step_budget
     large_payload: tests/api/test_routes_answer_what_they_did.py::test_a_trace_records_exactly_its_step_budget

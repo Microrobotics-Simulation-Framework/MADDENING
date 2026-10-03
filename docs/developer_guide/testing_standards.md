@@ -784,8 +784,10 @@ test exercised: x64, a predictor inside a windowed fit, a write pending at
 an FMU export. So an inventory can name a `domain_set` at its top level,
 and then every row carries a `domains` mapping that says, for each domain
 of the set, how the claim stands there. The coupling and sysid+FMU
-inventories use the `numeric` set; the REST inventory will get a server
-set of its own (a new set is one entry in the guard's `DOMAIN_SETS`).
+inventories use the `numeric` set below; the REST and run_pod inventory
+uses the `server` set ("The server set", at the end of this section). A
+new set is one entry in the guard's `DOMAIN_SETS`, with the spellings its
+conditions use and the words its tests must name.
 
 | domain | what it means |
 |---|---|
@@ -879,6 +881,70 @@ the claim under `run_adaptive` itself.
   Gauss-Seidel follows it on purpose);
 - an identity relay on an internal edge moves the fixed point only by
   rounding.
+
+#### The server set
+
+`rest_runpod_claims.yaml` names `domain_set: server`. Its domains:
+
+| domain | what it means |
+|---|---|
+| `loopback_bind` | the server bound to a loopback address (127.0.0.0/8, `::1`, `localhost`): the default |
+| `non_loopback_bind` | bound to anything else (`0.0.0.0`, `::`, a routable address or name) |
+| `token_enforced` | a request the bearer token is demanded of: any request on a non-loopback bind, or a routable peer's behind a loopback one |
+| `no_token` | a request no token is demanded of: a loopback bind and a loopback or non-IP peer |
+| `concurrent` | simultaneous requests on a real loopback server: uvicorn on `127.0.0.1`, the requests meeting on one socket, event loop and worker pool (in-process `TestClient` threads are not this domain) |
+| `runner_active` | the realtime runner running beside the request |
+| `sim_run_active` | a `POST /sim/run` in flight beside the request |
+| `large_payload` | at and past the body, state, budget and size caps |
+| `hostile_input` | malformed, wrong-typed, non-finite, oversized, path-traversal input; for run_pod, a truncated or tampered record |
+| `shutdown` | SIGINT or SIGTERM arriving mid-request |
+| `wrapper_nodes` | `HybridNode` and the sharded wrappers as the target of a write or a load |
+| `checkpoint_restore` | the claim on a graph restored by `POST /checkpoint/load` (and the loads themselves) |
+| `dry_run_cpu` | run_pod: the records a `--dry-run` on CPU virtual devices writes, as written |
+| `relabelled_records` | run_pod: those records relabelled as a real 4-GPU run (the evidence a pod session brings back) |
+| `mixed_commits` | run_pod: a directory whose files record more than one commit |
+
+A REST row's run_pod domains are `n/a`, and so are an RPD row's server
+domains but `hostile_input`. Within a REST row `n/a` is kept for these:
+
+- a domain the claim's subject does not reach: a rule decided from the
+  bind, the peer and the headers before any route reads the graph
+  (authentication, the Origin and Host rules) has no `wrapper_nodes` or
+  `checkpoint_restore` cell; a construction-time rule or a function (the
+  token's source, `APIAuth.verify`, the runner object) has no request, so
+  no `concurrent`, `runner_active`, `sim_run_active` or `shutdown` cell;
+- `shutdown` for a claim decided before the request takes the graph (the
+  authentication and browser rules, the request model's 422s, the size
+  refusals told before anything is built) and for a route that never takes
+  it (a stop, the stride, `/healthz`): the signal reaches a request only
+  through what holds the graph -- an in-flight `/sim/run` stops at its next
+  slice, the runner stops at the lifespan's end (REST-052, REST-053);
+- `runner_active` and `sim_run_active` for a route REST-041 refuses beside
+  a stepper (the state and structure writes, a load, a step or run): the
+  409 is that domain's claim, and REST-041's and REST-096's cells test it.
+
+Most REST cells cite one of two batteries. `tests/api/rest_claims_support.py`
+states each route row's claim once, as a check keyed by its row id (the
+`@check(...)` decorator; `skip=` / `only=` say which domains it runs in),
+written to hold wherever the claim does: it compares only what its own
+requests could change, writes the same values in every copy, and puts back
+what it changed. `tests/api/test_rest_claims_in_every_domain.py` runs each
+check, on a fresh server and graph, on a loopback bind with no token, on a
+non-loopback bind with the token, beside the runner, beside an in-flight
+`/sim/run` (its slices slowed to one 30 ms step), on a graph restored from
+a checkpoint, on wrapper nodes (a `HybridNode` spring, `ShardedStencilNode`
+rods on a one-device mesh), and with SIGTERM raised -- through the handler
+the server chains ahead of the installed one -- while the check's first
+request (or the one it marks `ctx.under_test()`) holds the graph.
+`tests/api/test_rest_claims_under_concurrent_requests.py` runs four copies
+of each check at once against uvicorn on loopback while a reader reads the
+state, and states the claims whose point is concurrency (the lock's
+serialisation, its 409 and 503, the graph budget, runner starts and stops,
+saves of one name, a saturated worker pool) once each. To put a new route
+row in them, add a check; to leave a domain out, say why in the row (`n/a`
+by the rules above, or a narrowed condition). The run_pod rows' record
+cells cite `test_run_pod_verdict_integrity.py`, `test_run_pod_dry_run.py`
+and `tests/cloud/multigpu/test_run_pod_claims_across_records.py`.
 
 ## Numeric constants carry their units
 

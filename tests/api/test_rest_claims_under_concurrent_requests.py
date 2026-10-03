@@ -460,6 +460,35 @@ def test_simultaneous_writes_while_the_runner_is_still_stopping_are_503s(tmp_pat
         assert S.wait_for(lambda: server.runner is None or not server.runner.is_alive)
 
 
+def test_a_trace_counts_exactly_its_step_budget_under_simultaneous_steps(tmp_path):
+    """REST-103 under concurrency: a JAX trace with a (patched) budget of ten
+    steps, then four clients sending five POST /sim/step each at once: the
+    trace stops itself having counted exactly ten, not one more or less."""
+    from maddening.core.simulation import profiler
+
+    chk = S.Check(fn=None, rows=(), bind="any", contexts=frozenset(), server_kw={},
+                  patch={"MAX_JAX_TRACE_STEPS": 10}, xfail={})
+    with S.loopback_server(chk, tmp_path) as (server, base):
+        with _client(base, server) as c:
+            assert c.post("/sim/step").status_code == 200        # compiled before tracing
+            assert c.post("/sim/profile/jax/start").status_code == 200
+        try:
+            def steps():
+                with _client(base, server) as c:
+                    return [c.post("/sim/step").status_code for _ in range(5)]
+
+            codes = simultaneously([steps] * 4)
+            assert [x for cs in codes for x in cs] == [200] * 20
+            assert S.wait_for(lambda: not profiler.jax_trace_active(), 20)
+            with _client(base, server) as c:
+                status = c.get("/sim/profile/jax/status").json()
+            assert status["active"] is False and status["steps"] == 10, status
+            assert "step budget" in status["stopped_by"]
+        finally:
+            if profiler.jax_trace_active():
+                profiler.stop_jax_trace()
+
+
 def test_simultaneous_saves_of_one_name_leave_a_manifest_that_hashes_to_the_file(tmp_path):
     """REST-091, REST-101: eight POST /checkpoint/save of one name at once,
     between steps: whichever lands last, the file and the manifest beside it

@@ -223,9 +223,12 @@ def test_low_level_fmi3_api_two_instances_state_and_reset(tmp_path):
         assert ia.getFloat32([pos])[0] == pa
         ia.freeFMUState(st)
         ia.freeFMUState(st2)
-        # reset returns to the initial state and constructor params
+        # reset returns to the initial state and constructor params, and to
+        # the Instantiated state, where FMI 3.0 allows no read: initialize
         ia.reset()
+        ia.enterInitializationMode(startTime=0.0)
         assert ia.getFloat32([pos])[0] == 0.5 and ia.getFloat32([k])[0] == 30.0
+        ia.exitInitializationMode()
         for inst in (ia, ib):
             inst.terminate()
             inst.freeInstance()
@@ -290,6 +293,8 @@ def test_an_array_variable_is_read_with_its_full_count(tmp_path):
                          modelIdentifier=desc.coSimulation.modelIdentifier, instanceName="i")
         inst.instantiate()
         try:
+            inst.enterInitializationMode(startTime=0.0)       # reads start here (FMI 3.0)
+            inst.exitInitializationMode()
             vr = _vr(md, "rod.temperature")
             assert inst.getFloat32([vr], nValues=5) == pytest.approx([1.0, 1.25, 1.5, 1.75, 2.0])
             with pytest.raises(FMICallException):

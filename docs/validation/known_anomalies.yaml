@@ -10756,7 +10756,155 @@ anomalies:
     verification:
       - "tests/core/test_coupling_spectral_bound_in_returned_weights.py::test_the_bound_holds_in_the_returned_states_weights_on_a_growing_group"
     github_issue: null
+
   - anomaly_id: "MADD-ANO-147"
+    title: "An FMU built over a pending structural node.params write ran the old model, while every graph entry point ran the new one"
+    description: >
+      A structural `node.params` write after `compile()` -- a value the
+      compiled step bakes in when it is traced, such as `HeatNode`'s
+      `stencil_order` -- is taken into the graph by its sync
+      (`GraphManager._sync_node_param_writes`) only as "dirty": every graph
+      entry point recompiles and runs the new model.
+      `build_model_description` and the user guide's sidecar wiring
+      (`SidecarConfig(step_fn=gm._compiled_step)`) never checked, so an FMU
+      built after `stencil_order` 2 -> 4 ran order 2 if the step had been
+      traced before the write (6.35 K off the graph after 50 steps of a
+      12-cell rod) and order 4 if it had not, with no warning.  Found by
+      the sysid and FMU claims inventory audit (rows FMU-040 and SYS-115,
+      2026-10-03).  No tagged release carried it: the parameter export and
+      the `node.params` sync are new in 0.4.0.
+      Resolved in 0.4.0 (9153c3f, 2026-10-03): `build_model_description`
+      syncs and refuses a graph that is not compiled or has changed since
+      its compile, asking for `compile()` (refused rather than compiled: an
+      export is an artefact, and a compile inside it would hide which model
+      it froze), and records the graph and compile it describes.
+      `compile()` tags its jitted step with its graph and compile;
+      `FmuSidecar` refuses a graph's step once that graph has changed or
+      been compiled again, and `FmuTcpBridge` refuses a description or a
+      sidecar step whose graph has.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the FMU computed with a model other than the one its graph
+      runs and its description was built from, and nothing said so.
+      Graded `major` under the 0.4.0 severity definition.  Not `critical`:
+      only a structural write between the last compile and the export was
+      affected, and a leaf write was exported as written.
+    affected_components:
+      - "maddening.fmi.model_description.build_model_description"
+      - "maddening.fmi.sidecar.FmuSidecar"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A graph changed after the bridge is built, before its first step, is
+      not seen: the step traces when the FMU first runs it.  A step that is
+      not a graph's compiled step (a wrapper) and a hand-built description
+      carry no graph and are not judged.
+    verification:
+      - "tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_description_over_a_pending_structural_write_is_refused"
+      - "tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_after_compile_the_fmu_runs_the_written_model"
+      - "tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_sidecar_refuses_a_step_its_graph_has_left"
+      - "tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_bridge_refuses_a_description_or_a_step_its_graph_has_left"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-148"
+    title: "A log parameter with no lower bound was advertised with no FMI min, and a bridge whose sidecar had no specs accepted and ran mass = -1"
+    description: >
+      `ParamSpec(transform="log")` with no lower bound is measured from 0
+      (`lo = bounds[0] or 0; p > lo strictly`), and `gm.check_params`
+      refuses `p <= 0` there.  `build_model_description`'s
+      `_advertised_bound` returned no bound for it, so the description
+      advertised no `min`.  A bridge whose sidecar was built without
+      `param_specs` enforces only what the description advertises, so it
+      accepted a set of `mass = -1.0` and stepped with it (the spring's
+      position read -1.07 after 20 steps); one built with `param_specs`
+      refused a value the XML declared settable.  `SpringDamperNode.mass`
+      is such a leaf.  Found by the sysid and FMU claims inventory audit
+      (rows FMU-016, FMU-033 and FMU-039, 2026-10-03).  No tagged release
+      carried it: the parameter export and the bridge's bounds are new in
+      0.4.0.
+      Resolved in 0.4.0 (0b5521c, 2026-10-03): such a leaf advertises the
+      smallest positive normal of its dtype as its `min`, the value an
+      explicit lower bound of 0 advertises, and the bridge's bounds-only
+      spec enforces it.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: an FMU accepted and ran a parameter value its graph declares
+      invalid, contrary to the documented promise that an importer cannot
+      drive the graph with such a constant.  Graded `major` under the 0.4.0
+      severity definition.  Not `critical`: only a bridge whose sidecar was
+      built without `param_specs` accepted the value.
+    affected_components:
+      - "maddening.fmi.model_description.build_model_description"
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A description built by hand carries only the bounds it was given.
+    verification:
+      - "tests/fmi/test_advertised_bounds.py::test_a_log_leaf_without_a_lower_bound_advertises_the_smallest_normal"
+      - "tests/fmi/test_advertised_bounds.py::test_no_bridge_takes_a_log_leaf_to_zero_or_below"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-149"
+    title: "The FMU bridge's time tolerance had an absolute floor, and a biased importer's reported time left the simulated time behind without bound"
+    description: >
+      `FmuTcpBridge._time_tolerance` added ulps of `max(|t|, 1.0)` to a
+      millionth of the master step, an absolute ~3.6e-15 s, so below a
+      master step of about 1e-9 s the tolerance was that floor: a step size
+      8.9e-4 of a 1e-12 s master step off was accepted, against the
+      documented millionth.  And since each communication point within the
+      tolerance of the last is adopted, an importer whose every step size
+      was a little long moved the time the FMU reports ahead of the time it
+      had simulated by up to the tolerance per step, without bound: after
+      2000 accepted steps at 1e-12 s the reported time was 1.6 master steps
+      ahead of the physics.  Found by the sysid and FMU claims inventory
+      audit (rows FMU-023, FMU-020 and FMU-050, 2026-10-03).  No tagged
+      release carried it: the bridge's communication-point checks are new
+      in 0.4.0.
+      Resolved in 0.4.0 (87169f7, 2026-10-03): the rounding slack is in
+      ulps of the times involved, with no floor, and the bridge counts the
+      graph steps since the start time, a reset or a restore and holds both
+      the communication point and the step's end `t + h` to that simulated
+      time, to the tolerance plus 4 ulps of the time per step, the
+      rounding an importer's running sum gathers.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the FMU labelled its state with a time its physics had not
+      reached, and answered fmi3OK.  Graded `major` under the 0.4.0
+      severity definition.  Not `critical`: it needed a master step below
+      about 1e-9 s or an importer whose step sizes were consistently off
+      within the tolerance.
+    affected_components:
+      - "maddening.fmi.tcp_bridge.FmuTcpBridge"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The drift is bounded by the tolerance plus a few ulps of the time per
+      step, so over a very long run at a master step tiny beside the time
+      (1e-12 s at t = 1 s, where an ulp of the time is 2.2e-4 of a step) a
+      biased importer can still gather what float64 cannot tell from an
+      honest running sum.  A restore starts the count again from the
+      restored time.
+    verification:
+      - "tests/fmi/test_communication_points.py::test_the_tolerance_is_a_millionth_of_the_master_step_at_any_step"
+      - "tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance"
+      - "tests/fmi/test_communication_points.py::test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside"
+      - "tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-150"
     title: "jax.grad through run_adaptive_scan of an accelerated coupling group is 0.0 when a member carries a step-dependent field and the iterate starts at its fixed point"
     description: >
       Under `acceleration="aitken"`, `"iqn-ils"` or `"iqn-imvj"`, the
@@ -10792,7 +10940,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive"
     github_issue: null
-  - anomaly_id: "MADD-ANO-148"
+  - anomaly_id: "MADD-ANO-151"
     title: "jax.grad through a 16-bit coupling group under solver=\"ift\" raises NotImplementedError"
     description: >
       The IFT rule's linear solve -- `jnp.linalg.solve` of `I - dF/dx` on the
@@ -10825,7 +10973,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group"
     github_issue: null
-  - anomaly_id: "MADD-ANO-149"
+  - anomaly_id: "MADD-ANO-152"
     title: "strict_convergence on a coupling group with a sharded member aborts the process"
     description: >
       `strict_convergence=True` raises through `equinox.error_if`, a host

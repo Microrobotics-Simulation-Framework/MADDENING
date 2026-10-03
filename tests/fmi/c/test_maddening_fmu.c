@@ -78,9 +78,12 @@ static void test_logger(fmi3InstanceEnvironment env, fmi3Status st, fmi3String c
     snprintf(g_last_log, sizeof g_last_log, "%s", msg ? msg : "");
 }
 
+/* In Step Mode, where get, set and doStep are allowed (the wrapper holds
+ * FMI 3.0's state machine); a test of another state sets in->phase. */
 static Instance *fake_instance(sock_t s) {
     Instance *in = (Instance *)calloc(1, sizeof *in);
     in->sock = s; in->log = test_logger;
+    in->phase = PHASE_STEP_MODE;
     return in;
 }
 
@@ -513,18 +516,21 @@ static void test_get_set_step(void) {
      * instance's time from then on (it used to stay in the wrapper, and the
      * "time" variable read 0.0 until the first step) */
     WITH_SERVER("{\"ok\":true,\"t\":5}", 0, {
+        in->phase = PHASE_INSTANTIATED;
         CHECK(fmi3EnterInitializationMode((fmi3Instance)in, fmi3False, 0, 5.0, fmi3False, 0) == fmi3OK);
-        CHECK(in->time == 5.0);
+        CHECK(in->time == 5.0 && in->phase == PHASE_INITIALIZATION_MODE);
     });
     CHECK(strcmp(g_seen, "{\"op\":\"initialize\",\"t\":5}") == 0);
     WITH_SERVER("{\"ok\":false,\"error\":\"ValueError: initialize after the instance has stepped\"}", 0, {
-        in->time = 0.7;
+        in->time = 0.7; in->phase = PHASE_INSTANTIATED;
         g_log_calls = 0;
         CHECK(fmi3EnterInitializationMode((fmi3Instance)in, fmi3False, 0, 0.0, fmi3False, 0) == fmi3Error);
         CHECK(in->time == 0.7 && strstr(g_last_log, "has stepped") != NULL);
+        CHECK(in->phase == PHASE_INSTANTIATED);          /* a refused initialize moves nothing */
     });
     {
         Instance *dead = fake_instance(SOCK_INVALID);
+        dead->phase = PHASE_INSTANTIATED;
         g_log_calls = 0;
         CHECK(fmi3EnterInitializationMode((fmi3Instance)dead, fmi3False, 0, NAN, fmi3False, 0) == fmi3Error);
         CHECK(g_log_calls == 1 && strstr(g_last_log, "start time must be finite") != NULL);
@@ -1122,6 +1128,7 @@ static void test_numbers_are_written_and_read_in_the_c_locale(void) {
     });
     CHECK(strcmp(g_seen, "{\"op\":\"step\",\"t\":0.5,\"dt\":0.01}") == 0);
     WITH_SERVER("{\"ok\":true,\"t\":0.25}", 0, {
+        in->phase = PHASE_INSTANTIATED;
         CHECK(fmi3EnterInitializationMode((fmi3Instance)in, fmi3False, 0, 0.25, fmi3False, 0) == fmi3OK);
     });
     CHECK(strcmp(g_seen, "{\"op\":\"initialize\",\"t\":0.25}") == 0);
@@ -1333,8 +1340,10 @@ static void test_instantiate(const char *good_token) {
             CHECK(in->timeout_s == 600.0);
             CHECK(getsockopt(in->sock, SOL_SOCKET, SO_RCVTIMEO, &tv, &len) == 0 && tv.tv_sec == 600);
         }
+        CHECK(in->phase == PHASE_INSTANTIATED);         /* where FMI starts an instance */
         CHECK(fmi3EnterInitializationMode(inst, fmi3False, 0, 0.5, fmi3False, 0) == fmi3OK && in->time == 0.5);
-        CHECK(fmi3ExitInitializationMode(inst) == fmi3OK);
+        CHECK(in->phase == PHASE_INITIALIZATION_MODE);
+        CHECK(fmi3ExitInitializationMode(inst) == fmi3OK && in->phase == PHASE_STEP_MODE);
         /* the listener has hung up after two exchanges, so FreeInstance's
          * terminate finds a closed peer: it must still free cleanly */
         fmi3FreeInstance(inst);
@@ -1441,6 +1450,106 @@ static void test_instantiate(const char *good_token) {
     fmi3FreeInstance(NULL);                              /* tolerated */
 }
 
+/* ------------------------------------------------- the FMI 3.0 state machine */
+
+/* `call` on an instance in `phase` with a dead socket is refused by the
+ * state machine itself: exactly one log message naming the state.  (A dead
+ * socket fails the call too, so the status alone would not tell.) */
+#define REFUSED_IN(phase_, call) do {                                            \
+    Instance *in = fake_instance(SOCK_INVALID);                                  \
+    in->phase = (phase_);                                                        \
+    g_log_calls = 0; g_last_log[0] = '\0';                                       \
+    CHECK((call) == fmi3Error);                                                  \
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "is not allowed in the") != NULL); \
+    CHECK(in->phase == (phase_));                                                \
+    free_instance(in);                                                           \
+} while (0)
+
+static void test_the_fmi_state_machine(void) {
+    fmi3ValueReference vr[1] = { 7 };
+    fmi3Float64 v[1] = { 0.5 };
+    fmi3Boolean ev, term, early; fmi3Float64 last;
+#define DOSTEP(in) fmi3DoStep((fmi3Instance)(in), 0.0, 0.01, fmi3False, &ev, &term, &early, &last)
+#define INIT(in) fmi3EnterInitializationMode((fmi3Instance)(in), fmi3False, 0, 0.0, fmi3False, 0)
+    /* Instantiated: no step before initialization (it used to advance the
+     * model), no reads, no exit from a mode it is not in, no terminate */
+    REFUSED_IN(PHASE_INSTANTIATED, DOSTEP(in));
+    CHECK(strstr(g_last_log, "fmi3DoStep is not allowed in the Instantiated state") != NULL);
+    REFUSED_IN(PHASE_INSTANTIATED, fmi3GetFloat64((fmi3Instance)in, vr, 1, v, 1));
+    REFUSED_IN(PHASE_INSTANTIATED, fmi3GetFloat64((fmi3Instance)in, vr, 0, v, 0));
+    REFUSED_IN(PHASE_INSTANTIATED, fmi3ExitInitializationMode((fmi3Instance)in));
+    REFUSED_IN(PHASE_INSTANTIATED, fmi3Terminate((fmi3Instance)in));
+    REFUSED_IN(PHASE_INSTANTIATED, fmi3EnterStepMode((fmi3Instance)in));
+    WITH_SERVER("{\"ok\":true}", 0, {                      /* a set is allowed */
+        in->phase = PHASE_INSTANTIATED;
+        CHECK(fmi3SetFloat64((fmi3Instance)in, vr, 1, v, 1) == fmi3OK);
+    });
+    /* Initialization Mode */
+    REFUSED_IN(PHASE_INITIALIZATION_MODE, INIT(in));
+    REFUSED_IN(PHASE_INITIALIZATION_MODE, DOSTEP(in));
+    REFUSED_IN(PHASE_INITIALIZATION_MODE, fmi3Terminate((fmi3Instance)in));
+    REFUSED_IN(PHASE_INITIALIZATION_MODE, fmi3EnterStepMode((fmi3Instance)in));
+    WITH_SERVER("{\"ok\":true,\"values\":[2]}", 0, {      /* reads and writes are */
+        in->phase = PHASE_INITIALIZATION_MODE;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 1, v, 1) == fmi3OK && v[0] == 2.0);
+    });
+    {
+        Instance *in = fake_instance(SOCK_INVALID);
+        in->phase = PHASE_INITIALIZATION_MODE;
+        CHECK(fmi3ExitInitializationMode((fmi3Instance)in) == fmi3OK && in->phase == PHASE_STEP_MODE);
+        free_instance(in);
+    }
+    /* Step Mode: fmi3EnterStepMode is Event Mode's way out, never this FMU's */
+    REFUSED_IN(PHASE_STEP_MODE, INIT(in));
+    REFUSED_IN(PHASE_STEP_MODE, fmi3ExitInitializationMode((fmi3Instance)in));
+    REFUSED_IN(PHASE_STEP_MODE, fmi3EnterStepMode((fmi3Instance)in));
+    CHECK(strstr(g_last_log, "Event Mode") != NULL);
+    WITH_SERVER("{\"ok\":false,\"error\":\"RuntimeError: stopped\"}", 0, {
+        CHECK(fmi3Terminate((fmi3Instance)in) == fmi3Error && in->phase == PHASE_STEP_MODE);
+    });
+    WITH_SERVER("{\"ok\":true}", 0, {
+        CHECK(fmi3Terminate((fmi3Instance)in) == fmi3OK && in->phase == PHASE_TERMINATED);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"terminate\"}") == 0);
+    /* Terminated: reading and the FMU-state functions only, until reset.
+     * A zero-length set, fmi3ExitInitializationMode and fmi3EnterStepMode
+     * all answered fmi3OK here. */
+    REFUSED_IN(PHASE_TERMINATED, fmi3SetFloat64((fmi3Instance)in, vr, 0, v, 0));
+    CHECK(strstr(g_last_log, "fmi3SetFloat64 is not allowed in the Terminated state") != NULL);
+    REFUSED_IN(PHASE_TERMINATED, fmi3SetFloat64((fmi3Instance)in, vr, 1, v, 1));
+    REFUSED_IN(PHASE_TERMINATED, DOSTEP(in));
+    REFUSED_IN(PHASE_TERMINATED, INIT(in));
+    REFUSED_IN(PHASE_TERMINATED, fmi3ExitInitializationMode((fmi3Instance)in));
+    REFUSED_IN(PHASE_TERMINATED, fmi3EnterStepMode((fmi3Instance)in));
+    REFUSED_IN(PHASE_TERMINATED, fmi3Terminate((fmi3Instance)in));
+    {
+        Instance *in = fake_instance(SOCK_INVALID);
+        in->phase = PHASE_TERMINATED;
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 0, v, 0) == fmi3OK);
+        free_instance(in);
+    }
+    WITH_SERVER("{\"ok\":true,\"state\":\"QUJD\"}", 0, {
+        in->phase = PHASE_TERMINATED;
+        fmi3FMUState st = NULL;
+        CHECK(fmi3GetFMUState((fmi3Instance)in, &st) == fmi3OK && in->phase == PHASE_TERMINATED);
+        fmi3FreeFMUState(NULL, &st);
+    });
+    WITH_SERVER("{\"ok\":false,\"error\":\"RuntimeError: stopped\"}", 0, {
+        in->phase = PHASE_TERMINATED;
+        CHECK(fmi3Reset((fmi3Instance)in) == fmi3Error && in->phase == PHASE_TERMINATED);
+    });
+    WITH_SERVER("{\"ok\":true}", 0, {
+        in->phase = PHASE_TERMINATED;
+        CHECK(fmi3Reset((fmi3Instance)in) == fmi3OK && in->phase == PHASE_INSTANTIATED);
+    });
+    /* a state the wrapper does not know allows nothing */
+    REFUSED_IN(7, fmi3GetFloat64((fmi3Instance)in, vr, 1, v, 1));
+    CHECK(strstr(g_last_log, "unknown state") != NULL);
+    REFUSED_IN(-1, fmi3SetFloat64((fmi3Instance)in, vr, 1, v, 1));
+#undef DOSTEP
+#undef INIT
+}
+
 /* ------------------------------------------------- misc entry points */
 
 static void test_misc_entry_points(void) {
@@ -1465,11 +1574,31 @@ static void test_misc_entry_points(void) {
     CHECK(fmi3GetClock(NULL, vr, 2, clk) == fmi3Error);
     CHECK(fmi3SetClock(NULL, vr, 2, clk) == fmi3Error);
     fmi3Boolean b1, b2, b3, b4, b5; fmi3Float64 t;
-    CHECK(fmi3UpdateDiscreteStates(NULL, &b1, &b2, &b3, &b4, &b5, &t) == fmi3OK && !b1 && !b5);
+    /* Event Mode's, and not declared: both answered fmi3OK in any state */
+    b1 = b5 = fmi3True;
+    CHECK(fmi3UpdateDiscreteStates(NULL, &b1, &b2, &b3, &b4, &b5, &t) == fmi3Error && !b1 && !b5);
+    {
+        Instance *dead = fake_instance(SOCK_INVALID);
+        g_log_calls = 0;
+        CHECK(fmi3UpdateDiscreteStates((fmi3Instance)dead, &b1, &b2, &b3, &b4, &b5, &t) == fmi3Error);
+        CHECK(g_log_calls == 1 && strstr(g_last_log, "Event Mode") != NULL);
+        CHECK(fmi3EvaluateDiscreteStates((fmi3Instance)dead) == fmi3Error);
+        CHECK(g_log_calls == 2 && strstr(g_last_log, "providesEvaluateDiscreteStates") != NULL);
+        free_instance(dead);
+    }
     CHECK(fmi3EnterContinuousTimeMode(NULL) == fmi3Error);
     CHECK(fmi3GetString(NULL, vr, 1, NULL, 1) == fmi3Error);
     Instance *dead = fake_instance(SOCK_INVALID);
-    CHECK(fmi3SetTime((fmi3Instance)dead, 3.0) == fmi3OK && dead->time == 3.0);
+    /* model exchange's: it used to answer fmi3OK and move the wrapper's clock */
+    g_log_calls = 0;
+    CHECK(fmi3SetTime((fmi3Instance)dead, 3.0) == fmi3Error && dead->time == 0.0);
+    CHECK(g_log_calls == 1 && strstr(g_last_log, "model-exchange") != NULL);
+    CHECK(fmi3SetTime(NULL, 3.0) == fmi3Error);
+    /* no structural parameters, so no Configuration Mode (both answered fmi3OK) */
+    CHECK(fmi3EnterConfigurationMode((fmi3Instance)dead) == fmi3Error);
+    CHECK(strstr(g_last_log, "no structural parameters") != NULL);
+    CHECK(fmi3ExitConfigurationMode((fmi3Instance)dead) == fmi3Error);
+    CHECK(fmi3EnterConfigurationMode(NULL) == fmi3Error);
     CHECK(fmi3SetDebugLogging((fmi3Instance)dead, fmi3True, 0, NULL) == fmi3OK && dead->logging_on);
     CHECK(fmi3Terminate(NULL) == fmi3Error);
     CHECK(fmi3Reset(NULL) == fmi3Error);
@@ -1503,6 +1632,7 @@ int main(int argc, char **argv) {
     test_the_wrappers_clock_follows_set_fmu_state_and_reset();
     test_a_silent_sidecar_times_out();
     test_fmu_state();
+    test_the_fmi_state_machine();
     test_instantiate("deadbeef-0000-4000-8000-000000000001");
     test_misc_entry_points();
     printf("maddening_fmu unit tests: %d checks, %d failures\n", g_checks, g_failures);

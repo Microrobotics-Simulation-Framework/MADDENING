@@ -1043,7 +1043,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-030]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-148. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-151. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -1062,7 +1062,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-147.
+    step does not. MADD-ANO-150.
   domains:
     f32: tests/core/test_coupling_ift_forward_mode.py::test_forward_reverse_adjoint_identity
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-030]'
@@ -1187,7 +1187,7 @@ claims:
     (strict xfail, in a subprocess). Guess: the eqx.error_if in the IFT
     forward's strict check (graph_manager.py, _run_ift_forward ~3756) inside
     a sharded program; reduce the verdict across devices before the
-    callback, or raise on the host after the step. MADD-ANO-149.
+    callback, or raise on the host after the step. MADD-ANO-152.
   domains:
     f32: tests/core/test_strict_convergence_threshold.py::test_strict_convergence_raises_at_twice_the_threshold
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-033]'
@@ -3300,7 +3300,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-093]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-148. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-151. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -3319,7 +3319,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-147.
+    step does not. MADD-ANO-150.
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-093]'
@@ -3367,7 +3367,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-094]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-148. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-151. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -3386,7 +3386,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-147.
+    step does not. MADD-ANO-150.
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_on_an_affine_map_the_bound_reads_zero_against_the_exact_gradient
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-094]'
@@ -4193,7 +4193,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-140]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-148. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-151. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -4212,7 +4212,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-147.
+    step does not. MADD-ANO-150.
   domains:
     f32: tests/core/test_coupling_solver_equivalence.py::test_the_ift_adjoint_is_the_sensitivity_of_the_fixed_point
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-140]'
@@ -4261,7 +4261,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-141]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-148. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-151. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -4280,7 +4280,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-147.
+    step does not. MADD-ANO-150.
   notes: >-
     Ambiguous until 0.4.0's claims fix ("the derivative is identical for all of
     them").  Reworded.
@@ -4368,7 +4368,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-143]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-148.
+    in _analysis_dtype and cast back. MADD-ANO-151.
   notes: >-
     Failing until 0.4.0's round-4 fix (MADD-ANO-113, since 0.3.0): atol was
     1e-8 + rtol * max|b|, so a cotangent below about 1e-8 met the GMRES
@@ -4494,7 +4494,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-146]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-148. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-151. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -4513,7 +4513,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-147.
+    step does not. MADD-ANO-150.
   domains:
     f32: tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-146]'

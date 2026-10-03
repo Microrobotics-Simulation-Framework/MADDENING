@@ -406,7 +406,12 @@ class ParamSpec:
         computed as that arithmetic computes it (:func:`_step_gap`:
         subnormal operands and results flushed to zero) and a distance
         that is not positive is refused as on the bound: ``log`` of a
-        float32 ``1e-40`` is ``-inf`` on that backend.
+        float32 ``1e-40`` is ``-inf`` on that backend.  A positive distance
+        is not yet a coordinate, so the coordinate itself is then computed,
+        as :meth:`to_unconstrained` computes it, and a value whose
+        coordinate is not finite is refused too: ``logit`` divides the
+        distance by the width, and a float32 ``nextafter(1, 0)`` under
+        bounds ``(-1, 1)`` rounds to ``t == 1``, a coordinate of ``+inf``.
         """
         lo, hi = self.bounds
         v = np.asarray(p)
@@ -437,6 +442,27 @@ class ParamSpec:
             a, b, tiny = _bound_operands(v, hi)
             if bool(np.any(_step_gap(b, a, tiny) <= 0.0) if strict else np.any(a > b)):
                 raise ValueError(f"{name}={v} above bound {hi}")
+        if strict and jnp.issubdtype(v.dtype, jnp.floating):
+            # A positive distance from each bound is not yet a coordinate:
+            # ``logit`` divides the distance by the width,
+            # ``t = (p - lo) / (hi - lo)``, and both steps round.  A float32
+            # ``nextafter(1, 0)`` under bounds ``(-1, 1)`` has ``p - lo ==
+            # 2.0`` at its precision, so ``t == 1`` and the coordinate is
+            # ``+inf``; ``1e-10`` under ``(0, 1e30)`` has a ``t`` below the
+            # smallest normal, which the arithmetic flushes to 0, and a
+            # coordinate of ``-inf``.  Both used to pass.  So the coordinate
+            # itself is computed, by the transform's own arithmetic -- what
+            # ``unconstrain`` and every fitter compute -- and a value
+            # without a finite one is refused.
+            u = np.asarray(self.to_unconstrained(jnp.asarray(p)))
+            if not bool(np.all(np.isfinite(u))):
+                where = ("(p - lo) / (hi - lo)" if self.transform == "logit"
+                         else "p - lo")
+                raise ValueError(
+                    f"{name}={v} has no finite {self.transform} coordinate: "
+                    f"{where} rounds onto a bound at its precision, so "
+                    "unconstrain would return an infinite coordinate. Move "
+                    "the value further inside the bounds.")
 
     def _check_through_jnp(self, v, name: str, strict: bool) -> None:
         """:meth:`check` of a complex value, as before 0.4.0: NumPy orders

@@ -1718,7 +1718,7 @@ claims:
     - src/maddening/api/server.py:3104 (set_node_params)
     - src/maddening/api/server.py:578 (_coerced_to_param_type)
     - docs/user_guide/parameters.md:176 (Writing parameters over REST)
-  conditions: integer, float and list parameters; JSON 4.0, 4.5, 4 and lists of them.
+  conditions: integer, float and list parameters; JSON 4.0, 4.5, 4 and lists of them; text ("1.5", " 3 ", a list holding one) for a numeric parameter or leaf, refused on PUT and POST (it was parsed on PUT); a boolean for a numeric parameter on POST, refused as on PUT.
   oracle: the stored Python type and value; 400.
   tests:
     - tests/api/test_params_writes_the_step_cannot_run_with.py::test_an_integral_float_for_an_integer_parameter_is_stored_as_the_integer
@@ -1727,6 +1727,10 @@ claims:
     - tests/api/test_params_writes_the_step_cannot_run_with.py::test_the_coercion_rule
     - tests/api/test_params_endpoint_live_view.py::test_put_json_int_keeps_constructor_type_and_next_step_works
     - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_an_integral_number_for_a_float_parameter_is_a_float_on_both_routes
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_text_for_a_numeric_parameter_is_refused_on_both_routes
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_numeric_string_for_a_float_leaf_is_refused_and_nothing_is_written
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_boolean_for_a_numeric_parameter_is_refused_on_construction
+    - tests/property/test_differential_param_acceptance.py::test_a_numeric_string_is_refused_by_every_door
   status: verified
 
 - id: REST-083
@@ -1783,6 +1787,8 @@ claims:
     - tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_outside_a_sharded_nodes_bounds_is_refused_by_name
     - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_new_node_outside_its_param_spec_bounds_is_refused_as_a_params_write_is
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_outside_its_bounds_is_not_loaded
+    - tests/property/test_differential_param_acceptance.py::test_a_node_is_not_built_with_a_value_outside_its_bounds
+    - tests/property/test_differential_param_acceptance.py::test_every_construction_door_agrees_with_the_write_doors
   status: verified
 
 - id: REST-086
@@ -1805,6 +1811,8 @@ claims:
     - tests/core/test_hybrid_node.py::test_a_rest_params_write_to_a_hybrid_node_is_kept
     - tests/core/test_hybrid_node.py::test_a_node_params_write_on_a_hybrid_reaches_the_step
     - tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_hybrid_over_a_sharded_node_changes_the_trajectory
+    - tests/property/test_differential_param_acceptance.py::test_a_hybrid_node_holds_a_write_every_door_takes
+    - tests/property/test_differential_param_acceptance.py::test_a_hybrid_node_takes_a_parameter_write_as_every_door_does
   status: verified
   notes: >-
     Failing in the round-7 audit (MADD-ANO-157): HybridNode held a copy of
@@ -1947,13 +1955,14 @@ claims:
     hold, or a parameter value PUT /graph/params would refuse on the node as
     it stands -- non-finite, outside its ParamSpec bounds, refused by the
     node's constructor with the graph's other values, one a node consumed at
-    construction, one that moves a mapped edge's points (asked only of a
-    parameter the load changes)"; a missing file is a 404.
+    construction, one that moves a mapped edge's points, text or a boolean;
+    each asked of a parameter the load changes only, so a graph built
+    outside its bounds reloads its own checkpoint"; a missing file is a 404.
   sources:
     - src/maddening/api/README.md:148 (Checkpoints)
     - src/maddening/api/server.py:3505 (checkpoint_load)
     - docs/user_guide/parameters.md:208 (Writing parameters over REST)
-  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a leaf put back to the node's own value (loads); for a dozen values, the same verdict as PUT /graph/params; a missing path.
+  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member; a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint (loads, on both doors) and one moving that leaf further out (refused); for a dozen values, the same verdict as PUT /graph/params; a missing path.
   oracle: 400 or 404, and the state and params unchanged.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded
@@ -1969,15 +1978,25 @@ claims:
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_checkpoint_that_puts_a_leaf_back_to_the_nodes_own_value_loads
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_that_puts_a_baked_leaf_back_to_the_nodes_own_value_loads
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_and_a_params_write_give_the_same_verdict_on_every_value
-    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_graph_manager_load_state_does_not_apply_the_rest_checks
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_graph_manager_load_state_refuses_what_check_params_and_the_constructor_refuse
+    - tests/property/test_differential_param_acceptance.py::test_a_restore_door_refuses_what_the_write_doors_refuse
+    - tests/property/test_differential_param_acceptance.py::test_every_restore_door_agrees_with_the_write_doors
+    - tests/property/test_differential_param_acceptance.py::test_a_restore_door_refuses_a_diffusivity_the_constructor_refuses
+    - tests/property/test_differential_param_acceptance.py::test_a_restore_door_takes_back_the_value_the_graph_holds_whatever_its_bounds
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_graph_built_outside_its_bounds_reloads_its_own_checkpoint
   status: verified
   notes: >-
     Failing in the round-7 audit (MADD-ANO-156): the load checked shapes,
     dtypes and baked leaves only, so it restored a Fourier-unstable
     diffusivity and a damping below its bound with a 200.  Fixed by asking
     the archive's changed leaves what PUT asks, through the shared
-    _params_write_refusal.  GraphManager.load_state does not ask them, by
-    decision (pinned by the last test).
+    _params_write_refusal; GraphManager.load_state itself refuses text and
+    booleans, a non-finite or out-of-bounds leaf it changes (as
+    check_params) and values the constructor refuses, so the domain
+    oracle's restore doors agree with its write doors.  "Fit" means: every
+    leaf the load changes passes what PUT asks of a written leaf; a leaf
+    left at the value the graph holds is not asked (documented difference
+    D3 of the oracle, shared with the FMU's set_fmu_state).
 
 - id: REST-094
   area: checkpoint

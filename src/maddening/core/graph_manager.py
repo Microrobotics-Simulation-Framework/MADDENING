@@ -6338,6 +6338,54 @@ class GraphManager:
             return True
         return not _leaf_values_equal(before, after)
 
+    def _refuse_loaded_params(self, candidate: dict, installed: dict) -> None:
+        """Refuse (``ValueError``) the parameters a checkpoint load would
+        install, before anything is written.
+
+        *installed* (``{"nodes": ..., "mappings": ...}``) holds the leaves
+        whose archived value differs from the one the graph holds now;
+        *candidate* holds every leaf the graph holds with the archive's
+        values written over it.  Refused when :meth:`check_params` would
+        refuse an installed leaf -- non-finite, or outside its
+        ``ParamSpec`` bounds, graph overrides included -- or when a node
+        the load changes is given values its constructor refuses
+        (:meth:`_constructor_write_reason`, asked with every leaf of
+        *candidate* at a value other than the one the node was built with:
+        the values a save after the load would carry).
+
+        A leaf the load leaves where it was is not asked, as
+        ``PUT /graph/params`` does not ask an unwritten one: a graph runs
+        whatever its constructor was given, bounds being metadata to it, so
+        a graph built (or written in Python) outside its bounds must still
+        reload its own checkpoint.  Called by
+        :func:`maddening.core.simulation.checkpoint.load_state`.
+        """
+        try:
+            _check_bounds(installed, self.param_specs())
+        except ValueError as exc:
+            raise ValueError(
+                f"Checkpoint does not fit this graph, nothing was loaded: params {exc}"
+            ) from None
+        for owner in (installed.get("nodes") or {}):
+            spec = self._nodes.get(owner)
+            leaves = (candidate.get("nodes") or {}).get(owner)
+            if spec is None or not isinstance(leaves, dict):
+                continue
+            node = spec.node
+            own = getattr(node, "params", None) or {}
+            ctor = node.params_pytree()
+            changes = {k: np.asarray(v).tolist() for k, v in leaves.items()
+                       if k in own and k in ctor and not _leaf_values_equal(v, ctor[k])}
+            if not changes:
+                continue
+            first, *rest = changes
+            reason = self._constructor_write_reason(
+                owner, first, changes[first], others={k: changes[k] for k in rest})
+            if reason is not None:
+                raise ValueError(
+                    f"Checkpoint does not fit this graph, nothing was loaded: node "
+                    f"{owner!r} with params {', '.join(changes)} as saved: {reason}")
+
     def _refuse_baked_param_writes(self, tree: Any, *, live: bool) -> None:
         """Refuse a leaf that differs from its node's value but that the
         compiled step cannot read.
@@ -10972,9 +11020,12 @@ class GraphManager:
         """Load node states from an ``.npz`` file.
 
         See :func:`maddening.core.simulation.checkpoint.load_state` for details.
-        The parameter leaves are restored as a ``gm.params`` write is taken:
-        not checked against a ``ParamSpec``'s bounds or a reload, which
-        ``POST /checkpoint/load`` asks as ``PUT /graph/params`` does.
+        The parameters the load changes are asked what :meth:`check_params`
+        asks (finite and inside their ``ParamSpec`` bounds), and each node
+        it changes whether its constructor takes the values a save would
+        carry, before anything is written; ``POST /checkpoint/load`` asks
+        the rest of what ``PUT /graph/params`` asks.  A leaf the load leaves
+        where it was is not asked, so a graph reloads its own checkpoint.
         """
         from maddening.core.simulation.checkpoint import load_state
         self._recover_from_escaped_tracers()

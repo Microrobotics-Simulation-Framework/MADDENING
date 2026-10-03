@@ -127,8 +127,9 @@ class Counted(SimulationNode):
     of that size."""
 
     def __init__(self, name, timestep, count: int = 3, dims: tuple = (2, 2),
-                 gain: float = 1.0):
-        super().__init__(name, timestep, count=count, dims=list(dims), gain=gain)
+                 gain: float = 1.0, label: str = "x", flag: bool = False):
+        super().__init__(name, timestep, count=count, dims=list(dims), gain=gain,
+                         label=label, flag=flag)
 
     def initial_state(self):
         return {"x": jnp.zeros((), jnp.float32)}
@@ -298,3 +299,54 @@ def test_a_node_that_fills_the_graph_budget_exactly_is_added_and_one_more_elemen
                                              "timestep": 0.01, "params": {}})
     assert resp.status_code == 400 and "whole graph" in resp.json()["detail"], resp.text
     assert set(server.gm._nodes) == {"spring", "a", "b"}
+
+
+@pytest.mark.parametrize("route, key, value", [
+    ("put", "gain", "1.5"), ("put", "count", "3"), ("put", "dims", ["2", 2]),
+    ("post", "gain", "1.5"), ("post", "count", " 3 "), ("post", "dims", [2, "2"]),
+])
+def test_text_for_a_numeric_parameter_is_refused_on_both_routes(route, key, value):
+    """N1: ``PUT /graph/params`` stored the string ``"1.5"`` as 1.5 (NumPy
+    parses it), where every FMU door refuses a string; ``POST /graph/nodes``
+    handed it to the constructor.  Both refuse text for a numeric parameter
+    now, and a text parameter still takes text."""
+    server, client = _counted_client()
+    if route == "put":
+        resp = client.put("/graph/params/c", json={"params": {key: value}})
+        assert server.gm.get_node("c").params[key] == {"gain": 1.0, "count": 3,
+                                                       "dims": [2, 2]}[key]
+    else:
+        resp = client.post("/graph/nodes", json={"type": "Counted", "name": "n",
+                                                 "timestep": 0.01, "params": {key: value}})
+        assert "n" not in server.gm._nodes
+    assert resp.status_code == 400 and "expected a number, got a string" in resp.text, resp.text
+    ok = client.post("/graph/nodes", json={"type": "Counted", "name": "t", "timestep": 0.01,
+                                           "params": {"label": "y"}})
+    assert ok.status_code == 201, ok.text
+
+
+def test_a_numeric_string_for_a_float_leaf_is_refused_and_nothing_is_written():
+    """N1 on a params-pytree leaf (the oracle's case)."""
+    server, client = _client()
+    before = float(server.gm.params["nodes"]["spring"]["stiffness"])
+    resp = client.put("/graph/params/spring", json={"params": {"stiffness": "1.5"}})
+    assert resp.status_code == 400 and "expected a number, got a string" in resp.text
+    assert float(server.gm.params["nodes"]["spring"]["stiffness"]) == before
+
+
+@pytest.mark.parametrize("key, value", [("gain", True), ("count", False), ("dims", [2, True])])
+def test_a_boolean_for_a_numeric_parameter_is_refused_on_construction(key, value):
+    """N3: ``POST /graph/nodes`` built a node with ``damping: true`` (201),
+    and the value dropped out of the params pytree, where ``PUT`` refuses a
+    boolean for a numeric parameter.  A boolean parameter takes one."""
+    server, client = _counted_client()
+    resp = client.post("/graph/nodes", json={"type": "Counted", "name": "n", "timestep": 0.01,
+                                             "params": {key: value}})
+    assert resp.status_code == 400 and "expected a number, got a boolean" in resp.text, resp.text
+    assert "n" not in server.gm._nodes
+    spring = client.post("/graph/nodes", json={"type": "SpringDamperNode", "name": "s2",
+                                               "timestep": 0.01, "params": {"damping": True}})
+    assert spring.status_code == 400 and "got a boolean" in spring.text
+    ok = client.post("/graph/nodes", json={"type": "Counted", "name": "b", "timestep": 0.01,
+                                           "params": {"flag": True}})
+    assert ok.status_code == 201, ok.text

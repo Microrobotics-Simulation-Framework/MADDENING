@@ -151,10 +151,20 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         leaf whose shape differs from the live one), or holds a value the
         live leaf's dtype cannot hold: a finite value that would overflow
         to ``inf``, a non-zero one that would flush to ``0``, an integer
-        that would wrap (:func:`_checked_cast`; a value that rounds to a
-        subnormal loads, and one already ``inf`` or ``NaN`` loads as it
-        was).  :class:`CheckpointFormatError`, a ``ValueError``, if the
-        file is not an ``.npz`` archive of plain arrays.
+        that would wrap, text, or a boolean for a numeric leaf
+        (:func:`_checked_cast`; a value that rounds to a subnormal loads,
+        and a state value already ``inf`` or ``NaN`` loads as it was).
+        Also if a parameter leaf the load changes is not what
+        :meth:`~maddening.core.graph_manager.GraphManager.check_params`
+        takes -- non-finite or outside its ``ParamSpec`` bounds, graph
+        overrides included -- or a node it changes is given values its
+        constructor refuses, so that a graph saved after the load would not
+        reload (``POST /checkpoint/load`` asks this and more, as
+        ``PUT /graph/params`` does).  A leaf the load leaves at the value
+        the graph holds is not asked, so a graph built outside its bounds
+        reloads its own checkpoint.  :class:`CheckpointFormatError`, a
+        ``ValueError``, if the file is not an ``.npz`` archive of plain
+        arrays.
 
     Notes
     -----
@@ -261,8 +271,23 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     # and keys are ignored (a node may have stopped accepting params);
     # a leaf whose shape differs from the live one is an error, like a
     # state field, because restoring it would run the graph wrong.
+    candidate: dict = {
+        section: {owner: dict(leaves) for owner, leaves in owners.items()
+                  if isinstance(leaves, dict)}
+        for section, owners in graph_manager.params.items()
+        if section in ("nodes", "mappings") and isinstance(owners, dict)
+    }
+
+    # The comparison PUT /graph/params and the FMU restores use: NaN equals
+    # NaN, so a leaf already NaN that the archive leaves NaN is unchanged.
+    from maddening.core.graph_manager import _leaf_values_equal  # noqa: PLC0415
+    installed: dict = {}
+
     def _stage_params(section: str, saved_tree: dict) -> list:
-        """``[(leaf_dict, name, value)]`` to write; raises before any write."""
+        """``[(leaf_dict, name, value)]`` to write; raises before any write.
+        Each value is also placed in ``candidate``, the parameters the load
+        would leave, and -- when it differs from the live leaf -- in
+        ``installed``; both are checked before anything is written."""
         current = graph_manager.params.get(section, {})
         writes: list[tuple[dict, str, Any]] = []
         for owner, saved in saved_tree.items():
@@ -277,14 +302,27 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
                         f"Checkpoint params {section}[{owner!r}][{pname!r}] has shape "
                         f"{tuple(arr.shape)}, graph has {tuple(live.shape)}"
                     )
-                writes.append((current[owner], pname, jnp.asarray(_checked_cast(
-                    arr, live.dtype, f"params {section}[{owner!r}][{pname!r}]"))))
+                value = jnp.asarray(_checked_cast(
+                    arr, live.dtype, f"params {section}[{owner!r}][{pname!r}]"))
+                writes.append((current[owner], pname, value))
+                candidate[section][owner][pname] = value
+                if not _leaf_values_equal(value, live):
+                    installed.setdefault(section, {}).setdefault(owner, {})[pname] = value
         return writes
 
     staged_params = (
         _stage_params("nodes", param_keys)
         + _stage_params("mappings", mapping_keys)
     )
+    # The parameters the load changes are asked what check_params asks
+    # (finite and inside their ParamSpec bounds, graph overrides included),
+    # and each node it changes whether its constructor takes the values a
+    # save after the load would carry.  A checkpoint used to restore a
+    # damping below its bound, a NaN, or a HeatNode diffusivity past its
+    # Fourier limit at this graph's timestep, and the graph ran (and saved)
+    # a model its own checks refuse.  A leaf left where it was is not
+    # asked: a graph built outside its bounds reloads its own checkpoint.
+    graph_manager._refuse_loaded_params(candidate, installed)
 
     # ---- Apply.  Everything above validated without mutating; the
     # rollback below is the net for whatever validation cannot see, so a
@@ -400,6 +438,16 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
     """
     a = np.asarray(arr)
     target = np.dtype(dtype)
+    # Text and booleans are not numbers: NumPy casts "1.5" to 1.5 and True
+    # to 1.0 without a word, and every other surface (PUT /graph/params,
+    # the FMU) refuses both.  A boolean for a boolean leaf is a boolean.
+    if a.dtype.kind in "USO":
+        raise ValueError(
+            f"Checkpoint {what} holds {a.dtype} data, not a number.  Nothing was loaded.")
+    if a.dtype.kind == "b" and target.kind != "b":
+        raise ValueError(
+            f"Checkpoint {what} holds a boolean, and this graph's leaf is {target}.  "
+            "Nothing was loaded.")
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         cast = a.astype(target)
     if a.dtype == target:

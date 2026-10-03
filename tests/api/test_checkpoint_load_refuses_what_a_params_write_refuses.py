@@ -13,10 +13,13 @@ so for every value the two answer alike: the property test below writes
 each value with ``PUT`` on one server and loads a checkpoint carrying it
 on another, and requires the same verdict.
 
-``GraphManager.load_state`` itself does not ask these, by decision: a
-value outside a ``ParamSpec``'s bounds is one Python code may hold on
-purpose, and parameter writes outside REST are not checked against a
-reload (``docs/user_guide/parameters.md``).  The last test pins that.
+``GraphManager.load_state`` itself asks the first three -- a leaf it
+changes finite and inside its bounds, as ``check_params`` asks, and the
+constructor -- for a Python caller, and refuses text and booleans for a
+numeric leaf; a leaf it leaves where it was is not asked, so a graph built
+outside its bounds reloads its own checkpoint.  The last tests pin that.  (The domain oracle,
+``tests/property/test_differential_param_acceptance.py``, holds both loads
+to every write door.)
 """
 
 from __future__ import annotations
@@ -122,7 +125,7 @@ def test_a_value_outside_its_bounds_is_not_loaded(tmp_path):
     assert put.status_code == 400
     load = client.post("/checkpoint/load", params={"path": "b.npz"})
     assert load.status_code == 400, load.text
-    assert "damping=-5.0 below bound 0.0" in load.json()["detail"]
+    assert "-5.0 below bound 0.0" in load.json()["detail"]
     assert _same(before, _snapshot(gm))
     assert client.get("/graph/params/s").json()["damping"] == 1.0
 
@@ -139,7 +142,7 @@ def test_a_non_finite_parameter_in_a_checkpoint_is_not_loaded(tmp_path):
     before = _snapshot(gm)
     load = client.post("/checkpoint/load", params={"path": "n.npz"})
     assert load.status_code == 400, load.text
-    assert "stiffness: value must be finite" in load.json()["detail"]
+    assert "stiffness" in load.json()["detail"] and "not finite" in load.json()["detail"]
     assert _same(before, _snapshot(gm))
 
 
@@ -221,11 +224,83 @@ def test_a_load_and_a_params_write_give_the_same_verdict_on_every_value(tmp_path
             == pytest.approx(value, rel=1e-6)
 
 
-def test_graph_manager_load_state_does_not_apply_the_rest_checks(tmp_path):
-    """The decision this PR records: ``GraphManager.load_state`` restores a
-    value outside a ``ParamSpec``'s bounds (Python may hold one on purpose);
-    only the REST route asks what ``PUT`` asks."""
-    _save_with_live_value(tmp_path, "py.npz", _spring(1.0), "damping", -5.0)
+@pytest.mark.parametrize("key, member, refusal", [
+    ("damping", np.float32(-5.0), "below bound 0.0"),
+    ("stiffness", np.float32(np.nan), "not finite"),
+    ("damping", np.asarray(True), "holds a boolean"),
+    ("damping", np.asarray("1.5"), "not a number"),
+], ids=["below-bound", "nan", "boolean", "numeric-string"])
+def test_graph_manager_load_state_refuses_what_check_params_and_the_constructor_refuse(
+        tmp_path, key, member, refusal):
+    """A Python caller had the same hole as the route: ``load_state``
+    restored a damping below its bound (which ``check_params`` refuses), a
+    NaN, and -- NumPy casting without a word -- a boolean as 1.0 and a
+    numeric string as its number.  Each is a ``ValueError`` now, with
+    nothing loaded."""
+    _save_with_live_value(tmp_path, "py.npz", _spring(1.0), key, 1.0)
+    with np.load(tmp_path / "py.npz") as data:
+        arrays = {k: data[k] for k in data.files}
+    arrays[next(k for k in arrays if k.endswith(f"/s/{key}"))] = member
+    np.savez(tmp_path / "py.npz", **arrays)
     gm = _graph(_spring(1.0))
-    gm.load_state(str(tmp_path / "py.npz"))
-    assert float(gm.params["nodes"]["s"]["damping"]) == -5.0
+    before = _snapshot(gm)
+    with pytest.raises(ValueError, match=refusal):
+        gm.load_state(str(tmp_path / "py.npz"))
+    assert _same(before, _snapshot(gm))
+
+
+def test_graph_manager_load_state_refuses_a_value_the_constructor_refuses(tmp_path):
+    gm_a = _graph(_rod(0.01, 0.4))
+    gm_a.save_state(str(tmp_path / "a.npz"))
+    gm = _graph(_rod(0.05, 0.05))
+    before = _snapshot(gm)
+    with pytest.raises(ValueError, match="constructor refuses"):
+        gm.load_state(str(tmp_path / "a.npz"))
+    assert _same(before, _snapshot(gm))
+    _save_with_live_value(tmp_path, "ok.npz", _rod(0.05, 0.05), "thermal_diffusivity", 0.09)
+    gm.load_state(str(tmp_path / "ok.npz"))      # the control
+    assert float(gm.params["nodes"]["rod"]["thermal_diffusivity"]) == pytest.approx(0.09)
+
+
+def test_a_graph_built_outside_its_bounds_reloads_its_own_checkpoint(tmp_path):
+    """A graph runs whatever its constructor was given, bounds being
+    metadata to it: a stiffness of 100 under a declared lower bound of 150
+    is the graph's own value.  Both loads ask nothing of a leaf they leave
+    where it was, so the graph reloads its own checkpoint (asked as a whole
+    tree, ``load_state`` refused it); a checkpoint that moves the leaf to
+    another value outside the bounds is still refused by both."""
+    from maddening.core.params import ParamSpec
+
+    gm = _graph(_spring(1.0))
+    gm.set_param_spec("s", "stiffness", ParamSpec(bounds=(150.0, None)))
+    gm.save_state(str(tmp_path / "own.npz"))
+    gm.load_state(str(tmp_path / "own.npz"))
+    _server, client = _client(gm, tmp_path)
+    assert client.post("/checkpoint/load", params={"path": "own.npz"}).status_code == 200
+    assert float(gm.params["nodes"]["s"]["stiffness"]) == 100.0
+
+    _save_with_live_value(tmp_path, "moved.npz", _spring(1.0), "stiffness", 120.0)
+    before = _snapshot(gm)
+    with pytest.raises(ValueError, match="120.0 below bound 150.0"):
+        gm.load_state(str(tmp_path / "moved.npz"))
+    load = client.post("/checkpoint/load", params={"path": "moved.npz"})
+    assert load.status_code == 400 and "below bound 150.0" in load.json()["detail"], load.text
+    assert _same(before, _snapshot(gm))
+
+
+def test_a_python_write_the_constructor_refuses_still_reloads_its_own_checkpoint(tmp_path):
+    """A ``gm.params`` write in Python is not checked against the node's
+    constructor (``MADD-ANO-047``'s residual), so a graph can hold a rod past
+    its Fourier limit.  Its own checkpoint, which leaves every leaf where it
+    was, reloads; the same checkpoint into a graph at a stable value is
+    refused, since there the load installs the value."""
+    gm = _graph(_rod(0.05, 0.05))
+    gm.params["nodes"]["rod"]["thermal_diffusivity"] = jnp.asarray(0.4, jnp.float32)
+    gm.save_state(str(tmp_path / "own.npz"))
+    gm.load_state(str(tmp_path / "own.npz"))
+    assert float(gm.params["nodes"]["rod"]["thermal_diffusivity"]) == pytest.approx(0.4)
+    fresh = _graph(_rod(0.05, 0.05))
+    before = _snapshot(fresh)
+    with pytest.raises(ValueError, match="constructor refuses"):
+        fresh.load_state(str(tmp_path / "own.npz"))
+    assert _same(before, _snapshot(fresh))

@@ -1010,18 +1010,23 @@ Documented differences: **D1** `check_params` judges the value held in the
 leaf's dtype (a value the dtype overflows or flushes is "does not fit its
 type" to every other door); **D2** it is not asked about a value that is
 not a number; **D3** a snapshot restores a parameter at the value the FMU
-was instantiated with whatever its bounds; **D4** the REST request model
-refuses a JSON integer above `MAX_NODE_PARAM_INT` in magnitude (422)
-whatever the leaf.  B1-M2 (a `log` spec without a lower bound advertised
-no `min`) is fixed in 0.4.0 and its cases run as tests.  Known failing:
-B2-H1 (a checkpoint load restores what PUT
-refuses: out of bounds, non-finite, a boolean, a value the constructor
-refuses), B2-L10 (`POST /graph/nodes` applies no `ParamSpec` bounds), B2-H2
-(a write to a `HybridNode` is lost), N1 (the REST route stores a numeric
-string as the number), N2 (an open bound in the band where a float32's
-spacing flushes is advertised one float inside it, where `ParamSpec.check`
-refuses), N3 (`POST /graph/nodes` takes a boolean for a float constant) and
-N4 (the FMU doors and `check_params` take a value the node's constructor
+was instantiated with whatever its bounds, and both checkpoint loads ask
+nothing of a leaf they leave at the value the graph holds (a graph built
+outside its bounds reloads its own checkpoint); **D4** (retired: the REST
+route bounds a JSON integer past `MAX_NODE_PARAM_INT` only for an integer
+parameter, so a float leaf takes one at every door); **D5** PUT and both
+restore doors ask the node's constructor and refuse a value it refuses (a
+`HeatNode` past its Fourier limit), which `check_params`, the sidecar and
+the bridge take (`MADD-ANO-047`'s residual, deferred to 0.5.0).  B1-M2 (a
+`log` spec without a lower bound advertised no `min`) is fixed in 0.4.0
+and its cases run as tests, as do B2-H1 (a checkpoint load restored what
+PUT refuses: out of bounds, non-finite, a boolean, a numeric string, a
+value the constructor refuses), B2-L10 (`POST /graph/nodes` applied no
+`ParamSpec` bounds), B2-H2 (a write to a `HybridNode` was lost), N1 (the
+REST route stored a numeric string as the number) and N3 (`POST
+/graph/nodes` took a boolean for a float constant), all fixed in 0.4.0.
+Known failing: N2 (an open bound in the band where a float32's spacing
+flushes is advertised one float inside it, where `ParamSpec.check`
 refuses).  Each pinned case compares only the doors its finding is about,
 so a fix shows even while another finding on the same value is pending.
 Cannot see: a rule every door shares, and arrays.

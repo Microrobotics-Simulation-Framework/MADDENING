@@ -481,6 +481,47 @@ def _constructor_default(cls: Any, key: str) -> Any:
     return (constructor_arguments(cls, {}) or {}).get(key)
 
 
+def _holds_text(value: Any) -> bool:
+    """Whether *value* is, or holds anywhere inside it, a string."""
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            return True
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple)):
+            stack.extend(item)
+    return False
+
+
+def _is_numeric_value(value: Any) -> bool:
+    """A number that is not a boolean, or a non-empty list of them: the
+    value of a numeric constructor parameter."""
+    if isinstance(value, (list, tuple)):
+        return bool(value) and all(_is_numeric_value(v) for v in value)
+    return isinstance(value, (int, float, np.integer, np.floating)) \
+        and not isinstance(value, (bool, np.bool_))
+
+
+def _new_node_type_refusal(cls: Any, params: dict[str, Any]) -> Optional[str]:
+    """Why ``POST /graph/nodes`` refuses a value for its parameter's type,
+    or ``None``: a boolean or text for a parameter whose constructor
+    default is a number.  ``PUT /graph/params`` refuses both for a numeric
+    parameter, and every FMU door takes numbers only; the constructor took
+    ``damping: true`` and the value dropped out of the params pytree."""
+    for key, value in params.items():
+        default = _constructor_default(cls, key)
+        if not _is_numeric_value(default):
+            continue
+        if isinstance(value, bool) or (isinstance(value, (list, tuple))
+                                       and any(isinstance(v, bool) for v in value)):
+            return f"{key}: expected a number, got a boolean"
+        if _holds_text(value):
+            return f"{key}: expected a number, got a string"
+    return None
+
+
 def _oversized_new_node_param(cls: Any, params: dict[str, Any]) -> Optional[str]:
     """:func:`_oversized_param`'s integer bound on ``POST /graph/nodes``'s
     *params*, asked of each value as its parameter's type reads it
@@ -1673,8 +1714,9 @@ def _leaf_value_refusal(key: str, value: Any, spec: Any) -> Optional[str]:
 
 def _new_node_bounds_refusal(node: Any, given: dict[str, Any]) -> Optional[str]:
     """Why ``POST /graph/nodes`` refuses the values *given* for a new
-    *node*'s params-pytree leaves (:func:`_leaf_value_refusal` against the
-    node's own :meth:`~maddening.core.node.SimulationNode.param_specs`), or
+    *node*'s params-pytree leaves -- one the leaf's dtype cannot hold
+    (:func:`_unrepresentable`), then :func:`_leaf_value_refusal` against the
+    node's own :meth:`~maddening.core.node.SimulationNode.param_specs` -- or
     ``None``.  Asked of a node that takes injected params, as ``PUT
     /graph/params`` asks of a live leaf, and only of the keys the request
     gives: a class's own default is its own business."""
@@ -1685,8 +1727,13 @@ def _new_node_bounds_refusal(node: Any, given: dict[str, Any]) -> Optional[str]:
         specs = node.param_specs()
     except Exception:  # noqa: BLE001 - the dry run below names what fails
         return None
-    for key in given:
+    for key, value in given.items():
         if key in leaves:
+            # A value the leaf's dtype flushes to zero or overflows, as PUT
+            # refuses it ("does not fit its type"): 1e-50 was built as 0.0.
+            problem = _unrepresentable(value, np.asarray(leaves[key]).dtype)
+            if problem is not None:
+                return f"{key}: {problem}, got {value!r}"
             reason = _leaf_value_refusal(key, leaves[key], specs.get(key))
             if reason is not None:
                 return reason
@@ -3171,6 +3218,11 @@ class SimulationServer:
             oversized = _oversized_new_node_param(node_cls, req.params)
             if oversized is not None:
                 raise HTTPException(status_code=422, detail=oversized)
+            # A boolean or text for a numeric parameter, refused as PUT
+            # refuses it (the constructor took both without a word).
+            wrong_type = _new_node_type_refusal(node_cls, req.params)
+            if wrong_type is not None:
+                raise HTTPException(status_code=400, detail=wrong_type)
             # Before the constructor, for a class that can say what it would
             # build: the size checks below run on the built node and state,
             # so they used to refuse a D3Q19 lattice of 140^3 cells after
@@ -3545,6 +3597,13 @@ class SimulationServer:
                         )
                     structural[key] = value
                     continue
+                if _holds_text(value) and (key in live
+                                           or _is_numeric_value(node.params.get(key))):
+                    # NumPy parses "1.5" as 1.5, so a numeric string was
+                    # stored as the number, where every FMU door refuses a
+                    # string and the comment below says a string is a 400.
+                    raise HTTPException(status_code=400,
+                                        detail=f"{key}: expected a number, got a string")
                 if key not in live:
                     # Kept in the parameter's type: a float written for an
                     # integer used to be stored as a float (HeatNode
@@ -3892,11 +3951,11 @@ class SimulationServer:
             the node's constructor refuses with the graph's other values
             (so a save after the load would not reload), one the node
             consumed when it was constructed, or one that moves the points
-            a mapped edge was built from.  A parameter is asked only when
-            the load changes it.  ``GraphManager.load_state`` itself does
-            not ask these: a value outside a ``ParamSpec``'s bounds is one
-            Python code may hold on purpose, and a write outside REST is
-            not checked against a reload (``docs/user_guide/parameters.md``).
+            a mapped edge was built from; and text or a boolean for a
+            numeric parameter.  Finiteness, the bounds and the constructor
+            are asked by ``GraphManager.load_state`` itself, the rest here;
+            every check is asked of a parameter the load changes only, so a
+            graph built outside its bounds reloads its own checkpoint.
 
             The streams (``/ws/state``, ``/ws/state/binary``, ``/ws/render``)
             serve the loaded state at once, and their ``sim_time`` is the

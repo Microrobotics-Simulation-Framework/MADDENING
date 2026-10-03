@@ -3140,6 +3140,7 @@ claims:
     - src/maddening/core/graph_manager.py:7960 (coupling_diagnostics, spectral_error_bound)
     - src/maddening/core/coupling/acceleration.py:1193 (spectral_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
+    - src/maddening/core/inspection.py:1397 (coupling_report, the error_estimate note)
   conditions: >-
     F linear; solver="ift", diagnostics=True; at most eight independent
     interface scalars (spectral_usable); the group's own norm at the

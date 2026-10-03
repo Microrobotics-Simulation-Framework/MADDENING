@@ -171,6 +171,9 @@ def test_the_mixed_norm_with_the_same_transforms_keeps_the_raw_fields():
     ])
     assert d["spectral_usable"], dict(d)
     _assert_bound_holds(d, true, "mixed")
+    # The report's note states the bound with its conditions (CPL-088).
+    notes = " ".join(gm.coupling_report().notes)
+    assert "spectral_usable is True" in notes and "transformed" in notes, notes
 
 
 # ---------------------------------------------------------------------------

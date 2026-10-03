@@ -2823,16 +2823,18 @@ def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
 #: Largest trainable-parameter count for which :func:`fit` accumulates the
 #: gradient Gram matrix that :class:`_ExcitationTracker` uses.
 #:
-#: The tracker holds one ``n x n`` float64 matrix and costs one ``n x n``
-#: outer product per iteration plus one ``eigh`` at the end -- ``n**2``
-#: fused multiply-adds per iteration and ``O(n**3)`` once, against the full
-#: rollout and reverse pass the gradient itself costs, and it only runs at
-#: all once there are ``n`` gradients to pool.  At the cap that is 2.1 MB,
-#: 0.26 MFLOP per iteration and ~0.13 GFLOP for the decomposition.  Wall
-#: clock is not quoted: measured on this box the same 512-wide ``eigh``
-#: ranged over 52-892 ms across five back-to-back runs, which is contention
-#: from the other work sharing it and not a property of the code.  A caller
-#: who does not want the cost at all passes ``hold_undetermined=False``.
+#: The tracker holds one ``n x n`` float64 triangular factor and a buffer
+#: of at most ``max(2n, 256)`` gradients, which it folds into the factor
+#: with one QR when full -- ``O(n**2)`` per gradient, as the ``n x n``
+#: outer product it replaced cost -- plus one SVD at the end, ``O(n**3)``
+#: once, against the full rollout and reverse pass the gradient itself
+#: costs, and it only runs at all once there are ``n`` gradients to pool.
+#: At the cap that is 2.1 MB for the factor and 4.2 MB for the buffer.
+#: Wall clock is not quoted: measured on this box the same 512-wide
+#: decomposition ranged over 52-892 ms across five back-to-back runs, which
+#: is contention from the other work sharing it and not a property of the
+#: code.  A caller who does not want the cost at all passes
+#: ``hold_undetermined=False``.
 #:
 #: When the Gram matrix leaves ``k`` directions unspanned, the guard pays
 #: once more, at the selected iterate, to ask the objective's curvature
@@ -2905,6 +2907,41 @@ def _float_resolution(tree) -> np.ndarray:
     return np.concatenate(parts) if parts else np.zeros(0)
 
 
+def _coarsest_dtype(tree, idx) -> np.dtype:
+    """The floating dtype of the trainable entries ``idx`` (in
+    ``ravel_pytree(tree)`` order) whose ``eps`` is largest.
+
+    ``ravel_pytree`` promotes a float32 leaf beside a float64 one to
+    float64, but what the run can resolve along a direction is bounded by
+    the arithmetic of the coarsest leaf the model computes with, not by the
+    raveled vector's dtype: the identifiability guard reads its precision
+    from here.  Measured: three float32 constants of a spring in an x64
+    graph, judged at float64's ``eps``, made the guard report full rank for
+    their exact scale degeneracy in every run.
+    """
+    selected = np.zeros(sum(_leaf_size(leaf) for leaf in jax.tree.leaves(tree)), dtype=bool)
+    selected[np.asarray(idx, dtype=np.intp)] = True
+    best, best_eps, offset = None, -1.0, 0
+    for leaf in jax.tree.leaves(tree):
+        n = _leaf_size(leaf)
+        dtype = jnp.result_type(leaf)
+        if jnp.issubdtype(dtype, jnp.floating) and selected[offset:offset + n].any():
+            eps = float(jnp.finfo(dtype).eps)
+            if eps > best_eps:
+                best, best_eps = dtype, eps
+        offset += n
+    return np.dtype(best if best is not None else np.float32)
+
+
+#: Gradients :class:`_ExcitationTracker` buffers before folding them into
+#: its triangular factor, at least: a fold is one QR of the factor and the
+#: buffer, so the cost per gradient is ``O(n**2)`` like the outer product
+#: it replaces, and the folds' rounding stays below the cutoff (the cutoff
+#: grows as ``sqrt(T)`` and the rounding of ``F`` folds as ``sqrt(F)``,
+#: ``F < T``).
+_EXCITATION_FOLD_ROWS = 256
+
+
 class _ExcitationTracker:
     """Accumulated gradient second moment ``G = sum_t g_t g_t^T`` of a fit.
 
@@ -2936,29 +2973,70 @@ class _ExcitationTracker:
     learning rates 0.01 to 0.2, against ``8e-3`` for the weakest direction
     the data does resolve -- twelve decades of separation.
 
-    ``G`` is accumulated in float64 whatever the gradients' own precision:
-    the quantity being resolved is twelve decades below the top eigenvalue,
-    which float32 accumulation cannot represent at all.
+    ``G`` is never formed.  The tracker keeps ``R``, the triangular factor
+    of the stacked gradients (``G = RᵀR``), in float64, and reads ``G``'s
+    spectrum as the squared singular values of ``R``.  Forming ``G`` and
+    decomposing it squares the condition: ``eigh`` resolves ``G``'s
+    eigenvalues only to about ``eps64`` of the largest, so an exactly null
+    direction of float64 gradients -- whose energy is ``eps64**2`` of the
+    largest -- came back at ``5e-17`` of it, far above the cutoff of
+    ``4e-31``, and under ``jax_enable_x64`` the guard reported full rank
+    for the spring's exact scale degeneracy and let Adam drift along it.
+    The factor's singular values resolve to ``eps64`` of the largest, the
+    square root of what the cutoff needs, at either precision.  In float32
+    the verdict is unchanged: ``eig(G) = s**2`` and the cutoff is the same
+    rule (see :meth:`projector`).
+
+    ``eps`` is that of the coarsest trainable leaf's dtype
+    (:func:`_coarsest_dtype`), which bounds what the gradients resolve, not
+    the raveled vector's: a float32 leaf in an x64 graph is float32.
     """
 
-    def __init__(self, n: int, dtype) -> None:
+    def __init__(self, n: int, dtype, eps: Optional[float] = None) -> None:
         self.n = int(n)
-        self.eps = float(np.finfo(dtype).eps)
+        self.eps = float(np.finfo(dtype).eps) if eps is None else float(eps)
         self.count = 0
-        self._gram = np.zeros((self.n, self.n), dtype=np.float64)
+        self._r = np.zeros((0, self.n), dtype=np.float64)
+        self._rows: list = []
+        # A non-finite gradient makes the spectrum undefined for the rest
+        # of the run (:meth:`split` answers ``None``); nothing more is kept.
+        self._finite = True
 
     def observe(self, g) -> None:
         """Fold one gradient into the accumulated second moment."""
-        gv = np.asarray(g, dtype=np.float64).reshape(-1)
-        self._gram += np.outer(gv, gv)
         self.count += 1
+        if not self._finite:
+            return
+        row = np.asarray(g, dtype=np.float64).reshape(-1)
+        if not np.all(np.isfinite(row)):
+            self._finite, self._rows = False, []
+            self._r = np.full((1, self.n), np.nan)
+            return
+        self._rows.append(row)
+        if len(self._rows) >= max(2 * self.n, _EXCITATION_FOLD_ROWS):
+            self._fold()
+
+    def _fold(self) -> np.ndarray:
+        """``R``, with every buffered gradient folded in (one QR)."""
+        if self._rows:
+            stacked = np.vstack([self._r, np.stack(self._rows)])
+            self._rows = []
+            self._r = np.linalg.qr(stacked, mode="r")
+        return self._r
+
+    @property
+    def _gram(self) -> np.ndarray:
+        """``G = RᵀR``, formed on request (diagnostics and tests; the
+        verdicts never read it)."""
+        r = self._fold()
+        return r.T @ r
 
     def gradient_scale(self) -> np.ndarray:
         """``sqrt(diag(G))``: each coordinate's accumulated gradient
         magnitude, which scales with the coordinate's units as a Jacobian
         column does (:func:`_relative_scale` uses it where a coordinate
         has no value of its own to be relative to)."""
-        return np.sqrt(np.maximum(np.diag(self._gram), 0.0))
+        return np.linalg.norm(self._fold(), axis=0)
 
     def split(self, scale: Optional[np.ndarray] = None
               ) -> Optional[tuple[np.ndarray, np.ndarray]]:
@@ -2980,13 +3058,21 @@ class _ExcitationTracker:
         """
         if self.count < self.n:
             return None
-        gram = self._gram if scale is None else self._gram / np.outer(scale, scale)
-        evals, evecs = np.linalg.eigh(gram)
-        top = float(evals[-1])
+        r = self._fold()
+        if not np.all(np.isfinite(r)):
+            return None
+        if scale is not None:
+            r = r / np.asarray(scale, dtype=np.float64)[None, :]
+        _, s, vt = np.linalg.svd(r, full_matrices=True)
+        sv = np.zeros(self.n, dtype=np.float64)
+        sv[:s.size] = s
+        order = np.argsort(sv, kind="stable")      # ascending, as ``eigh``
+        sv, evecs = sv[order], vt.T[:, order]
+        top = float(sv[-1])
         if not np.isfinite(top) or top <= 0.0:
             return None
-        cutoff = (max(self.n, math.sqrt(self.count)) * self.eps) ** 2 * top
-        return evecs, np.asarray(evals > cutoff)
+        cutoff = max(self.n, math.sqrt(self.count)) * self.eps * top
+        return evecs, np.asarray(sv > cutoff)
 
     def projector(self, scale: Optional[np.ndarray] = None
                   ) -> tuple[Optional[int], Optional[np.ndarray]]:
@@ -3003,7 +3089,9 @@ class _ExcitationTracker:
         (:func:`_hold_undetermined_directions`).
 
         The cutoff is ``(max(n, sqrt(T)) * eps)**2`` of the largest
-        eigenvalue, for ``n`` parameters and ``T`` gradients -- the same rule
+        eigenvalue -- ``max(n, sqrt(T)) * eps`` of the largest singular
+        value of ``R``, which is how it is applied -- for ``n`` parameters
+        and ``T`` gradients: the same rule
         and the same reasoning as :func:`_resolve_rank_rtol`'s default, moved
         one level out: ``max(n, sqrt(T)) * eps`` is the relative floor of a
         gradient *component* under an ``eigh`` of an ``n x n`` matrix summed
@@ -3054,7 +3142,8 @@ def _check_hold_undetermined(value) -> None:
     _check_flag("hold_undetermined", value)
 
 
-def _make_excitation_tracker(hold_undetermined, theta0) -> Optional[_ExcitationTracker]:
+def _make_excitation_tracker(hold_undetermined, theta0,
+                             dtype=None) -> Optional[_ExcitationTracker]:
     """The tracker for a fit's trainable block, or ``None`` if it cannot run.
 
     Shared by :func:`fit`, :func:`fit_lm` and :func:`fit_multiple_shooting`
@@ -3063,13 +3152,15 @@ def _make_excitation_tracker(hold_undetermined, theta0) -> Optional[_ExcitationT
     :attr:`FitResult.excited_rank` reports as ``None``: the caller switched
     the guard off, there are more trainable coordinates than
     :data:`_EXCITATION_MAX_PARAMS`, or the block is empty or not
-    floating-point.
+    floating-point.  ``dtype`` is the coarsest trainable leaf's
+    (:func:`_coarsest_dtype`); without it, ``theta0``'s.
     """
     _check_hold_undetermined(hold_undetermined)
     if (hold_undetermined
             and 0 < theta0.size <= _EXCITATION_MAX_PARAMS
             and jnp.issubdtype(theta0.dtype, jnp.floating)):
-        return _ExcitationTracker(int(theta0.size), theta0.dtype)
+        return _ExcitationTracker(int(theta0.size),
+                                  theta0.dtype if dtype is None else dtype)
     return None
 
 
@@ -3454,8 +3545,11 @@ def _hold_undetermined_directions(tracker, theta, theta0, objective: _SelectedOb
     direction passes both tests or the question could not be answered.
     When every coordinate is a ``log`` / ``logit`` one ``zeta`` is
     ``theta``, and when every candidate of test 1 also passes test 2 the
-    hold is then computed exactly as the 0.4.0 development builds computed
-    it, so a degenerate fit they held correctly is held to the same bits.
+    hold is then the 0.4.0 development builds' formula, the projector onto
+    the spanned directions.  (Its eigenvectors now come from the singular
+    value decomposition of the gradients' factor rather than an ``eigh`` of
+    their Gram matrix -- see :class:`_ExcitationTracker` -- so they agree
+    with the older builds' to rounding, not to the bit.)
     """
     if tracker is None:
         return theta, None, None, None
@@ -4015,7 +4109,8 @@ def fit(
     m = jnp.zeros_like(theta)
     v = jnp.zeros_like(theta)
     frame = None
-    tracker = _make_excitation_tracker(hold_undetermined, theta0)
+    coarse = _coarsest_dtype(start, idx)
+    tracker = _make_excitation_tracker(hold_undetermined, theta0, coarse)
     best = _BestIterate(theta0)
     losses: list[float] = []
     converged = False
@@ -4067,7 +4162,7 @@ def fit(
     def _flatness(candidates, spanned, scale):
         return _hessian_flatness(
             lambda V: _hvp_columns(lambda t: value_and_grad(t)[1], selected, (), V),
-            candidates, spanned, selected.dtype, "fit", scale)
+            candidates, spanned, coarse, "fit", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,
@@ -4408,7 +4503,8 @@ def fit_lm(
         return not (np.isfinite(loss_gn) and loss_gn < loss_at_th)
 
     lam = float(lam0)
-    tracker = _make_excitation_tracker(hold_undetermined, theta0)
+    coarse = _coarsest_dtype(start, idx)
+    tracker = _make_excitation_tracker(hold_undetermined, theta0, coarse)
     losses: list[float] = []
     # ``theta``'s update count and its loss as last evaluated.  No
     # ``_BestIterate`` here: the acceptance test already makes the current
@@ -4543,7 +4639,7 @@ def fit_lm(
         return _loss(selected), np.asarray(J_sel.T @ r_sel, dtype=np.float64)
 
     def _flatness(candidates, spanned, scale):
-        return _gauss_newton_flatness(_rj_selected()[1], candidates, selected.dtype,
+        return _gauss_newton_flatness(_rj_selected()[1], candidates, coarse,
                                       scale=scale)
 
     def _columns():
@@ -4708,7 +4804,8 @@ def fit_multiple_shooting(
     m_t = jnp.zeros_like(theta); v_t = jnp.zeros_like(theta)
     m_s = jnp.zeros_like(ws); v_s = jnp.zeros_like(ws)
     frames = None
-    tracker = _make_excitation_tracker(hold_undetermined, theta0)
+    coarse = _coarsest_dtype(start, idx)
+    tracker = _make_excitation_tracker(hold_undetermined, theta0, coarse)
     best = _BestIterate((theta0, ws_flat0))
     losses: list[float] = []
     converged = False
@@ -4764,7 +4861,7 @@ def fit_multiple_shooting(
         return _hessian_flatness(
             lambda V: _hvp_columns(lambda t, w: value_and_grad(t, w)[1][0],
                                    selected, (ws,), V),
-            candidates, spanned, selected.dtype, "fit_multiple_shooting", scale)
+            candidates, spanned, coarse, "fit_multiple_shooting", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,

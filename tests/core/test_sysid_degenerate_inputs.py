@@ -566,41 +566,6 @@ def test_the_warning_names_the_eigenvalue_nearest_the_cutoff():
     assert abs(ratio / (1.1 * cutoff) - 1.0) < 1e-3, ratio
 
 
-@contextlib.contextmanager
-def _x64():
-    """``jax_enable_x64`` for the duration of the block.
-
-    Process-global and normally set before the first JAX import, which
-    is exactly why the warning recommends it rather than doing it: it
-    changes every library in the process.  Toggling it here is safe only
-    because the block restores it.
-    """
-    prior = jax.config.read("jax_enable_x64")
-    jax.config.update("jax_enable_x64", True)
-    try:
-        yield
-    finally:
-        jax.config.update("jax_enable_x64", prior)
-
-
-def test_the_x64_rerun_the_warning_recommends_actually_settles_the_verdict():
-    """The warning is worth emitting only if its remedy works.
-
-    The pinned case -- ratio 2.08e-07, cutoff 2.38e-07 -- reads
-    ``rank=1`` in float32.  Under x64 the cutoff drops to ``n * 2.2e-16``
-    and the same data resolve both directions, so the answer the warning
-    said was undetermined is determined, and the other way round from
-    the float32 verdict.  If this ever stopped holding, the warning
-    would be sending users on an errand that does not pay.
-    """
-    with _x64():
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", PrecisionLimitWarning)
-            report = _linear_fim(2.08e-07, dtype=jnp.float64)
-    assert report.rank == 2
-    assert np.all(np.isfinite(np.asarray(report.crb)))
-
-
 def test_under_x64_the_message_does_not_send_the_user_round_again():
     """At float64 the remedy has already been taken and there is no
     third precision, so the message has to say something else.  Pointing

@@ -25,7 +25,7 @@
 # beyond its type check (coupling_claims.yaml, CPL-160 to CPL-162); the
 # REST parameter routes (the REST surface's own audit area).
 #
-# Top level: schema_version (1), prefixes (the id prefixes this file owns;
+# Top level: schema_version (1), domain_set (numeric), prefixes (the id prefixes this file owns;
 # no other inventory may use them) and claims.
 #
 # Row fields:
@@ -43,6 +43,14 @@
 #               file:line guess.  Every failing row cites a strict xfail.
 #   reason      required for untested: why no test can fail.
 #   notes       optional.
+#   domains     the domain matrix (top-level domain_set: numeric): for each of
+#               f32, f64, mixed_dtype, 16bit, jit, grad, vmap, multi_rate,
+#               sub_cycled, predictors_warm_starts, adaptive,
+#               checkpoint_restart and sharded, the test (or tests) that
+#               exercise the claim in that domain, `narrowed` (the
+#               conditions' trailing "Not claimed for ..." clause excludes
+#               it) or `n/a` (the claim cannot apply there).  Definitions
+#               and rules: testing_standards.md, "The domain matrix".
 #
 # Line numbers are those of the tree the row was last verified on
 # (release/0.4.0 at a0f12ef for the first edition, 037d469 for the rows

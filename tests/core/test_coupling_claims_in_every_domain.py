@@ -167,6 +167,9 @@ class Config:
     multirate: bool = False
     subcycled: bool = False
     runner: str = "steps"          # "steps", "vmap", "adaptive", "restart"
+    #: Run the strict_convergence scenario in this process.  The sharded
+    #: domain cannot: its raise aborts the process (see its module).
+    strict: bool = True
 
     def group(self, kind: str) -> dict:
         if kind == "main":
@@ -721,7 +724,8 @@ def domain_run(name: str, tmp_path_factory, *, cfg: Config | None = None,
         if not adaptive:
             _collect(run, "grads_single", lambda: runner.grads(single, rec["single"]))
             _jvp_and_cotangent(run, runner, plain, main_off)
-        run.strict = _strict(cfg, runner, steps, builder)
+        if cfg.strict:
+            run.strict = _strict(cfg, runner, steps, builder)
     return run
 
 # ---------------------------------------------------------------------------
@@ -1263,6 +1267,9 @@ SKIP: dict = {
     # recorded state: the single-pass closed form and the jvp of one step
     # have no stepper analogue, and run_adaptive_scan's gradients stand in.
     "adaptive": {"CPL-006", "CPL-143"},
+    # strict_convergence's raise aborts a process stepping a sharded member;
+    # the sharded module checks it in a subprocess.
+    "sharded": {"CPL-033"},
 }
 _RUNS: dict = {}
 

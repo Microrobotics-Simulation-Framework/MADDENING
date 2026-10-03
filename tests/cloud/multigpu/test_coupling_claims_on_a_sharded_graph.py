@@ -20,7 +20,12 @@ point is the battery's algebra on ``(x_a, mean x_b)``, and ``x_b* = g_b x_a*
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import textwrap
 import warnings
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -66,7 +71,7 @@ class _ForcedField(SimulationNode):
         return 1
 
 
-CFG = battery.Config("sharded", jnp.float32, jnp.float32)
+CFG = battery.Config("sharded", jnp.float32, jnp.float32, strict=False)
 
 
 def build(cfg: battery.Config, kind: str, diagnostics: bool) -> GraphManager:
@@ -110,7 +115,60 @@ def test_the_member_is_partitioned():
     assert field.addressable_shards[0].data.shape == (N_CELLS // N_DEV,)
 
 
+# Slow: five graphs with a member partitioned over four devices, two with
+# diagnostics, and their gradients: ~45 s for the domain on three cores.  A
+# coupling group with a sharded member stays on every push, forward and
+# adjoint, against an independent float64 model.
+# Per push: tests/cloud/multigpu/test_coupling_group_with_sharded_and_replicated_members.py::test_the_forward_rollout_is_the_implicitly_coupled_step
+# tests/cloud/multigpu/test_coupling_group_adjoint_through_a_sharded_member.py::test_reverse_mode_ad_through_a_coupling_group_with_a_sharded_member
+@pytest.mark.slow
 @pytest.mark.parametrize("row", battery._rows("sharded"))
 def test_the_claim_holds_with_a_sharded_member(row, tmp_path_factory):
     """Each row's check, as in every other domain, on the group with ``b`` sharded."""
     battery.CHECKS[row](_run(tmp_path_factory))
+
+
+#: strict_convergence at a capped solve, on the group with ``b`` sharded, in a
+#: process of its own: today the raise inside one device's thread leaves the
+#: others waiting at an all-reduce until XLA aborts the process.
+_STRICT = textwrap.dedent("""
+    import jax
+    from tests.cloud.multigpu.test_coupling_claims_on_a_sharded_graph import CFG, build
+    from tests.core import test_coupling_claims_in_every_domain as battery
+    gm = build(CFG, "strict", diagnostics=False)
+    p = battery.params_for(gm, "slow")
+    try:
+        for _ in range(4):
+            gm.step(params=p)
+            jax.block_until_ready(gm._state)
+    except Exception as exc:
+        print("RAISED", type(exc).__name__, "strict_convergence" in str(exc))
+        raise SystemExit(0)
+    print("NO RAISE")
+""")
+
+
+# Slow: a subprocess with its own JAX start and two compiles, ~10 s once fixed;
+# today it is killed at the timeout, after XLA's collective has hung.
+# Per push: tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_for_each_member_of_a_vmapped_step
+# (strict_convergence on a batched step, every member checked)
+@pytest.mark.slow
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "CPL-033: strict_convergence on a coupling group with a sharded member aborts the "
+    "process: the error_if callback raises on one device's thread and the others wait at "
+    "an all-reduce until XLA aborts (SIGABRT after ~60 s); pending fix"))
+def test_strict_convergence_raises_with_a_sharded_member():
+    """CPL-033 with ``b`` sharded: a capped, unconverged solve raises a Python
+    exception naming ``strict_convergence``, and the process lives."""
+    repo = Path(__file__).resolve().parents[3]
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+        [str(repo / "src"), str(repo), os.environ.get("PYTHONPATH", "")]),
+        "JAX_PLATFORMS": "cpu",
+        "XLA_FLAGS": f"--xla_force_host_platform_device_count={N_DEV}"}
+    try:
+        proc = subprocess.run([sys.executable, "-c", _STRICT], cwd=repo, env=env,
+                              capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("the strict raise hung the sharded step for 45 s") from None
+    assert proc.returncode == 0 and "RAISED" in proc.stdout and "True" in proc.stdout, (
+        f"exit {proc.returncode}: {proc.stdout[-500:]} {proc.stderr[-1500:]}")

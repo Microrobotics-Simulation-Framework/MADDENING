@@ -700,9 +700,11 @@ claims:
     the precision warning".
   sources:
     - src/maddening/sysid.py:2345 (fim, Warns)
+    - src/maddening/sysid.py:164 (_x64_enabled)
   conditions: >-
     float32 at the floor; well conditioned; exactly singular; raised and
-    zero rank_rtol; under x64. Not claimed for 16-bit floats.
+    zero rank_rtol; under x64, with float64 leaves and with float32 leaves
+    (whose remedy is float64 leaves). Not claimed for 16-bit floats.
   oracle: the warning and its text, or its absence; the x64 re-run's verdict.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
@@ -711,24 +713,13 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_rank_rtol_zero_leaves_no_threshold_to_sit_near
     - tests/core/test_sysid_degenerate_inputs.py::test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit
     - tests/core/test_sysid_degenerate_inputs.py::test_the_warning_names_the_eigenvalue_nearest_the_cutoff
-  status: failing
-  finding: >-
-    mixed_dtype domain: with float32 leaves in an x64 process the
-    PrecisionLimitWarning names the ratio and the cutoff, but its remedy is
-    to re-run under x64 -- jax.config.update('jax_enable_x64', True) or
-    JAX_ENABLE_X64=1 -- which is already on and changes nothing: the
-    decomposition is float32 because the leaves (and the residual they make)
-    are. The remedy that settles it is float64 leaves. The remedy is chosen
-    on the decomposition's dtype alone, not on whether x64 is enabled. Loud
-    (an advisory warning whose advice loops), so minor and no registry
-    entry. Reproducer: under jax_enable_x64, fim of a float32 linear
-    residual whose Fisher matrix has eigenvalue ratio 2.08e-7 (cutoff
-    2.38e-7) warns 'Settle it by re-running under x64'. Pinned by
-    tests/core/test_sysid_claims_under_x64.py::test_a_float32_rank_at_the_floor_in_an_x64_process_names_a_remedy_that_settles_it
-    (strict xfail). Guess: src/maddening/sysid.py ~2694, the remedy's 'if
-    dtype == np.float32' should also ask jax.config.jax_enable_x64 and, when
-    it is set, name float64 leaves (cast the parameters and the state)
-    instead.
+  status: verified
+  notes: >-
+    mixed_dtype domain failing on d2429a6: with float32 leaves in an x64
+    process the PrecisionLimitWarning's remedy was to re-run under x64,
+    which was already on. Fixed: the remedy is chosen on jax_enable_x64 as
+    well as on the decomposition's dtype, and names float64 leaves there;
+    the range-limited warning follows the same rule.
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
     f64: tests/core/test_sysid_degenerate_inputs.py::test_under_x64_the_warning_stops_recommending_x64
@@ -1441,10 +1432,14 @@ claims:
   conditions: >-
     a log-transformed leaf, so the start round-trips through the optimiser's
     coordinates. Not claimed for 16-bit floats.
-  oracle: the loss evaluated at the start, to the last bits the round trip moves it.
+  oracle: the loss evaluated at the start, bit for bit.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_losses_zero_is_the_starting_points_loss
   status: verified
+  notes: >-
+    Tightened with SYS-071's fix: the oracle allowed the last bits the
+    start's log round trip moved it, and the fitters now evaluate the start
+    as it went in, so losses[0] is its loss exactly.
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_losses_zero_is_the_starting_points_loss
     f64: tests/core/test_sysid_claims_under_x64.py::test_losses_zero_is_the_starting_points_loss_under_x64
@@ -2248,31 +2243,16 @@ claims:
   oracle: windowed_loss at the returned params and window states.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
-  status: failing
-  finding: >-
-    f64 domain: 'the parameters are [returned exactly as selected]' and
-    best_loss is the selected pair's loss 'as the run evaluated it', so
-    without the guard the pair should be exact -- but a leaf no step moved
-    is returned as it went in (SYS-054), while the run evaluated the iterate
-    after its round trip through the optimiser's coordinates. For a log leaf
-    whose exp(log(p)) moves (k = 30.03 in float64) the returned pair's loss
-    differs from best_loss by the loss's change over that ulp: a run that
-    walks away from a start 0.1% off the truth returns its start's bits with
-    best_loss 5.364755728149608e-06 against 5.364755728152416e-06
-    recomputed, 5.2e-13 relative (2357 ulps of the loss). float32 leaves
-    round-trip exactly through the float64 coordinates (mixed passes); in
-    float32 the same happens wherever exp(log(p)) moves (30.0 does).
-    Rounding-level and never shipped (the sentence is round 7's), so minor
-    and no registry entry. Reproducer: under x64, the float64 spring, 200
-    recorded steps, fit_multiple_shooting(window=20, stiffness 30.03,
-    n_iter=60, lr=0.05, hold_undetermined=False); windowed_loss of the
-    returned pair != best_loss. Pinned by
-    tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_best_loss_is_exactly_the_returned_pairs_under_x64[float64]
-    (strict xfail). Guess: sysid.py ~4790, best.loss reported beside
-    to_params(theta), which restores unmoved leaves; either re-evaluate the
-    loss at the returned parameters or say 'as the run evaluated it, after
-    the optimiser's round trip'.
+    - tests/core/test_sysid_claims_edges.py::test_best_loss_is_the_loss_of_exactly_the_params_returned
+  status: verified
   notes: >-
+    f64 domain failing on d2429a6: a log leaf no step moved was returned as
+    it went in while the run evaluated its exp(log(p)) round trip, so
+    best_loss differed from the returned pair's loss by the loss's change
+    over that ulp (5.2e-13 relative at k = 30.03). Fixed: the objectives of
+    fit, fit_lm and fit_multiple_shooting evaluate exactly the parameters
+    to_params returns (_exact_physical_params), so without the guard the
+    pair is exact in float32 and float64.
     Ambiguous in the first edition: fit_multiple_shooting said "the loss of
     exactly the pair returned" and FitResult "the value before the guard",
     and round 7 (B1, on 04bc3e5) measured a held pair 1.9e-9 off best_loss.
@@ -4149,13 +4129,16 @@ claims:
   claim: >-
     min / max "come from ParamSpec.bounds, so an importer sees the same
     envelope the sidecar enforces": an open log or logit bound is
-    advertised as the nearest representable value inside it.
+    advertised as the nearest representable value inside it -- the first
+    value inside it the spec accepts, where it refuses the nearest.
   sources:
     - src/maddening/fmi/model_description.py:83 (FMIVariable, min / max)
+    - src/maddening/fmi/model_description.py:578 (_advertised_bound)
   conditions: >-
     log with a zero, a non-zero and no lower bound (float32 and float64);
-    logit; inclusive identity bounds; no bounds. Not claimed for 16-bit
-    floats.
+    logit; a bound whose spacing is below the smallest normal (TINY <= |b|
+    < 2**-102 in float32); inclusive identity bounds; no bounds. Not
+    claimed for 16-bit floats.
   oracle: the advertised attribute against the float32 envelope.
   tests:
     - tests/fmi/test_advertised_bounds.py::test_a_log_leaf_without_a_lower_bound_advertises_the_smallest_normal
@@ -4164,10 +4147,17 @@ claims:
     - tests/fmi/test_advertised_bounds.py::test_logit_leaf_advertises_both_open_bounds
     - tests/fmi/test_advertised_bounds.py::test_inclusive_identity_bounds_are_unchanged
     - tests/fmi/test_advertised_bounds.py::test_a_parameter_the_description_bounds_nowhere_stays_unbounded
+    - tests/fmi/test_advertised_bounds.py::test_an_open_bound_advertises_the_first_value_its_spec_accepts
+    - tests/fmi/test_advertised_bounds.py::test_a_flushed_band_bound_is_held_by_the_graph_and_the_description_alike
+    - tests/property/test_differential_param_acceptance.py::test_an_open_bound_in_the_flushed_band_is_held_by_every_door
   status: verified
   notes: >-
     Failing on 04bc3e5 (B1 round 7): a log leaf with no lower bound, which
     ParamSpec measures from 0, was advertised with no min (MADD-ANO-148).
+    And on d2429a6 (the acceptance oracle's N2): a bound with TINY <= |b| <
+    2**-102 was advertised one float inside, a distance the step's
+    arithmetic flushes to zero, which ParamSpec.check refused and a bridge
+    without specs took; the first accepted value is advertised now.
   domains:
     f32: tests/fmi/test_advertised_bounds.py::test_log_leaf_with_zero_bound_advertises_smallest_normal
     f64: tests/fmi/test_fmu_claims_in_float64.py::test_an_open_bound_is_advertised_as_the_nearest_float64_inside_it

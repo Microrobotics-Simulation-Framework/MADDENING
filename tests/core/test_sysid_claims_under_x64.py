@@ -632,9 +632,9 @@ def _only(gm, *keys):
 @pytest.mark.parametrize("leaves", LEAVES)
 def test_losses_zero_is_the_starting_points_loss_under_x64(leaves):
     """SYS-050: ``losses[i]`` is the loss before update ``i + 1``, so
-    ``losses[0]`` is the start's -- to the bits a ``log`` leaf's round trip
-    through the optimiser's coordinates moves it in the leaves' precision;
-    for ``fit_lm`` the half sum of squares."""
+    ``losses[0]`` is the start's, bit for bit (the run evaluates the start as
+    it went in, not its ``log`` round trip: SYS-071); for ``fit_lm`` the half
+    sum of squares."""
     with _x64():
         gm = _spring(leaves)
         mask = _only(gm, "stiffness")
@@ -643,14 +643,13 @@ def test_losses_zero_is_the_starting_points_loss_under_x64(leaves):
             return (p["nodes"]["s"]["stiffness"] - 25.0) ** 2
 
         res = fit(gm, loss, mask=mask, n_iter=4, lr=0.1)
-        assert float(res.losses[0]) == pytest.approx(float(loss(gm.params)), rel=32 * _eps(leaves))
+        assert float(res.losses[0]) == float(loss(gm.params))
 
         def residual(p):
             return jnp.atleast_1d(p["nodes"]["s"]["stiffness"] - 25.0)
 
         lm = fit_lm(gm, residual, mask=mask, n_iter=4)
-        assert float(lm.losses[0]) == pytest.approx(
-            0.5 * float(residual(gm.params)[0]) ** 2, rel=32 * _eps(leaves))
+        assert float(lm.losses[0]) == float(0.5 * jnp.sum(residual(gm.params) ** 2))
 
 
 @pytest.mark.parametrize("leaves", LEAVES)

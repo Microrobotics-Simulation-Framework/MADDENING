@@ -201,6 +201,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **Two released behaviours corrected** (MADD-ANO-160, 159, since 0.1.0): `jax.grad` through `run_adaptive_scan` read NaN or exactly 0.0 wherever an attempt's step-doubling estimates agreed exactly (a coupled group at its fixed point, a memoryless or resting node) and now reads the derivative; `compile()` warns, naming the edge, when a coupling group whose members are joined only through outside nodes reads one of them a step late.
+  Action: re-run a calibration or sensitivity study that differentiated `run_adaptive_scan`; a group the new warning names should take the joining nodes in, or be split.
 - **A Krylov solve answers a right-hand side with a NaN or infinite entry with NaN, not zeros** (MADD-ANO-154, 155): the IFT tangent and adjoint of a coupling group read exactly 0.0, reported successful, for a NaN or `+-inf` tangent or cotangent (never released; dense and fori read NaN),
   and `sharded_cg` (since 0.3.0, mostly with `converged=True`) and `ift_linear_solve`'s CG (since 0.3.1) returned zeros, as did every GMRES path on this cycle's relative tolerance.  Every Krylov path (`_ift_linear_solve`, `ift_linear_solve`, both `sharded_*` backends, tangents and cotangents included) now answers NaN in every entry; a sharded result reads `converged=False` and a NaN `residual_norm`.
   Action: none for a finite right-hand side (its path is unchanged); a solve or derivative that read 0.0 from a non-finite input now reads NaN -- check the input with `jnp.isfinite`.
@@ -361,6 +363,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The known coupling, sysid and FMU findings** (MADD-ANO-158 to 162, CPL-087, SYS-024, SYS-071, the FMU's N2): `jax.grad` / `jax.jvp` through a bfloat16 or float16 group under `solver="ift"` works (the adjoint solve runs in float32); a 16-bit group's spectral slots are float32; `strict_convergence` on a step spanning several devices raises instead of aborting the process; a typed PRNG key steps under `"ift"` with Aitken or fixed relaxation;
+  the precision warning names float64 leaves when x64 is already on; `best_loss` and `losses` are the loss of exactly the parameters a fit returns (an untouched `log` leaf was evaluated at its round trip, an ulp away); an FMU advertises the first value its spec accepts inside an open bound (in `TINY <= |b| < 2**-102` it advertised a refused one).
+  Action: none; a 16-bit group's gradient is to its dtype's resolution.  MADD-ANO-156 and 157 (flux edges across a group's boundary or staggered by an ungrouped cycle) stay open for 0.5.0.
 - **sysid round-7 fixes** (MADD-ANO-150 to 153, never released): the identifiability guard holds an exact degeneracy under x64 and with float32 leaves in an x64 graph; `windowed_loss` replays coupling predictor and IQN-IMVJ warm starts across windows (zero loss at the truth); `fim` warns when its rank cutoff is below float32's normal range;
   bool and non-number hyper-parameters and non-bool mask leaves are refused; `ParamSpec.check` refuses a `log`/`logit` value without a finite coordinate; the nominal width guard tests the width, not its square; `fit_lm` reaches its float64 floor.
   Action: pass real numbers and bool mask leaves; a fit with a predictor or IQN-IMVJ group, or under x64, may return a different (correct) point.  SYS-071 is verified; SYS-127 to 130 are new.

@@ -1081,8 +1081,9 @@ is not exactly one group, and three or more additive edges into one port.
 | strict == report | the row with `strict_convergence` against without | It raises on exactly the steps reported unconverged. With `waveform_iterations > 1` it also raises where an earlier sweep hit the cap (CPL-052). Where it does not raise, bitwise | A raise that happens to fall on a step that is also unconverged |
 | usable bounds | `spectral_error_bound` against the distance in the returned state's weights; `gradient_relative_error_bound` against central differences of the exact fixed point in every member's gains and biases (slow) | None: the bound must be at least the truth | Constants outside the group |
 
-The harness found MADD-ANO-156 to 159, which are strict xfails naming
-CPL-003, CPL-186 and CPL-187.  Each oracle was mutation-tested against a
+The harness found MADD-ANO-156 to 159, pinned as strict xfails naming
+CPL-003, CPL-186 and CPL-187.  158 and 159 are fixed in 0.4.0 and their
+cases run as tests; 156 and 157 (CPL-186) are still strict xfails.  Each oracle was mutation-tested against a
 scratch copy of `src/` with a seeded fault, and the PR that added the
 harness lists them:
 
@@ -1202,14 +1203,14 @@ not a number; **D3** a snapshot restores a parameter at the value the FMU
 was instantiated with whatever its bounds; **D4** the REST request model
 refuses a JSON integer above `MAX_NODE_PARAM_INT` in magnitude (422)
 whatever the leaf.  B1-M2 (a `log` spec without a lower bound advertised
-no `min`) is fixed in 0.4.0 and its cases run as tests.  Known failing:
+no `min`) and N2 (an open bound in the band where a float32's spacing
+flushes was advertised one float inside it, where `ParamSpec.check`
+refuses) are fixed in 0.4.0 and their cases run as tests.  Known failing:
 B2-H1 (a checkpoint load restores what PUT
 refuses: out of bounds, non-finite, a boolean, a value the constructor
 refuses), B2-L10 (`POST /graph/nodes` applies no `ParamSpec` bounds), B2-H2
 (a write to a `HybridNode` is lost), N1 (the REST route stores a numeric
-string as the number), N2 (an open bound in the band where a float32's
-spacing flushes is advertised one float inside it, where `ParamSpec.check`
-refuses), N3 (`POST /graph/nodes` takes a boolean for a float constant) and
+string as the number), N3 (`POST /graph/nodes` takes a boolean for a float constant) and
 N4 (the FMU doors and `check_params` take a value the node's constructor
 refuses).  Each pinned case compares only the doors its finding is about,
 so a fix shows even while another finding on the same value is pending.

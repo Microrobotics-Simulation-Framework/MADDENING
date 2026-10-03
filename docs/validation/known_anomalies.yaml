@@ -11239,6 +11239,154 @@ anomalies:
       - "tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py::test_a_non_finite_cotangent_on_a_mesh_gives_a_nan_gradient"
     github_issue: null
 
+  - anomaly_id: "MADD-ANO-156"
+    title: "A flux edge that crosses a coupling group's boundary -- from an outside producer into a member, or from a member to an outside reader -- fails to trace with a bare KeyError"
+    description: >
+      A flux is a value `compute_boundary_fluxes` returns, not a field of
+      the producer's state, and the node authoring guide says its keys
+      "become available as source_field on edges".  The step resolves a
+      flux in two separate dictionaries: a coupling group's members' fluxes
+      in one local to `_run_coupled_block_impl`, every other node's in the
+      step's own `flux_state` (`_build_step_fn`).  Neither looks in the
+      other, so a flux edge from a node outside a group into one of its
+      members, and one from a member to a reader outside the group, both
+      raise `KeyError` naming the flux inside the traced step, with nothing
+      saying which edge or why.  Measured identically at v0.1.0, v0.2.0,
+      v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag, CPU, jaxlib
+      0.11.0) and on the 0.4.0 development tree, under both solvers: a
+      two-relay group fed `drv.q -> g0` by a flux-producing driver, and the
+      same group read `g1.q -> sink`; `KeyError: 'q'` at the first step.
+      A flux edge inside a group, and one between two outside nodes read
+      forward, step.  Found by the coupling topology harness
+      (`tests/property/test_differential_coupling_topologies.py`, CPL-186),
+      whose generator draws edge kinds across group boundaries that no
+      earlier generator drew.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the step raises before returning anything, so no wrong value
+      is reported.  The harm is a graph the API accepts failing with an
+      error that names a field and no cause.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+      - "maddening.core.graph_manager.GraphManager.step"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Carry the coupled quantity in a state field of the producer (compute
+      it in `update` and write it to the state) instead of a flux, or put
+      the outside producer or reader in the group.
+    resolution_status: "open"
+    verification:
+      - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_an_outside_node_into_a_group_member_steps"
+      - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-157"
+    title: "A flux edge that an ungrouped cycle reads from the previous step fails to trace with a bare KeyError, so whether the graph runs depends on the order its nodes were added"
+    description: >
+      A cycle of nodes outside every coupling group is staggered: the edge
+      whose source is not scheduled before its target reads the previous
+      step's state, and which edge that is follows the `add_node` order.
+      A flux is not in the state, so when the staggered edge is a flux
+      edge the lookup falls through to `state[producer][flux]` and raises
+      `KeyError` naming the flux inside the traced step
+      (`_build_step_fn`'s `_resolve_and_update_node`).  The same two-node
+      ring `a.q -> b`, `b -> a` steps when built `a, b` (the flux edge is
+      read this step) and fails when built `b, a`.  Measured identically
+      at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each
+      tag, CPU, jaxlib 0.11.0) and on the 0.4.0 development tree.  The
+      adaptive steppers refuse the same edge with a `ValueError` that names
+      it (`_build_dt_step_fn`).  Found by the coupling topology harness
+      (CPL-186).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the step raises before returning anything.  The harm is a
+      graph that runs or fails depending on the order of its `add_node`
+      calls, with an error that names a field and no cause.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.step"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Add the flux producer before its reader, so the cycle is staggered
+      on a state edge, or carry the quantity in a state field.
+    resolution_status: "open"
+    verification:
+      - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-158"
+    title: "A typed PRNG key in a coupling group member fails to trace under solver='ift' with acceleration='aitken' or 'fixed'"
+    description: >
+      `CouplingGroup.accelerated_fields` documents that only floating
+      fields are accelerated, "here and under aitken / fixed", and that a
+      PRNG-key field is computed by every pass and never relaxed
+      (MADD-ANO-059, CPL-003).  Under `solver="ift"` with `"aitken"` or
+      `"fixed"`, `_run_coupled_block_impl` still sizes the accelerator from
+      `_flatten(state_after_first)` with `accel_fields=None` -- the IFT
+      path relaxes its own floating vector and was meant to read this only
+      for IQN's index map -- and that concatenates every field of every
+      member, a typed key included: `ValueError: dtype=key<fry> is not a
+      valid dtype for JAX type promotion` at the first step.  `"none"`, the
+      IQN pair and `solver="fori"` (which flattens the floating fields
+      only) step the same group.  At v0.1.0 to v0.3.1 (`git archive` of
+      each tag, CPU, jaxlib 0.11.0) a typed key in an accelerated group
+      failed under every solver those releases had; MADD-ANO-059's fix
+      reached the `uint32`-data keys and integer leaves it measured, and
+      every path but this one.  Found by the coupling topology harness,
+      whose nodes carry a typed key beside the integer leaves.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: the step raises before returning anything.  The harm is a
+      documented combination that does not run.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.step"
+      - "maddening.core.coupling.group.CouplingGroup.accelerated_fields"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Keep the key's `uint32` data (`jax.random.key_data`) in the state
+      instead of a typed key, or use `acceleration="none"`, an IQN
+      acceleration or `solver="fori"` on that group.
+    resolution_status: "open"
+    verification:
+      - "tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-159"
+    title: "A coupling group whose members are joined only through an outside node, on no cycle, reads that node one step late with no warning"
+    description: >
+      `CouplingGroup` documents that its members "form (part of) a cycle";
+      nothing checks it.  Group `{a, b}` with `a -> c -> b` and `a -> b`
+      and no edge back is an acyclic graph, which an uncoupled step reads
+      entirely in the same step.  The group runs as one block at its first
+      member's place (`_block_schedule`), so `c` is scheduled after it and
+      `identify_back_edges` staggers `c -> b`: `b` reads `c` from the
+      previous step.  The edge joins two different strongly connected
+      components, which CPL-025 says always points forward, and
+      `compile()`'s warning for a group inside a larger loop
+      (`_loop_through_outside_nodes`) looks at strongly connected
+      components only, so nothing is said.  Measured identically at
+      v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag,
+      CPU, jaxlib 0.11.0) and on the 0.4.0 development tree: `b = 0.25`
+      after one step where reading `c` this step gives `2.75`.  Found by
+      the coupling topology harness (CPL-187).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a value read one step late with no warning, never `minor`.
+      Not `critical`: it needs a group whose members break its documented
+      precondition.  `context_dependent` because what a one-step lag does
+      depends on the model.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.compile"
+      - "maddening.core.schedule.identify_back_edges"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Put only nodes that form a cycle in a group, or put the outside node
+      that joins two members in the group too.
+    resolution_status: "open"
+    verification:
+      - "tests/property/test_differential_coupling_topologies.py::test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late"
+    github_issue: null
+
   - anomaly_id: "MADD-ANO-160"
     title: "A checkpoint load -- POST /checkpoint/load and GraphManager.load_state -- restored parameter values the write paths refuse (past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string), answered 200, and left a graph whose save did not reload and whose steps diverged"
     description: >

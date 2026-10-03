@@ -128,7 +128,19 @@ claims:
     - tests/core/test_coupling_non_float_leaves.py::test_an_integer_field_named_in_accelerated_fields_is_left_out
     - tests/core/test_coupling_non_float_leaves.py::test_accelerated_fields_naming_no_floating_field_is_refused_at_compile
     - tests/property/test_differential_leaves.py::test_non_float_leaves_keep_their_closed_form_under_every_accelerator
-  status: verified
+    - tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation
+    - tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_every_other_iterator
+  status: failing
+  finding: >-
+    Under solver="ift" with acceleration="aitken" or "fixed" a typed PRNG key
+    in a member fails to trace: ValueError "dtype=key<fry> is not a valid
+    dtype for JAX type promotion" at the first step.  _run_coupled_block_impl
+    sizes the accelerator from _flatten(state_after_first) with
+    accel_fields=None, which concatenates every field of every member, the
+    key included (src/maddening/core/graph_manager.py:3726).  "none", the
+    IQN pair and solver="fori" step the same group.  Reproducer:
+    tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation.
+    Since 0.1.0 (MADD-ANO-158).
 
 - id: CPL-004
   area: configuration
@@ -155,6 +167,7 @@ claims:
     - tests/core/test_coupling_group_validation.py::test_round_trip_through_to_dict_does_not_warn_twice
     - tests/core/test_coupling_group_validation.py::test_rtol_set_under_l2_warns
     - tests/core/test_coupling_group_validation.py::test_atol_set_under_l2_is_silent_because_the_l2_norm_reads_it
+    - tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged
   status: verified
 
 - id: CPL-005
@@ -408,6 +421,7 @@ claims:
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_one_pass_reads_the_iterate_its_mode_documents
     - tests/core/test_coupling_convergence.py::TestJacobiIteration::test_jacobi_produces_different_results
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference
   status: verified
 
 - id: CPL-017
@@ -428,6 +442,7 @@ claims:
     - tests/core/test_subcycling_ratio_refusal.py::test_a_member_that_divides_is_accepted_and_keeps_the_graphs_clock
     - tests/property/test_differential_schedules.py::test_a_subcycled_group_steps_like_its_uniform_rate_reference
     - tests/core/test_coupling_subcycling.py::TestSubcyclingValidation::test_mixed_timestep_without_subcycling_raises
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference
   status: verified
 
 - id: CPL-018
@@ -449,6 +464,7 @@ claims:
     - tests/property/test_differential_schedules.py::test_linear_interpolation_is_constant_where_documented_and_quadratic_is_linear
     - tests/core/test_coupling_waveform_report.py::test_the_interpolation_modes_coincide_when_the_source_is_scheduled_after
     - tests/core/test_phases_5_7_8.py::TestQuadraticInterpolation::test_quadratic_interpolation_is_linear_interpolation_today
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference
   status: verified
 
 - id: CPL-019
@@ -485,6 +501,7 @@ claims:
     - tests/core/test_coupling_predictor.py::TestPredictorReducesIterations::test_predictor_converges_to_same_result
     - tests/core/test_coupling_non_float_leaves.py::test_predictor_leaves_integer_fields_alone
     - tests/core/test_coupling_nonfloat_leaves_track_the_iterate.py::test_a_predictor_starts_from_an_iterate_that_keeps_the_non_floating_fields
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference
   status: verified
 
 - id: CPL-021
@@ -559,6 +576,8 @@ claims:
   tests:
     - tests/core/test_coupling.py::TestGaussSeidel::test_iteration_actually_runs
     - tests/property/test_differential_fixed_point.py::test_converged_means_within_the_threshold_of_the_exact_fixed_point
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference
+    - tests/property/test_differential_coupling_topologies.py::test_a_named_topology_reproduces_the_monolithic_reference
   status: verified
 
 - id: CPL-025
@@ -588,6 +607,9 @@ claims:
     - tests/core/test_schedule.py::test_every_component_is_contiguous_and_keeps_its_build_order
     - tests/core/test_schedule.py::test_a_schedule_rebuilt_in_its_own_order_is_itself
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
+    - tests/property/test_differential_coupling_topologies.py::test_a_named_topology_reproduces_the_monolithic_reference
+    - tests/property/test_differential_coupling_topologies.py::test_a_drawn_topology_reproduces_the_monolithic_reference
+    - tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing
   status: verified
   notes: >-
     Failing until 0.4.0's claims fix (MADD-ANO-120, since 0.1.0): a node
@@ -659,6 +681,7 @@ claims:
     - tests/core/test_coupling_solver_equivalence.py::test_the_state_returned_is_the_one_measured_not_its_successor
     - tests/core/test_coupling_solver_equivalence.py::test_both_gradients_agree_once_the_forward_has_converged
     - tests/property/test_differential_coupling_solvers.py::test_the_two_solvers_return_the_same_steps_on_generated_spectra
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver
   status: verified
 
 - id: CPL-033
@@ -679,6 +702,7 @@ claims:
     - tests/core/test_strict_convergence_threshold.py::test_strict_convergence_tests_the_error_estimate_not_the_raw_residual
     - tests/core/test_coupling_convergence_reporting.py::test_a_group_that_reached_its_fixed_point_reports_it_converged
     - tests/core/test_coupling_while_default.py::test_unconverged_is_reported_not_raised_by_default
+    - tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged
   status: verified
 
 - id: CPL-034
@@ -1029,6 +1053,7 @@ claims:
   oracle: the report and the strict check on the same step.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
+    - tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged
   status: verified
   notes: >-
     Ambiguous until 0.4.0's claims fix: "all of them give one verdict" against
@@ -1209,6 +1234,7 @@ claims:
     - tests/core/test_coupling_solver_equivalence.py::test_the_multirate_solvers_agree_across_the_configuration_class
     - tests/core/test_coupling_solver_equivalence.py::test_the_residual_at_the_fixed_point_is_reported_to_its_own_resolution
     - tests/core/test_coupling_error_bound.py::test_both_solvers_report_the_same_bound
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver
   status: verified
 
 - id: CPL-064
@@ -1295,6 +1321,7 @@ claims:
     - tests/core/test_coupling_imvj_solver_agreement.py::test_fori_carries_the_latching_passs_columns
     - tests/core/test_coupling_imvj_solver_agreement.py::test_the_solvers_take_the_same_passes_every_step
     - tests/core/test_coupling_while_default.py::test_imvj_warm_start_persists_secant_matrices
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver
   status: verified
 
 - id: CPL-069
@@ -1510,6 +1537,7 @@ claims:
     - tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_groups_keep_independent_iteration_counts
     - tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_steps_deterministically
     - tests/core/test_coupling_convergence.py::TestDiagnostics::test_diagnostics_multiple_groups
+    - tests/property/test_differential_coupling_topologies.py::test_a_named_topology_reproduces_the_monolithic_reference
   status: verified
 
 # ---------------------------------------------------------------------------
@@ -1706,6 +1734,7 @@ claims:
     - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
     - tests/core/test_coupling_claims_graphs.py::test_a_usable_bound_holds_on_a_stalled_subcycled_or_multirate_group
     - tests/core/test_coupling_spectral_bound_in_returned_weights.py::test_the_bound_holds_in_the_returned_states_weights_on_a_growing_group
+    - tests/property/test_differential_coupling_interactions.py::test_a_usable_spectral_bound_bounds_the_distance_in_every_row
   status: verified
 
 - id: CPL-089
@@ -1761,6 +1790,7 @@ claims:
     - tests/core/test_coupling_diagnostics_leave_the_state_alone.py::test_diagnostics_leave_an_accelerated_group_bit_identical
     - tests/property/test_differential_coupling_solvers.py::test_diagnostics_leave_every_returned_value_bit_identical
     - tests/property/test_differential_coupling_solvers.py::test_diagnostics_leave_gradients_through_run_scan_bit_identical
+    - tests/property/test_differential_coupling_interactions.py::test_every_row_returns_the_same_bits_with_diagnostics_on_or_off
   status: verified
 
 - id: CPL-092
@@ -1794,6 +1824,7 @@ claims:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_resolved_spectrum_is_usable
     - tests/core/test_coupling_spectral_bound_certificate.py::test_a_residual_the_space_never_absorbs_reads_as_unresolved
     - tests/core/test_coupling_precision_floor.py::test_an_undeclared_sub_stepped_node_is_not_usable_at_the_floor
+    - tests/property/test_differential_coupling_interactions.py::test_a_usable_spectral_bound_bounds_the_distance_in_every_row
   status: verified
 
 - id: CPL-093
@@ -1829,6 +1860,7 @@ claims:
     - tests/core/test_coupling_gradient_bound_applies_the_full_resolvent.py::test_a_constant_above_the_entry_limit_is_probed_whole_and_named
     - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit
     - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_every_cap
+    - tests/property/test_differential_coupling_interactions.py::test_a_usable_gradient_bound_bounds_the_error_in_every_row
   status: verified
 
 - id: CPL-094
@@ -2696,6 +2728,8 @@ claims:
   tests:
     - tests/property/test_coupling_invariances.py::test_renaming_every_node_changes_nothing_but_the_keys
     - tests/property/test_coupling_invariances.py::test_renaming_is_invariant_on_generated_graphs
+    - tests/property/test_differential_coupling_topologies.py::test_renaming_every_node_of_a_named_topology_changes_nothing
+    - tests/property/test_differential_coupling_topologies.py::test_renaming_a_drawn_topology_changes_nothing
   status: verified
 
 - id: CPL-181
@@ -2725,7 +2759,27 @@ claims:
     - tests/core/test_coupling_block_schedule.py::test_an_outside_node_added_between_the_members_reads_the_group_this_step
     - tests/core/test_coupling_block_schedule.py::test_a_group_inside_a_larger_loop_warns_naming_the_edge_read_late
     - tests/core/test_coupling_block_schedule.py::test_two_groups_on_one_loop_each_warn
-  status: verified
+    - tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing
+    - tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_drawn_topology_changes_nothing
+    - tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_an_ungrouped_cycle_picks_the_edge_read_late
+  status: ambiguous
+  proposed_wording: >-
+    The order of add_edge calls, and of add_node calls for every node outside
+    a group that is on no cycle -- a node downstream of the group included --
+    does not reach the result: the same graph built in another order gives
+    bit-identical states, verdicts and reports.  The relative order of the
+    nodes of a strongly connected component that is not exactly one group --
+    an ungrouped cycle, or a loop through a group and outside nodes -- does
+    reach it: it picks which of the component's edges is read from the
+    previous step (topological_sort keeps a cycle's nodes in add_node order).
+  notes: >-
+    Ambiguous since the coupling topology harness: the claim says the
+    add_node order of every node outside a group does not reach the result,
+    but an ungrouped cycle's build order picks which of its edges is
+    staggered (topological_sort, "within a cycle ... the nodes keep their
+    order in node_names"), and the two documents disagree.  The topology
+    tests keep each such component's relative order and pass; the
+    ungrouped-cycle test pins the dependence.
 
 - id: CPL-182
   area: invariance
@@ -2780,4 +2834,73 @@ claims:
     - tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_no_bit_under_a_gauss_seidel_constant_iterator
     - tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_the_fixed_point_only_by_rounding
     - tests/property/test_coupling_invariances.py::test_an_identity_relay_keeps_the_verdict
+    - tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit
+    - tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference
+    - tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_drawn_topology_on_its_reference
   status: verified
+
+# ---------------------------------------------------------------------------
+# Edge kinds and group shapes the topology harness draws
+# ---------------------------------------------------------------------------
+
+- id: CPL-186
+  area: edges
+  claim: >-
+    A flux -- a key compute_boundary_fluxes returns -- is a source_field
+    like any other: "Keys become available as source_field on edges",
+    "called automatically after each node update during edge resolution".
+  sources:
+    - docs/developer_guide/node_authoring.md:393 (Exposing Flux Quantities)
+    - src/maddening/core/node.py:1441 (SimulationNode.compute_boundary_fluxes)
+  conditions: >-
+    Unstated beyond the two refusals of CPL-075.  Read here as: a flux edge
+    inside a group, between two outside nodes, from an outside node into a
+    member, from a member to an outside reader, and on the edge an
+    ungrouped cycle reads from the previous step.
+  oracle: the monolithic float64 reference of the step (tests/property/coupled_topologies.py).
+  tests:
+    - tests/property/test_differential_coupling_topologies.py::test_a_named_topology_reproduces_the_monolithic_reference
+    - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_forward_in_an_ungrouped_cycle_steps
+    - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_an_outside_node_into_a_group_member_steps
+    - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps
+    - tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps
+  status: failing
+  finding: >-
+    Three of the five fail to trace with a bare KeyError naming the flux.
+    A member's flux is resolved in a dictionary local to
+    _run_coupled_block_impl and an outside node's in _build_step_fn's
+    flux_state; neither reads the other, so drv.q -> member and
+    member.q -> reader raise (graph_manager.py:3252 _resolve_value and
+    8125 _resolve_and_update_node).  A back edge reads the old state (8119), which
+    holds no flux, so an ungrouped ring a.q -> b, b -> a raises when built
+    b, a and steps when built a, b.  Reproducers: the three strict xfails
+    cited.  Since 0.1.0 (MADD-ANO-156, MADD-ANO-157).
+
+- id: CPL-187
+  area: configuration
+  claim: >-
+    A coupling group's nodes "must belong to the same graph and form (part
+    of) a cycle", and compile() names a group that is only part of a larger
+    feedback loop, with the edge it reads from the previous step (CPL-181).
+  sources:
+    - src/maddening/core/coupling/group.py:56 (CouplingGroup, nodes)
+    - src/maddening/core/graph_manager.py:1478 (_loop_through_outside_nodes)
+  conditions: any group, any build order.
+  oracle: >-
+    the warning against the strongly connected components; for a group
+    whose members are joined only through an outside node on no cycle, a
+    refusal or a warning naming the edge read late.
+  tests:
+    - tests/property/test_differential_coupling_topologies.py::test_compile_warns_exactly_for_a_group_inside_a_larger_loop
+    - tests/property/test_differential_coupling_topologies.py::test_a_drawn_topology_reproduces_the_monolithic_reference
+    - tests/property/test_differential_coupling_topologies.py::test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late
+  status: failing
+  finding: >-
+    Nothing checks the precondition.  Group {a, b} with a -> c -> b and
+    a -> b and no edge back is acyclic, but the group runs as one block
+    before c (_block_schedule), so c -> b -- an edge between two strongly
+    connected components -- is read from the previous step, and
+    _loop_through_outside_nodes, which looks at components only, says
+    nothing: b = 0.25 after one step where reading c this step gives 2.75
+    (graph_manager.py:1447 and 1478).  Reproducer: the strict xfail cited.
+    Since 0.1.0 (MADD-ANO-159).

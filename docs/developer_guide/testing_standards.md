@@ -911,6 +911,99 @@ harness lists them. Random draws have twice let a floor defect through
 claim rests on a model's premise needs a generator that attacks the
 premise, not only one that samples around it.
 
+### Configuration interactions and graph shapes
+
+Files: `tests/property/test_differential_coupling_interactions.py` and
+`test_differential_coupling_topologies.py`, with the scaffolding in
+`covering_array.py` and `coupled_topologies.py`.  The coupling-and-numerics
+harness above draws one group in a cycle, and its tables hold one knob at
+a time.  This harness draws *combinations* of knobs and *shapes* of graph.
+
+**The covering array** (`covering_array.py`) is a deterministic IPOG
+greedy with constraints.  The coupling knob space is `solver`,
+`iteration_mode`, `acceleration`, `convergence_norm`, `linear_solver`,
+`predictor`, `subcycling`, `boundary_interpolation`, `waveform_iterations`,
+`diagnostics`, `strict_convergence`, the dtype and a budget.  Over it the
+generator gives 65 rows, in which every valid pair and triple of values
+appears.  `test_the_array_covers_every_valid_triple` regenerates the array
+and checks its coverage, and dropping any one row fails the check.  The
+constraints are the inert-knob rules: under `"fori"` `linear_solver` and
+`strict_convergence` do nothing, and without sub-cycling neither do the
+two waveform knobs.  `"bicgstab"` is not an option (CPL-039).  Per push
+the harness runs a one-way slice of the array, the float32 rows that hold
+every value of every knob.  The slow lane runs every row, and the float64
+rows in subprocesses under `jax_enable_x64`.
+
+**The topology generator** (`coupled_topologies.py`) describes whole
+graphs of linear relays:
+
+- several groups: rings, stars and nested cycles;
+- outside nodes inside a group's component, two groups in one component,
+  and ungrouped cycles;
+- drivers and readers in any build order;
+- additive edges (three into one port), flux edges, mapped edges between
+  sizes and transformed edges;
+- `int32`, `uint32`, `bool` and typed PRNG-key leaves, and three-argument
+  nodes.
+
+Per push the harness runs four named structures, each in its own build
+order and in an *interleaved* one: readers added before the cycle they
+read, and outside nodes added between a group's members.  The slow lane
+draws the structure.
+
+**The monolithic reference** is `LinearModel`.  One step of linear relays
+is one linear system: each edge reads its source's new value, except a
+back edge, which reads the old one.  The back edges come from the
+documented rule, restated rather than called: an edge between two
+components points forward; inside a component the nodes run in their
+build order, each group as one block at its first member's place.  The
+system is solved in 80-bit extended precision, refined from a float64
+solve, so a float64 graph's rounding is about 2000 reference ulps.  The
+oracle is local:
+
+- a node outside every group is within its float rounding of its update
+  at the values it read;
+- a group's defect `x - Phi(x)` is within what its *reported* residual
+  allows, `-(I - L)(F(x) - x) + epsilon` for an affine pass, and the
+  reported residual is `||F(x) - x||` of the returned state to its
+  rounding;
+- a converged group is within its threshold's tolerance of its exact
+  fixed point;
+- the whole state is within `|(I - M)^{-1}|` of those allowances of the
+  exact solve.
+
+The same structures carry renaming, build-order and identity-relay
+invariances.  The build order keeps the relative orders the documentation
+says reach the result: a group's members, every node of a component that
+is not exactly one group, and three or more additive edges into one port.
+
+| Oracle | Paths | Tolerance | Cannot see |
+|---|---|---|---|
+| monolithic reference | the step against the extended-precision solve of the whole graph, per step from the library's own pre-step state, for every array row and every structure | A node's float rounding, `T eps sum|term|`. `T` counts the rounding chain: the constants, and per port the product, the additive sum and a mapping's inner product. `T eps` is twice `T u`, which covers `1 / (1 - T u)` and any reassociation or FMA. A group adds `||D S (I - L) S^+ diag(rho_up)||` times its reported residual, and its float evaluation `(N + 4) eps` | Non-linear nodes. Multi-rate and adaptive stepping. A fault the restated schedule shares with the documentation |
+| fori == ift | the array row against its solver twin, in lock step: before each step the twin takes the row's whole state, node states and the shared warm-start slots, so each step compares one solve from one input | The coupling-and-numerics oracle's parity rule, at every step; with equal passes, round-off of that step's passes | As above |
+| diagnostics on == off | the row against its diagnostics twin | Bitwise: states, `_meta` slots, passes, verdicts | A fault that moves both settings the same way |
+| strict == report | the row with `strict_convergence` against without | It raises on exactly the steps reported unconverged. With `waveform_iterations > 1` it also raises where an earlier sweep hit the cap (CPL-052). Where it does not raise, bitwise | A raise that happens to fall on a step that is also unconverged |
+| usable bounds | `spectral_error_bound` against the distance in the returned state's weights; `gradient_relative_error_bound` against central differences of the exact fixed point in every member's gains and biases (slow) | None: the bound must be at least the truth | Constants outside the group |
+
+The harness found MADD-ANO-156 to 159, which are strict xfails naming
+CPL-003, CPL-186 and CPL-187.  Each oracle was mutation-tested against a
+scratch copy of `src/` with a seeded fault, and the PR that added the
+harness lists them:
+
+- back edges decided over the node order rather than the block order;
+- readers downstream of a cycle scheduled in build order;
+- an understated residual;
+- the ift loop returning the iterate after the measured one;
+- Aitken dropping its relaxation carry (caught in the slow lane, by the
+  rows whose Aitken runs past three passes);
+- IQN-IMVJ ignoring `jacobian_reuse` under `"ift"`;
+- the fori loop not freezing the converged iterate;
+- diagnostics nudging the state;
+- `strict_convergence` that never raises;
+- a spectral bound reported at a tenth of its value, and a gradient bound
+  at a hundredth (caught in the slow lane);
+- a group swept in its members' name order (caught by renaming).
+
 ### System identification and the params machinery
 
 Two oracles; each was mutation-tested against a scratch copy of `src/`

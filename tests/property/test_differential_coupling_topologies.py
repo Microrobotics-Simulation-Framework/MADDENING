@@ -1,0 +1,602 @@
+"""Differential oracles over coupled topologies the coupled_graphs generator never draws.
+
+Coupling's defects have lived in graph *shapes* as much as in settings: a
+node downstream of a group added before the group's members read it a step
+late (CPL-025, MADD-ANO-120), an outside node added between two members of
+a group inside a larger loop did too (MADD-ANO-144).  The structures here
+(:func:`~tests.property.coupled_topologies.named_topologies` per push,
+:func:`drawn_topologies` in the slow lane) put those shapes under test:
+rings, chains, stars and nested cycles; outside nodes inside a group's
+strongly connected component and several groups in one component; groups
+beside acyclic outside nodes and ungrouped cycles; additive edges (three
+into one port), flux edges, mapped edges between nodes of different sizes
+and transformed edges; integer, boolean and typed PRNG-key leaves; nodes on
+the three-argument contract.  Build orders and names are permuted on top.
+
+**The monolithic reference** (:class:`~tests.property.coupled_topologies.LinearModel`):
+every node is affine, so one step is one linear system, back edges read
+from the pre-step state by the documented rule (restated, not called).
+Every node outside a group must sit within its own float rounding of its
+update at the values that rule says it reads; every group within what its
+reported residual allows; the whole state within the propagated allowance
+of the exact solve.  ``compile()`` must warn exactly for the groups that
+are a strict subset of a strongly connected component.
+
+**Invariances** on the same structures: renaming every node; permuting the
+``add_node`` and ``add_edge`` calls, except the orders the documentation
+says reach the result (a group's members, CPL-077; the nodes of a
+component that is not exactly one group, whose order picks the edge read
+late; three or more additive edges into one port, whose sum follows their
+order); and an identity relay on a group-internal edge (bit for bit under
+Gauss-Seidel with a constant iterator, and on its reference everywhere).
+
+What this cannot see: non-linear nodes (no closed form), sub-cycling and
+multi-rate stepping on these shapes (the covering array and the schedule
+harness hold those), and any fault the reference's restatement of the
+schedule shares with the library's (the restatement is from the
+documentation, so a documented rule that is itself wrong passes).
+"""
+
+from __future__ import annotations
+
+import functools
+
+import numpy as np
+import pytest
+from hypothesis import given, note, settings
+from hypothesis import strategies as st
+
+from tests.conftest import EXAMPLES_COSTLY
+from tests.property import coupled_graphs as cg
+from tests.property import coupled_topologies as ct
+from tests.property.test_coupling_invariances import report_differences
+
+NAMED = ct.named_topologies()
+_STEPS = 3
+
+
+@functools.lru_cache(maxsize=24)
+def _built(name: str, choice: int, node_order=None, edge_order=None, rename=None,
+           relay=None, constant=False) -> tuple:
+    """``(topology, knobs, Built)`` of a named structure, built once per variant."""
+    topo = NAMED[name]
+    if relay is not None:
+        topo = ct.with_identity_relay(topo, relay)
+    knobs = ct.topology_knobs(topo, choice)
+    if constant:
+        knobs = [dict(g, acceleration="none", iteration_mode="gauss-seidel", tolerance=0.0,
+                      convergence_norm="l2", max_iterations=8) for g in knobs]
+        for g in knobs:
+            g.pop("rtol", None)
+            g.pop("relaxation", None)
+            g.pop("jacobian_reuse", None)
+    if rename is not None:
+        mapping = dict(rename)
+        topo = topo.renamed(mapping)
+        node_order = tuple(mapping[n] for n in (node_order or NAMED[name].names))
+    return topo, knobs, ct.build(topo, knobs, node_order=node_order, edge_order=edge_order)
+
+
+@st.composite
+def _values(draw, topo, knobs):
+    rho = draw(st.sampled_from([0.3, 0.6, 0.9]))
+    seed = draw(st.integers(0, 2**32 - 1))
+    return ct.draw_values(topo, np.random.default_rng(seed), rho,
+                          nonnormal=draw(st.booleans()),
+                          bias_scale=draw(st.sampled_from([1e-3, 1.0, 1e3])),
+                          group_cfgs=ct.group_cfgs_of(knobs))
+
+
+def assert_reproduces_the_reference(topo, knobs, built, values, steps=_STEPS):
+    model = ct.LinearModel(topo, values, node_order=built.node_order,
+                           group_cfgs=ct.group_cfgs_of(knobs))
+    traj = ct.run(built, values, steps)
+    for k, step in enumerate(traj, start=1):
+        where = f"{topo.label} step {k}"
+        model.check_step(step.pre, step.state, step.reports,
+                         thresholds=ct.thresholds_of(knobs), where=where)
+        ct.check_leaves(topo, step.state, k, where=where)
+    return traj
+
+
+def assert_warns_exactly_for_groups_inside_larger_loops(topo, built):
+    for gi, members in enumerate(topo.groups):
+        said = any(f"coupling group {sorted(members)} is part of a larger feedback loop" in w
+                   for w in built.warnings)
+        assert said == ct.group_in_larger_loop(topo, gi), (
+            f"{topo.label}: group {members} in a larger loop: "
+            f"{ct.group_in_larger_loop(topo, gi)}, warned: {said} ({built.warnings})")
+
+
+def assert_same_runs(a, b, *, what=""):
+    """States bit for bit and reports value for value, step by step."""
+    for k, (sa, sb) in enumerate(zip(a, b), start=1):
+        diff = cg.bitwise_differences(sa.state, sb.state)
+        assert not diff, f"{what} step {k}: states differ in {diff}"
+        for gi in set(sa.reports) | set(sb.reports):
+            rdiff = report_differences(sa.reports.get(gi), sb.reports.get(gi))
+            assert not rdiff, f"{what} step {k} group {gi}: reports differ: {rdiff}"
+
+
+# ---------------------------------------------------------------------------
+# The monolithic reference, per push
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("order", ["as-built", "interleaved"])
+@pytest.mark.parametrize("choice", [0, 1])
+@pytest.mark.parametrize("name", sorted(NAMED))
+# Costly tier: one compiled graph per (structure, configuration, order);
+# the examples draw the gains, biases, mapping matrices, scale and start.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_named_topology_reproduces_the_monolithic_reference(name, choice, order, data):
+    """Per push; slow sibling :func:`test_a_drawn_topology_reproduces_the_monolithic_reference`.
+
+    ``"interleaved"`` adds every reader of a cycle before the cycle and
+    every outside node of a group's component between the group's first
+    two members (:func:`~tests.property.coupled_topologies.interleaved_order`):
+    the two build orders the schedule has read a step late before.
+    """
+    node_order = None if order == "as-built" else ct.interleaved_order(NAMED[name])
+    topo, knobs, built = _built(name, choice, node_order=node_order)
+    values = data.draw(_values(topo, knobs))
+    assert_reproduces_the_reference(topo, knobs, built, values)
+
+
+@pytest.mark.parametrize("name", sorted(NAMED))
+def test_compile_warns_exactly_for_a_group_inside_a_larger_loop(name):
+    """``compile()`` names every group that is a strict subset of a component, and no other."""
+    topo, _knobs, built = _built(name, 0)
+    assert_warns_exactly_for_groups_inside_larger_loops(topo, built)
+
+
+# ---------------------------------------------------------------------------
+# Invariances, per push
+# ---------------------------------------------------------------------------
+
+#: Names that sort differently from the schedule, one before ``"_meta"``,
+#: one with the ``"+"`` group keys are joined with, one with a dot.
+_NAME_POOL = ("zeta", "Alpha", "_m", "m+n", "q.r", "beta", "Z9", "omega", "k_1", "ALPHA",
+              "a-b", "yy", "c0x", "Q")
+
+
+def _renaming(topo, seed):
+    rng = np.random.default_rng(seed)
+    pool = list(_NAME_POOL)
+    rng.shuffle(pool)
+    return tuple(zip(topo.names, pool[:len(topo.names)]))
+
+
+@pytest.mark.parametrize("name", sorted(NAMED))
+# Costly tier: two compiled graphs per structure, the examples draw values.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_renaming_every_node_of_a_named_topology_changes_nothing(name, data):
+    """CPL-180 on the new shapes; slow sibling :func:`test_renaming_a_drawn_topology_changes_nothing`."""
+    topo, knobs, built = _built(name, 0)
+    rename = _renaming(topo, 11)
+    _rt, _rk, renamed = _built(name, 0, rename=rename)
+    values = data.draw(_values(topo, knobs))
+    assert_same_runs(ct.run(built, values, 2),
+                     ct.run(renamed, values, 2, rename=dict(rename)), what=f"{name} renamed")
+
+
+def _orders(topo, seed):
+    rng = np.random.default_rng(seed)
+    keep_nodes, keep_edges = ct.invariant_orders(topo)
+    return (tuple(ct.ordered_permutation(topo.names, keep_nodes, rng)),
+            tuple(ct.ordered_permutation(list(range(len(topo.edges))), keep_edges, rng)))
+
+
+@pytest.mark.parametrize("name", sorted(NAMED))
+# Costly tier: two compiled graphs per structure, the examples draw values.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_the_build_order_of_a_named_topology_changes_nothing(name, data):
+    """CPL-181 on the new shapes, outside nodes included; slow sibling draws the orders too."""
+    topo, knobs, built = _built(name, 0)
+    node_order, edge_order = _orders(topo, 5)
+    _t, _k, reordered = _built(name, 0, node_order=node_order, edge_order=edge_order)
+    assert reordered.gm.schedule != built.gm.schedule or edge_order != tuple(
+        range(len(topo.edges))), "the permutation must reach the graph"
+    values = data.draw(_values(topo, knobs))
+    assert_same_runs(ct.run(built, values, 2), ct.run(reordered, values, 2),
+                     what=f"{name} reordered")
+
+
+def _relayable(topo):
+    """The first group-internal, unmapped edge (the relay's place)."""
+    return next(i for i, e in enumerate(topo.edges) if topo.internal(e) and not e.mapped)
+
+
+@pytest.mark.parametrize("name", sorted(NAMED))
+# Costly tier: two compiled graphs per structure, the examples draw values.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_an_identity_relay_on_a_named_topology_moves_no_bit(name, data):
+    """CPL-183's strongest statement on the new shapes.
+
+    Gauss-Seidel, no acceleration and a criterion only exact stationarity
+    meets (``tolerance=0``, eight passes): the relay is recomputed from
+    its source in the same pass before anything reads it, so every other
+    node's iterate is bit-identical pass for pass and the relay holds what
+    it relays.
+    """
+    topo = NAMED[name]
+    k = _relayable(topo)
+    t0, knobs, plain = _built(name, 0, constant=True)
+    t1, _k1, relayed = _built(name, 0, relay=k, constant=True)
+    values = data.draw(_values(t0, knobs))
+    a = ct.run(plain, values, 2)
+    b = ct.run(relayed, ct.relay_values(t0, values, t1, k), 2)
+    others = list(t0.names)
+    for step, (sa, sb) in enumerate(zip(a, b), start=1):
+        diff = cg.bitwise_differences({n: sa.state[n] for n in others},
+                                      {n: sb.state[n] for n in others})
+        assert not diff, f"{name} step {step}: the relay moved {diff}"
+
+
+@pytest.mark.parametrize("name", sorted(NAMED))
+# Costly tier: one compiled graph per structure, the examples draw values.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_an_identity_relay_keeps_a_named_topology_on_its_reference(name, data):
+    """CPL-183 under every configuration: the relayed graph reproduces the same exact solve."""
+    topo = NAMED[name]
+    k = _relayable(topo)
+    t1, knobs, relayed = _built(name, 1, relay=k)
+    values = ct.relay_values(topo, data.draw(_values(topo, ct.topology_knobs(topo, 1))), t1, k)
+    assert_reproduces_the_reference(t1, knobs, relayed, values)
+
+
+# ---------------------------------------------------------------------------
+# Drawn topologies, slow
+# ---------------------------------------------------------------------------
+
+
+@st.composite
+def drawn_topologies(draw):
+    """One or two groups of 2-4 members (ring, nested cycles or star), joined or not,
+    with drivers, readers, an outside node in a group's component, an
+    ungrouped cycle, additive ports, flux, mapped and transformed edges,
+    every leaf kind and three-argument nodes, each drawn."""
+    b = ct.TopologyBuilder()
+    sizes = st.sampled_from([1, 2])
+    transforms = st.sampled_from([None, None, "negate", "scale_2.0", "scale_0.5", "identity"])
+
+    def node(name, **kw):
+        return b.node(name, draw(sizes), alpha=draw(st.sampled_from([0.0, 0.5, -0.25, 1.0])),
+                      beta=draw(st.sampled_from([0.0, 1.0, -0.5])),
+                      leaves=tuple(draw(st.lists(st.sampled_from(ct.LEAF_KINDS), unique=True,
+                                                 max_size=3))),
+                      three_arg=draw(st.integers(0, 3)) == 0, **kw)
+
+    def edge(src, dst, **kw):
+        mapped = None if b._nodes[src]["n"] != b._nodes[dst]["n"] else draw(  # noqa: SLF001
+            st.integers(0, 3)) == 0
+        return b.edge(src, dst, transform=draw(transforms), mapped=mapped, **kw)
+
+    groups = []
+    for gi in range(draw(st.integers(1, 2))):
+        m = draw(st.integers(2, 4))
+        shape = draw(st.sampled_from(["ring", "nested", "star"]))
+        flux_member = draw(st.integers(-1, m - 1))
+        members = [node(f"g{gi}{k}", flux=(k == flux_member)) for k in range(m)]
+        pairs = ([(members[0], leaf) for leaf in members[1:]]
+                 + [(leaf, members[0]) for leaf in members[1:]] if shape == "star"
+                 else [(members[i], members[(i + 1) % m]) for i in range(m)]
+                 + ([(members[m - 1], members[1])] if shape == "nested" and m >= 3 else []))
+        for src, dst in pairs:
+            field = "q" if b._nodes[src]["flux"] and draw(st.booleans()) else "x"  # noqa: SLF001
+            edge(src, dst, field=field)
+        b.group(*members)
+        groups.append(members)
+    if len(groups) == 2:
+        link = draw(st.sampled_from(["one-scc", "chain", "apart"]))
+        if link in ("one-scc", "chain"):
+            edge(draw(st.sampled_from(groups[0])), draw(st.sampled_from(groups[1])))
+        if link == "one-scc":
+            edge(draw(st.sampled_from(groups[1])), draw(st.sampled_from(groups[0])))
+    everyone = [m for g in groups for m in g]
+    drivers = [node(f"d{k}", flux=k == 0) for k in range(draw(st.integers(0, 2)))]
+    if len(drivers) == 2 and draw(st.booleans()):
+        edge(drivers[0], drivers[1], field="q")
+    if drivers:
+        target = draw(st.sampled_from(everyone))
+        if len(drivers) == 2 and draw(st.booleans()):
+            # Three additive edges into one port: both drivers and a member.
+            port = edge(drivers[0], target)
+            edge(drivers[1], target, port=port)
+            other = draw(st.sampled_from([m for m in everyone if m != target]))
+            edge(other, target, port=port)
+        else:
+            for d in drivers:
+                edge(d, draw(st.sampled_from(everyone)))
+    if draw(st.booleans()):
+        o = node("o")
+        edge(draw(st.sampled_from(groups[0])), o)
+        edge(o, draw(st.sampled_from(groups[0])))
+    if draw(st.booleans()):
+        u0, u1 = node("u0"), node("u1")
+        edge(draw(st.sampled_from(everyone)), u0)
+        edge(u0, u1)
+        edge(u1, u0)
+    for k in range(draw(st.integers(0, 2))):
+        edge(draw(st.sampled_from(everyone)), node(f"r{k}"))
+    topo = b.build("drawn")
+    order = tuple(draw(st.permutations(topo.names)))
+    return topo, order
+
+
+def _drawn_case(data):
+    topo, order = data.draw(drawn_topologies())
+    knobs = ct.topology_knobs(topo, data.draw(st.integers(0, 4)))
+    note(f"{topo}\norder={order}\nknobs={knobs}")
+    return topo, order, knobs
+
+
+# Slow: the structure is the draw, so every example compiles a graph of its
+# own (1-2 s each on CI).
+# Per push: tests/property/test_differential_coupling_topologies.py::test_a_named_topology_reproduces_the_monolithic_reference
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_drawn_topology_reproduces_the_monolithic_reference(data):
+    topo, order, knobs = _drawn_case(data)
+    built = ct.build(topo, knobs, node_order=order)
+    assert_warns_exactly_for_groups_inside_larger_loops(topo, built)
+    assert_reproduces_the_reference(topo, knobs, built, data.draw(_values(topo, knobs)))
+
+
+# Slow: two graphs compiled per example.
+# Per push: tests/property/test_differential_coupling_topologies.py::test_renaming_every_node_of_a_named_topology_changes_nothing
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_renaming_a_drawn_topology_changes_nothing(data):
+    topo, order, knobs = _drawn_case(data)
+    mapping = dict(zip(topo.names, data.draw(st.permutations(_NAME_POOL))))
+    values = data.draw(_values(topo, knobs))
+    a = ct.run(ct.build(topo, knobs, node_order=order), values, 2)
+    b = ct.run(ct.build(topo.renamed(mapping), knobs,
+                        node_order=tuple(mapping[n] for n in order)),
+               values, 2, rename=mapping)
+    assert_same_runs(a, b, what="renamed")
+
+
+# Slow: two graphs compiled per example.
+# Per push: tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_the_build_order_of_a_drawn_topology_changes_nothing(data):
+    topo, order, knobs = _drawn_case(data)
+    seed = data.draw(st.integers(0, 2**32 - 1))
+    keep_nodes, keep_edges = ct.invariant_orders(topo)
+    rng = np.random.default_rng(seed)
+    # The keep-groups take their relative order from the first build's.
+    other = tuple(ct.ordered_permutation(order, keep_nodes, rng))
+    edges = tuple(ct.ordered_permutation(list(range(len(topo.edges))), keep_edges, rng))
+    values = data.draw(_values(topo, knobs))
+    a = ct.run(ct.build(topo, knobs, node_order=order), values, 2)
+    b = ct.run(ct.build(topo, knobs, node_order=other, edge_order=edges), values, 2)
+    assert_same_runs(a, b, what=f"orders {order} / {other}")
+
+
+# Slow: two graphs compiled per example.
+# Per push: tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference
+@pytest.mark.slow
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_an_identity_relay_keeps_a_drawn_topology_on_its_reference(data):
+    topo, order, knobs = _drawn_case(data)
+    candidates = [i for i, e in enumerate(topo.edges) if topo.internal(e) and not e.mapped]
+    if not candidates:
+        return      # every internal edge of this draw is mapped; nothing to relay
+    k = data.draw(st.sampled_from(candidates))
+    relayed = ct.with_identity_relay(topo, k)
+    src = topo.edges[k].src
+    r_order = list(order)
+    r_order.insert(r_order.index(src) + 1, "rly")
+    r_knobs = ct.topology_knobs(relayed, 0)
+    built = ct.build(relayed, r_knobs, node_order=tuple(r_order))
+    values = ct.relay_values(topo, data.draw(_values(topo, r_knobs)), relayed, k)
+    assert_reproduces_the_reference(relayed, r_knobs, built, values)
+
+
+# ---------------------------------------------------------------------------
+# What the harness found
+# ---------------------------------------------------------------------------
+
+
+def _ring_with(extra_nodes, extra_edges, *, flux_members=()):
+    b = ct.TopologyBuilder()
+    b.node("g0", 1, alpha=0.5, flux="g0" in flux_members)
+    b.node("g1", 1, alpha=0.0, beta=1.0, flux="g1" in flux_members)
+    for name, kw in extra_nodes:
+        b.node(name, 1, **kw)
+    b.edge("g0", "g1")
+    b.edge("g1", "g0")
+    for src, dst, kw in extra_edges:
+        b.edge(src, dst, **kw)
+    b.group("g0", "g1")
+    return b.build("finding")
+
+
+def _steps_like_its_reference(topo, knobs=None, node_order=None):
+    knobs = knobs or [dict(tolerance=1e-6, max_iterations=100)]
+    built = ct.build(topo, knobs, node_order=node_order)
+    values = ct.draw_values(topo, np.random.default_rng(0), 0.5,
+                            group_cfgs=ct.group_cfgs_of(knobs))
+    assert_reproduces_the_reference(topo, knobs, built, values)
+
+
+@pytest.mark.xfail(strict=True, raises=KeyError, reason=(
+    "CPL-186: a flux edge from an outside node into a coupling group member fails to "
+    "trace with a bare KeyError naming the flux; pending fix"))
+def test_a_flux_edge_from_an_outside_node_into_a_group_member_steps():
+    """The flux an outside producer computes earlier in the step reaches a member.
+
+    ``compute_boundary_fluxes``'s keys "become available as source_field
+    on edges" (node authoring guide), and a forward flux edge between two
+    outside nodes works.  ``_run_coupled_block_impl`` resolves a member's
+    inputs from the group's own flux dictionary only, never from the
+    fluxes the outside nodes produced earlier in the step
+    (``graph_manager.py``, ``_resolve_value``), so the step raises
+    ``KeyError: 'q'`` at trace.  Measured at 0.4.0.dev0 under both solvers.
+    """
+    _steps_like_its_reference(_ring_with([("drv", dict(alpha=1.0, beta=1.0, flux=True))],
+                                         [("drv", "g0", dict(field="q"))]))
+
+
+@pytest.mark.xfail(strict=True, raises=KeyError, reason=(
+    "CPL-186: a flux edge from a coupling group member to an outside reader fails to "
+    "trace with a bare KeyError naming the flux; pending fix"))
+def test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps():
+    """A member's flux reaches a reader outside the group.
+
+    The group computes its members' fluxes in a dictionary local to
+    ``_run_coupled_block_impl``; the outside reader looks them up in the
+    step's own ``flux_state`` (``_build_step_fn``'s
+    ``_resolve_and_update_node``), which the group never writes, so the
+    step raises ``KeyError: 'q'`` at trace.
+    """
+    _steps_like_its_reference(_ring_with([("sink", dict(alpha=0.5))],
+                                         [("g1", "sink", dict(field="q"))],
+                                         flux_members=("g1",)))
+
+
+def _ungrouped_flux_ring():
+    b = ct.TopologyBuilder()
+    b.node("a", 1, alpha=0.5, flux=True)
+    b.node("b", 1, alpha=0.25, beta=1.0)
+    b.edge("a", "b", field="q")
+    b.edge("b", "a")
+    return b.build("ungrouped-flux-ring")
+
+
+def test_a_flux_edge_read_forward_in_an_ungrouped_cycle_steps():
+    """The control: built ``a, b`` the flux edge ``a.q -> b`` is read this step, and works."""
+    _steps_like_its_reference(_ungrouped_flux_ring(), knobs=[], node_order=("a", "b"))
+
+
+@pytest.mark.xfail(strict=True, raises=KeyError, reason=(
+    "CPL-186: a flux edge an ungrouped cycle reads from the previous step fails to trace "
+    "with a bare KeyError naming the flux; pending fix"))
+def test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps():
+    """Built ``b, a``, the cycle is staggered on the flux edge, which then fails.
+
+    A back edge reads its source from the previous step's state
+    (``_build_step_fn``), and a flux is not in the state: the lookup falls
+    through to ``state['a']['q']`` and raises ``KeyError: 'q'`` at trace,
+    so whether the graph runs at all depends on the order the two nodes
+    were added.  The adaptive steppers refuse the same edge with a
+    ``ValueError`` that names it (``_build_dt_step_fn``).
+    """
+    _steps_like_its_reference(_ungrouped_flux_ring(), knobs=[], node_order=("b", "a"))
+
+
+@pytest.mark.parametrize("acceleration", ["aitken", "fixed"])
+@pytest.mark.xfail(strict=True, raises=ValueError, reason=(
+    "CPL-003: a typed PRNG key in a coupling group member fails to trace under "
+    "solver='ift' with acceleration='aitken' or 'fixed'; pending fix"))
+def test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation(acceleration):
+    """CPL-003: a PRNG-key field is computed by every pass and never relaxed.
+
+    Under ``solver="ift"`` with ``"aitken"`` or ``"fixed"`` the step
+    builder sizes the accelerator from ``_flatten(state_after_first)`` with
+    ``accel_fields=None`` (``_run_coupled_block_impl``: "the IFT path
+    relaxes on its own floating vector and reads this only for IQN's index
+    map"), which concatenates *every* field of every member, the typed key
+    included: ``ValueError: dtype=key<fry> is not a valid dtype for JAX
+    type promotion``.  ``"none"``, the IQN pair and ``solver="fori"``
+    (which flattens the floating fields only) all step.
+    """
+    b = ct.TopologyBuilder()
+    b.node("a", 2, alpha=0.5, leaves=("key",))
+    b.node("b", 2, alpha=0.0, beta=1.0)
+    b.edge("a", "b")
+    b.edge("b", "a")
+    b.group("a", "b")
+    knobs = [dict(acceleration=acceleration, relaxation=0.7, tolerance=1e-6,
+                  max_iterations=100)]
+    _steps_like_its_reference(b.build("keyed-pair"), knobs=knobs)
+
+
+def test_a_typed_prng_key_in_a_member_steps_under_every_other_iterator():
+    """The control for the finding above: the same group steps everywhere else."""
+    b = ct.TopologyBuilder()
+    b.node("a", 2, alpha=0.5, leaves=("key",))
+    b.node("b", 2, alpha=0.0, beta=1.0)
+    b.edge("a", "b")
+    b.edge("b", "a")
+    b.group("a", "b")
+    topo = b.build("keyed-pair")
+    for knobs in (dict(acceleration="none"), dict(acceleration="iqn-ils"),
+                  dict(acceleration="aitken", solver="fori", diagnostics=True)):
+        _steps_like_its_reference(topo, knobs=[dict(knobs, tolerance=1e-6,
+                                                    max_iterations=100)])
+
+
+def _joined_through_an_outside_node():
+    """Group ``{a, b}`` with ``a -> c -> b`` and ``a -> b``: no node-level cycle at all."""
+    b = ct.TopologyBuilder()
+    b.node("a", 1, alpha=0.5, beta=1.0)
+    b.node("b", 1, alpha=0.25)
+    b.node("c", 1, alpha=0.0)
+    b.edge("a", "c")
+    b.edge("c", "b")
+    b.edge("a", "b")
+    b.group("a", "b")
+    return b.build("joined-off-cycle")
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "CPL-187: a group whose members are joined only through an outside node, on no "
+    "cycle, reads that node a step late with no warning; pending fix"))
+def test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late():
+    """The group runs as one block, so ``c -> b`` is read from the previous step -- silently.
+
+    ``CouplingGroup`` documents that its members "form (part of) a cycle";
+    nothing checks it.  With ``a -> c -> b`` and no edge back, the graph
+    is acyclic and an uncoupled step would read every edge this step, but
+    the group's block runs ``a`` and ``b`` together before ``c``
+    (``_block_schedule``), so ``identify_back_edges`` staggers ``c -> b``
+    -- an edge between two strongly connected components, which CPL-025
+    says always points forward.  ``compile()``'s warning for a group inside
+    a larger loop (``_loop_through_outside_nodes``) looks for strongly
+    connected components only and stays silent.  Either a refusal or a
+    warning naming the staggered edge would say so.
+    """
+    topo = _joined_through_an_outside_node()
+    try:
+        built = ct.build(topo, [dict(tolerance=1e-6, max_iterations=50)])
+    except (ValueError, RuntimeError):
+        return
+    assert any("c.x -> b.u" in w for w in built.warnings), built.warnings
+
+
+def test_the_build_order_of_an_ungrouped_cycle_picks_the_edge_read_late():
+    """An ungrouped cycle is staggered on the edge its build order makes a back edge.
+
+    Documented in ``topological_sort`` ("within a cycle ... the nodes keep
+    their order in node_names") and for a group inside a larger loop
+    (CPL-181's exclusion), but not stated where CPL-181 says the order of
+    every outside node's ``add_node`` call "does not reach the result": a
+    cycle of outside nodes is the counterexample.  Both orders step as the
+    documented rule says, and differently from each other.
+    """
+    b = ct.TopologyBuilder()
+    b.node("a", 1, alpha=0.5, beta=1.0)
+    b.node("p", 1, alpha=0.25)
+    b.edge("a", "p")
+    b.edge("p", "a")
+    topo = b.build("ungrouped-ring")
+    values = ct.draw_values(topo, np.random.default_rng(1), 0.5)
+    runs = []
+    for order in (("a", "p"), ("p", "a")):
+        built = ct.build(topo, [], node_order=order)
+        runs.append(assert_reproduces_the_reference(topo, [], built, values))
+    assert cg.bitwise_differences(runs[0][-1].state, runs[1][-1].state)
+

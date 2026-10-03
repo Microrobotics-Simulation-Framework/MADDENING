@@ -91,6 +91,7 @@ What is deliberately *not* drawn
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from dataclasses import fields as dataclass_fields
 from dataclasses import replace as dataclass_replace
@@ -619,7 +620,16 @@ class GraphRecipe:
             # is the whole reason a config that drops one is a correctness
             # bug rather than a cosmetic one.
             gm.add_coupling_group(list(group.nodes), **group.kwargs)
-        gm.compile()
+        with warnings.catch_warnings():
+            # A drawn group can be part of a larger feedback loop through
+            # nodes outside it, and compile() names the edge that closes
+            # that loop one step late (CPL-181, MADD-ANO-144) -- a property
+            # of the structure, not a mistake in the draw.  The recipe fixes
+            # the order nodes are added in, so the graph it builds, and the
+            # edge read late, are the same on every call.
+            warnings.filterwarnings("ignore", message=".*part of a larger feedback loop.*",
+                                    category=UserWarning)
+            gm.compile()
         for node_name, key, factor in self.param_overrides:
             leaf = gm.params["nodes"][node_name][key]
             gm.params["nodes"][node_name][key] = (leaf * factor).astype(leaf.dtype)

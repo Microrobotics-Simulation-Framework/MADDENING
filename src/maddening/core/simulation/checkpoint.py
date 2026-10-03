@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import warnings
+import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -147,7 +148,13 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     ValueError
         If the saved state does not match the current graph structure
         (different node names, field names, or a state field / params
-        leaf whose shape differs from the live one).
+        leaf whose shape differs from the live one), or holds a value the
+        live leaf's dtype cannot hold: a finite value that would overflow
+        to ``inf``, a non-zero one that would flush to ``0``, an integer
+        that would wrap (:func:`_checked_cast`; a value that rounds to a
+        subnormal loads, and one already ``inf`` or ``NaN`` loads as it
+        was).  :class:`CheckpointFormatError`, a ``ValueError``, if the
+        file is not an ``.npz`` archive of plain arrays.
 
     Notes
     -----
@@ -169,7 +176,7 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint file not found: {path}")
 
-    data = np.load(path, allow_pickle=False)
+    data = _read_checkpoint_archive(path)
 
     # Separate meta keys from node keys.
     meta_keys: dict[str, np.ndarray] = {}
@@ -177,7 +184,7 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     param_keys: dict[str, dict[str, np.ndarray]] = {}
     mapping_keys: dict[str, dict[str, np.ndarray]] = {}
 
-    for flat_key in data.files:
+    for flat_key in data:
         parts = flat_key.split("/", 1)
         if len(parts) != 2:
             raise ValueError(
@@ -242,7 +249,8 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
                     f"Checkpoint field '{node_name}/{field}' has shape {tuple(arr.shape)}, "
                     f"graph has {tuple(want.shape)}"
                 )
-            new_state[field] = jnp.asarray(arr, dtype=want.dtype)
+            new_state[field] = jnp.asarray(_checked_cast(
+                arr, want.dtype, f"field '{node_name}/{field}'"))
         staged_states[node_name] = new_state
 
     # Stage the graph parameters the same way, so a leaf that does not
@@ -269,9 +277,8 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
                         f"Checkpoint params {section}[{owner!r}][{pname!r}] has shape "
                         f"{tuple(arr.shape)}, graph has {tuple(live.shape)}"
                     )
-                writes.append(
-                    (current[owner], pname, jnp.asarray(arr, dtype=live.dtype))
-                )
+                writes.append((current[owner], pname, jnp.asarray(_checked_cast(
+                    arr, live.dtype, f"params {section}[{owner!r}][{pname!r}]"))))
         return writes
 
     staged_params = (
@@ -314,7 +321,7 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
                 if tuple(np.shape(arr)) != tuple(want.shape):
                     reshaped.append(field)
                     continue
-                merged[field] = jnp.asarray(arr, dtype=want.dtype)
+                merged[field] = jnp.asarray(_checked_cast(arr, want.dtype, f"_meta '{field}'"))
             if merged:
                 raw_state[_META_KEY] = merged
             if dropped or reshaped:
@@ -339,6 +346,83 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     except BaseException:
         _restore_state_and_params(graph_manager, undo)
         raise
+
+
+class CheckpointFormatError(ValueError):
+    """The file is not a checkpoint: not an ``.npz`` archive of plain
+    arrays, or one whose members cannot be read without unpickling."""
+
+
+def _read_checkpoint_archive(path: Path) -> dict[str, np.ndarray]:
+    """Every member of the ``.npz`` at *path*, read with
+    ``allow_pickle=False``, or :class:`CheckpointFormatError`.
+
+    NumPy answers a file that is not an archive, or a member holding Python
+    objects, with its own ``ValueError`` ("This file contains pickled
+    (object) data ...") -- a message about how to load the file unsafely,
+    which a caller passing ``ValueError`` on as a checkpoint mismatch used
+    to show to whoever had named the file.  A damaged archive (``EOFError``,
+    ``zipfile.BadZipFile``) is the same answer.
+    """
+    what = (f"{path} is not a checkpoint: an .npz archive of plain arrays, "
+            "saved by GraphManager.save_state, is expected")
+    try:
+        data = np.load(path, allow_pickle=False)
+    except (ValueError, EOFError, zipfile.BadZipFile):
+        raise CheckpointFormatError(what) from None
+    if not isinstance(data, np.lib.npyio.NpzFile):
+        raise CheckpointFormatError(what)
+    try:
+        return {key: data[key] for key in data.files}
+    except (ValueError, EOFError, zipfile.BadZipFile, KeyError):
+        raise CheckpointFormatError(
+            f"{path} is not a checkpoint: one of its members holds Python objects "
+            "or is damaged") from None
+    finally:
+        data.close()
+
+
+def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
+    """*arr* in the live leaf's *dtype*, refused (``ValueError``) when the
+    cast would lose a value.
+
+    A checkpoint written in a wider dtype -- a graph run under
+    ``jax_enable_x64`` and loaded without it -- was cast with no check:
+    a float64 ``1e39`` loaded into a float32 field as ``inf`` and ``1e-50``
+    as ``0.0``, its sign lost, with nothing said.  The rule is the FMU's
+    (:func:`maddening.fmi.sidecar._checked_value`): a finite value that
+    overflows to ``inf``, or a non-zero one flushed to ``+-0``, is
+    refused; one that rounds to a subnormal keeps its sign and magnitude
+    and is kept; a value that is already ``inf`` or ``NaN`` is stored as
+    it was (a diverged state, a ``NaN``-seeded diagnostics slot).  An
+    integer that would wrap or truncate, and a non-finite value for an
+    integer leaf, are refused too.
+    """
+    a = np.asarray(arr)
+    target = np.dtype(dtype)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        cast = a.astype(target)
+    if a.dtype == target:
+        return cast
+    if target.kind in "fc":
+        finite = np.isfinite(a) if a.dtype.kind in "fc" else np.ones(a.shape, bool)
+        lost = (finite & ~np.isfinite(cast)) | ((a != 0) & (cast == 0))
+    elif target.kind in "iu":
+        if a.dtype.kind in "fc":
+            lost = ~np.isfinite(a) | (cast.astype(np.float64) != a.astype(np.float64))
+        else:
+            lost = cast.astype(a.dtype) != a
+    elif target.kind == "b":
+        lost = (a != 0) & (a != 1)
+    else:
+        lost = np.zeros(a.shape, bool)
+    if np.any(lost):
+        index = tuple(int(i) for i in np.argwhere(lost)[0]) if a.ndim else ()
+        raise ValueError(
+            f"Checkpoint {what} holds {a[index].item()!r} ({a.dtype}), which this graph's "
+            f"{target} cannot hold: it would load as {cast[index].item()!r}.  Nothing was "
+            "loaded.")
+    return cast
 
 
 def _state_and_params_snapshot(graph_manager: "GraphManager") -> tuple[dict, dict]:

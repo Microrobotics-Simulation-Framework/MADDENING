@@ -190,3 +190,46 @@ def test_a_float32_value_below_a_zero_bound_by_a_subnormal_is_refused_under_x64(
         p["nodes"]["s"]["damping"] = jnp.asarray(-1e-40, jnp.float32)
         with pytest.raises(ValueError, match=r"\['damping'\].*below bound 0.0"):
             gm.check_params(p)
+
+
+def _checkpoint_with(gm, path, member, value):
+    """*gm*'s checkpoint at *path* with one member replaced by *value*."""
+    gm.save_state(str(path))
+    with np.load(path) as data:
+        members = {k: data[k] for k in data.files}
+    members[member] = np.asarray(value)
+    np.savez(path, **members)
+    return path
+
+
+def test_load_state_into_a_float32_field_of_an_x64_graph_refuses_what_float32_cannot_hold(tmp_path):
+    """SYS-123 with mixed dtypes: the built-in spring keeps float32 state under
+    x64, and a float64 checkpoint value it cannot hold -- ``1e39``, ``-1e-50`` --
+    is refused, leaving the graph as it was; ``1e-40`` loads with its sign."""
+    with _x64():
+        gm = _spring_graph()
+        assert np.asarray(gm.get_node_state("s")["position"]).dtype == np.float32
+        before = np.asarray(gm.get_node_state("s")["position"]).copy()
+        for value in (1e39, -1e-50):
+            path = _checkpoint_with(gm, tmp_path / "c.npz", "s/position", np.float64(value))
+            with pytest.raises(ValueError, match="float32 cannot hold"):
+                gm.load_state(str(path))
+            assert np.array_equal(np.asarray(gm.get_node_state("s")["position"]), before)
+        gm.load_state(str(_checkpoint_with(gm, tmp_path / "c.npz", "s/position",
+                                           np.float64(-1e-40))))
+        got = np.asarray(gm.get_node_state("s")["position"])
+        assert got.dtype == np.float32 and got == np.float32(-1e-40) and np.signbit(got)
+
+
+def test_load_state_into_a_float64_field_loads_what_float32_could_not(tmp_path):
+    """SYS-123 at float64: a float64 field holds ``1e39`` and ``-1e-50``, so they
+    load bit for bit; a value already non-finite loads as it was."""
+    from tests.core.test_coupling_claims_in_every_domain import CONFIGS, build
+
+    with _x64():
+        gm = build(CONFIGS["f64"], "plain", diagnostics=False)
+        assert np.asarray(gm.get_node_state("a")["x"]).dtype == np.float64
+        for value in (1e39, -1e-50, float("inf")):
+            gm.load_state(str(_checkpoint_with(gm, tmp_path / "c.npz", "a/x", np.float64(value))))
+            got = np.asarray(gm.get_node_state("a")["x"])
+            assert got.dtype == np.float64 and got.tobytes() == np.float64(value).tobytes()

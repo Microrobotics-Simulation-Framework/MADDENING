@@ -91,8 +91,9 @@ every axis (which passed on eight devices too, the grids being square).
 They now fail on `1d-axis1` and `2d-flat`, on `2d-flat`, and on every mesh
 that shards axis 1, respectively.
 
-`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds the seven
-faults as seeds of `sharded_node.py` and `halo.py`: slow-marked, it
+`tests/cloud/multigpu/test_run_pod_seeded_faults.py` holds eight faults
+as seeds of `sharded_node.py` and `halo.py` -- the four and the three
+above, and domain integrals summed over the first mesh axis only: slow-marked, it
 applies each to a scratch copy of the library, runs `--goal checklist
 --dry-run --keep-going`, and requires `stencil`, `hybrid` and `coupled`
 to read `FAIL` (and `halo` too for the `halo_exchange` seed; the other

@@ -1036,3 +1036,19 @@ def test_the_source_reader_follows_the_names_a_test_uses(tmp_path):
     assert source_of_test("tests/core/test_y.py::TestK::test_two", repo_root=tmp_path)
     assert source_of_test("tests/core/test_y.py::test_none", repo_root=tmp_path) is None
     assert source_of_test("tests/core/test_nope.py::test_one", repo_root=tmp_path) is None
+
+
+def test_a_pending_cell_is_accepted_only_while_pending_cells_are(monkeypatch):
+    """``TODO-oracle`` / ``TODO-fix`` mark a cell a parallel branch will fill; the
+    guard takes them only while ``PENDING_ALLOWED`` is set, so a release that
+    turns it off fails on any left."""
+    module = sys.modules[__name__]
+    row = _drow(f32=_T, f64="TODO-oracle", vmap="TODO-fix")
+    monkeypatch.setattr(module, "PENDING_ALLOWED", True)
+    assert row_problems([row], ["CPL"], domains=NUMERIC_DOMAINS) == []
+    monkeypatch.setattr(module, "PENDING_ALLOWED", False)
+    problems = row_problems([row], ["CPL"], domains=NUMERIC_DOMAINS)
+    assert any("domain f64: 'TODO-oracle'" in p for p in problems), problems
+    assert any("domain vmap: 'TODO-fix'" in p for p in problems), problems
+    # a pending cell carries no test, so nothing is collected for it
+    assert domain_targets(row) == [("f32", _T)]

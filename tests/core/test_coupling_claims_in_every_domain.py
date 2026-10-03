@@ -348,10 +348,12 @@ def _f64(v) -> np.ndarray:
     return np.asarray(v, np.float64)
 
 
-def _norm(group, new: dict, old: dict) -> float:
+def _norm(group, new: dict, old: dict, weights_from_new: bool = False) -> float:
     """The group's norm of ``new - old``: each field's change over ``rtol``
-    times the field's magnitude (the larger of its two ``max |v|``), the L2
-    norm the root sum of squares at ``rtol = 1``, the mixed norm the RMS
+    times the field's magnitude -- the larger of its two ``max |v|``, as the
+    residual takes it, or with *weights_from_new* ``new``'s alone, the
+    returned state's weights the bounds are stated in (MADD-ANO-146) -- the
+    L2 norm the root sum of squares at ``rtol = 1``, the mixed norm the RMS
     over every active entry."""
     l2 = group.convergence_norm == "l2"
     rtol = 1.0 if l2 else float(group.rtol)
@@ -361,7 +363,9 @@ def _norm(group, new: dict, old: dict) -> float:
             a, b = _f64(new[n][f]), _f64(old[n][f])
             if not (np.all(np.isfinite(a)) and np.all(np.isfinite(b))):
                 return math.inf
-            ref = max(float(np.max(np.abs(a))), float(np.max(np.abs(b))))
+            ref = float(np.max(np.abs(a)))
+            if not weights_from_new:
+                ref = max(ref, float(np.max(np.abs(b))))
             if not ref > float(group.atol):
                 continue
             total += float(np.sum((np.abs(a - b) / (rtol * ref)) ** 2))
@@ -394,10 +398,11 @@ def _with(r: Record, xa, xb) -> dict:
 
 
 def distance(r: Record) -> float:
-    """The returned state's distance to the step's fixed point, in the group's norm."""
+    """The returned state's distance to the step's fixed point, in the group's
+    norm at the returned state: each field over its own ``max |field|`` there."""
     x_star, _ = r.oracle()
     xb_star = r.gains[1] * x_star[0] + _f64(r.state["b"]["c"])
-    return _norm(r.group, r.state, _with(r, x_star[0], xb_star))
+    return _norm(r.group, r.state, _with(r, x_star[0], xb_star), weights_from_new=True)
 
 
 def recomputed_residual(r: Record) -> float:

@@ -14,6 +14,8 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **A domain matrix in the coupling and sysid+FMU claims inventories** (`domain_set: numeric`, a `domains:` mapping per row): for float32, float64, mixed dtypes, 16-bit, jit, gradients, vmap, multi-rate, sub-cycling, predictors and warm starts, `run_adaptive`, checkpoint restarts and sharding, each row names the test that exercises its claim there, `narrowed` (its conditions now exclude the domain) or `n/a`; `test_claims_inventories.py` checks it.
+  It found four failing domains (MADD-ANO-147 to 149, and a bfloat16 `rho_spectral` that is not float32-exact): nine coupling rows are `failing`, and many conditions are narrowed -- read a row's conditions before relying on it outside float32 (`testing_standards.md`, "The domain matrix").
 - **REST and run_pod claims inventory** (`docs/validation/rest_runpod_claims.yaml`, prefixes `REST`, `RPD`): every documented claim about the HTTP API and the multi-GPU session runner with its conditions, oracle and a test that can fail -- 143 rows, 132 verified, 5 failing (strict xfails), 5 ambiguous, 1 untested; the surrogate and streaming endpoints are out of scope (experimental).
   Read the failing and ambiguous rows before relying on those claims; a new REST or `run_pod.py` claim gets a row in the same change (`testing_standards.md`).
 - **System identification and FMU claims inventory** (`docs/validation/sysid_fmu_claims.yaml`, `SYS-NNN` / `FMU-NNN`): every documented `sysid`, `ParamSpec` and FMU-export claim with its conditions, oracle and a test that can fail -- 147 rows, 139 verified, 4 failing (strict xfails), 4 ambiguous.
@@ -351,6 +353,11 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling round-5 audit fixes** (MADD-ANO-142 to 146; new, resolved): the gradient bound applies the exact resolvent to each secant (it read 5.2x below the true error, usable), probes each entry of an array constant, and certifies Kantorovich with the full resolvent norm; the spectral bound is in the returned state's weights;
+  a group is one block in the schedule (an outside node between its members read it a step late, since 0.1.0) and compile() warns when a group is part of a larger loop; CouplingGroup refuses out-of-range counts and thresholds (waveform_iterations=0 froze a sub-cycling group, since 0.1.0).
+  Action: re-read diagnostics=True bounds; expect a UserWarning for a group inside a larger feedback loop; fix any out-of-range CouplingGroup knob.
+- **Checkpoints, the token file and the stride say what they did** (MADD-ANO-138 to 141): `load_state` refuses a value its dtype cannot hold (a float64 `1e39` loaded as `inf` since 0.1.0); `PUT /sim/stride` keeps an omitted value (it reset it to 1, since 0.1.0); the token file is a new `0600` file; a refused save writes nothing and no checkpoint 4xx names a server path;
+  a JAX trace's time budget has its own timer; `run_pod.py --summarise` reads an unparseable goal file INVALID (exit 3).  Action: load a checkpoint into a graph of the precision that wrote it; send both stride values only if you relied on the reset.
 - **The identifiability guard decides the same in any units** (MADD-ANO-135, never released): its tests, hold and tolerance measure an identity parameter relative to its size, as `fim(scale="relative")` does;
   **bounds checks compare exactly** (MADD-ANO-136): a float32 `-1e-40` no longer passes a `(0, None)` bound through XLA's subnormal flush; **a value its type flushes to 0 is refused** (MADD-ANO-137) like one it overflows.
   Action: none; a `fit_lm` with an identity parameter in units far from 1 may return a different (correct) point.  The sysid/FMU inventory's SYS-063, -088, -109, FMU-024 and -039 are verified (144 of 147 rows).

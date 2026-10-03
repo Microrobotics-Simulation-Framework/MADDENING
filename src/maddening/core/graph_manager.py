@@ -449,8 +449,21 @@ def _F_dispatch(step_pure, x, consts):
 
 
 def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
-                      resolution=None):
+                      resolution=None, field_reference=None):
     """``(rho, arnoldi_residual, amplification)`` of ``dF/dx`` at ``x_star``.
+
+    With ``field_reference`` -- a function from a flat state to the flat
+    vector holding, at each entry, its field's ``max|v|`` -- a fourth
+    value is returned: ``||D r|| / ||D_pair r||``, ``r = F(x*) - x*``, the
+    factor by which the residual in the returned state's weights ``D``
+    (each field over its own magnitude at ``x*``, the weights the
+    resolvent is measured in) exceeds the same residual in the weights the
+    loop measured it in (each field over ``max(max|F(x*)|, max|x*|)``,
+    the pair the pass compared).  It is ``1`` unless a field grew across
+    the last pass, and ``coupling_diagnostics()`` multiplies the bound's
+    resolvent factor by it so that ``spectral_error_bound`` bounds the
+    distance in the returned state's weights, the norm it documents
+    (MADD-ANO-XL2).
 
     ``weights`` is the flat vector of per-entry factors the group's
     convergence norm multiplies a state change by at ``x_star`` --
@@ -567,7 +580,21 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
         radius = jnp.where(contracting, 1.0 / jnp.where(contracting, 1.0 - rho_safe, 1.0),
                            jnp.inf)
         folded = jnp.maximum(amp, radius) * jnp.sqrt(1.0 + share * share)
-        return rho, resid, jnp.where(unread, folded, amp)
+        amp_out = jnp.where(unread, folded, amp)
+        if field_reference is None:
+            return rho, resid, amp_out
+        # The pair the loop's residual divided each field by: its magnitude
+        # at ``x*`` or at ``F(x*)``, whichever is larger.  The ratio of the
+        # two norms of the same ``r`` is a ratio of the norm's own units, so
+        # the constants it leaves out (``rtol``, a mixed norm's ``1/count``)
+        # cancel.
+        fx = _F_dispatch(step_pure, xx, cc)
+        ref_x = field_reference(xx).astype(work)
+        ref_pair = jnp.maximum(field_reference(fx).astype(work), ref_x)
+        shrink = jnp.where(ref_pair > 0, ref_x / jnp.where(ref_pair > 0, ref_pair, 1.0), 1.0)
+        r_pair = jnp.linalg.norm(jnp.where(kept, r_w * shrink, 0.0))
+        ratio = jnp.where(r_pair > 0, r_kept / jnp.where(r_pair > 0, r_pair, 1.0), 1.0)
+        return rho, resid, amp_out, jnp.maximum(ratio, 1.0)
 
     nan = jnp.full((), jnp.nan, work)
     # A Jacobian at a state that has left float range describes nothing
@@ -577,8 +604,9 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
     # same reason that one is: compiled as a separate computation, the
     # Jacobian-vector products cannot share subexpressions with the
     # forward and so cannot move the state it diagnoses.
+    nans = (nan, nan, nan) if field_reference is None else (nan, nan, nan, nan)
     return jax.lax.cond(
-        jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan),
+        jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: nans,
         (x_sg, consts_sg, d, dw, res),
     )
 
@@ -3950,6 +3978,16 @@ def _run_coupled_block_impl(
                     top = jnp.logical_or(top, ref * jnp.finfo(val.dtype).tiny > 1.0)
                 return jnp.where(top, 16.0, 1.0).astype(x_full.dtype)
 
+            def _field_magnitudes(x_full):
+                """At each entry of the flat state, its field's ``max|v|``."""
+                s_star = _embed(x_full)
+                m = {nn: {fld: jnp.broadcast_to(
+                    jnp.max(jnp.abs(jnp.asarray(s_star[nn][fld]))),
+                    jnp.shape(s_star[nn][fld])).astype(jnp.asarray(s_star[nn][fld]).dtype)
+                    for fld in float_fields[nn]}
+                    for nn in group_node_names}
+                return _flatten_full({**s_star, **m})
+
             def _norm_weights(x_full, zero_field_weight=None, scale: Any = 1.0):
                 """Per-entry factors of the group's norm at ``x_full``.
 
@@ -4074,9 +4112,9 @@ def _run_coupled_block_impl(
                         for fld in float_fields[nn]}
                     for nn in group_node_names
                 }))
-                rho_spec, spec_resid, spec_amp = _spectral_rate_at(
+                rho_spec, spec_resid, spec_amp, pair_ratio = _spectral_rate_at(
                     step_pure, x_star_full, consts, weights, spec_weights,
-                    resolution=resolution,
+                    resolution=resolution, field_reference=_field_magnitudes,
                 )
                 # Its distance is the spectral bound (never below the Newton
                 # step); the resolvent is applied exactly to each probe's
@@ -4087,6 +4125,11 @@ def _run_coupled_block_impl(
                     step_pure, x_star_full, consts, weights,
                     rho_spec, spec_resid, spec_amp, resolution=resolution,
                 )
+                # The factor the report's bound applies, in the returned
+                # state's weights: the gradient bound above takes its own
+                # residual in those weights already, so only the stored
+                # factor carries the pair-to-returned ratio.
+                spec_amp = spec_amp * pair_ratio.astype(spec_amp.dtype)
             else:
                 rho_spec = jnp.full((), jnp.nan, x0_full.dtype)
                 spec_resid = spec_amp = rho_spec
@@ -8743,7 +8786,16 @@ class GraphManager:
               non-linear ``F`` it is asymptotic (Ostrowski) -- exact to
               float32 on a log map within ``tolerance`` of its fixed
               point, an estimate far from one; it is in the group's
-              norm at the returned state, so the dead band's excluded
+              norm at the returned state -- each field divided by its
+              own ``max|field|`` *at the returned state*, which is what
+              the resolvent factor is measured in, and the residual it
+              multiplies is put in those weights too: ``"residual"``
+              divides each field by the larger of its magnitude at the
+              returned state and after one more pass, and until 0.4.0's
+              round-5 fix the bound used it as it was, which on a group
+              still growing toward its fixed point read 0.94x the true
+              distance in the returned state's weights, usable
+              (MADD-ANO-XL2) -- so the dead band's excluded
               fields are outside what it bounds and the norm's scale
               drifts with the iterate exactly as it does for
               ``"residual"``; and its float floor is a model of the

@@ -335,7 +335,14 @@ the bound carries a margin of `2 h_{k+1,k}` on the radius.
 For a *linear* map the error of any iterate is `(A − I)⁻¹` of its
 residual — no step sequence, relaxation factor or accelerator enters —
 so `residual · ‖(I − A)⁻¹‖` bounds the distance to the fixed point
-whatever the iteration did.  `1/(1 − rho)` is that norm for a normal
+whatever the iteration did, with both factors in one set of weights:
+each field divided by its own `max|field|` at the returned state.  The
+loop's `residual` divides by the larger of that and the field's magnitude
+after one more pass, so the factor carries the ratio of the two weightings
+of `F(x) − x` (1 unless a field grew across the pass); without it, on a
+group still growing toward its fixed point, the bound read 0.94x the true
+distance in the returned state's weights with `spectral_usable=True`
+(round-5 audit).  `1/(1 − rho)` is that norm for a normal
 `A`; the resolvent term is what holds when `A` is not normal, which a
 Jacobi loop between a node that responds strongly and one that
 responds weakly is measured to be.  Measured `spectral_error_bound /

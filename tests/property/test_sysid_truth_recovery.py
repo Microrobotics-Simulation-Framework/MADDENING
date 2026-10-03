@@ -190,14 +190,20 @@ def test_fit_lm_converged_means_the_truth(kinds, truth_at, start_at):
 
 
 def _check_units(kinds, truth_at, start_at, which, unit):
-    """Parameter-unit invariance: measure one parameter in a unit 1e4 times
-    larger or smaller (its bounds, start and truth scale with it) and the
-    fit must give the same answer, in about as many iterations -- and each
-    run must still recover the truth or say ``converged=False``.  A
-    Marquardt floor of ``eps`` times the *mean* of ``diag(JᵀJ)`` failed
-    exactly this: the coordinate whose column the rescaling shrank had its
-    step crushed and stopped short, "converged".  (Residual-scale
-    invariance: ``tests/core/test_sysid_bounded_coordinates_and_residual_scale.py``.)"""
+    """Parameter-unit invariance: measure one parameter in a unit up to 1e6
+    times larger or smaller (its bounds, start and truth scale with it) and
+    the fit, as called by default, must give the same answer -- the same
+    returned point, ``excited_rank`` and ``hold_declined`` -- in about as
+    many iterations, and each run must still recover the truth or say
+    ``converged=False``.  A Marquardt floor of ``eps`` times the *mean* of
+    ``diag(JᵀJ)`` failed exactly this: the coordinate whose column the
+    rescaling shrank had its step crushed and stopped short, "converged".
+    So did the identifiability guard asking its questions in the
+    optimiser's coordinates: an identity coordinate in units 1e-4 was
+    called undetermined and the hold declined (rank 2 of 3), and in units
+    1e-5 or 1e6 it was held at its start, "converged", far from the truth.
+    (Residual-scale invariance:
+    ``tests/core/test_sysid_bounded_coordinates_and_residual_scale.py``.)"""
     units = tuple(unit if i == which else 1.0 for i in range(3))
     base, base_ok, base_errors = _fit(kinds, truth_at, start_at)
     scaled, scaled_ok, scaled_errors = _fit(kinds, truth_at, start_at, units)
@@ -206,6 +212,11 @@ def _check_units(kinds, truth_at, start_at, which, unit):
     if base.converged and scaled.converged:
         slack = max(3, (base.n_iter + scaled.n_iter) // 4)
         assert abs(base.n_iter - scaled.n_iter) <= slack, (base.n_iter, scaled.n_iter)
+        assert (scaled.excited_rank, scaled.hold_declined) == (
+            base.excited_rank, base.hold_declined), (base, scaled)
+        for (key, got, _), (_, got_scaled, _), kind in zip(base_errors, scaled_errors, kinds):
+            lo, hi = _SPECS[kind][1]
+            assert abs(got_scaled - got) <= 1e-3 * (hi - lo), (key, got, got_scaled)
 
 
 #: Per push, each transform's coordinate rescaled both ways (two fits a case,
@@ -215,6 +226,9 @@ _UNIT_CASES = [
     (("clip", "log", "logit"), (0.5, 0.3, 0.6), (0.9, 0.7, 0.2), 0, 1e-4),
     (("log", "clip", "logit"), (0.2, 0.01, 0.5), (0.8, 0.9, 0.9), 1, 1e4),
     (("log", "clip", "logit"), (0.2, 0.01, 0.5), (0.8, 0.9, 0.9), 1, 1e-4),
+    # The units the 0.4.0-dev guard held a determined identity coordinate in.
+    (("log", "clip", "logit"), (0.6, 0.6, 0.5), (0.4, 0.4, 0.9), 1, 1e-5),
+    (("log", "clip", "logit"), (0.6, 0.6, 0.5), (0.4, 0.4, 0.9), 1, 1e6),
     (("logit", "log", "clip"), (0.5, 0.5, 0.75), (0.1, 0.9, 0.2), 2, 1e4),
     (("logit", "log", "clip"), (0.5, 0.5, 0.75), (0.1, 0.9, 0.2), 2, 1e-4),
 ]
@@ -227,7 +241,8 @@ def test_fit_lm_answers_the_same_in_any_units(kinds, truth_at, start_at, which, 
 
 # Per push: tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units
 @pytest.mark.slow  # two fits compiled per example: over 5 s on CI
-@given(**_PROBLEM, which=st.integers(0, 2), unit=st.sampled_from([1e-4, 1e4]))
+@given(**_PROBLEM, which=st.integers(0, 2),
+       unit=st.sampled_from([1e-6, 1e-5, 1e-4, 1e-2, 1e2, 1e4, 1e5, 1e6]))
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 def test_fit_lm_answers_the_same_in_any_units_broadly(kinds, truth_at, start_at, which, unit):
     _check_units(kinds, truth_at, start_at, which, unit)

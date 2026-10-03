@@ -185,11 +185,15 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
         If the incoming value is not a number (a string, an object, a
         boolean for a numeric leaf: :func:`_number_kind_error`), is not
         finite, or if ``dtype`` cannot hold it: a float32 leaf set to
-        ``1e39`` would be stored (and read back) as ``inf``, an integer
-        would wrap or truncate silently, and a boolean leaf takes a
-        boolean or exactly 0 or 1 -- ``0.5``, ``2.0`` and ``-3.0`` used to
-        be stored as ``True`` by their truthiness, from a ``set`` and from
-        an FMU-state archive alike.
+        ``1e39`` would be stored (and read back) as ``inf``, and one set to
+        ``1e-50`` as ``0.0`` -- the value lost entirely, its sign included;
+        an integer would wrap or truncate silently, and a boolean leaf
+        takes a boolean or exactly 0 or 1 -- ``0.5``, ``2.0`` and ``-3.0``
+        used to be stored as ``True`` by their truthiness, from a ``set``
+        and from an FMU-state archive alike.  A value that rounds to a
+        subnormal keeps its sign and magnitude and is accepted; whether it
+        lies inside a parameter's bounds is :meth:`ParamSpec.check
+        <maddening.core.params.ParamSpec.check>`'s question.
     """
     a = np.asarray(arr)
     target = np.dtype(dtype)
@@ -205,7 +209,9 @@ def _checked_value(arr: Any, dtype: Any, *, what: str) -> np.ndarray:
     with np.errstate(over="ignore", invalid="ignore"):
         cast = a.astype(dtype)
     if np.issubdtype(cast.dtype, np.floating):
-        fits = bool(np.all(np.isfinite(cast)))
+        # Finite, and not a non-zero value flushed to +-0 by the cast: both
+        # lose the value, at either end of the type's range.
+        fits = bool(np.all(np.isfinite(cast)) and not np.any((a != 0) & (cast == 0)))
     elif np.issubdtype(cast.dtype, np.integer):
         fits = bool(np.array_equal(cast.astype(np.float64), a.astype(np.float64)))
     else:

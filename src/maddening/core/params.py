@@ -392,29 +392,95 @@ class ParamSpec:
         ``inf`` is likewise never a usable constant.  Under
         ``transform="log"`` a missing lower bound is the 0 the transform is
         measured from, so a value ``<= 0`` is refused.
+
+        The comparisons are made on the host, in NumPy, with the value and
+        the bound each rounded to the dtype JAX would compare them in (the
+        leaf's, or float32 for an integer leaf against a float bound).
+        Through ``jnp`` they were not exact: XLA's CPU backend flushes a
+        subnormal operand to zero, so a float32 ``-1e-40`` passed a
+        ``(0, None)`` bound -- every ``check_params``, FMU ``set`` and
+        ``set_state`` behind it then accepted a value below the range the
+        spec declares, and reported it back as stored.  Under a ``log`` or
+        ``logit`` transform the step's own arithmetic decides whether the
+        value has a coordinate, so there its distance from a bound is
+        computed as that arithmetic computes it (:func:`_step_gap`:
+        subnormal operands and results flushed to zero) and a distance
+        that is not positive is refused as on the bound: ``log`` of a
+        float32 ``1e-40`` is ``-inf`` on that backend.
         """
         lo, hi = self.bounds
-        v = jnp.asarray(p)
-        if jnp.issubdtype(v.dtype, jnp.inexact) and not bool(jnp.all(jnp.isfinite(v))):
-            raise ValueError(f"{name}={v} is not finite")
+        v = np.asarray(p)
         strict = self.transform in ("log", "logit")
+        if np.issubdtype(v.dtype, np.complexfloating):
+            self._check_through_jnp(jnp.asarray(p), name, strict)
+            return
+        if jnp.issubdtype(v.dtype, jnp.inexact) \
+                and not bool(np.all(np.isfinite(v.astype(np.float64)))):
+            raise ValueError(f"{name}={v} is not finite")
         if lo is None and self.transform == "log":
             # ``log`` is measured from ``lo``, or from 0 without one
             # (:meth:`_lo`): 0 and below have no coordinate at all --
             # ``unconstrain`` returned -inf for 0 and NaN below it, and this
             # check used to pass both.
-            if bool(jnp.any(v <= 0.0)):
+            a, b, tiny = _bound_operands(v, 0.0)
+            if bool(np.any(_step_gap(a, b, tiny) <= 0.0)):
                 raise ValueError(
                     f"{name}={v} below bound 0.0 (transform='log' without a "
-                    "lower bound is measured from 0, so the value must be > 0)")
+                    "lower bound is measured from 0, so the value must be > 0, "
+                    "and by at least the smallest normal number of its dtype, "
+                    "below which the arithmetic flushes it to 0)")
         if lo is not None:
-            bad = bool(jnp.any(v <= lo)) if strict else bool(jnp.any(v < lo))
-            if bad:
+            a, b, tiny = _bound_operands(v, lo)
+            if bool(np.any(_step_gap(a, b, tiny) <= 0.0) if strict else np.any(a < b)):
                 raise ValueError(f"{name}={v} below bound {lo}")
         if hi is not None:
-            bad = bool(jnp.any(v >= hi)) if strict else bool(jnp.any(v > hi))
-            if bad:
+            a, b, tiny = _bound_operands(v, hi)
+            if bool(np.any(_step_gap(b, a, tiny) <= 0.0) if strict else np.any(a > b)):
                 raise ValueError(f"{name}={v} above bound {hi}")
+
+    def _check_through_jnp(self, v, name: str, strict: bool) -> None:
+        """:meth:`check` of a complex value, as before 0.4.0: NumPy orders
+        complex numbers and JAX does not, so the host comparison would
+        accept what this has always refused."""
+        lo, hi = self.bounds
+        if not bool(jnp.all(jnp.isfinite(v))):
+            raise ValueError(f"{name}={v} is not finite")
+        if lo is None and self.transform == "log" and bool(jnp.any(v <= 0.0)):
+            raise ValueError(f"{name}={v} below bound 0.0")
+        if lo is not None and bool(jnp.any(v <= lo) if strict else jnp.any(v < lo)):
+            raise ValueError(f"{name}={v} below bound {lo}")
+        if hi is not None and bool(jnp.any(v >= hi) if strict else jnp.any(v > hi)):
+            raise ValueError(f"{name}={v} above bound {hi}")
+
+
+def _bound_operands(v: np.ndarray, bound) -> tuple[np.ndarray, float, float]:
+    """``(value, bound, tiny)`` for an exact host comparison of ``v`` with
+    ``bound``: each rounded to the dtype JAX compares them in (the result
+    type of the leaf and a weakly typed Python number), then widened to
+    float64, which holds every such value exactly -- a float32 subnormal is
+    a normal float64.  ``tiny`` is that dtype's smallest normal number."""
+    # ``canonicalize_dtype`` first: a float64 NumPy value without x64 is
+    # compared in float32, as ``jnp.asarray`` would make it, and asking
+    # ``result_type`` of float64 itself warns that it is unavailable.
+    dt = np.dtype(jnp.result_type(jax.dtypes.canonicalize_dtype(v.dtype), bound))
+    a = v.astype(dt).astype(np.float64)
+    b = float(np.asarray(bound, dtype=dt).astype(np.float64))
+    tiny = float(jnp.finfo(dt).tiny) if jnp.issubdtype(dt, jnp.floating) else 0.0
+    return a, b, tiny
+
+
+def _step_gap(a, b, tiny: float):
+    """``a - b`` as XLA's CPU backend computes it in a dtype whose smallest
+    normal number is ``tiny``: a subnormal operand is read as zero, and a
+    subnormal result is stored as zero.  ``a`` and ``b`` are exact float64
+    copies of values of that dtype (:func:`_bound_operands`), so the
+    difference of the flushed operands is exact and only its flush is
+    left to apply.  A strict bound is met when this is positive: it is the
+    distance ``log`` and the logistic's inverse take."""
+    def flush(x):
+        return np.where(np.abs(x) < tiny, 0.0, x)
+    gap = flush(np.asarray(a, dtype=np.float64)) - flush(np.asarray(b, dtype=np.float64))
+    return flush(gap)
 
 
 DEFAULT_SPEC = ParamSpec()

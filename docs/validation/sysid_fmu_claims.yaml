@@ -134,20 +134,33 @@ claims:
   area: windowed_loss
   claim: >-
     Teacher forcing: "every window restarts from the measured state";
-    "Each window is an independent lax.scan, so memory is O(window) and
-    gradients cannot compound across windows."  The loss is zero at the
-    parameters that generated the record and positive elsewhere.
+    "Each window is its own lax.scan, so memory is O(window) and gradients
+    cannot compound across windows: the coupling warm starts a window
+    inherits from the one before it ... enter with their gradient
+    stopped."  The loss is zero at the parameters that generated the record
+    and positive elsewhere.
   sources:
     - src/maddening/sysid.py:1 (module docstring)
     - src/maddening/sysid.py:302 (windowed_loss)
     - docs/user_guide/parameters.md (System identification)
-  conditions: single-rate graph; for multi-rate see SYS-011.
+  conditions: >-
+    single-rate graph, with or without coupling groups -- their predictor
+    history and IQN-IMVJ warm starts are replayed, not reset (SYS-123) --
+    for a record taken from compile() or reset_state(); for multi-rate see
+    SYS-011.
   oracle: the loss over the record against the sum of the losses over each window's own slice of it; zero at the truth.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows
     - tests/core/test_sysid.py::test_loss_zero_at_truth_positive_elsewhere
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_loss_is_exactly_zero_and_stationary_at_the_truth
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_inherited_warm_starts_carry_no_gradient
   status: verified
-  notes: The memory claim (O(window)) is not measured here.
+  notes: >-
+    The memory claim (O(window)) is not measured here.  Failing in round 7
+    (B1, on 04bc3e5): every window restarted the coupling warm starts at
+    zero, so with a predictor or IQN-IMVJ at a finite max_iterations the
+    loss at the truth was not zero (1.7e-2 for a quadratic predictor at one
+    pass) and a fit started there walked 6.4% away (MADD-ANO-139).
 
 - id: SYS-007
   area: windowed_loss
@@ -216,12 +229,14 @@ claims:
     start_step (experimental): "Window w restarts at base step start_step +
     k * sample_every ... so each node fires on the sub-step it fired on
     when the record was made"; "None (the default) assumes 0 and, on a
-    multi-rate graph, warns (UserWarning) that it is assuming it.  It has
-    no effect on a single-rate graph."
+    multi-rate graph, warns (UserWarning) that it is assuming it.  On a
+    single-rate graph it moves no schedule; on a graph whose coupling
+    groups carry warm starts, a start_step > 0 warns that the record's warm
+    starts at sample 0 are not known."
   sources:
     - src/maddening/sysid.py:302 (windowed_loss, start_step)
     - docs/user_guide/parameters.md (System identification)
-  conditions: multi-rate graph with an odd first sample, even sample_every, a record starting mid-schedule; single-rate graph.
+  conditions: multi-rate graph with an odd first sample, even sample_every, a record starting mid-schedule; single-rate graph, with and without coupling warm starts.
   oracle: zero loss at the generating parameters on the right phase; non-zero and a warning on the wrong one.
   tests:
     - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_window_on_an_odd_base_step_runs_the_slow_node_on_its_own_phase
@@ -230,6 +245,8 @@ claims:
     - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_an_odd_start_read_as_zero_is_off_phase_and_the_default_warns
     - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_single_rate_graph_needs_no_start_step
     - tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_start_step_that_is_not_a_step_is_refused
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_record_that_began_after_the_graph_stepped_warns
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_graph_without_warm_starts_has_nothing_to_warn_about
   status: verified
 
 - id: SYS-012
@@ -260,6 +277,45 @@ claims:
     - tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
     - tests/core/test_sysid.py::test_recovers_stiffness_from_20_percent_perturbation
   status: verified
+
+- id: SYS-123
+  area: windowed_loss
+  claim: >-
+    "Coupling warm starts are replayed, not reset": "window w starts from
+    the warm starts window w - 1 ended with, and window 0 from the cold ones
+    compile() and reset_state() leave.  At the parameters that generated a
+    record taken from compile() or reset_state() each window therefore
+    reproduces it exactly and the loss is exactly zero, whatever the
+    predictor, the acceleration or max_iterations.  The inherited warm
+    starts enter a window with their gradient stopped ...; a window
+    mask_unconverged drops hands the next one cold warm starts rather than
+    its own"; "A record that began after the graph had stepped (start_step
+    > 0) ... warns (UserWarning) that it cannot be exact."
+  sources:
+    - src/maddening/sysid.py:329 (windowed_loss)
+    - src/maddening/sysid.py:1 (module docstring)
+  conditions: >-
+    quadratic and linear predictors at one and two passes, solver="fori",
+    IQN-IMVJ alone and with a predictor, a multi-rate graph, sample_every 2,
+    multiple shooting; a fit started at the truth; a masked diverged window;
+    start_step None, 0 and 7.
+  oracle: >-
+    the loss exactly 0.0 at the generating parameters; the windows run by
+    hand from the step function, the warm starts passed on with and without
+    their gradient stopped; the masked loss against the clean loss less the
+    dropped window's.
+  tests:
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_loss_is_exactly_zero_and_stationary_at_the_truth
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_multiple_shooting_and_sparse_samples_replay_exactly
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_fit_started_at_the_truth_stays_there
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_inherited_warm_starts_carry_no_gradient
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_window_the_mask_drops_hands_on_cold_warm_starts
+    - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_record_that_began_after_the_graph_stepped_warns
+  status: verified
+  notes: >-
+    New in round 7 (MADD-ANO-139).  Data that the model did not generate
+    carries no warm starts of its own; the replay then uses the model's,
+    from the previous window, which is the only thing it can use.
 
 # ---------------------------------------------------------------------------
 # fim and FIMReport
@@ -320,11 +376,21 @@ claims:
   sources:
     - src/maddening/sysid.py:640 (FIMReport)
     - docs/user_guide/parameters.md (System identification)
-  conditions: float32; sigma from 1e-15 to 1e15; full-rank and rank-deficient matrices.
+  conditions: >-
+    float32; sigma from 1e-15 to 1e15; full-rank and rank-deficient
+    matrices; while the cutoff rank_rtol * max(eigvals) is at least
+    2 * m * tiny.  Below that F = J^T J flushes the products the smallest
+    directions are built from and the verdict moves with the scale, which
+    fim reports with a PrecisionLimitWarning (SYS-125).
   oracle: rank and the +inf pattern of crb at every sigma.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled
   status: verified
+  notes: >-
+    Round 7 (B1, on 04bc3e5) moved the verdict inside the stated sigma range
+    with |J| near 1e-3: at sigma = 1e15 the rank fell from 2 to 1 and every
+    crb went to inf, silently (MADD-ANO-140).  The condition now states the
+    range F can be formed in, and outside it the verdict is flagged.
 
 - id: SYS-024
   area: fim
@@ -421,18 +487,29 @@ claims:
   area: fim
   claim: >-
     specs are "Required under scale="nominal" and refused under any other
-    scale"; a width "that would round to zero or overflow at the
-    parameters' precision is refused by name".
+    scale"; a width "that would round to zero, be subnormal or overflow at
+    the parameters' precision is refused by name (the width itself: its
+    square is never formed)".
   sources:
     - src/maddening/sysid.py:2345 (fim, specs / scale)
-  conditions: specs under relative and None; nominal without specs; a width that is not a float32 scale.
-  oracle: the ValueError and its text.
+  conditions: >-
+    specs under relative and None; nominal without specs; a width that is
+    zero, subnormal or infinite at float32; representable widths whose
+    square is not (1e-37, 1e20).
+  oracle: the ValueError and its text; at a representable width, the report a unit width gives.
   tests:
     - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_specs_under_another_scale_is_refused
     - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_nominal_without_specs_is_refused
     - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_a_width_that_is_not_a_float32_scale_is_refused_by_name
     - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_the_guard_is_applied_at_the_parameters_precision
+    - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_a_representable_width_is_accepted_whatever_its_square
+    - tests/core/test_sysid_fim_nominal_scale.py::TestRefusals::test_a_width_whose_column_overflows_is_reported_non_finite
   status: verified
+  notes: >-
+    Round 7 (B1, on 04bc3e5): the guard tested the width's square, which F is
+    never built from, and refused the representable bounds (0, 1e-23) and
+    (0, 1e20).  It now tests the width itself; a scaled column that
+    overflows is the non-finite F fim raises on.
 
 - id: SYS-030
   area: fim
@@ -574,6 +651,26 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_fit_result_cannot_be_built_positionally
     - tests/core/test_sysid_claims_edges.py::test_fim_core_cannot_be_built_positionally
   status: verified
+
+- id: SYS-125
+  area: fim
+  claim: >-
+    The rank verdict holds under rescaling "while F can be formed: once the
+    cutoff rank_rtol * max(eigvals) falls below 2 * m * tiny of the
+    precision ..., the products the smallest directions are built from
+    flush to zero and the verdict moves with the scale ... and fim says so
+    with a PrecisionLimitWarning (and FIMCore with precision_limited) rather
+    than reporting it."
+  sources:
+    - src/maddening/sysid.py:734 (FIMReport, rank)
+    - src/maddening/sysid.py:1774 (FIMCore, precision_limited)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: float32; |J| near 1e-3 with sigma 1 to 1e15; the core under jit.
+  oracle: the warning and the flag where the cutoff is below the range, neither above it.
+  tests:
+    - tests/core/test_sysid_claims_edges.py::test_a_rank_decided_below_the_normal_range_warns
+  status: verified
+  notes: New in round 7 (MADD-ANO-140).
 
 # ---------------------------------------------------------------------------
 # fim_core and FIMCore
@@ -899,13 +996,41 @@ claims:
   sources:
     - src/maddening/sysid.py:3625 (fit)
     - src/maddening/sysid.py:3942 (fit_lm)
-  conditions: zero, negative, NaN and wrongly typed values.
+  conditions: >-
+    zero, negative, NaN and wrongly typed values -- bools in every
+    spelling, strings, lists, complex numbers -- and real numbers in every
+    spelling (NumPy and JAX scalars, 0-d arrays, ints) still read.
   oracle: the ValueError; the defaults inside the accepted range.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_fit_rejects_a_hyper_parameter_with_no_reading
     - tests/core/test_sysid_degenerate_inputs.py::test_fit_lm_rejects_a_hyper_parameter_with_no_reading
     - tests/core/test_sysid_degenerate_inputs.py::test_the_documented_defaults_are_inside_the_accepted_range
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_bool_or_a_non_number_hyper_parameter_is_refused
+    - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_and_its_fitter_refuse_a_bool_continuity_weight
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_real_number_in_any_spelling_is_still_read
   status: verified
+  notes: >-
+    Round 7 (B1, on 04bc3e5): a bool passed float() -- fit(tol=True) stopped
+    at its first evaluation and reported converged=True at the unfitted
+    start -- and so did a numeric string (MADD-ANO-141).
+
+- id: SYS-124
+  area: fitters
+  claim: >-
+    A caller's mask: "Every leaf must be a bool (a NumPy bool_ or a 0-d
+    boolean array will do), and anything else is refused (ValueError): a
+    leaf is read as a flag, and a string "False" used to select its
+    parameter"; fim's mask likewise.
+  sources:
+    - src/maddening/sysid.py:4168 (fit, mask)
+    - src/maddening/sysid.py:2541 (fim, mask)
+  conditions: strings, ints, a float32, a one-element bool array; bool, numpy bool_ and a 0-d jax bool; fit, fit_lm, fim and fim_core.
+  oracle: the ValueError; a False leaf leaving its parameter unmoved and out of the report.
+  tests:
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_not_a_bool_is_refused
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_mask_leaf_that_is_a_bool_in_any_spelling_is_read
+  status: verified
+  notes: New in round 7 (MADD-ANO-141).
 
 # ---------------------------------------------------------------------------
 # The fitters: the identifiability guard (hold_undetermined)
@@ -922,13 +1047,29 @@ claims:
   sources:
     - src/maddening/sysid.py:3625 (fit, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
-  conditions: the spring's (k, c, m) scale degeneracy with log transforms on all three; every budget and lr.
+  conditions: >-
+    the spring's (k, c, m) scale degeneracy with log transforms on all
+    three; every budget and lr; float32, float64 under jax_enable_x64, and
+    float32 constants in an x64 graph (the guard's precision is the
+    coarsest trainable leaf's).
   oracle: the fitted scale against the starting scale; the loss and k/m, c/m.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_fitted_scale_is_the_starting_scale_for_every_budget
     - tests/core/test_sysid_undetermined_directions.py::test_the_fitted_scale_does_not_depend_on_the_optimiser_schedule
     - tests/core/test_sysid_undetermined_directions.py::test_holding_the_scale_does_not_cost_loss_or_the_identifiable_ratios
+    - tests/core/test_sysid_undetermined_directions.py::test_fit_holds_the_scale_under_x64
+    - tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_holds_the_scale_under_x64
+    - tests/core/test_sysid_undetermined_directions.py::test_the_tracker_resolves_an_exact_null_direction_at_either_precision
+    - tests/core/test_sysid_undetermined_directions.py::test_the_guard_reads_its_precision_from_the_coarsest_trainable_leaf
   status: verified
+  notes: >-
+    Failing in round 7 (B1, on 04bc3e5) under x64: the tracker's eigh of
+    G = sum g g^T resolved G only to eps64 of its largest eigenvalue, so an
+    exact null direction (eps64**2 of it) read 5e-17 against a cutoff of
+    4e-31; excited_rank 3, nothing held, the scale 1-2% off.  float32
+    constants in an x64 graph failed in every run, judged at float64's eps
+    (MADD-ANO-138).  The tracker now reads the singular values of the
+    gradients' triangular factor, with the coarsest trainable leaf's eps.
 
 - id: SYS-063
   area: identifiability guard
@@ -981,7 +1122,7 @@ claims:
   sources:
     - src/maddening/sysid.py:3400 (FitResult, excited_rank)
     - src/maddening/sysid.py:3942 (fit_lm, hold_undetermined)
-  conditions: a well-posed four-parameter bowl; a candidate with curvature; the cutoffs.
+  conditions: a well-posed four-parameter bowl; a candidate with curvature; the cutoffs; float32 and x64, float32 leaves in an x64 graph.
   oracle: bitwise equality with the unguarded iterate; the cutoff functions.
   tests:
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_fit_lm_on_a_well_posed_bowl_returns_the_minimum_it_reached
@@ -989,6 +1130,8 @@ claims:
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_candidate_with_curvature_is_neither_held_nor_counted
     - tests/core/test_sysid_hold_never_raises_the_loss.py::test_the_gauss_newton_cutoff_is_fims_rank_rule
     - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_gets_its_iterate_back_bit_for_bit
+    - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_under_x64_gets_its_iterate_back_bit_for_bit
+    - tests/core/test_sysid_undetermined_directions.py::test_the_tracker_folds_a_long_run_without_moving_its_verdict
   status: verified
 
 - id: SYS-065
@@ -1001,7 +1144,7 @@ claims:
   sources:
     - docs/user_guide/parameters.md (System identification)
     - src/maddening/sysid.py:3400 (FitResult, excited_rank)
-  conditions: each of the listed cases; all three fitters for the bool check.
+  conditions: each of the listed cases; all three fitters for the bool check; under x64 as in float32.
   oracle: None; the ValueError.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_fewer_iterations_than_parameters_answers_none_not_full_rank
@@ -1009,6 +1152,7 @@ claims:
     - tests/core/test_sysid_undetermined_directions.py::test_hold_undetermined_refuses_a_non_bool
     - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_refuses_a_non_bool_hold_undetermined
     - tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_refuses_a_non_bool_hold_undetermined
+    - tests/core/test_sysid_undetermined_directions.py::test_fit_holds_the_scale_under_x64
   status: verified
 
 - id: SYS-066
@@ -1041,13 +1185,14 @@ claims:
   sources:
     - src/maddening/sysid.py:3942 (fit_lm, hold_undetermined)
     - docs/user_guide/parameters.md (System identification)
-  conditions: the spring scale degeneracy, noiseless and noisy.
+  conditions: the spring scale degeneracy, noiseless and noisy; float32, x64, float32 leaves in an x64 graph.
   oracle: the scale across budgets, unguarded and guarded.
   tests:
     - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_unguarded_moves_along_the_scale_direction_but_converges
     - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_returns_the_starting_scale_for_every_budget
     - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_holding_costs_neither_loss_nor_the_identifiable_ratios
     - tests/core/test_sysid_undetermined_directions.py::test_a_well_posed_fit_lm_gets_its_iterate_back_bit_for_bit
+    - tests/core/test_sysid_undetermined_directions.py::test_fit_lm_holds_the_scale_under_x64
   status: verified
 
 - id: SYS-068
@@ -1102,29 +1247,25 @@ claims:
 - id: SYS-071
   area: fit_multiple_shooting
   claim: >-
-    "FitResult.best_loss is the loss of exactly the pair returned."
+    "FitResult.best_loss is the loss of that selected pair, as the run
+    evaluated it, before the hold_undetermined guard.  The window states are
+    returned exactly as selected; the parameters are too unless the guard
+    held a direction ..., in which case the returned pair's loss is within
+    the guard's tolerance of best_loss ... and not necessarily equal to it";
+    FitResult: best_loss "is the value before the hold_undetermined guard".
   sources:
-    - src/maddening/sysid.py:4354 (fit_multiple_shooting)
-    - src/maddening/sysid.py:3400 (FitResult, best_loss)
-  conditions: >-
-    unstated: hold_undetermined, which moves params after the selection;
-    FitResult says best_loss "is the value before the hold_undetermined
-    guard".
+    - src/maddening/sysid.py:4951 (fit_multiple_shooting)
+    - src/maddening/sysid.py:3938 (FitResult, best_loss)
+  conditions: a run the guard does not hold (the pair exact) and one it holds (within the tolerance).
   oracle: windowed_loss at the returned params and window states.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
-  status: ambiguous
-  proposed_wording: >-
-    FitResult.best_loss is the loss of the selected iterate's parameters
-    and window states.  The window states are returned as selected; the
-    parameters are too unless the guard held a direction, in which case
-    the returned pair's loss is within the guard's tolerance of best_loss
-    (2**10 * eps relative, plus the rounding of the held point).
+  status: verified
   notes: >-
-    The two docstrings disagree.  Measured on the spring scale degeneracy
-    (60 iterations, lr 0.05): exact without the guard; with it (excited
-    rank 2, drift 0.041) the recomputed loss matched to the last bit,
-    which the guard's tolerance does not promise.
+    Ambiguous in the first edition: fit_multiple_shooting said "the loss of
+    exactly the pair returned" and FitResult "the value before the guard",
+    and round 7 (B1, on 04bc3e5) measured a held pair 1.9e-9 off best_loss.
+    The two docstrings now say the same, which is what the test asserts.
 
 - id: SYS-072
   area: fit_multiple_shooting
@@ -1162,10 +1303,16 @@ claims:
     - src/maddening/sysid.py:3942 (fit_lm)
     - src/maddening/sysid.py:3400 (FitResult, converged)
     - docs/user_guide/parameters.md (System identification)
-  conditions: a noiseless float32 fit at its optimum; a run of rejected candidates; a residual reading nothing trainable.
+  conditions: >-
+    a noiseless fit at its optimum in float32 and under x64; a run of
+    rejected candidates; a residual reading nothing trainable.  Not a
+    parameter whose truth is exactly 0: it has no relative resolution, and
+    such a run stops at its floor unconverged unless given a tol (SYS-126).
   oracle: the flag and the iteration it stopped on.
   tests:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float64_fit_at_its_floor_is_converged
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_the_ladder_extension_does_not_depend_on_lam_up
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_shorter_damped_retry_does_not_make_a_rejected_run_converged
     - tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_a_residual_that_reads_no_trainable_parameter_is_converged_at_its_start
     - tests/core/test_sysid_noise_model.py::test_fit_lm_never_accepting_a_step_returns_cleanly
@@ -1174,6 +1321,12 @@ claims:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_run_that_never_lowered_the_loss_is_not_converged_by_the_floor_rule
     - tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_rule_never_fires_while_a_bound_coordinate_could_descend
   status: verified
+  notes: >-
+    Round 7 (B1, on 04bc3e5): under x64 the floor rule's twelve damped
+    candidates ended one rung short of step_tol (4.4e-15 against 3.6e-15)
+    and a fit at loss 2.3e-30 read converged=False.  The ladder now goes on
+    for the floor rule until a candidate is within step_tol or lam reaches
+    its cap.
 
 - id: SYS-081
   area: fit_lm
@@ -1184,7 +1337,7 @@ claims:
     bit where it was"; measured relative to each physical parameter.
   sources:
     - src/maddening/sysid.py:3942 (fit_lm, step_tol)
-  conditions: float32 and float64; zero; an explicit value; one with no reading.
+  conditions: float32 and float64 (a noiseless x64 fit meets the default); zero; an explicit value; one with no reading.
   oracle: the convergence verdict at proposals either side of the tolerance.
   tests:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_the_default_step_tol_is_sixteen_ulps_of_the_parameter
@@ -1192,6 +1345,7 @@ claims:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_step_tol_zero_counts_only_a_proposal_of_exactly_nothing
     - tests/core/test_sysid_fit_lm_step_tol.py::test_an_explicit_step_tol_is_relative_to_each_parameter
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_step_tol_with_no_reading_is_refused
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float64_fit_at_its_floor_is_converged
   status: verified
 
 - id: SYS-082
@@ -1328,6 +1482,26 @@ claims:
     RuntimeWarning at 1e-3.  Root cause SYS-063's; closed with it
     (MADD-ANO-135).
 
+- id: SYS-126
+  area: fit_lm
+  claim: >-
+    step_tol: "a parameter whose truth is exactly 0 (a damping of 0, say):
+    the fit lands on the residual's rounding noise around it ... and a step
+    relative to a value that is itself rounding noise is never within
+    step_tol, so such a run stops at its floor with converged=False however
+    small its loss ... read best_loss, or pass a tol at the noise floor";
+    the floor rule's candidates "are extended -- a decade or more of lam
+    each, up to the cap of 1e12 -- until one is within step_tol".
+  sources:
+    - src/maddening/sysid.py:4504 (fit_lm, step_tol)
+  conditions: x64; a damping truth of exactly 0, with and without a tol; a lam_up of 1.5.
+  oracle: the flag, the loss and the fitted damping.
+  tests:
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_a_truth_of_exactly_zero_has_no_relative_resolution
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_the_ladder_extension_does_not_depend_on_lam_up
+  status: verified
+  notes: New in round 7 (the maintainer's question of what a truth of 0 means for a relative tolerance).
+
 # ---------------------------------------------------------------------------
 # ParamSpec and the constrained coordinates
 # ---------------------------------------------------------------------------
@@ -1385,20 +1559,33 @@ claims:
     - tests/core/test_param_spec_edge_cases.py::test_a_log_spec_without_a_lower_bound_refuses_a_value_at_or_below_zero
     - tests/core/test_param_spec_edge_cases.py::test_a_log_spec_without_a_lower_bound_accepts_what_it_can_unconstrain
     - tests/core/test_param_spec_edge_cases.py::test_a_log_or_logit_transform_refuses_a_leaf_it_cannot_return
+    - tests/core/test_param_spec_edge_cases.py::test_check_accepts_a_logit_value_exactly_when_its_coordinate_is_finite
   status: verified
 
 - id: SYS-103
   area: ParamSpec
   claim: >-
-    transform "logit": lo < p < hi, strictly, for any coordinate.
+    transform "logit": lo < p < hi, strictly, for any coordinate; check
+    refuses a value whose coordinate is not finite: "A positive distance is
+    not yet a coordinate, so the coordinate itself is then computed, as
+    to_unconstrained computes it, and a value whose coordinate is not
+    finite is refused too."
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-  conditions: large bounds; an interval a few ulps wide.
-  oracle: strict inequality.
+    - src/maddening/core/params.py:386 (ParamSpec.check)
+  conditions: large bounds; an interval a few ulps wide; float32 values within 40 ulps of either bound, the coordinate infinite and finite.
+  oracle: strict inequality; check accepts exactly the values unconstrain gives a finite coordinate.
   tests:
     - tests/core/test_param_spec_edge_cases.py::test_logit_constrain_is_strictly_inside_for_large_bounds
     - tests/core/test_params_persistence_edge_cases.py::test_logit_clamp_strictly_inside_a_few_ulp_interval
+    - tests/core/test_param_spec_edge_cases.py::test_check_refuses_a_logit_value_whose_coordinate_rounds_onto_a_bound
+    - tests/core/test_param_spec_edge_cases.py::test_check_accepts_a_value_whose_logit_coordinate_is_finite
+    - tests/core/test_param_spec_edge_cases.py::test_check_accepts_a_logit_value_exactly_when_its_coordinate_is_finite
   status: verified
+  notes: >-
+    Round 7 (B1, on 04bc3e5): a float32 nextafter(1, 0) under (-1, 1) passed
+    check with a coordinate of +inf (p - lo rounds to the width), and so
+    did 1e-10 under (0, 1e30), whose t flushes to 0.
 
 - id: SYS-104
   area: ParamSpec
@@ -1410,7 +1597,13 @@ claims:
     - docs/user_guide/parameters.md (ParamSpec)
     - src/maddening/core/params.py:767 (constrain)
     - docs/release_notes/v0.4.0.md (ParamSpec and the optimiser surface)
-  conditions: any coordinates, including extreme ones; list leaves.
+  conditions: >-
+    any coordinates, including extreme ones, for constrain landing inside
+    bounds and unconstrain(constrain(u)) being finite; the inverse --
+    constrain(unconstrain(p)) == p to a few ulps -- for a p inside the
+    clamp's interior, at least 4 * eps * max(|lo|, |hi|, hi - lo) from a
+    logit bound (within that margin p comes back on the clamp, up to 800
+    ulps away for bounds (-100, 1)); list leaves.
   oracle: the bounds; the round trip; jax.jit and jax.grad.
   tests:
     - tests/core/test_params_spec.py::test_constrain_inverts_unconstrain_inside_bounds

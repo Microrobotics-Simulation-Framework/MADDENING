@@ -240,6 +240,37 @@ def test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled():
         assert r.rank == 1 and np.isinf(np.asarray(r.crb)).all(), sigma
 
 
+def test_a_rank_decided_below_the_normal_range_warns():
+    """SYS-125: once the cutoff falls below ``2 * m * tiny``, ``F = J^T J``
+    flushes the products of the smallest directions and the verdict moves
+    with the scale -- here a determined direction drops out, rank 2 to 1,
+    every ``crb`` ``inf`` -- and that is now said (a
+    :class:`PrecisionLimitWarning`; ``FIMCore.precision_limited``) where it
+    used to be reported as a fact.  Above the range nothing is said
+    (audit_040_p4_8/fmu-sysid/repro_fim_sigma_underflow.py)."""
+    from maddening.sysid import fim_core
+    from maddening.warnings import PrecisionLimitWarning
+
+    rng = np.random.default_rng(0)
+    m = 50
+    A = np.stack([rng.normal(size=m), 1e-2 * rng.normal(size=m)], axis=1)
+    J0 = jnp.asarray(1e-3 * A, jnp.float32)
+
+    def residual(p):
+        return J0 @ jnp.stack([p["x"], p["y"]])
+
+    p0 = {"x": jnp.float32(1.0), "y": jnp.float32(1.0)}
+    for sigma in (1.0, 1e6, 1e12):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PrecisionLimitWarning)
+            assert fim(residual, p0, scale=None, noise_std=sigma).rank == 2, sigma
+        assert not bool(fim_core(residual, p0, scale=None, noise_std=sigma).precision_limited)
+    with pytest.warns(PrecisionLimitWarning, match="below float32's normal range"):
+        fim(residual, p0, scale=None, noise_std=1e15)
+    core = jax.jit(lambda q: fim_core(residual, q, scale=None, noise_std=1e15))(p0)
+    assert bool(core.precision_limited)
+
+
 def test_the_bound_is_in_the_parameters_units():
     """SYS-026: with ``noise_std`` the Cramer-Rao bound is "in the parameters' own units":
     sigma**2 times the unit-noise bound, ``c**2`` times as large for a parameter measured in

@@ -2637,7 +2637,8 @@ def fim(
         Unlike the fitters' ``mask`` this one is free to name a leaf the
         specs freeze: ``fim`` only linearises, it never steps a
         parameter, and the sensitivity of a frozen constant is a
-        legitimate thing to ask for.
+        legitimate thing to ask for.  As there, every leaf must be a bool
+        (``ValueError`` otherwise).
     noise_std : float or pytree, optional
         Measurement noise model.  A scalar σ (same for every residual
         entry) or a pytree matching ``residual_fn``'s output (per-leaf σ,
@@ -4218,10 +4219,14 @@ def fit(
         instead, which is what activates its bounds and transform.
         A trainable set (the default one included) holding an integer or
         boolean leaf is refused the same way: its gradient is identically
-        zero, so the fit could only hand it back unchanged.
+        zero, so the fit could only hand it back unchanged.  Every leaf
+        must be a bool (a NumPy ``bool_`` or a 0-d boolean array will do),
+        and anything else is refused (``ValueError``): a leaf is read as a
+        flag, and a string ``"False"`` used to select its parameter.
     n_iter, lr, tol, betas, eps
         Adam hyper-parameters; ``tol > 0`` stops early once the loss is
-        at or below it.  ``eps`` is *relative*: it floors Adam's
+        at or below it.  Each is a real number -- a ``bool`` or a string
+        is refused (``ValueError``), as a value with no reading is.  ``eps`` is *relative*: it floors Adam's
         denominator in units of the run's first gradient (its largest entry,
         rounded to a power of two), so the iterates do not depend on the
         units the loss is written in.  Earlier 0.4.0 development builds

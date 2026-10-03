@@ -2309,7 +2309,17 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
     carried an absolute ``1e-8``, below which the zero initial guess
     passed lineax's test before a single step: the tangent or adjoint of
     a group in small units, or of a loss near its minimum, came back
-    exactly zero and "successful" (MADD-ANO-113).  Memory is
+    exactly zero and "successful" (MADD-ANO-113).  A right-hand side
+    with a NaN or infinite entry is answered with NaN in every entry,
+    under every backend: the Krylov backends never see it (they are
+    handed zeros), because its ``max|b|`` made the tolerance NaN or
+    ``inf`` and lineax passed its test at the zero initial guess, so a
+    non-finite tangent or cotangent came back as an exactly zero
+    derivative, reported successful, where ``"dense"`` and
+    ``solver="fori"`` read NaN (MADD-ANO-147).  NaN everywhere is also
+    what an honest Krylov iteration produces -- its first basis vector
+    is ``b / ||b||`` -- and ``"dense"`` agrees wherever its LU
+    propagates the entry.  Memory is
     O(N) for the matrix-free backends; no Jacobian is ever
     materialised except under ``"dense"``.
 
@@ -2420,8 +2430,19 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # to its minimum -- and above the dense fallback's size a
         # moderately small ``b`` raised the "ill-conditioned" error
         # instead.  A zero rhs is answered with exact zeros.
+        #
+        # A rhs with a NaN or infinite entry is answered with NaN in every
+        # entry, and lineax is handed zeros in its place.  Posed on the rhs
+        # itself, ``max|b|`` made ``atol`` NaN or ``inf``, the zero initial
+        # guess passed lineax's test at once and the solve returned zeros
+        # reported successful: a NaN tangent or cotangent came back as an
+        # exactly zero derivative (MADD-ANO-147).  The zeros keep the
+        # Krylov loop from iterating on NaN, and a non-finite rhs is
+        # neither "failed" (no dense re-solve, no adjoint error above
+        # the fallback's size) nor "zero".
         scale = pow2_frame(b)
-        b_hat = b * scale
+        finite = jnp.all(jnp.isfinite(b))
+        b_hat = jnp.where(finite, b * scale, jnp.zeros_like(b))
         # lineax declares `atol: float`, but it only ever compares against
         # it, and under `jit` this is a traced scalar that must stay one.
         atol = cast(float, rtol * jnp.max(jnp.abs(b_hat)))
@@ -2476,9 +2497,11 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         sol = lx.linear_solve(op, b_hat, solver=solver, throw=False)
         is_zero = jnp.logical_not(jnp.any(b != 0))
         failed = jnp.logical_and(
-            jnp.logical_not(sol.result == lx.RESULTS.successful),
-            jnp.logical_not(is_zero))
+            jnp.logical_and(jnp.logical_not(sol.result == lx.RESULTS.successful),
+                            jnp.logical_not(is_zero)),
+            finite)
         value = jnp.where(is_zero, jnp.zeros_like(b), sol.value / scale)
+        value = jnp.where(finite, value, jnp.full_like(b, jnp.nan))
         if n <= _DENSE_ADJOINT_FALLBACK_MAX_DOF:
             return jax.lax.cond(
                 failed, lambda bb: _dense(mv, bb), lambda _bb: value, b,

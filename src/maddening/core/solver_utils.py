@@ -159,6 +159,13 @@ def ift_linear_solve(
     loss near its minimum, a solution in small units) gave a gradient of
     exactly zero with no error.
 
+    A right-hand side, tangent or cotangent with a NaN or infinite entry
+    gives NaN in every entry of the Krylov backends' answer, as an honest
+    Krylov iteration does (its first basis vector is ``b / ||b||``);
+    ``"dense"`` is non-finite wherever its LU propagates the entry.  Until
+    0.4.0 the Krylov backends returned zeros with no error there
+    (MADD-ANO-148).
+
     For ``solver="gmres"`` the internal restart is clamped to
     ``min(N, 50)`` to guard against the silent-low-rank-adjoint bug
     documented in ``graph_manager._ift_linear_solve``.
@@ -248,9 +255,19 @@ def ift_linear_solve(
         |b_i|``), so an entry of ``b`` at zero needs a floor, and an
         absolute one below float rounding of the large entries made GMRES
         raise "iterative breakdown" on a solve as exact as the dtype allows.
+
+        A ``b`` with a NaN or infinite entry is answered with NaN in every
+        entry, and lineax is handed zeros in its place: posed on ``b``
+        itself, ``max|b|`` made the relative ``atol`` NaN or ``inf`` and
+        the zero initial guess passed lineax's test at once, so the
+        solution, the tangent and the gradient came back as zeros with no
+        error (CG did so under an explicit ``atol`` as well), and an
+        explicit ``atol`` under GMRES raised lineax's "non-finite output"
+        error instead (MADD-ANO-148).
         """
         p = pow2_frame(b)
-        b_hat = b * p
+        finite = jnp.all(jnp.isfinite(b))
+        b_hat = jnp.where(finite, b * p, jnp.zeros_like(b))
         atol_hat: Any = rtol * jnp.max(jnp.abs(b_hat)) if atol is None else atol * p
         shape = jax.eval_shape(lambda: b)
         if solver == "cg":
@@ -276,7 +293,8 @@ def ift_linear_solve(
                 rtol=rtol, atol=atol_hat, restart=restart,
                 max_steps=max(4 * restart, 100),
             )
-        return lx.linear_solve(op, b_hat, solver=solver_obj, options=options).value / p
+        x = lx.linear_solve(op, b_hat, solver=solver_obj, options=options).value / p
+        return jnp.where(finite, x, jnp.full_like(x, jnp.nan))
 
     # ``custom_linear_solve`` rather than lineax's own autodiff: the tangent
     # and adjoint solves are then calls of ``_framed_solve`` on *their own*

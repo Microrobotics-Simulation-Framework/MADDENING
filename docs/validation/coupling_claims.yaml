@@ -2538,7 +2538,8 @@ claims:
     - src/maddening/core/coupling/group.py:236 (CouplingGroup, solver)
   conditions: >-
     every acceleration, both solvers, bfloat16 and float16, the norms, the
-    floor and the residual measured and held in float32 (MADD-ANO-167). Not
+    floor and the residual measured and held in 32-bit precision or wider
+    (MADD-ANO-167). Not
     claimed for mixed dtypes, vmap, multi-rate graphs, sub-cycled groups,
     predictors or warm starts, run_adaptive, checkpoint restarts or sharded
     graphs.

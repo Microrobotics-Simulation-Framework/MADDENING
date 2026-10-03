@@ -1021,7 +1021,7 @@ def _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype):
     return matvec_t
 
 
-def _full_resolvent_norm(U, M, make_transpose, with_rows=False):
+def _full_resolvent_norm(U, M, make_transpose):
     """``||(I - J)^{-1}||_2`` over the whole space, from the range basis; ``None`` without ``J^T``.
 
     With ``range(J)`` inside ``span(U)`` (orthonormal, ``n x k``) and
@@ -1036,30 +1036,32 @@ def _full_resolvent_norm(U, M, make_transpose, with_rows=False):
     ``U`` is square (``n <= k``) the resolvent is ``U (I - M)^{-1} U^T``
     and needs no product.  ``None`` where the map has no transpose and
     ``U`` is not square.
+    """
+    return _full_resolvent_norm_and_rows(U, M, make_transpose)[0]
 
-    With ``with_rows=True`` it returns ``(norm, R)`` instead, ``R`` an
-    orthonormal basis (``n x min(n, k)``) of ``J``'s row space -- ``span(B^T)``,
-    which ``B`` already computed, or the whole space where ``U`` is square --
-    so the Kantorovich check can take the Jacobian's change as an operator
-    on the directions ``J`` reads at no further reverse-mode cost; ``(None,
+
+def _full_resolvent_norm_and_rows(U, M, make_transpose):
+    """``(norm, R)``: :func:`_full_resolvent_norm` and a basis of ``J``'s row space.
+
+    ``R`` is an orthonormal basis (``n x min(n, k)``) of ``span(B^T)``,
+    which ``B`` already computed -- ``J``'s row space, since ``J^T`` maps
+    ``range(J)`` onto it -- or the whole space where ``U`` is square, so
+    the Kantorovich check can take the Jacobian's change as an operator on
+    the directions ``J`` reads at no further reverse-mode cost.  ``(None,
     None)`` without a transpose.
     """
     n, k = U.shape
     eye_k = jnp.eye(k, dtype=M.dtype)
     if n <= k:
-        beta = jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2)
-        return (beta, jnp.eye(n, dtype=M.dtype)) if with_rows else beta
+        return jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2), jnp.eye(n, dtype=M.dtype)
     matvec_t = make_transpose()
     if matvec_t is None:
-        return (None, None) if with_rows else None
+        return None, None
     B = jax.vmap(matvec_t)(U.T)                     # row i: u_i^T J
     P, _ = jnp.linalg.qr(jnp.concatenate([U, B.T], axis=1))
     T = jnp.eye(P.shape[1], dtype=M.dtype) + (P.T @ U) @ jnp.linalg.solve(eye_k - M, B @ P)
-    beta = jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype))
-    if not with_rows:
-        return beta
     R, _ = jnp.linalg.qr(B.T)
-    return beta, R
+    return jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype)), R
 
 
 def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
@@ -1303,11 +1305,10 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # point, the uncorrected bound read 0.20-0.96x the true relative
     # error with the flag True; ``h`` there is 0.48-0.58.
     step = norm(delta_s)
-    beta, rows = _full_resolvent_norm(
-        U, M, lambda: _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype),
-        with_rows=True)
+    beta, rows = _full_resolvent_norm_and_rows(
+        U, M, lambda: _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype))
     jac_change = norm(jac_secant_s)
-    if beta is None:
+    if beta is None or rows is None:
         # No transpose to take the full norm with (a node the map cannot be
         # reverse-differentiated through, in a group larger than the range
         # basis): a map whose Jacobian does not move (``jac_change == 0``,

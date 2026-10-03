@@ -404,6 +404,34 @@ def test_a_rank_below_the_normal_range_warns_under_x64(leaves):
         assert bool(core.precision_limited)
 
 
+@pytest.mark.parametrize("leaves", LEAVES)
+def test_a_fisher_matrix_flushed_to_zero_warns_under_x64(leaves):
+    """SYS-129 at the end of the range: a Jacobian whose every product
+    ``J_ij * J_ik`` is below the precision's smallest normal number gives an
+    ``F`` of exact zeros, and ``rank`` 0 is flagged rather than reported --
+    for float64 leaves at ``|J|`` near ``1e-170``, for float32 leaves in the
+    x64 process at float32's ``1e-20``."""
+    from tests.core.test_sysid_claims_edges import _rank2_integer_jacobian
+
+    A, _ = _rank2_integer_jacobian()
+    scale = 1e-170 if leaves == "float64" else 1e-20
+    with _x64():
+        dt = _dt(leaves)
+        M = jnp.asarray(A, dt)
+        p0 = {"p": jnp.asarray([1.0, 2.0, 3.0], dt)}
+
+        def residual(p):
+            return M @ p["p"] * jnp.asarray(scale, dt)
+
+        with pytest.warns(PrecisionLimitWarning, match="came out exactly zero although J"):
+            assert fim(residual, p0, scale=None).rank == 0
+        core = jax.jit(lambda q: fim_core(residual, q, scale=None))(p0)
+        assert bool(core.precision_limited)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", PrecisionLimitWarning)
+            assert fim(lambda p: M @ p["p"], p0, scale=None).rank == 2
+
+
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "SYS-024: with float32 leaves in an x64 process the PrecisionLimitWarning's remedy is "
     "to re-run under x64, which is already on: the remedy is chosen on the decomposition's "

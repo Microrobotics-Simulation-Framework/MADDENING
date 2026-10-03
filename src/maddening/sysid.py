@@ -778,6 +778,11 @@ class FIMReport:
     ``1e-3`` divided by ``noise_std=1e15`` -- and :func:`fim` says so with
     a :class:`~maddening.warnings.PrecisionLimitWarning` (and
     :class:`FIMCore` with ``precision_limited``) rather than reporting it.
+    The same is said when every product flushed and ``F`` came out exactly
+    zero although ``J`` has a nonzero entry (``|J|`` below about
+    ``sqrt(tiny)``, ``1e-19`` in float32): the cutoff is then ``0`` and
+    ``rank`` reads ``0``, which earlier 0.4.0 development builds reported
+    as a fact, with every ``crb`` ``inf`` and no warning (MADD-ANO-165).
 
     The verdict is a comparison of two numbers, and at float32 it can be
     a comparison of two numbers that differ by less than the
@@ -1855,8 +1860,10 @@ class FIMCore:
     precision_limited : jnp.ndarray
         0-d bool: the rank verdict rests on a difference this precision
         cannot resolve, or was decided below the range ``F`` can be
-        formed in (:func:`_range_limited`) -- the conditions :func:`fim`
-        turns into a :class:`~maddening.warnings.PrecisionLimitWarning`.
+        formed in (:func:`_range_limited`), which includes an ``F`` that
+        flushed to exactly zero from a ``J`` that is not -- the
+        conditions :func:`fim` turns into a
+        :class:`~maddening.warnings.PrecisionLimitWarning`.
         A live gate should read it as a third outcome, "verdict
         unavailable", rather than as a refusal.
     deciding_ratio : jnp.ndarray
@@ -2001,7 +2008,8 @@ def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
 
 
 def _range_limited(top: float, rank_rtol: float, n_residual: int, dtype,
-                   factor: float = _PRECISION_WARN_FACTOR) -> bool:
+                   factor: float = _PRECISION_WARN_FACTOR, *,
+                   j_nonzero: bool = False) -> bool:
     """Whether the rank cutoff sits where ``F = JᵀJ`` cannot be formed.
 
     ``F``'s entries are sums of ``m`` products ``J_ij * J_ik``, and XLA's
@@ -2014,26 +2022,45 @@ def _range_limited(top: float, rank_rtol: float, n_residual: int, dtype,
     ``1e-18``) dropped a determined direction, rank 2 to 1, with every
     ``crb`` ``inf``, while the same residual at any smaller ``noise_std``
     reported rank 2.  The test is ``rank_rtol * top < factor * m * tiny``
-    (``factor`` is :data:`_PRECISION_WARN_FACTOR`, the band's own margin);
-    a largest eigenvalue that is not positive and finite has no scale to
-    judge, and is not flagged.
+    (``factor`` is :data:`_PRECISION_WARN_FACTOR`, the band's own margin).
+
+    A largest eigenvalue that is not positive is flagged when ``j_nonzero``
+    (``J`` has an entry that is not zero): ``F`` of a nonzero ``J`` is not
+    zero, so a zero ``F`` is the same flush taken to the end -- every
+    product below ``tiny`` (``|J|`` under about ``1e-19`` in float32) --
+    and the cutoff, ``rank_rtol * 0``, decides ``rank = 0`` for any data.
+    Earlier 0.4.0 development builds exempted it and reported rank 0 of 3
+    silently for a residual of exact rank 2 (MADD-ANO-165).  Whatever
+    ``rank_rtol`` is, even ``0``: no verdict can be read from such an
+    ``F``.  A zero ``J`` -- a residual that reads no parameter -- is a
+    real rank 0 and is not flagged; a non-finite ``top`` is :func:`fim`'s
+    ``FloatingPointError``.
     """
-    if not (math.isfinite(top) and top > 0.0) or rank_rtol <= 0.0:
+    if not math.isfinite(top):
+        return False
+    if top <= 0.0:
+        return bool(j_nonzero)
+    if rank_rtol <= 0.0:
         return False
     tiny = float(np.finfo(dtype).tiny)
     return rank_rtol * top < factor * max(int(n_residual), 1) * tiny
 
 
 def _device_range_limited(eigvals, rank_rtol: float, n_residual: int,
-                          factor: float = _PRECISION_WARN_FACTOR):
+                          factor: float = _PRECISION_WARN_FACTOR, *,
+                          j_nonzero=False):
     """:func:`_range_limited` on the device, as a 0-d bool; the threshold
-    is computed on the host (every operand but ``eigvals`` is static)."""
+    is computed on the host (every operand but ``eigvals`` and
+    ``j_nonzero``, a traced 0-d bool, is static)."""
     hi = eigvals[-1]
+    # ``hi <= 0`` is False for a ``NaN`` ``hi``: a non-finite ``F`` is
+    # ``finite``'s to report, not this flag's.
+    flushed = (hi <= 0.0) & j_nonzero
     if rank_rtol <= 0.0:
-        return jnp.zeros((), dtype=bool)
+        return jnp.asarray(flushed, dtype=bool)
     tiny = float(np.finfo(eigvals.dtype).tiny)
     threshold = factor * max(int(n_residual), 1) * tiny / rank_rtol
-    return jnp.isfinite(hi) & (hi > 0.0) & (hi < threshold)
+    return (jnp.isfinite(hi) & (hi > 0.0) & (hi < threshold)) | flushed
 
 
 _SCALES = ("relative", "nominal", None)
@@ -2347,8 +2374,10 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
     rank, crb = _device_rank_crb(eigvals, eigvecs, rtol, n_params)
     limited, ratio = _device_precision_limited(eigvals, rtol, floor)
     # A cutoff below the range ``F`` can be formed in (:func:`_range_limited`)
-    # leaves the verdict as unavailable as one at the noise floor.
-    out_of_range = _device_range_limited(eigvals, rtol, n_residual)
+    # leaves the verdict as unavailable as one at the noise floor -- and so
+    # does an ``F`` flushed to exactly zero from a ``J`` that is not.
+    out_of_range = _device_range_limited(eigvals, rtol, n_residual,
+                                         j_nonzero=jnp.any(J != 0.0))
     ratio = jnp.where(limited | ~out_of_range, ratio,
                       _device_precision_limited(eigvals, rtol, floor,
                                                 factor=math.inf)[1])
@@ -2920,7 +2949,26 @@ def fim(
         )
     rtol_in_force = _resolve_rank_rtol(eigvals_h.dtype, n_params, rank_rtol,
                                        n_residual=n_residual)
-    if _range_limited(hi, rtol_in_force, n_residual, eigvals_h.dtype):
+    # Read back only when ``F`` has no positive eigenvalue -- the one case
+    # it decides -- so an ordinary report keeps its four transfers.
+    j_nonzero = (math.isfinite(hi) and hi <= 0.0) and bool(jnp.any(J != 0.0))
+    if j_nonzero and _range_limited(hi, rtol_in_force, n_residual, eigvals_h.dtype,
+                                    j_nonzero=True):
+        dtype = eigvals_h.dtype
+        warnings.warn(
+            f"rank={rank} of {len(names)} was read from a Fisher matrix that "
+            f"came out exactly zero although J has nonzero entries: every "
+            f"product J_ij * J_ik is below {dtype}'s smallest normal number "
+            f"({float(np.finfo(dtype).tiny):.4g}) and the arithmetic flushes "
+            f"it to zero, so F = J^T J carries nothing of what J does, the "
+            f"cutoff is 0 and rank, crb and cond say nothing about the data. "
+            f"Rescale the residual -- a smaller noise_std, or residual units "
+            f"nearer one -- so that F's entries are normal numbers"
+            + (", or re-run under x64." if dtype == np.float32 else "."),
+            PrecisionLimitWarning,
+            stacklevel=2,
+        )
+    elif _range_limited(hi, rtol_in_force, n_residual, eigvals_h.dtype):
         dtype = eigvals_h.dtype
         warnings.warn(
             f"rank={rank} of {len(names)} was decided below {dtype}'s normal "

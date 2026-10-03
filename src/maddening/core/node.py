@@ -11,10 +11,13 @@ Nodes must NEVER store mutable simulation state.  All state lives in the
 GraphManager.
 """
 
+import copy
 import functools
 import inspect
+import math
 import warnings
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Optional
 
@@ -152,8 +155,18 @@ class _ParamsDict(dict):
     make every entry point recompile before it runs, or a cached trace runs
     the old model while a fresh trace (a new scan length, a sysid loss) runs
     the new one.  So each mutation through the mapping interface bumps a
-    total and a per-key count.  A value mutated *inside* a stored object (an
-    element of a list) is not seen here; the graph also compares values.
+    total and a per-key count.
+
+    A value mutated *inside* a stored object -- an element of a list, of a
+    NumPy array or of a nested dict, written in place -- goes through no
+    method of this mapping and is not counted here.  The graph finds it by
+    comparing each such value with a copy taken at its last sync
+    (:func:`_mutable_snapshot`, :func:`_mutated_keys`), so it counts as a
+    write of that key all the same; the cost is a copy and a comparison of
+    those values per sync, and nothing for an immutable value (a float, a
+    tuple of numbers, a JAX array).  Until 0.4.0 shipped no comparison was
+    made, although this docstring said one was, and such a write was lost
+    to ``gm.params`` and to every run (MADD-ANO-164).
 
     Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON, a
     JAX pytree with the dict's own flattening, and a copy (``dict(p)``,
@@ -210,6 +223,68 @@ class _ParamsDict(dict):
 
     def __reduce__(self):
         return (_ParamsDict, (dict(self),))
+
+
+def _holds_mutable(value) -> bool:
+    """Whether ``value`` can change in place: a list, dict, set, bytearray or
+    NumPy array, or a tuple holding one.  A float, a string, a tuple of
+    numbers and a JAX array cannot."""
+    if isinstance(value, (list, dict, set, bytearray, np.ndarray)):
+        return True
+    if isinstance(value, tuple):
+        return any(_holds_mutable(item) for item in value)
+    return False
+
+
+def _mutable_snapshot(params) -> dict:
+    """``{key: deep copy}`` of every value of ``params`` that can change in
+    place (:func:`_holds_mutable`) -- what :func:`_mutated_keys` compares
+    against at the next sync.  Empty, and free, for a mapping of floats."""
+    if not isinstance(params, Mapping):
+        return {}
+    out = {}
+    for key, value in params.items():
+        if _holds_mutable(value):
+            try:
+                out[key] = copy.deepcopy(value)
+            except Exception:   # noqa: BLE001 - an uncopyable value is not compared
+                continue
+    return out
+
+
+def _same_value(a, b) -> bool:
+    """Bit-for-bit equality of two parameter values, element by element:
+    a ``NaN`` equals itself and ``-0.0`` is not ``0.0``, so an unchanged
+    value never reads as written and a written one never reads as
+    unchanged."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, np.ndarray):
+        return (a.shape == b.shape and a.dtype == b.dtype
+                and np.ascontiguousarray(a).tobytes() == np.ascontiguousarray(b).tobytes())
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(_same_value(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
+    if isinstance(a, np.generic):
+        return a.dtype == b.dtype and a.tobytes() == b.tobytes()
+    if isinstance(a, float):
+        return (a == b and math.copysign(1.0, a) == math.copysign(1.0, b)) or (a != a and b != b)
+    try:
+        return bool(a == b)
+    except Exception:   # noqa: BLE001 - an incomparable value is unchanged only if it is the same object
+        return a is b
+
+
+def _mutated_keys(params, snapshot: dict) -> set:
+    """The keys of ``params`` whose value no longer equals its copy in
+    ``snapshot`` (:func:`_mutable_snapshot`): an in-place write the mapping
+    could not count.  A key the snapshot does not hold was counted, or
+    replaced, through the mapping."""
+    if not snapshot or not isinstance(params, Mapping):
+        return set()
+    return {key for key, copied in snapshot.items()
+            if key in params and not _same_value(params[key], copied)}
 
 
 def _params_dict_flatten_with_keys(d: _ParamsDict):
@@ -542,6 +617,36 @@ class SimulationNode(ABC):
         # Counts its writes, so a graph can tell a write after compile from
         # an unchanged value (see ``_ParamsDict``).
         self.params: dict = _ParamsDict(params)
+
+    @property
+    def params(self) -> dict:
+        """The node's constants: a ``dict`` that counts the writes made
+        through it (``_ParamsDict``), so a graph holding the node takes each
+        one in (``GraphManager.params``).
+
+        Assigning it -- ``node.params = {**node.params, "k": v}`` -- stores
+        the mapping's items in a fresh counting mapping (one that already
+        counts, another node's included, is stored as it is), so writes made
+        through ``node.params`` afterwards are seen like any other.  Until
+        0.4.0 shipped the assigned ``dict`` was stored as given: the
+        replacement itself was taken in, but every later write into it was
+        lost to the graph (MADD-ANO-164).  A reference to the assigned
+        object is therefore not ``node.params``: write through
+        ``node.params``.
+        """
+        try:
+            return self.__dict__["params"]
+        except KeyError:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute 'params'") from None
+
+    @params.setter
+    def params(self, value) -> None:
+        # Kept in the instance ``__dict__`` under its own name, so pickle,
+        # ``copy`` and every walk of ``vars(node)`` see what they always saw.
+        if isinstance(value, Mapping) and not isinstance(value, _ParamsDict):
+            value = _ParamsDict(value)
+        self.__dict__["params"] = value
 
     # ------------------------------------------------------------------
     # Abstract interface

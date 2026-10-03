@@ -290,3 +290,148 @@ def test_assigning_gm_params_is_later_than_a_node_write_before_it():
     gm.params = saved
     assert _k(gm) == 30.0
     assert _k_stepped(gm) == pytest.approx(30.0, rel=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# A replaced mapping keeps counting, and an in-place write is a write
+# (MADD-ANO-164)
+# ---------------------------------------------------------------------------
+
+
+def _saved_value(gm, node, key):
+    return next(d for d in gm.to_dict()["nodes"] if d["name"] == node)["params"][key]
+
+
+def test_assigning_node_params_stores_a_counting_mapping():
+    """``node.params = {...}`` stores the items in a fresh ``_ParamsDict``;
+    one that already counts (a sharded wrapper shares its node's) is stored
+    as it is, and anything that is not a mapping is left alone."""
+    node = SpringDamperNode("s", 0.01, stiffness=30.0)
+    plain = {**node.params, "stiffness": 40.0}
+    node.params = plain
+    assert type(node.params) is _ParamsDict and node.params == plain
+    assert node.params is not plain and node.params._writes == 0
+    shared = _ParamsDict(a=1.0)
+    node.params = shared
+    assert node.params is shared
+    assert "params" in vars(node) and vars(node)["params"] is shared
+    other = SpringDamperNode("t", 0.01)
+    del other.__dict__["params"]
+    assert getattr(other, "params", None) is None          # AttributeError, not KeyError
+
+
+def test_a_replaced_mapping_counts_the_writes_made_into_it_afterwards():
+    """The idiom ``node.params = {**node.params, "k": v}`` then a write into
+    the new mapping: the write used to be lost to ``gm.params``, every run,
+    ``compile`` and ``to_dict`` (audit_040_p4_10/fmu-sysid/
+    repro_params_sync_lost_writes.py, case A)."""
+    gm = _spring()
+    node = gm.get_node("s")
+    node.params = {**node.params, "stiffness": 40.0}
+    assert _k(gm) == 40.0
+    node.params["stiffness"] = 99.0
+    assert _k(gm) == 99.0
+    assert _k_stepped(gm) == pytest.approx(99.0, rel=1e-3)
+    gm.compile()
+    assert _k(gm) == 99.0
+    assert _saved_value(gm, "s", "stiffness") == 99.0
+
+
+def test_a_replaced_mapping_with_no_later_write_reaches_the_graph():
+    """The replacement alone is a write of every key, including one never
+    written before -- the replaced mapping's write counts start again at
+    zero, so only the identity test can see it."""
+    gm = _spring()
+    node = gm.get_node("s")
+    node.params = {**node.params, "damping": 7.0}
+    assert float(gm.params["nodes"]["s"]["damping"]) == 7.0
+    gm.compile()
+    assert float(gm.params["nodes"]["s"]["damping"]) == 7.0
+    gm2 = _counted()
+    gm2.get_node("c").params = {"count": 4, "gain": 1.0}     # a structural value
+    assert _increment(gm2) == 4.0
+
+
+class _VecDecay(SimulationNode):
+    """``x' = -rates * x`` with ``rates`` a list of numbers, a parameter leaf;
+    ``shape`` a nested dict, structural (read when the step is traced)."""
+
+    def initial_state(self):
+        return {"x": jnp.ones(2, dtype=jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        gain = float(self.params["shape"]["gain"])
+        return {"x": state["x"] - dt * gain * jnp.asarray(p["rates"]) * state["x"]}
+
+
+def _vec(rates):
+    gm = GraphManager()
+    gm.add_node(_VecDecay("v", 0.1, rates=rates, shape={"gain": 1.0, "tag": float("nan")}))
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("spelling", ["list", "ndarray"])
+def test_an_in_place_write_into_a_parameter_reaches_every_reader(spelling):
+    """``node.params["rates"][0] = 5.0`` goes through no method of the
+    mapping.  It used to be lost to ``gm.params``, every run, ``compile`` and
+    ``to_dict`` (case B of the reproducer); the graph now compares each list
+    and array with its copy from the last sync."""
+    import numpy as np
+
+    rates = [1.0, 2.0] if spelling == "list" else np.asarray([1.0, 2.0], np.float32)
+    gm = _vec(rates)
+    gm.get_node("v").params["rates"][0] = 5.0
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [5.0, 2.0]
+    gm.step()
+    assert gm.get_node_state("v")["x"].tolist() == pytest.approx([0.5, 0.8])
+    gm.compile()
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [5.0, 2.0]
+    assert list(_saved_value(gm, "v", "rates")) == [5.0, 2.0]
+
+
+def test_an_in_place_write_into_a_structural_value_recompiles():
+    gm = _vec([1.0, 1.0])
+    generation = gm._compile_generation  # noqa: SLF001
+    gm.get_node("v").params["shape"]["gain"] = 3.0
+    gm.step()
+    assert gm._compile_generation > generation  # noqa: SLF001
+    assert gm.get_node_state("v")["x"].tolist() == pytest.approx([0.7, 0.7])
+    taken = gm._compile_generation  # noqa: SLF001
+    gm.step()
+    gm.step()
+    assert gm._compile_generation == taken  # noqa: SLF001 - taken in once, not on every sync
+
+
+def test_an_unchanged_mutable_value_is_not_a_write():
+    """A list or dict holding ``NaN`` compares equal to its own copy: a
+    comparison by ``==`` would read it as written on every sync and
+    recompile the graph on every step."""
+    gm = _vec([1.0, float("nan")])
+    gm.step()
+    generation = gm._compile_generation  # noqa: SLF001
+    for _ in range(3):
+        gm.step()
+        _ = gm.params
+    assert gm._compile_generation == generation  # noqa: SLF001
+    assert not gm._dirty  # noqa: SLF001
+
+
+def test_values_compare_bit_for_bit():
+    import numpy as np
+
+    from maddening.core.node import _mutable_snapshot, _mutated_keys, _same_value
+
+    assert _same_value([float("nan"), 1.0], [float("nan"), 1.0])
+    assert not _same_value([0.0], [-0.0])
+    assert not _same_value([1.0], (1.0,))
+    a = np.asarray([1.0, np.nan], np.float32)
+    assert _same_value(a, a.copy())
+    assert not _same_value(a, a.astype(np.float64))
+    params = _ParamsDict(k=1.0, xs=[1.0, 2.0], t=(1.0, 2.0), nested=({"a": [1]},))
+    snap = _mutable_snapshot(params)
+    assert set(snap) == {"xs", "nested"}                    # floats and tuples of numbers are not copied
+    params["xs"][1] = 3.0
+    params["nested"][0]["a"].append(2)
+    assert _mutated_keys(params, snap) == {"xs", "nested"}

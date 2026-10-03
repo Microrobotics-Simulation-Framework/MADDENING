@@ -3222,7 +3222,8 @@ class SimulationServer:
             # refuses it (the constructor took both without a word).
             wrong_type = _new_node_type_refusal(node_cls, req.params)
             if wrong_type is not None:
-                raise HTTPException(status_code=400, detail=wrong_type)
+                raise HTTPException(status_code=400,
+                                    detail=f"node '{req.name}': {wrong_type}")
             # Before the constructor, for a class that can say what it would
             # build: the size checks below run on the built node and state,
             # so they used to refuse a D3Q19 lattice of 140^3 cells after

@@ -590,19 +590,27 @@ def test_the_per_push_slice_takes_every_value_of_every_knob():
 # ---------------------------------------------------------------------------
 
 
-def _row_params(slow_everywhere: bool = False):
+def _row_params(slow_everywhere: bool = False, also_slow=frozenset()):
     """The float32 rows: the per-push slice unmarked, every other row slow.
 
     Every per-row test takes this one list, so ``scope="module"`` groups
     the tests by row: one row's graphs are built once and serve every
     oracle before the next row's are built (pytest groups by the
     parameter's index, which is only shared when the lists are equal).
+    *also_slow* moves rows of the slice to the slow lane for one test.
     """
     for i, row in enumerate(ROWS):
         if row["dtype"] != "float32":
             continue
-        slow = slow_everywhere or i not in PER_PUSH
+        slow = slow_everywhere or i not in PER_PUSH or i in also_slow
         yield pytest.param(i, id=f"r{i:02d}", marks=(pytest.mark.slow,) if slow else ())
+
+
+#: Per-push rows under ``"ift"`` without diagnostics, whose diagnostics twin
+#: compiles the spectral machinery (4-8 s cold on CI): the first keeps the
+#: oracle on every push, the others run it in the slow lane.
+_DIAGNOSTICS_TWIN_SLOW = frozenset(
+    [i for i in PER_PUSH if ROWS[i]["solver"] == "ift" and not ROWS[i]["diagnostics"]][1:])
 
 
 # Slow: the rows outside the per-push slice, each one compiled graph (1-5 s
@@ -620,9 +628,12 @@ def test_every_row_takes_the_same_passes_under_either_solver(index):
     assert_fori_and_ift_agree(index)
 
 
-# Slow: as above; the diagnostics twin compiles a second graph.
+# Slow: as above; the diagnostics twin compiles a second graph, and for an
+# ift row without diagnostics that twin is the spectral machinery
+# (_DIAGNOSTICS_TWIN_SLOW).
 # Per push: tests/property/test_differential_coupling_interactions.py::test_every_row_returns_the_same_bits_with_diagnostics_on_or_off
-@pytest.mark.parametrize("index", list(_row_params()), scope="module")
+@pytest.mark.parametrize("index", list(_row_params(also_slow=_DIAGNOSTICS_TWIN_SLOW)),
+                         scope="module")
 def test_every_row_returns_the_same_bits_with_diagnostics_on_or_off(index):
     assert_diagnostics_are_inert(index)
 

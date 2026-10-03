@@ -990,7 +990,7 @@ def _the_stride_is_bounded_and_a_value_left_out_keeps_its_own(ctx):
                                                      "relay_stride": 1}).status_code == 200
 
 
-@check("REST-039", skip=("runner", "sim_run", "wrapper", "concurrent"))
+@check("REST-039", skip=("runner", "sim_run", "wrapper"))
 def _the_profile_step_count_is_clamped_not_refused(ctx):
     """A zero or negative step count is clamped to one, not refused."""
     for n in (0, -5):
@@ -1114,30 +1114,25 @@ def _a_request_that_cannot_have_the_graph_is_a_503_that_writes_nothing(ctx):
             assert "Nothing was changed" not in run.text, run.text
 
 
-@check("REST-044", "REST-105", only=("public",), patch={"_GRAPH_LOCK_TIMEOUT": 0.25})
-def _a_runner_route_answers_within_one_timeout_of_its_arrival(ctx):
-    from tests.api.test_runner_routes_answer_within_a_lock_timeout import (
-        test_each_request_behind_a_long_holder_answers_within_about_one_timeout as scenario)
+def _timed(ctx, method, url, **kw):
+    """``(seconds, status)`` of one request from a client of its own."""
+    t0 = time.monotonic()
+    resp = ctx.make_client(headers=dict(BEARER) if ctx.enforced else {},
+                           peer=None).request(method, url, **kw)
+    return time.monotonic() - t0, resp.status_code
 
-    del scenario    # the same scenario, on this server's bind: below
+
+def _behind_a_long_holder(ctx, calls) -> dict:
+    """Hold the graph and send each ``(label, method, url, kwargs)`` of
+    *calls* 20 ms apart, each from a thread of its own; their timings."""
     lock = ctx.server._graph_lock
     assert lock.acquire(timeout=20)
     timings: dict = {}
     try:
-        def call(label, method, url, **kw):
-            def job():
-                t0 = time.monotonic()
-                resp = ctx.make_client(headers=dict(BEARER) if ctx.enforced else {},
-                                       peer=None).request(method, url, **kw)
-                timings[label] = (time.monotonic() - t0, resp.status_code)
-            return job
-
-        jobs = [call("start", "POST", "/sim/start"), call("reset", "POST", "/sim/reset"),
-                call("stride", "PUT", "/sim/stride", params={"steps_per_frame": 2}),
-                call("stop", "POST", "/sim/stop")]
         threads = []
-        for job in jobs:
-            t = threading.Thread(target=job)
+        for label, method, url, kw in calls:
+            t = threading.Thread(target=lambda label=label, method=method, url=url, kw=kw:
+                                 timings.__setitem__(label, _timed(ctx, method, url, **kw)))
             t.start()
             threads.append(t)
             time.sleep(0.02)
@@ -1145,13 +1140,65 @@ def _a_runner_route_answers_within_one_timeout_of_its_arrival(ctx):
             t.join(30)
     finally:
         lock.release()
+    return timings
+
+
+@check("REST-044", only=("public", "sim_run", "shutdown"), patch={"_GRAPH_LOCK_TIMEOUT": 0.25})
+def _a_runner_route_answers_within_one_timeout_of_its_arrival(ctx):
+    """Behind a long holder of the graph, a start, a reset and a stop each
+    answer within about one (patched) lock timeout of their arrival.  Beside
+    an in-flight /sim/run each is refused at once (409: a run is in
+    progress, or no runner to stop).  When SIGTERM arrives while a start
+    holds the graph, the start still answers within the timeout."""
+    if ctx.domain == "sim_run":
+        for method, url, want in (("POST", "/sim/start", 409), ("POST", "/sim/reset", 409),
+                                  ("POST", "/sim/stop", 409)):
+            elapsed, status = _timed(ctx, method, url)
+            assert status == want and elapsed < 1.0, (url, status, elapsed)
+        return
+    if ctx.domain == "shutdown":
+        try:
+            t0 = time.monotonic()
+            with ctx.under_test():
+                resp = ctx.client.post("/sim/start")
+            assert resp.status_code == 200 and time.monotonic() - t0 < 0.25 + 1.0, resp.text
+        finally:
+            stop_runner(ctx.server)
+        return
+    timings = _behind_a_long_holder(ctx, [("start", "POST", "/sim/start", {}),
+                                          ("reset", "POST", "/sim/reset", {}),
+                                          ("stop", "POST", "/sim/stop", {})])
     for label, (elapsed, status) in timings.items():
         assert elapsed < 1.6 * 0.25 + 1.0, (label, elapsed, status)
-    assert timings["stride"][1] == 200
+    stop_runner(ctx.server)
 
 
-@check("REST-045", only=("public",))
+@check("REST-105", only=("public", "sim_run"), patch={"_GRAPH_LOCK_TIMEOUT": 0.25})
+def _the_stride_is_answered_at_once_whatever_the_runner_routes_wait_for(ctx):
+    """PUT /sim/stride answers at once and applies its value: behind a long
+    holder of the graph with a start and a reset waiting there, and beside
+    an in-flight /sim/run."""
+    if ctx.domain == "sim_run":
+        elapsed, status = _timed(ctx, "PUT", "/sim/stride", params={"steps_per_frame": 2})
+    else:
+        timings = _behind_a_long_holder(ctx, [
+            ("start", "POST", "/sim/start", {}), ("reset", "POST", "/sim/reset", {}),
+            ("stride", "PUT", "/sim/stride", {"params": {"steps_per_frame": 2}})])
+        elapsed, status = timings["stride"]
+        stop_runner(ctx.server)
+    assert status == 200 and elapsed < 0.25 / 2 + 0.5, (status, elapsed)
+    assert ctx.client.put("/sim/stride", params={}).json()["steps_per_frame"] == 2
+
+
+@check("REST-045", only=("public", "sim_run"))
 def _stop_is_answered_while_another_request_holds_the_graph(ctx):
+    """With the runner running and the graph held by another request, POST
+    /sim/stop is answered at once; beside an in-flight /sim/run (no runner)
+    it is the 409 'not started', at once."""
+    if ctx.domain == "sim_run":
+        elapsed, status = _timed(ctx, "POST", "/sim/stop")
+        assert status == 409 and elapsed < 1.0, (status, elapsed)
+        return
     assert ctx.client.post("/sim/start").status_code == 200
     assert wait_for(lambda: ctx.server.relay.step_count > 1)
     lock = ctx.server._graph_lock
@@ -1166,10 +1213,20 @@ def _stop_is_answered_while_another_request_holds_the_graph(ctx):
     stop_runner(ctx.server)
 
 
-@check("REST-046", only=("public",), patch={"_GRAPH_LOCK_TIMEOUT": 0.25})
+@check("REST-046", only=("public", "shutdown"), patch={"_GRAPH_LOCK_TIMEOUT": 0.25})
 def _a_reset_that_stopped_the_runner_says_so(ctx):
+    """A reset stops the runner first and takes the graph after: when the
+    graph cannot be had in time its 503 says the runner it stopped stays
+    stopped; when SIGTERM arrives while the reset holds the graph, it
+    resets, says the runner was running, and the runner is gone."""
     assert ctx.client.post("/sim/start").status_code == 200
     assert wait_for(lambda: ctx.server.relay.step_count > 1)
+    if ctx.domain == "shutdown":
+        with ctx.under_test():
+            resp = ctx.client.post("/sim/reset")
+        assert resp.status_code == 200 and resp.json()["was_running"] is True, resp.text
+        assert ctx.server.runner is None or not ctx.server.runner.is_alive
+        return
     lock = ctx.server._graph_lock
     assert lock.acquire(timeout=20)
     try:
@@ -1201,10 +1258,6 @@ def _a_read_waits_for_at_most_the_step_in_flight(ctx):
 
 @check("REST-049", only=("public",))
 def _while_the_runner_is_still_stopping_writes_and_start_are_503s(ctx):
-    from tests.api.test_runner_stop_and_stride import (
-        test_while_the_runner_is_still_stopping_state_writes_are_503s as scenario)
-
-    del scenario
     gm = ctx.gm
     real = gm._compiled_step
     release = threading.Event()
@@ -1381,7 +1434,7 @@ def _a_graph_that_cannot_step_is_a_400_naming_why_and_nothing_is_stepped(ctx):
         assert ctx.client.request("DELETE", "/graph/edges", json=edge).status_code == 200
 
 
-@check("REST-063", "REST-100", skip=("runner", "sim_run", "concurrent"))
+@check("REST-063", "REST-100", skip=("runner", "sim_run"))
 def _a_profile_is_a_trace_and_leaves_the_live_simulation_where_it_was(ctx):
     if ctx.copies == 1:
         advance(ctx, 3)
@@ -1475,7 +1528,7 @@ def _an_edge_names_nodes_and_fields_that_exist(ctx):
     assert structure(ctx) == before
 
 
-@check("REST-069", skip=("concurrent",))
+@check("REST-069")
 def _compile_returns_the_schedule_and_validate_the_issues(ctx):
     resp = ctx.client.post("/graph/compile")
     assert resp.status_code == 200, resp.text
@@ -1511,7 +1564,7 @@ def _a_state_write_the_field_cannot_hold_is_a_400_and_nothing_is_written(ctx):
     assert _ball(ctx)["position"] == big
 
 
-@check("REST-072", skip=("concurrent", "wrapper"))
+@check("REST-072", skip=("wrapper",))
 def _a_non_finite_reply_is_written_as_tokens(ctx):
     """A diverged state answers strict JSON, the non-finite values written as
     the quoted tokens."""
@@ -1938,8 +1991,24 @@ def _stop_any_trace() -> None:
         profiler.stop_jax_trace()
 
 
-@check("REST-103", only=("public", "restored"), patch={"MAX_JAX_TRACE_STEPS": 4})
+@check("REST-103", only=("public", "restored", "runner"), patch={"MAX_JAX_TRACE_STEPS": 4})
 def _a_trace_stops_itself_at_its_step_budget(ctx):
+    """A trace stops itself after its (patched) four steps: three leave it
+    running, the fourth stops it, later ones are not counted -- the steps
+    of POST /sim/step, or of the runner stepping the graph."""
+    from maddening.core.simulation import profiler
+
+    if ctx.domain == "runner":
+        try:
+            resp = ctx.client.post("/sim/profile/jax/start")
+            assert resp.status_code == 200, resp.text
+            assert wait_for(lambda: not profiler.jax_trace_active(), 20)
+            status = ctx.client.get("/sim/profile/jax/status").json()
+            assert status["active"] is False and status["steps"] == 4, status
+            assert "step budget" in status["stopped_by"]
+        finally:
+            _stop_any_trace()
+        return
     advance(ctx, 1)                       # compiled before tracing
     try:
         resp = ctx.client.post("/sim/profile/jax/start")
@@ -1955,11 +2024,15 @@ def _a_trace_stops_itself_at_its_step_budget(ctx):
         _stop_any_trace()
 
 
-@check("REST-104", only=("public", "restored"), patch={"MAX_JAX_TRACE_SECONDS": 0.1})
+@check("REST-104", only=("public", "restored", "runner", "sim_run"),
+       patch={"MAX_JAX_TRACE_SECONDS": 0.1})
 def _a_trace_stops_itself_at_its_time_budget(ctx):
+    """A trace stops itself at its (patched) 0.1 s budget: an idle one by its
+    own timer, and one the runner or a /sim/run keeps feeding steps."""
     from maddening.core.simulation import profiler
 
-    advance(ctx, 1)
+    if not ctx.steps_beside:
+        advance(ctx, 1)
     try:
         resp = ctx.client.post("/sim/profile/jax/start")
         assert resp.status_code == 200, resp.text

@@ -414,6 +414,52 @@ def test_simultaneous_stops_leave_no_runner_thread(tmp_path):
         assert server.relay.step_count == count
 
 
+def test_simultaneous_writes_while_the_runner_is_still_stopping_are_503s(tmp_path):
+    """REST-049: the runner told to stop while its thread is held in a step
+    past the (patched) stop timeout: the stop is a 503 that keeps it as
+    stopping, and six writes and starts sent at once are each a 503 --
+    "two runners would step one graph" -- that change nothing."""
+    chk = S.Check(fn=None, rows=(), bind="any", contexts=frozenset(), server_kw={},
+                  patch={"_RUNNER_STOP_TIMEOUT": 0.2}, xfail={})
+    with S.loopback_server(chk, tmp_path) as (server, base):
+        gm = server.gm
+        with _client(base, server) as c:
+            assert c.post("/sim/start").status_code == 200
+        assert S.wait_for(lambda: server.relay.step_count > 0)
+        real, release, entered = gm._compiled_step, threading.Event(), threading.Event()
+
+        def held(*args):
+            entered.set()
+            release.wait(30)
+            return real(*args)
+
+        gm._compiled_step = held
+        try:
+            assert entered.wait(20)
+            with _client(base, server) as c:
+                assert c.post("/sim/stop").status_code == 503
+            before = {f: float(np.asarray(v)) for f, v in gm.get_node_state("ball").items()}
+
+            def call(method, url, kw):
+                def job():
+                    with _client(base, server) as c:
+                        return c.request(method, url, **kw)
+                return job
+
+            calls = [("PUT", "/graph/state/ball", {"json": {"state": {"position": 1.0,
+                                                                      "velocity": 0.0}}}),
+                     ("POST", "/sim/step", {}), ("POST", "/sim/start", {})] * 2
+            replies = simultaneously([call(*c) for c in calls])
+            for (method, url, _), resp in zip(calls, replies):
+                assert resp.status_code == 503, (method, url, resp.status_code, resp.text)
+            assert {f: float(np.asarray(v)) for f, v in gm.get_node_state("ball").items()} \
+                == before
+        finally:
+            release.set()
+            gm._compiled_step = real
+        assert S.wait_for(lambda: server.runner is None or not server.runner.is_alive)
+
+
 def test_simultaneous_saves_of_one_name_leave_a_manifest_that_hashes_to_the_file(tmp_path):
     """REST-091, REST-101: eight POST /checkpoint/save of one name at once,
     between steps: whichever lands last, the file and the manifest beside it

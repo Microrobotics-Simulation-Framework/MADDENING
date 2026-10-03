@@ -1452,8 +1452,7 @@ claims:
     1000 to keep request latency bounded)".
   sources:
     - src/maddening/api/server.py:4226 (sim_profile)
-  conditions: >-
-    n_steps below 1 and above 1000. Not claimed for simultaneous requests.
+  conditions: n_steps below 1 and above 1000.
   oracle: the number of steps the returned trace profiles (clamped, not refused).
   tests:
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_clamps_n_steps_lower_bound
@@ -1464,7 +1463,7 @@ claims:
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-039]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-039]'
     no_token: tests/api/test_profile_endpoints.py::TestSimProfile::test_clamps_n_steps_lower_bound
-    concurrent: narrowed
+    concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_the_claim_holds_under_simultaneous_requests_on_a_loopback_server[REST-039]'
     runner_active: n/a
     sim_run_active: n/a
     large_payload: tests/api/test_profile_endpoints.py::TestSimProfile::test_clamps_n_steps_lower_bound
@@ -1669,8 +1668,8 @@ claims:
   conditions: >-
     a long holder of the graph lock, a POST /sim/start waiting for it, then
     runner routes (two resets; start, three resets, stride and stop) arriving
-    20 ms apart; the timeout patched to 0.25 s.  The surrogate routes are out
-    of scope. Not claimed for an in-flight /sim/run or a server shutting down.
+    20 ms apart; the timeout patched to 0.25 s.  The surrogate routes are
+    out of scope.
   oracle: each request answered within 1.6 timeouts of its arrival.
   tests:
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout
@@ -1700,10 +1699,10 @@ claims:
     no_token: tests/api/test_graph_lock_refusals_cover_every_route.py::test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout
     concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_a_runner_route_answers_in_time_while_every_worker_waits_for_the_graph[start]'
     runner_active: tests/api/test_concurrent_requests_are_serialised.py::test_stop_is_answered_while_another_request_holds_the_graph
-    sim_run_active: narrowed
+    sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-044]'
     large_payload: n/a
     hostile_input: n/a
-    shutdown: narrowed
+    shutdown: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_when_sigterm_arrives_mid_request[REST-044]'
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: n/a
@@ -1725,9 +1724,9 @@ claims:
   conditions: >-
     at once: the long holder is a request that is not a runner route (a
     checkpoint save slowed to 1.5 s) while the runner runs.  Within one
-    timeout: a POST /sim/start is waiting for the graph when the stop arrives
-    (it holds the runner lock until it gives up), timeout patched to 0.25 s.
-    Not claimed for an in-flight /sim/run or a server shutting down.
+    timeout: a POST /sim/start is waiting for the graph when the stop
+    arrives (it holds the runner lock until it gives up), timeout patched
+    to 0.25 s.
   oracle: the stop answered within 1 s of the 1.5 s holder; behind the waiting start, within 1.6 timeouts of its arrival, a 409 once the start has given up.
   tests:
     - tests/api/test_concurrent_requests_are_serialised.py::test_stop_is_answered_while_another_request_holds_the_graph
@@ -1760,10 +1759,10 @@ claims:
     no_token: tests/api/test_concurrent_requests_are_serialised.py::test_stop_is_answered_while_another_request_holds_the_graph
     concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_a_runner_route_answers_in_time_while_every_worker_waits_for_the_graph[stop]'
     runner_active: tests/api/test_concurrent_requests_are_serialised.py::test_stop_is_answered_while_another_request_holds_the_graph
-    sim_run_active: narrowed
+    sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-045]'
     large_payload: n/a
     hostile_input: n/a
-    shutdown: narrowed
+    shutdown: n/a
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: n/a
@@ -1784,9 +1783,9 @@ claims:
     - src/maddening/api/README.md:160 (Simulation Control)
     - docs/release_notes/v0.4.0.md:4724 (The REST round-6 audit, Smaller fixes)
   conditions: >-
-    a running runner (and none), the graph held by another request when POST
-    /sim/reset arrives, timeout patched to 0.25 s; a runner whose stop times
-    out. Not claimed for a server shutting down.
+    a running runner (and none), the graph held by another request when
+    POST /sim/reset arrives, timeout patched to 0.25 s; a runner whose stop
+    times out.
   oracle: the 503 does not say "Nothing was changed", says the runner stays stopped, and carries was_running; the runner is no longer alive.
   tests:
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_a_reset_that_stopped_the_runner_does_not_say_nothing_was_changed
@@ -1819,7 +1818,7 @@ claims:
     sim_run_active: tests/api/test_graph_lock_refusals_cover_every_route.py::test_every_write_is_a_409_while_a_run_is_in_progress
     large_payload: n/a
     hostile_input: n/a
-    shutdown: narrowed
+    shutdown: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_when_sigterm_arrives_mid_request[REST-046]'
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: n/a
@@ -1901,9 +1900,7 @@ claims:
     - src/maddening/api/server.py:2229 (SimulationServer._refuse_while_runner_alive)
     - src/maddening/api/server.py:3681 (sim_start)
     - docs/release_notes/v0.4.0.md:4574 (POST /sim/stop means stopped)
-  conditions: >-
-    a runner whose step is blocked past the stop timeout. Not claimed for
-    simultaneous requests.
+  conditions: a runner whose step is blocked past the stop timeout.
   oracle: 503 on state writes and on /sim/start.
   tests:
     - tests/api/test_runner_stop_and_stride.py::test_while_the_runner_is_still_stopping_state_writes_are_503s
@@ -1914,7 +1911,7 @@ claims:
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-049]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-049]'
     no_token: tests/api/test_runner_stop_and_stride.py::test_while_the_runner_is_still_stopping_state_writes_are_503s
-    concurrent: narrowed
+    concurrent: tests/api/test_rest_claims_under_concurrent_requests.py::test_simultaneous_writes_while_the_runner_is_still_stopping_are_503s
     runner_active: tests/api/test_runner_stop_and_stride.py::test_while_the_runner_is_still_stopping_state_writes_are_503s
     sim_run_active: n/a
     large_payload: n/a
@@ -2399,9 +2396,7 @@ claims:
   sources:
     - src/maddening/api/server.py:4226 (sim_profile)
     - src/maddening/api/README.md:213 (Concurrency, limits and shutdown)
-  conditions: >-
-    a compiled graph; the runner running; a /sim/run in progress. Not claimed
-    for simultaneous requests.
+  conditions: a compiled graph; the runner running; a /sim/run in progress.
   oracle: the trace's structure; 409.
   tests:
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_returns_perfetto_json
@@ -2415,7 +2410,7 @@ claims:
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-063]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-063]'
     no_token: tests/api/test_profile_endpoints.py::TestSimProfile::test_returns_perfetto_json
-    concurrent: narrowed
+    concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_the_claim_holds_under_simultaneous_requests_on_a_loopback_server[REST-063]'
     runner_active: tests/api/test_profile_endpoints.py::TestSimProfile::test_runner_running_returns_409
     sim_run_active: tests/api/test_graph_lock_refusals_cover_every_route.py::test_every_write_is_a_409_while_a_run_is_in_progress
     large_payload: n/a
@@ -2617,9 +2612,7 @@ claims:
   sources:
     - src/maddening/api/README.md:117 (Graph Structure)
     - src/maddening/api/server.py:2970 (compile_graph)
-  conditions: >-
-    a valid graph; an edge between fields of mismatched shapes. Not claimed
-    for simultaneous requests.
+  conditions: a valid graph; an edge between fields of mismatched shapes.
   oracle: the schedule and issues; 400.
   tests:
     - tests/api/test_api.py::TestGraphEndpoints::test_compile
@@ -2631,7 +2624,7 @@ claims:
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-069]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-069]'
     no_token: tests/api/test_api.py::TestGraphEndpoints::test_compile
-    concurrent: narrowed
+    concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_the_claim_holds_under_simultaneous_requests_on_a_loopback_server[REST-069]'
     runner_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_the_runner_runs[REST-069]'
     sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-069]'
     large_payload: n/a
@@ -2720,10 +2713,7 @@ claims:
     - src/maddening/api/README.md:128 (State)
     - src/maddening/api/server.py:141 (_json_reply)
     - CHANGELOG.md:404 (State and IO, from the differential harness)
-  conditions: >-
-    GET /graph/state, GET /graph/state/{node}, /sim/step, /sim/run,
-    /sim/reset, /checkpoint/load, GET /graph/params. Not claimed for
-    simultaneous requests.
+  conditions: GET /graph/state, GET /graph/state/{node}, /sim/step, /sim/run, /sim/reset, /checkpoint/load, GET /graph/params.
   oracle: strict JSON parse of every reply; json_codec.loads round trip.
   tests:
     - tests/api/test_state_replies_with_non_finite_values.py::test_every_state_route_answers_strict_json_once_the_simulation_diverged
@@ -2737,7 +2727,7 @@ claims:
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-072]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-072]'
     no_token: tests/api/test_state_replies_with_non_finite_values.py::test_every_state_route_answers_strict_json_once_the_simulation_diverged
-    concurrent: narrowed
+    concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_the_claim_holds_under_simultaneous_requests_on_a_loopback_server[REST-072]'
     runner_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_the_runner_runs[REST-072]'
     sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-072]'
     large_payload: n/a
@@ -3824,9 +3814,9 @@ claims:
     - docs/validation/known_anomalies.yaml (MADD-ANO-132)
   conditions: >-
     a single node after 640 steps, a params write before the profile, and a
-    coupling group with a predictor's history in _meta.  What the streams send
-    is out of scope; the relay's step count and clock are read directly. Not
-    claimed for simultaneous requests.
+    coupling group with a predictor's history in _meta.  What the streams
+    send is out of scope; the relay's step count and clock are read
+    directly.
   oracle: the state, the params leaves and _meta before and after; the next step against a never-profiled twin, bit for bit.
   tests:
     - tests/api/test_profile_leaves_the_live_simulation.py::test_a_profile_leaves_the_state_and_the_streams_clock_as_they_were
@@ -3839,7 +3829,7 @@ claims:
     non_loopback_bind: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-100]'
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-100]'
     no_token: tests/api/test_profile_leaves_the_live_simulation.py::test_a_profile_leaves_the_state_and_the_streams_clock_as_they_were
-    concurrent: narrowed
+    concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_the_claim_holds_under_simultaneous_requests_on_a_loopback_server[REST-100]'
     runner_active: n/a
     sim_run_active: n/a
     large_payload: n/a
@@ -3951,7 +3941,7 @@ claims:
     the budget patched to 4 and 5 steps: three steps leave it running, the
     fourth stops it and later steps are not counted; a run of 12 past a budget
     of 5; a stop by request after 3 steps. Not claimed for simultaneous
-    requests, the runner running or a server shutting down.
+    requests or a server shutting down.
   oracle: the status route's active, steps and stopped_by; the trace directory holds files; the stop route's 409 names the directory.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_trace_records_exactly_its_step_budget
@@ -3965,7 +3955,7 @@ claims:
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-103]'
     no_token: tests/api/test_routes_answer_what_they_did.py::test_a_trace_records_exactly_its_step_budget
     concurrent: narrowed
-    runner_active: narrowed
+    runner_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_the_runner_runs[REST-103]'
     sim_run_active: tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_step_budget
     large_payload: tests/api/test_routes_answer_what_they_did.py::test_a_trace_records_exactly_its_step_budget
     hostile_input: n/a
@@ -3991,8 +3981,8 @@ claims:
   conditions: >-
     the budget patched to 0 s and 0.1 s; a step after it; no step and no
     request; a timer that never fires (the status and stop routes' own check);
-    a timer left from an earlier trace. Not claimed for simultaneous requests,
-    the runner running, an in-flight /sim/run or a server shutting down.
+    a timer left from an earlier trace. Not claimed for simultaneous requests
+    or a server shutting down.
   oracle: jax_trace_active() with nothing asking; the status route's active and stopped_by; the second trace still active.
   tests:
     - tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_time_budget
@@ -4011,8 +4001,8 @@ claims:
     token_enforced: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-104]'
     no_token: tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_time_budget
     concurrent: narrowed
-    runner_active: narrowed
-    sim_run_active: narrowed
+    runner_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_the_runner_runs[REST-104]'
+    sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-104]'
     large_payload: tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_time_budget
     hostile_input: n/a
     shutdown: narrowed
@@ -4031,10 +4021,7 @@ claims:
     - src/maddening/api/README.md:161 (Simulation Control)
     - src/maddening/api/server.py:3786 (sim_set_stride)
     - docs/release_notes/v0.4.0.md:4730 (The REST round-6 audit, Smaller fixes)
-  conditions: >-
-    a long holder of the graph lock and a /sim/start and three resets waiting
-    behind it, timeout patched to 0.25 s. Not claimed for an in-flight
-    /sim/run.
+  conditions: a long holder of the graph lock and a /sim/start and three resets waiting behind it, timeout patched to 0.25 s.
   oracle: 200 within half a timeout, and the value applied.
   tests:
     - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_each_request_behind_a_long_holder_answers_within_about_one_timeout
@@ -4060,7 +4047,7 @@ claims:
     no_token: tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_each_request_behind_a_long_holder_answers_within_about_one_timeout
     concurrent: 'tests/api/test_rest_claims_under_concurrent_requests.py::test_a_runner_route_answers_in_time_while_every_worker_waits_for_the_graph[stride]'
     runner_active: tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_each_request_behind_a_long_holder_answers_within_about_one_timeout
-    sim_run_active: narrowed
+    sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-105]'
     large_payload: n/a
     hostile_input: n/a
     shutdown: n/a

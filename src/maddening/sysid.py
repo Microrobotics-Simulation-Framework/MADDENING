@@ -555,8 +555,9 @@ def windowed_loss(
             "known at its first sample. Window 0 starts them cold, as "
             "compile() and reset_state() leave them, and every later window "
             "from where the previous one left them, so the record is not "
-            "replayed exactly: the loss at the generating parameters is not "
-            "zero. Record from compile() or reset_state() for an exact replay.",
+            "replayed exactly: the loss at the generating parameters need "
+            "not be zero. Record from compile() or reset_state() for an "
+            "exact replay.",
             UserWarning, stacklevel=2,
         )
 

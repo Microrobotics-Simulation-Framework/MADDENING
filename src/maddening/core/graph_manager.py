@@ -612,6 +612,109 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
     )
 
 
+def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
+                                weights, spectral_weights, resolution, reference):
+    """``(rho, arnoldi_residual, amplification, ratio)`` in the interface norm's own coordinates.
+
+    :func:`_spectral_rate_at` with ``field_reference``, for a group under
+    ``convergence_norm="interface"`` with a transform on an internal edge.
+    That norm measures each internal edge's source value *after* the
+    edge's transform (``coupling_residual_interface``), each over its own
+    magnitude; the spectral analysis took its weights from the raw source
+    fields, and the bound multiplied a residual in one set of coordinates
+    by a resolvent norm in the other.  An offset (a unit conversion's
+    273.15) shrinks the reading's relative change, a selection
+    (``"extract_last"``) changes which magnitude an entry is divided by,
+    and the bound read 0.0014-0.098x the true distance with
+    ``spectral_usable=True``.
+
+    So here every quantity is taken on the reading ``y = Phi(x)`` itself
+    (``reading``: the flat vector of the transformed edge values, in the
+    order the norm sums them).  The pass reads the iterate only through
+    those edges, ``F = G o Phi``, so the reading iterates by its own map
+    ``Phi o G``, whose Jacobian ``A = Phi' G'`` has ``dF/dx``'s non-zero
+    spectrum, and for an affine reading of an affine map ``Phi(x) -
+    Phi(x*) = (I - A)^{-1} (Phi(x) - Phi(F(x)))`` exactly: the resolvent of
+    ``A`` in the reading's weights carries the residual the loop measured
+    to the distance in the norm the loop measured it in.  ``A`` is applied
+    through preimages (:func:`~maddening.core.coupling.acceleration._arnoldi_through`):
+    the Krylov vectors are readings of state tangents, so no transform is
+    ever inverted.
+
+    ``x_weights`` are the state's spectral weights, which only condition
+    the preimages; ``weights``, ``spectral_weights`` and ``resolution``
+    are the reading's, entry by entry, with the meanings
+    :func:`_spectral_rate_at` gives them for the state's (dead band,
+    spectrum, float floor); ``reference(x)`` is, at each entry of the
+    reading, its edge's ``max|Phi_e(x)|``, which gives the pair-to-returned
+    ratio (MADD-ANO-146).  The share of a dead-banded edge's residual is
+    folded into the factor as there.  NaN on a non-finite state.
+    """
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        SPECTRAL_MARGIN,
+        _arnoldi_through,
+    )
+
+    x_sg = jax.lax.stop_gradient(x_star)
+    consts_sg = tuple(jax.lax.stop_gradient(c) for c in consts)
+    work = _analysis_dtype(x_sg.dtype)
+    wx = jax.lax.stop_gradient(jnp.asarray(x_weights, work))
+    dd0 = jax.lax.stop_gradient(jnp.asarray(weights, work))
+    ww0 = jax.lax.stop_gradient(jnp.asarray(spectral_weights, work))
+    rr0 = jax.lax.stop_gradient(jnp.asarray(resolution, work))
+
+    def spectrum(operands):
+        xx, cc, wxx, dd, ww, rr = operands
+        live = wxx > 0
+        w_inv = jnp.where(live, 1.0 / jnp.where(live, wxx, 1.0), 0.0)
+        lift = pow2_frame(w_inv, mode="lift")
+
+        def matvec(v):
+            _, Jv = jax.jvp(
+                lambda x_: _F_dispatch(step_pure, x_, cc), (xx,),
+                ((v * (w_inv * lift)).astype(xx.dtype),)
+            )
+            return (wxx / lift) * Jv.astype(work)
+
+        def measure(v):
+            # Only the fields the reading reads have a weight, so a
+            # preimage's other entries carry nothing into it.
+            _, Lv = jax.jvp(reading, (xx,), ((v * (w_inv * lift)).astype(xx.dtype),))
+            return (ww / lift) * Lv.astype(work)
+
+        fx = _F_dispatch(step_pure, xx, cc)
+        r_y = _framed_difference(reading(fx).astype(work), reading(xx).astype(work), ww)
+        r_x = _framed_difference(fx.astype(work), xx.astype(work), wxx)
+        u0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, work) * live.astype(work)
+        rho, resid, amp = _arnoldi_through(matvec, measure, u0, extra=(r_x, r_y))
+        kept = dd > 0
+        r_kept = jnp.linalg.norm(jnp.where(kept, r_y, 0.0))
+        r_unread = jnp.linalg.norm(jnp.where(kept, 0.0, r_y))
+        floor = _floor_of(rr, kept)
+        denom = jnp.maximum(r_kept, floor)
+        unread = r_unread > 0
+        share = jnp.where(unread, r_unread / jnp.where(denom > 0, denom, 1.0), 0.0)
+        share = jnp.where(jnp.logical_and(unread, denom <= 0), jnp.inf, share)
+        rho_safe = rho + SPECTRAL_MARGIN * resid
+        contracting = rho_safe < 1
+        radius = jnp.where(contracting, 1.0 / jnp.where(contracting, 1.0 - rho_safe, 1.0),
+                           jnp.inf)
+        folded = jnp.maximum(amp, radius) * jnp.sqrt(1.0 + share * share)
+        amp_out = jnp.where(unread, folded, amp)
+        ref_x = reference(xx).astype(work)
+        ref_pair = jnp.maximum(reference(fx).astype(work), ref_x)
+        shrink = jnp.where(ref_pair > 0, ref_x / jnp.where(ref_pair > 0, ref_pair, 1.0), 1.0)
+        r_pair = jnp.linalg.norm(jnp.where(kept, r_y * shrink, 0.0))
+        ratio = jnp.where(r_pair > 0, r_kept / jnp.where(r_pair > 0, r_pair, 1.0), 1.0)
+        return rho, resid, amp_out, jnp.maximum(ratio, 1.0)
+
+    nan = jnp.full((), jnp.nan, work)
+    return jax.lax.cond(
+        jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan, nan),
+        (x_sg, consts_sg, wx, dd0, ww0, rr0),
+    )
+
+
 def _analysis_dtype(dtype):
     """The dtype the coupling diagnostics' linear algebra runs in: at least float32.
 
@@ -1651,6 +1754,15 @@ def _group_residual_dtype(state, node_names):
     ``PYTHONHASHSEED``, and ``run_scan`` raised a scan-carry dtype
     ``TypeError`` in some processes and not in others.  ``float32`` for
     a group with no floating field.
+
+    **At least float32.**  Every norm measures and accumulates in at
+    least float32 (``acceleration._widened``), so a bfloat16 or float16
+    group's residual is a float32 number, and it is held in one: kept in
+    the group's 16-bit dtype, a residual the norm computed finitely
+    overflowed again on the way into the loop's carry or the report slot
+    (float16 holds nothing above 65 504, and a mixed-norm ratio at
+    ``rtol=1e-6`` is about 977 per ulp), and the verdict compared a
+    float16 rounding of it.  A float32 or float64 group is unchanged.
     """
     dtypes = [
         jnp.asarray(leaf).dtype
@@ -1658,7 +1770,25 @@ def _group_residual_dtype(state, node_names):
         for leaf in state.get(nn, {}).values()
         if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
     ]
-    return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
+    if not dtypes:
+        return jnp.dtype(jnp.float32)
+    return jnp.promote_types(jnp.result_type(*dtypes), jnp.float32)
+
+
+def _state_measurable(state, node_names, norm):
+    """Whether *state* is one a coupling group's norm can measure a change at.
+
+    Every floating field of every member finite (:func:`_group_state_finite`),
+    and every field the norm reads within the range its dtype can measure
+    a change at: the group's norm of *state* against itself (``norm(s_new,
+    s_old)``, the group's ``_compute_residual``) is ``0.0`` there and ``inf``
+    on a field it cannot evaluate (``acceleration._scaled_change``).  A
+    verdict on the *state*, not on the residual: ``strict_convergence``
+    reads it to tell a diverged iteration from one whose estimate was
+    non-finite on a perfectly finite state.
+    """
+    return jnp.logical_and(_group_state_finite(state, node_names),
+                           jnp.isfinite(norm(state, state)))
 
 
 def _group_state_finite(state, node_names):
@@ -2079,8 +2209,10 @@ def _fixed_point_while(
     # guard is provable at every cap instead of being switched off at
     # the smallest one.  ``cond`` forces the first body regardless, so
     # this value only ever reaches the criterion as the ``r_{k-1}``
-    # of the first ratio.
-    seed = jnp.asarray(first_res, dtype)
+    # of the first ratio.  In the residual's dtype, at least float32
+    # (``_group_residual_dtype``), which ``step_pure`` returns it in:
+    # the iterate's own for a float32 or wider group.
+    seed = jnp.asarray(first_res, acc_dt)
     init = (x0, x0, seed, seed, seed, jnp.int32(0), acc0)
     (x_next, x_meas, final_res, res_prev, res_prev2, n_iters,
      acc) = jax.lax.while_loop(cond, body, init)
@@ -2904,11 +3036,18 @@ def _strict_convergence_messages(group) -> tuple[str, str]:
     """``(non-finite, unconverged)``: what ``strict_convergence`` raises for *group*.
 
     Two checks with exclusive predicates, so the message names the cause.
-    A non-finite estimate is a non-finite *state*: since 0.4.0 the norm
-    reports ``inf`` for a field it cannot evaluate rather than dropping it
-    (MADD-ANO-019), and that is the one case where no amount of iteration
-    would help.  Shared by the in-graph checks and by ``run_adaptive*``,
-    which raise them only about a solve the step keeps.
+    The first fires on a non-finite *state*, decided from the state itself
+    (:func:`_state_measurable`): a field that is NaN or inf, or whose
+    magnitude is beyond the range its dtype can measure a change at --
+    since 0.4.0 the norm reports ``inf`` for such a field rather than
+    dropping it (MADD-ANO-019), and it is the one case where no amount of
+    iteration would help.  The second fires on every other unconverged
+    exit, a non-finite *estimate* on a finite state included: it was once
+    taken for the first, and a float16 group whose norm overflowed at the
+    default ``rtol`` on a finite state was told it had diverged and that no
+    larger cap would help, when the cap was the whole story.  Shared by
+    the in-graph checks and by ``run_adaptive*``, which raise them only
+    about a solve the step keeps.
     """
     head = (f"coupling group {sorted(group.nodes)} exited at "
             f"max_iterations={group.max_iterations} without converging")
@@ -3228,19 +3367,23 @@ def _run_coupled_block_impl(
 
     _strict_nonfinite_msg, _strict_unconverged_msg = _strict_convergence_messages(group)
 
-    def _strict_check(value, est):
+    def _strict_check(value, est, state_ok):
         """``strict_convergence`` on a solve whose error estimate is ``est``.
 
+        ``state_ok`` is the verdict on the returned state itself
+        (:func:`_state_measurable`), which decides which message an
+        unconverged exit raises (``_strict_convergence_messages``): the
+        estimate cannot, since a norm can overflow on a finite state.
         Raises in-graph about a solve the step keeps (``_gate_on_firing``),
         or, with ``strict_sink``, hands the two predicates to the caller.
         """
-        nonfinite = jnp.logical_not(jnp.isfinite(est))
+        # ``not (r <= t)``, not ``r > t``: see below.
+        unmet = jnp.logical_not(est <= conv_threshold_value)
+        nonfinite = jnp.logical_and(jnp.logical_not(state_ok), unmet)
         if strict_sink is not None:
             strict_sink.append((
                 nonfinite,
-                # ``not (r <= t)``, not ``r > t``: see below.
-                jnp.logical_and(jnp.isfinite(est),
-                                jnp.logical_not(est <= conv_threshold_value)),
+                jnp.logical_and(state_ok, unmet),
             ))
             return value
         # Lazy for import time only: equinox is a transitive
@@ -3258,16 +3401,13 @@ def _run_coupled_block_impl(
             # ``not (r <= t)`` rather than ``r > t``: the two differ
             # exactly on NaN, which answers False to both, and a NaN
             # residual is the one case where the IFT gradient is certainly
-            # invalid.  That case is named by the check above; this
+            # invalid.  A non-finite state is named by the check above; this
             # predicate stays in the closed form and is made exclusive of
             # it so exactly one message fires.  ``coupling_diagnostics()``
             # already reads a non-finite residual as ``converged=False``;
             # the guard has to agree.
             value,
-            _gate_on_firing(jnp.logical_and(
-                jnp.isfinite(est),
-                jnp.logical_not(est <= conv_threshold_value),
-            )),
+            _gate_on_firing(jnp.logical_and(state_ok, unmet)),
             _strict_unconverged_msg,
         )
 
@@ -3553,20 +3693,26 @@ def _run_coupled_block_impl(
     one_pass = one_pass_jacobi if use_jacobi else one_pass_gs
 
     def _compute_residual(s_new, s_old):
+        # In the group's residual dtype (``_group_residual_dtype``: the
+        # promotion of its floating fields, at least float32), which every
+        # loop carry and report slot holds it in.  The norms already return
+        # it wherever the fields they read carry the group's widest dtype;
+        # the cast is for the interface norm reading only narrower fields.
+        res_dtype = _group_residual_dtype(s_new, group_node_names)
         with jax.named_scope("coupling:residual"):
             if use_interface_norm:
                 return coupling_residual_interface(
                     s_new, s_old, interface_edges_in_order,
                     group.atol, group.rtol,
-                )
+                ).astype(res_dtype)
             if use_mixed_norm:
                 return coupling_residual_mixed(
                     s_new, s_old, group_node_names,
                     group.atol, group.rtol,
-                )
+                ).astype(res_dtype)
             return coupling_residual_l2(
                 s_new, s_old, group_node_names, group.atol,
-            )
+            ).astype(res_dtype)
 
     def _estimate(residual, prev_residual, prev2_residual, first=False):
         """``(estimated distance to the fixed point, amplification)``.
@@ -3724,10 +3870,11 @@ def _run_coupled_block_impl(
             )
             sub = {nn: state_after_first[nn] for nn in group_node_names}
             if group.strict_convergence and group.solver == "ift":
-                # A non-finite estimate is a non-finite state; see
+                # Which message, decided from the state; see
                 # ``_strict_check`` and the ift branch below.
                 single_est = estimated_error(single_r, single_amp, step_scale)
-                sub = _strict_check(sub, single_est)
+                sub = _strict_check(sub, single_est, _state_measurable(
+                    state_after_first, group_node_names, _compute_residual))
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = sub[nn]
@@ -4067,6 +4214,88 @@ def _run_coupled_block_impl(
                     w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
+            # Under ``convergence_norm="interface"`` with a transform on an
+            # internal edge the norm reads each edge's *transformed* source
+            # value, so the report's spectral analysis is taken on that
+            # reading (``_interface_spectral_rate_at``); the raw source
+            # fields' weights above measured a different norm.  Static: a
+            # group without such an edge keeps the analysis it had.
+            transformed_reading = use_interface_norm and any(
+                e.transform is not None
+                and e.source_field in float_fields.get(e.source_node, ())
+                for e in interface_edges_in_order
+            )
+
+            def _reading_values(s_star):
+                """The interface norm's reading at ``s_star``: each internal
+                edge's source value after its transform, in the order and by
+                the rules ``coupling_residual_interface`` sums them."""
+                out = []
+                for e in interface_edges_in_order:
+                    v = s_star[e.source_node][e.source_field]
+                    if not jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating):
+                        continue
+                    if e.transform is not None:
+                        v = e.transform(v)
+                    v = jnp.asarray(v)
+                    if v.size == 0:
+                        continue
+                    out.append(v)
+                return out
+
+            def _reading(x_full):
+                """``Phi(x)``: the reading as one flat vector."""
+                vals = _reading_values(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                return jnp.concatenate([jnp.ravel(v).astype(work) for v in vals])
+
+            def _reading_reference(x_full):
+                """At each entry of the reading, its edge's ``max|Phi_e(x)|``."""
+                vals = _reading_values(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                return jnp.concatenate([
+                    jnp.broadcast_to(_field_reference(v, v), (v.size,)).astype(work)
+                    for v in vals])
+
+            def _reading_weights(x_full, zero_field_weight=None):
+                """``(weights, scale)`` of the reading at ``x_full``, entry by entry.
+
+                ``_norm_weights`` and ``_weight_scale`` on the reading: each
+                edge's value over its own magnitude, read only above the dead
+                band (or, with ``zero_field_weight``, the spectrum's weights,
+                a dead-banded edge keeping its own magnitude's), times a
+                common power of two that keeps every reciprocal normal.
+                """
+                vals = _reading_values(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                top = jnp.array(False)
+                for v in vals:
+                    top = jnp.logical_or(
+                        top, _field_reference(v, v) * jnp.finfo(v.dtype).tiny > 1.0)
+                parts = []
+                for v in vals:
+                    ref = _field_reference(v, v)
+                    k = jnp.where(top, 16.0, 1.0).astype(v.dtype)
+                    if zero_field_weight is None:
+                        active = jnp.logical_and(ref > group.atol, ref > 0)
+                        inv = jnp.where(active, k / jnp.where(active, ref, 1.0), 0.0)
+                    else:
+                        scaled = ref >= jnp.finfo(v.dtype).tiny
+                        inv = jnp.where(scaled, k / jnp.where(scaled, ref, 1.0),
+                                        zero_field_weight * k)
+                    parts.append(jnp.broadcast_to(inv, (v.size,)).astype(v.dtype).astype(work))
+                return jnp.concatenate(parts), jnp.where(top, 16.0, 1.0).astype(work)
+
+            def _reading_resolution(x_full, scale, evaluations):
+                """The reading's float resolution per entry, each edge's value at
+                its own dtype's eps (``_residual_resolution``), in the reading's
+                weights' units, for a pass that rounds like ``evaluations``."""
+                vals = _reading_values(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                eps = jnp.concatenate([
+                    jnp.full((v.size,), jnp.finfo(v.dtype).eps, work) for v in vals])
+                return (scale * evaluations.astype(work)) * _residual_resolution(eps)
+
             if accel_fields is not None:
                 # Positions of the accelerated (interface) fields in
                 # the full flat vector: flatten an index-valued state
@@ -4096,7 +4325,7 @@ def _run_coupled_block_impl(
 
             x_star_full, (n_iters, final_res, final_amp, vw) = _ift_solve(
                 step_pure, x0_full, consts, accel_init,
-                jnp.asarray(first_r, x0_full.dtype),
+                first_r,
                 conv_threshold_value,
                 int(max_iters),
                 group.acceleration,
@@ -4154,10 +4383,18 @@ def _run_coupled_block_impl(
                         for fld in float_fields[nn]}
                     for nn in group_node_names
                 }))
-                rho_spec, spec_resid, spec_amp, pair_ratio = _spectral_rate_at(
-                    step_pure, x_star_full, consts, weights, spec_weights,
-                    resolution=resolution, field_reference=_field_magnitudes,
-                )
+                if transformed_reading:
+                    # The gradient bound's triple, in the state's weights,
+                    # which its own norms are taken in.
+                    rho_spec, spec_resid, spec_amp = _spectral_rate_at(
+                        step_pure, x_star_full, consts, weights, spec_weights,
+                        resolution=resolution,
+                    )
+                else:
+                    rho_spec, spec_resid, spec_amp, pair_ratio = _spectral_rate_at(
+                        step_pure, x_star_full, consts, weights, spec_weights,
+                        resolution=resolution, field_reference=_field_magnitudes,
+                    )
                 # Its distance is the spectral bound (never below the Newton
                 # step); the resolvent is applied exactly to each probe's
                 # secant, a second difference of the adjoint's own matvec.
@@ -4167,6 +4404,28 @@ def _run_coupled_block_impl(
                     step_pure, x_star_full, consts, weights,
                     rho_spec, spec_resid, spec_amp, resolution=resolution,
                 )
+                if transformed_reading:
+                    # The report reads ``gradient_bound_usable`` off the
+                    # reading's spectrum below; the gradient bound rests on
+                    # the state's, so it stands only where that one settled.
+                    grad_bound = jnp.where(
+                        spectral_rate_settled(rho_spec, spec_resid), grad_bound,
+                        jnp.full_like(grad_bound, jnp.nan))
+                    # The report's triple, on the interface norm's own
+                    # reading: each internal edge's transformed value over its
+                    # own magnitude -- the coordinates ``residual`` and the
+                    # floor are measured in (``_interface_spectral_rate_at``).
+                    x_sg = jax.lax.stop_gradient(x_star_full)
+                    read_w, read_scale = _reading_weights(x_sg)
+                    read_spec_w, _ = _reading_weights(
+                        x_sg,
+                        zero_field_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0)
+                    rho_spec, spec_resid, spec_amp, pair_ratio = _interface_spectral_rate_at(
+                        step_pure, x_star_full, consts, spec_weights, _reading,
+                        read_w, read_spec_w,
+                        _reading_resolution(x_sg, read_scale, pass_evals),
+                        _reading_reference,
+                    )
                 # The factor the report's bound applies, in the returned
                 # state's weights: the gradient bound above takes its own
                 # residual in those weights already, so only the stored
@@ -4176,15 +4435,17 @@ def _run_coupled_block_impl(
                 rho_spec = jnp.full((), jnp.nan, x0_full.dtype)
                 spec_resid = spec_amp = rho_spec
             if group.strict_convergence:
-                # A non-finite estimate is a non-finite *state*.  Since
+                # A non-finite *state* is the diverged iteration: since
                 # 0.4.0 every norm reports ``inf`` for a field it cannot
                 # evaluate -- a NaN or inf entry, or a magnitude beyond
                 # what its dtype can measure a change at -- instead of
-                # dropping it from the dead band (MADD-ANO-019), so that
-                # is exactly the diverged iteration, and no larger cap
-                # would help: ``_strict_check`` names it first.
+                # dropping it from the dead band (MADD-ANO-019), and no
+                # larger cap would help: ``_strict_check`` names it first.
+                # Decided from the state (``_state_measurable``), not the
+                # estimate, which a norm can also overflow on a finite one.
                 final_est = estimated_error(final_res, final_amp, step_scale)
-                x_star_full = _strict_check(x_star_full, final_est)
+                x_star_full = _strict_check(x_star_full, final_est, _state_measurable(
+                    _embed(x_star_full), group_node_names, _compute_residual))
             # ``_embed`` restores the non-floating fields from the first
             # pass; they are recomputed at the returned floating state
             # (``_with_nonfloat_fields_at``, the rule both solvers share).

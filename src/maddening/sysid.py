@@ -165,7 +165,7 @@ def _x64_enabled() -> bool:
     """Whether ``jax_enable_x64`` is on: a float32 decomposition then comes
     from float32 leaves, and its precision remedy is float64 leaves rather
     than the x64 re-run (SYS-024)."""
-    return bool(jax.config.jax_enable_x64)
+    return bool(jax.config.read("jax_enable_x64"))
 
 
 @stability(StabilityLevel.EVOLVING)

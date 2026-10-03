@@ -3090,11 +3090,13 @@ def _drain_mesh(mesh) -> None:
 
     After :func:`_strict_error_if` raised on every device, Python sees the
     first device's error while the others may still be running their own
-    raising callback; a process that exits then aborts in teardown
-    ("terminate called without an active exception", about half the time on
-    a four-device CPU mesh).  A computation over every device of the mesh
-    runs on each after what came before it, so blocking on one waits them
-    all out.
+    raising callback; a process that exits then can abort in teardown
+    ("terminate called without an active exception": 3 runs in 6 of a bare
+    four-device CPU program that exited right after catching the error; no
+    run of 22 through the graph's entry points, with or without this).  A
+    computation over every device of the mesh runs on each after what came
+    before it, so blocking on one waits them all out.  Defensive: it costs
+    nothing on the path that does not raise.
     """
     from jax.sharding import NamedSharding, PartitionSpec  # noqa: PLC0415
 

@@ -2814,9 +2814,11 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     iteration_mode="jacobi"; the members' build order varied, everything
-    else fixed. Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    else fixed. In float64, 16-bit floats, vmap, multi-rate graphs,
+    sub-cycled groups, with a predictor and after a checkpoint restart the
+    constant-iterator statement is held: the states bit for bit, the
+    verdicts equal, the residual to round-off. Not claimed for mixed dtypes,
+    run_adaptive or sharded graphs.
   oracle: >-
     bit-identity of the states (constant iterators); for the accelerators,
     the forward error of each node's sum over the same four passes,
@@ -2842,17 +2844,33 @@ claims:
     passes).  Stated in the guide and the coupling_diagnostics docstring.
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_jacobi_states_do_not_depend_on_the_build_order_under_a_constant_iterator
-    f64: narrowed
+    f64:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[f64-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[f64-star-and-ungrouped-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[bfloat16-star-and-ungrouped-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[float16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[float16-star-and-ungrouped-ring]'
     jit: tests/core/test_coupling_claims_graphs.py::test_jacobi_states_agree_to_round_off_under_aitken_and_iqn_whatever_the_build_order
     grad: tests/core/test_coupling_claims_graphs.py::test_the_gradient_bound_holds_in_every_build_order
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[vmap-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[vmap-star-and-ungrouped-ring]'
+    multi_rate:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[multi_rate-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[multi_rate-star-and-ungrouped-ring]'
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[sub_cycled-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[sub_cycled-star-and-ungrouped-ring]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[predictors_warm_starts-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[predictors_warm_starts-star-and-ungrouped-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart:
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[checkpoint_restart-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_jacobi_under_a_constant_iterator_ignores_the_members_build_order[checkpoint_restart-star-and-ungrouped-ring]'
     sharded: narrowed
 
 - id: CPL-079
@@ -2864,10 +2882,11 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#start-here
     - docs/developer_guide/coupling_algorithm_guide.md#invariants
   conditions: >-
-    two groups of different modes. Not claimed for float64 (x64), mixed
-    dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled groups,
-    predictors or warm starts, run_adaptive, checkpoint restarts or sharded
-    graphs.
+    two groups of different modes. Under run_adaptive one controller chooses
+    the step for the whole graph from every field's step-doubling error, so
+    an under-converged group's iterate moves the steps the other is given;
+    with both converged the groups keep to themselves there too. Not claimed
+    for sharded graphs.
   oracle: the counterfactual with one group's mode flipped.
   tests:
     - tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_gives_each_group_its_own_schedule
@@ -2878,17 +2897,35 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_groups_keep_independent_iteration_counts
-    f64: narrowed
-    mixed_dtype: narrowed
-    16bit: narrowed
+    f64:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[f64]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[mixed_dtype]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[bfloat16]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[float16]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[bfloat16]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[float16]'
     jit: tests/core/test_coupling_fixture_invariants.py::test_mixed_mode_graph_steps_deterministically
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
-    adaptive: narrowed
-    checkpoint_restart: narrowed
+    vmap:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[vmap]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[vmap]'
+    multi_rate:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[multi_rate]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[multi_rate]'
+    sub_cycled:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[sub_cycled]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[sub_cycled]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[predictors_warm_starts]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[adaptive]'
+    checkpoint_restart:
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_each_group_in_a_two_group_graph_is_the_group_alone[checkpoint_restart]'
+      - 'tests/core/test_coupling_groups_in_every_domain.py::test_flipping_one_groups_schedule_leaves_the_other_alone[checkpoint_restart]'
     sharded: narrowed
 
 # ---------------------------------------------------------------------------
@@ -5163,9 +5200,9 @@ claims:
     - src/maddening/core/graph_manager.py:928 (_refuse_colliding_group_keys)
   conditions: >-
     both solvers, both schedules, every acceleration and norm, diagnostics
-    on. Not claimed for float64 (x64), mixed dtypes, 16-bit floats, vmap,
-    multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    on. A checkpoint restart runs on the structures without their typed PRNG
+    key leaves, which save_state cannot write (MADD-ANO-164). Not claimed
+    for mixed dtypes, run_adaptive or sharded graphs.
   oracle: bit-identity against the run under the original names.
   tests:
     - tests/property/test_coupling_invariances.py::test_renaming_every_node_changes_nothing_but_the_keys
@@ -5175,17 +5212,19 @@ claims:
   status: verified
   domains:
     f32: tests/property/test_coupling_invariances.py::test_renaming_every_node_changes_nothing_but_the_keys
-    f64: narrowed
+    f64: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[f64-chain-into-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[float16-chain-into-ring]'
     jit: tests/property/test_coupling_invariances.py::test_renaming_is_invariant_on_generated_graphs
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[vmap-chain-into-ring]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[multi_rate-chain-into-ring]'
+    sub_cycled: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[sub_cycled-chain-into-ring]'
+    predictors_warm_starts: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[predictors_warm_starts-chain-into-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain[checkpoint_restart-chain-into-ring]'
     sharded: narrowed
 
 - id: CPL-181
@@ -5207,10 +5246,10 @@ claims:
     closed by an edge read from the previous step, which follows the build
     order, and compile() warns naming it.  An outside node added between two
     members is scheduled after the group and reads it this step (a group is
-    one block in the schedule; MADD-ANO-144). Not claimed for float64 (x64),
-    mixed dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled groups,
-    predictors or warm starts, run_adaptive, checkpoint restarts or sharded
-    graphs.
+    one block in the schedule; MADD-ANO-144). A checkpoint restart runs on
+    the structures without their typed PRNG key leaves, which save_state
+    cannot write (MADD-ANO-164). Not claimed for mixed dtypes, run_adaptive
+    or sharded graphs.
   oracle: bit-identity against the original build order.
   tests:
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
@@ -5241,17 +5280,19 @@ claims:
     ungrouped-cycle test pins the dependence.
   domains:
     f32: tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing
-    f64: narrowed
+    f64: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[f64-chain-into-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[float16-chain-into-ring]'
     jit: tests/property/test_coupling_invariances.py::test_the_build_order_is_invariant_on_generated_graphs
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[vmap-chain-into-ring]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[multi_rate-chain-into-ring]'
+    sub_cycled: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[sub_cycled-chain-into-ring]'
+    predictors_warm_starts: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[predictors_warm_starts-chain-into-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[checkpoint_restart-chain-into-ring]'
     sharded: narrowed
 
 - id: CPL-182
@@ -5266,10 +5307,10 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#what-the-way-a-graph-is-built-can-change
   conditions: >-
     convergence_norm="interface", any acceleration and solver; two edges
-    with the same endpoints keep their relative order. Not claimed for
-    float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
-    restarts or sharded graphs.
+    with the same endpoints keep their relative order. A checkpoint restart
+    runs on the structures without their typed PRNG key leaves, which
+    save_state cannot write (MADD-ANO-164). Not claimed for mixed dtypes,
+    run_adaptive or sharded graphs.
   oracle: states and reports against the same graph with its edges added in reverse, and with its nodes renamed, bit for bit.
   tests:
     - tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
@@ -5283,17 +5324,19 @@ claims:
     (CPL-180) fail under this norm instead.
   domains:
     f32: tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
-    f64: narrowed
+    f64: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[f64-chain-into-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[float16-chain-into-ring]'
     jit: tests/property/test_coupling_invariances.py::test_the_interface_residual_does_not_depend_on_the_edge_order
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[vmap-chain-into-ring]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[multi_rate-chain-into-ring]'
+    sub_cycled: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[sub_cycled-chain-into-ring]'
+    predictors_warm_starts: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[predictors_warm_starts-chain-into-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain[checkpoint_restart-chain-into-ring]'
     sharded: narrowed
 
 - id: CPL-183
@@ -5320,9 +5363,13 @@ claims:
     stagnate (capped at 400 passes at rate 0.9 where the relay-free group
     stopped at 278 through the raw-residual fallback) -- the documented
     failure of Aitken's single-mode assumption on a Jacobi spectrum, not
-    rounding. Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, multi-rate graphs, sub-cycled groups, predictors or warm starts,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    rounding. In float64, sub-cycled groups and with a predictor both
+    statements are held (the second against the monolithic reference's exact
+    solve, under IQN-ILS and Jacobi); in 16-bit floats, vmap, multi-rate
+    graphs and after a checkpoint restart, the first. A checkpoint restart
+    runs on the structures without their typed PRNG key leaves, which
+    save_state cannot write (MADD-ANO-164). Not claimed for mixed dtypes,
+    run_adaptive or sharded graphs.
   oracle: bit-identity; the exact float64 fixed point and the operator norm of (I - M)^-1.
   tests:
     - tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_no_bit_under_a_gauss_seidel_constant_iterator
@@ -5334,17 +5381,25 @@ claims:
   status: verified
   domains:
     f32: tests/property/test_coupling_invariances.py::test_an_identity_relay_moves_no_bit_under_a_gauss_seidel_constant_iterator
-    f64: narrowed
+    f64:
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[f64-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_domain[f64-chain-into-ring]'
     mixed_dtype: narrowed
-    16bit: narrowed
+    16bit:
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[bfloat16-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[float16-chain-into-ring]'
     jit: tests/property/test_coupling_invariances.py::test_an_identity_relay_keeps_the_verdict
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[vmap-chain-into-ring]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[multi_rate-chain-into-ring]'
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[sub_cycled-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_domain[sub_cycled-chain-into-ring]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[predictors_warm_starts-chain-into-ring]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_domain[predictors_warm_starts-chain-into-ring]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain[checkpoint_restart-chain-into-ring]'
     sharded: narrowed
 
 # ---------------------------------------------------------------------------

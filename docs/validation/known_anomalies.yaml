@@ -11533,3 +11533,42 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit"
     github_issue: null
+  - anomaly_id: "MADD-ANO-164"
+    title: "save_state cannot write a typed PRNG key leaf"
+    description: >
+      `GraphManager.save_state` (`maddening.core.simulation.checkpoint.save_state`)
+      converts every state leaf with `np.asarray`, and a typed PRNG key array
+      (`jax.random.key(...)`) refuses the conversion: `TypeError: JAX array
+      with PRNGKey dtype cannot be converted to a NumPy array`.  A typed key
+      is a supported state leaf (the IFT adjoint carries it as its uint32
+      data, CPL-145), so a graph holding one, in a coupling group or outside
+      it, cannot be checkpointed at all, where `save_state` documents that it
+      persists all node states.  One node
+      `{"x": float32, "key": jax.random.key(0)}`, stepped once and saved,
+      raises on the tree and on the extracted 0.1.0, 0.2.0 and 0.3.1 trees
+      (CPU, empty HOME, jaxlib 0.11.0).  Loud: nothing is written and nothing
+      wrong is restored.  Found by the coupling inventory's domain lift: the
+      invariance claims' checkpoint-restart cells run on the named structures
+      without their key leaves.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An exception at save time: no checkpoint is written, so none can be
+      restored wrongly.  The cost is a run that cannot be checkpointed or
+      resumed while it holds a typed key.
+    affected_components:
+      - "maddening.core.simulation.checkpoint.save_state"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Hold the key's raw data instead (`jax.random.key_data(key)`, a uint32
+      array, rewrapped with `jax.random.wrap_key_data` where it is used), or
+      a legacy `jax.random.PRNGKey`, which is a uint32 array already.
+      Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to write a typed key as
+      its key data with its implementation recorded and rewrap it on load.
+      Until then a graph with a typed key leaf has no checkpoint.
+    verification:
+      - "tests/property/test_differential_coupling_topologies.py::test_a_structure_with_a_typed_prng_key_survives_a_checkpoint_restart"
+    github_issue: null

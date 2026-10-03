@@ -641,6 +641,12 @@ def sharded_cg(
     -------
     SharedSolveResult
         ``.value`` (solution), ``.converged``, ``.iters``, ``.residual_norm``.
+        A ``b`` with a NaN or infinite entry gives NaN in every entry of
+        ``.value``, a NaN ``.residual_norm`` and ``converged=False`` (and
+        under ``differentiable=True`` a non-finite tangent or cotangent a
+        NaN derivative).  Until 0.4.0 it gave zeros, on lineax and for
+        ``+-inf`` on the loop backend with ``converged=True``
+        (MADD-ANO-148).
 
     Stability
     ---------
@@ -727,7 +733,9 @@ def sharded_gmres(
     solve is GMRES on the transposed operator (``jax.linear_transpose``),
     with the same preconditioner.
 
-    See :func:`sharded_cg` for the matvec / mesh / in_specs contract.
+    See :func:`sharded_cg` for the matvec / mesh / in_specs contract, and
+    for the answer to a ``b`` with a NaN or infinite entry: NaN, with
+    ``converged=False`` (MADD-ANO-148).
 
     Parameters
     ----------

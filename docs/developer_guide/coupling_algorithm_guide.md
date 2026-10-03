@@ -1279,6 +1279,18 @@ derivative of a group in small units, or of a loss near its minimum, came
 back exactly zero and "successful" (MADD-ANO-113).  An ill-conditioned
 solve now fails at every scale alike, with the error below.
 
+A `b` with a NaN or infinite entry -- a node whose derivative cannot be
+evaluated, a NaN observation in the loss -- is answered with NaN in every
+entry, on every backend.  The relative tolerance is the reason it has to
+be said: `rtol * max|b|` is NaN or `inf` there, the zero initial guess
+passed lineax's test at once, and until 0.4.0's fix the derivative came
+back exactly zero, "successful", where `"dense"` and `solver="fori"` read
+NaN (MADD-ANO-147).  The Krylov backend is now handed zeros in place of
+such a `b`, so it does not iterate on NaN, and the answer is NaN -- which
+is also what an honest Krylov iteration gives, its first basis vector
+being `b / ||b||`.  The check is per right-hand side: under `jacfwd` or
+`jacrev` only the column with the non-finite entry is NaN.
+
 ## `linear_solver="dense"` is not an escape hatch on a grid
 
 When the GMRES adjoint fails to converge — an ill-conditioned

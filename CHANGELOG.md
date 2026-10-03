@@ -194,6 +194,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **A Krylov solve answers a right-hand side with a NaN or infinite entry with NaN, not zeros** (MADD-ANO-147, 148): the IFT tangent and adjoint of a coupling group read exactly 0.0, reported successful, for a NaN or `+-inf` tangent or cotangent (never released; dense and fori read NaN),
+  and `sharded_cg` (since 0.3.0, mostly with `converged=True`) and `ift_linear_solve`'s CG (since 0.3.1) returned zeros, as did every GMRES path on this cycle's relative tolerance.  Every Krylov path (`_ift_linear_solve`, `ift_linear_solve`, both `sharded_*` backends, tangents and cotangents included) now answers NaN in every entry; a sharded result reads `converged=False` and a NaN `residual_norm`.
+  Action: none for a finite right-hand side (its path is unchanged); a solve or derivative that read 0.0 from a non-finite input now reads NaN -- check the input with `jnp.isfinite`.
 - **The surrogate-training routes and the state streams are experimental in 0.4.0** (`/surrogate/train`, `/surrogate/status`, `/surrogate/activate`, `/surrogate/deactivate`; `/ws/state`, `/ws/state/binary`, `/ws/render`; `StateRelay`): they are to be hardened in 0.5.0 and may change in any minor release until then.
   They carried no level before; the routes are listed in the stability report (`register_route_stability`) and tagged `x-maddening-stability` in `/openapi.json`. Action: pin the version if you build on them.
 - **No absolute constant hides in a relative computation** (MADD-ANO-123 to 130; gate `scripts/check_numeric_constants.py`): `sharded_cg`/`sharded_gmres`/`ift_linear_solve` default `atol=None` (relative; a right-hand side near 1e-9 came back 40-100% wrong with `converged=True`), and the multi-rate GCD, Adam's `eps` and the adaptive error norm no longer depend on units.

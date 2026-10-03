@@ -137,3 +137,52 @@ def test_fit_multiple_shooting_takes_the_same_steps_for_a_loss_in_any_units():
                           np.asarray(ref.params["nodes"]["s"]["damping"]))
     for a, b in zip(jax.tree.leaves(ws), jax.tree.leaves(ref_ws)):
         assert np.array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_the_guards_curvature_is_the_losss_whatever_the_lift(record, monkeypatch):
+    """The identifiability guard's tolerance pairs the objective's largest
+    curvature with each coordinate's rounding, so it is in the loss's units.
+    A lifted run takes its Hessian-vector products from the lifted gradient,
+    a power of two larger, and must unlift them: the spring's ``(k, c, m)``
+    scale degeneracy fitted on the loss scaled by ``2**-120`` reports a
+    curvature ``2**-120`` times the unscaled fit's (to within a factor of
+    two, the selected iterates differing), not the lift times that."""
+    import warnings
+
+    from maddening import sysid
+
+    curvatures = []
+    real = sysid._hold_tolerance
+
+    def spy(loss_sel, grad_sel, curvature, *args, **kwargs):
+        curvatures.append(float(curvature))
+        return real(loss_sel, grad_sel, curvature, *args, **kwargs)
+
+    monkeypatch.setattr(sysid, "_hold_tolerance", spy)
+
+    def fit_at(scale):
+        obs = record
+
+        def loss(p):
+            x = _spring().run_scan_with_history(N, params=p)[1]["s"]["position"]
+            return scale * jnp.sum((x - obs) ** 2)
+
+        from maddening.core.params import ParamSpec
+
+        gm = _spring()
+        # ``log`` on all three, so the degeneracy is a fixed direction the
+        # guard can hold (with an identity damping it curves, and the guard
+        # rightly holds nothing).
+        gm.set_param_spec("s", "damping", ParamSpec(bounds=(0.0, None), transform="log"))
+        mask = jax.tree.map(lambda _: False, gm.trainable_mask(gm.params))
+        for key in ("stiffness", "damping", "mass"):
+            mask["nodes"]["s"][key] = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return fit(gm, jax.jit(loss), mask=mask, n_iter=60, lr=0.05)
+
+    fit_at(1.0)
+    fit_at(2.0 ** -120)
+    assert len(curvatures) == 2, curvatures
+    ratio = curvatures[1] / curvatures[0] / 2.0 ** -120
+    assert 0.5 <= ratio <= 2.0, ratio

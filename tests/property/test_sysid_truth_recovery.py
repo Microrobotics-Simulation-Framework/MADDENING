@@ -318,9 +318,13 @@ def test_fit_lm_answers_the_same_in_any_units(kinds, truth_at, start_at, which, 
 #: ``1e-19`` the products of ``JᵀJ`` and ``Jᵀr`` flush too.  ``fit_lm`` used to
 #: report ``converged=True`` at a point 2-7% off, or at its unmoved start,
 #: from ``1e-18`` down (audit_040_p4_10/fmu-sysid/
-#: repro_fitters_tiny_residual_units.py).
-_RESIDUAL_SCALES = [1e-30, 1e-25, 1e-20, 1e-19, 1e-18, 1e-10, 1e10, 1e18, 1e19, 1e20,
-                    1e25, 1e30]
+#: repro_fitters_tiny_residual_units.py).  At ``1e37`` the sum of even the
+#: column-framed ``Jᵀr`` overflows unless the residual is framed too.  Below
+#: about ``1e-31`` the residual's own rounding at the optimum (``s * eps``)
+#: is not a normal number: the model flushes it to an exact zero, which no
+#: fitter can tell from an exact fit, so the range ends there.
+_RESIDUAL_SCALES = [1e-30, 1e-25, 1e-20, 1e-19, 1e-18, 1e-10, 1e10, 1e18, 1e19,
+                    1e20, 1e25, 1e30, 1e37]
 
 #: Parameter natural scales across float32's range, for the identity
 #: (``clip``) and the ``logit`` coordinate (a ``log`` coordinate is

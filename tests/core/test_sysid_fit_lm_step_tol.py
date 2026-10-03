@@ -395,3 +395,36 @@ def test_a_truth_on_either_bound_converges(truth, x64):
     assert res.converged, (truth, x64, res.n_iter, res.best_loss)
     assert float(res.params["nodes"]["h"]["a"]) == truth
     assert float(res.params["nodes"]["h"]["b"]) == pytest.approx(0.7, rel=1e-5)
+
+
+def test_only_an_on_bound_pull_within_step_tol_counts_as_zero(monkeypatch):
+    """What the on-bound test is handed, both ways: a coordinate started on
+    its bound with the truth well inside keeps its inward gradient (the
+    pull's own Newton step is far beyond ``step_tol``), and at a truth
+    exactly on the bound the pull left at the end is zeroed."""
+    from maddening import sysid
+    from maddening.core.params import ParamSpec
+
+    seen = []
+    real = sysid._CoordinateBounds.inward_descent
+
+    def spy(self, theta, g, physical=None, rel_tol=0.0):
+        seen.append((np.asarray(theta, np.float64).copy(), np.asarray(g, np.float64).copy()))
+        return real(self, theta, g, physical, rel_tol)
+
+    monkeypatch.setattr(sysid._CoordinateBounds, "inward_descent", spy)
+    rng = np.random.default_rng(1)
+    B = rng.normal(size=(30, 2))
+    for truth, start, expect_pull in ((1.25, 0.5, True), (2.0, 1.25, False)):
+        seen.clear()
+        gm = _pair({"a": ParamSpec(bounds=(0.5, 2.0)), "b": ParamSpec()}, a=start, b=1.0)
+        Bj, yb = jnp.asarray(B, jnp.float32), jnp.asarray(B @ np.array([truth, 0.7]), jnp.float32)
+        res = fit_lm(gm, lambda p: Bj @ jnp.stack([p["nodes"]["h"]["a"],
+                                                   p["nodes"]["h"]["b"]]) - yb, n_iter=100)
+        assert res.converged
+        if expect_pull:
+            theta, g = seen[0]
+            assert theta[0] == 0.5 and g[0] < 0.0          # on the bound, pulled inward
+        else:
+            theta, g = seen[-1]
+            assert theta[0] == 2.0 and g[0] == 0.0         # rounding, zeroed

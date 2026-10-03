@@ -11567,7 +11567,10 @@ anomalies:
       The range is the working precision's: a Jacobian entry that is itself
       not a normal number (a residual of `1e-30` and a parameter at `1e30`
       together, in float32) is lost before any fitter sees it, and is read
-      as a parameter the residual does not depend on.  A float64 residual
+      as a parameter the residual does not depend on; and a residual whose
+      own rounding at the optimum is not a normal number (scale below about
+      `1e-31` in float32) is flushed to an exact zero there, which reads as
+      an exact fit.  A float64 residual
       whose `0.5 ||r||²` leaves float64's range (above about `1e153`) has no
       loss to report and is refused as non-finite; below about `1e-162`
       it reads `0.0` and is not called converged.  `fit`'s loss is the

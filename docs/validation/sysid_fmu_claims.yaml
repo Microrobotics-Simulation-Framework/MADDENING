@@ -2563,8 +2563,11 @@ claims:
     - docs/validation/known_anomalies.yaml (MADD-ANO-121)
   conditions: >-
     any residual whose entries, and whose Jacobian's, are normal numbers of
-    the working precision: scaled from 1e-30 to 1e30 in float32 (r * r,
-    JᵀJ and Jᵀr flush below about 1e-19 and overflow above 1e19 bare) and
+    the working precision at every iterate, the fit's own rounding at the
+    optimum (about s * eps for a residual of scale s) included: scaled from
+    1e-30 to 1e37 in float32 (r * r, JᵀJ and Jᵀr flush below about 1e-19
+    and overflow above 1e19 bare; below about 1e-31 the rounding itself
+    flushes to an exact zero, which reads as an exact fit) and
     from 1e-157 to 1e150 in float64 (a residual whose 0.5 ||r||² is a
     nonzero, finite float64 at every iterate: below the smallest subnormal
     the loss reads 0.0 and fit_lm refuses to call the iterate converged;
@@ -2578,6 +2581,7 @@ claims:
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system
     - tests/property/test_sysid_truth_recovery.py::test_fit_lm_recovers_the_truth_at_every_residual_scale
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_frames_reach_the_gauss_newton_test_too
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_marquardt_step_scales_exactly_with_its_residual
     - tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64
   status: verified
   notes: >-

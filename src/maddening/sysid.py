@@ -1388,22 +1388,6 @@ class _CoordinateBounds:
         lo_all = np.concatenate(los) if los else np.zeros(0)
         hi_all = np.concatenate(his) if his else np.zeros(0)
         lo_np, hi_np = lo_all[idx], hi_all[idx]
-        # A coordinate of a narrower leaf (a float32 constant in an x64
-        # graph) lives on its leaf's grid (:func:`_leaf_grid`), and
-        # ``constrain`` clips the leaf at its bound rounded to the leaf's
-        # dtype; so is the bound here, or an iterate on the grid would read
-        # as off a bound it sits on.  Unchanged for every other coordinate.
-        narrow, to_leaf_grid = _leaf_grid(start, idx, dtype)
-        if narrow.any():
-            with np.errstate(over="ignore"):
-                lo_np = np.where(np.isfinite(lo_np),
-                                 np.asarray(to_leaf_grid(jnp.asarray(
-                                     np.where(np.isfinite(lo_np), lo_np, 0.0), dtype))),
-                                 lo_np)
-                hi_np = np.where(np.isfinite(hi_np),
-                                 np.asarray(to_leaf_grid(jnp.asarray(
-                                     np.where(np.isfinite(hi_np), hi_np, 0.0), dtype))),
-                                 hi_np)
         #: The physical values the edges of each coordinate's range map to.
         self.p_lo = (np.concatenate(p_los) if p_los else np.zeros(0))[idx]
         self.p_hi = (np.concatenate(p_his) if p_his else np.zeros(0))[idx]
@@ -4964,7 +4948,8 @@ def fit_lm(
     a parameter measured in small units, MADD-ANO-121).
 
     That holds across the working precision's whole range -- any residual,
-    and any parameter, whose Jacobian entries are normal numbers: in
+    and any parameter, whose residual entries (its own rounding at the
+    optimum included) and Jacobian entries are normal numbers: in
     float32 a residual of ``1e-30`` or ``1e30``, a parameter whose natural
     scale is ``1e-23`` (a 10 nm particle's volume in cubic metres) or
     ``1e23``.  The loss is ``0.5 * ||r||²`` of ``r`` framed by a power of two

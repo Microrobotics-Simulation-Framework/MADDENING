@@ -354,6 +354,40 @@ def test_the_frames_reach_the_gauss_newton_test_too(linear_problem):
     np.testing.assert_array_equal(np.asarray(cand), np.asarray(base))
 
 
+def test_the_marquardt_step_scales_exactly_with_its_residual():
+    """``_marquardt_step`` frames the residual as well as ``J``'s columns, so
+    its step is linear in ``r`` to the bit for a power-of-two scaling --
+    down to a residual of ``2**-100`` (every entry still a normal number)
+    against a Jacobian whose columns hold entries down to ``1e-8`` of their
+    largest, where the products of a bare ``Jᵀr`` flush."""
+    from maddening.sysid import _marquardt_step
+
+    rng = np.random.default_rng(4)
+    J = jnp.asarray(rng.normal(size=(20, 3)) * np.array([1.0, 1e-2, 1e-4])
+                    * np.logspace(-8.0, 0.0, 20)[:, None], jnp.float32)
+    r = jnp.asarray(rng.normal(size=20), jnp.float32)
+    th = jnp.zeros(3, jnp.float32)
+    lo, hi = jnp.full(3, -jnp.inf, jnp.float32), jnp.full(3, jnp.inf, jnp.float32)
+    held = jnp.zeros(3, bool)
+    lam = jnp.asarray(1e-2, jnp.float32)
+    base, ok = _marquardt_step(th, r, J, lam, lo, hi, held)
+    assert bool(ok)
+    for k in (-100, -60, 60, 100):
+        assert float(jnp.min(jnp.abs(r * 2.0 ** k))) >= float(jnp.finfo(jnp.float32).tiny)
+        cand, ok = _marquardt_step(th, r * 2.0 ** k, J, lam, lo, hi, held)
+        assert bool(ok)
+        np.testing.assert_array_equal(np.asarray(cand) * 2.0 ** -k, np.asarray(base))
+    # At the top of the range ``Jᵀr`` itself overflows unless ``r`` is framed:
+    # twenty residual entries near ``1e38`` summed against framed columns.
+    Jw = jnp.asarray(rng.normal(size=(20, 3)), jnp.float32)
+    rw = jnp.asarray(np.sign(np.asarray(Jw[:, 0])) * 1.5, jnp.float32)
+    base_w, _ = _marquardt_step(th, rw, Jw, lam, lo, hi, held)
+    cand, ok = _marquardt_step(th, rw * 2.0 ** 126, Jw, lam, lo, hi, held)
+    assert bool(ok) and np.all(np.isfinite(np.asarray(cand)))
+    np.testing.assert_array_equal(np.asarray(cand, np.float64) * 2.0 ** -126,
+                                  np.asarray(base_w, np.float64))
+
+
 def test_a_loss_that_underflows_float64_is_never_converged():
     """Under x64 a residual near ``1e-170`` has a framed loss whose unframing
     underflows float64 to ``0.0`` while ``r`` is not zero; no step can lower

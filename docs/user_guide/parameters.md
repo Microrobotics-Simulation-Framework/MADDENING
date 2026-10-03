@@ -542,8 +542,9 @@ the step of a parameter measured in small units, which then read as
 converged), and with the identifiability guard below making its tests in
 coordinates no change of units moves, neither does the answer `fit_lm`
 returns with its defaults.  That holds across the whole float range, for
-any residual and any parameter whose Jacobian entries are normal numbers
-of the working precision -- in float32 a residual of `1e-30` or `1e30`, a
+any residual and any parameter whose residual entries (its own rounding at
+the optimum included) and Jacobian entries are normal numbers of the
+working precision -- in float32 a residual of `1e-30` or `1e30`, a
 parameter whose natural scale is `1e-23` (a 10 nm particle's volume in
 cubic metres) or `1e23` -- because the loss is computed on the residual
 framed by a power of two and the solve on Jacobian columns framed the

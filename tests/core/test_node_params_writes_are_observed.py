@@ -435,3 +435,16 @@ def test_values_compare_bit_for_bit():
     params["xs"][1] = 3.0
     params["nested"][0]["a"].append(2)
     assert _mutated_keys(params, snap) == {"xs", "nested"}
+
+
+def test_an_in_place_write_is_taken_in_once_and_a_later_calibration_wins():
+    """After the sync takes an in-place write in, its copy is renewed: a
+    ``gm.params`` write made afterwards is later and stays, rather than being
+    overwritten at every later read by a write already taken in."""
+    gm = _vec([1.0, 2.0])
+    gm.get_node("v").params["rates"][0] = 5.0
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [5.0, 2.0]
+    gm.params["nodes"]["v"]["rates"] = jnp.asarray([7.0, 2.0], jnp.float32)
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [7.0, 2.0]
+    gm.step()
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [7.0, 2.0]

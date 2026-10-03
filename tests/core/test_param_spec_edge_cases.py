@@ -125,6 +125,10 @@ def test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64():
         assert float(spec.to_constrained(jnp.asarray(0.0, jnp.float64))) == 0.0
         assert float(spec.to_constrained(jnp.asarray(-100.0, jnp.float64))) == pytest.approx(-3e38)
         spec.check(jnp.asarray(0.0, jnp.float64))
+        # Mixed dtypes: a float32 leaf in the same x64 process is still a
+        # float32 leaf, and is refused.
+        with pytest.raises(ValueError, match="cannot map a float32 leaf"):
+            spec.to_constrained(jnp.asarray(0.0, jnp.float32))
 
 
 def test_a_log_bound_its_dtype_cannot_hold_is_refused():

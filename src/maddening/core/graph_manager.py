@@ -5462,7 +5462,7 @@ class GraphManager:
         found by comparing each such value with its copy from the last sync
         (:func:`~maddening.core.node._mutated_keys`); so a write of the
         value the node already held counts, and one into a list is not lost
-        (MADD-ANO-171).  Never compiles, so it is safe from a getter and
+        (MADD-ANO-175).  Never compiles, so it is safe from a getter and
         from :meth:`compile`; node values are taken under
         ``jax.ensure_compile_time_eval``, so a sync inside a trace stores
         concrete arrays.

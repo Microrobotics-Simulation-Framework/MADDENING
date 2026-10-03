@@ -1306,7 +1306,7 @@ def test_multiple_shooting_recovers_from_noisy_window_starts_under_x64(leaves):
 
 
 # ---------------------------------------------------------------------------
-# fit_lm with float32 constants in an x64 graph: no creep (MADD-ANO-170)
+# fit_lm with float32 constants in an x64 graph: no creep (MADD-ANO-174)
 # ---------------------------------------------------------------------------
 
 

@@ -83,7 +83,7 @@ def test_fit_takes_the_same_steps_for_a_loss_whose_gradient_flushes(record, k):
     ``2**-120`` the loss's own value flushes to zero as well.  The cotangent
     is exact, so every iterate is the reference's, to the bit, either way;
     the gradient used to read zero there and the fit did not move
-    (MADD-ANO-170).  (At ``2**-120`` the losses all read 0.0, so the returned
+    (MADD-ANO-174).  (At ``2**-120`` the losses all read 0.0, so the returned
     iterate is the last -- a tie goes to the later one -- not the reference's
     lowest; the iterates themselves are compared.)"""
     import warnings

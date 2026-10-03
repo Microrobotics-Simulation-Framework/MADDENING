@@ -1211,7 +1211,7 @@ claims:
     New in round 7 (MADD-ANO-152).  Round 8 (B1, on d2429a6): an F flushed to exactly
     zero (|J| near 1e-20) read rank 0 of 3 silently and precision_limited
     False: the flag exempted a largest eigenvalue that is not positive.  It
-    is now flagged when J is not zero (MADD-ANO-172).
+    is now flagged when J is not zero (MADD-ANO-176).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_a_rank_decided_below_the_normal_range_warns
     f64: tests/core/test_sysid_claims_under_x64.py::test_a_rank_below_the_normal_range_warns_under_x64
@@ -1892,7 +1892,7 @@ claims:
   notes: >-
     Round 8 (B1, on d2429a6): at s = 1e-19 fit returned its start (its
     gradient's products flushed and it read zero), and at 1e-18 a point 1%
-    off (MADD-ANO-170).
+    off (MADD-ANO-174).
   domains:
     f32: tests/property/test_sysid_truth_recovery.py::test_fit_recovers_the_truth_at_every_residual_scale
     f64: tests/core/test_sysid_claims_under_x64.py::test_fit_recovers_the_truth_when_its_gradient_flushes_under_x64
@@ -2456,7 +2456,7 @@ claims:
     unconverged in units 1e-6, 1e3 and 1e8; converged in the others): the
     damped candidates' verdicts were the loss's rounding while the
     Gauss-Newton step still pointed at the optimum.  The floor rule now
-    takes that step (MADD-ANO-170).
+    takes that step (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
     f64: tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float64_fit_at_its_floor_is_converged
@@ -2534,7 +2534,7 @@ claims:
     Round 8 (B1, on d2429a6): with the truth exactly on a bound the on-bound
     gradient is rounding, and its sign decided the verdict -- converged on
     one bound of (0.5, 2.0) and not the other, and the opposite pair under
-    x64.  A pull within step_tol now counts as zero (MADD-ANO-170).
+    x64.  A pull within step_tol now counts as zero (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on_the_bound
     f64: tests/core/test_sysid_claims_under_x64.py::test_no_converged_test_fires_while_a_bound_coordinate_could_descend_under_x64
@@ -2591,7 +2591,7 @@ claims:
     1e-18 down, r * r, JᵀJ and Jᵀr flushed, and fit_lm reported
     converged=True 2% and 7% off (1e-18, 1e-19) or at its start (1e-20),
     best_loss 0.0.  The loss and both solves are now framed by powers of
-    two (MADD-ANO-170).
+    two (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual
     f64: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64
@@ -2641,7 +2641,7 @@ claims:
     an identity parameter whose natural scale is 1e-23 (the guide's own
     example) or 1e23 had diag(JᵀJ) flush or overflow and came back unmoved,
     converged=True, best_loss 5.35 against 0.  The columns are now framed
-    before A is formed (MADD-ANO-170).
+    before A is formed (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter
     f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system[float64]'
@@ -2713,7 +2713,7 @@ claims:
     Round 8 (B1, on d2429a6): with a float32 constant in an x64 graph fit_lm took
     25-39 iterations against 5-6 (its float64 coordinate crept below one
     float32 ulp a step) and a truth on a bound ran out of n_iter.  The
-    coordinate now stays on its leaf's grid (MADD-ANO-170).
+    coordinate now stays on its leaf's grid (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid.py::test_fit_lm_recovers_k_c_in_few_iterations
     f64: tests/property/test_sysid_truth_recovery.py::test_fit_lm_converged_means_the_truth_under_x64
@@ -2789,7 +2789,7 @@ claims:
     returned at 2.0 against 3) and at u = 1e6 (3.085), and declined with a
     RuntimeWarning at 1e-3.  Root cause SYS-063's; closed with it
     (MADD-ANO-135).  Round 8 (B1, on d2429a6): at natural scales 1e-23 and 1e23 the
-    answer was the start, "converged" (SYS-084's root cause, MADD-ANO-170).
+    answer was the start, "converged" (SYS-084's root cause, MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults
     f64: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults_under_x64
@@ -3049,7 +3049,7 @@ claims:
     dtype that cannot hold it, by name"; the same spec maps a float64 leaf.
   sources:
     - src/maddening/core/params.py:251 (ParamSpec._require_representable)
-    - docs/validation/known_anomalies.yaml (MADD-ANO-173)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-177)
   conditions: >-
     a logit width that overflows float32 (6e38 and 4e38) or is subnormal
     there (1e-40), through to_constrained, to_unconstrained, check, the
@@ -3067,7 +3067,7 @@ claims:
     Round 8 (B1, on d2429a6): ParamSpec(bounds=(-3e38, 3e38),
     transform="logit") was accepted, and on a float32 leaf constrain mapped
     the midpoint to the upper edge and far coordinates to NaN while check
-    refused every value (MADD-ANO-173).
+    refused every value (MADD-ANO-177).
   domains:
     f32: tests/core/test_param_spec_edge_cases.py::test_a_logit_width_its_dtype_cannot_hold_is_refused
     f64: tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64
@@ -3489,7 +3489,7 @@ claims:
     dict) every later write into it was lost, and so was an in-place write
     to a list-valued parameter, against _ParamsDict's "the graph also
     compares values".  The setter now stores a counting mapping and the
-    sync compares mutable values (MADD-ANO-171).
+    sync compares mutable values (MADD-ANO-175).
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_a_leaf_write_reaches_every_entry_point_too
     f64: narrowed

@@ -189,6 +189,8 @@ NOT_A_DOCS_READ: dict[str, str] = {
         "the URL route of the API server's generated docs page, not a file",
     "tests/api/test_auth_and_host_rules_hold_at_their_edges.py: /docs":
         "the URL route of the API server's generated docs page, not a file",
+    "tests/api/rest_claims_support.py: /docs":
+        "the URL route of the API server's generated docs page, not a file",
 }
 
 

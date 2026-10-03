@@ -225,6 +225,66 @@ def test_an_allowed_host_is_matched_whatever_port_either_side_names():
     assert client.get("/graph", headers={"Host": "sim.lab.example"}).status_code == 200
 
 
+@pytest.mark.parametrize("entry", ["http://x", "a b", "[::1", "x:y", "host:80:90", "",
+                                   "*.example.com", "evil.example/path", "user@host",
+                                   "host?x=1", "host#frag", "\thost", "host ", "b\u00fccher.example",
+                                   "-lead.example", "x" * 64 + ".example"])
+def test_an_allowed_hosts_entry_that_is_not_a_host_name_is_refused(entry):
+    """``allowed_hosts`` took anything ``Host``-shaped: ``"a b"``,
+    ``"*.example.com"`` (no wildcard is implemented), ``"user@host"``,
+    ``"evil.example/path"``, ``" host"`` -- none of which a browser's
+    ``Host`` header can match, so the server was silently configured to
+    serve a name it never would."""
+    with pytest.raises(ValueError, match="is not a host name"):
+        _server("127.0.0.1", allowed_hosts=[entry])
+
+
+@pytest.mark.parametrize("entry", ["proxy.internal:8443", "Alias.Local.", "localhost",
+                                   "10.0.0.7", "[::1]:8000", "[fe80::1]", "my_host.lan",
+                                   "a" * 63 + ".example", "xn--bcher-kva.example"])
+def test_an_allowed_hosts_entry_that_is_a_host_name_is_taken(entry):
+    assert _server("127.0.0.1", allowed_hosts=[entry]) is not None
+
+
+@pytest.mark.parametrize("token", ["abc ", " abc", "abc\n", "\tabc"])
+def test_a_token_with_whitespace_around_it_is_refused_at_construction(token):
+    """A client's ``Authorization: Bearer`` credential is read stripped, so
+    a configured token with whitespace around it could never be presented:
+    every client was refused, with nothing said at start-up.  It is a
+    configuration error, as a blank one is -- from ``token=`` and from the
+    environment alike."""
+    with pytest.raises(ValueError, match="whitespace before or after it"):
+        APIAuth(bind_host="0.0.0.0", token=token, environ={})
+    with pytest.raises(ValueError, match="whitespace before or after it"):
+        APIAuth(bind_host="0.0.0.0", environ={"MADDENING_API_TOKEN": token})
+    # Whitespace inside a token is the operator's choice, and works.
+    inner = APIAuth(bind_host="0.0.0.0", token="a b", environ={})
+    client = TestClient(SimulationServer(REGISTRY, graph_manager=_graph(), bind_host="0.0.0.0",
+                                         api_token="a b").create_app())
+    assert inner.verify("a b")
+    assert client.get("/graph", headers={"Authorization": "Bearer a b"}).status_code == 200
+
+
+def test_the_token_file_is_read_from_the_environment_the_instance_was_given(tmp_path,
+                                                                           monkeypatch):
+    """``APIAuth(environ=...)`` read ``MADDENING_API_TOKEN_FILE`` from
+    ``os.environ``: a path in *environ* was never written to, and an
+    explicit empty *environ* still wrote the process's path."""
+    given, process = tmp_path / "given", tmp_path / "process"
+    monkeypatch.setenv(TOKEN_FILE_ENV, str(process))
+    monkeypatch.delenv("MADDENING_API_TOKEN", raising=False)
+    auth = APIAuth(bind_host="0.0.0.0", environ={TOKEN_FILE_ENV: str(given)})
+    assert auth.announce(8000) is True
+    assert given.read_text() == auth.token + "\n" and not process.exists()
+    empty = APIAuth(bind_host="0.0.0.0", environ={})
+    assert empty.announce(8000) is True
+    assert not process.exists()
+    # With no environ the process's environment is read, as documented.
+    default = APIAuth(bind_host="0.0.0.0")
+    default.announce(8000)
+    assert process.read_text() == default.token + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Order: who is refused before what
 # ---------------------------------------------------------------------------
@@ -259,8 +319,7 @@ def test_healthz_answers_while_another_request_holds_the_graph():
 
 def test_a_new_token_file_is_written_with_mode_0600(tmp_path, monkeypatch):
     path = tmp_path / "token"
-    monkeypatch.setenv(TOKEN_FILE_ENV, str(path))
-    auth = APIAuth(bind_host="0.0.0.0", environ={})
+    auth = APIAuth(bind_host="0.0.0.0", environ={TOKEN_FILE_ENV: str(path)})
     assert auth.announce(8000) is True
     assert path.read_text() == auth.token + "\n"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
@@ -277,8 +336,7 @@ def test_a_token_file_that_already_existed_is_left_readable_by_its_owner_only(
     path = tmp_path / "token"
     path.write_text("the last run's token\n")
     path.chmod(0o644)
-    monkeypatch.setenv(TOKEN_FILE_ENV, str(path))
-    auth = APIAuth(bind_host="0.0.0.0", environ={})
+    auth = APIAuth(bind_host="0.0.0.0", environ={TOKEN_FILE_ENV: str(path)})
     assert auth.announce(8000) is True
     assert path.read_text() == auth.token + "\n"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600, oct(stat.S_IMODE(path.stat().st_mode))
@@ -292,8 +350,7 @@ def test_a_reader_who_had_the_old_token_file_open_cannot_read_the_new_token(tmp_
     path.write_text("the last run's token\n")
     path.chmod(0o644)
     with open(path, encoding="utf-8") as reader:          # opened while 0644
-        monkeypatch.setenv(TOKEN_FILE_ENV, str(path))
-        auth = APIAuth(bind_host="0.0.0.0", environ={})
+        auth = APIAuth(bind_host="0.0.0.0", environ={TOKEN_FILE_ENV: str(path)})
         assert auth.announce(8000) is True
         assert reader.read() == "the last run's token\n"
     assert path.read_text() == auth.token + "\n"
@@ -310,8 +367,7 @@ def test_a_token_file_path_that_is_a_link_writes_where_it_points(tmp_path, monke
     real.chmod(0o664)
     link = tmp_path / "token"
     link.symlink_to(real)
-    monkeypatch.setenv(TOKEN_FILE_ENV, str(link))
-    auth = APIAuth(bind_host="0.0.0.0", environ={})
+    auth = APIAuth(bind_host="0.0.0.0", environ={TOKEN_FILE_ENV: str(link)})
     auth.announce(8000)
     assert link.is_symlink() and real.read_text() == auth.token + "\n"
     assert stat.S_IMODE(real.stat().st_mode) == 0o600
@@ -331,8 +387,7 @@ def test_a_token_file_that_cannot_be_written_is_left_alone_and_logged(tmp_path, 
     path.chmod(0o644)
     directory.chmod(0o555)
     try:
-        monkeypatch.setenv(TOKEN_FILE_ENV, str(path))
-        auth = APIAuth(bind_host="0.0.0.0", environ={})
+        auth = APIAuth(bind_host="0.0.0.0", environ={TOKEN_FILE_ENV: str(path)})
         with caplog.at_level("WARNING", logger="maddening.api.auth"):
             assert auth.announce(8000) is True
         assert path.read_text() == "old\n"

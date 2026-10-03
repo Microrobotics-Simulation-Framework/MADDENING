@@ -84,6 +84,7 @@ SLOW_RULE = (_SLOW_RULE,)
 _CLAIMS = "tests/compliance/test_claims_inventories.py"
 CLAIMS = (_CLAIMS,)
 CPL = "docs/validation/coupling_claims.yaml"
+RST = "docs/validation/rest_runpod_claims.yaml"
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
@@ -452,6 +453,29 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("K4", _CLAIMS, "        if value == NOT_APPLICABLE and d in covered:\n", "        if False:\n",
        CLAIMS, "n/a accepted for a domain the conditions name: an untested domain hidden as "
        "inapplicable"),
+    _M("K5", RST, "    runs. Not claimed for a server shutting down.\n", "    runs.\n", CLAIMS,
+       "a narrowed server domain whose conditions no longer exclude it: REST-051 reads as "
+       "claimed while the server shuts down"),
+    _M("K6", RST, "    no_token: tests/api/test_concurrent_requests_are_serialised.py::"
+       "test_concurrent_steps_are_all_taken_bit_identical_to_serial\n"
+       "    concurrent: tests/api/test_rest_claims_under_concurrent_requests.py::"
+       "test_simultaneous_steps_are_all_taken_bit_identical_to_serial\n",
+       "    no_token: tests/api/test_concurrent_requests_are_serialised.py::"
+       "test_concurrent_steps_are_all_taken_bit_identical_to_serial\n"
+       "    concurrent: tests/api/test_concurrent_requests_are_serialised.py::"
+       "test_concurrent_steps_are_all_taken_bit_identical_to_serial\n", CLAIMS,
+       "a concurrent cell citing in-process TestClient threads, not a real server"),
+    _M("K7", _CLAIMS, "        return bool(_REAL_SERVER.search(text) and _SIMULTANEOUS.search(text))\n",
+       "        return bool(_SIMULTANEOUS.search(text))\n", CLAIMS,
+       "the concurrent witness satisfied by threads alone: in-process clients read as a real "
+       "server"),
+    _M("K8", _CLAIMS, '                                           "server": SERVER_DOMAINS}\n',
+       "                                           }\n", CLAIMS,
+       "the server domain set dropped: the REST inventory's matrix checked by nothing"),
+    _M("K9", _CLAIMS, '    (re.compile(r"\\bnon-loopback (?:bind|spelling)", re.IGNORECASE), '
+       '("token_enforced",)),\n', "", CLAIMS,
+       "a non-loopback bind no longer covers token_enforced: the token cell of a row about "
+       "such a bind could hide as n/a"),
 )
 
 

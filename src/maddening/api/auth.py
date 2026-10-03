@@ -35,6 +35,9 @@ or blank string is a configuration error and raises**: it is what
 ``MADDENING_API_TOKEN=$UNSET_VARIABLE`` produces, and reading it as
 "authentication off" would resurrect exactly the failure this module
 exists to remove.  Unset the variable if you want a generated token.
+A token with whitespace before or after it raises too: a client's
+``Authorization`` header is read with that whitespace stripped, so such
+a token could never be presented.
 
 A generated token is only useful to somebody who can read the log.
 When nothing can — a detached container, a job whose stdout goes
@@ -311,9 +314,10 @@ class APIAuth:
         A non-loopback value turns authentication on for every request.
     token : str, optional
         An explicit token, overriding the environment.  Must be a
-        non-blank string.
+        non-blank string without whitespace before or after it.
     environ : mapping, optional
-        Environment to read; defaults to :data:`os.environ`.
+        Environment to read (``MADDENING_HOST``, ``MADDENING_API_TOKEN``,
+        ``MADDENING_API_TOKEN_FILE``); defaults to :data:`os.environ`.
 
     Attributes
     ----------
@@ -335,7 +339,8 @@ class APIAuth:
         If ``MADDENING_API_TOKEN`` (or *token*) is set but blank.  See
         the module docstring: an empty token is a configuration mistake,
         and silently reading it as "no authentication" is the defect
-        this class exists to fix.
+        this class exists to fix.  Also if it has whitespace before or
+        after it, which no ``Authorization`` header can present.
 
     Examples
     --------
@@ -361,8 +366,8 @@ class APIAuth:
         self.bind_is_loopback = is_loopback(bind_host)
 
         source = token if token is not None else env.get(TOKEN_ENV)
+        origin = "the token= argument" if token is not None else TOKEN_ENV
         if source is not None and not source.strip():
-            origin = "the token= argument" if token is not None else TOKEN_ENV
             raise ValueError(
                 f"{origin} is set but blank. A blank token is a configuration "
                 f"error, not a request to disable authentication -- it is what "
@@ -370,7 +375,20 @@ class APIAuth:
                 f"have the server generate a token and log it once, or set it "
                 f"to a value."
             )
+        if source is not None and source != source.strip():
+            # bearer_from_headers strips the credential a client presents,
+            # so a token with whitespace around it could never be matched:
+            # every client was refused, with nothing said at start-up.
+            raise ValueError(
+                f"{origin} has whitespace before or after it ({len(source)} "
+                f"characters, {len(source.strip())} without it). An "
+                "'Authorization: Bearer' header cannot carry that whitespace -- "
+                "the server strips it from what a client presents -- so no "
+                "client could ever present this token. Set it without the "
+                "surrounding whitespace (a trailing newline from a file, say)."
+            )
         self.generated = source is None
+        self._environ = env
         self.token = secrets.token_urlsafe(TOKEN_BYTES) if source is None else source
         self._announced = False
 
@@ -517,7 +535,11 @@ class APIAuth:
         the server cannot write, a file another user owns in a sticky
         directory) nothing is written and the failure is logged.
         """
-        path = os.environ.get(TOKEN_FILE_ENV, "").strip()
+        # The environment the instance was built with (``environ=``), as
+        # every other setting is read: this used to read os.environ, so
+        # ``environ={"MADDENING_API_TOKEN_FILE": ...}`` wrote nothing, and
+        # an explicit ``environ={}`` still wrote to the process's path.
+        path = (self._environ.get(TOKEN_FILE_ENV) or "").strip()
         if not path:
             return
         target = os.path.realpath(path)

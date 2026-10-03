@@ -77,8 +77,15 @@ class CouplingGroup:
         largest magnitude (the larger of its two iterates' ``max|v|``),
         so this is a *relative* tolerance: it equals the pre-0.4.0
         absolute threshold exactly when every field's largest magnitude
-        is 1, and is an absolute threshold of ``tolerance * max|v|`` per
-        field otherwise.
+        is 1.  It is one threshold for the whole group, not one per
+        field: the norm is the root-sum-square, over every entry of
+        every floating field of every member, of that entry's change
+        divided by its field's largest magnitude.  A field of ``n``
+        entries each moving by ``tolerance * max|v|`` therefore reads
+        ``tolerance * sqrt(n)``, and so do ``n`` one-entry fields each
+        moving by that much of their own magnitude; to hold every entry
+        to ``tolerance`` of its field, divide by the square root of the
+        number of entries the group's norm reads.
 
         Read **only** when ``convergence_norm="l2"``.  The other two
         norms carry their tolerance in ``rtol`` and test against a

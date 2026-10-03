@@ -869,7 +869,11 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     ``A`` exactly, and ``residual`` is ``0.0``.  A group with more
     independent interface scalars than ``n_steps`` gets Ritz values
     that lie, for a normal ``A``, inside the convex hull of the
-    spectrum -- an estimate of ``rho`` *from below* -- and a
+    spectrum -- an estimate of ``rho`` *from below* -- and for a
+    non-normal ``A`` inside its field of values, which can reach past
+    the spectral radius, so the estimate can then read from either side
+    (1.17 for a weighted cyclic shift of nine entries whose every
+    eigenvalue has modulus 0.95) -- and a
     ``residual`` that is not small, which is what
     :func:`spectral_rate_settled` reports and
     :func:`spectral_error_bound` adds a margin for.  Eight steps
@@ -1217,7 +1221,8 @@ def spectral_error_bound(residual, rho, arnoldi_residual, amplification=1.0,
       the Krylov space is *not* invariant -- the Arnoldi residual is
       zero when the space captured the Jacobian's range, so a resolved
       spectrum pays no margin, and where it is not zero the Ritz radius
-      is an estimate from below and is inflated by the size of what the
+      is an estimate (from below for a normal ``A``, from either side
+      for a non-normal one) and is inflated by the size of what the
       space missed.
 
     Neither is what :func:`error_amplification` could state: it read

@@ -329,8 +329,10 @@ the compressed Jacobian.  A coupling Jacobian's rank is at most the
 number of boundary scalars crossing the group's edges, so for a group
 with up to eight of them the Krylov space is the whole range, the
 non-zero spectrum is exact and `h_{k+1,k}` is zero; for a larger group
-the radius is an estimate from below, `spectral_usable` is false, and
-the bound carries a margin of `2 h_{k+1,k}` on the radius.
+the radius is an estimate -- from below for a normal Jacobian, from
+either side for a non-normal one (1.17 on a Jacobi ring of nine relays
+whose every eigenvalue has modulus 0.95) -- `spectral_usable` is false,
+and the bound carries a margin of `2 h_{k+1,k}` on the radius.
 
 For a *linear* map the error of any iterate is `(A − I)⁻¹` of its
 residual — no step sequence, relaxation factor or accelerator enters —

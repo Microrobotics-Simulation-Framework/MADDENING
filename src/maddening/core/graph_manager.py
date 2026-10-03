@@ -8762,8 +8762,12 @@ class GraphManager:
               0.2 it reads 0.999.  Exact (non-zero eigenvalues, to
               float32) for a group whose Jacobian has rank at most
               eight -- rank is at most the number of boundary scalars
-              crossing the group's edges -- and an estimate from below
-              otherwise, which ``"spectral_usable"`` reports.  **Only
+              crossing the group's edges -- and an estimate otherwise,
+              which ``"spectral_usable"`` reports: from below for a
+              normal ``dF/dx`` (in the norm's weights), from either side
+              for a non-normal one, whose Ritz values can lie outside
+              the spectrum's convex hull (1.17 on a Jacobi ring of nine
+              relays whose every eigenvalue has modulus 0.95).  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1`` (no fixed point was solved) and on
@@ -8868,7 +8872,8 @@ class GraphManager:
               ``"rho_spectral"``), where the bound is ``inf``, for
               a group with more independent interface scalars than the
               eight Krylov steps resolve -- there ``"rho_spectral"``
-              is from below and the bound carries only the margin --
+              is an estimate (from below only for a normal ``dF/dx``)
+              and the bound carries only the margin --
               where the residual never entered the Krylov space
               (its outside fraction is reported as unresolved), and
               where the residual is at its float floor

@@ -194,6 +194,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **The surrogate-training routes and the state streams are experimental in 0.4.0** (`/surrogate/train`, `/surrogate/status`, `/surrogate/activate`, `/surrogate/deactivate`; `/ws/state`, `/ws/state/binary`, `/ws/render`; `StateRelay`): they are to be hardened in 0.5.0 and may change in any minor release until then.
+  They carried no level before; the routes are listed in the stability report (`register_route_stability`) and tagged `x-maddening-stability` in `/openapi.json`. Action: pin the version if you build on them.
 - **No absolute constant hides in a relative computation** (MADD-ANO-123 to 130; gate `scripts/check_numeric_constants.py`): `sharded_cg`/`sharded_gmres`/`ift_linear_solve` default `atol=None` (relative; a right-hand side near 1e-9 came back 40-100% wrong with `converged=True`), and the multi-rate GCD, Adam's `eps` and the adaptive error norm no longer depend on units.
   Coupled fields below `finfo.tiny/eps` warn once (`UnderflowRangeWarning`); the power-of-two frames are one helper (bit-identical, 125 configs x 3 jaxlibs).  `run_adaptive`'s `atol`/`dt_min` stay absolute (MADD-ANO-128).
   Action: pass `atol` only as a noise floor in `b`'s units; re-run small-unit solves, `fit` runs and nanosecond multi-rate graphs; give adaptive steppers `atol` in your state's units.
@@ -349,6 +351,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **REST round-6 audit fixes** (MADD-ANO-131 to 134; 096 completed): a surrogate job re-checks its memory budget on the graph it sweeps; `POST /sim/profile` restores the live state and keeps the streams out; a reset, a state write, a node edit and a surrogate swap publish to the streams (the relay adds `run_adaptive`'s `dt`); a JAX trace stops itself at 10 000 steps or 600 s;
+  `/sim/run` reports `steps_run` when a step raises; runner routes answer within one lock timeout and say when they left the runner stopped; checkpoint saves are atomic; past the stream cap a client gets 1013, not 403; `run_pod.py` records only a real commit and `--summarise` survives older files.
+  Action: none; read `GET /sim/profile/jax/status` if a long trace ends early.
 - **`fit_lm` no longer depends on the parameters' units, and a shrunken step cannot read as converged** (MADD-ANO-121, never released): the Marquardt floor is per column, and `converged` also needs the undamped Gauss-Newton step to be stationary;
   **every reader of `gm.params` sees a pending `node.params` write** (MADD-ANO-122, never released): one sync point, the `gm.params` getter, serves readers and runners alike, and the later write wins.  Action: none.
 - **A node reading a cycle runs after it in the same step, whatever order it was added in** (MADD-ANO-120, since 0.1.0: added before a coupling group's members, it read their previous-step output); the interface norm sums its edges in the group's sweep order, not insertion order; `solver="fori"` docs: forward mode works.

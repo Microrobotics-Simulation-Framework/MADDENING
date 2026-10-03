@@ -216,14 +216,19 @@ The report covers the modules this release worked on. It does not cover:
 
 - **`maddening.api.server.SimulationServer`** — the REST API's central class,
   in every example, with no tag. Two functions beside it in the same file now
-  have one, which makes the omission more visible rather than less.
+  have one, which makes the omission more visible rather than less.  Its
+  surrogate-training routes and state streams were marked `experimental`
+  late in the cycle (`ROUTE_STABILITY`, registered with
+  `register_route_stability`), for hardening in 0.5.0; the class and its
+  other routes are still untagged.
 - **`maddening.CloudSession` / `maddening.CloudConfig`** — importable from the
   top-level package, with new fields added this release (PR 94:
   `api_token`, `transport_token`, `container_env()`, `CloudConfig.ports`,
   `CloudConfig.api_port`), and untagged. So is the rest of `cloud.session`
   and all of `cloud.launcher`.
-- **The whole of `maddening.viz` and `maddening.viz.backends`** — zero
-  `@stability` occurrences in the package, including `NetworkRelay`,
+- **The whole of `maddening.viz` and `maddening.viz.backends`**, but for
+  `StateRelay` (`experimental`, with the streams that read it) — no other
+  `@stability` occurrence in the package, including `NetworkRelay`,
   `NetworkReceiver`, `CommandPublisher` and `CommandReceiver`, which are the
   components MADD-ANO-015 is about.
 - **`maddening.surrogates`' concrete architectures and training callbacks** —

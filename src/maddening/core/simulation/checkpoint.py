@@ -473,7 +473,8 @@ def compute_checkpoint_hash(path: str | Path) -> str:
     return h.hexdigest()
 
 
-def write_manifest(npz_path: str | Path, *, extra: Optional[dict] = None) -> Path:
+def write_manifest(npz_path: str | Path, *, extra: Optional[dict] = None,
+                   manifest_path: str | Path | None = None) -> Path:
     """Write a sidecar ``<file>.manifest.json`` next to an ``.npz`` file.
 
     The manifest captures:
@@ -481,6 +482,11 @@ def write_manifest(npz_path: str | Path, *, extra: Optional[dict] = None) -> Pat
       * ``sha256`` — full hash of the .npz body
       * ``size_bytes``
       * ``extra`` — caller-supplied dict (commit hash, sim_time, etc.)
+
+    *manifest_path* writes it elsewhere: the manifest of a checkpoint still
+    under a temporary name, to be moved into place after its manifest.  The
+    file is written under a temporary name and moved into place
+    (``os.replace``), so a reader never sees half of one.
 
     Returns the manifest path.
     """
@@ -491,8 +497,16 @@ def write_manifest(npz_path: str | Path, *, extra: Optional[dict] = None) -> Pat
         "size_bytes": npz_path.stat().st_size,
         "extra": dict(extra or {}),
     }
-    manifest_path = npz_path.with_suffix(npz_path.suffix + ".manifest.json")
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    if manifest_path is None:
+        manifest_path = npz_path.with_suffix(npz_path.suffix + ".manifest.json")
+    manifest_path = Path(manifest_path)
+    partial = manifest_path.with_name(f".{manifest_path.name}.{os.getpid()}.partial")
+    try:
+        partial.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        os.replace(partial, manifest_path)
+    finally:
+        if partial.exists():
+            partial.unlink()
     return manifest_path
 
 

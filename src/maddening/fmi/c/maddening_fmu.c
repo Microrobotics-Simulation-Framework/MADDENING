@@ -59,12 +59,30 @@
  * POSIX, _create_locale on Windows) and formats and parses through it
  * (uselocale around the call on POSIX, the _l functions on Windows).
  *
- * State machine.  fmi3GetClock / fmi3SetClock are refused: FMI 3.0 allows
- * them only in Event Mode, which this FMU does not have
- * (hasEventMode="false"), and its clocks are constant-interval, their
- * ticks implied by time.  The bridge holds the rest of the state machine
- * (after fmi3Terminate it refuses doStep, set and initialize until
- * fmi3Reset).  The wrapper's own clock, which fmi3DoStep reports as
+ * State machine.  The wrapper holds FMI 3.0's co-simulation states for an
+ * FMU without Event Mode or structural parameters, and refuses a call its
+ * state does not allow, with fmi3Error, a log message and nothing sent:
+ *
+ *   Instantiated  --fmi3EnterInitializationMode-->  Initialization Mode
+ *   Initialization Mode  --fmi3ExitInitializationMode-->  Step Mode
+ *   Step Mode  --fmi3Terminate-->  Terminated
+ *   any state  --fmi3Reset-->  Instantiated
+ *
+ * fmi3DoStep is allowed in Step Mode only; fmi3Get* in Initialization Mode,
+ * Step Mode and Terminated; fmi3Set* in Instantiated, Initialization Mode
+ * and Step Mode (a zero-length call too).  fmi3EnterStepMode is always
+ * refused: FMI 3.0 allows it only from Event Mode, and without Event Mode
+ * fmi3ExitInitializationMode enters Step Mode itself.  So are
+ * fmi3EnterConfigurationMode / fmi3ExitConfigurationMode (the FMU has no
+ * structural parameters), fmi3SetTime (model exchange), and fmi3GetClock /
+ * fmi3SetClock, which FMI 3.0 allows only in Event Mode (its clocks are
+ * constant-interval, their ticks implied by time).  The FMU-state
+ * functions are allowed in every state and leave it as it is.  Until
+ * 0.4.0's fix fmi3DoStep before fmi3EnterInitializationMode advanced the
+ * model, and fmi3ExitInitializationMode, fmi3EnterStepMode and a
+ * zero-length fmi3Set* answered fmi3OK after fmi3Terminate.  The bridge
+ * keeps its own check of the Terminated state (it refuses doStep, set and
+ * initialize until fmi3Reset).  The wrapper's own clock, which fmi3DoStep reports as
  * lastSuccessfulTime when it fails, follows fmi3SetFMUState (the bridge's
  * reply carries the restored time) and fmi3Reset (only once the reset
  * succeeded).
@@ -155,6 +173,8 @@ typedef struct {
     const char *raw;       /* its raw part (points into resp) */
     size_t raw_len;
     double timeout_s;      /* MADDENING_FMU_TIMEOUT; 0 = no deadline */
+    int phase;             /* FMI 3.0 state (Phase); 0, as calloc leaves it, is
+                              Instantiated */
     int c_numeric_ready;   /* c_numeric holds a C LC_NUMERIC locale */
 #ifdef _WIN32
     _locale_t c_numeric;
@@ -162,6 +182,40 @@ typedef struct {
     locale_t c_numeric;
 #endif
 } Instance;
+
+/* ------------------------------------------------- FMI 3.0 state machine */
+
+/* The co-simulation states of an FMU without Event Mode or structural
+ * parameters (see the State machine note at the top of this file). */
+typedef enum {
+    PHASE_INSTANTIATED = 0,
+    PHASE_INITIALIZATION_MODE = 1,
+    PHASE_STEP_MODE = 2,
+    PHASE_TERMINATED = 3
+} Phase;
+
+#define IN_INSTANTIATED   (1u << PHASE_INSTANTIATED)
+#define IN_INITIALIZATION (1u << PHASE_INITIALIZATION_MODE)
+#define IN_STEP_MODE      (1u << PHASE_STEP_MODE)
+#define IN_TERMINATED     (1u << PHASE_TERMINATED)
+#define ALLOWED_GET (IN_INITIALIZATION | IN_STEP_MODE | IN_TERMINATED)
+#define ALLOWED_SET (IN_INSTANTIATED | IN_INITIALIZATION | IN_STEP_MODE)
+
+static const char *phase_name(int phase) {
+    switch (phase) {
+    case PHASE_INSTANTIATED: return "Instantiated";
+    case PHASE_INITIALIZATION_MODE: return "Initialization Mode";
+    case PHASE_STEP_MODE: return "Step Mode";
+    case PHASE_TERMINATED: return "Terminated";
+    default: return "unknown";
+    }
+}
+
+/* 1 if the instance's state allows `fn` (`allowed` is a mask of IN_*
+ * bits, `where` says which states in words); else logs and returns 0, and
+ * the caller returns fmi3Error with nothing sent.  An unknown state is
+ * allowed nothing. */
+static int phase_allows(Instance *in, unsigned allowed, const char *fn, const char *where);
 
 /* ---------------------------------------------------- C-locale numbers */
 
@@ -240,6 +294,17 @@ static void inst_log(Instance *in, fmi3Status status, const char *category,
     if (in && in->log) {
         in->log(in->env, status, category, msg);
     }
+}
+
+static int phase_allows(Instance *in, unsigned allowed, const char *fn, const char *where) {
+    if (in->phase >= PHASE_INSTANTIATED && in->phase <= PHASE_TERMINATED
+            && (allowed & (1u << in->phase)))
+        return 1;
+    char msg[384];
+    snprintf(msg, sizeof msg, "maddening_fmu: %s is not allowed in the %s state; FMI 3.0 "
+             "allows it %s.  Nothing was sent", fn, phase_name(in->phase), where);
+    inst_log(in, fmi3Error, "logStatusError", msg);
+    return 0;
 }
 
 /* A sidecar that went away must surface as fmi3Error from the next call,
@@ -900,6 +965,9 @@ FMI3_Export fmi3Status fmi3EnterInitializationMode(
     (void)toleranceDefined; (void)tolerance; (void)stopTimeDefined; (void)stopTime;
     Instance *in = (Instance *)instance;
     if (!in) return fmi3Error;
+    if (!phase_allows(in, IN_INSTANTIATED, "fmi3EnterInitializationMode",
+                      "in the Instantiated state only (after instantiation or fmi3Reset)"))
+        return fmi3Error;
     if (!isfinite(startTime)) {
         inst_log(in, fmi3Error, "logStatusError", "maddening_fmu: start time must be finite");
         return fmi3Error;
@@ -909,11 +977,19 @@ FMI3_Export fmi3Status fmi3EnterInitializationMode(
     fmi3Status st = bridge_call(in, req);
     if (st != fmi3OK) return st;
     in->time = startTime;
+    in->phase = PHASE_INITIALIZATION_MODE;
     return fmi3OK;
 }
 
+/* Without Event Mode, leaving Initialization Mode enters Step Mode. */
 FMI3_Export fmi3Status fmi3ExitInitializationMode(fmi3Instance instance) {
-    return instance ? fmi3OK : fmi3Error;
+    Instance *in = (Instance *)instance;
+    if (!in) return fmi3Error;
+    if (!phase_allows(in, IN_INITIALIZATION, "fmi3ExitInitializationMode",
+                      "in Initialization Mode only"))
+        return fmi3Error;
+    in->phase = PHASE_STEP_MODE;
+    return fmi3OK;
 }
 
 FMI3_Export fmi3Status fmi3EnterEventMode(fmi3Instance instance) {
@@ -923,16 +999,22 @@ FMI3_Export fmi3Status fmi3EnterEventMode(fmi3Instance instance) {
 
 FMI3_Export fmi3Status fmi3Terminate(fmi3Instance instance) {
     Instance *in = (Instance *)instance;
-    return in ? bridge_call(in, "{\"op\":\"terminate\"}") : fmi3Error;
+    if (!in) return fmi3Error;
+    if (!phase_allows(in, IN_STEP_MODE, "fmi3Terminate", "in Step Mode only"))
+        return fmi3Error;
+    fmi3Status st = bridge_call(in, "{\"op\":\"terminate\"}");
+    if (st == fmi3OK) in->phase = PHASE_TERMINATED;
+    return st;
 }
 
-/* The wrapper's clock goes back to zero only once the bridge has reset:
- * a failed reset leaves the instance, and its time, where they were. */
+/* The wrapper's clock goes back to zero, and the instance to Instantiated,
+ * only once the bridge has reset: a failed reset leaves the instance, its
+ * state and its time where they were. */
 FMI3_Export fmi3Status fmi3Reset(fmi3Instance instance) {
     Instance *in = (Instance *)instance;
     if (!in) return fmi3Error;
     fmi3Status st = bridge_call(in, "{\"op\":\"reset\"}");
-    if (st == fmi3OK) in->time = 0.0;
+    if (st == fmi3OK) { in->time = 0.0; in->phase = PHASE_INSTANTIATED; }
     return st;
 }
 
@@ -991,6 +1073,9 @@ FMI3_Export fmi3Status NAME(fmi3Instance instance, const fmi3ValueReference vr[]
                             size_t nvr, CTYPE values[], size_t nValues) {              \
     Instance *in = (Instance *)instance;                                               \
     if (!in) return fmi3Error;                                                         \
+    if (!phase_allows(in, ALLOWED_GET, #NAME,                                          \
+                      "in Initialization Mode, Step Mode and Terminated"))             \
+        return fmi3Error;                                                              \
     if (nValues == 0) return fmi3OK;                                                   \
     double *tmp = (double *)malloc(nValues * sizeof(double));                          \
     if (!tmp) return fmi3Fatal;                                                        \
@@ -1008,6 +1093,9 @@ FMI3_Export fmi3Status NAME(fmi3Instance instance, const fmi3ValueReference vr[]
                             size_t nvr, const CTYPE values[], size_t nValues) {        \
     Instance *in = (Instance *)instance;                                               \
     if (!in) return fmi3Error;                                                         \
+    if (!phase_allows(in, ALLOWED_SET, #NAME,                                          \
+                      "in Instantiated, Initialization Mode and Step Mode"))           \
+        return fmi3Error;                                                              \
     if (nValues == 0) return fmi3OK;                                                   \
     for (size_t i = 0; i < nValues; ++i)                                               \
         if (!(EXACT(values[i]))) return refuse_inexact_value(in, #NAME, i);           \
@@ -1262,8 +1350,19 @@ FMI3_Export fmi3Status fmi3GetAdjointDerivative(
     (void)nSeed; (void)sensitivity; (void)nSensitivity;
     return fmi3Error;
 }
-FMI3_Export fmi3Status fmi3EnterConfigurationMode(fmi3Instance instance) { (void)instance; return fmi3OK; }
-FMI3_Export fmi3Status fmi3ExitConfigurationMode(fmi3Instance instance) { (void)instance; return fmi3OK; }
+/* FMI 3.0: never called on an FMU without tunable structural parameters,
+ * which this one is; both used to answer fmi3OK in any state. */
+static const char *const no_configuration_mode =
+    "maddening_fmu: this FMU has no structural parameters, so it has no Configuration Mode "
+    "(FMI 3.0: fmi3EnterConfigurationMode must not be called on such an FMU)";
+FMI3_Export fmi3Status fmi3EnterConfigurationMode(fmi3Instance instance) {
+    inst_log((Instance *)instance, fmi3Error, "logStatusError", no_configuration_mode);
+    return fmi3Error;
+}
+FMI3_Export fmi3Status fmi3ExitConfigurationMode(fmi3Instance instance) {
+    inst_log((Instance *)instance, fmi3Error, "logStatusError", no_configuration_mode);
+    return fmi3Error;
+}
 FMI3_Export fmi3Status fmi3GetIntervalDecimal(fmi3Instance instance, const fmi3ValueReference vr[],
                                               size_t nvr, fmi3Float64 intervals[],
                                               fmi3IntervalQualifier qualifiers[]) {
@@ -1327,11 +1426,15 @@ FMI3_Export fmi3Status fmi3CompletedIntegratorStep(fmi3Instance instance,
     *enterEventMode = fmi3False; *terminateSimulation = fmi3False;
     return fmi3Error;
 }
+/* Model exchange only: a co-simulation instance's time moves with
+ * fmi3DoStep.  It used to answer fmi3OK and overwrite the wrapper's clock,
+ * which fmi3DoStep reports as lastSuccessfulTime when it fails. */
 FMI3_Export fmi3Status fmi3SetTime(fmi3Instance instance, fmi3Float64 time) {
-    Instance *in = (Instance *)instance;
-    if (!in) return fmi3Error;
-    in->time = time;
-    return fmi3OK;
+    (void)time;
+    inst_log((Instance *)instance, fmi3Error, "logStatusError",
+             "maddening_fmu: fmi3SetTime is a model-exchange function; this is a "
+             "co-simulation FMU, whose time moves with fmi3DoStep");
+    return fmi3Error;
 }
 FMI3_Export fmi3Status fmi3SetContinuousStates(fmi3Instance instance, const fmi3Float64 x[],
                                                size_t nx) {
@@ -1361,7 +1464,17 @@ FMI3_Export fmi3Status fmi3GetNumberOfContinuousStates(fmi3Instance instance, si
 
 /* ---- co-simulation ---- */
 
-FMI3_Export fmi3Status fmi3EnterStepMode(fmi3Instance instance) { (void)instance; return fmi3OK; }
+/* FMI 3.0 allows fmi3EnterStepMode only from Event Mode, which this FMU
+ * does not have: fmi3ExitInitializationMode enters Step Mode itself.  It
+ * used to answer fmi3OK in any state, fmi3Terminate's Terminated too. */
+FMI3_Export fmi3Status fmi3EnterStepMode(fmi3Instance instance) {
+    Instance *in = (Instance *)instance;
+    if (!in) return fmi3Error;
+    (void)phase_allows(in, 0u, "fmi3EnterStepMode",
+                       "from Event Mode only, which this FMU does not have "
+                       "(hasEventMode=\"false\"); fmi3ExitInitializationMode enters Step Mode");
+    return fmi3Error;
+}
 
 FMI3_Export fmi3Status fmi3GetOutputDerivatives(fmi3Instance instance,
                                                 const fmi3ValueReference vr[], size_t nvr,
@@ -1380,6 +1493,12 @@ FMI3_Export fmi3Status fmi3DoStep(
     *eventHandlingNeeded = fmi3False; *terminateSimulation = fmi3False; *earlyReturn = fmi3False;
     Instance *in = (Instance *)instance;
     if (!in) { *lastSuccessfulTime = 0.0; return fmi3Error; }
+    if (!phase_allows(in, IN_STEP_MODE, "fmi3DoStep",
+                      "in Step Mode only (after fmi3EnterInitializationMode and "
+                      "fmi3ExitInitializationMode)")) {
+        *lastSuccessfulTime = in->time;
+        return fmi3Error;
+    }
     if (!isfinite(currentCommunicationPoint) || !isfinite(communicationStepSize)) {
         /* %.17g would write "nan" / "inf", which is not JSON */
         inst_log(in, fmi3Error, "logStatusError",

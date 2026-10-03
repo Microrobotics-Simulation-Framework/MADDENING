@@ -853,6 +853,25 @@ over `float64` (every leaf float64) and `mixed` (float32 leaves in the x64
 process, where the fitters' coordinates are promoted to float64 around
 them) and sits at float64's own edge where the claim has one.
 
+The cross-cutting oracles fill cells too, and a narrowed cell is
+re-examined whenever one lands: if it now runs the claim in that domain,
+the cell cites it and the domain leaves the row's clause. A parametrized
+oracle is cited at the parameter that reaches the domain, not by its
+function name. The covering array
+(`test_differential_coupling_interactions.py`) runs every oracle on its
+float64 rows in a subprocess (one test, slow) and has per-push float32
+rows with a sub-cycled group (`r06`, `r18`, `r28`) and with a predictor
+(`r05`, `r13`, `r28`). Its reference model reads the iteration mode,
+the sub-steps, the interpolation weights and the norm, so a claim about
+any of them is exercised wherever a row sets it. The replay oracle's
+checkpoint mid `run_adaptive` (`test_differential_replay.py`) is a
+`checkpoint_restart` cell for a claim about state carried in `_meta`,
+and its multi-rate and sub-cycled records are cells for the windowed
+losses. The FMU oracles' `[coupled]`, `[multirate]` and `[subcycled]`
+families do the same for the FMU rows. None of them is an `adaptive`
+cell: a restart that matches the uninterrupted run says nothing about
+the claim under `run_adaptive` itself.
+
 `tests/property/test_coupling_invariances.py` holds three metamorphic rows:
 
 - renaming every node changes nothing;

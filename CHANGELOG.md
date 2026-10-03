@@ -349,7 +349,7 @@ guidance; the itemized changes follow.
 ### Fixed
 - **The identifiability guard decides the same in any units** (MADD-ANO-131, never released): its tests, hold and tolerance measure an identity parameter relative to its size, as `fim(scale="relative")` does;
   **bounds checks compare exactly** (MADD-ANO-132): a float32 `-1e-40` no longer passes a `(0, None)` bound through XLA's subnormal flush; **a value its type flushes to 0 is refused** (MADD-ANO-133) like one it overflows.
-  Action: none; a `fit_lm` with an identity parameter in units far from 1 may return a different (correct) point.
+  Action: none; a `fit_lm` with an identity parameter in units far from 1 may return a different (correct) point.  The sysid/FMU inventory's SYS-063, -088, -109, FMU-024 and -039 are verified (144 of 147 rows).
 - **`fit_lm` no longer depends on the parameters' units, and a shrunken step cannot read as converged** (MADD-ANO-121, never released): the Marquardt floor is per column, and `converged` also needs the undamped Gauss-Newton step to be stationary;
   **every reader of `gm.params` sees a pending `node.params` write** (MADD-ANO-122, never released): one sync point, the `gm.params` getter, serves readers and runners alike, and the later write wins.  Action: none.
 - **A node reading a cycle runs after it in the same step, whatever order it was added in** (MADD-ANO-120, since 0.1.0: added before a coupling group's members, it read their previous-step output); the interface norm sums its edges in the group's sweep order, not insertion order; `solver="fori"` docs: forward mode works.

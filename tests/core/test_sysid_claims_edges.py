@@ -348,16 +348,10 @@ def test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter(unit):
     assert abs(res.n_iter - base.n_iter) <= 2, (base.n_iter, res.n_iter)
 
 
-_GUARD_UNITS = [pytest.param(1e-3, id="1e-3"),
-                pytest.param(1e-5, id="1e-5", marks=pytest.mark.xfail(
-                    strict=True, raises=AssertionError, reason=(
-                        "SYS-063: the hold's quantisation allowance pairs the largest "
-                        "curvature with the largest coordinate, so a determined direction "
-                        "is held at a loss of 13.9 against 1.6e-11; pending fix"))),
-                pytest.param(1e6, id="1e6", marks=pytest.mark.xfail(
-                    strict=True, raises=AssertionError, reason=(
-                        "SYS-063: at 1e6 units the hold raises the loss from 3.1e-12 to "
-                        "0.1, inside its allowance; pending fix")))]
+#: 1e-5 and 1e6 were held at a loss of 13.9 and 0.1 against 1e-11 while the guard asked
+#: its questions in the optimiser's coordinates (SYS-063, MADD-ANO-131).
+_GUARD_UNITS = [pytest.param(1e-3, id="1e-3"), pytest.param(1e-5, id="1e-5"),
+                pytest.param(1e6, id="1e6")]
 
 
 @pytest.mark.parametrize("unit", _GUARD_UNITS)
@@ -370,15 +364,10 @@ def test_the_hold_leaves_the_loss_where_the_fit_left_it_in_any_units(unit):
                                                res.hold_declined, res.undetermined_drift)
 
 
-_ANSWER_UNITS = [pytest.param(1e-3, id="1e-3"),
-                 pytest.param(1e-5, id="1e-5", marks=pytest.mark.xfail(
-                     strict=True, raises=AssertionError, reason=(
-                         "SYS-088: with the guard on (the default) damping in units 1e-5 "
-                         "comes back at its start, 2, against a truth of 3; pending fix"))),
-                 pytest.param(1e6, id="1e6", marks=pytest.mark.xfail(
-                     strict=True, raises=AssertionError, reason=(
-                         "SYS-088: with the guard on, damping in units 1e6 comes back at "
-                         "3.085 against 3; pending fix")))]
+#: Damping came back at 2 (its start) and 3.085 against 3 at 1e-5 and 1e6 while the
+#: guard asked its questions in the optimiser's coordinates (SYS-088, MADD-ANO-131).
+_ANSWER_UNITS = [pytest.param(1e-3, id="1e-3"), pytest.param(1e-5, id="1e-5"),
+                 pytest.param(1e6, id="1e6")]
 
 
 @pytest.mark.parametrize("unit", _ANSWER_UNITS)
@@ -469,15 +458,12 @@ def test_fim_core_cannot_be_built_positionally():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(strict=True, raises=pytest.fail.Exception, reason=(
-    "SYS-109: ParamSpec.check compares through jnp, which on CPU flushes a subnormal to "
-    "zero, so a value below a zero bound by less than the smallest normal passes; "
-    "pending fix"))
 @pytest.mark.parametrize("value", [-1e-45, -1e-40, -1e-38])
 def test_a_value_below_a_zero_bound_is_refused_however_small(value):
     """SYS-109: ``check`` raises "if a concrete value ... violates bounds", and
     ``gm.check_params`` names "the first leaf out of range".  A negative float32 subnormal
-    is below the lower bound 0 of ``SpringDamperNode``'s ``damping``."""
+    is below the lower bound 0 of ``SpringDamperNode``'s ``damping``.  (It passed while
+    ``check`` compared through ``jnp``, which flushes it to zero on CPU: MADD-ANO-132.)"""
     with pytest.raises(ValueError, match="below bound"):
         ParamSpec(bounds=(0.0, None)).check(np.float32(value), name="damping")
 

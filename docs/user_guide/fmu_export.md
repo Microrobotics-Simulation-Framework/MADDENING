@@ -277,7 +277,9 @@ the value references, bounds, read-only-ness and the state archive exactly
 as for JSON (a header nested too deeply for the JSON parser is a malformed
 request like any other), and answers a malformed frame with an error reply
 rather than dropping the instance.  Values are checked in the variable's
-own type: a float32 input set to `1e308` is refused, not stored as `inf`.
+own type: a float32 input set to `1e308` is refused, not stored as `inf`,
+and so is one set to `1e-50`, which would be stored as `0.0`; a value that
+rounds to a subnormal (`1e-40`) keeps its sign and magnitude and is held.
 A `set_state` archive is refused from its directory alone, before any
 member is decompressed, unless every member is one the model expects
 (`_token`, `_time`, its state fields, parameters and inputs, all `.npy`)
@@ -349,9 +351,10 @@ build a new `FmuTcpBridge` to serve again.
 **A value that `set` refuses, `set_state` refuses too.**  Both doors
 into the state and parameter tree apply the same checks: every value
 must be a number (a string such as `"45"` or a boolean is refused, not
-parsed), finite, and representable in the dtype of the array it
-replaces, and every parameter must lie inside its declared `ParamSpec`
-bounds — the `min` / `max` the model description advertises, which the
+parsed), finite, and in range for the dtype of the array it replaces
+(neither overflowing to an infinity nor, if non-zero, underflowing to
+zero), and every parameter must lie inside its declared `ParamSpec`
+bounds, compared exactly (a negative subnormal is below a bound of 0) — the `min` / `max` the model description advertises, which the
 bridge enforces however its sidecar was built.  An importer therefore
 cannot use an FMU-state archive to install a constant the graph declares
 invalid.  An archive cannot change interface-mapping weights either

@@ -187,12 +187,25 @@ def _framed(solve, b, x0, atol):
     reporting ``converged=True``: the defect ``graph_manager._ift_linear_solve``
     had (MADD-ANO-113).  ``p`` is ``stop_gradient``-ed: it is piecewise
     constant in ``b``.
+
+    A ``b`` with a NaN or infinite entry is answered with NaN in every
+    entry of ``value``, a NaN ``residual_norm`` and ``converged=False``,
+    and the backend is handed zeros (and a zero start) in its place, so it
+    does not iterate on NaN.  Posed on ``b`` itself, ``max|b|`` made
+    lineax's relative ``atol`` NaN or ``inf`` and the zero initial guess
+    passed its test at once, and the loop CG's tolerance went ``inf`` with
+    ``||b||``: CG (both backends) and lineax GMRES returned zeros, mostly
+    reported ``converged=True`` (MADD-ANO-155).
     """
     p = jax.lax.stop_gradient(pow2_frame(b))
-    res = solve(b * p, x0 * p, None if atol is None else atol * p)
+    finite = jnp.all(jnp.isfinite(b))
+    res = solve(jnp.where(finite, b * p, jnp.zeros_like(b)),
+                jnp.where(finite, x0 * p, jnp.zeros_like(x0)),
+                None if atol is None else atol * p)
     return SharedSolveResult(
-        value=res.value / p, converged=res.converged, iters=res.iters,
-        residual_norm=res.residual_norm / p,
+        value=jnp.where(finite, res.value / p, jnp.full_like(b, jnp.nan)),
+        converged=jnp.logical_and(res.converged, finite), iters=res.iters,
+        residual_norm=jnp.where(finite, res.residual_norm / p, jnp.nan),
     )
 
 
@@ -628,6 +641,12 @@ def sharded_cg(
     -------
     SharedSolveResult
         ``.value`` (solution), ``.converged``, ``.iters``, ``.residual_norm``.
+        A ``b`` with a NaN or infinite entry gives NaN in every entry of
+        ``.value``, a NaN ``.residual_norm`` and ``converged=False`` (and
+        under ``differentiable=True`` a non-finite tangent or cotangent a
+        NaN derivative).  Until 0.4.0 it gave zeros, on lineax and for
+        ``+-inf`` on the loop backend with ``converged=True``
+        (MADD-ANO-155).
 
     Stability
     ---------
@@ -714,7 +733,9 @@ def sharded_gmres(
     solve is GMRES on the transposed operator (``jax.linear_transpose``),
     with the same preconditioner.
 
-    See :func:`sharded_cg` for the matvec / mesh / in_specs contract.
+    See :func:`sharded_cg` for the matvec / mesh / in_specs contract, and
+    for the answer to a ``b`` with a NaN or infinite entry: NaN, with
+    ``converged=False`` (MADD-ANO-155).
 
     Parameters
     ----------

@@ -10084,7 +10084,10 @@ anomalies:
       `MAX_JAX_TRACE_STEPS` (10 000) steps or `MAX_JAX_TRACE_SECONDS` (600
       s), writing its files as a requested stop does, and `GET
       /sim/profile/jax/status` reports its steps, its budgets and what
-      stopped it.
+      stopped it.  The time budget was first read only when a step was
+      recorded, so a trace started on an idle simulation ran past it until
+      the next step; it has its own timer since, and the status and stop
+      routes read the clock too (REST-104).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -10111,6 +10114,8 @@ anomalies:
       - "tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_step_budget"
       - "tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_time_budget"
       - "tests/api/test_jax_trace_stops_itself.py::test_a_trace_stopped_by_request_is_reported_as_before"
+      - "tests/api/test_routes_answer_what_they_did.py::test_the_time_budget_stops_a_trace_with_no_request_at_all"
+      - "tests/api/test_routes_answer_what_they_did.py::test_a_status_read_stops_a_trace_whose_timer_has_not_fired"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-135"
@@ -10285,6 +10290,206 @@ anomalies:
       - "tests/fmi/test_a_value_its_type_rounds_to_zero_is_refused.py::test_a_subnormal_keeps_its_sign_and_magnitude_and_zero_is_zero"
       - "tests/fmi/test_a_value_its_type_rounds_to_zero_is_refused.py::test_every_write_path_refuses_a_value_that_would_be_stored_as_zero"
       - "tests/api/test_params_endpoint_small_values.py::test_a_value_float32_flushes_to_zero_is_refused_before_the_cast"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-138"
+    title: "load_state cast a checkpoint value to the graph's dtype with no check: a float64 1e39 loaded into a float32 field as inf, and -1e-50 as -0.0"
+    description: >
+      `GraphManager.load_state` read every member of the checkpoint and put
+      it into the live leaf's dtype without asking whether that dtype could
+      hold it.  A checkpoint written by a graph run under `jax_enable_x64`
+      and loaded by one without it, or a file written by hand, therefore
+      loaded a float64 `1e39` into a float32 state field as `inf` and
+      `-1e-50` as `-0.0`, the value and its sign lost, with nothing said;
+      an int64 too large for an int32 field wrapped.  The same held for the
+      params leaves and the `_meta` entries a checkpoint carries.
+      Reproduced identically at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0, under an 8 GiB
+      address-space cap), where `load_state` narrowed every leaf with
+      `jnp.array` to the canonical float32: a spring's `position` saved as
+      float64 `1e39` loaded as `inf`, and `-1e-50` as `-0.0`.  The 0.4.0
+      tree cast to the live leaf's dtype instead, still unchecked.  Found
+      while settling the REST inventory's checkpoint rows.
+      Resolved in 0.4.0: `load_state` holds every leaf to the FMU's value
+      rule (MADD-ANO-137) before anything is written -- a finite value that
+      would overflow to `inf`, a non-zero one that would flush to `+-0`, an
+      integer that would wrap or a non-finite value for an integer leaf is
+      a `ValueError` naming the leaf, the value and what it would load as,
+      and the graph is left as it was; a value that rounds to a subnormal
+      keeps its sign and magnitude and loads, and one already `inf` or
+      `NaN` loads as it was.  `POST /checkpoint/load` answers it with a 400
+      naming no server path.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, never `minor` under the 0.4.0 severity
+      definition: a resumed simulation started from a state that was not
+      the one saved, an `inf` that propagates or a zero that hides, with no
+      warning.  Not `critical`: it needs a checkpoint written in a wider
+      dtype than the graph that loads it, or written by hand.
+      `context_dependent` because whether a resumed run feeds a decision is
+      the program's choice.
+    affected_components:
+      - "maddening.core.simulation.checkpoint.load_state"
+      - "maddening.core.graph_manager.GraphManager.load_state"
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: load a checkpoint into a graph of the precision that
+      wrote it (`jax_enable_x64` on both sides or on neither), and check a
+      loaded state for values that became `inf` or `0` against the file
+      (`numpy.load`).
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A float64 value rounds to the nearest float32 as any narrowing does:
+      the rule refuses only what loses the value outright (an overflow, a
+      flush to zero, a wrapped integer), not the precision a narrower type
+      cannot carry.
+    verification:
+      - "tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_float64_value_a_float32_field_would_lose_is_refused"
+      - "tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_value_float32_holds_loads_a_subnormal_with_its_sign"
+      - "tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_value_that_was_already_non_finite_loads_as_it_was"
+      - "tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_a_params_leaf_is_held_to_the_same_rule"
+      - "tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_an_integer_that_would_wrap_is_refused_and_one_that_fits_loads"
+      - "tests/core/test_checkpoint_load_refuses_values_its_dtype_cannot_hold.py::test_the_rest_route_answers_the_refusal_naming_no_path"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-139"
+    title: "PUT /sim/stride reset a value left out of the query to 1: a call naming only steps_per_frame reset the relay's stride, and the reverse"
+    description: >
+      `PUT /sim/stride` takes `steps_per_frame` and `relay_stride`, and
+      each defaulted to `1`.  A call naming one therefore set the other to
+      `1` as well, and said so only in its reply: a client that slowed the
+      stream to every 10th step and then changed the runner's steps per
+      frame found the stream back at every step.  No document said what an
+      omitted value meant.  Reproduced identically at v0.1.0, v0.2.0,
+      v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag, FastAPI
+      `TestClient`): after `steps_per_frame=5&relay_stride=3`, a call with
+      `steps_per_frame=7` alone left the relay's stride at 1.  Found by the
+      REST claims inventory (REST-099).
+      Resolved in 0.4.0: a value left out of the query keeps its current
+      value; a call naming neither changes nothing.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A display and pacing setting, not a result: the simulation's state
+      and time are unaffected; only how many steps a frame batches and how
+      many the stream shows.  No computed quantity changes.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: send both values on every call.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_routes_answer_what_they_did.py::test_a_stride_call_that_names_one_value_keeps_the_other"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-140"
+    title: "A generated API token written to MADDENING_API_TOKEN_FILE kept the mode of a file already at that path: a placeholder of mode 0644 left the token readable by every local user"
+    description: >
+      `MADDENING_API_TOKEN_FILE` names a file the generated bearer token is
+      written to "with mode 0600".  The file was opened with `O_CREAT |
+      O_TRUNC` and mode `0600`, which applies the mode only to a file the
+      call creates: a file already at the path -- a placeholder on a mounted
+      volume, the last run's token -- kept its own mode, and the new token
+      landed in a world-readable file while the log said "written ... (mode
+      0600)".  A `chmod` after opening would not have closed it either: a
+      reader who had the file open before the `chmod` keeps reading it.
+      Introduced with the bearer-token authentication of 0.4.0's
+      development (`maddening/api/auth.py`, in no release); found by the
+      REST claims inventory (REST-016).
+      Resolved in 0.4.0: the token is written to a new file created `0600`
+      by `tempfile.mkstemp` in the destination's own directory and moved
+      over the path (`os.replace`), so whatever was there -- of any mode,
+      held open by any reader -- never holds it; a symbolic link at the
+      path is followed, and a destination the server cannot replace is
+      left alone and the failure logged.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A credential exposure: the token grants every route of the API --
+      graph edits, checkpoint writes, the runner -- to whoever reads it, and
+      any local account could.  Not `critical`: it needs a generated token
+      (no `MADDENING_API_TOKEN`), a token file configured, and a file
+      already at that path with a looser mode.  `context_dependent`: who
+      else has an account on the host is the deployment's.
+    affected_components:
+      - "maddening.api.auth.APIAuth.announce"
+    affected_versions: "none"
+    workaround: >
+      On a 0.4.0 development build before the fix: remove the file before
+      the server starts, or set `MADDENING_API_TOKEN` yourself.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The directory has to be one the server can write: a token file in a
+      directory it cannot (a file it may write inside a read-only
+      directory) is not written at all, and the token is only in the log.
+    verification:
+      - "tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_file_that_already_existed_is_left_readable_by_its_owner_only"
+      - "tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_reader_who_had_the_old_token_file_open_cannot_read_the_new_token"
+      - "tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_file_path_that_is_a_link_writes_where_it_points"
+      - "tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_file_that_cannot_be_written_is_left_alone_and_logged"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-141"
+    title: "POST /checkpoint/save refused at its final move answered \"nothing was written\" having replaced the manifest of that name, and checkpoint refusals named the server's absolute paths"
+    description: >
+      `POST /checkpoint/save` wrote the checkpoint under a temporary name,
+      then its manifest beside the target -- under the manifest's own name
+      -- and moved the checkpoint into place last.  A save refused at that
+      move (the target's name a directory, which a save of
+      `d.npz/inner.npz` made through the API creates) answered 400
+      "could not save checkpoint, nothing was written" having already
+      written `d.npz.manifest.json`, replacing the manifest of an earlier
+      checkpoint of that name -- whose clock `POST /checkpoint/load` then
+      no longer restored (the new manifest does not hash to it), silently.
+      The refusals' details also named the server's absolute paths: the
+      checkpoint root in the refusal of a name outside it, and an
+      `OSError`'s text in the others.  Introduced with the checkpoint
+      manifest and confinement of 0.4.0's development (the routes of
+      v0.3.1 wrote no manifest); found by the REST claims inventory
+      (REST-102).
+      Resolved in 0.4.0: both files are written under temporary names and
+      moved into place only after both exist, the checkpoint first and its
+      manifest last; a name that is not a file is refused before anything
+      is written; the one failure left after the first move -- the
+      manifest's own move -- is answered as what it is ("checkpoint ... was
+      written, but its manifest could not be"); and no checkpoint 4xx
+      detail names an absolute server path (an `OSError` is told by its
+      `strerror`, and the root is cut out of any other message).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      The route said it had changed nothing and had changed a file, and the
+      change lost an earlier checkpoint's recorded clock without a word: a
+      later load of that checkpoint labelled its states from zero.  Not
+      `critical`: it needs a save to a name a directory has taken.
+      `context_dependent`: whether a checkpoint's clock feeds a decision is
+      the client's.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: "none"
+    workaround: >
+      On a 0.4.0 development build before the fix: do not save to a name a
+      directory has taken.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The two moves are not one atomic step: a failure of the manifest's
+      move leaves the new checkpoint without its manifest (it loads, with
+      `sim_time` counted from zero), and the 400 says so.  The 200 reply's
+      `path` still names the absolute path written.
+    verification:
+      - "tests/api/test_routes_answer_what_they_did.py::test_a_save_refused_at_its_final_move_writes_nothing"
+      - "tests/api/test_routes_answer_what_they_did.py::test_a_save_whose_manifest_name_is_taken_by_a_directory_writes_nothing"
+      - "tests/api/test_routes_answer_what_they_did.py::test_a_save_whose_manifest_cannot_be_moved_says_the_checkpoint_was_written"
+      - "tests/api/test_routes_answer_what_they_did.py::test_no_checkpoint_refusal_names_an_absolute_server_path"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-142"

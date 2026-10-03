@@ -232,6 +232,14 @@ def test_a_params_reply_is_what_a_get_then_reads(compile_first):
 # Checkpoints that do not fit
 # ---------------------------------------------------------------------------
 
+#: What NumPy's and zipfile's own messages say, which a 400 must not echo.
+_INTERNALS = ("pickle", "allow_pickle", "zip", "Zip", "magic", "EOF", "unsafely")
+
+
+def _names_no_internals(detail: str) -> bool:
+    return not any(word in detail for word in _INTERNALS)
+
+
 def test_a_checkpoint_that_is_not_an_archive_is_a_400_naming_no_internals(tmp_path):
     server, client = _ball_server(tmp_path)
     assert client.post("/sim/run", params={"n_steps": 3}).status_code == 200
@@ -239,14 +247,15 @@ def test_a_checkpoint_that_is_not_an_archive_is_a_400_naming_no_internals(tmp_pa
     (tmp_path / "bad.npz").write_bytes(b"PK\x03\x04 this is not an archive")
     resp = client.post("/checkpoint/load", params={"path": "bad.npz"})
     assert resp.status_code == 400, resp.text
-    assert resp.json()["detail"] == "could not load checkpoint 'bad.npz'", resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("could not load checkpoint 'bad.npz'"), resp.text
+    assert _names_no_internals(detail) and str(tmp_path) not in detail, detail
     assert client.get("/graph/state").json() == before
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-095: a file NumPy refuses with a ValueError has NumPy's "
-                          "message echoed in the 400; pending fix")
-def test_a_checkpoint_numpy_refuses_as_a_pickle_is_a_400_naming_no_internals(tmp_path):
+@pytest.mark.parametrize("content", [b"{}", b"", b"\x93NUMPY not really"],
+                         ids=["json-text", "empty", "npy-magic"])
+def test_a_checkpoint_numpy_refuses_as_a_pickle_is_a_400_naming_no_internals(tmp_path, content):
     """The release notes: "load errors no longer echo parser internals".
     A file that is not an ``.npz`` (``{}``) is refused by ``numpy.load``
     with a ``ValueError`` about pickled data, and the route answers every
@@ -254,11 +263,29 @@ def test_a_checkpoint_numpy_refuses_as_a_pickle_is_a_400_naming_no_internals(tmp
     own mismatch messages."""
     server, client = _ball_server(tmp_path)
     before = client.get("/graph/state").json()
-    (tmp_path / "text.npz").write_text("{}")
+    (tmp_path / "text.npz").write_bytes(content)
     resp = client.post("/checkpoint/load", params={"path": "text.npz"})
     assert resp.status_code == 400, resp.text
     assert client.get("/graph/state").json() == before
-    assert resp.json()["detail"] == "could not load checkpoint 'text.npz'", resp.text
+    detail = resp.json()["detail"]
+    assert detail == ("could not load checkpoint 'text.npz': it is not an .npz archive of "
+                      "plain arrays saved by this API"), detail
+    assert _names_no_internals(detail)
+
+
+def test_a_checkpoint_with_a_member_holding_python_objects_is_refused_by_name(tmp_path):
+    """REST-095's neighbour: an ``.npz`` that is an archive, one of whose members NumPy
+    could only read by unpickling.  Saved with ``allow_pickle=True``, as no MADDENING
+    writer does."""
+    server, client = _ball_server(tmp_path)
+    before = client.get("/graph/state").json()
+    np.savez(tmp_path / "objects.npz", **{"ball/position": np.array([{"x": 1}], dtype=object)})
+    resp = client.post("/checkpoint/load", params={"path": "objects.npz"})
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("could not load checkpoint 'objects.npz': it is not an .npz")
+    assert _names_no_internals(detail)
+    assert client.get("/graph/state").json() == before
 
 
 def test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded(tmp_path):
@@ -339,26 +366,29 @@ def test_the_checkpoint_root_defaults_to_a_checkpoints_directory_under_the_worki
     assert (tmp_path / "checkpoints" / "c.npz.manifest.json").is_file()
 
 
-def test_a_stride_call_that_names_one_value_sets_the_other_to_one():
-    """``PUT /sim/stride`` sets both values on every call; one left out is
-    set to its default, 1 (REST-099 is ``ambiguous``: no document says
-    what an omitted value means)."""
+def test_a_stride_call_that_names_one_value_keeps_the_other():
+    """REST-099: "A value left out of the query keeps its current value" -- each way
+    round, and a call naming neither changes nothing.  Until 0.4.0 the one left out was
+    reset to 1."""
     server, client = _ball_server()
     resp = client.put("/sim/stride", params={"steps_per_frame": 5, "relay_stride": 3})
     assert resp.json() == {"steps_per_frame": 5, "relay_stride": 3}
     resp = client.put("/sim/stride", params={"steps_per_frame": 7})
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"steps_per_frame": 7, "relay_stride": 1}
-    assert server.relay.stride == 1
+    assert resp.json() == {"steps_per_frame": 7, "relay_stride": 3}
+    assert server.relay.stride == 3
+    resp = client.put("/sim/stride", params={"relay_stride": 2})
+    assert resp.json() == {"steps_per_frame": 7, "relay_stride": 2}
+    assert server._steps_per_frame == 7
+    assert client.put("/sim/stride").json() == {"steps_per_frame": 7, "relay_stride": 2}
+    for bad in ({"steps_per_frame": 0}, {"relay_stride": 0}):
+        assert client.put("/sim/stride", params=bad).status_code == 422
 
 
 # ---------------------------------------------------------------------------
 # A save refused on the way, and a JAX trace's budgets
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-102: a save refused at its final move has already written "
-                          "the manifest; pending fix")
 def test_a_save_refused_at_its_final_move_writes_nothing(tmp_path):
     """The REST guide: the checkpoint "is written under a temporary name,
     the manifest next, and the file moved into place last: a save refused
@@ -372,7 +402,65 @@ def test_a_save_refused_at_its_final_move_writes_nothing(tmp_path):
     resp = client.post("/checkpoint/save", params={"path": "d.npz"})
     assert resp.status_code == 400, resp.text
     assert "nothing was written" in resp.json()["detail"]
+    assert str(tmp_path) not in resp.json()["detail"], resp.text
     assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+def test_a_save_whose_manifest_name_is_taken_by_a_directory_writes_nothing(tmp_path):
+    """REST-102: the manifest's name, not the checkpoint's, is the directory -- an earlier
+    checkpoint of that name stays as it was, manifest included."""
+    server, client = _ball_server(tmp_path)
+    assert client.post("/checkpoint/save", params={"path": "c.npz"}).status_code == 200
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+    (tmp_path / "c.npz.manifest.json").unlink()
+    (tmp_path / "c.npz.manifest.json").mkdir()
+    del before["c.npz.manifest.json"]
+    assert client.post("/sim/step").status_code == 200
+    resp = client.post("/checkpoint/save", params={"path": "c.npz"})
+    assert resp.status_code == 400, resp.text
+    assert "nothing was written" in resp.json()["detail"]
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
+
+
+def test_a_save_whose_manifest_cannot_be_moved_says_the_checkpoint_was_written(
+        tmp_path, monkeypatch):
+    """REST-102: the one failure left after the checkpoint is moved into place -- its
+    manifest's own move -- is answered as what it is, and the checkpoint loads (with
+    sim_time counted from zero, the manifest not being there to restore it)."""
+    server, client = _ball_server(tmp_path)
+    real = server_module.os.replace
+
+    def second_move_fails(src, dst):          # the manifest's move into place
+        if str(dst) == str(tmp_path / "c.npz.manifest.json"):
+            raise PermissionError(13, "Permission denied", str(dst))
+        return real(src, dst)
+
+    monkeypatch.setattr(server_module.os, "replace", second_move_fails)
+    resp = client.post("/checkpoint/save", params={"path": "c.npz"})
+    monkeypatch.setattr(server_module.os, "replace", real)
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail.startswith("checkpoint 'c.npz' was written, but its manifest could not be")
+    assert str(tmp_path) not in detail, detail
+    assert (tmp_path / "c.npz").is_file() and not (tmp_path / "c.npz.manifest.json").exists()
+    assert not [p for p in tmp_path.iterdir() if "partial" in p.name]
+    loaded = client.post("/checkpoint/load", params={"path": "c.npz"})
+    assert loaded.status_code == 200 and loaded.json()["sim_time_from_checkpoint"] is False
+
+
+@pytest.mark.parametrize("name", ["../outside.npz", "a\x00b.npz", "x" * 300 + ".npz",
+                                  "d.npz"], ids=["outside", "nul", "too-long", "directory"])
+def test_no_checkpoint_refusal_names_an_absolute_server_path(tmp_path, name):
+    """REST-102: a 4xx detail names the file as the client named it, never the server's
+    absolute paths (the checkpoint root's used to be in the refusal of a path outside
+    it, and an OSError's text in the others)."""
+    server, client = _ball_server(tmp_path)
+    (tmp_path / "d.npz").mkdir()
+    for route in ("/checkpoint/save", "/checkpoint/load"):
+        resp = client.post(route, params={"path": name})
+        assert 400 <= resp.status_code < 500, resp.text
+        detail = resp.json()["detail"]
+        assert str(tmp_path) not in detail and os.getcwd() not in detail, (route, detail)
 
 
 @pytest.fixture
@@ -401,9 +489,6 @@ def test_a_trace_records_exactly_its_step_budget(monkeypatch, traced_client):
     assert client.get("/sim/profile/jax/status").json()["steps"] == 4
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-104: past its time budget a trace runs on until it records "
-                          "another step; pending fix")
 def test_a_trace_past_its_time_budget_is_stopped_without_waiting_for_a_step(
         monkeypatch, traced_client):
     """The REST guide: a trace runs "for at most MAX_JAX_TRACE_STEPS (10 000)
@@ -416,6 +501,64 @@ def test_a_trace_past_its_time_budget_is_stopped_without_waiting_for_a_step(
     time.sleep(0.05)
     status = client.get("/sim/profile/jax/status").json()
     assert status["active"] is False, status
+    assert status["stopped_by"] == "its time budget, 0 s", status
+
+
+def test_the_time_budget_stops_a_trace_with_no_request_at_all(monkeypatch, traced_client):
+    """REST-104: the budget has its own clock -- a timer set when the trace starts -- so
+    the trace stops with nothing stepping and nothing asking."""
+    from maddening.core.simulation import profiler
+
+    monkeypatch.setattr(server_module, "MAX_JAX_TRACE_SECONDS", 0.1)
+    server, client = traced_client
+    assert client.post("/sim/profile/jax/start").status_code == 200
+    deadline = time.monotonic() + 10.0
+    while profiler.jax_trace_active() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert not profiler.jax_trace_active()
+    assert server._trace_stopped_by == "its time budget, 0.1 s"
+    assert server._last_jax_trace_dir is not None
+
+
+def test_a_status_read_stops_a_trace_whose_timer_has_not_fired(monkeypatch, traced_client):
+    """REST-104: the status, stop and step routes read the clock too, so a late timer
+    does not leave a trace reported active past its budget."""
+    class Late:                               # a timer that never fires
+        def __init__(self, *a, **k):
+            self.daemon = True
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(server_module.threading, "Timer", Late)
+    monkeypatch.setattr(server_module, "MAX_JAX_TRACE_SECONDS", 0.0)
+    server, client = traced_client
+    assert client.post("/sim/profile/jax/start").status_code == 200
+    status = client.get("/sim/profile/jax/status").json()
+    assert status["active"] is False and status["stopped_by"] == "its time budget, 0 s"
+    stop = client.post("/sim/profile/jax/stop")
+    assert stop.status_code == 409 and "stopped itself" in stop.json()["detail"]
+    assert "/" not in stop.json()["detail"].split("GET")[0], stop.json()["detail"]
+
+
+def test_a_timer_left_from_an_earlier_trace_stops_nothing(monkeypatch, traced_client):
+    """REST-104: a trace stopped by a request, then a new one with a longer budget: the
+    first trace's timer, firing later, leaves the second alone."""
+    from maddening.core.simulation import profiler
+
+    server, client = traced_client
+    monkeypatch.setattr(server_module, "MAX_JAX_TRACE_SECONDS", 0.2)
+    assert client.post("/sim/profile/jax/start").status_code == 200
+    first = server._trace_timer
+    assert client.post("/sim/profile/jax/stop").status_code == 200
+    monkeypatch.setattr(server_module, "MAX_JAX_TRACE_SECONDS", 30.0)
+    assert client.post("/sim/profile/jax/start").status_code == 200
+    first.function(*first.args)                # what the first timer would do on firing
+    assert profiler.jax_trace_active()
+    assert client.get("/sim/profile/jax/status").json()["active"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -66,9 +66,6 @@ def _copy_record(tmp_path: Path) -> Path:
 # The summary's exit codes at their edge
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(strict=True, raises=json.JSONDecodeError,
-                   reason="RPD-009: a truncated goal file stops the summary on a traceback; "
-                          "pending fix")
 def test_a_truncated_goal_file_reads_invalid_and_the_summary_exits_3(rp, tmp_path):
     """The runbook runs every goal under ``timeout``, which kills the
     runner wherever it is -- inside ``json.dump`` too.  A truncated file
@@ -81,13 +78,23 @@ def test_a_truncated_goal_file_reads_invalid_and_the_summary_exits_3(rp, tmp_pat
     assert rp.summarise(directory) == 3
 
 
-@pytest.mark.xfail(strict=True, raises=AttributeError,
-                   reason="RPD-009: a goal file that is not a JSON object stops the summary "
-                          "on a traceback; pending fix")
 def test_a_goal_file_that_is_not_an_object_reads_invalid_and_the_summary_exits_3(rp, tmp_path):
     directory = _copy_record(tmp_path)
     (directory / "halo.json").write_text("[]", encoding="utf-8")
     assert rp.summarise(directory) == 3
+
+
+@pytest.mark.parametrize("content", [b"", b"\xff\xfe not utf-8", b"null", b'"halo"'],
+                         ids=["empty", "not-utf8", "null", "string"])
+def test_any_goal_file_that_is_not_a_json_object_reads_invalid_naming_the_file(
+        rp, tmp_path, capsys, content):
+    """RPD-009's neighbours: an empty file, one not in UTF-8, JSON null and a JSON
+    string -- each read INVALID, naming the file and why, and the summary exits 3."""
+    directory = _copy_record(tmp_path)
+    (directory / "halo.json").write_bytes(content)
+    assert rp.summarise(directory) == 3
+    out = capsys.readouterr().out
+    assert "halo.json" in out and "cannot be read as a JSON object" in out, out
 
 
 def test_an_older_runners_file_reads_invalid_instead_of_stopping_the_summary(rp, tmp_path,
@@ -169,19 +176,21 @@ def test_the_checklist_items_are_decided_by_the_runbooks_goals(rp):
 
 
 def test_every_seeded_fault_the_runbook_names_is_a_seed():
-    """The runner's docstring and the runbook name seven faults; the seeded
-    test holds those seven and one more (domain integrals summed over the
-    first mesh axis only), which neither document counts (RPD-024 is
-    ``ambiguous``)."""
+    """RPD-024: the runner's docstring counts the seeded faults, and the count is the
+    seeded test's: eight, the last of them domain integrals summed over the first mesh
+    axis only (it used to count seven and leave it out).  The runbook's count is
+    ``tests/compliance/test_run_pod_runbook_counts_its_seeds.py``'s, since a docs-only
+    change runs only the compliance tests."""
+    import re
+
     faults = _load(Path(__file__).resolve().parent / "test_run_pod_seeded_faults.py",
                    "run_pod_seeded_faults_for_their_names")
-    named = {"static_halos_are_nan", "grid_inputs_are_zeroed", "domain_integrals_are_halved",
-             "later_axes_are_zero_at_the_global_edges", "wrong_neighbour_along_spatial_axis_1",
-             "shard_info_extent_from_the_first_mesh_axis",
-             "shard_info_extent_from_spatial_axis_0"}
-    assert named <= set(faults._SEEDS), named - set(faults._SEEDS)
-    assert set(faults._SEEDS) - named == {
-        "domain_integrals_summed_over_the_first_mesh_axis_only"}
+    words = {"seven": 7, "eight": 8, "nine": 9}
+    runner = _RUNNER.read_text(encoding="utf-8")
+    in_runner = re.search(r"broken in any of (\w+) ways", runner)
+    assert in_runner
+    assert words[in_runner.group(1)] == len(faults._SEEDS)
+    assert "domain integrals summed over the first mesh axis only" in runner.replace("\n", " ")
 
 
 # ---------------------------------------------------------------------------

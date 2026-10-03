@@ -782,7 +782,7 @@ class FIMReport:
     zero although ``J`` has a nonzero entry (``|J|`` below about
     ``sqrt(tiny)``, ``1e-19`` in float32): the cutoff is then ``0`` and
     ``rank`` reads ``0``, which earlier 0.4.0 development builds reported
-    as a fact, with every ``crb`` ``inf`` and no warning (MADD-ANO-165).
+    as a fact, with every ``crb`` ``inf`` and no warning (MADD-ANO-169).
 
     The verdict is a comparison of two numbers, and at float32 it can be
     a comparison of two numbers that differ by less than the
@@ -2030,7 +2030,7 @@ def _range_limited(top: float, rank_rtol: float, n_residual: int, dtype,
     product below ``tiny`` (``|J|`` under about ``1e-19`` in float32) --
     and the cutoff, ``rank_rtol * 0``, decides ``rank = 0`` for any data.
     Earlier 0.4.0 development builds exempted it and reported rank 0 of 3
-    silently for a residual of exact rank 2 (MADD-ANO-165).  Whatever
+    silently for a residual of exact rank 2 (MADD-ANO-169).  Whatever
     ``rank_rtol`` is, even ``0``: no verdict can be read from such an
     ``F``.  A zero ``J`` -- a residual that reads no parameter -- is a
     real rank 0 and is not flagged; a non-finite ``top`` is :func:`fim`'s
@@ -4457,7 +4457,7 @@ def fit(
         the gradients are taken with a power-of-two cotangent that lifts the
         backward pass out of the flush, exactly (:func:`_gradient_lift`);
         until 0.4.0's fix the gradient read zero there and the fit returned
-        its start (MADD-ANO-163).  ``loss_fn``'s own value is the caller's
+        its start (MADD-ANO-167).  ``loss_fn``'s own value is the caller's
         and can still flush to ``0.0``: a ``RuntimeWarning`` says so once,
         and such a ``0.0`` with a nonzero gradient does not meet ``tol``.
     callback : callable, optional
@@ -4961,7 +4961,7 @@ def fit_lm(
     bare, which XLA's CPU backend flushes below ``tiny`` and which overflow
     above ``sqrt(max)``: a residual of ``1e-19`` returned a point 7% off, or
     its start, with ``converged=True`` and a loss of ``0.0``, and a
-    parameter at ``1e-23`` came back unmoved, "converged" (MADD-ANO-163).
+    parameter at ``1e-23`` came back unmoved, "converged" (MADD-ANO-167).
     ``converged`` is never reported on a solve whose live columns were not
     representable even framed, or on a loss of ``0.0`` from a residual that
     is not zero (a float64 residual below about ``1e-162``): the run stops
@@ -5394,7 +5394,7 @@ def fit_lm(
             # and ``J`` linearly, still points at the optimum.  Earlier 0.4.0
             # development builds ended such a run unconverged there, 40 ulps
             # short, or converged a few ulps away, by which of the two the
-            # parameters' units happened to round to (MADD-ANO-163).
+            # parameters' units happened to round to (MADD-ANO-167).
             if _within_step_tol(theta, cand):
                 gn_cand, gn_ok = _quantised(
                     theta, lambda held: _gauss_newton_step(theta, r, J, bounds.lo,

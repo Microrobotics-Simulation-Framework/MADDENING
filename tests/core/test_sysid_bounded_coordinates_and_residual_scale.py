@@ -269,7 +269,7 @@ def test_fit_lm_answers_the_same_for_every_scaling_of_the_residual(linear_proble
     1e-7 the absolute floor left the fit unconverged after 50 iterations; at
     1e-8 it barely moved.  From ``1e-18`` down, ``r * r``, ``JᵀJ`` and ``Jᵀr``
     flushed in float32 and the fit reported ``converged=True`` 2-7% off or at
-    its start; from ``1e19`` up they overflowed (MADD-ANO-163)."""
+    its start; from ``1e19`` up they overflowed (MADD-ANO-167)."""
     gm, mask, A, b = linear_problem
     ft = jnp.float32
 
@@ -302,7 +302,7 @@ def test_a_noise_std_is_the_same_scaling(linear_problem):
 
 
 def test_fit_lm_never_converges_on_a_solve_it_could_not_form(linear_problem, monkeypatch):
-    """Defence in depth for MADD-ANO-163: whatever frames the solve, a step
+    """Defence in depth for MADD-ANO-167: whatever frames the solve, a step
     whose live columns were not representable (a ``diag(JᵀJ)`` of 0 or
     ``inf`` for a column ``J`` does not leave at zero) never carries a
     converged verdict -- the run stops unconverged and says why."""
@@ -489,7 +489,7 @@ def test_a_run_of_stalled_candidates_is_not_the_rounding_floor(monkeypatch):
     tie and are rejected, but the fit is nowhere near its floor.
 
     The Gauss-Newton step that lowers the loss is now taken as the iterate
-    (MADD-ANO-163) rather than ending the run unconverged, so a run whose
+    (MADD-ANO-167) rather than ending the run unconverged, so a run whose
     damped candidates all stall is carried on by it, and converges only
     where that step is within ``step_tol`` -- at the truth."""
     from maddening import sysid

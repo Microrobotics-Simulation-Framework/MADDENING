@@ -294,7 +294,7 @@ def test_assigning_gm_params_is_later_than_a_node_write_before_it():
 
 # ---------------------------------------------------------------------------
 # A replaced mapping keeps counting, and an in-place write is a write
-# (MADD-ANO-164)
+# (MADD-ANO-168)
 # ---------------------------------------------------------------------------
 
 

@@ -214,6 +214,39 @@ def test_a_float32_parameter_in_an_x64_graph_advertises_the_float32_envelope():
         assert not _set(bridge, k, 1.0)["ok"]
 
 
+def test_a_float64_logit_parameters_advertised_bounds_are_settable_with_and_without_specs():
+    """FMU-016 and FMU-039 at float64: under ``logit`` on ``(-10, 10)`` a
+    float64 leaf's ``nextafter(10, 0)`` has ``(p - lo) / (hi - lo) == 1`` at
+    float64, so ``ParamSpec.check`` refuses it and the outermost value it
+    accepts is advertised instead (the B1 round-8 L1 finding was the float32
+    case).  Both sidecar configurations take each advertised bound and
+    refuse the next float64 outside it."""
+    with _x64():
+        gm = _graph()
+        gm.set_param_spec("s", "d", ParamSpec(bounds=(-10.0, 10.0), transform="logit"))
+        md = build_model_description(gm, model_name="m")
+        d = _vars(md)["s.params.d"]
+        spec = gm.param_specs()["nodes"]["s"]["d"]
+        one_in = np.nextafter(F64(10.0), F64(0.0))
+        with pytest.raises(ValueError, match="no finite logit coordinate"):
+            spec.check(np.asarray(one_in))
+        assert float(d.min) == float(np.nextafter(F64(-10.0), F64(0.0)))
+        assert float(d.max) < float(one_in)
+        for with_specs in (True, False):
+            bridge = FmuTcpBridge(FmuSidecar(SidecarConfig(
+                schema_token=md.instantiation_token, step_fn=gm._compiled_step,
+                initial_state=gm._state, params=gm.params,
+                param_specs=gm.param_specs() if with_specs else None)), md,
+                master_dt=gm.timestep)
+            try:
+                for edge, outward in ((d.min, -np.inf), (d.max, np.inf)):
+                    assert _set(bridge, d, float(edge), "Float64")["ok"], (edge, with_specs)
+                    beyond = float(np.nextafter(F64(edge), F64(outward)))
+                    assert not _set(bridge, d, beyond, "Float64")["ok"], (beyond, with_specs)
+            finally:
+                bridge.stop()
+
+
 # ---------------------------------------------------------------------------
 # Stepping and time
 # ---------------------------------------------------------------------------

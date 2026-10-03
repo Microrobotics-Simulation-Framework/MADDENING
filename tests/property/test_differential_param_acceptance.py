@@ -67,14 +67,14 @@ Documented differences, which the oracle allows and nothing else:
   dtype cannot hold, as every door does.  A decision, recorded in
   ``MADD-ANO-163``.
 
-Known disagreements, pinned as strict xfails:
+Known disagreements, pinned as strict xfails: none left.
 
-* **N2** -- a ``log`` / ``logit`` bound in the band where a float32's
-  spacing is subnormal (``TINY <= |b| < 2**-102``) is advertised one float
-  inside it, a distance XLA flushes to zero, where ``ParamSpec.check``
-  refuses; a bridge whose sidecar has no specs takes it.
-
-Fixed, and run as tests: **N1** -- the REST route stored a numeric string
+Fixed, and run as tests: **N2** -- a ``log`` / ``logit`` bound in the band
+where a float32's spacing is subnormal (``TINY <= |b| < 2**-102``) was
+advertised one float inside it, a distance XLA flushes to zero, where
+``ParamSpec.check`` refuses, and a bridge whose sidecar had no specs took
+it; an open bound is now advertised as the outermost value inside it that
+``check`` accepts.  **N1** -- the REST route stored a numeric string
 (``"1.5"``) in a float leaf as the number; **B2-H1** -- ``POST
 /checkpoint/load`` restored what PUT refuses: out of bounds, non-finite, a
 boolean, a numeric string, a value the constructor refuses
@@ -660,12 +660,6 @@ def test_every_door_agrees_on_a_log_spec_without_a_lower_bound(doors, data):
     check_acceptance(doors, spec, data.draw(values(spec), label="value"))
 
 
-_N2_REASON = (
-    "N2: a log/logit bound b with TINY <= |b| < 2**-102 is advertised as nextafter(b), "
-    "a flushed distance from b that ParamSpec.check refuses, so a bridge whose sidecar has "
-    "no specs accepts it (model_description.py _advertised_bound); pending fix")
-
-
 @pytest.mark.parametrize("spec, value", [
     (ParamSpec(bounds=(TINY, None), transform="log"), float(np.nextafter(np.float32(TINY), 1))),
     (ParamSpec(bounds=(1e-35, None), transform="log"),
@@ -675,12 +669,10 @@ _N2_REASON = (
     (ParamSpec(bounds=(-1.0, -1e-35), transform="logit"),
      float(np.nextafter(np.float32(-1e-35), np.float32(-1)))),
 ], ids=["log-at-TINY", "log-at-1e-35", "logit-lower", "logit-upper"])
-@pytest.mark.xfail(strict=True, reason=_N2_REASON)
 def test_an_open_bound_in_the_flushed_band_is_held_by_every_door(doors, spec, value):
     check_acceptance(doors, spec, value)
 
 
-@pytest.mark.xfail(strict=True, reason=_N2_REASON)
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
 def test_every_door_agrees_on_an_open_bound_in_the_flushed_band(doors, data):

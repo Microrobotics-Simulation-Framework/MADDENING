@@ -27,7 +27,20 @@ to the same rules:
 * **a verified row cites no xfail**, strict or not: a claim the tree does
   not meet is not verified.  And every xfail whose reason names a row is
   strict and cited by that row, and names a row some inventory holds, so a
-  test cannot outlive its row's status.
+  test cannot outlive its row's status;
+* **every row of a file with a domain matrix fills it**: a file that
+  names a ``domain_set`` (one of :data:`DOMAIN_SETS`, a fixed list) gives
+  every row a ``domains`` mapping with exactly that set's domains, each
+  one a tested node id (or a list of them), ``narrowed`` or ``n/a``.  A
+  ``narrowed`` domain is excluded in the row's ``conditions`` by a
+  trailing "Not claimed for ..." clause that names it, and the clause
+  names no domain that is not narrowed.  A domain the conditions name
+  before that clause, or cover with a phrase such as "any dtype", is
+  covered, so it cannot be ``n/a``.  A tested domain's test is collected
+  and runs on every push (the rule above), counts for the xfail rules,
+  and names its domain in its own source (a float64 cell cites a test
+  that mentions x64 or float64): a floor that catches a cell citing a
+  test written for another domain, not a proof that the test is apt.
 
 Which tests are slow, skipped or xfail comes from pytest itself, in one
 ``--collect-only`` subprocess over the files every inventory cites.  The
@@ -38,12 +51,14 @@ each rule fires.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -60,9 +75,9 @@ INVENTORIES = sorted(VALIDATION.glob("*_claims.yaml"))
 EXPECTED = ("coupling_claims.yaml", "sysid_fmu_claims.yaml", "rest_runpod_claims.yaml")
 
 SCHEMA_VERSION = 1
-TOP_LEVEL = ("schema_version", "prefixes", "claims")
+TOP_LEVEL = ("schema_version", "prefixes", "domain_set", "claims")
 REQUIRED = ("id", "area", "claim", "sources", "conditions", "oracle", "tests", "status")
-OPTIONAL = ("proposed_wording", "finding", "reason", "notes")
+OPTIONAL = ("proposed_wording", "finding", "reason", "notes", "domains")
 STATUSES = ("verified", "failing", "untested", "ambiguous")
 #: The field each status needs beside the required ones.
 NEEDS = {"ambiguous": "proposed_wording", "failing": "finding", "untested": "reason"}
@@ -72,6 +87,93 @@ _ID = re.compile(r"^([A-Z]{2,6})-\d{3}$")
 _SOURCE_PATH = re.compile(r"^([\w./\-]+?\.(?:py|md|yaml|toml|json|txt|c|h|xml))(?=$|[:#\s(])")
 #: An xfail reason that names a row.
 _REASON_ROW = re.compile(r"^(([A-Z]{2,6})-\d{3}):")
+
+# --------------------------------------------------------------------------
+# The domain matrix: the fixed vocabularies, and how conditions name them
+# --------------------------------------------------------------------------
+#: The numeric domains a coupling, sysid or FMU claim can be exercised in
+#: (``testing_standards.md``, "The domain matrix", defines each).
+NUMERIC_DOMAINS = (
+    "f32", "f64", "mixed_dtype", "16bit",
+    "jit", "grad", "vmap",
+    "multi_rate", "sub_cycled", "predictors_warm_starts",
+    "adaptive", "checkpoint_restart", "sharded",
+)
+#: Every vocabulary a file may name in its top-level ``domain_set``.  A
+#: file that names none has no matrix yet (the REST inventory's server
+#: domains are a set of their own, added here when it gets one), and its
+#: rows may not carry one.
+DOMAIN_SETS: dict[str, tuple[str, ...]] = {"numeric": NUMERIC_DOMAINS}
+NOT_APPLICABLE = "n/a"
+NARROWED = "narrowed"
+#: Cells waiting on a parallel branch: an oracle that will cover them, or a
+#: fix PR whose tests will.  Temporary while those branches are open; the
+#: matrix is complete only when none is left (PENDING_ALLOWED False).
+PENDING = ("TODO-oracle", "TODO-fix")
+PENDING_ALLOWED = False
+#: A narrowed domain is excluded by a clause that starts with this and runs
+#: to the end of the row's ``conditions``.
+NARROWING_LEAD = "Not claimed for"
+#: How a condition names each domain.  Matched in this order, each match
+#: blanked before the next domain is looked for, so "float32 leaves under
+#: x64" names mixed_dtype and not f32 or f64 as well.
+DOMAIN_SPELLINGS: tuple[tuple[str, re.Pattern], ...] = tuple(
+    (name, re.compile(pattern, re.IGNORECASE)) for name, pattern in (
+        ("mixed_dtype", r"mixed[- ](?:dtypes?|precisions?)|float32 (?:leaves|fields|parameters|"
+                        r"nodes?|members?) (?:in|under|beside) (?:an? )?(?:x64|float64)"),
+        ("16bit", r"\bb?float16\b|\bbfloat16\b|\b16-bit\b|\bsixteen-bit\b"),
+        ("predictors_warm_starts", r"\bpredictors?\b|\bwarm[- ]starts?\b"),
+        ("sub_cycled", r"\bsub-?cycl\w*"),
+        ("multi_rate", r"\bmulti-?rate\b"),
+        ("adaptive", r"\brun_adaptive\w*|\badaptive step\w*"),
+        ("checkpoint_restart", r"\bcheckpoints?\b|\brestarts?\b|\bsave_state\b|\bload_state\b"),
+        ("sharded", r"\bshard\w*|\bvirtual devices\b|\bdevice mesh\b"),
+        ("vmap", r"\bvmap\w*|\bbatched\b"),
+        ("grad", r"\bgrad\b|\bgradients?\b|\bjvp\b|\bvjp\b|\bjacfwd\b|\bjacrev\b|"
+                 r"\bderivatives?\b|\bdifferentiat\w*|\b(?:forward|reverse)[- ]mode\b"),
+        ("jit", r"\bjit\b|\bjitted\b|\bjax\.jit\b"),
+        ("f64", r"\bfloat64\b|\bx64\b"),
+        ("f32", r"\bfloat32\b"),
+    ))
+#: Phrases in a condition that cover several domains at once.
+COVERING_PHRASES: tuple[tuple[re.Pattern, tuple[str, ...]], ...] = (
+    (re.compile(r"\b(?:any|every|all) (?:float(?:ing)?(?:-point)? )?dtypes?\b", re.IGNORECASE),
+     ("f32", "f64", "mixed_dtype", "16bit")),
+    (re.compile(r"\b(?:any|every|all) graphs?\b", re.IGNORECASE), ("multi_rate", "sub_cycled")),
+)
+#: What a tested cell's test must say somewhere in its source (its node id,
+#: its decorators, its body and the definitions it names, three levels
+#: deep): the domain's own vocabulary.  A floor, not a proof.
+DOMAIN_WITNESS: dict[str, re.Pattern] = {
+    name: re.compile(pattern, re.IGNORECASE) for name, pattern in (
+        # float64 state exists only under x64; "float64" alone is usually an
+        # oracle's precision, not the domain under test.
+        ("f64", r"x64"),
+        ("16bit", r"float16|bfloat16|sixteen"),
+        ("jit", r"jit|compile|run_scan|\.step\(|\.run\(|lax\.|while_loop|fori_loop"),
+        # The fitters and fim differentiate the loss or residual they are given.
+        ("grad", r"grad|jvp|vjp|jacfwd|jacrev|jacobian|hessian|linearize|derivative|"
+                 r"\bfit\w*\(|\bfim\w*\("),
+        ("vmap", r"vmap|run_sweep"),
+        ("multi_rate", r"multi.?rate|rate.?divider|start_step"),
+        ("sub_cycled", r"sub.?cycl"),
+        ("predictors_warm_starts", r"predictor|warm|jacobian_reuse"),
+        ("adaptive", r"adaptive"),
+        ("checkpoint_restart", r"checkpoint|save_state|load_state|restart|snapshot|fmu_state|"
+                               r"get_state|set_state|restore|reset|window"),
+        ("sharded", r"shard|mesh"),
+    )}
+
+
+def witnesses(domain: str, text: str) -> bool:
+    """Whether *text*, a test's source, names *domain*."""
+    if domain == "f32":     # the default precision: anything but an x64-only test
+        return bool(re.search(r"float32|bfloat16|float16", text)) or not re.search(
+            r"x64", text, re.IGNORECASE)
+    if domain == "mixed_dtype":
+        return bool(re.search(r"mixed", text, re.IGNORECASE)) or bool(
+            re.search(r"x64", text, re.IGNORECASE) and re.search(r"float32", text))
+    return bool(DOMAIN_WITNESS[domain].search(text))
 
 
 @dataclass(frozen=True)
@@ -104,6 +206,15 @@ class Inventory:
     @property
     def prefixes(self) -> list:
         return self._get("prefixes")
+
+    @property
+    def domain_set(self):
+        return self.doc.get("domain_set") if isinstance(self.doc, dict) else None
+
+    @property
+    def domains(self) -> tuple[str, ...] | None:
+        """The domain names this file's rows fill, or None for no matrix."""
+        return DOMAIN_SETS.get(self.domain_set) if isinstance(self.domain_set, str) else None
 
 
 def load(path: Path) -> Inventory:
@@ -138,6 +249,10 @@ def file_problems(inventories: list[Inventory]) -> list[str]:
                             f"is not {SCHEMA_VERSION}")
         if not (isinstance(doc.get("claims"), list) and doc["claims"]):
             problems.append(f"{inv.name}: 'claims' must be a non-empty list")
+        if "domain_set" in doc and not (isinstance(doc["domain_set"], str)
+                                        and doc["domain_set"] in DOMAIN_SETS):
+            problems.append(f"{inv.name}: domain_set {doc['domain_set']!r} is not one of "
+                            f"{sorted(DOMAIN_SETS)}")
         prefixes = doc.get("prefixes")
         if not (isinstance(prefixes, list) and prefixes):
             problems.append(f"{inv.name}: 'prefixes' must be a non-empty list")
@@ -159,8 +274,10 @@ def file_problems(inventories: list[Inventory]) -> list[str]:
 # --------------------------------------------------------------------------
 # Rule 1: the rows themselves
 # --------------------------------------------------------------------------
-def row_problems(rows: list, prefixes, repo_root: Path = REPO_ROOT) -> list[str]:
-    """What is wrong with one file's rows, read alone; *prefixes* are the file's own."""
+def row_problems(rows: list, prefixes, repo_root: Path = REPO_ROOT,
+                 domains: tuple[str, ...] | None = None) -> list[str]:
+    """What is wrong with one file's rows, read alone; *prefixes* are the file's own,
+    and *domains* its domain set (None: the file has no matrix)."""
     problems = []
     seen: set[str] = set()
     for i, row in enumerate(rows):
@@ -214,6 +331,91 @@ def row_problems(rows: list, prefixes, repo_root: Path = REPO_ROOT) -> list[str]
         for t in tests:
             if not (isinstance(t, str) and _NODE_ID.fullmatch(t)):
                 problems.append(f"{where}: {t!r} is not a node id tests/<file>.py::<test>")
+        problems += domain_problems(row, domains)
+    return problems
+
+
+# --------------------------------------------------------------------------
+# Rule 1b: the domain matrix of a row
+# --------------------------------------------------------------------------
+def domain_mentions(text: str) -> set[str]:
+    """The domains *text* names, by :data:`DOMAIN_SPELLINGS`, most specific first."""
+    found: set[str] = set()
+    rest = text
+
+    def blank(name):
+        def sub(m):
+            found.add(name)
+            return " " * len(m.group(0))
+        return sub
+
+    for name, pattern in DOMAIN_SPELLINGS:
+        rest = pattern.sub(blank(name), rest)
+    return found
+
+
+def split_conditions(text: str) -> tuple[str, str]:
+    """``(what the conditions claim, the trailing "Not claimed for" clause or "")``."""
+    i = text.find(NARROWING_LEAD)
+    return (text, "") if i < 0 else (text[:i], text[i:])
+
+
+def covered_domains(text: str) -> set[str]:
+    """The domains a condition (before its narrowing clause) names or covers."""
+    found = domain_mentions(text)
+    for pattern, names in COVERING_PHRASES:
+        if pattern.search(text):
+            found.update(names)
+    return found
+
+
+def cell_tests(value) -> list[str] | None:
+    """The node ids a tested cell cites, or None if *value* is not a tested cell."""
+    values = value if isinstance(value, list) and value else [value]
+    if all(isinstance(v, str) and _NODE_ID.fullmatch(v) for v in values):
+        return list(values)
+    return None
+
+
+def domain_problems(row: dict, domains: tuple[str, ...] | None) -> list[str]:
+    """What is wrong with one row's ``domains``, against its file's domain set."""
+    where = row.get("id") or "a row"
+    cells = row.get("domains")
+    if domains is None:
+        return ([f"{where}: a 'domains' matrix, but its file names no domain_set"]
+                if "domains" in row else [])
+    if not isinstance(cells, dict):
+        return [f"{where}: no 'domains' mapping of each domain to a test, "
+                f"'{NARROWED}' or '{NOT_APPLICABLE}'"]
+    problems = []
+    missing = [d for d in domains if d not in cells]
+    if missing:
+        problems.append(f"{where}: 'domains' says nothing about {missing}")
+    unknown = sorted(str(k) for k in cells if k not in domains)
+    if unknown:
+        problems.append(f"{where}: {unknown} not in its file's domain set")
+    conditions = row.get("conditions") if isinstance(row.get("conditions"), str) else ""
+    claimed, clause = split_conditions(conditions)
+    excluded = domain_mentions(clause)
+    covered = covered_domains(claimed)
+    if clause and not excluded:
+        problems.append(f"{where}: its '{NARROWING_LEAD}' clause names no domain")
+    for d in domains:
+        if d not in cells:
+            continue
+        value = cells[d]
+        narrowed = value == NARROWED
+        pending = PENDING_ALLOWED and value in PENDING
+        if not (narrowed or pending or value == NOT_APPLICABLE or cell_tests(value) is not None):
+            problems.append(f"{where}: domain {d}: {value!r} is not a node id, a list of them, "
+                            f"'{NARROWED}' or '{NOT_APPLICABLE}'")
+        if narrowed and d not in excluded:
+            problems.append(f"{where}: domain {d} is narrowed, but its conditions do not "
+                            f"exclude it (a trailing '{NARROWING_LEAD} ...' clause naming it)")
+        if d in excluded and not narrowed:
+            problems.append(f"{where}: its conditions exclude {d}, but the cell is {value!r}")
+        if value == NOT_APPLICABLE and d in covered:
+            problems.append(f"{where}: domain {d} is n/a, but its conditions cover it")
     return problems
 
 
@@ -246,9 +448,23 @@ sys.exit(code)
 """
 
 
+def domain_targets(row: dict) -> list[tuple[str, str]]:
+    """``(domain, node id)`` for every test the row's domain matrix cites."""
+    cells = row.get("domains")
+    if not isinstance(cells, dict):
+        return []
+    return [(str(d), t) for d, v in cells.items() for t in (cell_tests(v) or [])]
+
+
+def cited_targets(row: dict) -> list[str]:
+    """Every node id a row cites: its tests, then its tested domains'."""
+    tests = [t for t in (row.get("tests") or []) if isinstance(t, str)]
+    return tests + [t for _, t in domain_targets(row)]
+
+
 def cited_files(rows: list) -> list[str]:
     return sorted({t.split("::", 1)[0] for row in rows if isinstance(row, dict)
-                   for t in (row.get("tests") or []) if isinstance(t, str)})
+                   for t in cited_targets(row)})
 
 
 @pytest.fixture(scope="module")
@@ -283,7 +499,7 @@ def collection_problems(rows: list, items: list[Item], witness=_per_push_witness
     """Cited tests pytest does not collect, that are skipped, or slow without a witness."""
     problems = []
     for row in rows:
-        for target in row.get("tests") or []:
+        for target in cited_targets(row):
             covered = [it for it in items if _covers(target, it.nodeid)]
             if not covered:
                 problems.append(f"{row.get('id')}: {target} -- pytest collects no such test")
@@ -315,7 +531,7 @@ def xfail_problems(rows: list, items: list[Item]) -> list[str]:
     cited_by: dict[str, set[str]] = {}
     for row in rows:
         rid, status = row.get("id"), row.get("status")
-        covered = [it for t in row.get("tests") or [] for it in items if _covers(t, it.nodeid)]
+        covered = [it for t in cited_targets(row) for it in items if _covers(t, it.nodeid)]
         for it in covered:
             cited_by.setdefault(it.nodeid, set()).add(rid)
         if status == "failing":
@@ -352,6 +568,134 @@ def unowned_xfail_problems(inventories: list[Inventory], items: list[Item]) -> l
 
 
 # --------------------------------------------------------------------------
+# Rule 5: a tested domain cites a test that names its domain
+# --------------------------------------------------------------------------
+@cache
+def _module(rel: str, repo_root: Path = REPO_ROOT):
+    """``(text, tree, top-level definitions by name)`` of a test module, or None."""
+    path = repo_root / rel
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text, filename=rel)
+    defs: dict[str, object] = {}
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defs[stmt.name] = (rel, stmt)
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            for t in targets:
+                if isinstance(t, ast.Name):
+                    defs[t.id] = (rel, stmt)
+        elif isinstance(stmt, ast.ImportFrom) and stmt.module and stmt.module.startswith("tests"):
+            for alias in stmt.names:
+                as_module = f"{stmt.module}.{alias.name}".replace(".", "/") + ".py"
+                if (repo_root / as_module).is_file():     # from tests.x import module
+                    defs.setdefault(alias.asname or alias.name, (as_module, None))
+                else:
+                    defs.setdefault(alias.asname or alias.name,
+                                    (stmt.module.replace(".", "/") + ".py", alias.name))
+        elif isinstance(stmt, ast.Import):
+            for alias in stmt.names:
+                if alias.name.startswith("tests.") and alias.asname:
+                    defs.setdefault(alias.asname, (alias.name.replace(".", "/") + ".py", None))
+    return text, tree, defs
+
+
+def _segment(text: str, node) -> str:
+    lines = text.splitlines()
+    first = min([d.lineno for d in getattr(node, "decorator_list", [])] + [node.lineno])
+    return "\n".join(lines[first - 1:node.end_lineno])
+
+
+def _resolve(entry, repo_root: Path):
+    """A definition entry ``(file, node)`` or an import ``(file, name)`` -> ``(text, node)``."""
+    rel, node = entry
+    if node is None:                    # a module alias: nothing to read by itself
+        return None
+    if isinstance(node, str):           # imported from another test module
+        mod = _module(rel, repo_root)
+        if mod is None or node not in mod[2] or isinstance(mod[2][node][1], str):
+            return None
+        rel, node = mod[2][node]
+    mod = _module(rel, repo_root)
+    return None if mod is None else (mod[0], node, mod[2])
+
+
+def source_of_test(nodeid: str, repo_root: Path = REPO_ROOT, depth: int = 3) -> str | None:
+    """The text a tested cell's witness is looked for in, or None if the test
+    cannot be found: the node id, the test with its decorators (and its
+    class's), the module's ``pytestmark``, and every module-level definition
+    the test names -- a helper, a fixture, a constant, one imported from
+    another test module, ``alias.name`` of a test module imported as
+    ``alias`` -- and the ones those name, *depth* levels deep."""
+    rel, *names = nodeid.split("[", 1)[0].split("::")
+    mod = _module(rel, repo_root)
+    if mod is None or not names:
+        return None
+    text, tree, defs = mod
+    owner = None
+    func = defs.get(names[0], (None, None))[1]
+    if len(names) == 2 and isinstance(func, ast.ClassDef):
+        owner, func = func, next((s for s in func.body if isinstance(
+            s, (ast.FunctionDef, ast.AsyncFunctionDef)) and s.name == names[1]), None)
+    if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)) or len(names) > 2:
+        return None
+    pieces = [nodeid, _segment(text, func)]
+    scope, members = defs, {}
+    if owner is not None:
+        pieces += [ast.unparse(d) for d in owner.decorator_list]
+        # The class's own helpers and fixtures, reached as ``self.name`` or
+        # by a fixture argument, shadow the module's.
+        members = {s.name: (rel, s) for s in owner.body
+                   if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        scope = {**defs, **members}
+    if "pytestmark" in defs and not isinstance(defs["pytestmark"][1], str):
+        pieces.append(_segment(text, defs["pytestmark"][1]))
+    seen: set[int] = {id(func)}
+    frontier = [(text, func, scope)]
+    for _ in range(depth):
+        nxt = []
+        for src, node, scope in frontier:
+            names_used = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            names_used |= {a.arg for a in ast.walk(node) if isinstance(a, ast.arg)}
+            entries = [scope.get(name) for name in sorted(names_used)]
+            # ``alias.name`` where ``alias`` is a test module imported here,
+            # and ``self.name`` / ``cls.name`` for a method of the test's class
+            for n in ast.walk(node):
+                if not (isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)):
+                    continue
+                if scope.get(n.value.id, (None, 0))[1] is None:
+                    entries.append((scope[n.value.id][0], n.attr))
+                elif n.value.id in ("self", "cls"):
+                    entries.append(scope.get(n.attr))
+            for entry in entries:
+                got = _resolve(entry, repo_root) if entry else None
+                if got is None or id(got[1]) in seen:
+                    continue
+                seen.add(id(got[1]))
+                pieces.append(_segment(got[0], got[1]))
+                # a method of the test's class keeps the class's scope
+                nxt.append((got[0], got[1], scope) if entry in members.values() else got)
+        frontier = nxt
+    return "\n".join(pieces)
+
+
+def domain_witness_problems(rows: list, source=source_of_test) -> list[str]:
+    """Tested domains whose test does not name its domain anywhere in its source."""
+    problems = []
+    for row in rows:
+        for domain, target in domain_targets(row):
+            text = source(target)
+            if text is None:
+                problems.append(f"{row.get('id')}: domain {domain}: cannot find {target}'s source")
+            elif domain in NUMERIC_DOMAINS and not witnesses(domain, text):
+                problems.append(f"{row.get('id')}: domain {domain}: {target} never names "
+                                f"its domain (see DOMAIN_WITNESS)")
+    return problems
+
+
+# --------------------------------------------------------------------------
 # The rules on the inventories
 # --------------------------------------------------------------------------
 _NAMES = [p.name for p in INVENTORIES]
@@ -370,7 +714,14 @@ def test_the_files_are_well_formed_and_own_disjoint_prefixes():
 @pytest.mark.parametrize("path", INVENTORIES, ids=_NAMES)
 def test_every_row_is_well_formed(path):
     inv = load(path)
-    problems = row_problems(inv.rows, inv.prefixes)
+    problems = row_problems(inv.rows, inv.prefixes, domains=inv.domains)
+    assert not problems, f"{inv.name}:\n  " + "\n  ".join(problems)
+
+
+@pytest.mark.parametrize("path", INVENTORIES, ids=_NAMES)
+def test_every_tested_domain_cites_a_test_that_names_its_domain(path):
+    inv = load(path)
+    problems = domain_witness_problems(inv.rows)
     assert not problems, f"{inv.name}:\n  " + "\n  ".join(problems)
 
 
@@ -542,3 +893,162 @@ def test_an_xfail_naming_a_row_nobody_holds_is_reported():
     other = _item("tests/core/test_x.py::test_g", xfail=True, strict=True,
                   reason="differential: x; pending fix")
     assert unowned_xfail_problems(invs, [other]) == []
+
+
+# --------------------------------------------------------------------------
+# Self-tests of the domain matrix
+# --------------------------------------------------------------------------
+_T = "tests/core/test_x.py::test_a"
+
+
+def _cells(**changes):
+    """A full numeric matrix: every domain n/a but the ones changed."""
+    cells = {d: NOT_APPLICABLE for d in NUMERIC_DOMAINS}
+    cells.update({k.replace("bit16", "16bit"): v for k, v in changes.items()})
+    return cells
+
+
+def _drow(conditions="k", **changes):
+    return _row(conditions=conditions, domains=_cells(**changes))
+
+
+@pytest.mark.parametrize("row, fragment", [
+    (_row(), "no 'domains' mapping"),
+    (_row(domains=["f32"]), "no 'domains' mapping"),
+    (_row(domains={d: NOT_APPLICABLE for d in NUMERIC_DOMAINS if d != "vmap"}),
+     "says nothing about ['vmap']"),
+    (_row(domains=dict(_cells(), gpu=NOT_APPLICABLE)), "not in its file's domain set"),
+    (_drow(f64="maybe"), "is not a node id, a list of them"),
+    (_drow(f64=3), "is not a node id, a list of them"),
+    (_drow(f64=[]), "is not a node id, a list of them"),
+    (_drow(f64=["tests/core/test_x.py"]), "is not a node id, a list of them"),
+    (_drow(f64=[_T, "test_b"]), "is not a node id, a list of them"),
+    (_drow(f64=NARROWED), "do not exclude it"),
+    (_drow("float32 only. Not claimed for vmap.", f64=NARROWED, vmap=NARROWED),
+     "domain f64 is narrowed"),
+    (_drow("k. Not claimed for float64.", f64=_T), "exclude f64, but the cell is"),
+    (_drow("k. Not claimed for float64.", f64=NOT_APPLICABLE), "exclude f64, but the cell is"),
+    (_drow("k. Not claimed for the moon.", f64=NARROWED), "names no domain"),
+    (_drow("under vmap and jit"), "domain vmap is n/a, but its conditions cover it"),
+    (_drow("any dtype", f32=_T), "domain 16bit is n/a, but its conditions cover it"),
+    (_drow("every graph", f32=_T), "domain sub_cycled is n/a, but its conditions cover it"),
+    (_drow("a sub-cycled group"), "domain sub_cycled is n/a"),
+    (_drow("an IFT gradient"), "domain grad is n/a"),
+    (_drow("float32 leaves under x64"), "domain mixed_dtype is n/a"),
+], ids=["no-matrix", "not-a-mapping", "missing-domain", "unknown-domain", "bad-word",
+        "bad-type", "empty-list", "bad-node-id", "bad-node-in-list", "narrowed-unexcluded",
+        "narrowed-other", "excluded-but-tested", "excluded-but-na", "empty-clause",
+        "named-but-na", "any-dtype", "any-graph", "sub-cycled-named", "gradient-named",
+        "mixed-named"])
+def test_the_domain_rule_fires_on_each_defect(row, fragment):
+    problems = row_problems([row], ["CPL"], domains=NUMERIC_DOMAINS)
+    assert any(fragment in p for p in problems), problems
+
+
+def test_the_domain_rule_passes_a_filled_matrix_and_reads_each_spelling():
+    assert row_problems([_drow(f32=_T, jit=[_T, "tests/core/test_x.py::test_b[1]"])], ["CPL"],
+                        domains=NUMERIC_DOMAINS) == []
+    narrowed = _drow("both solvers. Not claimed for float64, mixed dtypes, 16-bit floats, vmap, "
+                     "multi-rate or sub-cycled graphs, predictors, run_adaptive, checkpoints "
+                     "or sharded graphs.", f32=_T,
+                     **{d: NARROWED for d in ("f64", "mixed_dtype", "bit16", "vmap", "multi_rate",
+                                              "sub_cycled", "predictors_warm_starts", "adaptive",
+                                              "checkpoint_restart", "sharded")})
+    assert row_problems([narrowed], ["CPL"], domains=NUMERIC_DOMAINS) == []
+    # The specific spelling is consumed first: this names mixed_dtype only.
+    assert domain_mentions("float32 leaves under x64") == {"mixed_dtype"}
+    assert domain_mentions("bfloat16 and float16") == {"16bit"}
+    assert domain_mentions("a jitted loss; jax.grad; jvp") == {"jit", "grad"}
+    assert domain_mentions("WaveletAdaptiveNode") == set()
+    # A domain named only after the clause is not covered by the conditions.
+    assert covered_domains(split_conditions("k. Not claimed for vmap.")[0]) == set()
+    # A file without a domain set: its rows carry no matrix, and need none.
+    assert row_problems([_GOOD], ["CPL"]) == []
+    assert any("names no domain_set" in p
+               for p in row_problems([_drow(f32=_T)], ["CPL"]))
+
+
+def test_the_file_rule_refuses_an_unknown_domain_set():
+    assert any("domain_set 'server'" in p for p in file_problems([_inv(domain_set="server")]))
+    assert any("domain_set 3" in p for p in file_problems([_inv(domain_set=3)]))
+    assert file_problems([_inv(domain_set="numeric")]) == []
+    assert _inv(domain_set="numeric").domains == NUMERIC_DOMAINS
+    assert _inv().domains is None
+
+
+def test_the_collection_and_xfail_rules_read_the_domain_tests():
+    row = _drow(f32=_T, vmap="tests/core/test_x.py::test_v")
+    assert any("test_v -- pytest collects no such test" in p
+               for p in collection_problems([row], [_item()]))
+    vm = _item("tests/core/test_x.py::test_v", slow=True)
+    assert any("no '# Per push" in p for p in collection_problems(
+        [row], [_item(), vm], witness=lambda f: False))
+    assert collection_problems([row], [_item(), _item("tests/core/test_x.py::test_v")]) == []
+    # A verified row cites no xfail, in its domains either.
+    xv = _item("tests/core/test_x.py::test_v", xfail=True, strict=True, reason="CPL-900: x")
+    assert any("verified, but cites the xfail" in p for p in xfail_problems([row], [_item(), xv]))
+    # A failing row's strict xfail may be the failing domain's test, which cites it.
+    failing = dict(row, status="failing", finding="f")
+    assert xfail_problems([failing], [_item(), xv]) == []
+    assert cited_files([row]) == ["tests/core/test_x.py"]
+
+
+def test_the_witness_rule_wants_each_domain_named_in_its_test():
+    row = _drow(f32=_T, f64="tests/core/test_x.py::test_d")
+    sources = {_T: "def test_a(): gm.step()", "tests/core/test_x.py::test_d": "def test_d(): ..."}
+    assert any("domain f64: tests/core/test_x.py::test_d never names" in p
+               for p in domain_witness_problems([row], source=sources.get))
+    sources["tests/core/test_x.py::test_d"] = "def test_d():\n    with _x64(): gm.step()"
+    assert domain_witness_problems([row], source=sources.get) == []
+    # f32 is the default: any test but one that only runs under x64.
+    sources[_T] = "def test_a():\n    jax.config.update('jax_enable_x64', True)"
+    assert any("domain f32" in p for p in domain_witness_problems([row], source=sources.get))
+    sources[_T] = "def test_a(dtype=jnp.float32):\n    with _x64(): ..."
+    assert domain_witness_problems([row], source=sources.get) == []
+    assert any("cannot find" in p for p in domain_witness_problems([row], source=lambda t: None))
+    assert witnesses("mixed_dtype", "with _x64(): jnp.float32") and not witnesses(
+        "mixed_dtype", "with _x64(): jnp.float64")
+    for domain in NUMERIC_DOMAINS:
+        assert not witnesses(domain, "def test_q(): x64") or domain in ("f64",)
+
+
+def test_the_source_reader_follows_the_names_a_test_uses(tmp_path):
+    (tmp_path / "tests" / "core").mkdir(parents=True)
+    (tmp_path / "tests" / "core" / "support.py").write_text(
+        "def farthest():\n    return 'jax.vmap'\n\ndef farther():\n    return farthest()\n\n"
+        "def far():\n    return farther()\n\ndef helper():\n    return far()\n\n"
+        "def by_alias():\n    return 'shard_map'\n")
+    (tmp_path / "tests" / "core" / "test_y.py").write_text(
+        "from tests.core.support import helper\n"
+        "import tests.core.support as sup\n"
+        "import pytest\n\n"
+        "def _deep():\n    return 'run_adaptive'\n\n"
+        "def _build():\n    return _deep()\n\n"
+        "@pytest.fixture\ndef graph():\n    return 'subcycling=True'\n\n"
+        "@pytest.mark.parametrize('n', [1])\n"
+        "def test_one(graph, n):\n    _build(); helper(); sup.by_alias()\n\n"
+        "class TestK:\n    def test_two(self):\n        pass\n")
+    one = source_of_test("tests/core/test_y.py::test_one[1]", repo_root=tmp_path)
+    assert "subcycling=True" in one and "run_adaptive" in one and "parametrize" in one
+    assert "helper()" in one and "return far()" in one and "return farther()" in one
+    assert "shard_map" in one      # sup.by_alias, through the module alias
+    assert "jax.vmap" not in one   # four levels away: not read
+    assert source_of_test("tests/core/test_y.py::TestK::test_two", repo_root=tmp_path)
+    assert source_of_test("tests/core/test_y.py::test_none", repo_root=tmp_path) is None
+    assert source_of_test("tests/core/test_nope.py::test_one", repo_root=tmp_path) is None
+
+
+def test_a_pending_cell_is_accepted_only_while_pending_cells_are(monkeypatch):
+    """``TODO-oracle`` / ``TODO-fix`` mark a cell a parallel branch will fill; the
+    guard takes them only while ``PENDING_ALLOWED`` is set, so a release that
+    turns it off fails on any left."""
+    module = sys.modules[__name__]
+    row = _drow(f32=_T, f64="TODO-oracle", vmap="TODO-fix")
+    monkeypatch.setattr(module, "PENDING_ALLOWED", True)
+    assert row_problems([row], ["CPL"], domains=NUMERIC_DOMAINS) == []
+    monkeypatch.setattr(module, "PENDING_ALLOWED", False)
+    problems = row_problems([row], ["CPL"], domains=NUMERIC_DOMAINS)
+    assert any("domain f64: 'TODO-oracle'" in p for p in problems), problems
+    assert any("domain vmap: 'TODO-fix'" in p for p in problems), problems
+    # a pending cell carries no test, so nothing is collected for it
+    assert domain_targets(row) == [("f32", _T)]

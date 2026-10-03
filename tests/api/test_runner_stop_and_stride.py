@@ -203,12 +203,35 @@ def test_while_the_runner_is_still_stopping_state_writes_are_503s(blocked_runner
 
 
 def test_a_reset_whose_stop_times_out_resets_nothing(blocked_runner):
+    """Nothing is reset -- but the runner was told to stop, and stays
+    stopped: the 503 says so, with ``was_running``.  It used to say
+    "Nothing was changed" of a runner it had just stopped."""
     gm, server, client, release = blocked_runner
     before = _live_position(gm)
     resp = client.post("/sim/reset")
     assert resp.status_code == 503, resp.text
-    assert "Nothing was changed" in resp.json()["detail"]
+    body = resp.json()
+    assert "Nothing was changed" not in body["detail"]
+    assert "the runner was told to stop" in body["detail"]
+    assert "stays stopped" in body["detail"] and body["was_running"] is True
+    assert resp.headers.get("retry-after") == "1"
     assert _live_position(gm) == before
+    release.set()
+    assert _wait_for(lambda: not server.runner._thread.is_alive())
+    assert client.post("/sim/pause").status_code == 409       # it did stop
+    assert _live_position(gm) == pytest.approx(before, abs=1e-3)
+
+
+def test_a_stop_that_times_out_says_the_runner_stays_stopped(blocked_runner):
+    gm, server, client, release = blocked_runner
+    resp = client.post("/sim/stop")
+    assert resp.status_code == 503, resp.text
+    body = resp.json()
+    assert "Nothing was changed" not in body["detail"]
+    assert "stays stopped" in body["detail"] and body["was_running"] is True
+    # A retry while it is still stopping: told to stop already, not running.
+    again = client.post("/sim/stop")
+    assert again.status_code == 503 and again.json()["was_running"] is False
 
 
 def test_while_the_runner_runs_state_writes_are_409s_and_params_still_go_through():

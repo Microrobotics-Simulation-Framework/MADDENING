@@ -1058,10 +1058,7 @@ def _every_write_is_a_409_beside_a_stepper(ctx):
         stop_runner(ctx.server)
 
 
-@check("REST-042", skip=("sim_run", "concurrent"),
-       xfail={("REST-042", "wrapper"): "REST-042: a PUT /graph/params to a HybridNode is "
-              "answered 200 and lost (the hybrid copies its physics node's params); "
-              "pending fix/p4-18-rest"})
+@check("REST-042", skip=("sim_run", "concurrent"))
 def _a_params_write_reaches_a_running_graph(ctx):
     started = ctx.server.runner is None
     if started:
@@ -1079,10 +1076,7 @@ def _a_params_write_reaches_a_running_graph(ctx):
             stop_runner(ctx.server)
 
 
-@check("REST-043", skip=("concurrent",), patch={"_GRAPH_LOCK_TIMEOUT": 0.2},
-       xfail={("REST-043", "sim_run"): (
-           "REST-043: a POST /sim/run whose next slice cannot have the graph in time answers "
-           "the 503 'Nothing was changed' after it has taken steps; pending fix/p4-18-rest")})
+@check("REST-043", skip=("concurrent",), patch={"_GRAPH_LOCK_TIMEOUT": 0.2})
 def _a_request_that_cannot_have_the_graph_is_a_503_that_writes_nothing(ctx):
     """Every request that cannot have the graph in time answers the 503
     'Nothing was changed', with ``Retry-After``, and nothing was changed --
@@ -1602,15 +1596,11 @@ def _a_non_finite_reply_is_written_as_tokens(ctx):
 # Parameters: PUT/GET /graph/params (REST-073 to REST-090, REST-106, REST-107)
 # ===========================================================================
 
-_HYBRID_LOST = ("a PUT /graph/params to a HybridNode is answered 200 and lost (the hybrid "
-                "copies its physics node's params); pending fix/p4-18-rest")
-
-
 def _put(ctx, node: str, params: dict):
     return ctx.client.put(f"/graph/params/{node}", json={"params": params})
 
 
-@check("REST-073", xfail={("REST-073", "wrapper"): f"REST-073: {_HYBRID_LOST}"})
+@check("REST-073")
 def _get_params_is_the_live_view(ctx):
     import jax.numpy as jnp
 
@@ -1624,7 +1614,7 @@ def _get_params_is_the_live_view(ctx):
     refused(ctx.client.get("/graph/params/nope"), 404)
 
 
-@check("REST-074", xfail={("REST-074", "wrapper"): f"REST-074: {_HYBRID_LOST}"})
+@check("REST-074")
 def _a_leaf_the_step_reads_takes_effect_on_the_next_step(ctx):
     """The spring's stiffness, written over REST, is what the next steps
     compute with, without a recompile: a twin graph built with the value
@@ -1766,7 +1756,7 @@ def _a_value_outside_the_leaf_s_bounds_is_a_400_and_mutates_nothing(ctx):
         assert _put(ctx, "spring", {"damping": before}).status_code == 200
 
 
-@check("REST-086", xfail={("REST-086", "wrapper"): f"REST-086: {_HYBRID_LOST}"})
+@check("REST-086")
 def _the_reply_is_what_a_get_then_reads(ctx):
     resp = _put(ctx, "spring", {"stiffness": 52})
     assert resp.status_code == 200, resp.text
@@ -2042,3 +2032,46 @@ def _a_trace_stops_itself_at_its_time_budget(ctx):
         assert status["active"] is False and "time budget" in status["stopped_by"]
     finally:
         _stop_any_trace()
+
+
+@check("REST-108", only=("public", "restored", "wrapper"), patch={"_GRAPH_LOCK_TIMEOUT": 0.25})
+def _a_run_that_cannot_have_the_graph_says_how_far_it_got(ctx):
+    """A ``/sim/run`` whose next slice cannot have the graph in time answers
+    the 503 'interrupted' body: ``steps_run`` the steps the graph took and
+    stored, the remaining count in the detail, and no ``Retry-After`` (only
+    a run that took nothing may be retried whole)."""
+    gm = ctx.gm
+    real_run = gm.run
+    held = threading.Event()
+
+    def slow(n, *args, **kwargs):          # one 30 ms step a slice, until held
+        if not held.is_set():
+            time.sleep(0.03)
+        return real_run(n, *args, **kwargs)
+
+    gm.run = slow
+    out: dict = {}
+    start = ctx.server.relay.step_count
+    t = threading.Thread(target=lambda: out.setdefault("r", ctx.make_client(
+        headers=dict(BEARER) if ctx.enforced else {}, peer=None).post(
+            "/sim/run", params={"n_steps": 100_000})))
+    t.start()
+    lock = ctx.server._graph_lock
+    try:
+        assert wait_for(lambda: ctx.server.relay.step_count >= start + 3)
+        assert lock.acquire(timeout=20)
+        held.set()
+        t.join(30)
+    finally:
+        if lock.held():
+            lock.release()
+        held.set()
+        gm.run = real_run
+    resp = out["r"]
+    assert resp.status_code == 503, resp.text
+    body = resp.json()
+    assert body["status"] == "interrupted" and body["n_steps"] == 100_000
+    assert body["steps_run"] == ctx.server.relay.step_count - start > 0
+    assert str(100_000 - body["steps_run"]) in body["detail"]
+    assert "Nothing was changed" not in body["detail"]
+    assert "retry-after" not in {k.lower() for k in resp.headers}

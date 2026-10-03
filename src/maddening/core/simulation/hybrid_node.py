@@ -65,6 +65,13 @@ class HybridNode(SimulationNode):
             **physics_node.params,
         )
         self.physics_node = physics_node
+        # One node, one params dict, as the sharded wrappers do: the
+        # hybrid's ``params_pytree()`` reads the physics node's, so a copy
+        # made here stranded every write to ``hybrid.params`` -- the graph
+        # took ``params_pytree()``'s unchanged value back over it at its
+        # next read of ``gm.params``, and a ``PUT /graph/params`` answered
+        # 200, echoed the new value and lost it.
+        self.params = physics_node.params
         self.correction_fn = correction_fn
 
     def halo_width(self) -> dict[int, int]:

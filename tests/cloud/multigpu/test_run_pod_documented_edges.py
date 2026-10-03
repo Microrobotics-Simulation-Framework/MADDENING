@@ -126,7 +126,7 @@ def test_a_file_the_runner_can_read_but_would_not_write_exits_3_with_its_tables(
     path.write_text(json.dumps(doc), encoding="utf-8")
     assert rp.summarise(directory) == 3
     out = capsys.readouterr().out
-    assert "schema_version 5, not 6" in out
+    assert "schema_version 5, not 7" in out
     assert "Halo exchange vs NumPy" in out
 
 
@@ -354,8 +354,8 @@ def _exchange_doc(rp, rows, *, n_devices=4, allow_fewer=False):
     results = []
     for cells, a2a, ppm in rows:
         results.append({
-            "cells": cells, "n_devices": n_devices, "bit_identical": True,
-            "input_presharded": True, "ppermute_speedup_median": a2a / ppm,
+            "cells": cells, "requested_cells": cells, "n_devices": n_devices,
+            "bit_identical": True, "input_presharded": True, "ppermute_speedup_median": a2a / ppm,
             "methods": {"all_to_all": {"median_ms": a2a, "min_ms": a2a, "bytes_total": 1},
                         "ppermute": {"median_ms": ppm, "min_ms": ppm, "bytes_total": 1}}})
     doc = {"schema_version": rp.SCHEMA_VERSION, "goal": "exchange", "dry_run": False,
@@ -390,3 +390,216 @@ def test_a_row_decides_only_at_enough_cells_and_devices(rp, n_devices, allow_few
     assert row["deciding"] is deciding, row["excluded_because"]
     # --allow-fewer-devices never closes a checklist item.
     assert rp.closes_the_gap(copy.deepcopy(doc)) is (n_devices >= 4)
+
+
+# ---------------------------------------------------------------------------
+# Every size the session asks for can decide the transport
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("requested", [1, 2, 4, 5, 25, 26, 99_855, 99_856, 99_857, 100_000,
+                                       100_489, 300_000, 1_000_000, 1_000_001])
+def test_a_synthetic_mesh_never_has_fewer_cells_than_requested(rp, requested):
+    """A grid is the smallest square holding the requested count (at least
+    2 x 2), and what ``synthetic_cells`` predicts is what ``grid_edges``
+    builds.  It used to round ``sqrt(n)``, and the "1e5-cell" row measured
+    316**2 = 99 856 cells."""
+    side = rp._grid_side(requested)
+    assert side * side >= requested and side >= 2
+    assert side == 2 or (side - 1) ** 2 < requested
+    assert rp.synthetic_cells("grid", requested) == side * side
+    assert rp.synthetic_cells("ring", requested) == requested
+    if requested <= 100_489:
+        n, edges = rp.grid_edges(requested)
+        assert n == side * side and edges.max() == n - 1
+
+
+def _relabelled_real_exchange(rp, rows, *, synthetic="grid", n_devices=4):
+    """An ``exchange.json`` of a real 4-GPU run at ``rows`` = ``[(requested,
+    a2a_ms, ppermute_ms)]``, measured at the size the runner builds for each
+    request, with the checks the runner derives (so it reads ``PASS``)."""
+    results = []
+    for requested, a2a, ppm in rows:
+        results.append({
+            "cells": rp.synthetic_cells(synthetic, requested), "requested_cells": requested,
+            "n_devices": n_devices, "bit_identical": True, "input_presharded": True,
+            "ppermute_speedup_median": a2a / ppm,
+            "methods": {"all_to_all": {"median_ms": a2a, "min_ms": a2a, "bytes_total": 1},
+                        "ppermute": {"median_ms": ppm, "min_ms": ppm, "bytes_total": 1}}})
+    doc = {"schema_version": rp.SCHEMA_VERSION, "goal": "exchange", "dry_run": False,
+           "allow_fewer_devices": False, "n_devices": n_devices, "results": results,
+           "environment": {"platform": "gpu", "device_kinds": ["gpu"],
+                           "devices": [f"gpu:{i}" for i in range(n_devices)],
+                           "n_devices_visible": n_devices, "git_commit": "0" * 40},
+           "config": {"cells": [r for r, _, _ in rows], "synthetic": synthetic, "mesh": None,
+                      "n_devices": n_devices, "allow_fewer_devices": False}}
+    doc = rp.finish_checks(doc, rp.exchange_checks(results, n_devices))
+    assert rp.record_problems(doc) == [] and rp.goal_verdict([doc]) == "PASS"
+    return doc
+
+
+@pytest.mark.parametrize("synthetic", ["grid", "ring"])
+def test_every_default_gpu_size_decides_and_all_to_all_faster_at_1e5_keeps_the_default(
+        rp, synthetic):
+    """RPD-006/022/023: the session measures ``GPU_CELLS`` with the default
+    ``--synthetic grid``.  Each of the three rows decides, so all_to_all
+    faster at the 1e5 point keeps it the default -- the documented rule.
+    Under the rounded grid the 1e5 row was excluded and the decision was
+    ``ppermute`` on two of three points."""
+    rows = [(n, 1.0, 1.0 / s) for n, s in zip(rp.GPU_CELLS, (0.90, 1.5, 1.5))]
+    rec = rp.recommend([_relabelled_real_exchange(rp, rows, synthetic=synthetic)])
+    assert [r["deciding"] for r in rec["rows"]] == [True, True, True], rec["rows"]
+    assert rec["decision"] == "all_to_all" and rec["deciding_rows"] == 3, rec["reason"]
+    assert [r["requested_cells"] for r in rec["rows"]] == list(rp.GPU_CELLS)
+    assert all(r["cells"] >= r["requested_cells"] for r in rec["rows"])
+
+
+def test_a_row_decides_on_its_requested_size_measured_at_no_fewer_cells(rp):
+    """A row requested below the threshold never decides, whatever it
+    measured; one measured at fewer cells than requested never decides
+    either (and reads INVALID, its case not being the runner's)."""
+    doc = _relabelled_real_exchange(rp, [(99_999, 2.0, 1.0)], synthetic="grid")
+    assert doc["results"][0]["cells"] == 100_489             # 317**2 >= 1e5 ...
+    (row,) = rp.recommend([doc])["rows"]
+    assert row["deciding"] is False                          # ... but 99 999 were asked for
+    assert row["excluded_because"] == "99999 cells requested < 100000"
+    short = _relabelled_real_exchange(rp, [(100_000, 2.0, 1.0)], synthetic="grid")
+    short["results"][0]["cells"] = 99_856                    # the old rounded grid
+    assert any("lacks case(s)" in p for p in rp.record_problems(short))
+    row = rp._excluded_because({**rp.recommend([short])["rows"][0], "record": "PASS"},
+                               min_cells=100_000, min_devices=4)
+    assert row == "measured 99856 cells, fewer than the 100000 requested"
+    older = _relabelled_real_exchange(rp, [(100_000, 2.0, 1.0)])
+    del older["results"][0]["requested_cells"]
+    assert any("cannot be read" in p for p in rp.record_problems(older))
+    (row,) = rp.recommend([older])["rows"]
+    assert row["deciding"] is False
+
+
+def test_the_summary_lists_every_row_that_does_not_decide(rp, tmp_path, capsys):
+    """A decision on fewer rows than were measured says so: each excluded
+    row is printed with its reason (``WARNING`` for a real-GPU one), and
+    the recommendation line counts them."""
+    doc = _relabelled_real_exchange(rp, [(50_000, 1.0, 0.5), (100_000, 1.0, 0.5),
+                                         (1_000_000, 1.0, 0.5)])
+    (tmp_path / "exchange.json").write_text(json.dumps(doc), encoding="utf-8")
+    rp.summarise(tmp_path)
+    out = capsys.readouterr().out
+    assert "Rows that do not decide" in out, out
+    assert ("WARNING: 50176 cells (requested 50000) on 4 GPU device(s): "
+            "50000 cells requested < 100000") in out, out
+    rec_line = next(ln for ln in out.splitlines() if ln.startswith("Recommendation:"))
+    assert rec_line.startswith("Recommendation: ppermute") and "decided on 2 of 3 row(s)" in rec_line
+    assert "1 excluded" in rec_line
+    every = _relabelled_real_exchange(rp, [(100_000, 1.0, 0.5), (1_000_000, 1.0, 0.5)])
+    (tmp_path / "exchange.json").write_text(json.dumps(every), encoding="utf-8")
+    rp.summarise(tmp_path)
+    out = capsys.readouterr().out
+    rec_line = next(ln for ln in out.splitlines() if ln.startswith("Recommendation:"))
+    assert "Rows that do not decide" not in out and "excluded" not in rec_line, out
+
+
+@pytest.mark.parametrize("recorded, a2a, ppm, deciding, decision", [
+    (3.0, 1.0, 2.0, True, "all_to_all"),          # the medians say ppermute is slower
+    (float("inf"), 1.0, 0.5, True, "ppermute"),   # re-derived: 2.0
+    (float("nan"), 1.0, 0.5, True, "ppermute"),
+    (2.0, float("nan"), 0.5, False, "undecided"),
+    (2.0, 1.0, float("inf"), False, "undecided"),
+    (2.0, float("inf"), 1.0, False, "undecided"),
+    (2.0, 1.0, -1.0, False, "undecided"),
+    (2.0, 1e308, 1e-308, False, "undecided"),     # the ratio overflows
+])
+def test_the_speedup_is_rederived_from_the_medians_and_must_be_finite(
+        rp, recorded, a2a, ppm, deciding, decision):
+    """RPD-022's "with a finite speedup": ``recommend`` used to read the
+    file's ``ppermute_speedup_median``, so an infinite one decided
+    ``ppermute``, a NaN one read as a tie (``NaN >= 1.05`` and ``NaN < 1.0``
+    are both false) and one its own medians contradict was believed."""
+    doc = _relabelled_real_exchange(rp, [(100_000, 1.0, 0.5)])
+    r = doc["results"][0]
+    r["ppermute_speedup_median"] = recorded
+    r["methods"]["all_to_all"]["median_ms"] = a2a
+    r["methods"]["ppermute"]["median_ms"] = ppm
+    rec = rp.recommend([doc])
+    (row,) = rec["rows"]
+    assert row["deciding"] is deciding, row["excluded_because"]
+    assert rec["decision"] == decision, rec["reason"]
+    if not deciding:
+        assert "speedup undefined" in row["excluded_because"]
+
+
+@pytest.mark.parametrize("content", [{}, {"results": []}, "stencil"],
+                         ids=["empty-object", "no-goal", "another-goal"])
+def test_a_goal_named_file_that_records_another_goal_reads_invalid(rp, tmp_path, capsys,
+                                                                  content):
+    """RPD-009's neighbour: a ``halo_rerun.json`` beside ``halo.json`` that
+    holds ``{}``, an object with no ``goal``, or another goal's record is
+    not evidence of anything: it reads INVALID, named, and the summary
+    exits 3.  It used to be dropped in silence (exit 0)."""
+    directory = _copy_record(tmp_path)
+    if content == "stencil":
+        content = json.loads((directory / "stencil.json").read_text(encoding="utf-8"))
+    (directory / "halo_rerun.json").write_text(json.dumps(content), encoding="utf-8")
+    assert rp.summarise(directory) == 3
+    out = capsys.readouterr().out
+    assert "halo_rerun.json" in out and "its name says goal 'halo'" in out, out
+    assert rp.summarise(_copy_record(tmp_path / "control")) == 0
+
+
+def _options(rp) -> list[str]:
+    return [o for a in rp._parser()._actions for o in a.option_strings if o.startswith("--")]
+
+
+def test_the_cli_takes_no_abbreviations(rp):
+    """RPD-002: ``_pre_import_setup`` pins the CPU backend for the literal
+    ``--dry-run`` only, so the parser must not accept anything else for
+    it.  argparse took ``--dry`` (and every other unambiguous prefix) as
+    ``--dry-run``, and such a "dry run" ran on the GPUs.  No option takes
+    an abbreviation now."""
+    options = _options(rp)
+    assert "--dry-run" in options and "--summarise" in options
+    for option in options:
+        for cut in range(3, len(option)):
+            prefix = option[:cut]
+            if prefix in options:
+                continue
+            with pytest.raises(SystemExit) as raised:
+                rp.parse_args([prefix, "--goal", "halo", "--out", "x"]
+                              if option != "--goal" else [prefix, "halo", "--out", "x"])
+            assert raised.value.code == 2, prefix
+    args = rp.parse_args(["--dry-run", "--goal", "halo", "--out", "x"])
+    assert args.dry_run is True
+
+
+def test_a_dry_run_is_pinned_whenever_the_parser_reads_one(rp, monkeypatch):
+    """The two readers of ``--dry-run`` agree on every spelling the parser
+    accepts: whenever ``parse_args`` gives ``dry_run``, ``_pre_import_setup``
+    has pinned the CPU backend."""
+    import os
+
+    for argv in (["--dry-run"], ["--goal", "halo", "--dry-run"], ["--dry"], ["--dry-ru"],
+                 ["--dry-run", "--cells", "16"]):
+        for key in ("JAX_PLATFORMS", "XLA_FLAGS"):
+            monkeypatch.delenv(key, raising=False)
+        rp._pre_import_setup(argv)
+        pinned = os.environ.get("JAX_PLATFORMS") == "cpu"
+        try:
+            parsed = rp.parse_args(argv + ["--goal", "halo", "--out", "x"]).dry_run
+        except SystemExit:
+            parsed = False
+        assert parsed <= pinned, (argv, parsed, pinned)
+
+
+def test_an_abbreviated_dry_run_exits_2_before_running_anything(tmp_path):
+    """The CLI itself, in a subprocess that never imports JAX: ``--dry``
+    is refused with exit 2 and nothing is written."""
+    import os
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k not in ("XLA_FLAGS",)}
+    env.update(JAX_PLATFORMS="cpu", HOME=str(tmp_path))
+    proc = subprocess.run([sys.executable, str(_RUNNER), "--dry", "--goal", "halo", "--out",
+                           str(tmp_path / "out")], capture_output=True, text=True, timeout=120,
+                          env=env, check=False)
+    assert proc.returncode == 2, proc.stderr
+    assert "unrecognized arguments: --dry" in proc.stderr
+    assert not (tmp_path / "out").exists()

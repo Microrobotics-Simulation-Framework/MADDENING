@@ -489,6 +489,53 @@ def test_a_trace_counts_exactly_its_step_budget_under_simultaneous_steps(tmp_pat
                 profiler.stop_jax_trace()
 
 
+def test_a_run_that_cannot_have_the_graph_among_simultaneous_requests_says_how_far_it_got(
+        tmp_path):
+    """REST-108 on a real server: a /sim/run in flight (slices slowed), the
+    graph then held by the test thread while three reads wait for it at
+    once: every read is the 503 'Nothing was changed' (it took nothing), and
+    the run is the 503 'interrupted' with ``steps_run`` the steps the graph
+    took -- the two kinds of 503 told apart, under load."""
+    chk = S.Check(fn=None, rows=(), bind="any", contexts=frozenset(), server_kw={},
+                  patch={"_GRAPH_LOCK_TIMEOUT": 0.3}, xfail={})
+    with S.loopback_server(chk, tmp_path) as (server, base):
+        gm = server.gm
+        real_run, held = gm.run, threading.Event()
+
+        def slow(n, *args, **kwargs):
+            if not held.is_set():
+                time.sleep(0.03)
+            return real_run(n, *args, **kwargs)
+
+        gm.run = slow
+        out: dict = {}
+        run = threading.Thread(target=lambda: out.setdefault(
+            "r", _client(base, server).post("/sim/run", params={"n_steps": 100_000})))
+        run.start()
+        lock = server._graph_lock
+        try:
+            assert S.wait_for(lambda: server.relay.step_count >= 3)
+            assert lock.acquire(timeout=20)
+            held.set()
+
+            def read():
+                with _client(base, server) as c:
+                    return c.get("/graph/state")
+
+            reads = simultaneously([read] * 3)
+            run.join(30)
+        finally:
+            if lock.held():
+                lock.release()
+            held.set()
+            gm.run = real_run
+        for resp in reads:
+            assert resp.status_code == 503 and "Nothing was changed" in resp.text, resp.text
+        body = out["r"].json()
+        assert out["r"].status_code == 503 and body["status"] == "interrupted", body
+        assert body["steps_run"] == server.relay.step_count > 0
+
+
 def test_simultaneous_saves_of_one_name_leave_a_manifest_that_hashes_to_the_file(tmp_path):
     """REST-091, REST-101: eight POST /checkpoint/save of one name at once,
     between steps: whichever lands last, the file and the manifest beside it
@@ -537,9 +584,6 @@ def test_healthz_answers_while_every_worker_waits_for_the_graph(tmp_path):
         assert resp.status_code == 200 and elapsed < 2.0, (resp.status_code, elapsed)
 
 
-_POOL = ("ran on the worker pool every graph read waits in, so behind more queued reads than "
-         "anyio has workers it waited for a worker before its own deadline began; pending "
-         "fix/p4-18-rest")
 #: The graph-lock timeout of the saturated-pool test, and how many reads it
 #: queues behind a held graph: three times anyio's 40 workers, so a route
 #: that needs a worker waits two waves of timed-out reads for one.
@@ -556,9 +600,7 @@ _ROUTES = [
 
 
 @pytest.mark.parametrize("method, url, row, running, want, timeouts", [
-    pytest.param(*r, marks=pytest.mark.xfail(strict=True, raises=AssertionError,
-                                             reason=f"{r[2]}: {r[0]} {r[1].split('?')[0]} {_POOL}"),
-                 id=r[1].split("?")[0].rsplit("/", 1)[1]) for r in _ROUTES])
+    pytest.param(*r, id=r[1].split("?")[0].rsplit("/", 1)[1]) for r in _ROUTES])
 def test_a_runner_route_answers_in_time_while_every_worker_waits_for_the_graph(
         tmp_path, method, url, row, running, want, timeouts):
     """REST-044, REST-045, REST-046, REST-105 on a real server: the graph held

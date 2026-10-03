@@ -11,6 +11,8 @@ domain (``tests/api/test_rest_claims_in_every_domain.py``):
 * ``hostile_input`` for a checkpoint load (REST-093): a checkpoint of this
   very graph whose parameters carry a value ``PUT /graph/params`` refuses
   (negative where the bound is 0, non-finite);
+* ``loopback_bind`` / ``no_token`` for REST-109: a configured token with
+  whitespace around it is refused at construction on a loopback bind too;
 * ``loopback_bind`` / ``non_loopback_bind`` for REST-098, the statement
   that there is no TLS: on either bind the server speaks plain HTTP on its
   socket, the bearer header travels as written, and a TLS ClientHello gets
@@ -101,9 +103,6 @@ def test_a_foreign_host_with_an_oversized_body_is_refused_for_its_host(
     assert float(np.asarray(server.gm.params["nodes"]["spring"]["stiffness"])) == before
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "REST-093: POST /checkpoint/load restores a parameter value PUT /graph/params refuses "
-    "(outside its ParamSpec bounds, non-finite) and answers 200; pending fix/p4-18-rest"))
 @pytest.mark.parametrize("value", [-1.0, float("nan"), float("inf")],
                          ids=["below-bound", "nan", "inf"])
 def test_a_checkpoint_carrying_a_value_a_params_write_refuses_is_not_loaded(value, tmp_path):
@@ -160,3 +159,19 @@ def test_the_server_speaks_plain_http_and_the_token_crosses_in_cleartext(bind, t
                 answer = b""
         assert not answer.startswith(b"\x16"), answer      # no TLS handshake record
         assert answer == b"" or answer.startswith(b"HTTP/1.1 4"), answer
+
+
+@pytest.mark.parametrize("token", [" t", "t ", "t\n", "\tt"], ids=["lead", "trail", "newline", "tab"])
+def test_a_token_with_whitespace_around_it_is_refused_on_a_loopback_bind_too(token):
+    """REST-109 on a loopback bind, where no token is demanded of a loopback
+    peer but the backstop demands it of a routable one: a configured token
+    with whitespace around it is refused at construction there too, from
+    ``token=`` and from the environment, and an inner space still works."""
+    from maddening.api.auth import APIAuth
+
+    for kwargs in ({"token": token, "environ": {}}, {"environ": {"MADDENING_API_TOKEN": token}}):
+        with pytest.raises(ValueError, match="whitespace before or after it"):
+            APIAuth(bind_host="127.0.0.1", **kwargs)
+    with pytest.raises(ValueError, match="whitespace before or after it"):
+        server_module.SimulationServer(S.REGISTRY, bind_host="127.0.0.1", api_token=token)
+    assert not APIAuth(bind_host="127.0.0.1", token="a b", environ={}).enforced

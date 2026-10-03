@@ -48,14 +48,19 @@ server was told the bind is loopback.  That backstop is why forgetting
 
 * `MADDENING_API_TOKEN` if set.  **Set but blank raises** — that is what
   `MADDENING_API_TOKEN=$UNSET_VARIABLE` produces, and reading it as
-  "authentication off" is the failure this exists to prevent.
+  "authentication off" is the failure this exists to prevent.  **So does a
+  token with whitespace before or after it** (a trailing newline from a
+  file, say): a client's `Authorization` header is read stripped, so no
+  client could ever present it, and every request was a 401.
 * Otherwise a `secrets.token_urlsafe(32)` value generated at startup and
   logged once.  If nothing reads your log — a detached container, a
   batch job — set `MADDENING_API_TOKEN` yourself, or point
   `MADDENING_API_TOKEN_FILE` at a path on a mounted volume and the
   generated token is written there with mode `0600`: into a new file moved
   over the path, so a file already there -- of any mode, or held open by
-  another reader -- never holds it.
+  another reader -- never holds it.  `APIAuth(environ=...)` reads all three
+  variables from the mapping it is given (the token file's used to be read
+  from `os.environ`).
 
 ### Presenting it
 
@@ -88,10 +93,15 @@ what is exposed at startup
 (`maddening.api.server.warn_if_publicly_bound`).
 
 Request sizes are bounded so one request cannot exhaust the host, but that
-is a backstop, not authentication.  An integer parameter over 10^7, more
-than 10^6 values in one request's params, `n_steps` over 100000 or an
-out-of-range training argument is a 422 from the request model, published
-in `/openapi.json`.  A node whose state would exceed 2·10^7 elements, or
+is a backstop, not authentication.  More than 10^6 values in one
+request's params, `n_steps` over 100000 or an out-of-range training
+argument is a 422 from the request model, published in `/openapi.json`.
+An integer over 10^7 for an **integer** parameter (an array dimension) is a
+422 from the route, which reads the parameter's type -- the running node's
+value on `PUT /graph/params`, the constructor's default on `POST
+/graph/nodes`, a parameter with neither being bounded as written -- so an
+integral JSON number for a float parameter is the float it spells: a
+browser's `JSON.stringify(2e7)` is `20000000`, and it used to be a 422.  A node whose state would exceed 2·10^7 elements, or
 whose build would exceed 2 GiB, or that would take the graph past 10^8
 state elements, is a 400 naming the size: those caps are server constants
 (`MAX_NODE_STATE_ELEMENTS`, `MAX_NODE_BUILD_BYTES`,
@@ -151,14 +161,14 @@ already been applied.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root, and beside the file a manifest (`<path>.manifest.json`: its SHA-256 and the streams' clock, `sim_time` and step count). Both are written under temporary names and moved into place after both exist, the checkpoint first and its manifest last: a save refused before that (400, "nothing was written") leaves any earlier file of either name as it was, and a name that is not a file is refused before anything is written. If only the manifest's move fails, the 400 says the checkpoint was written without it (it loads, with `sim_time` counted from zero). No 4xx detail names the server's absolute paths. Replies `{status, path, sim_time}` |
-| POST | `/checkpoint/load?path=` | Restore them. A checkpoint that does not fit this graph -- including one whose parameters carry another value of one a node consumed at construction -- is a 400, and nothing is loaded. The streams then serve the loaded state at the checkpoint's `sim_time` -- the one its manifest records, or zero, counted from the load, for a file without one or whose manifest does not hash to it (`sim_time_from_checkpoint` says which). 409 while the runner runs or a `/sim/run` is in progress |
+| POST | `/checkpoint/load?path=` | Restore them. A checkpoint that does not fit this graph is a 400, and nothing is loaded: other node or field names, a field or parameter of another shape, a value its dtype cannot hold, or a parameter value `PUT /graph/params` would refuse on the node as it stands -- non-finite, outside its `ParamSpec` bounds, refused by the node's constructor with the graph's other values (a save after the load would not reload), one a node consumed at construction, one that moves a mapped edge's points, text or a boolean; each asked of what the load changes only, and finiteness and the bounds only of a value that is neither the leaf's now nor the node's own, so a graph built outside its bounds reloads its own checkpoint.  `GraphManager.load_state` refuses text and booleans and asks none of the rest (Python may hold a value outside a `ParamSpec`'s bounds on purpose). The streams then serve the loaded state at the checkpoint's `sim_time` -- the one its manifest records, or zero, counted from the load, for a file without one or whose manifest does not hash to it (`sim_time_from_checkpoint` says which). 409 while the runner runs or a `/sim/run` is in progress |
 
 ### Simulation Control
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/sim/step` | Advance one timestep. Returns new state |
-| POST | `/sim/run?n_steps=100` | Run N steps (at most 100000). Returns final state. While it runs, writes are a 409 and reads are served between its slices. When the server shuts down it stops within a slice and answers 503 `{status: "interrupted", steps_run, n_steps}`; the graph is left after `steps_run` steps. A step that raises (a run-time check in the step, `strict_convergence`) answers 400 `{detail, steps_run, n_steps}`: the steps before it were taken |
+| POST | `/sim/run?n_steps=100` | Run N steps (at most 100000). Returns final state. While it runs, writes are a 409 and reads are served between its slices. When the server shuts down it stops within a slice and answers 503 `{status: "interrupted", steps_run, n_steps}`; the graph is left after `steps_run` steps. So does a run that cannot have the graph within `_GRAPH_LOCK_TIMEOUT` -- between slices, for its final state, or for the compile of `n_steps=0` -- with the detail saying how many steps remain; retry the whole run only when `steps_run` is 0 (that reply carries `Retry-After`). A step that raises (a run-time check in the step, `strict_convergence`) answers 400 `{detail, steps_run, n_steps}`: the steps before it were taken |
 | POST | `/sim/start` | Start real-time runner (background thread). A runner whose thread died (a step raised) is replaced |
 | POST | `/sim/pause` | Pause the runner. 409 when it is not running, saying why a started one stopped |
 | POST | `/sim/resume` | Resume the runner, paced from the resume |
@@ -232,7 +242,15 @@ The runner routes (`/sim/start`, `/sim/stop`, `/sim/pause`,
 `/sim/resume`, `/sim/reset`, surrogate activate and deactivate) answer
 within about one `_GRAPH_LOCK_TIMEOUT` of their arrival, a 503 past it: the
 runner's own lock is taken with a deadline, and a reset or a surrogate swap
-lets go of it before waiting for the graph.
+lets go of it before waiting for the graph.  Start, stop, pause, resume and
+reset count that deadline from the request's arrival and run on small
+thread pools of their own (`PUT /sim/stride` on the event loop), so they
+answer while every worker thread of the shared pool is waiting for the
+graph; they used to queue for a worker first (a stop took 5.6 s behind 240
+queued reads at a 1 s timeout).  The surrogate routes are experimental and
+still run on the shared pool.  A stop or reset whose runner thread will not
+stop in time answers 503 saying the runner was told to stop and stays
+stopped, with `was_running`.
 
 Shutdown: the app's lifespan, and a SIGINT or SIGTERM when it is served
 from the main thread, tell an in-flight `/sim/run` to stop at its next

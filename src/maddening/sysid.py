@@ -1345,6 +1345,58 @@ def _physical_params(gm, start: dict, flat_u, unravel, idx):
     return to_params
 
 
+@jax.custom_jvp
+def _with_tangent_of(value, carrier):
+    """``value``, differentiated as ``carrier`` (see :func:`_exact_physical_params`)."""
+    return value
+
+
+@_with_tangent_of.defjvp
+def _with_tangent_of_jvp(primals, tangents):
+    value, _carrier = primals
+    _value_dot, carrier_dot = tangents
+    return value, carrier_dot
+
+
+def _exact_physical_params(gm, start: dict, flat_u, unravel, idx):
+    """``theta -> physical params`` for the fitters' objectives: traceable, and
+    equal bit for bit to what ``to_params`` (:func:`_physical_params`) returns.
+
+    The objectives used to evaluate ``gm.constrain(unravel(...))`` -- every
+    leaf through its ``constrain(unconstrain(p))`` round trip -- while the
+    fitters return a leaf no step moved as the value that went in.  For a
+    ``log`` leaf whose ``exp(log(p))`` lands an ulp away (``30.03`` in
+    float64, ``30.0`` in float32) the run therefore evaluated a point it did
+    not return: ``best_loss`` read 5.364755728149608e-06 for a returned
+    start whose loss is 5.364755728152416e-06 (SYS-071).  Here a leaf with
+    no optimiser coordinate is the value that went in, and a leaf whose
+    coordinates are bit for bit where they started is that value too, its
+    derivative still the round trip's (:func:`_with_tangent_of`), so the
+    gradient the optimiser steps on is unchanged and every loss the run
+    records -- ``losses``, ``best_loss`` -- is the loss of exactly the
+    parameters that iterate returns.
+    """
+    leaves_start, treedef = jax.tree.flatten(start)
+    edges = np.cumsum([0] + [int(np.asarray(leaf).size) for leaf in leaves_start])
+    coordinate = np.zeros(int(edges[-1]), dtype=bool)
+    coordinate[np.asarray(idx, dtype=np.int64)] = True
+
+    def physical(theta):
+        flat_new = flat_u.at[idx].set(theta)
+        full = jax.tree.leaves(gm.constrain(unravel(flat_new)))
+        out = []
+        for untouched, fitted, lo, hi in zip(leaves_start, full, edges[:-1], edges[1:]):
+            if not coordinate[lo:hi].any():
+                out.append(untouched)
+                continue
+            unmoved = jnp.all(flat_new[lo:hi] == flat_u[lo:hi])
+            value = jnp.where(unmoved, jnp.asarray(untouched, jnp.result_type(fitted)), fitted)
+            out.append(_with_tangent_of(value, fitted))
+        return jax.tree.unflatten(treedef, out)
+
+    return physical
+
+
 class _CoordinateBounds:
     """The bounds of each optimiser coordinate ``theta``, and the projection
     onto them.
@@ -4058,11 +4110,13 @@ class FitResult:
         be flat in, and only when the moved point's loss is within the
         guard's tolerance of this one (a relative ``2**10 * eps``, 1.2e-4 in
         float32, plus the loss cost of rounding the moved point; see
-        ``hold_declined``).  It was computed from the optimiser's
-        unconstrained coordinates, so ``loss_fn(params)`` can differ from it
-        in the last bits: a ``log`` leaf round-trips as ``exp(log(p))``,
-        which ``params`` does not when it returns the start bit for bit.
-        ``None`` when nothing was evaluated (``n_iter=0``).
+        ``hold_declined``).  Where the guard holds nothing it is the loss of
+        exactly ``params``, bit for bit: the fitters evaluate a leaf no step
+        moved at the value that went in -- the value ``params`` returns --
+        and not at its ``constrain(unconstrain(p))`` round trip, which for a
+        ``log`` leaf is ``exp(log(p))`` and can land an ulp away (until
+        0.4.0's SYS-071 fix ``best_loss`` was the round trip's loss, off in
+        the last bits).  ``None`` when nothing was evaluated (``n_iter=0``).
 
     Every leaf no step moved is the value that went in, bit for bit --
     not merely close -- so comparing a fit's input and output leaf by
@@ -4376,11 +4430,12 @@ def fit(
     if idx is None:
         idx = np.arange(flat_u.size)
     to_params = _physical_params(gm, start, flat_u, unravel, idx)
+    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
     theta0 = flat_u[idx]
 
     def objective(theta):
-        u = unravel(flat_u.at[idx].set(theta))
-        return loss_fn(gm.constrain(u))
+        # At exactly the parameters ``to_params`` returns (SYS-071).
+        return loss_fn(physical(theta))
 
     value_and_grad = jax.jit(jax.value_and_grad(objective))
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
@@ -4746,6 +4801,7 @@ def fit_lm(
     if idx is None:
         idx = np.arange(flat_u.size)
     to_params = _physical_params(gm, start, flat_u, unravel, idx)
+    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
     theta0 = flat_u[idx]
     theta = theta0
     progress = _progress_notifier(gm, "lm", n_iter, notify_every)
@@ -4760,7 +4816,8 @@ def fit_lm(
     inv_sigma = _resolved_noise(residual_fn, gm.constrain(u0), noise_std)
 
     def _residual(th):
-        p = gm.constrain(unravel(flat_u.at[idx].set(th)))
+        # At exactly the parameters ``to_params`` returns (SYS-071).
+        p = physical(th)
         r = ravel_pytree(residual_fn(p))[0]
         return r if inv_sigma is None else r * inv_sigma
 
@@ -5023,7 +5080,9 @@ def fit_multiple_shooting(
     window states are one point of the joint objective, so they are
     selected together: :attr:`FitResult.best_loss` is the loss of that
     selected pair, as the run evaluated it, before the
-    ``hold_undetermined`` guard.  The window states are returned exactly
+    ``hold_undetermined`` guard -- which, the run evaluating every leaf no
+    step moved at the value that went in, is the loss of exactly the pair
+    returned when the guard holds nothing.  The window states are returned exactly
     as selected; the parameters are too unless the guard held a direction
     (``excited_rank`` below the count, ``hold_declined`` False), in which
     case the returned pair's loss is within the guard's tolerance of
@@ -5107,11 +5166,13 @@ def fit_multiple_shooting(
     if idx is None:
         idx = np.arange(flat_u.size)
     to_params = _physical_params(gm, start, flat_u, unravel, idx)
+    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
     theta0 = flat_u[idx]
     ws_flat0, unravel_ws = ravel_pytree(ws0)
 
     def objective(theta, ws_flat):
-        p = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+        # At exactly the parameters ``to_params`` returns (SYS-071).
+        p = physical(theta)
         return windowed_loss(
             gm, p, observations, obs_fn=obs_fn, window=window,
             sample_every=sample_every, external_inputs=external_inputs,

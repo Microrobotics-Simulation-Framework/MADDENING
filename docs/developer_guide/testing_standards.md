@@ -1014,6 +1014,161 @@ Two oracles; each was mutation-tested against a scratch copy of `src/`
 | Truth recovery (`tests/property/test_sysid_truth_recovery.py`) | A fit's `converged=True` against the truth it was generated from: noiseless data, a truth drawn anywhere inside the bounds (near them too), a start anywhere in the box. The fit must recover the truth to 1e-3 of the coordinate's range, or say `converged=False`; and the same fit with one parameter measured in a unit up to 1e6 times larger or smaller must give the same answer -- the same returned point, `excited_rank` and `hold_declined` -- in about as many iterations | `fit_lm` per push on a closed-form problem whose only constrained stationary point is the truth (one strictly monotone, non-saturating block of residuals per coordinate, nonlinear so that a Gauss-Newton step overshoots), over every transform: a clipped `transform=None` leaf, `log`, `logit`. In the slow lane, more draws, `fit` (Adam with a `tol`), and all three fitters on the spring graph | A problem with a second stationary point (a plateau where the model saturates is one, and a fit may stop there); the size of a fit's error when it says `converged=False` |
 | Entry points and readers agree after a `node.params` write (`tests/property/test_differential_entry_points_after_a_node_write.py`) | `gm.step`, `gm.run`, `gm.run_scan` at a length traced before the write and at a new one, `gm.run_scan_with_history` and `sysid.windowed_loss`, each from one fixed state, after a write with no compile and again after `compile()`: all must run the model the write leaves. Readers likewise, with nothing run first: `gm.params`, a `jax.jit` and a `jax.grad` of a sysid loss handed `gm.params`, `to_dict` reloaded, a checkpoint, `GET /graph/params` (the FMU export: `tests/core/test_node_params_writes_are_observed.py`) | A constant of a three-argument node, a structural `int` and a `gm.params` leaf of a params-taking node; two writes in a row | An entry point that keeps its own copy of the compiled step (an FMU sidecar built before the write runs the step it was given) |
 
+### Domains the claims cover: precision, replay, acceptance, FMU writes, stability
+
+Five oracles over domains the claims inventories state and audits kept
+finding defects in, because no test drew from them: x64, a predictor's
+history inside a windowed fit, a structural write pending at an FMU export,
+the FMU's acceptance rules, the stability filter.  Each disagreement is a
+strict xfail naming its finding (`B1-H1` ... `B1-M2` and `B2-H1`, `B2-H2`,
+`B2-L10` from the audits, `N1` to `N4` found here) rather than an inventory row, so the row stays where its fix PR puts
+it; the fix flips the xfail.  Every fault in the table at the end was
+seeded into a scratch copy of `src/` and caught by the per-push tests.
+
+#### Precision: float32 against float64
+
+`tests/property/test_differential_precision.py`, with the cases in
+`tests/property/precision_cases.py`.  x64 is process-global, so each case
+runs in float32 in the pytest process and in float64 in a worker process
+started with `JAX_ENABLE_X64=1` (one per module, fed one JSON request per
+case, run concurrently with the float32 side).  On problems drawn away from
+every decision threshold the verdicts must be equal (`converged`,
+`excited_rank`, `hold_declined`, the FIM's `rank`, the coupling report's
+`converged`, `ratio_usable`, `spectral_usable`, `precision_limited`,
+`gradient_bound_usable`) and the answers must agree within a tolerance
+derived from the problem; where the truth is known each precision must
+recover it within its own, so a float64 run that computed in float32 fails.
+
+| Covers | Tolerance | Cannot see |
+|---|---|---|
+| `fit_lm` on a closed-form problem (every transform) and float32 leaves in an x64 graph | `norm(pinv(J)) * 6 eps * norm(g)` (the residual's forward error, six roundings an entry, moved into the parameters by the problem's sensitivity) plus `step_tol` | A defect both precisions share |
+| `fit` (Adam with a `tol`) | `norm(pinv(J)) * sqrt(2 tol)` plus the floor above | Adam's trajectory near its `tol` |
+| `fit_multiple_shooting` (slow) | `norm(pinv(J_w)) * sqrt(best_loss)`, `J_w` the windowed simulation's sensitivity | Window states that move far |
+| `fim` | Weyl: `(N + 2n + 12) eps32 trace(F)` | The CRB of a near-singular `F` |
+| `windowed_loss` | `0.0` at the truth in both; elsewhere `2 sqrt(M L) d + M d^2`, `d` the stable integrator's forward error over the window and the record | An unstable integrator |
+| `coupling_diagnostics()` on a pair contracting at 0.06-0.48 with a tolerance two orders above the float32 floor | Each state within its `spectral_error_bound` of the step's exact fixed point; `rho_spectral` to its Arnoldi residuals plus `sqrt(8 eps32)` | A precision-limited group, where the two read differently by design |
+| An IFT gradient (slow) | Each within its own `gradient_relative_error_bound`, plus `2 * 8 eps32 / (1 - rho)` | |
+
+It found B1-H1 (under x64 the identifiability guard missed the spring's
+exact scale degeneracy, with float64 leaves and with float32 ones) and B1-L1
+(`fit_lm` reported `converged=False` at its float64 floor), both fixed in
+0.4.0.  Two differences are documented, and pinned as such: a parameter
+whose truth is exactly 0 (float32 lands on 0.0 and converges, float64 on
+rounding noise no relative step resolves), and a direction whose gradients
+lie below float32's cutoff and above float64's -- so a drawn problem holds
+`excited_rank` to "float64's is at least float32's", not to equality.
+
+#### Replay and restart
+
+`tests/property/test_differential_replay.py`.  A restart from recorded
+state must land on the recorded run, bit for bit: `windowed_loss` at the
+generating parameters is `0.0` teacher-forced and under multiple shooting
+(`init_window_states`, any continuity weight), for every window, sample
+spacing and multi-rate `start_step`; a fit started at the truth, in
+identity coordinates, sees a zero loss at every iterate and returns it
+(under a `log` spec `constrain(unconstrain(p))` is an ulp off, a rounding
+the oracle does not claim through); and a checkpoint taken mid
+`run_adaptive` resumes it with the same `dt_history` and state.  Drawn over
+no predictor, `linear` and `quadratic`, Aitken, IQN-ILS, IQN-IMVJ with
+Jacobian reuse, multi-rate graphs and sub-cycling.  Tolerance: none.
+It found B1-H2 (`windowed_loss` zeroed the carried `_meta`, so a group
+whose next step reads predictor history or IMVJ warm starts replayed from
+another state), fixed in 0.4.0; the history families are checked to carry
+history their next step reads.  Cannot see: a defect the record and the replay share.
+`run` and `step` resumes are the checkpoint oracle's (State and I/O).
+
+#### Acceptance: every door that writes or restores a parameter
+
+`tests/property/test_differential_param_acceptance.py`.  For a drawn
+`ParamSpec` (bounds `None`, finite, infinite the unbounded way, zero, a
+float32 subnormal; every transform) and a drawn value (inside, on and one
+float32 step past each bound, the open edge of a `log` / `logit`
+coordinate, subnormals, values that flush to `+-0`, overflow, non-finite,
+integers, booleans, wrong types), every door either accepts the value with
+the same resulting model -- the same leaf, bit for bit -- or refuses it,
+and a door on the graph that refuses leaves every node's params, every
+`gm.params` leaf, the state and the dirty flag where they were.  The doors:
+`gm.check_params`, `FmuSidecar.set_params`, the bridge's `set` and
+`set_state` over a sidecar with and without `param_specs`,
+`PUT /graph/params/{node}` (in process, launchers stubbed); the restore
+doors `GraphManager.load_state` and `POST /checkpoint/load` (the graph's
+own checkpoint with the leaf's member replaced); and `POST /graph/nodes`
+building a node of the class with the value, against the class's own
+specs.  Over a plain spring, a `HeatNode` rod (whose constructor refuses a
+diffusivity past its Fourier limit), and the wrappers `HybridNode`,
+`ShardedStencilNode` (a generated stencil node and a rod) and
+`ShardedUnstructuredNode` on a one-device mesh; the FMU doors are asked
+where the description exports the leaf.
+Documented differences: **D1** `check_params` judges the value held in the
+leaf's dtype (a value the dtype overflows or flushes is "does not fit its
+type" to every other door); **D2** it is not asked about a value that is
+not a number; **D3** a snapshot restores a parameter at the value the FMU
+was instantiated with whatever its bounds; **D4** the REST request model
+refuses a JSON integer above `MAX_NODE_PARAM_INT` in magnitude (422)
+whatever the leaf.  B1-M2 (a `log` spec without a lower bound advertised
+no `min`) is fixed in 0.4.0 and its cases run as tests.  Known failing:
+B2-H1 (a checkpoint load restores what PUT
+refuses: out of bounds, non-finite, a boolean, a value the constructor
+refuses), B2-L10 (`POST /graph/nodes` applies no `ParamSpec` bounds), B2-H2
+(a write to a `HybridNode` is lost), N1 (the REST route stores a numeric
+string as the number), N2 (an open bound in the band where a float32's
+spacing flushes is advertised one float inside it, where `ParamSpec.check`
+refuses), N3 (`POST /graph/nodes` takes a boolean for a float constant) and
+N4 (the FMU doors and `check_params` take a value the node's constructor
+refuses).  Each pinned case compares only the doors its finding is about,
+so a fix shows even while another finding on the same value is pending.
+Cannot see: a rule every door shares, and arrays.
+
+#### The FMU with `node.params` writes, four ways
+
+`tests/property/test_differential_fmu.py` (the end of the module).  The
+three-path oracle (State and I/O) gains the compiled C wrapper, through
+`ctypes` against a bridge of its own, and sequences that write a constant
+or a structural `node.params` value, with and without `compile()` before
+`build_model_description`, on a multi-rate graph and a sub-cycled group,
+each followed by an export wired as the guide wires one.  The graph path
+takes the same write and runs what `gm.step` runs.  Every value read
+through `fmi3Get*` must equal the bridge's, the C wrapper's bridge's full
+state the TCP bridge's, and every operation the C API can express must
+succeed exactly when the bridge's does.  Tolerance: none.  A structural write pending at the export must be
+refused, naming `compile()` (B1-H3, fixed in 0.4.0: the FMU ran the old
+model); the sequence then follows the advice and exports again.
+Cannot see: an operation the C API cannot express (a string time), and a
+defect every path shares.  Without a C compiler it compares three paths,
+and `test_the_c_wrapper_is_a_fourth_path_here` says so by skipping.
+
+#### The stability filter (metamorphic)
+
+`tests/property/test_metamorphic_fmu_stability_filter.py`.  The
+description built under any assignment of stability levels (every level,
+and untagged), `include_evolving` and `multi_clock` must equal the full
+export (every class `STABLE`) filtered by the documented rule, surface by
+surface: inputs, outputs, parameters with `fixed_parameters`' reasons, and
+clocks.  Changing one class's level then changes exactly its own
+surfaces.  Tolerance: none.  It found B1-M1 (the inputs were not filtered;
+fixed in 0.4.0).
+Cannot see: a defect in the full export itself, which the FMU oracles
+check against the graph.
+
+| Seeded fault | Oracle | Per-push tests that catch it |
+|---|---|---|
+| `fit_lm` evaluates its residual at parameters rounded to float32 under x64 | precision | `test_fit_lm_agrees_across_precisions` (both cases: the float64 answer misses the truth by float32's resolution) |
+| `windowed_loss` drops `start_step` when it rebuilds a window's step counter | replay | `test_a_replay_of_a_graphs_own_record_is_exact`, both multi-rate families, teacher-forced and multiple shooting |
+| A checkpoint load restores the state and leaves the parameters where they were | acceptance | `test_a_restore_door_takes_what_every_write_door_takes`, the refusal cases (the leaf is never cast, so nothing is refused), the rod and every sharded wrapper's restore case |
+| An open `log` / `logit` bound advertised as itself (inclusive) rather than one float inside | acceptance | `test_every_door_accepts_or_refuses_a_parameter_value_together`; every `test_a_logit_range_no_value_can_enter_is_refused_by_every_door` case |
+| The C wrapper's `fmi3DoStep` reports the step's start as `lastSuccessfulTime` | FMU four ways | `test_four_fmu_paths_agree_after_a_node_params_write`, every case that passes today |
+| A structural `node.params` write no longer marks the graph dirty | FMU four ways | the compiled structural cases (the graph path keeps the old model), and the pending ones (the export no longer refuses) |
+| The clocks ignore the stability filter | stability | `test_a_class_level_filters_exactly_its_own_surfaces[clocks]`, `test_changing_one_class_changes_only_its_own_variables` |
+
+Three first attempts survived and were replaced, each for a reason worth
+knowing: a float32 rounding of `fit_lm`'s *residual* (a residual near zero
+rounds with float32's relative precision, so a noiseless fit still reaches
+the truth: equivalent there), the C wrapper's `fmi3Reset` leaving its own
+clock (an importer passes the communication point itself, so only a refused
+step's `lastSuccessfulTime` reads it), and `build_model_description`
+reading the parameter tree without syncing (an earlier read in the same
+call syncs it: equivalent).
+
 ### Sharding wrappers
 
 **Oracle.** For a node and a composition of sharded wrappers around it,

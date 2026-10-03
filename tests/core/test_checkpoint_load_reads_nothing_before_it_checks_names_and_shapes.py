@@ -163,8 +163,8 @@ def test_a_valid_checkpoint_reads_each_member_it_restores_once(tmp_path, good, r
 
 
 def test_the_rest_route_refuses_the_archive_without_reading_it(tmp_path, reads):
-    """The auditor's case through ``POST /checkpoint/load``: a 400, and the
-    intruder's data never read."""
+    """The auditor's case through ``POST /checkpoint/load`` on a loopback
+    bind, without a token: a 400, and the intruder's data never read."""
     from maddening.api.server import SimulationServer
     from tests._loopback_client import LoopbackTestClient as TestClient
 

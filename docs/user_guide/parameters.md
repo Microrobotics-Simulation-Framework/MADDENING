@@ -192,7 +192,8 @@ would not fit in the machine's memory.  A node class without an estimate
 is checked on the state it builds, as before.
 
 `python -m maddening.examples.servers.rest_params_demo` walks through
-these answers in-process (FastAPI's `TestClient`, no port): a write
+these answers in-process (FastAPI's `TestClient`, no port, presenting the
+server's token as an in-process client must): a write
 honoured on the next step without a recompile, a bound and a
 constructor refusal, and an initial condition applied at reset.
 

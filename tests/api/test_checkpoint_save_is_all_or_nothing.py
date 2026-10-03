@@ -140,3 +140,17 @@ def test_a_save_refused_after_its_directories_were_made_removes_them(tmp_path, m
     assert resp.status_code == 400, resp.text
     assert "nothing was written: No space left on device" in resp.json()["detail"]
     assert _listing(tmp_path) == before
+
+
+def test_a_save_reply_names_the_file_by_its_absolute_server_path(tmp_path):
+    """REST-102's scope, stated precisely: no 4xx detail names a server
+    path, but the 200 reply's ``path`` is the checkpoint's absolute path on
+    the server, inside the root."""
+    from pathlib import Path
+
+    client = _client(tmp_path)
+    resp = client.post("/checkpoint/save?path=sub/named.npz")
+    assert resp.status_code == 200, resp.text
+    path = Path(resp.json()["path"])
+    assert path.is_absolute() and path == (tmp_path / "sub" / "named.npz").resolve()
+    assert path.is_file()

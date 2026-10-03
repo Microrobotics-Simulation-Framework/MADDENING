@@ -506,7 +506,8 @@ def test_a_token_file_failure_points_at_the_token_logged_above_it(tmp_path, capl
 def test_a_comma_joined_subprotocol_entry_still_carries_the_browser_token():
     """uvicorn 0.50.0 hands the app ``Sec-WebSocket-Protocol`` as one
     comma-joined entry, not the list ASGI specifies; the bearer carrier and
-    ``maddening.v1`` were then not found, and the handshake was refused."""
+    ``maddening.v1`` were then not found, and the handshake was refused.
+    Asked on a non-loopback bind, with the token presented in the carrier."""
     import asyncio
 
     from maddening.api.auth import bearer_from_subprotocols, websocket_credentials

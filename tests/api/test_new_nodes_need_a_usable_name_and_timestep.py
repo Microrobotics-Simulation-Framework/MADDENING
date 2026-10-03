@@ -56,6 +56,8 @@ def _post_node(client, name, timestep_literal):
 @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity", "0", "0.0", "-0.0",
                                      "-0.01", "-1e308"])
 def test_a_timestep_that_is_not_a_finite_positive_number_is_refused(literal):
+    """On a loopback bind, without a token: a 422 that parses (never the
+    500 a non-finite value in the reply made it), and no node."""
     gm, _server, client = _served()
     resp = _post_node(client, "new", literal)
     assert resp.status_code == 422, resp.text
@@ -84,6 +86,7 @@ def test_add_node_refuses_a_timestep_that_is_not_a_finite_positive_number(timest
 
 @pytest.mark.parametrize("name", RESERVED)
 def test_a_reserved_state_key_is_refused_as_a_node_name(name, tmp_path):
+    """On a loopback bind, without a token, and in-process."""
     gm, _server, client = _served(root=tmp_path)
     resp = client.post("/graph/nodes", json={"type": "BallNode", "name": name,
                                              "timestep": 0.01, "params": {}})
@@ -109,6 +112,7 @@ def test_a_lookalike_of_a_reserved_key_is_taken(name, tmp_path):
 
 
 def test_starting_the_runner_on_a_graph_with_no_nodes_is_refused():
+    """On a loopback bind, without a token: a 409, and no runner thread."""
     gm, server, client = _served(nodes=False)
     resp = client.post("/sim/start")
     assert resp.status_code == 409, resp.text

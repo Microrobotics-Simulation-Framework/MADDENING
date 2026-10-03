@@ -151,10 +151,16 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         leaf whose shape differs from the live one), or holds a value the
         live leaf's dtype cannot hold: a finite value that would overflow
         to ``inf``, a non-zero one that would flush to ``0``, an integer
-        that would wrap (:func:`_checked_cast`; a value that rounds to a
-        subnormal loads, and one already ``inf`` or ``NaN`` loads as it
-        was).  :class:`CheckpointFormatError`, a ``ValueError``, if the
-        file is not an ``.npz`` archive of plain arrays.
+        that would wrap, text, or a boolean for a numeric leaf
+        (:func:`_checked_cast`; a value that rounds to a subnormal loads,
+        and a state value already ``inf`` or ``NaN`` loads as it was).
+        A parameter leaf is not asked what ``PUT /graph/params`` asks --
+        its ``ParamSpec`` bounds, finiteness, the node's constructor -- as a
+        ``gm.params`` write is not: bounds are metadata to a graph, and a
+        graph whose parameters Python moved outside them resumes its own
+        checkpoint.  ``POST /checkpoint/load`` asks them.
+        :class:`CheckpointFormatError`, a ``ValueError``, if the file is not
+        an ``.npz`` archive of plain arrays.
 
     Notes
     -----
@@ -400,6 +406,16 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
     """
     a = np.asarray(arr)
     target = np.dtype(dtype)
+    # Text and booleans are not numbers: NumPy casts "1.5" to 1.5 and True
+    # to 1.0 without a word, and every other surface (PUT /graph/params,
+    # the FMU) refuses both.  A boolean for a boolean leaf is a boolean.
+    if a.dtype.kind in "USO":
+        raise ValueError(
+            f"Checkpoint {what} holds {a.dtype} data, not a number.  Nothing was loaded.")
+    if a.dtype.kind == "b" and target.kind != "b":
+        raise ValueError(
+            f"Checkpoint {what} holds a boolean, and this graph's leaf is {target}.  "
+            "Nothing was loaded.")
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         cast = a.astype(target)
     if a.dtype == target:

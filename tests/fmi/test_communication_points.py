@@ -198,14 +198,19 @@ TOL = 1e-6 * DT
 
 @pytest.mark.parametrize("n", [1, 3, 1000])
 def test_a_step_inside_the_tolerance_leaves_the_next_legal_point_accepted(served, n):
+    """The next legal point, ``t + h``, is accepted after a step whose size
+    was inside the tolerance -- and steps from there that do not add to the
+    drift (exact ones, or ones off the other way) go on being accepted."""
     md, bridge = served
     h = n * DT + 0.9 * TOL
-    t = 0.0
-    for _ in range(3):
-        reply = bridge.handle({"op": "step", "t": t, "dt": h})
-        assert reply["ok"], (t, reply)
-        t = t + h                                     # where the importer goes next
-    assert _time(md, bridge) == pytest.approx(3 * h, abs=TOL)
+    reply = bridge.handle({"op": "step", "t": 0.0, "dt": h})
+    assert reply["ok"], reply
+    t = h                                             # where the importer goes next
+    for size in (n * DT, n * DT - 0.9 * TOL, n * DT + 0.9 * TOL):
+        reply = bridge.handle({"op": "step", "t": t, "dt": size})
+        assert reply["ok"], (t, size, reply)
+        t = t + size
+    assert _time(md, bridge) == pytest.approx(4 * n * DT, abs=TOL)
 
 
 @pytest.mark.parametrize("n", [1, 3, 1000])
@@ -227,14 +232,103 @@ def test_the_audits_step_size_is_refused_instead_of_breaking_the_next_step(serve
     assert bridge.handle({"op": "step", "t": 3 * DT, "dt": 3 * DT})["ok"]
 
 
-def test_an_importer_whose_step_is_off_by_less_than_the_tolerance_never_drifts_out(served):
-    """Two hundred steps of a size 0.9 tolerance off, at the importer's own
-    running sum: every point is adopted, so the discrepancy never builds up
-    past one step's worth."""
+def test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance(served):
+    """Every step size a third of the tolerance long, at the importer's own
+    running sum: each one alone is inside the tolerance, and each point is
+    adopted, but the reported time used to move ahead of the simulated time
+    by that much per step, without bound (1.6 master steps after 2000 steps
+    at a 1e-12 s step).  The step that would carry the drift past the
+    tolerance is refused, with nothing advanced, and the reported time never
+    left the simulated time by more than the tolerance."""
     md, bridge = served
-    h, t = DT + 0.9 * TOL, 0.0
-    for k in range(200):
+    h, t = DT + TOL / 3, 0.0
+    for k in range(3):
         reply = bridge.handle({"op": "step", "t": t, "dt": h})
         assert reply["ok"], (k, reply)
         t += h
-    assert abs(_time(md, bridge) - t) <= TOL
+    before = _state(md, bridge)
+    refused = bridge.handle({"op": "step", "t": t, "dt": h})
+    assert refused["ok"] is False and "from the time the FMU has simulated" in refused["error"]
+    assert _state(md, bridge) == before
+    assert abs(_time(md, bridge) - 3 * DT) <= TOL     # reported vs simulated
+    # the importer can still go on at the master step
+    assert bridge.handle({"op": "step", "t": t, "dt": DT})["ok"]
+
+
+def test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside(served):
+    """The point and the step's end are each held to the simulated time.  A
+    point 0.9 tolerance ahead of the FMU's clock is adopted; a second one
+    another 0.9 ahead, with a step 0.9 short, would end back inside the
+    tolerance -- but the step would start, and the reported time with it,
+    1.8 tolerances from the physics.  Refused, nothing advanced."""
+    md, bridge = served
+    assert bridge.handle({"op": "step", "t": 0.0, "dt": DT})["ok"]
+    assert bridge.handle({"op": "step", "t": DT + 0.9 * TOL, "dt": DT})["ok"]
+    before = _state(md, bridge)
+    reply = bridge.handle({"op": "step", "t": 2 * DT + 1.8 * TOL, "dt": DT - 0.9 * TOL})
+    assert reply["ok"] is False, reply
+    assert "the communication point" in reply["error"]
+    assert "from the time the FMU has simulated" in reply["error"], reply
+    assert _state(md, bridge) == before
+
+
+@pytest.mark.parametrize("dt", [1e-2, 1e-9, 1e-12])
+def test_the_tolerance_is_a_millionth_of_the_master_step_at_any_step(dt):
+    """The rounding slack used to be in ulps of ``max(|t|, 1)``, an absolute
+    ~3.6e-15 s: below a master step of about 1e-9 s that floor was the
+    tolerance, and 8.9e-4 of a 1e-12 s step was accepted.  Now a step size
+    1.1 millionths off is refused at every master step, 0.9 millionths is
+    accepted, and so is a communication point 0.9 millionths off."""
+    bridge = _spring_bridge(dt)
+    try:
+        assert bridge.handle({"op": "step", "t": 0.0, "dt": dt * (1 + 0.9e-6)})["ok"]
+        bridge.handle({"op": "reset"})
+        reply = bridge.handle({"op": "step", "t": 0.0, "dt": dt * (1 + 1.1e-6)})
+        assert reply["ok"] is False and "is not a whole multiple" in reply["error"], reply
+        assert bridge.handle({"op": "step", "t": 0.0, "dt": dt})["ok"]
+        assert bridge.handle({"op": "step", "t": dt * (1 + 0.9e-6), "dt": dt})["ok"]
+        reply = bridge.handle({"op": "step", "t": dt * (3 + 1.1e-6), "dt": dt})
+        assert reply["ok"] is False and "not the FMU's current time" in reply["error"], reply
+    finally:
+        bridge.stop()
+
+
+def _spring_bridge(dt):
+    from maddening.core.graph_manager import GraphManager
+    from maddening.fmi import FmuTcpBridge, build_model_description
+    from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
+    from maddening.nodes.spring import SpringDamperNode
+
+    gm = GraphManager()
+    gm.add_node(SpringDamperNode("s", dt, initial_position=0.5))
+    gm.compile()
+    md = build_model_description(gm, model_name="M")
+    return FmuTcpBridge(FmuSidecar(SidecarConfig(
+        schema_token=md.instantiation_token, step_fn=gm._compiled_step,      # noqa: SLF001
+        initial_state=gm._state, params=gm.params)), md, master_dt=gm.timestep)  # noqa: SLF001
+
+
+@pytest.mark.parametrize("start, dt", [(0.0, 0.01), (1000.0, 0.1), (1.0, 1e-9)])
+def test_an_honest_importers_clock_stays_inside_the_drift_tolerance(start, dt):
+    """The drift bound grows by a few ulps of the time per step, the rounding
+    a running sum of step sizes gathers, so an importer that keeps one --
+    or computes ``start + k * h`` -- is never refused, however long it runs.
+    A million steps of both clocks, judged by the bridge's own tolerance at
+    every thousandth step and at the hundred worst ones (no physics is run:
+    the drift check is a function of the times alone)."""
+    bridge = _spring_bridge(dt)
+    try:
+        bridge._t_ref, bridge._n_ref = start, 0                           # noqa: SLF001
+        k = np.arange(1, 1_000_001)
+        running = start + np.cumsum(np.full(k.size, dt))                  # sequential sums
+        clocks = {"running sum": running, "start + k * h": start + k * dt}
+        simulated = start + k * dt
+        for name, clock in clocks.items():
+            err = np.abs(clock - simulated)
+            picks = np.unique(np.concatenate([np.arange(999, k.size, 1000),
+                                              np.argsort(err / k)[-100:]]))
+            for i in picks:
+                tol = bridge._drift_tolerance(float(clock[i]), int(k[i]))  # noqa: SLF001
+                assert err[i] <= tol, (name, int(k[i]), float(err[i]), tol)
+    finally:
+        bridge.stop()

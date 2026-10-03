@@ -21,6 +21,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maddening.core.compliance.metadata import StabilityLevel
+from maddening.core.compliance.stability import stability
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import SimulationNode
 from maddening.fmi import build_model_description
@@ -31,9 +33,11 @@ from maddening.fmi.tcp_bridge import FmuTcpBridge, state_of
 DT = 1e-2
 
 
+@stability(StabilityLevel.STABLE)
 class _Gate(SimulationNode):
     """Integrates its rate while an external boolean ``open`` is set, and
-    remembers whether it was open."""
+    remembers whether it was open.  STABLE, so its input is exported: an
+    FMU exports no input of a node whose stability it does not export."""
 
     def __init__(self, name, timestep):
         super().__init__(name, timestep, rate=1.0)

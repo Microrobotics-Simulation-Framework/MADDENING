@@ -56,8 +56,9 @@ def _vr(md):
                                                        ((0.02, 0.03), False)])
 def test_the_fastest_clock_is_the_default_step_only_where_the_timesteps_divide(
         dts, fastest_is_the_step):
-    """FMU-012: every clock is a whole number of default steps, and the fastest equals the
-    step "unless the timesteps do not divide each other" -- 0.02 and 0.03 run on 0.01."""
+    """FMU-012: at the default step size, one graph step, every clock is a whole number of
+    default steps, and the fastest equals the step when the timesteps divide each other --
+    0.02 and 0.03 run on 0.01."""
     gm = _springs(*dts)
     md = build_model_description(gm, model_name="m", multi_clock=True)
     intervals = sorted(c.interval_decimal for c in md.clocks())
@@ -66,6 +67,28 @@ def test_the_fastest_clock_is_the_default_step_only_where_the_timesteps_divide(
         ratio = interval / md.default_step_size
         assert abs(ratio - round(ratio)) < 1e-9 and round(ratio) >= 1
     assert (intervals[0] == pytest.approx(md.default_step_size)) is fastest_is_the_step
+
+
+@pytest.mark.parametrize("default_step", [None, 0.04, 0.05])
+def test_a_clock_is_a_whole_number_of_graph_steps_whatever_the_default_step(default_step):
+    """FMU-012: every interval is a whole number of graph steps (``md.graph_timestep``),
+    whatever ``default_step_size`` advertises, and an explicit one need not equal or divide
+    any clock.  The docstring said "a whole number of default steps", false for 0.04 and
+    0.05 against clocks of 0.01 and 0.02 (B1 round 7)."""
+    gm = _springs(0.01, 0.02)
+    md = build_model_description(gm, model_name="m", multi_clock=True,
+                                 default_step_size=default_step)
+    intervals = sorted(c.interval_decimal for c in md.clocks())
+    assert intervals == [0.01, 0.02]
+    for interval in intervals:
+        ratio = interval / md.graph_timestep
+        assert abs(ratio - round(ratio)) < 1e-9 and round(ratio) >= 1, interval
+    if default_step is None:
+        assert md.default_step_size == md.graph_timestep == intervals[0]
+    else:
+        assert md.default_step_size == default_step != intervals[0]
+        ratios = [interval / default_step for interval in intervals]
+        assert all(abs(r - round(r)) > 1e-9 for r in ratios), ratios   # divides no clock
 
 
 def test_a_single_clock_export_carries_no_clock():

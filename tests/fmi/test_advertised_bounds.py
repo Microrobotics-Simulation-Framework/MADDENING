@@ -130,6 +130,30 @@ def test_an_open_bound_advertises_the_first_value_its_spec_accepts(spec, side):
     assert not _accepted(spec, outward), (spec, outward)
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_the_bisection_key_orders_the_floats_as_the_reals_and_inverts(dtype):
+    """``_first_accepted`` bisects on an integer key of each float: it must order
+    the floats as the reals do, put ``-0.0`` just below ``0.0``, and come back
+    to the same bits -- an off-by-one on the negative half moves the
+    advertised bound one float, onto a value the spec refuses."""
+    from maddening.fmi.model_description import _float_of_order_key, _float_order_key
+
+    dt = np.dtype(dtype)
+    fi = np.finfo(dt)
+    sub = fi.smallest_subnormal
+    values = [-fi.max, -1.0, -fi.tiny, -sub, -0.0, 0.0, sub, fi.tiny, 1.0, fi.max]
+    keys = [_float_order_key(dt.type(v), dt) for v in values]
+    assert keys == sorted(keys) and len(set(keys)) == len(keys), keys
+    assert keys[5] - keys[4] == 1        # 0.0 (index 5) just above -0.0 (index 4)
+    for v, k in zip(values, keys):
+        back = _float_of_order_key(k, dt)
+        assert np.asarray(back, dt).tobytes() == np.asarray(v, dt).tobytes(), (v, back)
+    # Adjacent keys are adjacent floats, across zero as well.
+    for v in (-fi.tiny, -sub, 1.0, -1.0):
+        k = _float_order_key(dt.type(v), dt)
+        assert _float_of_order_key(k + 1, dt) == np.nextafter(dt.type(v), dt.type(np.inf))
+
+
 @pytest.mark.parametrize("bound", [8.0, 1.0, 2.0 ** -102, 1e-20])
 def test_an_open_bound_whose_neighbour_is_accepted_still_advertises_the_neighbour(bound):
     """Outside the band the advertised value is unchanged: the next float inside

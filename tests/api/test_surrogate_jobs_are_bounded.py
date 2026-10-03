@@ -83,6 +83,12 @@ def _wait_status(client, job_id, *, until=lambda s: s != "running", timeout=120.
 # Memory
 # ---------------------------------------------------------------------------
 
+def _surrogate_threads() -> set:
+    """The live threads the server starts for training jobs (it names them
+    ``maddening-surrogate-<job id>``)."""
+    return {t for t in threading.enumerate() if t.name.startswith("maddening-surrogate-")}
+
+
 def test_a_job_over_the_memory_budget_is_refused_before_anything_is_built(monkeypatch):
     """The audited request: a 25 000-cell rod at the defaults.  Refused from
     the estimate, without a sweep, a dataset or a thread."""
@@ -95,13 +101,16 @@ def test_a_job_over_the_memory_budget_is_refused_before_anything_is_built(monkey
         gm.compile()
     server = SimulationServer({}, graph_manager=gm)
     client = TestClient(server.create_app(), raise_server_exceptions=False)
-    threads = threading.active_count()
+    before = _surrogate_threads()
     resp = client.post("/surrogate/train", json={"node_name": "rod", "n_epochs": 1,
                                                  "hidden_sizes": [8], "batch_size": 64})
     assert resp.status_code == 400, resp.text
     assert "nothing was started" in resp.json()["detail"]
-    assert server._surrogate_jobs == {}
-    assert threading.active_count() == threads
+    assert server._surrogate_jobs == {} and server._surrogate_threads == {}
+    # No job thread was started.  Counted by the server's own thread name,
+    # not by threading.active_count(): the server's worker pool and JAX
+    # start and stop threads of their own, which made that count flaky.
+    assert _surrogate_threads() - before == set()
 
 
 def test_the_estimate_is_the_boundary_of_the_refusal(monkeypatch):

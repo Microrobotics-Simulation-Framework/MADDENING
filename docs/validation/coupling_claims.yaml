@@ -2140,7 +2140,7 @@ claims:
     of the streak being the pass before the loop; IQN is deliberately not on
     the list and stops on its first sub-threshold pass.  (The guide's "so the
     guard costs at most one extra pass" is CPL-062's claim, which fails:
-    MADD-ANO-163.)
+    MADD-ANO-167.)
   sources:
     - src/maddening/core/graph_manager.py:1452 (_fixed_point_while)
     - src/maddening/core/graph_manager.py:1311 (_TWO_PASS_EXIT)
@@ -2230,7 +2230,7 @@ claims:
     residual 4.6e-5), and the guard stops at pass 11.  The state returned is converged
     and nearer the fixed point; what fails is the documented cost.
     Reproducer: tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit[f32]
-    (src/maddening/core/graph_manager.py:2036, _met).  MADD-ANO-163; the
+    (src/maddening/core/graph_manager.py:2036, _met).  MADD-ANO-167; the
     guide's sentence is to be reworded, or the guard's rule changed, in 0.5.0.
   notes: >-
     Ambiguous until 0.4.0's claims fix ("Budget one pass over the unaccelerated
@@ -4650,9 +4650,9 @@ claims:
     solver="ift", reverse and forward mode through run_scan (under vmap,
     through a lax.scan of the raw step). After a checkpoint restart, the
     integer and boolean leaves only: save_state cannot write a typed PRNG
-    key (MADD-ANO-164). With a predictor, the run is reset outside the
+    key (MADD-ANO-168). With a predictor, the run is reset outside the
     differentiated function (inside it the second transform raises:
-    MADD-ANO-165). Not claimed for 16-bit floats, run_adaptive or sharded
+    MADD-ANO-169). Not claimed for 16-bit floats, run_adaptive or sharded
     graphs.
   oracle: bit-exact leaves; finite gradients equal to the leafless graph's.
   tests:
@@ -5204,7 +5204,7 @@ claims:
   conditions: >-
     both solvers, both schedules, every acceleration and norm, diagnostics
     on. A checkpoint restart runs on the structures without their typed PRNG
-    key leaves, which save_state cannot write (MADD-ANO-164). Not claimed
+    key leaves, which save_state cannot write (MADD-ANO-168). Not claimed
     for mixed dtypes, run_adaptive or sharded graphs.
   oracle: bit-identity against the run under the original names.
   tests:
@@ -5251,7 +5251,7 @@ claims:
     members is scheduled after the group and reads it this step (a group is
     one block in the schedule; MADD-ANO-144). A checkpoint restart runs on
     the structures without their typed PRNG key leaves, which save_state
-    cannot write (MADD-ANO-164). Not claimed for mixed dtypes, run_adaptive
+    cannot write (MADD-ANO-168). Not claimed for mixed dtypes, run_adaptive
     or sharded graphs.
   oracle: bit-identity against the original build order.
   tests:
@@ -5312,7 +5312,7 @@ claims:
     convergence_norm="interface", any acceleration and solver; two edges
     with the same endpoints keep their relative order. A checkpoint restart
     runs on the structures without their typed PRNG key leaves, which
-    save_state cannot write (MADD-ANO-164). Not claimed for mixed dtypes,
+    save_state cannot write (MADD-ANO-168). Not claimed for mixed dtypes,
     run_adaptive or sharded graphs.
   oracle: states and reports against the same graph with its edges added in reverse, and with its nodes renamed, bit for bit.
   tests:
@@ -5371,7 +5371,7 @@ claims:
     solve, under IQN-ILS and Jacobi); in 16-bit floats, vmap, multi-rate
     graphs and after a checkpoint restart, the first. A checkpoint restart
     runs on the structures without their typed PRNG key leaves, which
-    save_state cannot write (MADD-ANO-164). Not claimed for mixed dtypes,
+    save_state cannot write (MADD-ANO-168). Not claimed for mixed dtypes,
     run_adaptive or sharded graphs.
   oracle: bit-identity; the exact float64 fixed point and the operator norm of (I - M)^-1.
   tests:

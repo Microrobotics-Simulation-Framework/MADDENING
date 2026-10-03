@@ -14,7 +14,7 @@ single-rate graph:
   threshold (the predecessor held to its raw residual, the pass to its
   estimate), and IQN on its first;
 * CPL-062: the guard's cost against Aitken's own exit (the claim of at
-  most one pass fails: MADD-ANO-163);
+  most one pass fails: MADD-ANO-167);
 * CPL-073: a positive eigenvalue above one is reported unconverged under
   every fixed-point acceleration, under-relaxation included, and IQN
   converges the same group;
@@ -264,7 +264,7 @@ def test_aitken_needs_two_consecutive_passes_in_every_dtype(label, acc, want):
 
 #: Three independent modes, ``x_a <- g_a x_b + c``, ``x_b <- s x_a`` entry by
 #: entry with ``s = +-1``: Aitken's single factor cannot fit all three, so
-#: its estimate is not monotone near the exit.  The first is MADD-ANO-163's
+#: its estimate is not monotone near the exit.  The first is MADD-ANO-167's
 #: reproducer: the guard holds Aitken two passes past its own exit.
 _MODES = (
     ((-0.02, 0.92, 0.53), (-1.0, -1.0, 1.0), (1.82, 1.27, 1.02)),
@@ -343,15 +343,15 @@ def test_iqn_stops_on_its_first_sub_threshold_pass(label, monkeypatch):
     assert sooner, f"{label}: IQN behaved as if it were on the guard's list"
 
 
-#: The domains MADD-ANO-163's draws reproduce in (bfloat16, float16 and the
+#: The domains MADD-ANO-167's draws reproduce in (bfloat16, float16 and the
 #: batch members, at their own criteria, land within one pass on these draws).
-_ANO_163 = ("f32", "f64", "mixed_dtype", "vmap", "multi_rate", "sub_cycled",
+_ANO_167 = ("f32", "f64", "mixed_dtype", "vmap", "multi_rate", "sub_cycled",
             "predictors_warm_starts", "checkpoint_restart")
 
 
-@pytest.mark.parametrize("label", _ANO_163)
+@pytest.mark.parametrize("label", _ANO_167)
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "CPL-062: MADD-ANO-163: the two-pass guard can hold Aitken two passes past its own "
+    "CPL-062: MADD-ANO-167: the two-pass guard can hold Aitken two passes past its own "
     "exit, not at most one: the predecessor is held to its raw residual and the pass to "
     "its estimate, which can rise back above the threshold; pending 0.5.0"))
 def test_the_guard_adds_at_most_one_pass_to_aitkens_exit(label, monkeypatch):

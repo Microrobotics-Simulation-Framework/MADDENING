@@ -11485,7 +11485,7 @@ anomalies:
     verification:
       - "tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_strict_convergence_raises_with_a_sharded_member"
     github_issue: null
-  - anomaly_id: "MADD-ANO-163"
+  - anomaly_id: "MADD-ANO-167"
     title: "The Aitken two-pass guard can add two passes to Aitken's own exit, where the guide says at most one"
     description: >
       Under `acceleration="aitken"` the coupling loop stops only when two
@@ -11533,7 +11533,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit"
     github_issue: null
-  - anomaly_id: "MADD-ANO-164"
+  - anomaly_id: "MADD-ANO-168"
     title: "save_state cannot write a typed PRNG key leaf"
     description: >
       `GraphManager.save_state` (`maddening.core.simulation.checkpoint.save_state`)
@@ -11572,7 +11572,7 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_structure_with_a_typed_prng_key_survives_a_checkpoint_restart"
     github_issue: null
-  - anomaly_id: "MADD-ANO-165"
+  - anomaly_id: "MADD-ANO-169"
     title: "reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform"
     description: >
       A loss that starts each evaluation from the initial state,

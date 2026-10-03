@@ -3125,6 +3125,104 @@ def _adam_frame(g0):
     return pow2_frame(g0)
 
 
+def _scaled_value_and_grad(objective, argnums=0):
+    """``jit((*args, cot) -> (loss, cot * gradient))``: the loss and its
+    gradient with ``cot`` as the cotangent of the backward pass.
+
+    A power-of-two ``cot`` scales every intermediate of the backward pass
+    exactly, so the result is ``cot`` times the gradient bit for bit
+    wherever those intermediates were normal numbers -- and where they were
+    not, it lifts them out of the flush (:func:`_gradient_lift`).
+    """
+    def run(*args):
+        *values, cot = args
+        loss, pullback = jax.vjp(objective, *values)
+        grads = pullback(cot)
+        if isinstance(argnums, int):
+            return loss, grads[argnums]
+        return loss, tuple(grads[a] for a in argnums)
+
+    return jax.jit(run)
+
+
+#: How many evaluations :func:`_gradient_lift` may spend looking for a
+#: cotangent at which the backward pass neither flushes nor overflows: one
+#: probe at the widest lift, halvings of its exponent while that overflows,
+#: and one evaluation at the lift that frames the gradient.
+_LIFT_PROBES = 12
+
+
+def _gradient_lift(scaled, grads, loss):
+    """The power of two to take an Adam fit's gradients with (as the
+    cotangent of the backward pass, :func:`_scaled_value_and_grad`), or
+    ``None`` when the gradient as evaluated is already clear of the flush.
+
+    ``scaled(cot)`` returns ``(loss, gradients)`` at the run's start; ``grads``
+    are the gradients evaluated plainly there, and ``loss`` the loss.  Their
+    products flush to zero below ``tiny`` on XLA's CPU backend, so a loss
+    written in small units -- ``0.5 * ||s * r||²`` with ``s = 1e-19``, a
+    nanoparticle's mass in kilograms -- had a gradient of exactly zero, and
+    :func:`fit` returned its start (at ``s = 1e-18`` a gradient that had
+    lost some of its products, and a point 1% off).  The loss's *value*
+    cannot be helped (it is the caller's function, and ``r * r`` has
+    already flushed inside it by the time it returns), but its gradient
+    can: the backward pass is linear in its cotangent, so evaluating it
+    with ``cot = 2**k`` instead of 1 lifts every product out of the flush
+    and scales the result by exactly ``2**k``.  Adam is invariant to that
+    scale beyond its ``eps``, which is relative to the run's first gradient
+    already (:func:`_adam_frame`).
+
+    A gradient whose largest entry is at least ``tiny / eps`` of its dtype
+    (``2**-103`` in float32) is clear: a product that flushed there was
+    ``2**23`` times smaller than it and moved it by less than an ulp, so no
+    lift is taken and the run is the one it always was, bit for bit.  Below
+    that the widest lift whose backward pass stays finite is probed, and
+    the lift is then set to frame the gradient's largest entry near one.
+    ``None`` also when even the widest lift finds no gradient: then it is
+    zero (a loss that does not read the parameters, or a start at an exact
+    optimum), and the plain evaluation already says so.
+    """
+    leaves = [np.asarray(g) for g in grads]
+    floor = min(float(np.finfo(g.dtype).tiny) / float(np.finfo(g.dtype).eps)
+                for g in leaves if np.issubdtype(g.dtype, np.floating)) \
+        if any(np.issubdtype(g.dtype, np.floating) for g in leaves) else 0.0
+
+    def top(gs):
+        values = [np.abs(np.asarray(g, dtype=np.float64)).max() if np.size(g) else 0.0
+                  for g in gs]
+        return max(values) if values else 0.0
+
+    first = top(leaves)
+    if not math.isfinite(first) or first >= floor:
+        return None
+    cot_dtype = jnp.result_type(loss)
+    if not jnp.issubdtype(cot_dtype, jnp.floating):
+        return None
+    widest = int(jnp.finfo(cot_dtype).maxexp) - 2
+
+    def probe(exponent):
+        _, gs = scaled(jnp.asarray(2.0 ** exponent, cot_dtype))
+        t = top(gs if isinstance(gs, (tuple, list)) else (gs,))
+        return t if math.isfinite(t) else None
+
+    exponent, budget = widest, _LIFT_PROBES
+    t = probe(exponent)
+    budget -= 1
+    while t is None and exponent > 1 and budget > 1:
+        exponent //= 2
+        t = probe(exponent)
+        budget -= 1
+    if t is None or t == 0.0:
+        return None
+    framed = min(exponent - math.frexp(t)[1], widest)
+    if framed <= 0:
+        return None
+    t2 = probe(framed)
+    if t2 is None or t2 < floor:
+        framed = exponent
+    return jnp.asarray(2.0 ** framed, cot_dtype)
+
+
 def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> tuple[int, int]:
     """The hyper-parameters :func:`fit` and :func:`fit_multiple_shooting`
     share; returns ``(n_iter, notify_every)`` as Python ints."""
@@ -4487,6 +4585,21 @@ def fit(
         return loss_fn(gm.constrain(u))
 
     value_and_grad = jax.jit(jax.value_and_grad(objective))
+    scaled_value_and_grad = _scaled_value_and_grad(objective)
+    # The cotangent the run takes its gradients with once a flushed first
+    # gradient made it lift them (:func:`_gradient_lift`); ``None`` -- the
+    # plain gradient, bit for bit as before -- otherwise.
+    lift = None
+
+    def evaluate(th):
+        """``(loss, gradient)`` at ``th``, the gradient times ``lift``."""
+        return value_and_grad(th) if lift is None else scaled_value_and_grad(th, lift)
+
+    def unlifted(g) -> np.ndarray:
+        """A gradient from :func:`evaluate`, in float64 and the loss's units."""
+        g64 = np.asarray(g, dtype=np.float64)
+        return g64 if lift is None else g64 / float(lift)
+
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
@@ -4511,9 +4624,17 @@ def fit(
     best = _BestIterate(theta0)
     losses: list[float] = []
     converged = False
+    vanished_warned = False
     i = 0
     for i in range(1, n_iter + 1):
-        loss, g = value_and_grad(theta)
+        loss, g = evaluate(theta)
+        if i == 1:
+            # A first gradient in the flush is evaluated again, lifted, and
+            # the run takes every gradient that way (``_gradient_lift``).
+            lift = _gradient_lift(lambda cot: scaled_value_and_grad(theta, cot),
+                                  (g,), loss)
+            if lift is not None:
+                loss, g = evaluate(theta)
         loss_f = float(loss)
         losses.append(loss_f)
         if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g))):
@@ -4526,14 +4647,29 @@ def fit(
             # Before the ``tol`` break, not after the step: this gradient is
             # information about the loss surface whether or not it moved
             # anything, and a run that stops on ``tol`` has still seen it.
-            tracker.observe(g)
+            tracker.observe(unlifted(g))
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
                 callback(i, loss_f, current)
             if progress is not None:
                 progress(i, loss_f, current)
-        if tol > 0.0 and loss_f <= tol:
+        # A loss of exactly 0.0 with a gradient that is not zero: ``loss_fn``
+        # flushed its own value (``r * r`` below ``tiny``).  It is not a loss
+        # that reached ``tol``, and the run says so once.
+        vanished = loss_f == 0.0 and bool(jnp.any(g != 0.0))
+        if vanished and not vanished_warned:
+            vanished_warned = True
+            warnings.warn(
+                f"fit: loss_fn returned exactly 0.0 at iteration {i} with a "
+                f"gradient that is not zero -- the loss underflows its "
+                f"precision (a squared residual below the smallest normal "
+                f"number flushes to 0).  The iterates follow the gradient, "
+                f"which is taken clear of the flush, but losses, best_loss and "
+                f"the tol test read 0.0 there, and tol does not count it. Write "
+                f"the loss in units nearer one.",
+                RuntimeWarning, stacklevel=2)
+        if tol > 0.0 and loss_f <= tol and not vanished:
             converged = True
             break
         if frame is None:
@@ -4542,28 +4678,32 @@ def fit(
 
     if i > 0 and not converged:
         # The budget ran out, so the last thing the loop did was an update
-        # whose result it never evaluated.  ``value_and_grad`` rather than a
+        # whose result it never evaluated.  ``evaluate`` rather than a
         # value-only function: the same compiled arithmetic as every entry
         # of ``losses``, so the comparison is like for like and costs no
         # compile.  The gradient is discarded -- in particular it is not
         # folded into the tracker, which would change ``excited_rank`` for
         # runs whose result is otherwise untouched.
-        _offer_final_iterate(best, theta, i, float(value_and_grad(theta)[0]), "fit")
+        _offer_final_iterate(best, theta, i, float(evaluate(theta)[0]), "fit")
 
     selected = best.state
 
     def _reference():
-        loss_sel, g_sel = value_and_grad(selected)
-        return float(loss_sel), np.asarray(g_sel, dtype=np.float64)
+        loss_sel, g_sel = evaluate(selected)
+        return float(loss_sel), unlifted(g_sel)
 
     def _flatness(candidates, spanned, scale):
+        # Hessian-vector products of the lifted gradient are lifted by the
+        # same power of two; the test is relative, the curvature it returns
+        # (for the hold's tolerance) is not, so it is unlifted.
+        lifted = 1.0 if lift is None else float(lift)
         return _hessian_flatness(
-            lambda V: _hvp_columns(lambda t: value_and_grad(t)[1], selected, (), V),
+            lambda V: _hvp_columns(lambda t: evaluate(t)[1], selected, (), V) / lifted,
             candidates, spanned, coarse, "fit", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,
-        _SelectedObjective(loss=lambda th: float(value_and_grad(th)[0]),
+        _SelectedObjective(loss=lambda th: float(evaluate(th)[0]),
                            reference=_reference, flatness=_flatness,
                            transformed=bounds.transformed,
                            columns=None if tracker is None else tracker.gradient_scale),
@@ -5449,6 +5589,19 @@ def fit_multiple_shooting(
         )
 
     value_and_grad = jax.jit(jax.value_and_grad(objective, argnums=(0, 1)))
+    scaled_value_and_grad = _scaled_value_and_grad(objective, argnums=(0, 1))
+    # As in ``fit``: the cotangent every gradient is taken with once a
+    # flushed first gradient made the run lift them (``_gradient_lift``).
+    lift = None
+
+    def evaluate(th, w):
+        return (value_and_grad(th, w) if lift is None
+                else scaled_value_and_grad(th, w, lift))
+
+    def unlifted(g) -> np.ndarray:
+        g64 = np.asarray(g, dtype=np.float64)
+        return g64 if lift is None else g64 / float(lift)
+
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
@@ -5467,9 +5620,15 @@ def fit_multiple_shooting(
     best = _BestIterate((theta0, ws_flat0))
     losses: list[float] = []
     converged = False
+    vanished_warned = False
     i = 0
     for i in range(1, n_iter + 1):
-        loss, (g_t, g_s) = value_and_grad(theta, ws)
+        loss, (g_t, g_s) = evaluate(theta, ws)
+        if i == 1:
+            lift = _gradient_lift(lambda cot: scaled_value_and_grad(theta, ws, cot),
+                                  (g_t, g_s), loss)
+            if lift is not None:
+                loss, (g_t, g_s) = evaluate(theta, ws)
         loss_f = float(loss)
         losses.append(loss_f)
         if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g_t))) \
@@ -5480,14 +5639,25 @@ def fit_multiple_shooting(
             # The parameter block's gradient only: the window states are
             # decision variables of this fit and are returned as the
             # optimiser left them.  Before the ``tol`` break, as in ``fit``.
-            tracker.observe(g_t)
+            tracker.observe(unlifted(g_t))
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
                 callback(i, loss_f, current)
             if progress is not None:
                 progress(i, loss_f, current)
-        if tol > 0.0 and loss_f <= tol:
+        vanished = loss_f == 0.0 and (bool(jnp.any(g_t != 0.0)) or bool(jnp.any(g_s != 0.0)))
+        if vanished and not vanished_warned:
+            vanished_warned = True
+            warnings.warn(
+                f"fit_multiple_shooting: the windowed loss is exactly 0.0 at "
+                f"iteration {i} with a gradient that is not zero -- it underflows "
+                f"its precision.  The iterates follow the gradient, which is "
+                f"taken clear of the flush, but losses, best_loss and the tol "
+                f"test read 0.0 there, and tol does not count it. Write the "
+                f"observations in units nearer one.",
+                RuntimeWarning, stacklevel=2)
+        if tol > 0.0 and loss_f <= tol and not vanished:
             converged = True
             break
         it = jnp.asarray(i, theta.dtype)
@@ -5503,27 +5673,28 @@ def fit_multiple_shooting(
     if i > 0 and not converged:
         # As in ``fit``: the last update's result was never evaluated.
         _offer_final_iterate(best, (theta, ws), i,
-                             float(value_and_grad(theta, ws)[0]),
+                             float(evaluate(theta, ws)[0]),
                              "fit_multiple_shooting")
     theta, ws = best.state
     selected = theta
 
     def _reference():
-        loss_sel, (g_sel, _) = value_and_grad(selected, ws)
-        return float(loss_sel), np.asarray(g_sel, dtype=np.float64)
+        loss_sel, (g_sel, _) = evaluate(selected, ws)
+        return float(loss_sel), unlifted(g_sel)
 
     def _flatness(candidates, spanned, scale):
         # The parameter block's Hessian at the selected window states, held
         # fixed: the guard moves only ``theta``, and does so with ``ws``
-        # where the optimiser left them.
+        # where the optimiser left them.  Unlifted, as in ``fit``.
+        lifted = 1.0 if lift is None else float(lift)
         return _hessian_flatness(
-            lambda V: _hvp_columns(lambda t, w: value_and_grad(t, w)[1][0],
-                                   selected, (ws,), V),
+            lambda V: _hvp_columns(lambda t, w: evaluate(t, w)[1][0],
+                                   selected, (ws,), V) / lifted,
             candidates, spanned, coarse, "fit_multiple_shooting", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,
-        _SelectedObjective(loss=lambda th: float(value_and_grad(th, ws)[0]),
+        _SelectedObjective(loss=lambda th: float(evaluate(th, ws)[0]),
                            reference=_reference, flatness=_flatness,
                            transformed=bounds.transformed,
                            columns=None if tracker is None else tracker.gradient_scale),

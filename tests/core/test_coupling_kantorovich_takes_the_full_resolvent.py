@@ -5,7 +5,7 @@
 ||(I - J(x_k))^{-1}||`` over the whole space in the group's norm, ``eta``
 the Newton step and ``L`` the change of the Jacobian along it -- and, since
 0.4.0's round-6 fix, the affine-covariant ``||(I - J(x_k))^{-1} (J(x_k +
-delta) - J(x_k))||`` on the Jacobian's row space (MADD-ANO-169).  Until
+delta) - J(x_k))||`` on the Jacobian's row space (MADD-ANO-172).  Until
 0.4.0's round-5 fix ``beta`` was the Arnoldi factor, the resolvent
 restricted to the Krylov space of the start vector and the residual
 (MADD-ANO-142).  On the round-5 audit's rank-one ring made nonlinear

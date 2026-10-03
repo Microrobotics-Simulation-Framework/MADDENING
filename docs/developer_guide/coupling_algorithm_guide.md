@@ -267,7 +267,7 @@ reads as exactly zero in the group's norm.
 | float64 | 1.0e-292 | 2.2e-308 |
 
 A bfloat16 or float16 field is measured in float32 (the round-6 fix,
-MADD-ANO-167): its value, widened exactly, is a normal float32 number, so
+MADD-ANO-170): its value, widened exactly, is a normal float32 number, so
 the norm reads a float16 field below 6.1e-5, and its changes, like any
 other.  For the 16-bit rows the table describes the node's own arithmetic
 on the field, which still rounds and flushes in the field's dtype.

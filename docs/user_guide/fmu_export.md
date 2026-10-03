@@ -129,7 +129,7 @@ the FMU reports stays within a millionth plus a tenth of a step of the time
 it has simulated, and always names the step its physics is at.  Uncapped,
 the slacks admitted whole steps where an ulp of the time is a sizeable part
 of one: at 1000 s an ulp is 0.11 of a 1e-12 s step, and a `doStep` a whole
-step ahead was adopted (MADD-ANO-164).  So a time whose 16 ulps pass a
+step ahead was adopted (MADD-ANO-168).  So a time whose 16 ulps pass a
 tenth of the master step -- 32 s and beyond at a 1e-12 s master step,
 about 9.1 hours (32768 s) at 1e-9 s, about 3.4e10 s at 1e-3 s -- is refused, at
 `fmi3EnterInitializationMode`, at a `doStep` that would reach it and at
@@ -263,7 +263,7 @@ nothing, so the compile check cannot see it) so that its `min`, `max` or
 `unit` is no longer the advertised one, or when the sidecar's own spec for
 an exported parameter enforces another envelope.  It used to keep the
 sidecar's spec, and accepted `damping = 7.0` against an advertised `[1, 5]`
-(MADD-ANO-163).  Build the description, the sidecar and the bridge after
+(MADD-ANO-167).  Build the description, the sidecar and the bridge after
 the last `set_param_spec`.  Only parameters the
 compiled step reads are exported, all `variability="tunable"`: an
 `initial_*` condition (the initial state is already built), a value a node
@@ -324,7 +324,7 @@ stale bytes.  A `get` naming more value references, or variables holding
 more values, than a binary reply frame carries (8 388 480) is refused
 before anything is read; split it.  One 64 MiB request naming a scalar 33.5
 million times used to take about 45 s and over 6 GB before its reply was
-refused (MADD-ANO-165).  A `get` may name a value reference more than once,
+refused (MADD-ANO-169).  A `get` may name a value reference more than once,
 and each occurrence gets the value; a `set` may not.  A JSON `get` reply
 that would pass the limit is abandoned while it is encoded.  A binary payload is a short JSON
 *header* carrying `op` and metadata, then the *raw* data, so bulk values

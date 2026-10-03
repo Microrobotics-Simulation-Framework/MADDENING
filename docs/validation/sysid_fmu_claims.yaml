@@ -4470,7 +4470,7 @@ claims:
     step: the uncapped ulp slacks were 1.8 master steps at 1000 s and 1e-12
     s, a doStep a whole step ahead was adopted, and a clock running 40% fast
     reported a time 364 steps ahead of its physics after 1000 steps (430 at
-    1.7e9 s and 1e-6 s) (MADD-ANO-164).  "Stays inside however long it runs"
+    1.7e9 s and 1e-6 s) (MADD-ANO-168).  "Stays inside however long it runs"
     was true of the uncapped slack only, and is restated for a running sum.
     Failing on 04bc3e5 (B1 round 7) below a master step of about 1e-9 s,
     where an absolute floor on the rounding slack was the tolerance (8.9e-4
@@ -4882,7 +4882,7 @@ claims:
     nothing) was enforced in place of the advertised bounds -- the bridge
     kept the sidecar's spec by setdefault -- so damping 0.5 and 7.0 were
     accepted against an advertised [1, 5], or refused inside an advertised
-    [0, inf) (MADD-ANO-163).
+    [0, inf) (MADD-ANO-167).
   domains:
     f32: tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs
     f64: narrowed
@@ -5108,7 +5108,7 @@ claims:
     bounds check, ParamSpec.check, compared through jnp and so flushed the
     subnormal to zero (SYS-109).  Closed with it (MADD-ANO-136).  Failing
     on d2429a6 (B1 round 8, M3) for a spec changed between the description
-    and the sidecar, which the sidecar enforced instead (MADD-ANO-163).
+    and the sidecar, which the sidecar enforced instead (MADD-ANO-167).
   domains:
     f32: tests/fmi/test_fmu_claims_edges.py::test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal
     f64: tests/fmi/test_fmu_claims_in_float64.py::test_a_float64_parameter_cannot_be_set_below_its_min_by_a_float64_subnormal
@@ -5233,7 +5233,7 @@ claims:
   notes: >-
     Failing on d2429a6 (B1 round 8, M5) in the sense the trust boundary
     needs: one in-limit 64 MiB get naming a scalar 33.5 million times took
-    about 45 s and over 6 GB before its reply was refused (MADD-ANO-165).
+    about 45 s and over 6 GB before its reply was refused (MADD-ANO-169).
   domains:
     f32: n/a
     f64: n/a
@@ -5481,7 +5481,7 @@ claims:
     04bc3e5 (B1 round 7) below a master step of about 1e-9 s, where an
     absolute floor on the rounding slack was the tolerance (MADD-ANO-149),
     and on d2429a6 (B1 round 8) at 1000 s with a 1e-12 s step, where the
-    uncapped slack was 1.8 steps (MADD-ANO-164); the conditions now say
+    uncapped slack was 1.8 steps (MADD-ANO-168); the conditions now say
     where the millionth holds.
   domains:
     f32: n/a

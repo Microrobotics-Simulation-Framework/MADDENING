@@ -2351,7 +2351,7 @@ claims:
   sources:
     - src/maddening/core/graph_manager.py:2021 (_ift_linear_solve)
     - docs/release_notes/v0.4.0.md#the-iqn-family-corrected
-  conditions: any rhs scale with a normal largest entry; a zero rhs is answered with zeros.
+  conditions: any rhs scale with a normal largest entry; a zero rhs is answered with zeros; a rhs with a NaN or infinite entry is answered with NaN in every entry (CPL-185).
   oracle: the gradient of s * sum(x*) divided by s, against the analytic 1 / (1 - g) at s = 1e-12.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_the_ift_gradient_is_scale_equivariant_in_the_cotangent
@@ -2419,7 +2419,44 @@ claims:
   tests:
     - tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises
     - tests/core/test_solver_ift_lineax_is_core.py::test_default_coupling_group_differentiable_with_no_extra_installed
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
   status: verified
+  notes: >-
+    It lied for a non-finite cotangent until 0.4.0's fix (MADD-ANO-154):
+    the gradient read exactly 0.0, reported successful, where dense and
+    fori read NaN.  The generated cotangents of the property test are
+    finite; the non-finite case is CPL-185's.
+
+- id: CPL-185
+  area: ift gradients
+  claim: >-
+    "A right-hand side with a NaN or infinite entry is answered with NaN in
+    every entry, under every backend": a non-finite tangent (jax.jvp,
+    jacfwd) or cotangent (jax.grad) gives a NaN derivative, never an
+    exactly zero one reported successful, and it neither re-solves densely
+    nor raises the adjoint error.
+  sources:
+    - src/maddening/core/graph_manager.py:2313 (_ift_linear_solve)
+    - docs/release_notes/v0.4.0.md#krylov-solves-of-a-non-finite-right-hand-side
+  conditions: solver="ift", every linear_solver (and the BiCGStab arm, reachable through _ift_linear_solve only); below and above the dense fallback's 50 coupled DOF; both iteration modes; NaN, +inf and -inf; at every scale of the finite entries from 2**-100 to 2**60.
+  oracle: NaN in every entry of the default path's derivative, and non-finite wherever linear_solver="dense" or solver="fori" is (each non-finite somewhere); a spy that lineax is never handed the non-finite rhs; the other columns of a jacfwd left at the dense answer.
+  tests:
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_tangent_gives_a_nan_tangent_not_zero
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_constant_with_no_derivative_gives_a_nan_column_and_leaves_the_others_right
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_the_private_solve_answers_a_non_finite_rhs_with_nan_on_every_backend
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_under_vmap_only_the_non_finite_column_is_nan
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_no_krylov_backend_is_handed_a_non_finite_rhs
+    - tests/property/test_differential_ift_derivatives.py::test_a_non_finite_rhs_gives_a_non_finite_derivative_at_every_scale
+  status: verified
+  notes: >-
+    Failing until 0.4.0's fix (MADD-ANO-154, never in a release): the solve
+    was posed on b framed by max|b| with the tolerance rtol * max|b|, which
+    a non-finite entry made NaN or inf, and the zero initial guess passed
+    lineax's test at once -- the derivative read 0.0 at both sizes and in
+    both modes.  NaN fills every entry, including any the non-finite entry
+    cannot reach, as an honest Krylov iteration does (its first basis
+    vector is b / ||b||); the dense LU can keep such an entry finite.
 
 # ---------------------------------------------------------------------------
 # profile_graph's coupling statistics

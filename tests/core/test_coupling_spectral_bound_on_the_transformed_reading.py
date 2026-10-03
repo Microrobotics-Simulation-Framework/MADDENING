@@ -272,7 +272,7 @@ def _values(rng, ab, ba, rho):
     GB = rng.normal(size=(N, S_ab.shape[0]))
     M = np.block([[np.zeros((N, N)), GA @ S_ba], [GB @ S_ab, np.zeros((N, N))]])
     r = max(abs(np.linalg.eigvals(M)))
-    s = math.sqrt(rho / r) if r > 0 else 1.0
+    s = rho / r if r > 0 else 1.0       # M scales with s: Jacobi radius rho
     return {"A": {"G": GA * s, "c": rng.normal(size=N) * 3.0, "u0": rng.normal(size=N)},
             "B": {"G": GB * s, "c": rng.normal(size=N) * 3.0, "u0": rng.normal(size=N)}}
 

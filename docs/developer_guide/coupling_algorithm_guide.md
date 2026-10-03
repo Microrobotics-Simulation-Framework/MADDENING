@@ -266,6 +266,12 @@ reads as exactly zero in the group's norm.
 | float16 | 0.0625 | 6.1e-5 |
 | float64 | 1.0e-292 | 2.2e-308 |
 
+A bfloat16 or float16 field is measured in float32 (the round-6 fix,
+MADD-ANO-163): its value, widened exactly, is a normal float32 number, so
+the norm reads a float16 field below 6.1e-5, and its changes, like any
+other.  For the 16-bit rows the table describes the node's own arithmetic
+on the field, which still rounds and flushes in the field's dtype.
+
 `GraphManager` checks each coupled group on the first step after every
 `compile()` and issues one `UnderflowRangeWarning` (a
 `PrecisionLimitWarning`) per group, naming the field, its magnitude and the
@@ -344,7 +350,31 @@ after one more pass, so the factor carries the ratio of the two weightings
 of `F(x) − x` (1 unless a field grew across the pass); without it, on a
 group still growing toward its fixed point, the bound read 0.94x the true
 distance in the returned state's weights with `spectral_usable=True`
-(round-5 audit).  `1/(1 − rho)` is that norm for a normal
+(round-5 audit).
+
+Under `convergence_norm="interface"` the "fields" are what that norm
+reads: each internal edge's source value *after* the edge's transform,
+over its own magnitude.  A transform changes the weights -- an offset (a
+unit conversion's 273.15) divides a change by a far larger magnitude, a
+selection (`"extract_last"`) by the selected entry's rather than the
+field's -- so the spectrum is taken on that reading `y = Φ(x)`.  The pass
+reads the iterate only through those edges, `F = G ∘ Φ`, so `y` iterates
+by its own map `Φ ∘ G`, whose Jacobian `A = Φ′ G′` has `dF/dx`'s non-zero
+spectrum, and for an affine map and affine transforms `Φ(x) − Φ(x*) =
+(I − A)⁻¹ (Φ(x) − Φ(F(x)))` exactly: the resolvent of `A` in the
+reading's weights carries the residual the loop measured to the distance
+in the norm it measured it in.  `A` is applied through state tangents
+(each Krylov vector is the reading of a state tangent, and the next is
+the reading of `dF/dx` applied to it), so no transform is ever inverted.
+Taken on the raw source fields instead, the bound multiplied a residual
+in one set of coordinates by a resolvent measured in another and read
+0.0014-0.098x the true distance with `spectral_usable=True` (round-6
+audit).  A transform that is not affine makes the map non-linear in the
+reading, and the bound is then asymptotic, as for a non-linear map.  The
+gradient bound below keeps the state's own analysis, in the raw fields'
+weights.
+
+In either reading `1/(1 − rho)` is the resolvent's norm for a normal
 `A`; the resolvent term is what holds when `A` is not normal, which a
 Jacobi loop between a node that responds strongly and one that
 responds weakly is measured to be.  Measured `spectral_error_bound /
@@ -437,16 +467,29 @@ group already has or measures cheaply:
    resolution it carries no direction, and a floor-sized vector's
    resolvent image — the slow mode — stands in;
 4. **how far the linearisation reaches**, by Newton–Kantorovich: with
-   `h = amp · L · ‖δ‖`, `L` the Jacobian's change along `δ` per unit
-   length squared (one more pair of Jacobian-vector products), the
-   resolvent at `x*` is at most `amp / √(1 − 2h)` and a fixed point lies
-   within Kantorovich's radius, so the bound carries that factor and at
-   least that distance — and is `inf`, unusable, at `h ≥ ½`, where
-   nothing measured at `x_k` bounds the resolvent at the fixed point.
-   On a convex map at `F'(x*) = 0.99`, 0.65–4.5% short, the bound without
-   it read 0.20–0.96x the true error with the flag true; `h` there is
-   0.48–0.58, so two of those points now read `inf` and two hold at
-   3.0–3.5x.  `h` is exactly zero on an affine map.
+   `h = β · L · ‖δ‖`, `β` the full resolvent norm at `x_k` and `L` the
+   Jacobian's change across `δ` per unit length — the larger of its
+   action on `δ` and its operator norm on the directions the Jacobian
+   reads (`2k` more Jacobian-vector products) — the resolvent at `x*`
+   is at most `β / √(1 − 2h)` and a fixed point lies within Kantorovich's
+   radius `t*`, so the bound carries that factor and at least that
+   distance — and is `inf`, unusable, at `h ≥ ½`, where nothing measured
+   at `x_k` bounds the resolvent at the fixed point.  On a convex map at
+   `F'(x*) = 0.99`, 0.65–4.5% short, the bound without it read 0.20–0.96x
+   the true error with the flag true; `h` there is 0.48–0.58, so two of
+   those points now read `inf` and two hold at 3.0–3.5x.  `L` was once
+   taken along `δ` alone, which can be several times the operator norm's
+   smaller: on a bilinear pair stopped two passes in, `h` read 0.37 along
+   `δ` and is 0.69 as an operator, the fixed point lay 0.568 away against
+   a radius of 0.552, and the bound read 0.81x the true error, usable
+   (round-6 audit).  `h` is exactly zero on an affine map;
+5. **what the Newton step misses**: `x* − x_k = δ + e` with `‖e‖ ≤ t* −
+   ‖δ‖`, and stretching the secant to `t*` covers only the part of `e`
+   along `δ`.  Each probe adds `β ‖G(x_k + δ) − G(x_k)‖ (t* − ‖δ‖) /
+   (‖δ‖ ‖t_k‖ √(1 − 2h))` — the change of its linearisation over the
+   missed part, at the rate its own secant shows, through the resolvent at
+   `x*` — which is zero on an affine map.  Without it the bound read
+   0.986x the true error, usable, at `max_iterations=2` (`h = 0.19`).
 
 The bound is `amplification · distance · ‖G(x_k + δ) − G(x_k)‖ / (‖δ‖ ‖t_k‖)`,
 relative to the tangent, taken for **one probe per floating constant**
@@ -458,7 +501,7 @@ read 0.0 on the stiff spring pair while its stiffness gradient was
 the same relative amount, and the dynamics see only their ratio.  The
 tangents and `δ` come from a Woodbury solve on an eight-vector basis of
 the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
-the cost is `11 + k + 5 n_p` Jacobian-vector products per group per step
+the cost is `11 + 3k + 5 n_p` Jacobian-vector products per group per step
 (`k ≤ 8`, `n_p` the probes: every entry of a floating constant of at most
 64 entries, one for a larger one) beside the spectral bound's eight, plus
 one linearisation and `k` reverse-mode products for the full resolvent

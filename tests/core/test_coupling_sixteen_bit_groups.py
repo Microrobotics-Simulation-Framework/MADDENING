@@ -11,7 +11,14 @@ Two defects of 16-bit groups under the default ``solver="ift"``:
 * ``diagnostics=True`` raised ``NotImplementedError`` from inside the step:
   the spectral and gradient bounds call LAPACK, which has no 16-bit
   kernels.  Their analysis now runs in float32 while the map is still
-  evaluated in the group's own dtype.
+  evaluated in the group's own dtype;
+* ``jax.grad`` and ``jax.jvp`` through the group raised the same
+  ``NotImplementedError`` (lineax's QR ``TypeError`` on jax 0.11.2): the
+  IFT rule's linear solve ran in the group's dtype (MADD-ANO-161).  It now
+  runs in float32 on the group's own 16-bit operator and casts back;
+* the spectral slots were stored in the group's dtype, so ``rho_spectral``
+  read to bfloat16's ``2**-8`` and the bounds beside it were rounded too
+  (CPL-087).  They are kept in the analysis's float32.
 
 The fixture is a rotation coupled to an identity relay (``|x|`` preserved,
 the residual O(1)), which never meets ``tolerance=1e-30`` and so always
@@ -24,6 +31,7 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -157,3 +165,128 @@ def test_fori_and_ift_take_the_same_passes_on_an_accelerated_sixteen_bit_group(d
         reports[solver] = gm.coupling_diagnostics()[KEY]
     assert reports["fori"]["iterations"] == reports["ift"]["iterations"], reports
     assert reports["fori"]["converged"] == reports["ift"]["converged"], reports
+
+
+class _Affine(SimulationNode):
+    """``x <- g * u + b`` entry by entry, ``g`` and ``b`` graph parameters."""
+
+    def __init__(self, name, g, b, n, dtype):
+        super().__init__(name, 1.0, g=jnp.asarray(g, dtype), b=jnp.full((n,), b, dtype))
+        self._n, self._dtype = n, dtype
+
+    def initial_state(self):
+        return {"x": jnp.zeros((self._n,), self._dtype)}
+
+    def boundary_input_spec(self):
+        return {"u": BoundaryInputSpec(shape=(self._n,), dtype=self._dtype,
+                                       default=jnp.zeros((self._n,), self._dtype))}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": (p["g"] * boundary_inputs["u"] + p["b"]).astype(self._dtype)}
+
+
+def _affine_pair(dtype, n, **group):
+    """``a <- 0.6 u + 1``, ``b <- 0.9 u + 0.5``, each reading the other: the
+    coupled sensitivity of ``x_a`` to ``b_a`` is ``1 / (1 - g_a g_b)`` per entry."""
+    gm = GraphManager()
+    gm.add_node(_Affine("a", 0.6, 1.0, n, dtype))
+    gm.add_node(_Affine("b", 0.9, 0.5, n, dtype))
+    gm.add_edge("a", "b", "x", "u")
+    gm.add_edge("b", "a", "x", "u")
+    gm.add_coupling_group(["a", "b"], tolerance=1e-2, max_iterations=200, **group)
+    gm.compile()
+    return gm
+
+
+def _sensitivity(gm, dtype):
+    """``1 / (1 - g_a g_b)`` in float64 from the gains as the dtype holds them."""
+    r = lambda v: float(np.asarray(jnp.asarray(v, dtype), np.float64))  # noqa: E731
+    return 1.0 / (1.0 - r(0.6) * r(0.9))
+
+
+def _xa_total(gm):
+    def f(p):
+        gm.reset_state()
+        return jnp.sum(gm.run_scan(2, params=p)["a"]["x"].astype(jnp.float32))
+    return f
+
+
+@pytest.mark.parametrize("linear_solver", ["gmres", "dense"])
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16])
+def test_the_ift_gradient_of_a_sixteen_bit_group_is_its_coupled_sensitivity(dtype, linear_solver):
+    """``jax.grad`` and ``jax.jvp`` through a 16-bit group under ``solver="ift"``
+    give the IFT sensitivity to the dtype's resolution, and agree with each
+    other; they raised ``NotImplementedError`` (MADD-ANO-161).
+
+    The tolerance is four ``eps`` of the dtype times the conditioning
+    ``1 / (1 - g_a g_b)``: the operator is the 16-bit map's own, its products
+    rounded to the dtype, and the answer is returned in it."""
+    gm = _affine_pair(dtype, 1, linear_solver=linear_solver)
+    p = jax.tree.map(lambda v: v, gm.params)
+    want = _sensitivity(gm, dtype)
+    eps = float(jnp.finfo(dtype).eps)
+    tol = 4 * eps * want * want
+    g = jax.grad(_xa_total(gm))(p)
+    got = float(np.asarray(g["nodes"]["a"]["b"], np.float64).sum())
+    assert abs(got - want) <= tol, (got, want, tol)
+    t = jax.tree.map(jnp.zeros_like, p)
+    t["nodes"]["a"]["b"] = jnp.ones_like(t["nodes"]["a"]["b"])
+    fwd = float(jax.jvp(_xa_total(gm), (p,), (t,))[1])
+    assert abs(fwd - want) <= tol, (fwd, want, tol)
+
+
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16])
+def test_a_sixteen_bit_group_above_the_dense_fallback_differentiates_by_gmres(dtype):
+    """128 coupled entries, above the 50 at which a failed GMRES re-solves
+    densely: the float32 GMRES must meet its criterion on the 16-bit operator
+    by itself.  A float32 criterion (100 float32 ``eps``) is unreachable on an
+    operator whose products are rounded to 16 bits, and raised "the coupling
+    adjoint solve did not converge"; the criterion is four units of the
+    dtype's roundoff, and the gradient is the dense answer's to the dtype's
+    resolution."""
+    n = 64
+    gm = _affine_pair(dtype, n)
+    p = jax.tree.map(lambda v: v, gm.params)
+    want = _sensitivity(gm, dtype)
+    g = np.asarray(jax.grad(_xa_total(gm))(p)["nodes"]["a"]["b"], np.float64)
+    assert g.shape == (n,) and np.all(np.isfinite(g)), g
+    eps = float(jnp.finfo(dtype).eps)
+    assert np.max(np.abs(g - want)) <= 4 * eps * want * want, (g, want)
+
+
+_SPECTRAL_SLOTS = ("rho_spectral", "spectral_residual", "spectral_amplification",
+                   "gradient_relative_error_bound", "pass_evaluations")
+
+
+def _slot_dtypes(gm):
+    meta = gm._state["_meta"]
+    return {s: jnp.asarray(meta[f"coupling_{KEY}_{s}"]).dtype for s in _SPECTRAL_SLOTS}
+
+
+@pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16])
+def test_the_spectral_slots_are_kept_in_the_analysis_dtype(dtype):
+    """A 16-bit group's spectral report is the float32 analysis's, not rounded to
+    the group's dtype (CPL-087): seeded, written by ``step`` and put back by
+    ``reset_state`` as float32.  ``rho_spectral``
+    is the pass map's radius to about one ``eps`` of the group's dtype times
+    the Jacobian's norm, as documented."""
+    gm = _affine_pair(dtype, 1, diagnostics=True)
+    want = {s: jnp.dtype(jnp.float32) for s in _SPECTRAL_SLOTS}
+    assert _slot_dtypes(gm) == want
+    gm.step()
+    assert _slot_dtypes(gm) == want
+    d = gm.coupling_diagnostics()[KEY]
+    resid = float(gm._state["_meta"][f"coupling_{KEY}_spectral_residual"])
+    r = lambda v: float(np.asarray(jnp.asarray(v, dtype), np.float64))  # noqa: E731
+    # Gauss-Seidel: b reads the updated a, so dF/dx = [[0, g_a], [0, g_a g_b]].
+    jac = np.array([[0.0, r(0.6)], [0.0, r(0.6) * r(0.9)]])
+    radius = r(0.6) * r(0.9)
+    eps = float(jnp.finfo(dtype).eps)
+    # Read whether or not the bound is usable: the rank-two spectrum is
+    # resolved either way (the residual it reports is the slack).
+    assert np.isfinite(d["rho_spectral"]), dict(d)
+    assert abs(d["rho_spectral"] - radius) <= (
+        eps * max(1.0, np.linalg.norm(jac, 2)) + 2 * resid), dict(d)
+    gm.reset_state()
+    assert _slot_dtypes(gm) == want

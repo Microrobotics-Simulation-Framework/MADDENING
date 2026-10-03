@@ -2403,7 +2403,27 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
             f"'gmres', 'bicgstab', 'dense'."
         )
     n = rhs.shape[0]
-    rtol = max(1e-6, 100.0 * float(jnp.finfo(rhs.dtype).eps))
+    # A bfloat16 or float16 group's solve runs in float32 and its answer is
+    # cast back (MADD-ANO-161): LAPACK has no 16-bit kernels, so the dense
+    # path's LU and lineax's QR raised, and every jax.grad / jax.jvp through
+    # a 16-bit group under solver="ift" failed.  The operator is still the
+    # group's own -- ``I - dF/dx`` applied in its dtype, each argument
+    # rounded to it -- so the dense path factors the 16-bit operator's exact
+    # matrix and the Krylov path iterates on it; only the arithmetic of the
+    # solve is widened, as the diagnostics' is (``_analysis_dtype``).
+    work = _analysis_dtype(rhs.dtype)
+    if work == rhs.dtype:
+        rtol = max(1e-6, 100.0 * float(jnp.finfo(rhs.dtype).eps))
+    else:
+        # A 16-bit operator resolves its products to its own unit roundoff,
+        # so a float32 criterion is unreachable (GMRES stalls at a residual
+        # of a few 16-bit units and reports failure).  Four units of
+        # roundoff of the dtype the answer is returned in: measured on
+        # contractions of 20 to 400 entries, radius 0.6 to 0.95, GMRES then
+        # converges, and its answer is within about twice the dense LU's
+        # error -- both at the 16-bit output's own resolution.
+        rtol = max(100.0 * float(jnp.finfo(work).eps),
+                   2.0 * float(jnp.finfo(rhs.dtype).eps))
 
     def _dense(mv, b):
         A = jax.jacfwd(mv)(jnp.zeros_like(b))
@@ -2517,6 +2537,15 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         )
 
     solve = _dense if effective_solver == "dense" else _krylov
+    if work != rhs.dtype:
+        narrow_solve = solve
+
+        def solve(mv, b):
+            def mv_work(v):
+                return mv(v.astype(b.dtype)).astype(work)
+
+            return narrow_solve(mv_work, b.astype(work)).astype(b.dtype)
+
     # ``transpose_solve`` receives ``vecmat = v -> A^T v`` and must
     # solve ``A^T x = b``; the same routine serves both.
     return jax.lax.custom_linear_solve(
@@ -4757,22 +4786,33 @@ def _run_coupled_block_impl(
         # ``compile()`` seeds exactly the same keys under the same
         # condition so the scan carry keeps its structure.
         if group.diagnostics and group.solver == "ift":
+            # The analysis outputs are kept in the dtype they were computed
+            # in, at least float32 (``_analysis_dtype``): stored in a 16-bit
+            # group's own dtype, ``rho_spectral`` read to bfloat16's 2**-8
+            # (0.361328125 for a radius of 0.3618774) where it is documented
+            # exact to float32, and the bound the host derives from it
+            # inherited the rounding (CPL-087).  ``compile()`` seeds them in
+            # the same dtype; a hand-built state with no seed takes it too.
+            seeded_spec = full_state.get(_META_KEY, {}).get(
+                f"coupling_{group_key}_rho_spectral")
+            spec_dtype = (jnp.asarray(seeded_spec).dtype if seeded_spec is not None
+                          else _analysis_dtype(res_dtype))
             result[_META_KEY] = {
                 **result[_META_KEY],
                 f"coupling_{group_key}_rho_spectral": jnp.asarray(
-                    rho_spec, dtype=res_dtype
+                    rho_spec, dtype=spec_dtype
                 ),
                 f"coupling_{group_key}_spectral_residual": jnp.asarray(
-                    spec_resid, dtype=res_dtype
+                    spec_resid, dtype=spec_dtype
                 ),
                 f"coupling_{group_key}_spectral_amplification": jnp.asarray(
-                    spec_amp, dtype=res_dtype
+                    spec_amp, dtype=spec_dtype
                 ),
                 f"coupling_{group_key}_gradient_relative_error_bound": jnp.asarray(
-                    grad_bound, dtype=res_dtype
+                    grad_bound, dtype=spec_dtype
                 ),
                 f"coupling_{group_key}_pass_evaluations": jnp.asarray(
-                    pass_evals, dtype=res_dtype
+                    pass_evals, dtype=spec_dtype
                 ),
             }
 
@@ -7481,28 +7521,32 @@ class GraphManager:
                         # resolvent norm) behind the spectral bound; NaN
                         # reads as "not computed".  Same
                         # condition as the write in
-                        # ``_run_coupled_block_impl``.
+                        # ``_run_coupled_block_impl``, and the same dtype:
+                        # the analysis's, at least float32, so a 16-bit
+                        # group's report is not rounded to its fields'
+                        # resolution (CPL-087).
+                        spec_dtype = _analysis_dtype(res_dtype)
                         meta[f"coupling_{key}_rho_spectral"] = jnp.array(
-                            jnp.nan, dtype=res_dtype
+                            jnp.nan, dtype=spec_dtype
                         )
                         meta[f"coupling_{key}_spectral_residual"] = jnp.array(
-                            jnp.nan, dtype=res_dtype
+                            jnp.nan, dtype=spec_dtype
                         )
                         meta[f"coupling_{key}_spectral_amplification"] = jnp.array(
-                            jnp.nan, dtype=res_dtype
+                            jnp.nan, dtype=spec_dtype
                         )
                         # The bound on the IFT gradient's relative
                         # error, built on the triple; NaN reads as
                         # "not computed" too.
                         meta[f"coupling_{key}_gradient_relative_error_bound"] = jnp.array(
-                            jnp.nan, dtype=res_dtype
+                            jnp.nan, dtype=spec_dtype
                         )
                         # The evaluations the pass rounds like, measured
                         # at the step's state with each same-pass read
                         # gain-weighted; NaN reads as "not measured" and
                         # the report falls back to the structural count.
                         meta[f"coupling_{key}_pass_evaluations"] = jnp.array(
-                            jnp.nan, dtype=res_dtype
+                            jnp.nan, dtype=spec_dtype
                         )
                 if g.acceleration == "iqn-imvj":
                     # Pre-populate V/W matrices for IQN-IMVJ
@@ -8763,7 +8807,13 @@ class GraphManager:
               float32) for a group whose Jacobian has rank at most
               eight -- rank is at most the number of boundary scalars
               crossing the group's edges -- and an estimate from below
-              otherwise, which ``"spectral_usable"`` reports.  **Only
+              otherwise, which ``"spectral_usable"`` reports.  For a
+              bfloat16 or float16 group the analysis and the value
+              reported are float32, but the Jacobian-vector products are
+              the map's own, rounded to the group's dtype, so the radius
+              is exact to about one ``eps`` of that dtype times the
+              Jacobian's norm (0.0036 on a bfloat16 pair of radius 0.90,
+              under half a bfloat16 ``eps``) rather than to float32.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1`` (no fixed point was solved) and on

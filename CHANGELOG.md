@@ -349,6 +349,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Coupling round-5 audit fixes** (MADD-ANO-XH1, XM1, XM2, XM3, XL2; new, resolved): the gradient bound applies the exact resolvent to each secant (it read 5.2x below the true error, usable), probes each entry of an array constant, and certifies Kantorovich with the full resolvent norm; the spectral bound is in the returned state's weights;
+  a group is one block in the schedule (an outside node between its members read it a step late, since 0.1.0) and compile() warns when a group is part of a larger loop; CouplingGroup refuses out-of-range counts and thresholds (waveform_iterations=0 froze a sub-cycling group, since 0.1.0).
+  Action: re-read diagnostics=True bounds; expect a UserWarning for a group inside a larger feedback loop; fix any out-of-range CouplingGroup knob.
 - **REST round-6 audit fixes** (MADD-ANO-131 to 134; 096 completed): a surrogate job re-checks its memory budget on the graph it sweeps; `POST /sim/profile` restores the live state and keeps the streams out; a reset, a state write, a node edit and a surrogate swap publish to the streams (the relay adds `run_adaptive`'s `dt`); a JAX trace stops itself at 10 000 steps or 600 s;
   `/sim/run` reports `steps_run` when a step raises; runner routes answer within one lock timeout and say when they left the runner stopped; checkpoint saves are atomic; past the stream cap a client gets 1013, not 403; `run_pod.py` records only a real commit and `--summarise` survives older files.
   Action: none; read `GET /sim/profile/jax/status` if a long trace ends early.

@@ -11572,3 +11572,42 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_structure_with_a_typed_prng_key_survives_a_checkpoint_restart"
     github_issue: null
+  - anomaly_id: "MADD-ANO-165"
+    title: "reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform"
+    description: >
+      A loss that starts each evaluation from the initial state,
+      `loss(p) = (gm.reset_state(); gm.run_scan(n, params=p))`, differentiates
+      once and then raises `UnexpectedTracerError` on the second `jax.grad`
+      (or `jax.jvp`) when a coupling group has `predictor="linear"` or
+      `"quadratic"`.  The first transform leaves its tracers in the graph
+      (run_scan assigns its result), `reset_state` puts the graph back
+      first -- except inside a transform, where the recovery does nothing so
+      that a traced multi-step loop works -- and then sizes the predictor
+      history's seed from the live `_meta` slot, the previous transform's
+      tracer.  Without a predictor both gradients are right (2/3 on the
+      reproducer: `x_a <- -0.5 x_b - 0.1`, `x_b <- x_a`, `d x_b / d c_a`).
+      MADD-ANO-072 fixed `reset_state` called between transforms; this is
+      the call inside one.  `reset_state` is new in 0.4.0, so no release
+      carried it.  Found by the coupling inventory's domain lift (CPL-145's
+      predictor cell).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An exception on the second evaluation; no gradient is returned to be
+      trusted, and the first was right.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.reset_state"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Reset outside the differentiated function (before each `jax.grad`),
+      or call any entry point -- `coupling_diagnostics()` will do -- between
+      two transforms.  Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to seed the predictor
+      history from the compiled structure rather than the live slot.  Until
+      then a fitting loss that resets a predictor group inside itself fails
+      loudly on its second evaluation.
+    verification:
+      - "tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_a_loss_that_resets_a_predictor_group_differentiates_twice"
+    github_issue: null

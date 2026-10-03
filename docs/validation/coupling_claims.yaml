@@ -4647,10 +4647,13 @@ claims:
     - docs/release_notes/v0.4.0.md#non-float-leaves-through-the-adjoint
     - src/maddening/core/coupling/acceleration.py:1514 (float_image)
   conditions: >-
-    solver="ift", reverse and forward mode through run_scan. Not claimed for
-    float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
-    restarts or sharded graphs.
+    solver="ift", reverse and forward mode through run_scan (under vmap,
+    through a lax.scan of the raw step). After a checkpoint restart, the
+    integer and boolean leaves only: save_state cannot write a typed PRNG
+    key (MADD-ANO-164). With a predictor, the run is reset outside the
+    differentiated function (inside it the second transform raises:
+    MADD-ANO-165). Not claimed for 16-bit floats, run_adaptive or sharded
+    graphs.
   oracle: bit-exact leaves; finite gradients equal to the leafless graph's.
   tests:
     - tests/core/test_cross_feature_edge_cases.py::test_int_leaf_in_coupling_group_reverse_and_forward_mode_through_scan
@@ -4660,17 +4663,17 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_cross_feature_edge_cases.py::test_int_leaf_in_coupling_group_reverse_and_forward_mode_through_scan
-    f64: narrowed
-    mixed_dtype: narrowed
+    f64: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[f64]'
+    mixed_dtype: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[mixed_dtype]'
     16bit: narrowed
     jit: tests/core/test_coupling_non_float_leaves.py::test_gradient_still_flows_with_wide_integer_leaves_in_the_group
     grad: tests/core/test_cross_feature_edge_cases.py::test_int_leaf_in_coupling_group_reverse_and_forward_mode_through_scan
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    vmap: tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_vmap_of_the_gradient_through_a_scan_with_non_float_leaves
+    multi_rate: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_through_run_scan_with_non_float_leaves[predictors_warm_starts]'
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_reverse_and_forward_mode_from_a_checkpoint_restart_with_non_float_leaves
     sharded: narrowed
 
 - id: CPL-146

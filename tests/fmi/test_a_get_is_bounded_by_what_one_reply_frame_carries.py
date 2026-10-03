@@ -72,16 +72,21 @@ def test_the_cap_is_what_a_binary_reply_frame_carries():
     assert 8 * (tb._MAX_GET_VALUES + 1024 // 8 + 1) > tb._MAX_MESSAGE
 
 
+@pytest.mark.parametrize("last", ["the same reference", "a float"])
 def test_a_get_of_more_references_than_a_reply_frame_holds_is_refused_before_anything_is_read(
-        served):
-    """The audit's frame, at the size that first exceeds the cap: refused at
-    once, allocating next to nothing, where it used to build an array per
-    entry (about 300 bytes each) and then refuse the reply."""
+        served, last):
+    """The audit's frame, at a size past the cap: refused at once,
+    allocating next to nothing, where it used to build an array per entry
+    (about 300 bytes each) and then refuse the reply.  Refused by its length
+    alone, before any entry is looked at -- even one the entry-by-entry
+    check would refuse at the end."""
     md, bridge = served
-    vrs = [_vr(md, "s.position")] * (tb._MAX_GET_VALUES + 1)
+    pos = _vr(md, "s.position")
+    vrs = [pos] * (tb._MAX_MESSAGE // 8) + [pos if last == "the same reference" else 2.0]
     reply, peak = _peak_while(lambda: bridge._dispatch(                   # noqa: SLF001
         {"op": "get", "type": "Float32", "vr": vrs}))
     assert reply["ok"] is False and "cannot be answered" in reply["error"], reply
+    assert f"a get of {len(vrs)} value references" in reply["error"], reply
     assert "split it into several gets" in reply["error"]
     assert peak < 1 << 20, peak
 
@@ -94,7 +99,7 @@ def test_a_get_whose_variables_hold_more_values_than_a_reply_frame_is_refused_be
     md, bridge = served
     rod = next(v for v in md.variables if v.name == "h.temperature")
     size = int(np.prod(rod.shape))
-    times = tb._MAX_GET_VALUES // size + 1
+    times = tb._MAX_MESSAGE // 8 // size + 1                          # past one frame of f64
     vrs = [rod.value_reference] * times
     reply, peak = _peak_while(lambda: bridge._dispatch(                   # noqa: SLF001
         {"op": "get", "type": "Float32", "vr": vrs}))
@@ -116,6 +121,13 @@ def test_a_repeated_reference_is_answered_in_place_from_one_read(served):
     assert np.array_equal(np.asarray(got["values"]), expected)
     raw = bridge._dispatch({"op": "get", "vr": [pos, pos, pos]})          # noqa: SLF001
     assert raw["values"].dtype == np.float64 and raw["values"].tolist() == [0.5] * 3
+    # scalars only (the reply is filled from one value per variable)
+    k, c = _vr(md, "s.params.stiffness"), _vr(md, "s.params.damping")
+    params = bridge._sidecar.get_params()                                 # noqa: SLF001
+    k0, c0 = (float(params[n]) for n in ("s.params.stiffness", "s.params.damping"))
+    assert len({0.5, k0, c0}) == 3
+    got = bridge.handle({"op": "get", "vr": [k, pos, c, k, pos, c, c]})
+    assert got["values"] == [k0, 0.5, c0, k0, 0.5, c0, c0], got
     assert bridge.handle({"op": "get", "vr": []}) == {"ok": True, "values": []}
 
 

@@ -58,13 +58,32 @@ def test_a_trace_stops_itself_at_its_step_budget(monkeypatch, client):
     stop = client.post("/sim/profile/jax/stop")
     assert stop.status_code == 409
     assert "stopped itself after 5 steps" in stop.json()["detail"]
-    assert status["last_trace_dir"] in stop.json()["detail"]
+    # The directory is the status route's to give (a 200); the 409's detail
+    # names no server path and says where to look.
+    assert status["last_trace_dir"] not in stop.json()["detail"]
+    assert "last_trace_dir in GET /sim/profile/jax/status" in stop.json()["detail"]
 
 
 def test_a_trace_stops_itself_at_its_time_budget(monkeypatch, client):
+    """A step recorded past the time budget stops the trace -- with the budget's own
+    timer held back, so that it is the step's check that does it (the timer is
+    ``tests/api/test_routes_answer_what_they_did.py``'s)."""
+    class Held:
+        def __init__(self, *a, **k):
+            self.daemon = True
+
+        def start(self):
+            pass
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(server_module.threading, "Timer", Held)
     monkeypatch.setattr(server_module, "MAX_JAX_TRACE_SECONDS", 0.0)
     assert client.post("/sim/profile/jax/start").status_code == 200
     assert client.post("/sim/step").status_code == 200
+    from maddening.core.simulation import profiler
+    assert not profiler.jax_trace_active()
     status = client.get("/sim/profile/jax/status").json()
     assert status["active"] is False and "time budget" in status["stopped_by"]
     assert status["steps"] == 1

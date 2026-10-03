@@ -40,7 +40,8 @@ A generated token is only useful to somebody who can read the log.
 When nothing can — a detached container, a job whose stdout goes
 nowhere — set ``MADDENING_API_TOKEN`` yourself, or set
 ``MADDENING_API_TOKEN_FILE`` to a path the generated token is written
-to with mode ``0600``.  The server does not fail if it cannot write
+to with mode ``0600`` (a new file moved over the path: one already there
+keeps neither its mode nor its readers).  The server does not fail if it cannot write
 that file; it logs the failure and carries on, because a server that
 refuses to start is worse than one whose token you have to recover from
 the log.
@@ -62,12 +63,13 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import hmac
 import ipaddress
 import logging
 import os
 import secrets
-import stat
+import tempfile
 from typing import Iterable, Mapping, Optional
 
 from maddening.core.compliance.metadata import StabilityLevel
@@ -497,20 +499,36 @@ class APIAuth:
         return True
 
     def _write_token_file(self) -> None:
-        """Write a generated token to ``$MADDENING_API_TOKEN_FILE``."""
+        """Write a generated token to ``$MADDENING_API_TOKEN_FILE``, mode 0600.
+
+        The token goes into a new file -- created ``0600`` by
+        :func:`tempfile.mkstemp` in the destination's own directory -- which
+        is then moved over the destination (:func:`os.replace`).  Whatever
+        was at the path, a file of any mode included, is replaced and never
+        written into.  Opening the path itself with ``O_CREAT`` and mode
+        ``0600`` applied the mode only to a file it created: one already
+        there (a placeholder on a volume, the last run's token) kept its
+        mode, ``0644`` say, and the new token landed in a file other users
+        could read.  ``chmod`` after opening would not close that either: a
+        reader who had the file open before the ``chmod`` keeps reading it.
+        A new inode no earlier reader can hold does.  A symbolic link at the
+        path is followed, so the token lands where the link points, in a
+        file that is now its own.  When the move cannot be made (a directory
+        the server cannot write, a file another user owns in a sticky
+        directory) nothing is written and the failure is logged.
+        """
         path = os.environ.get(TOKEN_FILE_ENV, "").strip()
         if not path:
             return
+        target = os.path.realpath(path)
+        partial = None
         try:
-            handle = os.open(
-                path,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                stat.S_IRUSR | stat.S_IWUSR,
-            )
-            try:
-                os.write(handle, (self.token + "\n").encode("utf-8"))
-            finally:
-                os.close(handle)
+            handle, partial = tempfile.mkstemp(
+                prefix=".maddening-token.", dir=os.path.dirname(target) or ".")
+            with os.fdopen(handle, "w", encoding="utf-8") as out:
+                out.write(self.token + "\n")
+            os.replace(partial, target)
+            partial = None
         except OSError:
             logger.warning(
                 "Could not write the generated API token to %s=%r; it is in "
@@ -519,3 +537,7 @@ class APIAuth:
             )
         else:
             logger.info("Generated API token written to %s (mode 0600)", path)
+        finally:
+            if partial is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(partial)

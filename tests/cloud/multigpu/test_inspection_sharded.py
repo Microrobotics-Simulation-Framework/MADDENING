@@ -18,10 +18,10 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.node import SimulationNode
 from maddening.nodes.heat import HeatNode
 from tests.core.inspection_guard_support import (
-    HAS_RICH,
     INSPECTION_CALLS,
     assert_read_only,
     eager_first_call,
+    unavailable,
 )
 
 pytestmark = pytest.mark.skipif(len(jax.devices()) < 4, reason="needs >=4 (virtual) devices")
@@ -69,8 +69,8 @@ KINDS = ("pointwise", "stencil", "pointwise_uncompiled")
 @pytest.mark.parametrize("method", sorted(INSPECTION_CALLS))
 @pytest.mark.parametrize("kind", KINDS)
 def test_inspection_of_a_sharded_graph_changes_nothing_and_compiles_nothing(kind, method):
-    if method.endswith("_rich") and not HAS_RICH:
-        pytest.skip("rich is not installed; the rich renderer is an optional extra")
+    if (reason := unavailable(method)) is not None:
+        pytest.skip(reason)
     gm = _graph(kind)
     call = INSPECTION_CALLS[method]
     assert_read_only(gm, call,

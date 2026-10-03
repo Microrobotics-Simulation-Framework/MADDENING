@@ -699,7 +699,9 @@ class FmuSidecar:
         (``SidecarConfig.fixed_params``), or a value outside the leaf's
         ``ParamSpec.bounds`` (when the sidecar has a spec for it: from
         ``param_specs``, or added by a bridge from the ``min`` / ``max``
-        its model description advertises) is an error, so an importer
+        its model description advertises), or -- behind a bridge -- outside
+        the advertised ``min`` / ``max`` whatever the sidecar's own spec
+        admits, is an error, so an importer
         cannot silently tune a constant the step never reads or declares
         invalid.  The
         value check is the TCP bridge's own, so ``set_params`` refuses

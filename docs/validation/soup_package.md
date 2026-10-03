@@ -222,8 +222,11 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-157 | A flux edge that an ungrouped cycle reads from the previous step fails to trace with a bare KeyError, so whether the graph runs depends on the order its nodes were added | `minor` | `not_safety_relevant` | `open` | >=0.1.0 |
 | MADD-ANO-158 | A typed PRNG key in a coupling group member fails to trace under solver='ift' with acceleration='aitken' or 'fixed' | `minor` | `not_safety_relevant` | `open` | >=0.1.0 |
 | MADD-ANO-159 | A coupling group whose members are joined only through an outside node, on no cycle, reads that node one step late with no warning | `major` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-160 | jax.grad through run_adaptive_scan of an accelerated coupling group is 0.0 when a member carries a step-dependent field and the iterate starts at its fixed point | `major` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-161 | jax.grad through a 16-bit coupling group under solver="ift" raises NotImplementedError | `minor` | `not_safety_relevant` | `open` | >=0.3.0 |
+| MADD-ANO-162 | strict_convergence on a coupling group with a sharded member aborts the process | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
 
-*159 anomalies registered.  29 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 21 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*162 anomalies registered.  32 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 24 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

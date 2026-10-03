@@ -11385,4 +11385,103 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late"
     github_issue: null
-
+  - anomaly_id: "MADD-ANO-160"
+    title: "jax.grad through run_adaptive_scan of an accelerated coupling group is 0.0 when a member carries a step-dependent field and the iterate starts at its fixed point"
+    description: >
+      Under `acceleration="aitken"`, `"iqn-ils"` or `"iqn-imvj"`, the
+      derivative of a coupled member's state through
+      `GraphManager.run_adaptive_scan` reads exactly 0.0 when a member of the
+      group carries a floating field that changes from step to step but not
+      within a step's passes (a clock, `t <- t + dt`) and the iterate starts at
+      its fixed point -- every step after the first under a steady forcing.
+      On two scalar relays `x <- 0.6 u + b`, each reading the other, each with
+      a clock, the derivative of `x_a` in `b_a` is `1 / (1 - 0.36) = 1.5625`:
+      `run_adaptive_scan` returns 0.0, while `run_scan` of the same graph, and
+      `run_adaptive_scan` under `"none"` or `"fixed"`, return 1.5625.  The
+      releases 0.1.0 to 0.3.1 returned NaN under `"aitken"` (and the right
+      value under `"iqn-ils"`) for the same graph, differentiated through an
+      external input (checked on extracted trees of every tag).  Found by the
+      coupling inventory's domain matrix: CPL-030, CPL-093, CPL-094, CPL-140,
+      CPL-141 and CPL-146 fail in their `adaptive` domain.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A gradient of exactly zero is a plausible number, so this is a silent
+      wrong result and never minor: a fit built on it does not move the
+      parameter and a sensitivity study reports it has no effect.  NaN, the
+      released form, is visible.  `context_dependent` because what the
+      gradient feeds is the caller's.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Differentiate through `run_scan` at a fixed step, or run the group with
+      `acceleration="none"` or `"fixed"` under `run_adaptive_scan`.
+    resolution_status: "open"
+    verification:
+      - "tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-161"
+    title: "jax.grad through a 16-bit coupling group under solver=\"ift\" raises NotImplementedError"
+    description: >
+      The IFT rule's linear solve -- `jnp.linalg.solve` of `I - dF/dx` on the
+      dense path, and the dense fallback behind GMRES -- runs in the group's
+      own dtype, and jaxlib's LAPACK has no bfloat16 or float16 kernels, so
+      `jax.grad` or `jax.jvp` through a step of a bfloat16 or float16 coupling
+      group raises `NotImplementedError` ("Unsupported dtype bfloat16"; on
+      jax 0.11.2 with lineax 0.1, a `TypeError` from lineax's QR).  The
+      diagnostics' analysis was widened to float32 for this reason
+      (`_analysis_dtype`); the adjoint was not.  Carried since
+      `solver="ift"` arrived in 0.3.0 (checked on the extracted 0.3.0 and
+      0.3.1 trees); 0.4.0 makes `"ift"` the default, so the default path now
+      raises where 0.3.x's default `"fori"` differentiated a bfloat16 group.
+      Found by the coupling inventory's domain matrix: CPL-030, CPL-093,
+      CPL-094, CPL-140, CPL-141, CPL-143 and CPL-146 fail in their `16bit`
+      domain.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: an exception, and no value is returned to be trusted.  Only
+      16-bit groups are affected, and a float32 group or the deprecated
+      `"fori"` solver differentiates the same model.
+    affected_components:
+      - "maddening.core.graph_manager._ift_linear_solve"
+    affected_versions: ">=0.3.0"
+    workaround: >
+      Hold the group's fields in float32 to differentiate it, or pass
+      `solver="fori"` (deprecated) for the derivative of the unrolled
+      iterate.
+    resolution_status: "open"
+    verification:
+      - "tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-162"
+    title: "strict_convergence on a coupling group with a sharded member aborts the process"
+    description: >
+      `strict_convergence=True` raises through `equinox.error_if`, a host
+      callback.  On a group with a sharded member the callback raises on one
+      device's thread while the other devices wait at the step's all-reduce;
+      XLA reports the stuck rendezvous after 20 s and aborts the process
+      (SIGABRT, exit 134) after about 60 s, so the documented runtime error
+      never reaches Python and the process is lost.  Without a sharded member
+      the same group raises at once.  `strict_convergence` is new in 0.4.0, so
+      no release carried it.  Found by the coupling inventory's domain matrix:
+      CPL-033 fails in its `sharded` domain.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Loud, but the loss is the whole process after a minute's hang -- every
+      result not yet written -- and the error that would have said why is
+      never shown.  `context_dependent` because what the process held is the
+      caller's.
+    affected_components:
+      - "maddening.core.coupling.group.CouplingGroup"
+      - "maddening.cloud.multigpu.sharded_node"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Leave `strict_convergence` off on a group with a sharded member and read
+      `coupling_diagnostics()["converged"]` instead.
+    resolution_status: "open"
+    verification:
+      - "tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_strict_convergence_raises_with_a_sharded_member"
+    github_issue: null

@@ -4599,14 +4599,16 @@ def fit_lm(
         whose value is exactly ``0`` has no relative resolution and meets
         it only with a step of exactly nothing there; give such a fit a
         ``tol``.  The same holds for a parameter whose *truth* is exactly
-        ``0`` (a damping of 0, say): the fit lands on the residual's
-        rounding noise around it -- ``1.3e-15`` for a noiseless float64
-        spring, ``0.0`` exactly in float32, where the bound clipped it --
-        and a step relative to a value that is itself rounding noise is
-        never within ``step_tol``, so such a run stops at its floor with
-        ``converged=False`` however small its loss (``4.6e-31`` there).
-        That is the flag being exact about what it tests, not a failed
-        fit: read ``best_loss``, or pass a ``tol`` at the noise floor.
+        ``0`` (a damping of 0, say) under x64: the fit lands on the
+        residual's rounding noise around it -- ``1.3e-15`` for a noiseless
+        float64 spring -- and a step relative to a value that is itself
+        rounding noise is never within ``step_tol``, so such a run stops at
+        its floor with ``converged=False`` however small its loss
+        (``4.6e-31`` there).  That is the flag being exact about what it
+        tests, not a failed fit: read ``best_loss``, or pass a ``tol`` at
+        the noise floor.  (In float32 the bound clips the same fit to
+        ``0.0`` exactly, where a step of nothing meets the tolerance and
+        the run converges.)
 
         The proposal is tested whether or not it was accepted, because at
         the float floor its verdict carries no information: a fit that has

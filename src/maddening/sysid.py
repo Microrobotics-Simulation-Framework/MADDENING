@@ -4216,8 +4216,9 @@ class FitResult:
 
         Neither :func:`fit_lm` test fires while a parameter held on its
         bound (``transform=None`` with ``bounds``) could lower the loss by
-        moving into its range: that point is not a constrained stationary
-        point, however small the step proposed there.
+        moving into its range by more than ``step_tol`` (its own Newton
+        step; a smaller pull is rounding): that point is not a constrained
+        stationary point, however small the step proposed there.
 
         It says the iteration stopped moving, not that the data determined
         the parameters: a residual that reads none of the trainable
@@ -4467,7 +4468,14 @@ def fit(
         units the loss is written in.  Earlier 0.4.0 development builds
         applied it in the loss's own units, and a loss near ``1e-12`` (a
         position residual in metres at micrometre scale, squared) did not
-        move its parameters at all.
+        move its parameters at all.  Smaller still -- a gradient whose
+        products flush below ``tiny``, ``0.5 * ||s * r||²`` at ``s = 1e-19`` --
+        the gradients are taken with a power-of-two cotangent that lifts the
+        backward pass out of the flush, exactly (:func:`_gradient_lift`);
+        until 0.4.0's fix the gradient read zero there and the fit returned
+        its start (MADD-ANO-163).  ``loss_fn``'s own value is the caller's
+        and can still flush to ``0.0``: a ``RuntimeWarning`` says so once,
+        and such a ``0.0`` with a nonzero gradient does not meet ``tol``.
     callback : callable, optional
         ``callback(i, loss, params)`` after each evaluation.
     notify_every : int
@@ -4771,8 +4779,9 @@ def _framed_gradient(J, r) -> np.ndarray:
     c = _column_frame(J)
     f = pow2_frame(r)
     g = (J * c[None, :]).T @ (r * f)
-    return (np.asarray(g, dtype=np.float64)
-            / (np.asarray(c, dtype=np.float64) * float(f)))
+    # One frame at a time: their product can leave float64's range (a
+    # float64 residual near 1e-170) where each frame, and the result, is in it.
+    return np.asarray(g, dtype=np.float64) / np.asarray(c, dtype=np.float64) / float(f)
 
 
 @jax.jit
@@ -4926,7 +4935,11 @@ def fit_lm(
     when every candidate of an iteration was rejected down to one damped
     within ``step_tol`` (the rounding floor; see ``step_tol``).  A run that
     never lowered the loss and rejected every candidate is not converged,
-    and neither is one that ran out of ``n_iter``.
+    and neither is one that ran out of ``n_iter``.  At that floor the
+    undamped Gauss-Newton step is asked last: if it moves a parameter by
+    more than ``step_tol`` and lowers the loss it is taken as the iterate
+    and the run goes on, so the verdict there does not depend on which way
+    the damped candidates' rounding fell.
 
     A trainable leaf with ``bounds`` and ``transform=None`` is optimised in
     its own coordinate and clipped by ``constrain``.  Every step is projected
@@ -4938,7 +4951,10 @@ def fit_lm(
     points out of the range is held there: the constraint is active, and
     the step for the rest is solved without it.  No ``converged`` test fires
     while a coordinate on its bound could lower the loss by moving into the
-    range.
+    range -- by more than ``step_tol``, measured by its own Newton step: a
+    pull smaller than that is the residual's rounding (at a truth exactly on
+    the bound its sign is a coin flip, and decided the verdict until 0.4.0's
+    fix) and counts as zero.
 
     The Marquardt solve's floor, which keeps it regular, is ``eps`` times
     each column's own ``diag(JᵀJ)``: so the step is the same for every
@@ -4946,6 +4962,33 @@ def fit_lm(
     made a residual of 1e-7 in its own units fail to converge in 50
     iterations, and a floor of ``eps`` times the *mean* crushed the step of
     a parameter measured in small units, MADD-ANO-121).
+
+    That holds across the working precision's whole range -- any residual,
+    and any parameter, whose Jacobian entries are normal numbers: in
+    float32 a residual of ``1e-30`` or ``1e30``, a parameter whose natural
+    scale is ``1e-23`` (a 10 nm particle's volume in cubic metres) or
+    ``1e23``.  The loss is ``0.5 * ||r||²`` of ``r`` framed by a power of two
+    and unframed in float64, and the solves are formed on columns of ``J``
+    and on ``r`` framed the same way (:func:`_marquardt_step`,
+    :func:`_gauss_newton_step`), which is exact and leaves every ordinary
+    problem's arithmetic as it was but for the Marquardt solve's pivots.
+    Earlier 0.4.0 development builds formed ``r * r``, ``JᵀJ`` and ``Jᵀr``
+    bare, which XLA's CPU backend flushes below ``tiny`` and which overflow
+    above ``sqrt(max)``: a residual of ``1e-19`` returned a point 7% off, or
+    its start, with ``converged=True`` and a loss of ``0.0``, and a
+    parameter at ``1e-23`` came back unmoved, "converged" (MADD-ANO-163).
+    ``converged`` is never reported on a solve whose live columns were not
+    representable even framed, or on a loss of ``0.0`` from a residual that
+    is not zero (a float64 residual below about ``1e-162``): the run stops
+    there unconverged, with a :class:`RuntimeWarning`.
+
+    A float32 leaf in an x64 graph is a float64 coordinate here
+    (``ravel_pytree`` promotes it), but its leaf is rounded to float32
+    before the model sees it; the coordinate is kept on that grid, and one
+    whose move rounds away is held while the others are solved again, so a
+    joint step never compensates for a move the model does not make
+    (:func:`_leaf_grid`; earlier development builds crept, five times the
+    iterations of an all-float64 fit).
 
     Like :func:`fit`, it returns the **lowest-loss iterate** it evaluated,
     and here that is always the last one: a step is accepted only when it
@@ -5189,8 +5232,13 @@ def fit_lm(
         """
         if not bounds.active:
             return g
-        curvature = np.sum(np.square(np.asarray(J, dtype=np.float64)), axis=0)
-        step = np.where(curvature > 0.0, g / np.where(curvature > 0.0, curvature, 1.0), 0.0)
+        # ``g_i / ||J_i||²`` from framed columns (each largest entry in
+        # ``[0.5, 1)``): ``(g_i c_i) c_i / ||c_i J_i||²``, which neither
+        # flushes nor overflows where the step itself does not.
+        c = np.asarray(_column_frame(J), dtype=np.float64)
+        curvature = np.sum(np.square(np.asarray(J, dtype=np.float64) * c), axis=0)
+        step = np.where(curvature > 0.0,
+                        (g * c) * c / np.where(curvature > 0.0, curvature, 1.0), 0.0)
         moved = np.clip(np.asarray(th, dtype=np.float64) - step,
                         np.asarray(bounds.lo, dtype=np.float64),
                         np.asarray(bounds.hi, dtype=np.float64))

@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 
 from maddening.core.graph_manager import GraphManager
+from maddening.core.node import SimulationNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.sysid import fit_lm
 
@@ -313,3 +314,84 @@ def test_the_ladder_extension_does_not_depend_on_lam_up(monkeypatch):
     assert res.best_loss < 1e-25
     assert max(per_iteration.values()) > 12, ("the extension never ran", per_iteration)
     assert max(per_iteration.values()) <= 12 + 24, per_iteration
+
+
+# ---------------------------------------------------------------------------
+# At the float floor the verdict depends on neither a parameter's units nor
+# the sign of an on-bound gradient's rounding (MADD-ANO-163)
+# ---------------------------------------------------------------------------
+
+
+class _Pair(SimulationNode):
+    """A node that only carries the constants ``a`` and ``b`` and their
+    specs; the residuals below read them through ``gm.params``."""
+
+    def __init__(self, name, specs, **params):
+        self._specs = specs
+        super().__init__(name, 0.01, **params)
+
+    def param_specs(self):
+        return {**super().param_specs(), **self._specs}
+
+    def initial_state(self):
+        return {"x": jnp.zeros(())}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": state["x"] + 0.0 * (p["a"] + p["b"])}
+
+
+def _pair(specs, **values):
+    gm = GraphManager()
+    gm.add_node(_Pair("h", specs, **values))
+    gm.compile()
+    return gm
+
+
+@pytest.mark.parametrize("unit", [1e-8, 1e-6, 1e-3, 1.0, 1e3, 1e6, 1e8])
+def test_the_floor_verdict_does_not_depend_on_a_parameters_units(unit):
+    """A noisy linear fit in float32, ``a`` an identity parameter in units
+    ``unit``: the loss's own rounding (its residual is noise of 0.01, whose
+    float32 rounding moves the loss by more than a few ulps of ``a`` do)
+    rejected every damped candidate 40 ulps short of the optimum in some
+    units -- ``converged=False`` there, ``True`` a few ulps away in others
+    (audit_040_p4_10/fmu-sysid/repro_fit_lm_floor_verdict_units.py, part A).
+    The floor rule now takes the undamped Gauss-Newton step that still
+    lowers the loss, and every unit converges within ``step_tol``."""
+    rng = np.random.default_rng(0)
+    A = rng.normal(size=(40, 2)).astype(np.float32)
+    y = (A @ np.array([1.3, 0.7]) + 0.01 * rng.normal(size=40)).astype(np.float32)
+    optimum = np.linalg.lstsq(A.astype(np.float64), y.astype(np.float64), rcond=None)[0]
+    Aj, yj = jnp.asarray(A), jnp.asarray(y)
+    from maddening.core.params import ParamSpec
+
+    gm = _pair({"a": ParamSpec(), "b": ParamSpec()}, a=float(2.0 / unit), b=1.0)
+    res = fit_lm(gm, lambda p: Aj @ jnp.stack([p["nodes"]["h"]["a"] * unit,
+                                               p["nodes"]["h"]["b"]]) - yj, n_iter=50)
+    a = float(res.params["nodes"]["h"]["a"]) * unit
+    assert res.converged, (unit, res.n_iter, list(res.losses))
+    assert abs(a - optimum[0]) <= 2.0 ** 4 * float(np.finfo(np.float32).eps) * abs(optimum[0])
+
+
+@pytest.mark.parametrize("x64", [False, True], ids=["float32", "float64"])
+@pytest.mark.parametrize("truth", [0.5, 2.0], ids=["lower", "upper"])
+def test_a_truth_on_either_bound_converges(truth, x64):
+    """Noiseless, the truth exactly on a bound of an identity parameter: at
+    the end of the fit the on-bound gradient is the residual's rounding, and
+    its sign decided whether "it could lower the loss by moving into the
+    range" -- converged on one bound and not the other in float32, the
+    opposite pair under x64 (part B of the reproducer).  A pull whose own
+    Newton step is within ``step_tol`` counts as zero."""
+    from maddening.core.params import ParamSpec
+
+    rng = np.random.default_rng(1)
+    B = rng.normal(size=(30, 2))
+    with (_x64() if x64 else contextlib.nullcontext()):
+        ft = jnp.float64 if x64 else jnp.float32
+        gm = _pair({"a": ParamSpec(bounds=(0.5, 2.0)), "b": ParamSpec()}, a=1.25, b=1.0)
+        Bj, yb = jnp.asarray(B, ft), jnp.asarray(B @ np.array([truth, 0.7]), ft)
+        res = fit_lm(gm, lambda p: Bj @ jnp.stack([p["nodes"]["h"]["a"],
+                                                   p["nodes"]["h"]["b"]]) - yb, n_iter=100)
+    assert res.converged, (truth, x64, res.n_iter, res.best_loss)
+    assert float(res.params["nodes"]["h"]["a"]) == truth
+    assert float(res.params["nodes"]["h"]["b"]) == pytest.approx(0.7, rel=1e-5)

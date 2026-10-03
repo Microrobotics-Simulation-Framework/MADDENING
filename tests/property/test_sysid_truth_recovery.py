@@ -99,9 +99,17 @@ def _blocks(p, units=_ONE):
     about).  The concave blocks make a Gauss-Newton step from above
     overshoot below the truth -- past a lower bound of 0 for a clipped
     coordinate -- and the convex one overshoots from below.  ``units``
-    measure each parameter in another unit: the model reads ``p / unit``."""
+    measure each parameter in another unit: the model reads ``p / unit``.
+
+    The division is kept apart from what follows by an optimisation barrier:
+    under ``jax.jit`` XLA reassociates ``0.2 * (x / 1e-20) ** 2`` into
+    ``x * x * (0.2 * 1e40)``, whose constant overflows float32 while ``x * x``
+    flushes, and the block is NaN -- a property of that rewrite and of no
+    fitter, which a model written for parameters at extreme scales has to
+    keep out of the way."""
     q = p["nodes"]["s"]
-    k, c, rest = (q[key] / unit for key, unit in zip(KEYS, units))
+    k, c, rest = jax.lax.optimization_barrier(
+        tuple(q[key] / unit for key, unit in zip(KEYS, units)))
     t = jnp.asarray(T, jnp.float32)
     return jnp.concatenate([
         jnp.log1p(c * t),
@@ -146,18 +154,21 @@ _PROBLEM = dict(
 )
 
 
-def _fit(kinds, truth_at, start_at, units=_ONE, dtype=jnp.float32):
+def _fit(kinds, truth_at, start_at, units=_ONE, dtype=jnp.float32, scale=1.0):
+    """``fit_lm`` on the closed-form problem; ``scale`` multiplies the
+    residual (its units), ``units`` the parameters'."""
     gm = _graph(kinds, units)
     truth = _start(gm, kinds, truth_at, units, dtype)
     data = _blocks(truth, units)
+    s = jnp.asarray(scale, data.dtype)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)       # a declined hold says so
-        res = fit_lm(gm, lambda p: _blocks(p, units) - data,
+        res = fit_lm(gm, lambda p: s * (_blocks(p, units) - data),
                      params=_start(gm, kinds, start_at, units, dtype), mask=_mask(gm),
                      n_iter=60)
     ok, errors = _recovered(res, truth, kinds, units)
-    _note(f"units={units} kinds={kinds} converged={res.converged} n_iter={res.n_iter} "
-          f"best_loss={res.best_loss} (key, got, truth)={errors}")
+    _note(f"units={units} scale={scale} kinds={kinds} converged={res.converged} "
+          f"n_iter={res.n_iter} best_loss={res.best_loss} (key, got, truth)={errors}")
     return res, ok, errors
 
 
@@ -296,6 +307,119 @@ _UNIT_CASES = [
 @pytest.mark.parametrize("kinds, truth_at, start_at, which, unit", _UNIT_CASES)
 def test_fit_lm_answers_the_same_in_any_units(kinds, truth_at, start_at, which, unit):
     _check_units(kinds, truth_at, start_at, which, unit)
+
+
+# ---------------------------------------------------------------------------
+# The whole float32 range: a residual and a parameter of any normal size
+# ---------------------------------------------------------------------------
+
+#: Residual scales across float32's range.  Below ``1e-19`` (``sqrt(tiny)``)
+#: ``r * r`` flushes to zero and above ``1e19`` it overflows; below about
+#: ``1e-19`` the products of ``JᵀJ`` and ``Jᵀr`` flush too.  ``fit_lm`` used to
+#: report ``converged=True`` at a point 2-7% off, or at its unmoved start,
+#: from ``1e-18`` down (audit_040_p4_10/fmu-sysid/
+#: repro_fitters_tiny_residual_units.py).
+_RESIDUAL_SCALES = [1e-30, 1e-25, 1e-20, 1e-19, 1e-18, 1e-10, 1e10, 1e18, 1e19, 1e20,
+                    1e25, 1e30]
+
+#: Parameter natural scales across float32's range, for the identity
+#: (``clip``) and the ``logit`` coordinate (a ``log`` coordinate is
+#: unit-free by construction).  An identity parameter whose natural scale
+#: is ``1e-23`` -- a 10 nm particle's volume in cubic metres, the example
+#: the parameter guide gives -- or ``1e23`` came back unmoved, "converged"
+#: (repro_fit_lm_extreme_parameter_units.py).
+_PARAMETER_SCALES = [1e-30, 1e-23, 1e-20, 1e20, 1e23, 1e30]
+
+_RANGE_CASE = (("clip", "log", "logit"), (0.5, 0.3, 0.6), (0.9, 0.7, 0.2))
+
+
+@pytest.mark.parametrize("scale", _RESIDUAL_SCALES)
+def test_fit_lm_recovers_the_truth_at_every_residual_scale(scale):
+    """A residual of any normal float32 size: ``fit_lm`` converges, at the
+    truth, at the point and in about the iterations of the unscaled fit."""
+    kinds, truth_at, start_at = _RANGE_CASE
+    base, base_ok, base_errors = _fit(kinds, truth_at, start_at)
+    res, ok, errors = _fit(kinds, truth_at, start_at, scale=scale)
+    assert base.converged and base_ok, base_errors
+    assert res.converged and ok, (scale, res.n_iter, res.best_loss, errors)
+    assert abs(res.n_iter - base.n_iter) <= 3, (base.n_iter, res.n_iter)
+    for (key, got, _), (_, got_scaled, _), kind in zip(base_errors, errors, kinds):
+        lo, hi = _SPECS[kind][1]
+        assert abs(got_scaled - got) <= 1e-4 * (hi - lo), (key, got, got_scaled)
+    # The loss is the scaled one, read without flushing or overflowing.
+    assert np.isfinite(res.losses).all() and res.losses[0] > 0.0
+    assert res.losses[0] == pytest.approx(base.losses[0] * scale ** 2, rel=1e-5)
+
+
+@pytest.mark.parametrize("which", [0, 2], ids=["clip", "logit"])
+@pytest.mark.parametrize("unit", _PARAMETER_SCALES)
+def test_fit_lm_recovers_the_truth_at_every_parameter_scale(which, unit):
+    """One parameter at a natural scale anywhere in float32's range: the
+    same answer as at unit scale, converged (``_check_units``), and never
+    ``converged=True`` away from the truth."""
+    kinds, truth_at, start_at = _RANGE_CASE
+    _check_units(kinds, truth_at, start_at, which, unit)
+    units = tuple(unit if i == which else 1.0 for i in range(3))
+    res, ok, errors = _fit(kinds, truth_at, start_at, units)
+    assert res.converged and ok, (unit, res.n_iter, res.best_loss, errors)
+
+
+def _adam_fit(kinds, truth_at, start_at, units=_ONE, scale=1.0, n_iter=400):
+    gm = _graph(kinds, units)
+    truth = _start(gm, kinds, truth_at, units)
+    data = _blocks(truth, units)
+    s = jnp.asarray(scale, data.dtype)
+    start = _start(gm, kinds, start_at, units)
+    loss = jax.jit(lambda p: 0.5 * jnp.sum((s * (_blocks(p, units) - data)) ** 2))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)       # a flushed loss says so
+        res = fit(gm, loss, params=start, mask=_mask(gm), n_iter=n_iter, lr=0.05)
+    ok, errors = _recovered(res, truth, kinds, units)
+    return res, ok, errors
+
+
+#: For ``fit`` the loss is the caller's, so it can only be evaluated where
+#: ``0.5 * ||s * r||²`` is finite: up to ``s`` near ``1e18`` here.  Above, the
+#: loss itself overflows and ``fit`` refuses (FloatingPointError), loudly.
+_ADAM_RESIDUAL_SCALES = [1e-30, 1e-20, 1e-19, 1e-18, 1e-10, 1.0, 1e10, 1e18]
+
+
+@pytest.mark.parametrize("scale", _ADAM_RESIDUAL_SCALES)
+def test_fit_recovers_the_truth_at_every_residual_scale(scale):
+    """Adam on a loss of any representable size: its gradient is taken clear
+    of the flush (``_gradient_lift``) and its ``eps`` is relative, so it
+    returns the unscaled fit's answer.  At ``1e-19`` it used to return its
+    start, and at ``1e-18`` a point 1% off."""
+    kinds, truth_at, start_at = _RANGE_CASE
+    base, base_ok, base_errors = _adam_fit(kinds, truth_at, start_at)
+    res, ok, errors = _adam_fit(kinds, truth_at, start_at, scale=scale)
+    assert base_ok, base_errors
+    assert ok, (scale, errors)
+    for (key, got, _), (_, got_scaled, _), kind in zip(base_errors, errors, kinds):
+        lo, hi = _SPECS[kind][1]
+        assert abs(got_scaled - got) <= 1e-4 * (hi - lo), (key, got, got_scaled)
+
+
+def test_fit_refuses_a_loss_that_overflows():
+    """Above the representable range the caller's loss is ``inf`` and the
+    refusal is loud, never a result."""
+    kinds, truth_at, start_at = _RANGE_CASE
+    with pytest.raises(FloatingPointError, match="non-finite loss or gradient"):
+        _adam_fit(kinds, truth_at, start_at, scale=1e30, n_iter=5)
+
+
+@pytest.mark.parametrize("unit", _PARAMETER_SCALES)
+def test_fit_recovers_the_truth_at_every_parameter_scale(unit):
+    """Adam on transformed coordinates, which are unit-free: a ``log`` and a
+    ``logit`` parameter at a natural scale anywhere in float32's range.  (An
+    identity coordinate is not: Adam's step is about ``lr`` in it, so its
+    path depends on its units by design -- MADD-ANO-135's residual risk.)"""
+    kinds, truth_at, start_at = (("log", "log", "logit"), (0.3, 0.6, 0.6),
+                                 (0.7, 0.2, 0.2))
+    base, base_ok, base_errors = _adam_fit(kinds, truth_at, start_at)
+    res, ok, errors = _adam_fit(kinds, truth_at, start_at, units=(unit, 1.0, unit))
+    assert base_ok, base_errors
+    assert ok, (unit, errors)
 
 
 # Per push: tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units

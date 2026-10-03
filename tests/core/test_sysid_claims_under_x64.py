@@ -32,6 +32,7 @@ import numpy as np
 import pytest
 
 from maddening.core.graph_manager import GraphManager
+from maddening.core.node import SimulationNode
 from maddening.core.params import ParamSpec
 from maddening.nodes.spring import SpringDamperNode
 from maddening import sysid
@@ -937,7 +938,7 @@ _A = np.random.default_rng(0).normal(size=(30, 3))
 _B = _A @ np.array([40.0, 3.0, 1.2])
 
 
-@pytest.mark.parametrize("scale", [1e-10, 1e-4, 1.0, 1e4, 1e10])
+@pytest.mark.parametrize("scale", [1e-30, 1e-20, 1e-10, 1e-4, 1.0, 1e4, 1e10, 1e20, 1e30])
 def test_fit_lm_answers_the_same_for_every_scaling_with_float32_leaves_under_x64(scale):
     """SYS-083 with mixed dtypes: the Marquardt floor is eps times each column's
     own ``diag(J^T J)``, so ``r = s (A x - b)`` has the optimum of ``A x - b``
@@ -960,6 +961,44 @@ def test_fit_lm_answers_the_same_for_every_scaling_with_float32_leaves_under_x64
         assert res.converged and res.n_iter <= 6, (res.converged, res.n_iter)
         np.testing.assert_allclose([float(q["stiffness"]), float(q["damping"]),
                                     float(q["rest_length"])], [40.0, 3.0, 1.2], rtol=2e-6)
+
+
+@pytest.mark.parametrize("scale", [1e-160, 1e-100, 1e100, 1e150])
+def test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64(scale):
+    """SYS-083 at float64's own range: ``r * r`` flushes below ``1e-154`` and
+    overflows above ``1e154``, and so do ``JᵀJ`` and ``Jᵀr`` -- framed, the fit
+    is the unscaled one.  (A float64 residual whose ``0.5 ||r||²`` is not a
+    finite float64, above about ``1e153``, has no loss to report.)"""
+    with _x64():
+        gm = _spring("float64")
+
+        def residual(p):
+            q = p["nodes"]["s"]
+            x = jnp.stack([q["stiffness"], q["damping"], q["rest_length"]])
+            return scale * (jnp.asarray(_A) @ x - jnp.asarray(_B))
+
+        res = fit_lm(gm, residual, mask=_only(gm, "stiffness", "damping", "rest_length"),
+                     n_iter=50)
+        q = res.params["nodes"]["s"]
+    assert res.converged and res.n_iter <= 8, (res.converged, res.n_iter)
+    np.testing.assert_allclose([float(q["stiffness"]), float(q["damping"]),
+                                float(q["rest_length"])], [40.0, 3.0, 1.2], rtol=1e-12)
+    assert 0.0 < res.losses[0] < np.inf
+
+
+@pytest.mark.parametrize("leaves, unit", [("float64", 1e-150), ("float64", 1e150),
+                                          ("mixed", 1e-30), ("mixed", 1e30)])
+def test_fit_lm_answers_the_same_at_every_parameter_scale_under_x64(leaves, unit):
+    """SYS-084/SYS-088 at each precision's range: damping, an identity
+    parameter, at a natural scale near either end of it -- the same answer
+    as at unit 1, with the defaults."""
+    with _x64():
+        base, damping, stiffness = _units_fit(leaves, 1.0)
+        res, damping_u, stiffness_u = _units_fit(leaves, unit)
+    rel = 1e-9 if leaves == "float64" else 1e-4
+    assert base.converged and res.converged, (base.n_iter, res.n_iter)
+    assert damping_u == pytest.approx(damping, rel=rel), (damping_u, damping)
+    assert stiffness_u == pytest.approx(stiffness, rel=rel), (stiffness_u, stiffness)
 
 
 def _units_fit(leaves, unit, **kw):
@@ -1252,3 +1291,120 @@ def test_multiple_shooting_recovers_from_noisy_window_starts_under_x64(leaves):
         assert abs(k - 30.0) / 30.0 < 0.05, k
         assert ws["s"]["position"].shape == (10,) and ws["s"]["position"].dtype == _dt(leaves)
         assert res.losses[-1] < res.losses[0]
+
+
+# ---------------------------------------------------------------------------
+# fit_lm with float32 constants in an x64 graph: no creep (MADD-ANO-163)
+# ---------------------------------------------------------------------------
+
+
+class _AB(SimulationNode):
+    """Carries the constants ``a`` and ``b``; the residuals read them."""
+
+    def __init__(self, name, specs=None, **params):
+        self._specs = specs or {}
+        super().__init__(name, 0.01, **params)
+
+    def param_specs(self):
+        return {**super().param_specs(), "a": ParamSpec(), "b": ParamSpec(), **self._specs}
+
+    def initial_state(self):
+        return {"x": jnp.zeros(())}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        return {"x": state["x"] + 0.0 * (p["a"] + p["b"])}
+
+
+def _ab_fit(a, b, A, y, specs=None, n_iter=50):
+    gm = GraphManager()
+    gm.add_node(_AB("h", specs, a=a, b=b))
+    gm.compile()
+    Aj, yj = jnp.asarray(A), jnp.asarray(y)
+    return fit_lm(gm, lambda p: Aj @ jnp.stack([p["nodes"]["h"]["a"].astype(jnp.float64),
+                                                p["nodes"]["h"]["b"]]) - yj, n_iter=n_iter)
+
+
+def test_float32_constants_in_an_x64_graph_converge_as_fast_as_float64_ones():
+    """SYS-084/SYS-086's "a few iterations" in the mixed domain.  The float32
+    leaf's coordinate was float64 (``ravel_pytree`` promotes it): a step of
+    less than one float32 ulp left the leaf where it was, the joint step's
+    compensation in ``b`` raised the loss, candidates were rejected and the
+    coordinate crept by ~1e-11 an iteration -- 25-39 iterations against 5-6,
+    and a truth on a bound unconverged after 100
+    (audit_040_p4_10/fmu-sysid/repro_fit_lm_mixed_dtype_creep.py).  The
+    coordinate now stays on its leaf's grid and a move that rounds away is
+    held while the others are solved again."""
+    rng = np.random.default_rng(5)
+    A = rng.normal(size=(30, 2))
+    with _x64():
+        for _ in range(6):
+            truth = rng.uniform(0.2, 1.8, size=2)
+            y = A @ truth
+            wide = _ab_fit(np.float64(1.0), np.float64(1.0), A, y)
+            narrow = _ab_fit(np.float32(1.0), np.float64(1.0), A, y)
+            assert wide.converged and narrow.converged, (wide.n_iter, narrow.n_iter)
+            assert narrow.n_iter <= wide.n_iter + 2, (wide.n_iter, narrow.n_iter)
+            a = narrow.params["nodes"]["h"]["a"]
+            assert a.dtype == jnp.float32
+            assert float(a) == pytest.approx(truth[0], rel=1e-6)
+        # The truth exactly on a bound of the float32 leaf.
+        rng1 = np.random.default_rng(1)
+        A1 = rng1.normal(size=(30, 2))
+        res = _ab_fit(np.float32(1.0), np.float64(1.0), A1, A1 @ np.array([0.1, 0.7]),
+                      specs={"a": ParamSpec(bounds=(0.1, 2.0))}, n_iter=100)
+        assert res.converged and res.n_iter <= 10, (res.n_iter, res.best_loss)
+        assert float(res.params["nodes"]["h"]["a"]) == float(np.float32(0.1))
+
+
+def test_a_float32_leafs_coordinate_stays_on_its_grid():
+    """The helper: only the narrower leaves' coordinates are rounded, to
+    exactly their leaf's dtype, and nothing at all when no leaf is narrower."""
+    from maddening.sysid import _leaf_grid
+
+    with _x64():
+        tree = {"a": jnp.asarray(1.0, jnp.float32), "b": jnp.asarray(1.0, jnp.float64),
+                "c": jnp.asarray([1.0, 2.0], jnp.float32)}
+        narrow, to_grid = _leaf_grid(tree, np.arange(4), jnp.float64)
+        assert narrow.tolist() == [True, False, True, True]
+        theta = jnp.asarray([0.1, 0.1, 0.2, 0.3], jnp.float64)
+        got = np.asarray(to_grid(theta))
+        assert got[1] == 0.1
+        assert got[[0, 2, 3]].tolist() == [float(np.float32(v)) for v in (0.1, 0.2, 0.3)]
+        wide, identity = _leaf_grid({"b": tree["b"]}, np.arange(1), jnp.float64)
+        assert not wide.any()
+        assert np.asarray(identity(theta[:1])).tolist() == [0.1]
+
+
+@pytest.mark.parametrize("leaves", LEAVES)
+def test_fit_recovers_the_truth_when_its_gradient_flushes_under_x64(leaves):
+    """SYS-132 at each precision: a loss so small that its gradient's
+    products flush -- ``0.5 * ||s * r||²`` with ``s = 1e-170`` for float64
+    leaves, ``1e-20`` for float32 ones in the x64 process -- is fitted as at
+    scale one, its gradients taken with a power-of-two cotangent."""
+    rng = np.random.default_rng(2)
+    A = rng.normal(size=(30, 2))
+    y = A @ np.array([0.3, 0.7])
+    scale = 1e-170 if leaves == "float64" else 1e-20
+    with _x64():
+        dt = _dt(leaves)
+        results = []
+        for s in (1.0, scale):
+            gm = GraphManager()
+            gm.add_node(_AB("h", a=dt(1.0), b=dt(1.0)))
+            gm.compile()
+            Aj, yj = jnp.asarray(A, dt), jnp.asarray(y, dt)
+            sj = jnp.asarray(s, dt)
+
+            def loss(p, Aj=Aj, yj=yj, sj=sj):
+                q = p["nodes"]["h"]
+                return 0.5 * jnp.sum((sj * (Aj @ jnp.stack([q["a"], q["b"]]) - sj * yj)) ** 2)
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)   # a flushed loss says so
+                results.append(fit(gm, jax.jit(loss), n_iter=300, lr=0.05))
+    base, small = results
+    for key, truth in (("a", 0.3), ("b", 0.7)):
+        got = float(small.params["nodes"]["h"][key])
+        assert got == pytest.approx(float(base.params["nodes"]["h"][key]), rel=1e-4), key
+        assert got == pytest.approx(truth, rel=1e-3), key

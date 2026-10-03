@@ -76,6 +76,26 @@ def test_fit_takes_the_same_steps_for_a_loss_in_any_units(record, hold):
         assert res.best_iteration == ref.best_iteration
 
 
+@pytest.mark.parametrize("k", [-100, -120])
+def test_fit_takes_the_same_steps_for_a_loss_whose_gradient_flushes(record, k):
+    """Smaller still: at ``2**-100`` the first gradient is below ``tiny / eps``
+    and is taken with a power-of-two cotangent (``_gradient_lift``), and at
+    ``2**-120`` the loss's own value flushes to zero as well.  The cotangent
+    is exact, so the steps are the reference's to the bit either way; the
+    gradient used to read zero there and the fit did not move
+    (MADD-ANO-163)."""
+    import warnings
+
+    ref = _fit_at(1.0, record, False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)       # a flushed loss says so
+        res = _fit_at(2.0 ** k, record, False)
+    assert np.array_equal(np.asarray(res.params["nodes"]["s"]["damping"]),
+                          np.asarray(ref.params["nodes"]["s"]["damping"])), k
+    if k == -100:
+        assert np.array_equal(res.losses, (ref.losses * 2.0 ** k).astype(res.losses.dtype))
+
+
 def test_fit_multiple_shooting_takes_the_same_steps_for_a_loss_in_any_units():
     gm_truth = _spring(damping=0.5)
     s0 = gm_truth._user_state(gm_truth._state)  # noqa: SLF001

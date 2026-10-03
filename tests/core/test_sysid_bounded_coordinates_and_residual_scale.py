@@ -262,11 +262,14 @@ def linear_problem():
     return gm, mask, A, b
 
 
-@pytest.mark.parametrize("scale", [1e-10, 1e-8, 1e-7, 1e-4, 1.0, 1e4, 1e10])
+@pytest.mark.parametrize("scale", [1e-30, 1e-20, 1e-19, 1e-18, 1e-10, 1e-8, 1e-7, 1e-4,
+                                   1.0, 1e4, 1e10, 1e18, 1e19, 1e20, 1e30])
 def test_fit_lm_answers_the_same_for_every_scaling_of_the_residual(linear_problem, scale):
     """``r = s (A x - b)`` has the optimum of ``A x - b`` for every ``s``.  At
     1e-7 the absolute floor left the fit unconverged after 50 iterations; at
-    1e-8 it barely moved."""
+    1e-8 it barely moved.  From ``1e-18`` down, ``r * r``, ``JᵀJ`` and ``Jᵀr``
+    flushed in float32 and the fit reported ``converged=True`` 2-7% off or at
+    its start; from ``1e19`` up they overflowed (MADD-ANO-163)."""
     gm, mask, A, b = linear_problem
     ft = jnp.float32
 
@@ -292,10 +295,90 @@ def test_a_noise_std_is_the_same_scaling(linear_problem):
         x = jnp.stack([q["stiffness"], q["damping"], q["rest_length"]])
         return jnp.asarray(A, jnp.float32) @ x - jnp.asarray(b, jnp.float32)
 
-    for sigma in (1.0, 1e8):
+    for sigma in (1.0, 1e8, 1e20, 1e-20):
         res = fit_lm(gm, residual, mask=mask, n_iter=50, noise_std=sigma)
         assert res.converged, sigma
         assert float(res.params["nodes"]["s"]["damping"]) == pytest.approx(3.0, rel=2e-6)
+
+
+def test_fit_lm_never_converges_on_a_solve_it_could_not_form(linear_problem, monkeypatch):
+    """Defence in depth for MADD-ANO-163: whatever frames the solve, a step
+    whose live columns were not representable (a ``diag(JᵀJ)`` of 0 or
+    ``inf`` for a column ``J`` does not leave at zero) never carries a
+    converged verdict -- the run stops unconverged and says why."""
+    from maddening import sysid
+
+    gm, mask, A, b = linear_problem
+    real = sysid._marquardt_step  # noqa: SLF001
+
+    def unrepresentable(th, r, J, lam, lo, hi, held):
+        cand, _ = real(th, r, J, lam, lo, hi, held)
+        return cand, False
+
+    def residual(p):
+        q = p["nodes"]["s"]
+        x = jnp.stack([q["stiffness"], q["damping"], q["rest_length"]])
+        return jnp.asarray(A, jnp.float32) @ x - jnp.asarray(b, jnp.float32)
+
+    assert fit_lm(gm, residual, mask=mask, n_iter=50).converged       # non-vacuity
+    monkeypatch.setattr(sysid, "_marquardt_step", unrepresentable)
+    with pytest.warns(RuntimeWarning, match="stationarity could not be read"):
+        res = fit_lm(gm, residual, mask=mask, n_iter=50)
+    assert not res.converged
+
+
+def test_the_frames_reach_the_gauss_newton_test_too(linear_problem):
+    """``_gauss_newton_step`` takes its column norms of framed columns: a
+    column of ``1e-23`` used to have a norm that flushed to zero, was left
+    out, and the iterate read as stationary with that parameter unmoved;
+    bare and framed agree bit for bit where the bare norms are normal."""
+    from maddening.sysid import _gauss_newton_step
+
+    rng = np.random.default_rng(3)
+    J = jnp.asarray(rng.normal(size=(20, 2)), jnp.float32)
+    r = jnp.asarray(rng.normal(size=20), jnp.float32)
+    th = jnp.asarray([0.3, 0.7], jnp.float32)
+    lo, hi = jnp.full(2, -jnp.inf, jnp.float32), jnp.full(2, jnp.inf, jnp.float32)
+    held = jnp.zeros(2, bool)
+    base, ok = _gauss_newton_step(th, r, J, lo, hi, held)
+    assert bool(ok)
+    # The second parameter in units 2**-80 smaller: its column 2**-80 the
+    # size (norm ~1e-24, flushed bare), its step 2**80 larger.
+    c = jnp.asarray([1.0, 2.0 ** -80], jnp.float32)
+    th_c = th / c
+    cand, ok = _gauss_newton_step(th_c, r, J * c, lo, hi, held)
+    assert bool(ok)
+    np.testing.assert_array_equal(np.asarray(cand * c), np.asarray(base))
+    # ... and the residual 2**-70 smaller, which flushed the norms' products.
+    cand, ok = _gauss_newton_step(th, r * 2.0 ** -70, J * 2.0 ** -70, lo, hi, held)
+    np.testing.assert_array_equal(np.asarray(cand), np.asarray(base))
+
+
+def test_a_loss_that_underflows_float64_is_never_converged():
+    """Under x64 a residual near ``1e-170`` has a framed loss whose unframing
+    underflows float64 to ``0.0`` while ``r`` is not zero; no step can lower
+    it, and a run started at the optimum is not called converged on it."""
+    from tests.core.test_sysid_claims_under_x64 import _x64
+
+    rng = np.random.default_rng(5)
+    A = rng.normal(size=(30, 2))
+    y = A @ np.array([0.3, 0.7]) + 1e-3 * rng.normal(size=30)
+    optimum = np.linalg.lstsq(A, y, rcond=None)[0]
+    with _x64():
+        gm = GraphManager()
+        gm.add_node(_Spring(name="s", timestep=0.01, stiffness=float(optimum[0]),
+                            damping=float(optimum[1])))
+        gm.compile()
+        mask = _only(gm, "stiffness", "damping")
+
+        def residual(p):
+            q = p["nodes"]["s"]
+            return 1e-170 * (jnp.asarray(A) @ jnp.stack([q["stiffness"], q["damping"]])
+                             - jnp.asarray(y))
+
+        with pytest.warns(RuntimeWarning, match="underflows float64 although r is not zero"):
+            res = fit_lm(gm, residual, mask=mask, n_iter=10, hold_undetermined=False)
+        assert not res.converged and res.best_loss == 0.0
 
 
 # ---------------------------------------------------------------------------

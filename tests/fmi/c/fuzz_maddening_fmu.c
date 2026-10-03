@@ -241,6 +241,7 @@ static void one_iteration(unsigned char *buf, size_t cap) {
 
     Instance *in = (Instance *)calloc(1, sizeof *in);
     in->sock = sv[0]; in->log = null_logger;
+    in->phase = PHASE_STEP_MODE;                   /* where get, set and doStep reach the wire */
     in->binary = (int)(rnd() % 2);                 /* half the runs negotiated protocol 2 */
     fmi3ValueReference vr[8]; double vals[16];
     for (size_t i = 0; i < 8; ++i) vr[i] = (fmi3ValueReference)rnd();

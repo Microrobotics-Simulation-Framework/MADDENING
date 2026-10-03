@@ -221,3 +221,62 @@ def test_an_fmu_started_outside_its_advertised_bounds_restores_its_own_snapshot(
         assert refused["ok"] is False and "below bound 50.0" in refused["error"]
     finally:
         bridge.stop()
+
+
+# ---------------------------------------------------------------------------
+# A log leaf with no lower bound is bounded below by 0 all the same
+# ---------------------------------------------------------------------------
+#
+# ``ParamSpec(transform="log")`` with no lower bound is measured from 0
+# (``lo = bounds[0] or 0; p > lo strictly``), and ``gm.check_params`` refuses
+# ``mass = -1`` there.  The description advertised no ``min`` at all, so a
+# bridge whose sidecar had no specs accepted ``mass = -1.0`` and ran it (the
+# spring's position read -1.07 after 20 steps), and one with specs refused a
+# value the XML declared settable (claims FMU-016, FMU-033, FMU-039).
+
+
+def _unbounded_log_mass(gm):
+    gm.set_param_spec("s", "mass", ParamSpec(transform="log"))
+    return build_model_description(gm, model_name="m")
+
+
+def test_a_log_leaf_without_a_lower_bound_advertises_the_smallest_normal(gm):
+    md = _unbounded_log_mass(gm)
+    var = next(v for v in md.variables if v.name == "s.params.mass")
+    assert var.min == float(F32.tiny) and var.max is None
+    el = next(v for v in ET.fromstring(md.to_xml()).find("ModelVariables")
+              if v.get("name") == "s.params.mass")
+    assert float(el.get("min")) == var.min
+    # the same envelope as an explicit bound of 0, which ParamSpec says it is
+    explicit = ParamSpec(bounds=(0.0, None), transform="log")
+    from maddening.fmi.model_description import _advertised_bound
+    for dtype in ("float32", "float64"):
+        assert _advertised_bound(ParamSpec(transform="log"), 0, dtype) == \
+            _advertised_bound(explicit, 0, dtype) == float(np.finfo(dtype).tiny)
+    # an identity leaf without bounds is still unbounded
+    assert _advertised_bound(ParamSpec(), 0, "float32") is None
+
+
+@pytest.mark.parametrize("with_specs", [False, True], ids=["bare sidecar", "with specs"])
+def test_no_bridge_takes_a_log_leaf_to_zero_or_below(gm, with_specs):
+    """Whichever way the sidecar was built: ``-1``, ``0`` and a negative
+    subnormal are refused with nothing written, and the advertised ``min``
+    itself is accepted."""
+    from maddening.fmi.tcp_bridge import FmuTcpBridge
+
+    md = _unbounded_log_mass(gm)
+    kw = {"param_specs": gm.param_specs()} if with_specs else {}
+    bridge = FmuTcpBridge(_bare_sidecar(gm, md, **kw), md, master_dt=1e-2)
+    try:
+        mass = _vr(md, "s.params.mass")
+        for bad in (-1.0, 0.0, -1e-40):
+            reply = bridge.handle({"op": "set", "type": "Float32", "vr": [mass], "values": [bad]})
+            assert reply["ok"] is False and "below bound" in reply["error"], (bad, reply)
+        assert bridge.handle({"op": "get", "vr": [mass]})["values"] == [1.0]
+        refused = bridge.handle(_archive_with(bridge, "p/nodes/s/mass", -1.0))
+        assert refused["ok"] is False and "below bound" in refused["error"], refused
+        floor = next(v.min for v in md.variables if v.name == "s.params.mass")
+        assert bridge.handle({"op": "set", "type": "Float32", "vr": [mass],
+                              "values": [floor]}) == {"ok": True}
+    finally:
+        bridge.stop()

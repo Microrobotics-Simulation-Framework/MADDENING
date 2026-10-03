@@ -546,7 +546,8 @@ def windowed_loss(
     # started there walked 6.4% away.  They enter each window with their
     # gradient stopped, so gradients still cannot compound across windows.
     warm_slots = _warm_start_slots(gm, meta0)
-    cold = {slot: jnp.zeros_like(meta0[slot]) for slot in warm_slots}
+    cold = ({} if meta0 is None
+            else {slot: jnp.zeros_like(meta0[slot]) for slot in warm_slots})
     if warm_slots and start_step > 0:
         warnings.warn(
             f"windowed_loss: the record began at base step {start_step}, "
@@ -673,7 +674,6 @@ def windowed_loss(
         w, warm = carry
         start = w * window
         p, ws = params, window_states
-        ok = None
         if mask_unconverged:
             ok = window_ok[w]
 
@@ -719,7 +719,7 @@ def windowed_loss(
             gap = jax.tree.map(lambda a, b: jnp.sum((a - b) ** 2), end_user, nxt)
             pen = sum(jax.tree.leaves(gap))
             loss_w = loss_w + continuity_weight * pen * (w < n_windows - 1)
-        return (w + 1, _next_warm(final, ok)), loss_w
+        return (w + 1, _next_warm(final, window_ok[w] if mask_unconverged else None)), loss_w
 
     _, losses = jax.lax.scan(_window, (jnp.int32(0), cold), None, length=n_windows)
     return jnp.sum(losses)

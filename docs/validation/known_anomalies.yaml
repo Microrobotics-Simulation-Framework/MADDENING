@@ -8132,13 +8132,14 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      `run_adaptive` notifies observers once per accepted step, and the
-      relays add `gm.timestep` for each, not the accepted `dt`.  So a relay
-      attached during an adaptive run counts steps of the fixed step.  This
-      is unchanged and is not a sub-cycling effect; read `t_history` from
-      the adaptive run's result instead.  A graph edited from another
-      thread in the middle of a runner frame is clocked by the step read
-      after each step, which is the step the next compile takes.
+      A graph edited from another thread in the middle of a runner frame is
+      clocked by the step read after each step, which is the step the next
+      compile takes.  (`run_adaptive` notified observers once per accepted
+      step and the relays added `gm.timestep` for each, not the accepted
+      `dt`: twelve adaptive steps to t = 1 s of a 1/64 s graph were
+      streamed as 0.1875 s.  Resolved in 0.4.0 as well, found by the
+      round-6 REST audit: the step event carries its `dt`, and both relays
+      add it.)
     verification:
       - "tests/core/test_graph_timestep_is_the_step_advance.py::test_every_node_advanced_n_steps_of_gm_timestep"
       - "tests/core/test_graph_timestep_is_the_step_advance.py::test_the_rate_dividers_count_in_gm_timestep"
@@ -8147,6 +8148,8 @@ anomalies:
       - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_the_clocks_keep_time_when_the_graph_is_edited_between_runs"
       - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_the_network_relay_stamps_each_message_with_the_real_advance"
       - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_a_server_reset_restarts_the_frames_clock"
+      - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_the_relay_clocks_run_adaptives_steps_by_their_dt"
+      - "tests/api/test_runner_and_relay_clock_the_step_advance.py::test_the_network_relay_stamps_run_adaptives_messages_with_their_dt"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-097"
@@ -8841,8 +8844,8 @@ anomalies:
     residual_risk: >
       A checkpoint without this server's manifest (written by another tool,
       or a server before 0.4.0) restarts the streams' clock at zero, as the
-      reply says.  `POST /sim/reset` clears the snapshot, as before: the
-      streams send nothing until the next step.
+      reply says.  (A reset, a state write and a node edit did not publish
+      either; that is MADD-ANO-133, also resolved in 0.4.0.)
     verification:
       - "tests/api/test_streams_after_a_checkpoint_load.py::test_ws_state_serves_the_loaded_state_at_the_checkpoints_time"
       - "tests/api/test_streams_after_a_checkpoint_load.py::test_ws_state_binary_serves_the_loaded_state_at_the_checkpoints_time"
@@ -9927,4 +9930,191 @@ anomalies:
     verification:
       - "tests/compliance/test_anomaly_gate_reads_safety_relevance.py::test_the_validator_reports_an_unhashable_enum_value_instead_of_raising"
       - "tests/compliance/test_anomaly_gate_reads_safety_relevance.py::test_the_gate_fails_on_a_planted_value_and_says_which_entry"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-131"
+    title: "POST /surrogate/train's memory budget was checked on the graph at the request, and the job swept the graph as it was later: a node added in between bypassed it"
+    description: >
+      0.4.0 estimates a training job's memory before its worker starts and
+      refuses it over `MAX_SURROGATE_TRAIN_BYTES` (MADD-ANO-092).  The
+      estimate was taken under the graph lock, in the request; the job's
+      data sweep runs in a worker thread that takes the lock again.  The
+      lock is first come, first served, and the worker does not exist when
+      the request lets go of it, so a request queued behind it -- a `POST
+      /graph/nodes` -- is served first, and the sweep ran over a graph the
+      estimate never saw.  On the 0.4.0 development tree (3a0b619, CPU,
+      jaxlib 0.11.0, under an 8 GiB address-space cap), a job admitted on
+      0.48 MiB for a two-scalar graph swept it after a 180 000-cell
+      `HeatNode` had been added: the same request then estimated 2.15 GiB
+      (and was refused), and the process peaked at 4.65 GB.  A node at the
+      per-node cap would have needed about 256 GB.  No release carried it:
+      the budget is new in 0.4.0.  Found by the round-6 REST audit.
+      Resolved in 0.4.0: the worker estimates again, under the lock it
+      sweeps with, just before the sweep, and over the budget ends the job
+      with status `error` naming the budget, before anything is swept.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A denial of service through the bound meant to prevent it, graded
+      `major` as MADD-ANO-092 is: the host's memory, and the OOM killer
+      then picks the largest process.  Not `critical`: it needs two
+      requests ordered behind a third that holds the graph lock, and no
+      wrong result comes of it.  Registered although no release carried
+      it, because it is major.  `context_dependent`: what else the host
+      runs is the deployment's.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: add nodes before starting a training job, not while one is
+      queued.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The job's memory is fixed once its sweep has started: an edit after
+      that waits for the sweep (it holds the graph lock), and training
+      needs no graph.
+    verification:
+      - "tests/api/test_surrogate_jobs_are_bounded.py::test_a_node_added_between_the_request_and_the_sweep_is_counted"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-132"
+    title: "POST /sim/profile reset the live simulation and left it at the profiler's last step, and the streams counted the profiler's steps"
+    description: >
+      The route handed the live graph to `profile_graph`, which resets it
+      to its initial state and steps it.  Nothing put the state back, the
+      route's reply and docstring did not mention it, and the streams'
+      relay observed the profiler's steps: every frame after it carried a
+      time its state was not at.  Checked at each tag that has the route,
+      v0.2.0, v0.2.1, v0.3.0 and v0.3.1, on 2026-10-03 (`git archive` of
+      each, CPU, jaxlib 0.11.0, FastAPI `TestClient`, memory-capped, an
+      empty `HOME`): a `BallNode` run 50 steps to position 98.749 read
+      99.979 after `POST /sim/profile?n_steps=5&n_warmup=1`.  v0.1.0 has no
+      such route.  On the 0.4.0 development tree, after 640 steps (t = 10
+      s) of a counter graph the profile left the state at 0.09375 and the
+      streams at t = 10.09375.  Found by the round-6 REST audit.  Resolved
+      in 0.4.0: the route snapshots the state and params, profiles with the
+      relay detached, and restores them; the next step after a profile is
+      bit-identical to the next step of a graph that was never profiled,
+      a coupling group's warm start included.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result, graded `major`: a run that was profiled went on
+      from the profiler's last step, near its initial condition, and
+      nothing said so.  Not `critical`: `GET /graph/state` showed it, and
+      saving a checkpoint before profiling avoids it.  `context_dependent`
+      because what a silently restarted run means depends on the run.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: save a checkpoint before `POST /sim/profile` and load it
+      after, or profile a copy of the graph in-process.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `profile_graph` called in-process still resets the graph it is given,
+      as its docstring says.
+    verification:
+      - "tests/api/test_profile_leaves_the_live_simulation.py::test_a_profile_leaves_the_state_and_the_streams_clock_as_they_were"
+      - "tests/api/test_profile_leaves_the_live_simulation.py::test_the_next_step_after_a_profile_is_the_unprofiled_graphs_next_step"
+      - "tests/api/test_profile_leaves_the_live_simulation.py::test_a_coupling_groups_state_and_warm_start_survive_a_profile"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-133"
+    title: "A reset, a state write or a node removed over REST was not shown by the streams: they served the state from before it until the next step"
+    description: >
+      `StateRelay` publishes on the steps it observes, and only `POST
+      /checkpoint/load` published otherwise (MADD-ANO-108).  Checked at
+      each tag, v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1, on 2026-10-03
+      (`git archive` of each, CPU, jaxlib 0.11.0, FastAPI `TestClient`,
+      memory-capped, an empty `HOME`), with two `BallNode`s run 50 steps:
+      after `POST /sim/reset` a new `/ws/state` client was sent nothing in
+      5 s; after `PUT /graph/state` of position 123.0 (which `GET` then
+      returned) the stream sent 99.946, the old value; and after `DELETE
+      /graph/nodes/x` the stream still carried node `x`.  On the 0.4.0
+      development tree the binary stream also re-sent a schema that put a
+      removed node back, and a surrogate activated or deactivated (each
+      resets the graph) was not shown either.  Found by the round-6 REST
+      audit.  Resolved in 0.4.0: every route that changes the state without
+      a step publishes it to the streams -- a reset and a surrogate swap at
+      step 0 and time 0, a state write and a node added or removed at the
+      streams' clock -- and all three streams (`/ws/state`,
+      `/ws/state/binary`, `/ws/render`) send it, to new and connected
+      clients.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silent wrong result in the view, graded `major` as MADD-ANO-108 is:
+      the streams showed a state the graph no longer had, with nothing to
+      say so.  Not `critical`: `GET /graph/state` returned the right state,
+      and the next step corrected the streams.  `context_dependent`
+      because the streams are a view a user may or may not act on.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.viz.relay.StateRelay"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: take one step after a reset, a state write or a node
+      edit before reading the streams.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A params write is not published: it changes no state, and the next
+      step shows its effect.
+    verification:
+      - "tests/api/test_routes_publish_to_the_streams.py::test_a_reset_is_published_at_step_zero"
+      - "tests/api/test_routes_publish_to_the_streams.py::test_a_state_write_is_published_at_the_clock_it_was_written"
+      - "tests/api/test_routes_publish_to_the_streams.py::test_a_removed_node_leaves_every_stream"
+      - "tests/api/test_routes_publish_to_the_streams.py::test_an_added_node_joins_every_stream"
+      - "tests/api/test_routes_publish_to_the_streams.py::test_a_connected_client_is_sent_the_written_state"
+      - "tests/api/test_routes_publish_to_the_streams.py::test_a_surrogate_swap_is_published_at_step_zero_both_ways"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-134"
+    title: "A JAX trace started over REST had no bound: left running, it grew the server's memory by kilobytes per step until stopped"
+    description: >
+      `POST /sim/profile/jax/start` starts a `jax.profiler` trace that
+      records every step until `POST /sim/profile/jax/stop`, and the
+      profiler holds the trace's events in memory until it stops.  Nothing
+      stopped a trace left running.  Checked at v0.2.0 and v0.3.1 (the
+      route is in every tag from v0.2.0), on 2026-10-03 (`git archive`,
+      CPU, jaxlib 0.11.0, FastAPI `TestClient`, under an 8 GiB
+      address-space cap): a `BallNode` graph grew by 53, 110 and 167 MB
+      over three blocks of 20 000 traced steps.  On the 0.4.0 development
+      tree the round-6 REST audit measured about 4.2 KB per step, linear --
+      a runner at 60 steps/s would add about 22 GB a day.  Found by that
+      audit.  Resolved in 0.4.0: a trace stops itself after
+      `MAX_JAX_TRACE_STEPS` (10 000) steps or `MAX_JAX_TRACE_SECONDS` (600
+      s), writing its files as a requested stop does, and `GET
+      /sim/profile/jax/status` reports its steps, its budgets and what
+      stopped it.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A denial of service, never a wrong result, graded `major` as
+      MADD-ANO-092 is: a forgotten trace exhausts the host's memory over
+      hours, and the OOM killer then picks the largest process.  Not
+      `critical`: it needs a trace started and not stopped, and its growth
+      is slow enough to see.  `context_dependent`: what else the host runs
+      is the deployment's.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: stop every trace you start, after the steps you need.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Stopping a trace writes and converts its events, which takes memory
+      of its own once (about 125 MB at the step budget on a one-node
+      graph); a graph of many kernels records more per step, so its budget
+      holds more.  A trace started in-process (`start_jax_trace`) is not
+      budgeted.
+    verification:
+      - "tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_step_budget"
+      - "tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_time_budget"
+      - "tests/api/test_jax_trace_stops_itself.py::test_a_trace_stopped_by_request_is_reported_as_before"
     github_issue: null

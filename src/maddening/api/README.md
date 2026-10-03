@@ -110,8 +110,8 @@ not loopback; `/healthz` and `/viz/*` never do.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/graph` | Return graph structure (nodes, edges, external inputs) |
-| POST | `/graph/nodes` | Add a node (`{type, name, timestep, params}`) |
-| DELETE | `/graph/nodes/{name}` | Remove a node and its connected edges |
+| POST | `/graph/nodes` | Add a node (`{type, name, timestep, params}`). The streams are sent the graph with it |
+| DELETE | `/graph/nodes/{name}` | Remove a node and its connected edges. The streams are sent the graph without it |
 | POST | `/graph/edges` | Add an edge (`{source_node, target_node, source_field, target_field}`) |
 | DELETE | `/graph/edges` | Remove an edge (same body as POST) |
 | POST | `/graph/compile` | Compile the graph (topo-sort + JIT). Returns schedule |
@@ -123,7 +123,7 @@ not loopback; `/healthz` and `/viz/*` never do.
 |--------|------|-------------|
 | GET | `/graph/state` | Get state of all nodes, `_meta` included |
 | GET | `/graph/state/{node_name}` | Get state of one node |
-| PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`). A value the field's dtype cannot hold (`1e39` into float32) or a non-finite one is a 400, and nothing is written |
+| PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`). A value the field's dtype cannot hold (`1e39` into float32) or a non-finite one is a 400, and nothing is written. The streams are sent the written state, at their clock |
 
 A non-finite number in any reply -- a diverged state, a coupling
 diagnostic not yet filled (`diagnostics=True` seeds its spectral `_meta`
@@ -144,7 +144,7 @@ already been applied.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root, and beside the file a manifest (`<path>.manifest.json`: its SHA-256 and the streams' clock, `sim_time` and step count). Replies `{status, path, sim_time}` |
+| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root, and beside the file a manifest (`<path>.manifest.json`: its SHA-256 and the streams' clock, `sim_time` and step count). The checkpoint is written under a temporary name, the manifest next, and the file moved into place last: a save refused on the way (400, "nothing was written") leaves any earlier file of that name as it was. Replies `{status, path, sim_time}` |
 | POST | `/checkpoint/load?path=` | Restore them. A checkpoint that does not fit this graph -- including one whose parameters carry another value of one a node consumed at construction -- is a 400, and nothing is loaded. The streams then serve the loaded state at the checkpoint's `sim_time` -- the one its manifest records, or zero, counted from the load, for a file without one or whose manifest does not hash to it (`sim_time_from_checkpoint` says which). 409 while the runner runs or a `/sim/run` is in progress |
 
 ### Simulation Control
@@ -152,21 +152,34 @@ already been applied.
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/sim/step` | Advance one timestep. Returns new state |
-| POST | `/sim/run?n_steps=100` | Run N steps (at most 100000). Returns final state. While it runs, writes are a 409 and reads are served between its slices. When the server shuts down it stops within a slice and answers 503 `{status: "interrupted", steps_run, n_steps}`; the graph is left after `steps_run` steps |
+| POST | `/sim/run?n_steps=100` | Run N steps (at most 100000). Returns final state. While it runs, writes are a 409 and reads are served between its slices. When the server shuts down it stops within a slice and answers 503 `{status: "interrupted", steps_run, n_steps}`; the graph is left after `steps_run` steps. A step that raises (a run-time check in the step, `strict_convergence`) answers 400 `{detail, steps_run, n_steps}`: the steps before it were taken |
 | POST | `/sim/start` | Start real-time runner (background thread). A runner whose thread died (a step raised) is replaced |
 | POST | `/sim/pause` | Pause the runner. 409 when it is not running, saying why a started one stopped |
 | POST | `/sim/resume` | Resume the runner, paced from the resume |
 | POST | `/sim/stop` | Stop the runner. A runner whose thread had died is reported stopped, with `error` |
-| POST | `/sim/reset` | Stop the runner and reset every node. `was_running` is whether a runner was running |
+| POST | `/sim/reset` | Stop the runner and reset every node; the streams are sent the reset state at step 0. `was_running` is whether a runner was running. When the graph cannot be had in time after the runner was stopped, the 503 says the runner stays stopped, with `was_running` |
+| PUT | `/sim/stride?steps_per_frame=&relay_stride=` | The runner's steps per frame and the relay's stride; answered at once, whatever the other runner routes wait for |
+| POST | `/sim/profile?n_steps=&n_warmup=` | A step-time profile (Perfetto JSON). The live state and parameters are restored after it, and the streams neither show nor count its steps |
+| POST | `/sim/profile/jax/start`, `/sim/profile/jax/stop` | A JAX trace of the steps between them, for at most `MAX_JAX_TRACE_STEPS` (10 000) steps or `MAX_JAX_TRACE_SECONDS` (600 s): past either it stops itself and writes its files |
+| GET | `/sim/profile/jax/status` | Whether a trace runs, its steps and budgets, its directory, and what stopped the last one |
 
 ### Surrogates
 
+**Experimental in 0.4.0.**  These routes, and the WebSocket streams below,
+are to be hardened in 0.5.0 and may change in any minor release until
+then (`ROUTE_STABILITY` in `server.py`; each HTTP one carries
+`x-maddening-stability` in `/openapi.json`).
+
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/surrogate/train` | Train a surrogate of one node in a background job. One job runs at a time (409 otherwise). The memory the job would take -- the data sweep over the whole graph, its dataset, the network -- is estimated first and refused (400) over `MAX_SURROGATE_TRAIN_BYTES`, and `width**2 * depth` of the network is bounded (422). The data come from a batched sweep that leaves the live simulation where it was. Replies `{job_id, status, estimated_bytes}` |
+| POST | `/surrogate/train` | Train a surrogate of one node in a background job. One job runs at a time (409 otherwise). The memory the job would take -- the data sweep over the whole graph, its dataset, the network -- is estimated first and refused (400) over `MAX_SURROGATE_TRAIN_BYTES`, and estimated again on the graph the sweep runs over: a graph that grew in between (a node added) ends the job `error`, naming the budget, before anything is swept. `width**2 * depth` of the network is bounded (422). The data come from a batched sweep that leaves the live simulation where it was. Replies `{job_id, status, estimated_bytes}` |
 | GET | `/surrogate/status/{job_id}` | The job's progress. The last `MAX_SURROGATE_JOBS_KEPT` (8) finished jobs are kept; a job stopped by a shutdown reads `cancelled` |
 
 ### WebSocket
+
+**Experimental in 0.4.0**, with `StateRelay`, the snapshot buffer they
+read: to be hardened in 0.5.0.  `BinaryStateEncoder`, the binary frame
+format, stays `evolving`.
 
 | Path | Description |
 |------|-------------|
@@ -175,8 +188,16 @@ already been applied.
 | `/ws/render` | Server-rendered frames, when a renderer is configured |
 
 At most `MAX_STREAM_CONNECTIONS` (16) streams are open at once; past it a
-handshake is closed with 1013.  Frames are encoded off the event loop, and
-a frame of the whole state is encoded once for every client of it.
+handshake is accepted and closed with 1013 (closed before the accept, a
+real client saw HTTP 403, the answer to an `Origin` or token refusal).
+Frames are encoded off the event loop, and a frame of the whole state is
+encoded once for every client of it.
+
+Every route that changes the state without a step publishes it: a reset
+and a surrogate swap at step 0 and `sim_time` 0, a state write and a node
+added or removed at the streams' clock, a checkpoint load at the
+checkpoint's.  A step of `GraphManager.run_adaptive` adds its own `dt` to
+the clock.
 
 ## Concurrency, limits and shutdown
 
@@ -200,6 +221,12 @@ before it is parsed; `PUT /graph/state` counts each field's values against
 the live field before converting them; the whole graph's state is held to
 `MAX_GRAPH_STATE_ELEMENTS` (10^8) as well as each node's to
 `MAX_NODE_STATE_ELEMENTS`; and nodes are built one at a time.
+
+The runner routes (`/sim/start`, `/sim/stop`, `/sim/pause`,
+`/sim/resume`, `/sim/reset`, surrogate activate and deactivate) answer
+within about one `_GRAPH_LOCK_TIMEOUT` of their arrival, a 503 past it: the
+runner's own lock is taken with a deadline, and a reset or a surrogate swap
+lets go of it before waiting for the graph.
 
 Shutdown: the app's lifespan, and a SIGINT or SIGTERM when it is served
 from the main thread, tell an in-flight `/sim/run` to stop at its next

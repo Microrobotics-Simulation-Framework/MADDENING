@@ -100,11 +100,12 @@ from maddening.core._size_estimate import (
     format_count,
 )
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.compliance.stability import stability
+from maddening.core.compliance.stability import register_route_stability, stability
 from maddening.core.graph_manager import (
     EVENT_COMPILED,
     EVENT_NODE_ADDED,
     EVENT_NODE_REMOVED,
+    EVENT_STEP,
     GraphManager,
     _declared_boundary_zeros,
     _hook_outputs,
@@ -342,6 +343,47 @@ _GRAPH_LOCK_TIMEOUT = 30.0
 #: the graph lock for each and checking between them whether the server
 #: is shutting down; reads are served between slices.
 _RUN_SLICE_SECONDS = 0.05
+
+#: The most steps a JAX trace started by ``POST /sim/profile/jax/start``
+#: records before it stops itself.  JAX's profiler holds a trace's events
+#: in memory until the trace stops -- about 4.2 KB per step of a one-node
+#: graph, more for a graph of more kernels -- and nothing stopped a trace
+#: left running: a runner at 60 steps/s grew the server by about 22 GB a
+#: day.  10 000 steps is about 40 MB for a small graph, and far more steps
+#: than a trace viewer is useful for.
+MAX_JAX_TRACE_STEPS = 10_000
+
+#: The longest a JAX trace runs before it stops itself, in seconds: it is
+#: stopped at the first step after this.
+MAX_JAX_TRACE_SECONDS = 600.0
+
+#: The stability of the routes whose level is set apart from the rest of
+#: the API.  The surrogate-training routes and the state streams are
+#: **experimental in 0.4.0**: they are to be hardened in 0.5.0, and may
+#: change in any minor release until then.  None of them carried a level
+#: before (``SimulationServer`` itself has none), so this is their first.
+#: Registered in the stability report as ``maddening.api.server:<route>``;
+#: an HTTP route here also carries ``x-maddening-stability`` in
+#: ``/openapi.json``.
+ROUTE_STABILITY: dict[str, StabilityLevel] = {
+    "POST /surrogate/train": StabilityLevel.EXPERIMENTAL,
+    "GET /surrogate/status/{job_id}": StabilityLevel.EXPERIMENTAL,
+    "POST /surrogate/activate/{job_id}": StabilityLevel.EXPERIMENTAL,
+    "POST /surrogate/deactivate/{node_name}": StabilityLevel.EXPERIMENTAL,
+    "WS /ws/state": StabilityLevel.EXPERIMENTAL,
+    "WS /ws/state/binary": StabilityLevel.EXPERIMENTAL,
+    "WS /ws/render": StabilityLevel.EXPERIMENTAL,
+}
+for _route, _level in ROUTE_STABILITY.items():
+    register_route_stability(__name__, _route, _level)
+del _route, _level
+
+
+def _route_openapi(method: str, path: str) -> Optional[dict]:
+    """``openapi_extra`` for an HTTP route of :data:`ROUTE_STABILITY`."""
+    level = ROUTE_STABILITY.get(f"{method} {path}")
+    return None if level is None else {"x-maddening-stability": level.value}
+
 
 
 def _oversized_param(value: Any, path: str = "") -> Optional[str]:
@@ -627,8 +669,10 @@ def _dry_run_node(node, state: Any = None) -> None:
 #: code failing on its params while the step is traced and compiled, a
 #: structure ``compile()`` refuses -- rather than because the server is
 #: broken.  ``POST /sim/step`` and ``POST /sim/run`` answer these 400 with
-#: the message (nothing is stepped); they used to answer every one but
-#: ``RuntimeError`` with an uncaught 500.
+#: the message; they used to answer every one but ``RuntimeError`` with an
+#: uncaught 500.  A failing ``/sim/step`` stores nothing; a ``/sim/run``
+#: whose step raises at run time part-way through keeps the steps before
+#: it, and its 400 says how many (``steps_run``).
 _GRAPH_CONFIGURATION_ERRORS = (
     RuntimeError, ValueError, TypeError, KeyError, AttributeError, IndexError,
     ArithmeticError,
@@ -868,6 +912,12 @@ _SURROGATE_STEPS_PER_CONDITION = 200
 class _TrainingCancelled(Exception):
     """Raised from a training job's progress callback when the server is
     shutting down: the job ends at the epoch it is in."""
+
+
+class _OverBudget(Exception):
+    """A training job's sweep, estimated again on the graph it would run
+    over, is past :data:`MAX_SURROGATE_TRAIN_BYTES`: the job ends with
+    status ``"error"`` before anything is swept."""
 
 
 #: Servers whose surrogate jobs are cancelled and joined at interpreter
@@ -2015,6 +2065,17 @@ class SimulationServer:
         # first when both are needed, and never while waiting for it.
         self._graph_lock = _GraphLock()
         self._runner_lock = threading.RLock()
+        # Guards only the runner's steps-per-frame, the one value
+        # ``PUT /sim/stride`` and a runner being created both touch: held
+        # for a few assignments, never across a wait, so the stride answers
+        # at once whatever the runner routes are waiting for.
+        self._stride_lock = threading.Lock()
+        # A JAX trace this server started: its step and time budget
+        # (MAX_JAX_TRACE_STEPS / _SECONDS), counted by _on_graph_event.
+        self._trace_lock = threading.Lock()
+        self._trace_steps = 0
+        self._trace_started: Optional[float] = None
+        self._trace_stopped_by: Optional[str] = None
         # A ``POST /sim/run`` is stepping the graph slice by slice.
         self._sync_run_active = False
         # Set when the server shuts down (the lifespan hook, a chained
@@ -2119,9 +2180,10 @@ class SimulationServer:
     def _ensure_runner(self) -> RealtimeRunner:
         if self.runner is None:
             self._ensure_relay_attached()
-            self.runner = RealtimeRunner(self.gm, self.relay,
-                                         steps_per_frame=self._steps_per_frame,
-                                         lock=self._graph_lock)
+            with self._stride_lock:
+                self.runner = RealtimeRunner(self.gm, self.relay,
+                                             steps_per_frame=self._steps_per_frame,
+                                             lock=self._graph_lock)
         return self.runner
 
     def _runner_stopping(self) -> bool:
@@ -2182,9 +2244,12 @@ class SimulationServer:
             )
 
     @contextlib.contextmanager
-    def _graph_access(self, action: str, *, write: bool = False):
+    def _graph_access(self, action: str, *, write: bool = False,
+                      deadline: Optional[float] = None):
         """Hold the graph lock for *action*: a 503 after
-        :data:`_GRAPH_LOCK_TIMEOUT` seconds without it.
+        :data:`_GRAPH_LOCK_TIMEOUT` seconds without it, or at *deadline*
+        (``time.monotonic()``) for a request that has already waited for
+        something else.
 
         With *write*, refused (:meth:`_refuse_while_runner_alive`) while
         the runner or a ``POST /sim/run`` steps the graph -- asked before
@@ -2194,7 +2259,9 @@ class SimulationServer:
         """
         if write:
             self._refuse_while_runner_alive(action)
-        if not self._graph_lock.acquire(timeout=_GRAPH_LOCK_TIMEOUT):
+        timeout = (_GRAPH_LOCK_TIMEOUT if deadline is None
+                   else max(0.0, deadline - time.monotonic()))
+        if not self._graph_lock.acquire(timeout=timeout):
             raise HTTPException(
                 status_code=503,
                 detail=(f"Cannot {action}: the graph has been in use for "
@@ -2209,6 +2276,68 @@ class SimulationServer:
             yield
         finally:
             self._graph_lock.release()
+
+    @contextlib.contextmanager
+    def _runner_control(self, action: str, deadline: float):
+        """Hold the runner lock for *action*, waiting until *deadline* at
+        most: a 503 then.  The routes that change the runner hold it; it
+        used to be taken with no timeout while some of them waited for the
+        graph lock inside it, so the k-th request behind a long holder of
+        the graph lock answered after about k graph-lock timeouts."""
+        if not self._runner_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            raise HTTPException(
+                status_code=503,
+                detail=(f"Cannot {action}: another request has been starting, "
+                        "stopping or resetting the runner for "
+                        f"{_GRAPH_LOCK_TIMEOUT:g} s. Nothing was changed; retry "
+                        "shortly."),
+                headers={"Retry-After": "1"},
+            )
+        try:
+            yield
+        finally:
+            self._runner_lock.release()
+
+    def _after_stopping_the_runner(self, exc: HTTPException, action: str,
+                                   was_running: bool) -> JSONResponse:
+        """The reply of a route that stopped the runner and then could not
+        do *action* (*exc*: the graph lock's 503, a 409): the runner stays
+        stopped, which the reply says, with ``was_running``.  It used to
+        answer "Nothing was changed" for a runner it had just stopped."""
+        stopped = (" The runner was stopped first and stays stopped; POST "
+                   "/sim/start starts it again." if was_running else "")
+        detail = str(exc.detail).replace(" Nothing was changed;", " Nothing was "
+                                         f"{action};") + stopped
+        return JSONResponse(status_code=exc.status_code, headers=exc.headers,
+                            content={"detail": detail, "was_running": was_running})
+
+    def _publish_state(self, *, restart: bool = False) -> None:
+        """Publish the graph's state to the streams, holding the graph
+        lock: at step 0 and time 0 with *restart* (a reset), at the clock
+        the relay has otherwise.  Routes that change the state without a
+        step -- a reset, a state write, a node added or removed, a
+        surrogate (de)activated -- used to publish nothing, so the streams
+        served the state from before them until the next step."""
+        self._ensure_relay_attached()
+        if restart:
+            self.relay.restore(self._user_state(), step_count=0, elapsed=0.0)
+        else:
+            self.relay.restore(self._user_state(), step_count=self.relay.step_count,
+                               elapsed=self.relay.elapsed)
+
+    @contextlib.contextmanager
+    def _relay_detached(self):
+        """Run a block without the relay observing the graph's steps (the
+        profiler's): the streams neither publish nor count them."""
+        callback = self.relay._on_event
+        detached = callback in self.gm._observers
+        if detached:
+            self.gm._observers.remove(callback)
+        try:
+            yield
+        finally:
+            if detached:
+                self.gm._observers.append(callback)
 
     def _state_json(self) -> dict:
         """The whole state, ``_meta`` included, as a reply body
@@ -2263,7 +2392,8 @@ class SimulationServer:
             )
 
     def _reset_state(self) -> None:
-        """Reset all nodes to their initial state (normalised, no retrace)."""
+        """Reset all nodes to their initial state (normalised, no retrace),
+        and publish it to the streams at step 0."""
         self.gm.reset_state()
         # Reset relay counters, its clock included: the relay sums each
         # step's advance, so leaving that sum would restart the frames'
@@ -2271,6 +2401,9 @@ class SimulationServer:
         self.relay.reset()
         # Invalidate binary encoder (state shape may have changed)
         self._binary_encoder = None
+        # And show the reset state: the streams used to send nothing until
+        # the next step, so a client kept the state from before the reset.
+        self._publish_state(restart=True)
 
     def _user_state(self) -> dict:
         """The state without ``_meta``, shallow-copied: call it holding the
@@ -2284,10 +2417,49 @@ class SimulationServer:
         longer the one they encode.  The encoder used to be dropped only by
         a reset, so a node replaced over REST kept a schema the graph no
         longer had."""
+        if event == EVENT_STEP:
+            if self._trace_started is not None:
+                self._count_traced_step()
+            return
         if event not in (EVENT_NODE_ADDED, EVENT_NODE_REMOVED, EVENT_COMPILED):
             return
         self._binary_encoder = None
         self._layout_generation += 1
+
+    def _count_traced_step(self) -> None:
+        """One more step recorded by the JAX trace this server started:
+        stop the trace past :data:`MAX_JAX_TRACE_STEPS` steps or
+        :data:`MAX_JAX_TRACE_SECONDS` seconds."""
+        with self._trace_lock:
+            if self._trace_started is None:
+                return
+            self._trace_steps += 1
+            if self._trace_steps >= MAX_JAX_TRACE_STEPS:
+                self._stop_trace(f"its step budget, {MAX_JAX_TRACE_STEPS} steps")
+            elif time.monotonic() - self._trace_started >= MAX_JAX_TRACE_SECONDS:
+                self._stop_trace(f"its time budget, {MAX_JAX_TRACE_SECONDS:g} s")
+
+    def _stop_trace(self, by: str) -> Optional[str]:
+        """Stop the JAX trace this server started, holding the trace lock;
+        returns its directory.  *by* says why, for the status route."""
+        from maddening.core.simulation.profiler import (  # noqa: PLC0415
+            jax_trace_active,
+            stop_jax_trace,
+        )
+        log_dir = None
+        if jax_trace_active():
+            try:
+                log_dir = stop_jax_trace()
+            except RuntimeError:          # stopped by someone else meanwhile
+                log_dir = None
+        if log_dir:
+            self._last_jax_trace_dir = log_dir
+        self._trace_started = None
+        self._trace_stopped_by = by
+        if by != "a request":
+            logger.warning("The JAX trace stopped itself after %d steps (%s); its "
+                           "trace is in %s", self._trace_steps, by, log_dir)
+        return log_dir
 
     def _get_binary_encoder(self):
         """Lazily build a BinaryStateEncoder from the current state: call it
@@ -2322,10 +2494,17 @@ class SimulationServer:
         with self._surrogate_lock:
             self._stream_connections -= 1
 
-    async def _refuse_stream(self, websocket: WebSocket, path: str) -> None:
+    async def _refuse_stream(self, websocket: WebSocket, path: str,
+                             subprotocol: Optional[str]) -> None:
+        """Close a stream past :data:`MAX_STREAM_CONNECTIONS` with 1013.
+        Accepted first: a handshake closed before it is accepted reaches a
+        real client as HTTP 403 -- the answer to an Origin or token
+        refusal -- with no close code at all (only Starlette's test client
+        reports the code)."""
         logger.warning("Refused WebSocket %s: %d streams are open, the most this "
                        "server serves (MAX_STREAM_CONNECTIONS)", path,
                        MAX_STREAM_CONNECTIONS)
+        await websocket.accept(subprotocol=subprotocol)
         await websocket.close(
             code=1013,
             reason=f"{MAX_STREAM_CONNECTIONS} streams are open already; try again later.",
@@ -2712,17 +2891,21 @@ class SimulationServer:
                     self.gm.add_node(node)
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
+                self._publish_state()
                 return {"status": "ok", "node": node.to_dict()}
 
         @app.delete("/graph/nodes/{name}", tags=["graph"], response_model=None)
         def remove_node(name: str) -> dict[str, str]:
             """Remove a node.  Refused (409) while the runner runs or a
-            ``POST /sim/run`` is in progress."""
+            ``POST /sim/run`` is in progress.  The streams are sent the
+            graph without it (they used to go on serving the removed node,
+            and the binary stream re-sent a schema that had it)."""
             with self._graph_access("remove a node", write=True):
                 try:
                     self.gm.remove_node(name)
                 except KeyError as exc:
                     raise HTTPException(status_code=404, detail=str(exc))
+                self._publish_state()
             return {"status": "ok"}
 
         @app.post("/graph/edges", tags=["graph"], status_code=201, response_model=None)
@@ -2865,6 +3048,9 @@ class SimulationServer:
                         raise HTTPException(status_code=400, detail=f"{field}: value must be finite")
                     staged[field] = arr
                 self.gm.set_node_state(node_name, staged)
+                # Published, so the streams show the written state (they
+                # served the value from before the write until a step).
+                self._publish_state()
             return {"status": "ok"}
 
         # -- parameter endpoints ---------------------------------------------
@@ -3282,23 +3468,36 @@ class SimulationServer:
             (``<path>.manifest.json``: its SHA-256 and the streams' clock,
             ``sim_time`` and step count), which ``POST /checkpoint/load``
             restores the clock from."""
+            from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
+                write_manifest,
+            )
             target = _checkpoint_path(path)
             manifest = _manifest_path(target)
             with self._graph_access("save a checkpoint"):
                 self._ensure_relay_attached()
                 clock = {"sim_time": self.relay.elapsed,
                          "step_count": self.relay.step_count}
+                # Written beside the target under a temporary name, the
+                # manifest next, and the checkpoint moved into place last
+                # (os.replace, atomic on one filesystem): a save refused at
+                # its manifest used to answer 400 having already written
+                # the checkpoint over the file of that name.
+                partial = target.with_name(f".{target.name}.{uuid.uuid4().hex}.partial.npz")
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    saved = Path(self.gm.save_state(str(target)) or target)
-                    if manifest is not None and saved == target:
-                        from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
-                            write_manifest,
-                        )
-                        write_manifest(saved, extra={"server_clock": clock})
+                    self.gm.save_state(str(partial))
+                    if manifest is not None:
+                        write_manifest(partial, extra={"server_clock": clock},
+                                       manifest_path=manifest)
+                    os.replace(partial, target)
                 except Exception as exc:  # noqa: BLE001
-                    raise HTTPException(status_code=400, detail=f"could not save checkpoint: {exc}")
-            return {"status": "ok", "path": str(saved), "sim_time": clock["sim_time"]}
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"could not save checkpoint, nothing was written: {exc}")
+                finally:
+                    with contextlib.suppress(OSError):
+                        partial.unlink(missing_ok=True)
+            return {"status": "ok", "path": str(target), "sim_time": clock["sim_time"]}
 
         @app.post("/checkpoint/load", tags=["checkpoint"], response_model=None)
         def checkpoint_load(path: str = "checkpoint.npz") -> dict[str, Any]:
@@ -3378,6 +3577,24 @@ class SimulationServer:
                     raise HTTPException(status_code=400, detail=_cannot_step_detail(exc))
                 return self._state_json()
 
+        def _run_failed(exc: BaseException, steps_run: int, n_steps: int) -> JSONResponse:
+            """The 400 of a ``POST /sim/run`` whose step raised after
+            *steps_run* steps had been stored."""
+            detail = _cannot_step_detail(exc)
+            if not steps_run and "nothing was stepped" not in detail:
+                detail += " (nothing was stepped)"     # a RuntimeError's own words
+            if steps_run:
+                detail = detail.replace(
+                    "; nothing was stepped",
+                    f"; the run stopped at step {steps_run + 1} of {n_steps}, and the "
+                    f"graph is left after the {steps_run} step(s) it took")
+                if detail == _cannot_step_detail(exc):     # a RuntimeError's own words
+                    detail += (f" (the run stopped at step {steps_run + 1} of {n_steps}, "
+                               f"and the graph is left after the {steps_run} step(s) "
+                               "it took)")
+            return JSONResponse(status_code=400, content={
+                "detail": detail, "steps_run": steps_run, "n_steps": n_steps})
+
         @app.post("/sim/run", tags=["sim"], response_model=None)
         def sim_run(
             n_steps: int = Query(
@@ -3401,6 +3618,11 @@ class SimulationServer:
             ``{"status": "interrupted", "steps_run": k, "n_steps": n}``:
             the graph is left after the *k* steps it took.  A shutdown used
             to wait for the whole run, up to an hour.
+
+            A step that raises answers 400 with ``steps_run``: the steps
+            before it were taken and stored (a run-time check in the step,
+            such as ``strict_convergence``, can raise part-way through), and
+            the reply used to say "nothing was stepped" and not how many.
             """
             with self._graph_access("run the graph", write=True):
                 self._ensure_relay_attached()
@@ -3414,12 +3636,16 @@ class SimulationServer:
                         break
                     k = min(chunk, n_steps - done)
                     t0 = time.perf_counter()
+                    taken: list = []
                     with self._graph_access("run the graph"):
                         try:
-                            self.gm.run(k)
+                            self.gm.run(k, callback=lambda i, _s: taken.append(i))
                         except _GRAPH_CONFIGURATION_ERRORS as exc:
-                            raise HTTPException(status_code=400,
-                                                detail=_cannot_step_detail(exc))
+                            # A step can raise at run time (an in-graph
+                            # check, strict_convergence) after the steps
+                            # before it were stored: say how many.
+                            steps_run = done + len(taken)
+                            return _run_failed(exc, steps_run, n_steps)
                     done += k
                     if time.perf_counter() - t0 < _RUN_SLICE_SECONDS / 2:
                         chunk = min(2 * chunk, MAX_RUN_STEPS)
@@ -3428,8 +3654,7 @@ class SimulationServer:
                         try:
                             self.gm.run(0)      # compiles a graph edited since
                         except _GRAPH_CONFIGURATION_ERRORS as exc:
-                            raise HTTPException(status_code=400,
-                                                detail=_cannot_step_detail(exc))
+                            return _run_failed(exc, 0, 0)
                     state = None if interrupted else self._state_json()
             finally:
                 self._sync_run_active = False
@@ -3446,7 +3671,10 @@ class SimulationServer:
 
         @app.post("/sim/start", tags=["sim"], response_model=None)
         def sim_start() -> dict[str, str]:
-            with self._runner_lock:
+            """Start the runner.  Answered within about one graph-lock
+            timeout of its arrival, a 503 past it."""
+            deadline = time.monotonic() + _GRAPH_LOCK_TIMEOUT
+            with self._runner_control("start the runner", deadline):
                 if self._runner_stopping():
                     raise HTTPException(
                         status_code=503,
@@ -3459,7 +3687,7 @@ class SimulationServer:
                 self._reap_dead_runner()
                 if self._runner_started:
                     raise HTTPException(status_code=409, detail="Runner is already started.")
-                with self._graph_access("start the runner", write=True):
+                with self._graph_access("start the runner", write=True, deadline=deadline):
                     runner = self._ensure_runner()
                     try:
                         runner.start()
@@ -3482,7 +3710,8 @@ class SimulationServer:
 
         @app.post("/sim/pause", tags=["sim"], response_model=None)
         def sim_pause() -> dict[str, str]:
-            with self._runner_lock:
+            with self._runner_control("pause the runner",
+                                      time.monotonic() + _GRAPH_LOCK_TIMEOUT):
                 detail = _not_running_detail()
                 runner = self.runner
                 if detail is not None or runner is None:
@@ -3493,7 +3722,8 @@ class SimulationServer:
 
         @app.post("/sim/resume", tags=["sim"], response_model=None)
         def sim_resume() -> dict[str, str]:
-            with self._runner_lock:
+            with self._runner_control("resume the runner",
+                                      time.monotonic() + _GRAPH_LOCK_TIMEOUT):
                 detail = _not_running_detail()
                 runner = self.runner
                 if detail is not None or runner is None:
@@ -3512,7 +3742,8 @@ class SimulationServer:
             waits for it again.  A runner whose thread had already died
             is reported stopped, with ``error`` saying why it died.
             """
-            with self._runner_lock:
+            with self._runner_control("stop the runner",
+                                      time.monotonic() + _GRAPH_LOCK_TIMEOUT):
                 if self.runner is None or not (
                         self._runner_started or self._runner_stop_pending):
                     raise HTTPException(status_code=409, detail="Runner is not started.")
@@ -3522,21 +3753,32 @@ class SimulationServer:
             return {"status": "stopped", "error": died} if died else {"status": "stopped"}
 
         @app.post("/sim/reset", tags=["sim"], response_model=None)
-        def sim_reset() -> dict[str, Any]:
+        def sim_reset() -> Any:
             """Stop the runner and reset all nodes to initial state.  A 503,
             with nothing reset, when the runner's thread will not stop in
             time (it would overwrite the reset); a 409 while a
             ``POST /sim/run`` is in progress.  ``was_running`` says whether
-            a runner was running -- one whose thread had died was not."""
-            with self._runner_lock:
+            a runner was running -- one whose thread had died was not.
+
+            The runner is stopped first and the graph lock taken after,
+            within about one graph-lock timeout of the request in all; when
+            the graph cannot be had in time the 503 (or a 409) says that
+            the runner it stopped stays stopped, with ``was_running``.  The
+            streams are sent the reset state at step 0.
+            """
+            deadline = time.monotonic() + _GRAPH_LOCK_TIMEOUT
+            with self._runner_control("reset the graph", deadline):
                 was_running = self._runner_running()
                 self._stop_runner_or_refuse("reset the graph")
-                with self._graph_access("reset the graph", write=True):
+            try:
+                with self._graph_access("reset the graph", write=True, deadline=deadline):
                     self._ensure_relay_attached()
                     self._reset_state()
                     self.gm._dirty = True
                     return {"status": "ok", "was_running": was_running,
                             "state": self._state_json()}
+            except HTTPException as exc:
+                return self._after_stopping_the_runner(exc, "reset", was_running)
 
         @app.put("/sim/stride", tags=["sim"], response_model=None)
         def sim_set_stride(
@@ -3574,10 +3816,14 @@ class SimulationServer:
             dict
                 The values in force, as the runner and the relay hold them.
             """
-            with self._runner_lock:
+            # The stride lock alone, held for these assignments: the runner
+            # lock is held by routes waiting for the graph, and the stride
+            # waited behind them.
+            with self._stride_lock:
                 self._steps_per_frame = steps_per_frame
-                if self.runner is not None:
-                    self.runner.steps_per_frame = steps_per_frame
+                runner = self.runner
+                if runner is not None:
+                    runner.steps_per_frame = steps_per_frame
                 self.relay.stride = relay_stride
                 return {
                     "steps_per_frame": self._steps_per_frame,
@@ -3586,9 +3832,11 @@ class SimulationServer:
 
         # -- surrogate endpoints --------------------------------------------
 
-        @app.post("/surrogate/train", tags=["surrogate"], response_model=None)
+        @app.post("/surrogate/train", tags=["surrogate"], response_model=None,
+                  openapi_extra=_route_openapi("POST", "/surrogate/train"))
         def surrogate_train(req: TrainSurrogateRequest) -> dict[str, Any]:
             """Start training a surrogate of one node in a background thread.
+            **Experimental in 0.4.0** (to be hardened in 0.5.0).
 
             **One job runs at a time**: a 409 while another one does.  The
             last :data:`MAX_SURROGATE_JOBS_KEPT` finished jobs are kept, the
@@ -3648,6 +3896,7 @@ class SimulationServer:
                 "val_loss": None,
                 "result": None,
                 "error": None,
+                "estimated_bytes": need,
             }
 
             def _train_worker():
@@ -3661,6 +3910,21 @@ class SimulationServer:
                         if req.node_name not in self.gm._nodes:
                             raise RuntimeError(
                                 f"node '{req.node_name}' was removed before the job started")
+                        # Estimated again on the graph this sweep runs over:
+                        # the request's estimate was taken under the lock,
+                        # and a request queued behind it -- a node added --
+                        # was served before this thread took it again.  A
+                        # 2-scalar graph's 0.5 MiB admitted a sweep of 2.15
+                        # GiB that way.
+                        need_now = _surrogate_training_bytes(self.gm, req.node_name, req)
+                        job["estimated_bytes"] = need_now
+                        if need_now > MAX_SURROGATE_TRAIN_BYTES:
+                            raise _OverBudget(
+                                f"the graph changed before the job started: its sweep "
+                                f"would now take about {format_bytes(need_now)}, over "
+                                f"the {format_bytes(MAX_SURROGATE_TRAIN_BYTES)} accepted "
+                                "over the API (MAX_SURROGATE_TRAIN_BYTES); nothing was "
+                                "swept or trained")
                         target_init = self.gm._nodes[req.node_name].node.initial_state()
                         n_conditions = _SURROGATE_CONDITIONS
                         steps_per_condition = min(_SURROGATE_STEPS_PER_CONDITION,
@@ -3715,6 +3979,10 @@ class SimulationServer:
                 except _TrainingCancelled:
                     job["status"] = "cancelled"
                     job["error"] = "the server shut down before the job finished"
+                except _OverBudget as exc:
+                    job["status"] = "error"
+                    job["error"] = str(exc)
+                    logger.warning("Surrogate job %s refused: %s", job_id, exc)
                 except Exception as exc:
                     job["status"] = "error"
                     job["error"] = str(exc)
@@ -3743,8 +4011,11 @@ class SimulationServer:
                 thread.start()
             return {"job_id": job_id, "status": "started", "estimated_bytes": need}
 
-        @app.get("/surrogate/status/{job_id}", tags=["surrogate"], response_model=None)
+        @app.get("/surrogate/status/{job_id}", tags=["surrogate"], response_model=None,
+                  openapi_extra=_route_openapi("GET", "/surrogate/status/{job_id}"))
         def surrogate_status(job_id: str) -> dict[str, Any]:
+            """A training job's progress.  **Experimental in 0.4.0** (to be
+            hardened in 0.5.0)."""
             job = self._surrogate_jobs.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
@@ -3757,13 +4028,19 @@ class SimulationServer:
                 "train_loss": job["train_loss"],
                 "val_loss": job["val_loss"],
                 "error": job["error"],
+                "estimated_bytes": job.get("estimated_bytes"),
             }
 
-        @app.post("/surrogate/activate/{job_id}", tags=["surrogate"], response_model=None)
-        def surrogate_activate(job_id: str) -> dict[str, str]:
-            """Replace the physics node with the trained surrogate (the
-            runner is stopped first; a 409 while a ``POST /sim/run`` is in
-            progress)."""
+        @app.post("/surrogate/activate/{job_id}", tags=["surrogate"], response_model=None,
+                  openapi_extra=_route_openapi("POST", "/surrogate/activate/{job_id}"))
+        def surrogate_activate(job_id: str) -> Any:
+            """Replace the physics node with the trained surrogate
+            (**experimental in 0.4.0**, to be hardened in 0.5.0; the runner
+            is stopped first; a 409 while a ``POST /sim/run`` is in
+            progress).  The graph is reset, and the streams are sent the
+            reset state at step 0.  ``was_running`` says whether a runner
+            was running; a refusal after it was stopped says it stays
+            stopped."""
             job = self._surrogate_jobs.get(job_id)
             if job is None:
                 raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
@@ -3773,60 +4050,80 @@ class SimulationServer:
             node_name = job["node_name"]
             result = job["result"]
 
-            with self._runner_lock:
+            deadline = time.monotonic() + _GRAPH_LOCK_TIMEOUT
+            with self._runner_control("activate a surrogate", deadline):
+                was_running = self._runner_running()
                 self._stop_runner_or_refuse("activate a surrogate")
-                with self._graph_access("activate a surrogate", write=True):
-                    if node_name not in self.gm._nodes:
-                        raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
-                    # Save original node info for deactivation
-                    if node_name not in self._original_nodes:
-                        orig_node = self.gm._nodes[node_name].node
-                        orig_edges = [e for e in self.gm._edges
-                                      if e.source_node == node_name or e.target_node == node_name]
-                        orig_ext = [ei for ei in self.gm._external_inputs
-                                    if ei.target_node == node_name]
-                        self._original_nodes[node_name] = (orig_node, orig_edges, orig_ext)
+            try:
+                return activate_locked(node_name, result, was_running, deadline)
+            except HTTPException as exc:
+                return self._after_stopping_the_runner(exc, "activated", was_running)
 
-                    # Use the ORIGINAL node's initial state for surrogate initial values
-                    orig_node = self._original_nodes[node_name][0]
-                    initial_values = {}
-                    for field_name, shape in result.state_spec.items():
-                        if shape == ():
-                            initial_values[field_name] = 0.0
-                        else:
-                            initial_values[field_name] = jnp.zeros(shape)
-                    orig_init = orig_node.initial_state()
-                    for k, v in orig_init.items():
-                        if k in initial_values:
-                            initial_values[k] = v
+        def activate_locked(node_name: str, result: Any, was_running: bool,
+                            deadline: float) -> dict[str, Any]:
+            """``POST /surrogate/activate``, from the graph lock on."""
+            with self._graph_access("activate a surrogate", write=True,
+                                    deadline=deadline):
+                if node_name not in self.gm._nodes:
+                    raise HTTPException(status_code=404, detail=f"No node '{node_name}'.")
+                # Save original node info for deactivation
+                if node_name not in self._original_nodes:
+                    orig_node = self.gm._nodes[node_name].node
+                    orig_edges = [e for e in self.gm._edges
+                                  if e.source_node == node_name or e.target_node == node_name]
+                    orig_ext = [ei for ei in self.gm._external_inputs
+                                if ei.target_node == node_name]
+                    self._original_nodes[node_name] = (orig_node, orig_edges, orig_ext)
 
-                    surrogate = result.to_node(
-                        name=node_name,
-                        timestep=orig_node.delta_t,
-                        initial_values=initial_values,
-                    )
+                # Use the ORIGINAL node's initial state for surrogate initial values
+                orig_node = self._original_nodes[node_name][0]
+                initial_values = {}
+                for field_name, shape in result.state_spec.items():
+                    if shape == ():
+                        initial_values[field_name] = 0.0
+                    else:
+                        initial_values[field_name] = jnp.zeros(shape)
+                orig_init = orig_node.initial_state()
+                for k, v in orig_init.items():
+                    if k in initial_values:
+                        initial_values[k] = v
 
-                    from maddening.surrogates.replace import replace_node
-                    replace_node(self.gm, node_name, surrogate)
-                    self.gm.compile()
-                    self._active_surrogates.add(node_name)
-                    self._reset_state()
+                surrogate = result.to_node(
+                    name=node_name,
+                    timestep=orig_node.delta_t,
+                    initial_values=initial_values,
+                )
 
-            return {"status": "activated", "node": node_name}
+                from maddening.surrogates.replace import replace_node
+                replace_node(self.gm, node_name, surrogate)
+                self.gm.compile()
+                self._active_surrogates.add(node_name)
+                self._reset_state()
 
-        @app.post("/surrogate/deactivate/{node_name}", tags=["surrogate"], response_model=None)
-        def surrogate_deactivate(node_name: str) -> dict[str, str]:
-            """Restore the original physics node."""
+            return {"status": "activated", "node": node_name, "was_running": was_running}
+
+        @app.post("/surrogate/deactivate/{node_name}", tags=["surrogate"], response_model=None,
+                  openapi_extra=_route_openapi("POST", "/surrogate/deactivate/{node_name}"))
+        def surrogate_deactivate(node_name: str) -> Any:
+            """Restore the original physics node (**experimental in 0.4.0**,
+            to be hardened in 0.5.0; the runner is stopped first).  The graph is reset, and the streams are sent the reset
+            state at step 0; ``was_running`` as for activate."""
             if node_name not in self._original_nodes:
                 raise HTTPException(
                     status_code=400,
                     detail=f"No original node saved for '{node_name}'.",
                 )
 
-            with self._runner_lock:
+            deadline = time.monotonic() + _GRAPH_LOCK_TIMEOUT
+            with self._runner_control("deactivate a surrogate", deadline):
+                was_running = self._runner_running()
                 self._stop_runner_or_refuse("deactivate a surrogate")
-                with self._graph_access("deactivate a surrogate", write=True):
-                    return deactivate_locked(node_name)
+            try:
+                with self._graph_access("deactivate a surrogate", write=True,
+                                        deadline=deadline):
+                    return {**deactivate_locked(node_name), "was_running": was_running}
+            except HTTPException as exc:
+                return self._after_stopping_the_runner(exc, "deactivated", was_running)
 
         def deactivate_locked(node_name: str) -> dict[str, str]:
             """``POST /surrogate/deactivate``, holding the graph lock."""
@@ -3933,17 +4230,36 @@ class SimulationServer:
             and drag-and-drop into https://ui.perfetto.dev for an
             interactive flame-graph view of per-node + coupling
             overhead.
+
+            The live simulation is left as it was: its state and params are
+            restored after the profile, and the streams neither show nor
+            count the profiler's steps.
             """
+            from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
+                _restore_state_and_params,
+                _state_and_params_snapshot,
+            )
             from maddening.core.simulation.profiler import (
                 profile_graph, profile_report_to_perfetto,
             )
             n_steps = max(1, min(1000, int(n_steps)))
             n_warmup = max(0, min(50, int(n_warmup)))
             with self._graph_access("profile the graph", write=True):
+                # The profiler resets the graph to its initial state and
+                # steps it: the live state, the params and the streams are
+                # put back as they were.  The route used to leave the graph
+                # at the profiler's last step -- 0.09 s into a run that had
+                # been at 10 s -- while the streams' clock went on from 10 s.
+                undo = _state_and_params_snapshot(self.gm)
+                dirty = self.gm._dirty
                 try:
-                    report = profile_graph(self.gm, n_steps=n_steps, n_warmup=n_warmup)
+                    with self._relay_detached():
+                        report = profile_graph(self.gm, n_steps=n_steps, n_warmup=n_warmup)
                 except RuntimeError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
+                finally:
+                    _restore_state_and_params(self.gm, undo)
+                    self.gm._dirty = self.gm._dirty or dirty
             return profile_report_to_perfetto(report)
 
         @app.post("/sim/profile/jax/start", tags=["sim"], response_model=None)
@@ -3951,8 +4267,14 @@ class SimulationServer:
             """Begin a JAX-level XLA trace.
 
             All subsequent ``/sim/step`` and ``/sim/run`` calls (and
-            any runner steps) are recorded.  POST
-            ``/sim/profile/jax/stop`` to end the trace.  The trace
+            any runner steps) are recorded, for at most
+            :data:`MAX_JAX_TRACE_STEPS` steps or
+            :data:`MAX_JAX_TRACE_SECONDS` seconds: past either the trace
+            stops itself, writes its files, and ``GET
+            /sim/profile/jax/status`` says so.  JAX's profiler holds a
+            trace's events in memory until it stops, and a trace left
+            running grew the server without bound.  POST
+            ``/sim/profile/jax/stop`` to end it sooner.  The trace
             directory is returned in the stop response and can be loaded
             via TensorBoard's "Trace Viewer" plugin (which uses a
             Perfetto frontend).
@@ -3960,29 +4282,37 @@ class SimulationServer:
             from maddening.core.simulation.profiler import (
                 start_jax_trace, jax_trace_active,
             )
-            if jax_trace_active():
-                raise HTTPException(
-                    status_code=409, detail="A JAX trace is already active.",
-                )
-            try:
-                log_dir = start_jax_trace()
-            except RuntimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-            return {"status": "tracing", "log_dir": log_dir}
+            with self._trace_lock:
+                if jax_trace_active():
+                    raise HTTPException(
+                        status_code=409, detail="A JAX trace is already active.",
+                    )
+                try:
+                    log_dir = start_jax_trace()
+                except RuntimeError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc))
+                self._trace_steps = 0
+                self._trace_stopped_by = None
+                self._trace_started = time.monotonic()
+            return {"status": "tracing", "log_dir": log_dir,
+                    "max_steps": MAX_JAX_TRACE_STEPS, "max_seconds": MAX_JAX_TRACE_SECONDS}
 
         @app.post("/sim/profile/jax/stop", tags=["sim"], response_model=None)
         def sim_profile_jax_stop() -> dict[str, Any]:
-            """End the active JAX trace and return the log directory."""
-            from maddening.core.simulation.profiler import (
-                stop_jax_trace, jax_trace_active,
-            )
-            if not jax_trace_active():
-                raise HTTPException(
-                    status_code=409, detail="No JAX trace is active.",
-                )
-            log_dir = stop_jax_trace()
-            self._last_jax_trace_dir = log_dir
-            return {"status": "stopped", "log_dir": log_dir}
+            """End the active JAX trace and return the log directory.  A
+            409 when none is active -- naming the directory of one that
+            stopped itself at its budget."""
+            from maddening.core.simulation.profiler import jax_trace_active
+            with self._trace_lock:
+                if not jax_trace_active():
+                    detail = "No JAX trace is active."
+                    if self._trace_stopped_by not in (None, "a request"):
+                        detail += (f" The last one stopped itself after "
+                                   f"{self._trace_steps} steps ({self._trace_stopped_by}); "
+                                   f"its trace is in {self._last_jax_trace_dir}.")
+                    raise HTTPException(status_code=409, detail=detail)
+                log_dir = self._stop_trace("a request")
+            return {"status": "stopped", "log_dir": log_dir, "steps": self._trace_steps}
 
         @app.get("/sim/profile/jax/status", tags=["sim"], response_model=None)
         def sim_profile_jax_status() -> dict[str, Any]:
@@ -3990,6 +4320,10 @@ class SimulationServer:
             return {
                 "active": jax_trace_active(),
                 "last_trace_dir": getattr(self, "_last_jax_trace_dir", None),
+                "steps": self._trace_steps,
+                "max_steps": MAX_JAX_TRACE_STEPS,
+                "max_seconds": MAX_JAX_TRACE_SECONDS,
+                "stopped_by": self._trace_stopped_by,
             }
 
         # -- cloud endpoints ------------------------------------------------
@@ -4082,7 +4416,8 @@ class SimulationServer:
 
         @app.websocket("/ws/state")
         async def ws_state(websocket: WebSocket) -> None:
-            """Stream state snapshots as JSON at ~30 Hz.
+            """Stream state snapshots as JSON at ~30 Hz.  **Experimental in
+            0.4.0** (to be hardened in 0.5.0).
 
             Client may send JSON messages to configure the stream:
 
@@ -4104,7 +4439,7 @@ class SimulationServer:
             if not authorised:
                 return
             if not self._admit_stream():
-                await self._refuse_stream(websocket, "/ws/state")
+                await self._refuse_stream(websocket, "/ws/state", subprotocol)
                 return
             try:
                 await websocket.accept(subprotocol=subprotocol)
@@ -4152,7 +4487,8 @@ class SimulationServer:
 
         @app.websocket("/ws/state/binary")
         async def ws_state_binary(websocket: WebSocket) -> None:
-            """Stream state snapshots as binary at ~60 Hz.
+            """Stream state snapshots as binary at ~60 Hz.  **Experimental in
+            0.4.0** (to be hardened in 0.5.0).
 
             Protocol:
                 1. Server sends JSON text frame with the binary schema.
@@ -4184,7 +4520,7 @@ class SimulationServer:
             if not authorised:
                 return
             if not self._admit_stream():
-                await self._refuse_stream(websocket, "/ws/state/binary")
+                await self._refuse_stream(websocket, "/ws/state/binary", subprotocol)
                 return
             try:
                 await websocket.accept(subprotocol=subprotocol)
@@ -4288,6 +4624,7 @@ class SimulationServer:
         @app.websocket("/ws/render")
         async def ws_render(websocket: WebSocket) -> None:
             """Stream server-side rendered frames as compressed images.
+            **Experimental in 0.4.0** (to be hardened in 0.5.0).
 
             Protocol:
                 1. Server sends a JSON text frame with renderer config
@@ -4315,7 +4652,7 @@ class SimulationServer:
                 )
                 return
             if not self._admit_stream():
-                await self._refuse_stream(websocket, "/ws/render")
+                await self._refuse_stream(websocket, "/ws/render", subprotocol)
                 return
             try:
                 await websocket.accept(subprotocol=subprotocol)

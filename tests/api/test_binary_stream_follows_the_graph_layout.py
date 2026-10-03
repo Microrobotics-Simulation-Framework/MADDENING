@@ -72,15 +72,26 @@ def test_a_new_client_after_a_node_is_replaced_decodes_the_graphs_state(n_cells)
     _replace_rod(client, n_cells)
     with client.websocket_connect("/ws/state/binary") as ws:
         schema = ws.receive_json()
+        # The replacement published the graph's state: the first frame.
+        schema, frame = _next_frame(ws, schema)
+        rod = next(f for f in schema["fields"] if f["node"] == "a_rod")
+        assert rod["shape"] == [n_cells]
+        _assert_frame_is_the_state(frame, schema, client.get("/graph/state").json())
         assert client.post("/sim/step").status_code == 200
-        message = ws.receive()
-        while "text" in message:                 # a schema for the new layout
-            schema = __import__("json").loads(message["text"])
-            message = ws.receive()
-        frame = message["bytes"]
-    rod = next(f for f in schema["fields"] if f["node"] == "a_rod")
-    assert rod["shape"] == [n_cells]
+        schema, frame = _next_frame(ws, schema)
     _assert_frame_is_the_state(frame, schema, client.get("/graph/state").json())
+
+
+def _next_frame(ws, schema: dict) -> tuple[dict, bytes]:
+    """The next binary frame and the schema sent last before it."""
+    import json
+
+    message = ws.receive()
+    while "text" in message:
+        schema = json.loads(message["text"])
+        message = ws.receive()
+    assert len(message["bytes"]) == schema["frame_bytes"]
+    return schema, message["bytes"]
 
 
 @pytest.mark.parametrize("n_cells", [6, 2])
@@ -96,16 +107,22 @@ def test_a_client_connected_through_a_replacement_gets_the_new_schema_first(n_ce
         _replace_rod(client, n_cells)
         assert client.post("/sim/step").status_code == 200
         truth = client.get("/graph/state").json()
-        # The snapshot from before the replacement was sent already, so the
-        # first frame now is the new step's: laid out by the schema sent
-        # last before it, which must be the new layout's.
-        message = ws.receive()
-        while "text" in message:
-            schema = json.loads(message["text"])
-            message = ws.receive()
-        rod = next(f for f in schema["fields"] if f["node"] == "a_rod")
-        assert rod["shape"] == [n_cells], "the frame came under the old schema"
-        _assert_frame_is_the_state(message["bytes"], schema, truth)
+        # The removal and the addition publish the graph's state too (the
+        # stream may send either, both or neither before the step's): every
+        # frame is laid out by the schema sent last before it, and the
+        # step's frame comes in the new layout.
+        for _ in range(4):
+            schema, frame = _next_frame(ws, schema)
+            rod = [f for f in schema["fields"] if f["node"] == "a_rod"]
+            if rod and rod[0]["shape"] == [n_cells] and \
+                    decode_frame(frame, schema)[1].size == schema["total_floats"]:
+                try:
+                    _assert_frame_is_the_state(frame, schema, truth)
+                    break
+                except AssertionError:
+                    continue                     # the addition's frame, before the step
+        else:
+            pytest.fail("no frame of the step in the new layout")
 
 
 def test_a_snapshot_of_another_layout_gets_its_schema_first_whatever_published_it():

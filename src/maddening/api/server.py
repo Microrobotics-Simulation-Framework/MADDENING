@@ -2328,6 +2328,18 @@ def _restore_graph_structure(gm, snapshot: dict) -> None:
     gm._dirty = snapshot["dirty"]
 
 
+#: Held while :meth:`SimulationServer.create_app` builds an application, so
+#: apps are built one at a time.  FastAPI builds each route's fields inside
+#: ``warnings.catch_warnings()``, which saves the process's warnings
+#: filters and puts them back on the way out and is not thread-safe: two
+#: apps built at once in two threads put back each other's filters.  A
+#: warning FastAPI silences was shown -- raised, where warnings are errors
+#: -- and ``ignore::UserWarning`` could be left in the filters for good,
+#: silencing every MADDENING warning in the process from then on
+#: (MADD-ANO-174).
+_CREATE_APP_LOCK = threading.RLock()
+
+
 class SimulationServer:
     """Wraps a ``GraphManager`` with a FastAPI HTTP + WebSocket interface.
 
@@ -3050,7 +3062,17 @@ class SimulationServer:
             :data:`maddening.api.auth.UNAUTHENTICATED_PATHS` requires
             ``Authorization: Bearer <token>``, and ``/docs``, ``/redoc``
             and ``/openapi.json`` are not served at all.
+
+        Notes
+        -----
+        Safe to call from several threads at once: the apps are built one
+        at a time (see :data:`_CREATE_APP_LOCK`).
         """
+        with _CREATE_APP_LOCK:
+            return self._build_app()
+
+    def _build_app(self) -> FastAPI:
+        """:meth:`create_app`'s application, built under :data:`_CREATE_APP_LOCK`."""
         # Swagger UI is a browser page that fetches /openapi.json with no
         # Authorization header, so it cannot work behind a bearer token.
         # A half-working docs page that 401s on its own schema is worse

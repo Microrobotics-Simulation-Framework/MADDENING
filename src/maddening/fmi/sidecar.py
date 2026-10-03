@@ -377,8 +377,11 @@ class SidecarConfig:
         :class:`maddening.fmi.model_description.ModelDescription` this
         FMU was built from.  Used to validate snapshots on SetFMUState.
     step_fn : callable
-        ``step_fn(state, external_inputs) -> new_state``.  Typically
-        :meth:`GraphManager.step` bound to a particular graph.
+        ``step_fn(state, external_inputs) -> new_state``, or
+        ``step_fn(state, external_inputs, params)`` when ``params`` is
+        given: the graph's compiled step, ``GraphManager._compiled_step``.
+        :meth:`GraphManager.step` cannot serve -- it takes no state and
+        advances the graph's own.
     initial_state : dict
         The seed state at FMU instantiation time.
     unknown_fn : callable, optional

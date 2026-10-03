@@ -10431,5 +10431,6 @@ anomalies:
     verification:
       - "tests/fmi/test_communication_points.py::test_the_tolerance_is_a_millionth_of_the_master_step_at_any_step"
       - "tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance"
+      - "tests/fmi/test_communication_points.py::test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside"
       - "tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance"
     github_issue: null

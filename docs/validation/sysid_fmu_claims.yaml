@@ -2275,6 +2275,7 @@ claims:
     - tests/fmi/test_communication_points.py::test_the_wrapper_reports_the_start_time_and_refuses_a_jump
     - tests/fmi/test_communication_points.py::test_the_tolerance_is_a_millionth_of_the_master_step_at_any_step
     - tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance
+    - tests/fmi/test_communication_points.py::test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside
     - tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance
   status: verified
   notes: >-
@@ -2302,8 +2303,8 @@ claims:
     the bridge and the compiled wrapper; every call in every state the
     wrapper holds (Instantiated, Initialization Mode, Step Mode,
     Terminated, and an unknown one); a zero-length set; a failed terminate
-    and reset; fmi3EnterStepMode, the configuration-mode pair and
-    fmi3SetTime.
+    and reset; fmi3EnterStepMode, the configuration-mode pair,
+    fmi3SetTime and the discrete-state functions.
   oracle: each call's status, its log message and the unchanged model.
   tests:
     - tests/fmi/test_a_terminated_instance_only_reads_until_reset.py::test_step_set_and_initialize_are_refused_after_terminate

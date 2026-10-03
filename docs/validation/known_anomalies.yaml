@@ -1929,6 +1929,17 @@ anomalies:
       every node, including `BallNode` and `SpringDamperNode`, which
       MADD-ANO-013 does not name.
 
+      (4) Resolved for `SpringDamperNode` in 0.4.0 (B1 round-8 claims audit,
+      2026-10-03): the parameter guide's system-identification recipe and the
+      sysid demo run on this node, and under x64 both raised the carry
+      `TypeError` above (`run_scan_with_history`, `run_sweep`).  Its
+      `initial_state` now seeds position and velocity in the dtype `update`
+      produces from the node's constants -- `jnp.result_type(float32,
+      *params_pytree())`: float64 under x64 for constants given as Python
+      floats, float32 for constants given as float32, float32 with x64 off as
+      before -- so a freshly compiled spring graph scans under x64, in float64
+      when its constants are.  The other nodes named below still seed float32.
+
       Severity.  Recorded `minor` rather than `major`, on three grounds, each
       checked rather than assumed.  The graph-level failure is loud: a
       `TypeError` on the first scan, before any number is produced, naming the
@@ -1974,7 +1985,6 @@ anomalies:
       - "maddening.core.graph_manager.GraphManager.run_sweep"
       - "maddening.core.node.SimulationNode.params_pytree"
       - "maddening.nodes.ball.BallNode.initial_state"
-      - "maddening.nodes.spring.SpringDamperNode.initial_state"
       - "maddening.nodes.lbm.LBMNode.initial_state"
       - "maddening.core.simulation.implicit.implicit_euler_step"
       - "maddening.core.simulation.integrators.integrate_node"
@@ -2000,11 +2010,21 @@ anomalies:
       hand it: `implicit_euler_step(node.implicit_residual, jax.tree.map(
       lambda v: v.astype(jnp.float64), state), bi, dt)` solves in float64.
       Leaving `jax_enable_x64` off is the fourth option and the supported one.
-    resolution_status: "open"
-    resolution_version: null
-    residual_risk: null
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Only the spring's surface is resolved.  Every other node that seeds its
+      state in float32 -- `BallNode`, `RigidBodyNode`, `RigidBody2DNode`,
+      `LBMNode` and any user node written the same way -- still refuses a
+      graph scan under x64 on a freshly compiled graph, `step()` still
+      promotes such a seed silently, and `implicit_euler_step` and the
+      `update` / `integrate_node` dtype divergence are unchanged; the
+      workarounds above apply to them as before.  A spring whose constants
+      mix float32 and float64 seeds float64 and runs in float64.
     verification:
       - "tests/core/test_x64_graph_scan_limitation.py"
+      - "tests/core/test_x64_graph_scan_limitation.py::TestTheSpringSeedsItsStateInItsConstantsDtype::test_python_float_constants_scan_in_float64_under_x64"
+      - "tests/core/test_x64_graph_scan_limitation.py::TestTheSpringSeedsItsStateInItsConstantsDtype::test_float32_constants_keep_a_float32_scan_under_x64"
       - "tests/core/test_x64_graph_scan_limitation.py::TestTheSolverPathsUnderX64::test_implicit_euler_step_refuses_a_float32_state_whatever_the_params"
       - "tests/core/test_x64_graph_scan_limitation.py::TestTheSolverPathsUnderX64::test_update_and_integrate_node_disagree_in_dtype_but_not_in_value"
       - "tests/core/test_coupling_accelerators_under_x64.py::test_a_float32_group_steps_and_scans_under_x64"

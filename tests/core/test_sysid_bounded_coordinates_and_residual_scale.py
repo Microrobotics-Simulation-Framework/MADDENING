@@ -448,7 +448,14 @@ def test_fit_lm_answers_the_same_in_every_unit_system(x64):
     damping in SI units (its column is small beside the log stiffness'):
     two iterations, ``converged=True``, damping at 3x its truth, where the
     same spring in tonnes reached the truth.  Per column, both do, in about
-    the same number of iterations."""
+    the same number of iterations: counted to the truth's neighbourhood (the
+    loss under ``64 eps`` of its start in the working precision), not to the
+    run's end.  The iterations
+    after that are the rounding floor's, and their number is not a property
+    of the units: since the fitters evaluate the leaves no step moves as
+    they went in (SYS-071), the unmasked mass is the recording's to the bit,
+    the float64 loss can reach exactly 0.0, and the two systems take 6 and
+    10 iterations to get there, where both used to stop near 2.7e-29."""
     with _precision(x64):
         runs = {}
         for name, (m, k, c_true) in _UNITS.items():
@@ -456,7 +463,11 @@ def test_fit_lm_answers_the_same_in_every_unit_system(x64):
             assert res.converged, name
             assert _damping(res) == pytest.approx(c_true, rel=2e-4), name
             assert float(res.params["nodes"]["s"]["stiffness"]) == pytest.approx(k, rel=1e-5)
-            runs[name] = res.n_iter
+            losses = np.asarray(res.losses, np.float64)
+            eps = float(np.finfo(np.float64 if x64 else np.float32).eps)
+            near = losses <= 64 * eps * losses[0]
+            assert near.any(), (name, losses)
+            runs[name] = int(np.argmax(near))
         assert abs(runs["SI"] - runs["tonnes"]) <= 2, runs
 
 

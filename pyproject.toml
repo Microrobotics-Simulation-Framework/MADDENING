@@ -270,6 +270,11 @@ filterwarnings = [
     # nodes and cycle staggering -- expected in unit tests with minimal graphs.
     "ignore:WARNING. node .* is disconnected:UserWarning",
     "ignore:WARNING. cycle detected:UserWarning",
+    # ... and about a coupling group whose block staggers an edge between two
+    # components (MADD-ANO-159): the drawn graphs of the serialisation and
+    # differential properties carry such groups.  Its own tests record it
+    # with catch_warnings(record=True) and simplefilter("always").
+    "ignore:.* is read from the previous step although no cycle runs through it:UserWarning",
     # RigidBody2DNode is deprecated but existing tests still exercise it
     "ignore:RigidBody2DNode is deprecated:DeprecationWarning",
     # solver='fori' is deprecated; the fori-vs-ift parity tests keep

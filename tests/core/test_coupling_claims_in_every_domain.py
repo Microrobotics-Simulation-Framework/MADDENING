@@ -168,7 +168,7 @@ class Config:
     subcycled: bool = False
     runner: str = "steps"          # "steps", "vmap", "adaptive", "restart"
     #: Run the strict_convergence scenario in this process.  The sharded
-    #: domain cannot: its raise aborts the process (see its module).
+    #: domain runs it in a subprocess instead (see its module).
     strict: bool = True
 
     def group(self, kind: str) -> dict:
@@ -1040,11 +1040,26 @@ def _a_non_finite_state(run: DomainRun):
     _fail(bad, "a non-finite state did not read residual=inf, converged=False")
 
 
-def _spectral_eps(r: Record) -> float:
+def _spectral_tolerance(r: Record) -> float:
     """The resolution ``rho_spectral`` is documented to: "exact ... to
-    float32", whatever the group's dtype (a 16-bit group's analysis runs in
-    float32, CPL-072; a float64 group's reads ~2e-8 off, measured)."""
-    return _eps(np.float32)
+    float32" for a float32 or wider group (64 float32 ``eps``; a float64
+    group's reads ~2e-8 off, measured), and for a bfloat16 or float16 group
+    "to about one ``eps`` of that dtype times the Jacobian's norm": its
+    analysis and its slot are float32 (CPL-072, CPL-087), but the
+    Jacobian-vector products are the map's own, rounded to its dtype."""
+    if r.eps > _eps(np.float32):
+        return r.eps * max(1.0, float(np.linalg.norm(pass_jacobian(r), 2)))
+    return 64 * _eps(np.float32)
+
+
+def pass_jacobian(r: Record) -> np.ndarray:
+    """One pass's Jacobian ``dF/dx`` in ``(x_a, x_b)``: ``M`` under Jacobi; under
+    Gauss-Seidel ``b`` reads the updated ``x_a``, so its row is ``g_b`` times
+    ``a``'s."""
+    m = r.matrix()
+    if r.group.iteration_mode == "gauss-seidel":
+        return np.array([m[0], m[1, 0] * m[0]])
+    return m
 
 
 def pass_radius(r: Record) -> float:
@@ -1067,7 +1082,7 @@ def _rho_spectral(run: DomainRun):
             continue
         seen += 1
         rho = pass_radius(r)
-        tol = 64 * _spectral_eps(r) + 2 * float(r.slot("spectral_residual"))
+        tol = _spectral_tolerance(r) + 2 * float(r.slot("spectral_residual"))
         if abs(d["rho_spectral"] - rho) > tol:
             problems.append(f"{_where(r)}: rho_spectral {d['rho_spectral']!r}, true {rho!r}")
     for r in _reported(run.single):
@@ -1288,8 +1303,9 @@ SKIP: dict = {
     # recorded state: the single-pass closed form and the jvp of one step
     # have no stepper analogue, and run_adaptive_scan's gradients stand in.
     "adaptive": {"CPL-006", "CPL-143"},
-    # strict_convergence's raise aborts a process stepping a sharded member;
-    # the sharded module checks it in a subprocess.
+    # strict_convergence's raise on a sharded member is checked in a
+    # subprocess by the sharded module: it aborted the process until
+    # MADD-ANO-162's fix, and a regression must not take the run with it.
     "sharded": {"CPL-033"},
 }
 _RUNS: dict = {}
@@ -1314,24 +1330,10 @@ ONLY: dict = {"CPL-142": {"predictors_warm_starts"}}
 #: The cells where the tree does not meet the claim: ``(domain, row) ->
 #: (exception, reason)``.  Each is a strict xfail whose reason starts with
 #: the row's id, and the row is ``failing`` in the inventory, its finding
-#: carrying the reproducer.
-_GRAD_16 = ("jax.grad and jax.jvp through a bfloat16 coupling group raise "
-            "NotImplementedError (TypeError from lineax's QR on jax 0.11.2): the IFT "
-            "rule's linear solve runs in the group's dtype, which LAPACK has no kernels "
-            "for; pending fix")
-_ADAPTIVE_ZERO = ("jax.grad through run_adaptive_scan is exactly 0.0 under aitken or "
-                  "IQN when a member carries a step-dependent field and the iterate "
-                  "starts at its fixed point; pending fix")
-KNOWN_FAILING: dict = {
-    **{("16bit", row): (_UNSUPPORTED_DTYPE, f"{row}: {_GRAD_16}")
-       for row in ("CPL-030", "CPL-093", "CPL-094", "CPL-140", "CPL-141", "CPL-143",
-                   "CPL-146")},
-    ("16bit", "CPL-087"): (AssertionError,
-                           "CPL-087: a bfloat16 group's rho_spectral is stored in bfloat16, "
-                           "exact to 2**-8 rather than to float32; pending fix"),
-    **{("adaptive", row): (AssertionError, f"{row}: {_ADAPTIVE_ZERO}")
-       for row in ("CPL-030", "CPL-093", "CPL-094", "CPL-140", "CPL-141", "CPL-146")},
-}
+#: carrying the reproducer.  Empty since the 16-bit adjoint solve
+#: (MADD-ANO-161), the 16-bit spectral slots (CPL-087) and the adaptive
+#: scan's gradient at an exact error estimate (MADD-ANO-160) were fixed.
+KNOWN_FAILING: dict = {}
 
 
 def _rows(domain):

@@ -185,17 +185,12 @@ claims:
     - tests/property/test_differential_leaves.py::test_non_float_leaves_keep_their_closed_form_under_every_accelerator
     - tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation
     - tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_every_other_iterator
-  status: failing
-  finding: >-
-    Under solver="ift" with acceleration="aitken" or "fixed" a typed PRNG key
-    in a member fails to trace: ValueError "dtype=key<fry> is not a valid
-    dtype for JAX type promotion" at the first step.  _run_coupled_block_impl
-    sizes the accelerator from _flatten(state_after_first) with
-    accel_fields=None, which concatenates every field of every member, the
-    key included (src/maddening/core/graph_manager.py:3726).  "none", the
-    IQN pair and solver="fori" step the same group.  Reproducer:
-    tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation.
-    Since 0.1.0 (MADD-ANO-158).
+  status: verified
+  notes: >-
+    Failing on d2429a6: under solver='ift' with 'aitken' or 'fixed' a typed
+    PRNG key in a member failed to trace, the accelerator sized from every
+    field (MADD-ANO-158). Fixed: that path flattens the floating fields
+    only, as the others do.
   domains:
     f32: tests/core/test_coupling_non_float_leaves.py::test_an_integer_field_named_in_accelerated_fields_is_left_out
     f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
@@ -1072,45 +1067,17 @@ claims:
     - tests/core/test_coupling_ift_forward_mode.py::test_forward_reverse_adjoint_identity
     - tests/core/test_coupling_while_default.py::test_forward_and_reverse_ad_through_previously_excluded_configs
     - tests/core/test_coupling_while_default.py::test_exits_early_and_reports_convergence
-  status: failing
-  finding: >-
-    16bit domain: jax.grad and jax.jvp through a coupled step raise
-    NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
-    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
-    solves (I - dF/dx) in the group's own dtype -- the dense path's
-    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
-    kernels; the diagnostics' analysis was widened to float32 for this
-    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
-    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
-    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
-    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
-    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
-    jax.grad(lambda p: gm.run_scan(2,
-    params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-030]
-    (strict xfail). Guess: _ift_linear_solve
-    (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-161. adaptive domain:
-    jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
-    is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
-    'iqn-imvj', when a member carries a field that changes from step to step
-    but not within a step's passes (a clock) and the iterate starts at its
-    fixed point (a steady forcing, after the first step). 'none' and 'fixed'
-    are right, and so is run_scan of the same graph. Silent. Releases 0.1.0
-    to 0.3.1 returned NaN under 'aitken' (the right value under 'iqn-ils')
-    for the same graph, through an external input. Reproducer: two scalar
-    relays x <- 0.6 u + b with a clock leaf t <- t + dt, b constant,
-    add_coupling_group(['a', 'b'], acceleration='aitken', tolerance=1e-4);
-    the derivative of run_adaptive_scan(0.375, max_steps=16,
-    dt_initial=0.125, dt_max=0.25, params=p)[0]['a']['x'] in
-    params['nodes']['a']['b'] is 0.0. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-030]
-    (strict xfail). Guess: the dt-parameterised step (_build_dt_step_fn,
-    graph_manager.py ~9518, which calls _run_coupled_block_impl with
-    runtime_dt): at a zero first-pass residual the accelerator's exit hands
-    back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-160.
+  status: verified
+  notes: >-
+    16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
+    or float16 group raised NotImplementedError (lineax's QR TypeError on
+    jax 0.11.2), the IFT rule's linear solve running in the group's dtype
+    (MADD-ANO-161). Fixed: the solve runs in float32 on the group's own
+    operator and is cast back. adaptive domain failing on d2429a6: jax.grad
+    through run_adaptive_scan read NaN (0.0 on 3fe7f275) where the
+    step-doubling estimates agreed exactly -- the controller's error norm, a
+    square root, had an infinite derivative there (MADD-ANO-160). Fixed with
+    a double where in adaptive._tree_error_norm.
   domains:
     f32: tests/core/test_coupling_ift_forward_mode.py::test_forward_reverse_adjoint_identity
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-030]'
@@ -1217,6 +1184,7 @@ claims:
     raising.  Default False: the condition is only reported."
   sources:
     - src/maddening/core/coupling/group.py:257 (CouplingGroup, strict_convergence)
+    - src/maddening/core/graph_manager.py:2997 (_strict_error_if)
   conditions: solver="ift".
   oracle: raises at 2x the threshold, not at the threshold; residual inside with the estimate outside raises.
   tests:
@@ -1226,23 +1194,17 @@ claims:
     - tests/core/test_coupling_convergence_reporting.py::test_a_group_that_reached_its_fixed_point_reports_it_converged
     - tests/core/test_coupling_while_default.py::test_unconverged_is_reported_not_raised_by_default
     - tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged
-  status: failing
-  finding: >-
-    sharded domain: strict_convergence on a coupling group with a sharded
-    member aborts the process instead of raising. error_if's host callback
-    raises on one device's thread while the other devices wait at the step's
-    all-reduce; XLA reports the stuck rendezvous after 20 s and aborts
-    (SIGABRT, exit 134) after about 60 s. The same group without a sharded
-    member raises at once. strict_convergence is new in 0.4.0: not shipped.
-    Reproducer: a scalar a <- 0.95 * mean(b) + 1 and an eight-entry field b
-    <- 0.95 * a + c under ShardedPointwiseNode over four CPU devices,
-    add_coupling_group(['a', 'b'], max_iterations=2, tolerance=1e-6,
-    strict_convergence=True); gm.step() hangs, then aborts. Pinned by
-    tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_strict_convergence_raises_with_a_sharded_member
-    (strict xfail, in a subprocess). Guess: the eqx.error_if in the IFT
-    forward's strict check (graph_manager.py, _run_ift_forward ~3756) inside
-    a sharded program; reduce the verdict across devices before the
-    callback, or raise on the host after the step. MADD-ANO-162.
+    - tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_a_converged_strict_step_with_a_sharded_member_is_the_unchecked_step
+  status: verified
+  notes: >-
+    sharded domain failing on d2429a6: strict_convergence's error_if
+    callback ran on one device while the others waited at the step's
+    all-reduce, and XLA aborted the process after about a minute
+    (MADD-ANO-162). Fixed: on a step spanning several devices the check
+    raises on every device of the mesh at once (_strict_error_if), and the
+    entry points drain the mesh before the error propagates. The sharded
+    cell runs the raise in a subprocess, so a regression cannot take the
+    test run with it.
   domains:
     f32: tests/core/test_strict_convergence_threshold.py::test_strict_convergence_raises_at_twice_the_threshold
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-033]'
@@ -3191,10 +3153,14 @@ claims:
     rho_spectral is "the spectral radius of dF/dx at the returned state, from
     eight Arnoldi steps ...  Exact (non-zero eigenvalues, to float32) for a
     group whose Jacobian has rank at most eight ... and an estimate from
-    below otherwise, which spectral_usable reports.  Only under
-    solver="ift" with diagnostics=True; NaN for "fori", for
-    diagnostics=False, at max_iterations=1 (no fixed point was solved) and
-    on a non-finite state."
+    below otherwise, which spectral_usable reports.  For a bfloat16 or
+    float16 group the analysis and the value reported are float32, but the
+    Jacobian-vector products are the map's own, rounded to the group's
+    dtype, so the radius is exact to about one eps of that dtype times the
+    Jacobian's norm ... rather than to float32.  Only under solver="ift"
+    with diagnostics=True; NaN for "fori", for diagnostics=False, at
+    max_iterations=1 (no fixed point was solved) and on a non-finite
+    state."
   sources:
     - src/maddening/core/graph_manager.py:7904 (coupling_diagnostics, rho_spectral)
     - src/maddening/core/coupling/acceleration.py:786 (arnoldi_spectral_radius)
@@ -3206,21 +3172,17 @@ claims:
     - tests/core/test_coupling_error_bound.py::test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed
     - tests/core/test_coupling_error_bound.py::test_on_a_nonlinear_map_the_spectrum_is_taken_at_the_returned_iterate
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
-  status: failing
-  finding: >-
-    16bit domain: rho_spectral reads to bfloat16's 2**-8, not 'to float32':
-    0.361328125 for a pass radius of 0.3618774 (rank two, resolved). The
-    analysis runs in float32 (_analysis_dtype) but the
-    coupling_<key>_rho_spectral slot is stored in the group's dtype, and
-    spectral_error_bound is derived on the host from the rounded slot. Over
-    a sweep of radii 0.90 to 0.99 the bound still held, with a margin of 4x
-    or more, so what is wrong is the reported number's precision. The
-    spectral keys are new in 0.4.0: not shipped, minor, no registry entry.
-    Reproducer: the battery's bfloat16 pair, diagnostics=True. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-087]
-    (strict xfail). Guess: the spectral slots' seed and write dtype in
-    graph_manager.py; keep them at _analysis_dtype, or say 'to the group's
-    dtype' in the docstring.
+    - tests/core/test_coupling_sixteen_bit_groups.py::test_the_spectral_slots_are_kept_in_the_analysis_dtype
+  status: verified
+  notes: >-
+    16bit domain failing on d2429a6: the spectral slots were stored in the
+    group's dtype, so a bfloat16 group's rho_spectral read to 2**-8
+    (0.361328125 for 0.3618774). Fixed: the five spectral slots are seeded
+    and written in _analysis_dtype. The radius itself comes from the map's
+    Jacobian-vector products rounded to the group's dtype, so the docstring
+    now says a 16-bit group's radius is exact to about one eps of its dtype
+    times the Jacobian's norm (0.0036 measured at radius 0.90), and the
+    battery's 16bit cell holds it to that.
   domains:
     f32: tests/core/test_coupling_error_bound.py::test_arnoldi_recovers_the_spectral_radius_of_a_resolved_spectrum
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-087]'
@@ -3491,45 +3453,17 @@ claims:
     - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit
     - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_every_cap
     - tests/property/test_differential_coupling_interactions.py::test_a_usable_gradient_bound_bounds_the_error_in_every_row
-  status: failing
-  finding: >-
-    16bit domain: jax.grad and jax.jvp through a coupled step raise
-    NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
-    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
-    solves (I - dF/dx) in the group's own dtype -- the dense path's
-    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
-    kernels; the diagnostics' analysis was widened to float32 for this
-    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
-    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
-    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
-    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
-    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
-    jax.grad(lambda p: gm.run_scan(2,
-    params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-093]
-    (strict xfail). Guess: _ift_linear_solve
-    (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-161. adaptive domain:
-    jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
-    is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
-    'iqn-imvj', when a member carries a field that changes from step to step
-    but not within a step's passes (a clock) and the iterate starts at its
-    fixed point (a steady forcing, after the first step). 'none' and 'fixed'
-    are right, and so is run_scan of the same graph. Silent. Releases 0.1.0
-    to 0.3.1 returned NaN under 'aitken' (the right value under 'iqn-ils')
-    for the same graph, through an external input. Reproducer: two scalar
-    relays x <- 0.6 u + b with a clock leaf t <- t + dt, b constant,
-    add_coupling_group(['a', 'b'], acceleration='aitken', tolerance=1e-4);
-    the derivative of run_adaptive_scan(0.375, max_steps=16,
-    dt_initial=0.125, dt_max=0.25, params=p)[0]['a']['x'] in
-    params['nodes']['a']['b'] is 0.0. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-093]
-    (strict xfail). Guess: the dt-parameterised step (_build_dt_step_fn,
-    graph_manager.py ~9518, which calls _run_coupled_block_impl with
-    runtime_dt): at a zero first-pass residual the accelerator's exit hands
-    back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-160.
+  status: verified
+  notes: >-
+    16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
+    or float16 group raised NotImplementedError (lineax's QR TypeError on
+    jax 0.11.2), the IFT rule's linear solve running in the group's dtype
+    (MADD-ANO-161). Fixed: the solve runs in float32 on the group's own
+    operator and is cast back. adaptive domain failing on d2429a6: jax.grad
+    through run_adaptive_scan read NaN (0.0 on 3fe7f275) where the
+    step-doubling estimates agreed exactly -- the controller's error norm, a
+    square root, had an infinite derivative there (MADD-ANO-160). Fixed with
+    a double where in adaptive._tree_error_norm.
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-093]'
@@ -3560,45 +3494,17 @@ claims:
   oracle: the float64 fixed point's gradient.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_on_an_affine_map_the_bound_reads_zero_against_the_exact_gradient
-  status: failing
-  finding: >-
-    16bit domain: jax.grad and jax.jvp through a coupled step raise
-    NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
-    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
-    solves (I - dF/dx) in the group's own dtype -- the dense path's
-    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
-    kernels; the diagnostics' analysis was widened to float32 for this
-    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
-    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
-    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
-    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
-    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
-    jax.grad(lambda p: gm.run_scan(2,
-    params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-094]
-    (strict xfail). Guess: _ift_linear_solve
-    (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-161. adaptive domain:
-    jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
-    is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
-    'iqn-imvj', when a member carries a field that changes from step to step
-    but not within a step's passes (a clock) and the iterate starts at its
-    fixed point (a steady forcing, after the first step). 'none' and 'fixed'
-    are right, and so is run_scan of the same graph. Silent. Releases 0.1.0
-    to 0.3.1 returned NaN under 'aitken' (the right value under 'iqn-ils')
-    for the same graph, through an external input. Reproducer: two scalar
-    relays x <- 0.6 u + b with a clock leaf t <- t + dt, b constant,
-    add_coupling_group(['a', 'b'], acceleration='aitken', tolerance=1e-4);
-    the derivative of run_adaptive_scan(0.375, max_steps=16,
-    dt_initial=0.125, dt_max=0.25, params=p)[0]['a']['x'] in
-    params['nodes']['a']['b'] is 0.0. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-094]
-    (strict xfail). Guess: the dt-parameterised step (_build_dt_step_fn,
-    graph_manager.py ~9518, which calls _run_coupled_block_impl with
-    runtime_dt): at a zero first-pass residual the accelerator's exit hands
-    back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-160.
+  status: verified
+  notes: >-
+    16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
+    or float16 group raised NotImplementedError (lineax's QR TypeError on
+    jax 0.11.2), the IFT rule's linear solve running in the group's dtype
+    (MADD-ANO-161). Fixed: the solve runs in float32 on the group's own
+    operator and is cast back. adaptive domain failing on d2429a6: jax.grad
+    through run_adaptive_scan read NaN (0.0 on 3fe7f275) where the
+    step-doubling estimates agreed exactly -- the controller's error norm, a
+    square root, had an infinite derivative there (MADD-ANO-160). Fixed with
+    a double where in adaptive._tree_error_norm.
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_on_an_affine_map_the_bound_reads_zero_against_the_exact_gradient
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-094]'
@@ -4389,45 +4295,17 @@ claims:
     - tests/core/test_coupling_solver_equivalence.py::test_the_ift_adjoint_disagrees_with_its_forward_by_about_the_residual
     - tests/core/test_coupling_ift_lineax.py::test_default_adjoint_solve_returns_the_analytic_gradient_when_stiff
     - tests/core/test_imvj_gradient_matches_finite_differences.py::test_the_gradient_through_a_multiphysics_imvj_group_matches_finite_differences
-  status: failing
-  finding: >-
-    16bit domain: jax.grad and jax.jvp through a coupled step raise
-    NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
-    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
-    solves (I - dF/dx) in the group's own dtype -- the dense path's
-    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
-    kernels; the diagnostics' analysis was widened to float32 for this
-    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
-    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
-    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
-    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
-    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
-    jax.grad(lambda p: gm.run_scan(2,
-    params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-140]
-    (strict xfail). Guess: _ift_linear_solve
-    (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-161. adaptive domain:
-    jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
-    is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
-    'iqn-imvj', when a member carries a field that changes from step to step
-    but not within a step's passes (a clock) and the iterate starts at its
-    fixed point (a steady forcing, after the first step). 'none' and 'fixed'
-    are right, and so is run_scan of the same graph. Silent. Releases 0.1.0
-    to 0.3.1 returned NaN under 'aitken' (the right value under 'iqn-ils')
-    for the same graph, through an external input. Reproducer: two scalar
-    relays x <- 0.6 u + b with a clock leaf t <- t + dt, b constant,
-    add_coupling_group(['a', 'b'], acceleration='aitken', tolerance=1e-4);
-    the derivative of run_adaptive_scan(0.375, max_steps=16,
-    dt_initial=0.125, dt_max=0.25, params=p)[0]['a']['x'] in
-    params['nodes']['a']['b'] is 0.0. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-140]
-    (strict xfail). Guess: the dt-parameterised step (_build_dt_step_fn,
-    graph_manager.py ~9518, which calls _run_coupled_block_impl with
-    runtime_dt): at a zero first-pass residual the accelerator's exit hands
-    back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-160.
+  status: verified
+  notes: >-
+    16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
+    or float16 group raised NotImplementedError (lineax's QR TypeError on
+    jax 0.11.2), the IFT rule's linear solve running in the group's dtype
+    (MADD-ANO-161). Fixed: the solve runs in float32 on the group's own
+    operator and is cast back. adaptive domain failing on d2429a6: jax.grad
+    through run_adaptive_scan read NaN (0.0 on 3fe7f275) where the
+    step-doubling estimates agreed exactly -- the controller's error norm, a
+    square root, had an infinite derivative there (MADD-ANO-160). Fixed with
+    a double where in adaptive._tree_error_norm.
   domains:
     f32: tests/core/test_coupling_solver_equivalence.py::test_the_ift_adjoint_is_the_sensitivity_of_the_fixed_point
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-140]'
@@ -4459,46 +4337,17 @@ claims:
     - tests/core/test_coupling_claims_graphs.py::test_the_ift_gradient_of_an_affine_group_is_the_same_under_every_acceleration
     - tests/core/test_coupling_ift_aitken.py::test_backward_parity_ift_aitken_through_jit
     - tests/core/test_coupling_ift_iqn_imvj.py::test_backward_parity_ift_iqn_imvj_through_jit
-  status: failing
-  finding: >-
-    16bit domain: jax.grad and jax.jvp through a coupled step raise
-    NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
-    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
-    solves (I - dF/dx) in the group's own dtype -- the dense path's
-    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
-    kernels; the diagnostics' analysis was widened to float32 for this
-    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
-    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
-    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
-    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
-    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
-    jax.grad(lambda p: gm.run_scan(2,
-    params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-141]
-    (strict xfail). Guess: _ift_linear_solve
-    (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-161. adaptive domain:
-    jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
-    is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
-    'iqn-imvj', when a member carries a field that changes from step to step
-    but not within a step's passes (a clock) and the iterate starts at its
-    fixed point (a steady forcing, after the first step). 'none' and 'fixed'
-    are right, and so is run_scan of the same graph. Silent. Releases 0.1.0
-    to 0.3.1 returned NaN under 'aitken' (the right value under 'iqn-ils')
-    for the same graph, through an external input. Reproducer: two scalar
-    relays x <- 0.6 u + b with a clock leaf t <- t + dt, b constant,
-    add_coupling_group(['a', 'b'], acceleration='aitken', tolerance=1e-4);
-    the derivative of run_adaptive_scan(0.375, max_steps=16,
-    dt_initial=0.125, dt_max=0.25, params=p)[0]['a']['x'] in
-    params['nodes']['a']['b'] is 0.0. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-141]
-    (strict xfail). Guess: the dt-parameterised step (_build_dt_step_fn,
-    graph_manager.py ~9518, which calls _run_coupled_block_impl with
-    runtime_dt): at a zero first-pass residual the accelerator's exit hands
-    back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-160.
+  status: verified
   notes: >-
+    16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
+    or float16 group raised NotImplementedError (lineax's QR TypeError on
+    jax 0.11.2), the IFT rule's linear solve running in the group's dtype
+    (MADD-ANO-161). Fixed: the solve runs in float32 on the group's own
+    operator and is cast back. adaptive domain failing on d2429a6: jax.grad
+    through run_adaptive_scan read NaN (0.0 on 3fe7f275) where the
+    step-doubling estimates agreed exactly -- the controller's error norm, a
+    square root, had an infinite derivative there (MADD-ANO-160). Fixed with
+    a double where in adaptive._tree_error_norm.
     Ambiguous until 0.4.0's claims fix ("the derivative is identical for all of
     them").  Reworded.
   domains:
@@ -4568,27 +4417,13 @@ claims:
     - tests/core/test_coupling_ift_gradient_in_any_units.py::test_the_tangent_and_the_adjoint_are_the_same_at_every_scale
     - tests/core/test_coupling_ift_gradient_in_any_units.py::test_the_adjoint_above_the_dense_fallback_is_the_same_at_every_scale
     - tests/property/test_differential_ift_derivatives.py::test_the_ift_derivatives_agree_with_dense_and_fori_at_every_scale
-  status: failing
-  finding: >-
-    16bit domain: jax.grad and jax.jvp through a coupled step raise
-    NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
-    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
-    solves (I - dF/dx) in the group's own dtype -- the dense path's
-    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
-    kernels; the diagnostics' analysis was widened to float32 for this
-    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
-    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
-    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
-    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
-    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
-    jax.grad(lambda p: gm.run_scan(2,
-    params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-143]
-    (strict xfail). Guess: _ift_linear_solve
-    (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-161.
+  status: verified
   notes: >-
+    16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
+    or float16 group raised NotImplementedError (lineax's QR TypeError on
+    jax 0.11.2), the IFT rule's linear solve running in the group's dtype
+    (MADD-ANO-161). Fixed: the solve runs in float32 on the group's own
+    operator and is cast back.
     Failing until 0.4.0's round-4 fix (MADD-ANO-113, since 0.3.0): atol was
     1e-8 + rtol * max|b|, so a cotangent below about 1e-8 met the GMRES
     test at x = 0 and the gradient came back exactly zero, reported
@@ -4704,46 +4539,17 @@ claims:
     - tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises
     - tests/core/test_solver_ift_lineax_is_core.py::test_default_coupling_group_differentiable_with_no_extra_installed
     - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
-  status: failing
-  finding: >-
-    16bit domain: jax.grad and jax.jvp through a coupled step raise
-    NotImplementedError ('Unsupported dtype bfloat16', float16 alike) from
-    jaxlib's LAPACK, or on jax 0.11.2 with lineax 0.1 a TypeError from
-    lineax's QR ('geqrf does not accept dtype bfloat16'). The IFT rule
-    solves (I - dF/dx) in the group's own dtype -- the dense path's
-    jnp.linalg.solve and GMRES's dense fallback -- and LAPACK has no 16-bit
-    kernels; the diagnostics' analysis was widened to float32 for this
-    reason (_analysis_dtype), the adjoint was not. Loud. Carried since
-    solver='ift' arrived (0.3.0), and on the default path since 0.4.0 made
-    'ift' the default (0.3.x's default 'fori' differentiated a bfloat16
-    group). Reproducer: two scalar bfloat16 relays x <- 0.6 u + b, each
-    reading the other, add_coupling_group(['a', 'b'], tolerance=0.25);
-    jax.grad(lambda p: gm.run_scan(2,
-    params=p)['a']['x'].astype(jnp.float32))(gm.params) raises. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-146]
-    (strict xfail). Guess: _ift_linear_solve
-    (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-161. adaptive domain:
-    jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
-    is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
-    'iqn-imvj', when a member carries a field that changes from step to step
-    but not within a step's passes (a clock) and the iterate starts at its
-    fixed point (a steady forcing, after the first step). 'none' and 'fixed'
-    are right, and so is run_scan of the same graph. Silent. Releases 0.1.0
-    to 0.3.1 returned NaN under 'aitken' (the right value under 'iqn-ils')
-    for the same graph, through an external input. Reproducer: two scalar
-    relays x <- 0.6 u + b with a clock leaf t <- t + dt, b constant,
-    add_coupling_group(['a', 'b'], acceleration='aitken', tolerance=1e-4);
-    the derivative of run_adaptive_scan(0.375, max_steps=16,
-    dt_initial=0.125, dt_max=0.25, params=p)[0]['a']['x'] in
-    params['nodes']['a']['b'] is 0.0. Pinned by
-    tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-146]
-    (strict xfail). Guess: the dt-parameterised step (_build_dt_step_fn,
-    graph_manager.py ~9518, which calls _run_coupled_block_impl with
-    runtime_dt): at a zero first-pass residual the accelerator's exit hands
-    back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-160.
+  status: verified
   notes: >-
+    16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
+    or float16 group raised NotImplementedError (lineax's QR TypeError on
+    jax 0.11.2), the IFT rule's linear solve running in the group's dtype
+    (MADD-ANO-161). Fixed: the solve runs in float32 on the group's own
+    operator and is cast back. adaptive domain failing on d2429a6: jax.grad
+    through run_adaptive_scan read NaN (0.0 on 3fe7f275) where the
+    step-doubling estimates agreed exactly -- the controller's error norm, a
+    square root, had an infinite derivative there (MADD-ANO-160). Fixed with
+    a double where in adaptive._tree_error_norm.
     It lied for a non-finite cotangent until 0.4.0's fix (MADD-ANO-154):
     the gradient read exactly 0.0, reported successful, where dense and
     fori read NaN.  The generated cotangents of the property test are
@@ -5484,6 +5290,7 @@ claims:
   sources:
     - src/maddening/core/coupling/group.py:56 (CouplingGroup, nodes)
     - src/maddening/core/graph_manager.py:1478 (_loop_through_outside_nodes)
+    - src/maddening/core/graph_manager.py:1516 (_staggered_across_components)
   conditions: >-
     any group, any build order. Not claimed for multi-rate graphs,
     sub-cycled groups, run_adaptive or sharded graphs.
@@ -5495,16 +5302,14 @@ claims:
     - tests/property/test_differential_coupling_topologies.py::test_compile_warns_exactly_for_a_group_inside_a_larger_loop
     - tests/property/test_differential_coupling_topologies.py::test_a_drawn_topology_reproduces_the_monolithic_reference
     - tests/property/test_differential_coupling_topologies.py::test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late
-  status: failing
-  finding: >-
-    Nothing checks the precondition.  Group {a, b} with a -> c -> b and
-    a -> b and no edge back is acyclic, but the group runs as one block
-    before c (_block_schedule), so c -> b -- an edge between two strongly
-    connected components -- is read from the previous step, and
-    _loop_through_outside_nodes, which looks at components only, says
-    nothing: b = 0.25 after one step where reading c this step gives 2.75
-    (graph_manager.py:1447 and 1478).  Reproducer: the strict xfail cited.
-    Since 0.1.0 (MADD-ANO-159).
+  status: verified
+  notes: >-
+    Failing on d2429a6: a group whose members are joined only through an
+    outside node, on no cycle, read that node a step late with no warning
+    (MADD-ANO-159). Fixed: compile() warns for every back edge joining two
+    strongly connected components, naming the edge and the group
+    (_staggered_across_components); the lag is what such a group computes,
+    so it is named, not removed.
   domains:
     f32: n/a
     f64: n/a

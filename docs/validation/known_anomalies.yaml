@@ -7364,7 +7364,12 @@ anomalies:
       `param_specs` enforces no bounds, as documented: it has no description
       to read them from.  The bounds the bridge adds are the advertised,
       inclusive ones; a `log` / `logit` leaf's open bound is advertised as
-      the nearest float inside it, so the envelope is the same.
+      the outermost value inside it `ParamSpec.check` accepts, so the
+      envelope is the same.  (Until the round-8 FMU fix it was the nearest
+      float inside, which the spec could refuse -- in the band `TINY <= |b|
+      < 2**-102`, or at a `logit` edge such as `max = -TINY` under
+      `(-1, 0)` -- and a bridge without specs took it: the acceptance
+      oracle's N2.)
     verification:
       - "tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs"
       - "tests/fmi/test_advertised_bounds.py::test_the_sidecars_own_specs_are_kept_and_not_written_into"
@@ -11355,6 +11360,11 @@ anomalies:
       reached the `uint32`-data keys and integer leaves it measured, and
       every path but this one.  Found by the coupling topology harness,
       whose nodes carry a typed key beside the integer leaves.
+
+      Resolved in 0.4.0: where the IFT path leaves `accel_fields` unset it
+      sizes the accelerator from the group's floating fields only, as
+      `solver="fori"` and the IQN pair already did.  An all-floating group
+      flattens exactly as before.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -11363,12 +11373,13 @@ anomalies:
     affected_components:
       - "maddening.core.graph_manager.GraphManager.step"
       - "maddening.core.coupling.group.CouplingGroup.accelerated_fields"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
-      Keep the key's `uint32` data (`jax.random.key_data`) in the state
-      instead of a typed key, or use `acceleration="none"`, an IQN
+      Before 0.4.0: keep the key's `uint32` data (`jax.random.key_data`) in
+      the state instead of a typed key, or use `acceleration="none"`, an IQN
       acceleration or `solver="fori"` on that group.
-    resolution_status: "open"
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation"
     github_issue: null
@@ -11390,6 +11401,13 @@ anomalies:
       CPU, jaxlib 0.11.0) and on the 0.4.0 development tree: `b = 0.25`
       after one step where reading `c` this step gives `2.75`.  Found by
       the coupling topology harness (CPL-187).
+
+      Resolved in 0.4.0: `compile()` warns for every back edge that joins
+      two strongly connected components, naming the edge, the group whose
+      block forced it, and the remedies (`_staggered_across_components`).
+      The lag itself is what such a group computes -- its members break the
+      documented precondition, and no schedule of the group as one block
+      reads `c` this step -- so it is now said, not removed.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -11400,16 +11418,20 @@ anomalies:
     affected_components:
       - "maddening.core.graph_manager.GraphManager.compile"
       - "maddening.core.schedule.identify_back_edges"
-    affected_versions: ">=0.1.0"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Put only nodes that form a cycle in a group, or put the outside node
       that joins two members in the group too.
-    resolution_status: "open"
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The step still reads the edge from the previous step, as the warning
+      says; a caller who ignores the warning gets the lag.
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late"
     github_issue: null
   - anomaly_id: "MADD-ANO-160"
-    title: "jax.grad through run_adaptive_scan of an accelerated coupling group is 0.0 when a member carries a step-dependent field and the iterate starts at its fixed point"
+    title: "jax.grad through run_adaptive_scan was 0.0 or NaN where an attempt's step-doubling estimates agreed exactly, as for an accelerated coupling group whose iterate starts at its fixed point"
     description: >
       Under `acceleration="aitken"`, `"iqn-ils"` or `"iqn-imvj"`, the
       derivative of a coupled member's state through
@@ -11426,6 +11448,29 @@ anomalies:
       external input (checked on extracted trees of every tag).  Found by the
       coupling inventory's domain matrix: CPL-030, CPL-093, CPL-094, CPL-140,
       CPL-141 and CPL-146 fail in their `adaptive` domain.
+
+      The cause is the step-size controller, not the coupling solve.
+      `run_adaptive_scan` differentiates through its controller, whose next
+      step is `dt * safety * max(error_norm, 1e-10)**(-1/(order+1))`, and
+      `error_norm` is the RMS of the step-doubling differences, a square root
+      (`adaptive._tree_error_norm`).  Where the full step and the two half
+      steps land on one value the RMS is exactly zero, the square root's
+      derivative there is infinite, and the backward pass multiplied it by the
+      zero `max` sends back on its flat side.  The accelerated groups reach
+      their fixed point exactly, so their estimates agree; `"none"` stops short
+      of it and its estimates differ by its truncation, which is why it read
+      right.  The same happens without any coupling group: a memoryless or
+      resting node, or a step past `t_end` at `dt_min` whose change rounds
+      away.  How the infinite intermediate surfaces depends on the rest of
+      the program: exactly 0.0 on the tree that found it (3fe7f275), NaN on
+      the fix's base (d2429a6) under jaxlib 0.10.2, 0.11.0 and 0.11.2 with
+      the reproducer above, and NaN at the tags.
+
+      Resolved in 0.4.0: the norm is taken through a double `where`, so a
+      zero error has the zero derivative of `max`'s flat side and every
+      nonzero branch keeps its own derivative.  The reproducer reads 1.5625
+      under every acceleration, and matches `run_scan`'s gradient and a
+      central difference of `run_adaptive`.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -11436,13 +11481,24 @@ anomalies:
       gradient feeds is the caller's.
     affected_components:
       - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
-    affected_versions: ">=0.1.0"
+      - "maddening.core.simulation.adaptive._tree_error_norm"
+    affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
-      Differentiate through `run_scan` at a fixed step, or run the group with
-      `acceleration="none"` or `"fixed"` under `run_adaptive_scan`.
-    resolution_status: "open"
+      Before 0.4.0: differentiate through `run_scan` at a fixed step, or run
+      the group with `acceleration="none"` under `run_adaptive_scan`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The gradient is the derivative of the program `run_adaptive_scan`
+      runs, controller included: where an attempt's acceptance flips between
+      two nearby parameter values, the derivative and a finite difference
+      across the flip differ, as for any piecewise program.
     verification:
       - "tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive"
+      - "tests/core/test_adaptive_scan_gradient_where_the_error_estimate_is_exact.py::test_the_error_norm_has_a_finite_derivative_where_the_estimates_agree"
+      - "tests/core/test_adaptive_scan_gradient_where_the_error_estimate_is_exact.py::test_the_adaptive_scan_gradient_of_a_group_at_its_fixed_point_is_the_coupled_sensitivity"
+      - "tests/core/test_adaptive_scan_gradient_where_the_error_estimate_is_exact.py::test_the_adaptive_scan_gradient_matches_a_central_difference_of_run_adaptive"
+      - "tests/core/test_adaptive_scan_gradient_where_the_error_estimate_is_exact.py::test_an_uncoupled_node_whose_estimates_agree_has_a_finite_adaptive_scan_gradient"
     github_issue: null
   - anomaly_id: "MADD-ANO-161"
     title: "jax.grad through a 16-bit coupling group under solver=\"ift\" raises NotImplementedError"
@@ -11461,6 +11517,17 @@ anomalies:
       Found by the coupling inventory's domain matrix: CPL-030, CPL-093,
       CPL-094, CPL-140, CPL-141, CPL-143 and CPL-146 fail in their `16bit`
       domain.
+
+      Resolved in 0.4.0: a bfloat16 or float16 group's tangent and adjoint
+      solve runs in float32 on the group's own operator (`I - dF/dx` applied
+      in its dtype) and is cast back -- the dense path factors that
+      operator's exact matrix, the Krylov path iterates on it.  The Krylov
+      criterion is four units of the 16-bit dtype's roundoff: a float32
+      criterion is unreachable on an operator whose products are rounded to
+      16 bits (GMRES stalls and reports failure, which above 50 coupled
+      entries raised the adjoint error), and at four units GMRES converges
+      within about twice the dense LU's error, measured on contractions of 20
+      to 400 entries at radius 0.6 to 0.95.
     severity: "minor"
     safety_relevance: "not_safety_relevant"
     safety_relevance_rationale: >
@@ -11469,14 +11536,21 @@ anomalies:
       `"fori"` solver differentiates the same model.
     affected_components:
       - "maddening.core.graph_manager._ift_linear_solve"
-    affected_versions: ">=0.3.0"
+    affected_versions: ">=0.3.0, <0.4.0"
     workaround: >
-      Hold the group's fields in float32 to differentiate it, or pass
-      `solver="fori"` (deprecated) for the derivative of the unrolled
-      iterate.
-    resolution_status: "open"
+      Before 0.4.0: hold the group's fields in float32 to differentiate it,
+      or pass `solver="fori"` (deprecated) for the derivative of the
+      unrolled iterate.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The derivative is the 16-bit map's, to the 16-bit output's resolution:
+      a few units of the dtype's roundoff times the conditioning
+      `1 / (1 - rho)`, not float32's.
     verification:
       - "tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group"
+      - "tests/core/test_coupling_sixteen_bit_groups.py::test_the_ift_gradient_of_a_sixteen_bit_group_is_its_coupled_sensitivity"
+      - "tests/core/test_coupling_sixteen_bit_groups.py::test_a_sixteen_bit_group_above_the_dense_fallback_differentiates_by_gmres"
     github_issue: null
   - anomaly_id: "MADD-ANO-162"
     title: "strict_convergence on a coupling group with a sharded member aborts the process"
@@ -11490,6 +11564,19 @@ anomalies:
       the same group raises at once.  `strict_convergence` is new in 0.4.0, so
       no release carried it.  Found by the coupling inventory's domain matrix:
       CPL-033 fails in its `sharded` domain.
+
+      Resolved in 0.4.0: on a step that spans several devices (a sharded
+      node's mesh, the graph's own, or a field placed over several devices)
+      the check runs inside a `shard_map` replicated over the mesh, so every
+      device raises at the same program point and none waits at a
+      collective; its result is a zero token OR-ed into the bits of the
+      checked state, an exact identity that keeps the check live without
+      gathering a sharded field (and, through its own derivative rule, an
+      identity to `jax.grad` and `jax.jvp`).  The graph's entry points wait for such a
+      call and drain the mesh before the error propagates.  The reproducer
+      raises the documented error in about a second and the process exits
+      cleanly.  The adaptive scan's in-graph strict check takes the same
+      path.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -11500,13 +11587,26 @@ anomalies:
     affected_components:
       - "maddening.core.coupling.group.CouplingGroup"
       - "maddening.cloud.multigpu.sharded_node"
-    affected_versions: ">=0.4.0.dev0"
+    affected_versions: "none"
     workaround: >
-      Leave `strict_convergence` off on a group with a sharded member and read
-      `coupling_diagnostics()["converged"]` instead.
-    resolution_status: "open"
+      Not applicable to a tagged release.  On the affected development
+      builds: leave `strict_convergence` off on a group with a sharded member
+      and read `coupling_diagnostics()["converged"]` instead.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Every device raises, and Python sees the first device's error while the
+      others may still be raising.  A bare multi-device program that exits
+      right after catching the error was seen to abort in teardown (3 runs in
+      6); through the graph's entry points, which wait for the call and drain
+      the mesh, no run of 22 did.  A caller that jits the raw step itself
+      gets the per-device raise without the drain.
     verification:
       - "tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_strict_convergence_raises_with_a_sharded_member"
+      - "tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_the_token_is_an_exact_identity_on_every_value"
+      - "tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_the_token_is_an_identity_to_differentiation"
+      - "tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_the_checked_state_keeps_its_partitioning"
+      - "tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_a_converged_strict_step_with_a_sharded_member_is_the_unchecked_step"
     github_issue: null
   - anomaly_id: "MADD-ANO-163"
     title: "POST /checkpoint/load restored parameter values PUT /graph/params refuses -- past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string -- answered 200, and left a graph whose save did not reload and whose steps diverged"

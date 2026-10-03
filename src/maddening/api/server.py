@@ -99,6 +99,7 @@ from maddening.api.auth import (
 )
 from maddening.core._size_estimate import (
     AllocationEstimate,
+    constructor_arguments,
     estimate_allocation,
     format_bytes,
     format_count,
@@ -475,14 +476,9 @@ def _oversized_param(value: Any, path: str = "", *, integers: bool = True) -> Op
 def _constructor_default(cls: Any, key: str) -> Any:
     """The default *cls*'s constructor gives parameter *key*, or ``None``
     when it gives none (a required parameter, one taken by ``**kwargs``) or
-    the signature cannot be read."""
-    try:
-        param = inspect.signature(cls).parameters.get(key)
-    except (TypeError, ValueError):
-        return None
-    if param is None or param.default is inspect.Parameter.empty:
-        return None
-    return param.default
+    the signature cannot be read -- read by the one helper that binds a
+    request to a constructor (:func:`~maddening.core._size_estimate.constructor_arguments`)."""
+    return (constructor_arguments(cls, {}) or {}).get(key)
 
 
 def _oversized_new_node_param(cls: Any, params: dict[str, Any]) -> Optional[str]:
@@ -2274,7 +2270,12 @@ class SimulationServer:
         API is unauthenticated, and a request whose ``Host`` names
         anything else is refused with 403: that is how a DNS-rebinding web
         page reaches it.  Not consulted where the bearer token is demanded
-        (a non-loopback bind, or a routable peer).
+        (a non-loopback bind, or a routable peer).  Each entry must be a
+        host name -- an IP literal (an IPv6 one in brackets) or DNS labels
+        of letters, digits, hyphens and underscores, optionally with a
+        port, nothing around it -- or the constructor raises
+        ``ValueError``: an entry no ``Host`` header can match (``"a b"``,
+        ``"*.example.com"``, ``"user@host"``) used to be taken.
 
     Attributes
     ----------

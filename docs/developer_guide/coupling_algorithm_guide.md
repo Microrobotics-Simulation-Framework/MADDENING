@@ -478,7 +478,7 @@ group already has or measures cheaply:
    the resolvent at the fixed point.  On a convex map at `F'(x*) = 0.99`,
    0.65–4.5% short, the bound without it read 0.20–0.96x the true error
    with the flag true; `h` there is 0.48–0.58, so two of those points now
-   read `inf` and two hold at 3.0–3.5x.  Along `δ` alone the Jacobian's
+   read `inf` and two hold at 3.3–4.0x.  Along `δ` alone the Jacobian's
    change can be far smaller than in the directions `δ` hardly moves: on a
    bilinear pair stopped two passes in, `h` read 0.37 along `δ` and is 0.65
    affine-covariantly, the fixed point lay 0.568 away against a radius of
@@ -524,13 +524,17 @@ construction:
 
 | fixture | `bound / true` |
 |---|---|
-| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.10–2.10 for `d/da`, 8.5–10.5 for `d/dg` |
-| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.12–1.16 for `d/dg`, 3.06–3.30 for `d/da` |
+| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.10–3.05 for `d/da`, 9.1–12.6 for `d/dg` |
+| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.17–1.22 for `d/dg`, 3.08–3.58 for `d/da` |
 | affine `a + g u`, `d/dg` (`d/da` is exact) | 1.35 at every cap |
 | spring pair (`k = 6000`, `c = 60`, `dt = 0.01`), stiffness and mass of each node, caps 2–6 | 1.19–1.70 |
-| two-mode, concave slow mode (`q = -0.014`), `converged=True` | 25 (with `error_estimate`'s distance: 40x short) |
+| two-mode, concave slow mode (`q = -0.014`), `converged=True` | 26 (with `error_estimate`'s distance: 40x short) |
 
-Re-measured after 0.4.0's round-5 fix (the resolvent applied exactly to
+Re-measured after 0.4.0's round-6 fix (the affine-covariant Kantorovich
+term and the Newton step's second-order miss, which raise the curved
+rows -- 1.10–2.10 and 8.5–10.5 concave, 1.12–1.16 and 3.06–3.30 convex,
+25 on the two-mode case before it -- and leave the linear ones alone).
+Measured after 0.4.0's round-5 fix (the resolvent applied exactly to
 each secant, one probe per entry, full-operator Kantorovich).  Before it
 the same table read 1.21–2.37 and 9.4–11.5 (concave), 1.29–1.36 and
 3.57–3.80 (convex), 1.81 (affine) and 83 on the two-mode case at
@@ -540,8 +544,8 @@ spring pair of the first edition (7–11x) is not in the tree, and the pair
 above, with the same stiffness-to-damping balance and stable as a coupled
 pair (MADD-ANO-098), reads 1.34–2.71x on the old bound.  The parameter
 with the larger relative error reads near the distance's own margin from
-cap 4 on, and more at cap 3 (2.10 on the concave map), where the
-Newton–Kantorovich factor below is largest; the other reads its gap to
+cap 4 on, and more at cap 3 (3.05 on the concave map), where the
+Newton–Kantorovich terms are largest; the other reads its gap to
 the worst probe as well.
 
 **What it is not — read this before using it.**  It is a statement

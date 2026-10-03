@@ -9297,12 +9297,13 @@ class GraphManager:
               float32) at every cap of a ``max_iterations`` sweep that
               stops the forward early by construction (caps 3-8): never
               below the true error on a concave and a convex map,
-              1.1-2.1x it for the parameter whose error is the larger
-              and up to 10.5x for the other, which reads its gap to the
-              worst probe; 1.35x for a parameter multiplying the state
-              of an affine map; 1.19-1.70x for a spring pair's
+              1.1-3.1x it for the parameter whose error is the larger
+              and up to 12.6x for the other, which reads its gap to the
+              worst probe (1.1-2.1x and 10.5x before 0.4.0's round-6
+              Kantorovich terms); 1.35x for a parameter multiplying the
+              state of an affine map; 1.19-1.70x for a spring pair's
               stiffnesses and masses (``k = 6000``, ``c = 60``, ``dt =
-              0.01``, caps 2-6); 25x on a hidden slow mode.  The distance carries the
+              0.01``, caps 2-6); 26x on a hidden slow mode.  The distance carries the
               residual's float resolution, as ``"spectral_error_bound"``
               does, so a stalled iterate no longer reads ``0.0`` (it did,
               against true errors of 1.5-3% at ``F'(x*) = 0.999``); where
@@ -9329,7 +9330,7 @@ class GraphManager:
               resolvent at ``x*``.  Uncorrected it read 0.20-0.96x the
               true error, flag ``True``, at ``F'(x*) = 0.99`` with the
               forward 0.65-4.5% short; ``h`` there is 0.48-0.58, so two
-              of those four now read ``inf`` and two hold at 3.0-3.5x.
+              of those four now read ``inf`` and two hold at 3.3-4.0x.
               With ``h`` along ``delta`` alone and no second-order term
               it read 0.986x the true error at ``max_iterations=2``
               (``h = 0.19``) and 0.81x on a pair whose ``h`` read 0.37

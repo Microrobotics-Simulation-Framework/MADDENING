@@ -3357,7 +3357,7 @@ claims:
     iterate ... Read it as |g_k - g*| <= bound * |g_k| for the gradient with
     respect to one scalar constant"; measured never below the true error at
     caps 3-8 on concave, convex and affine maps, 1.19-1.70x on a spring pair,
-    25x on a hidden slow mode.
+    26x on a hidden slow mode.
   sources:
     - src/maddening/core/graph_manager.py:8023 (coupling_diagnostics, gradient_relative_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#gradient_relative_error_bound-the-gradient-not-the-solve

@@ -354,7 +354,9 @@ direction, so none of them is separately determined.  Read `rank` rather
 than `cond` for that verdict: `cond` is `eigvals[-1] / eigvals[0]` and in
 float32 rescaling the residual (by `noise_std`, say) can round the
 smallest eigenvalue to zero and turn a large `cond` into `inf`, whereas
-`rank`'s threshold scales with the matrix.  Freeze one of them, then fit:
+`rank`'s threshold scales with the matrix (until the matrix itself leaves
+float32's normal range, which `fim` reports with a
+`PrecisionLimitWarning`).  Freeze one of them, then fit:
 
 `scale="relative"` — the default, and the coordinates the eigenvectors
 above are in — multiplies each Jacobian column by the parameter's value,

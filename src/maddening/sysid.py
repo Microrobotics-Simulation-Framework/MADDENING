@@ -760,7 +760,14 @@ class FIMReport:
     undetermined.  Unlike ``cond`` the verdict does not move when the
     residual is rescaled (by ``noise_std``, say), because the threshold
     scales with the matrix; a float32 ``cond`` can flip between a finite
-    number and ``inf`` under exactly that rescaling.
+    number and ``inf`` under exactly that rescaling.  That holds while
+    ``F`` can be formed: once the cutoff ``rank_rtol * max(eigvals)``
+    falls below ``2 * m * tiny`` of the precision (``m`` residual rows),
+    the products the smallest directions are built from flush to zero and
+    the verdict moves with the scale -- in float32, a residual of size
+    ``1e-3`` divided by ``noise_std=1e15`` -- and :func:`fim` says so with
+    a :class:`~maddening.warnings.PrecisionLimitWarning` (and
+    :class:`FIMCore` with ``precision_limited``) rather than reporting it.
 
     The verdict is a comparison of two numbers, and at float32 it can be
     a comparison of two numbers that differ by less than the
@@ -1049,6 +1056,40 @@ def _mask_flags(params: dict, mask: dict) -> list:
     )
 
 
+def _is_bool_flag(flag) -> bool:
+    """A ``bool``, a NumPy ``bool_`` or a 0-d boolean array."""
+    if isinstance(flag, (bool, np.bool_)):
+        return True
+    return (isinstance(flag, (np.ndarray, jax.Array)) and flag.ndim == 0
+            and flag.dtype == np.bool_)
+
+
+def _refuse_non_bool_flags(mask, flags) -> None:
+    """Refuse a caller's mask leaf that is not a bool (an explicit
+    ``mask=`` to a fitter, :func:`fim` or :func:`fim_core`).
+
+    Every reader decides a leaf with ``bool(flag)``, which reads any object
+    by its truthiness: a leaf of ``"False"`` -- a non-empty string --
+    selected its parameter, and the fit moved it.  ``0`` and ``1`` read as
+    the caller meant, but they are no more a flag than ``"False"`` is, and
+    a mask built by arithmetic can hold ``2`` or ``-1`` as easily; so only a
+    bool is a flag.
+    """
+    bad = [(path, flag) for (path, _), flag
+           in zip(jax.tree_util.tree_flatten_with_path(mask)[0], flags)
+           if not _is_bool_flag(flag)]
+    if not bad:
+        return
+    listed = ", ".join(f"mask{jax.tree_util.keystr(path)} = {flag!r} "
+                       f"({type(flag).__name__})" for path, flag in bad[:6])
+    more = f" (+{len(bad) - 6} more)" if len(bad) > 6 else ""
+    raise ValueError(
+        f"every mask leaf must be a bool; got {listed}{more}. A leaf is read "
+        "by its truthiness, so a string 'False' would select its parameter. "
+        "Build the mask with True / False, e.g. jax.tree.map(lambda _: False, "
+        "params) and then set the leaves to fit to True.")
+
+
 def _masked_indices(params: dict, mask: Optional[dict]) -> Optional[np.ndarray]:
     """Flat indices (in ``ravel_pytree`` order) of the leaves ``mask``
     marks True; ``None`` when there is no mask."""
@@ -1101,6 +1142,7 @@ def _fim_indices(params: dict, mask: Optional[dict]):
                 "parameters as floating-point arrays.")
         return None, excluded
     flags = _mask_flags(params, mask)
+    _refuse_non_bool_flags(mask, flags)
     asked = [jax.tree_util.keystr(path)
              for (path, leaf), k, flag in zip(entries, keep, flags)
              if bool(flag) and not k]
@@ -1204,6 +1246,7 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
         return resolved
     entries = jax.tree_util.tree_flatten_with_path(params)[0]
     flags = _mask_flags(params, mask)
+    _refuse_non_bool_flags(mask, flags)
     per_leaf = _resolve_specs(params, gm.param_specs())
     frozen = []
     for (path, _), flag, spec in zip(entries, flags, per_leaf):
@@ -1801,14 +1844,16 @@ class FIMCore:
         ``scale=None``.
     precision_limited : jnp.ndarray
         0-d bool: the rank verdict rests on a difference this precision
-        cannot resolve -- the condition :func:`fim` turns into a
-        :class:`~maddening.warnings.PrecisionLimitWarning`.  A live gate
-        should read it as a third outcome, "verdict unavailable",
-        rather than as a refusal.
+        cannot resolve, or was decided below the range ``F`` can be
+        formed in (:func:`_range_limited`) -- the conditions :func:`fim`
+        turns into a :class:`~maddening.warnings.PrecisionLimitWarning`.
+        A live gate should read it as a third outcome, "verdict
+        unavailable", rather than as a refusal.
     deciding_ratio : jnp.ndarray
         0-d float: the eigenvalue ratio nearest the cutoff in log
-        distance -- the number :func:`fim`'s warning quotes -- or
-        ``0.0`` when ``precision_limited`` is False.  Zero and not
+        distance -- the number :func:`fim`'s noise-floor warning quotes --
+        or ``0.0`` when ``precision_limited`` is False (or when no
+        eigenvalue ratio is positive).  Zero and not
         ``NaN``: a reported ratio is always strictly positive, so zero
         is unambiguous, and nothing in the core produces a ``NaN`` that
         would stop a ``jax_debug_nans`` run on a value it discarded.
@@ -1945,6 +1990,42 @@ def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
     return limited, jnp.where(limited, deciding, zero)
 
 
+def _range_limited(top: float, rank_rtol: float, n_residual: int, dtype,
+                   factor: float = _PRECISION_WARN_FACTOR) -> bool:
+    """Whether the rank cutoff sits where ``F = JᵀJ`` cannot be formed.
+
+    ``F``'s entries are sums of ``m`` products ``J_ij * J_ik``, and XLA's
+    CPU backend flushes a subnormal product or sum to zero, so an entry --
+    and an eigenvalue -- of order ``m * tiny`` or below loses whatever the
+    flushed products carried.  When the cutoff ``rank_rtol * max(eig)`` is
+    there, the eigenvalues that decide the rank are among those losses and
+    the verdict depends on the residual's scale, not on the data: in
+    float32 a residual divided by ``noise_std=1e15`` (``|J|`` near
+    ``1e-18``) dropped a determined direction, rank 2 to 1, with every
+    ``crb`` ``inf``, while the same residual at any smaller ``noise_std``
+    reported rank 2.  The test is ``rank_rtol * top < factor * m * tiny``
+    (``factor`` is :data:`_PRECISION_WARN_FACTOR`, the band's own margin);
+    a largest eigenvalue that is not positive and finite has no scale to
+    judge, and is not flagged.
+    """
+    if not (math.isfinite(top) and top > 0.0) or rank_rtol <= 0.0:
+        return False
+    tiny = float(np.finfo(dtype).tiny)
+    return rank_rtol * top < factor * max(int(n_residual), 1) * tiny
+
+
+def _device_range_limited(eigvals, rank_rtol: float, n_residual: int,
+                          factor: float = _PRECISION_WARN_FACTOR):
+    """:func:`_range_limited` on the device, as a 0-d bool; the threshold
+    is computed on the host (every operand but ``eigvals`` is static)."""
+    hi = eigvals[-1]
+    if rank_rtol <= 0.0:
+        return jnp.zeros((), dtype=bool)
+    tiny = float(np.finfo(eigvals.dtype).tiny)
+    threshold = factor * max(int(n_residual), 1) * tiny / rank_rtol
+    return jnp.isfinite(hi) & (hi > 0.0) & (hi < threshold)
+
+
 _SCALES = ("relative", "nominal", None)
 
 
@@ -2060,13 +2141,21 @@ def _nominal_column_vector(nominal, theta0):
 
     The width guard is here because this is where the dtype is known.
     ``ParamSpec`` already refuses ``lo >= hi``, so a width is positive
-    in float64 -- but it is applied at ``theta0``'s precision and
-    squared on the way into ``F = J.T @ J``, and a width of ``1e-300``
-    or a pair of bounds like ``(0.0, 1e39)`` is a zero or an ``inf``
-    column by the time it gets there.  A zero column is the defect this
-    scale exists to remove, so a width that does not survive both is
-    refused by name rather than let through.  Trace time, host side:
-    ``nominal`` is static, so no value of ``theta0`` is consulted.
+    in float64 -- but it is applied at ``theta0``'s precision, and a
+    width of ``1e-300`` or a pair of bounds like ``(0.0, 1e39)`` is a
+    zero or an ``inf`` multiplier there.  A zero column is the defect this
+    scale exists to remove, so a width that is not a positive, finite,
+    *normal* number at that precision (a subnormal one is flushed to zero
+    by the arithmetic it enters) is refused by name rather than let
+    through.  The width itself is tested, not its square: ``F`` is formed
+    from the scaled Jacobian ``J * width``, whose size depends on ``J`` as
+    much as on the width, and the square of a width is never computed; a
+    Gram product whose entries fall below the normal range is what
+    :func:`_range_limited` reports.  Testing the square (0.4.0 development builds)
+    refused the bounds ``(0, 1e-23)`` of a parameter whose natural size is
+    ``1e-23`` -- a 10 nm particle's volume in cubic metres -- whose report
+    is perfectly well conditioned.  Trace time, host side: ``nominal`` is
+    static, so no value of ``theta0`` is consulted.
     """
     dtype = theta0.dtype
     widths = np.ones(len(nominal), dtype=dtype)
@@ -2081,17 +2170,16 @@ def _nominal_column_vector(nominal, theta0):
         # finding: silence them here and read the result.
         with np.errstate(all="ignore"):
             w = np.asarray(width, dtype=dtype)
-            sq = w * w
-        if not (np.isfinite(w) and w > 0 and np.isfinite(sq) and sq > 0):
+        if not (np.isfinite(w) and w >= np.finfo(dtype).tiny):
             raise ValueError(
                 f"scale='nominal': the width of {name}'s bounds is {width!r}, "
-                f"which is not a positive finite number at {np.dtype(dtype)} "
-                f"once squared into F = J^T J ({w!r} -> {sq!r}). A column "
-                f"scaled by it would be zero or non-finite and the parameter "
-                f"would read as unidentifiable whatever the data say -- the "
-                f"failure this scale exists to remove -- so it is refused "
-                f"rather than reported. Widen or narrow the bounds to a "
-                f"width this precision can carry, or re-run under x64.")
+                f"which is not a positive, finite, normal number at "
+                f"{np.dtype(dtype)} ({w!r}). A column scaled by it would be "
+                f"zero or non-finite and the parameter would read as "
+                f"unidentifiable whatever the data say -- the failure this "
+                f"scale exists to remove -- so it is refused rather than "
+                f"reported. Widen or narrow the bounds to a width this "
+                f"precision can carry, or re-run under x64.")
         widths[j] = w
         has_width[j] = True
     if bool(has_width.all()):
@@ -2248,6 +2336,13 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
                                n_residual=n_residual)
     rank, crb = _device_rank_crb(eigvals, eigvecs, rtol, n_params)
     limited, ratio = _device_precision_limited(eigvals, rtol, floor)
+    # A cutoff below the range ``F`` can be formed in (:func:`_range_limited`)
+    # leaves the verdict as unavailable as one at the noise floor.
+    out_of_range = _device_range_limited(eigvals, rtol, n_residual)
+    ratio = jnp.where(limited | ~out_of_range, ratio,
+                      _device_precision_limited(eigvals, rtol, floor,
+                                                factor=math.inf)[1])
+    limited = limited | out_of_range
     return FIMCore(
         fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
         crb=crb, finite=finite, zero_scaled=zero_scaled,
@@ -2500,8 +2595,8 @@ def fim(
         scale is what a column needs and the midpoint of ``(-1, 1)`` is
         the ``0.0`` this mode exists to escape; ``ParamSpec`` enforces
         ``lo < hi``, so a width is never zero, and one that would round
-        to zero or overflow at the parameters' precision is refused by
-        name.  Columns are still dimensionless, so ``cond`` still
+        to zero, be subnormal or overflow at the parameters' precision is
+        refused by name (the width itself: its square is never formed).  Columns are still dimensionless, so ``cond`` still
         compares like with like, and the answer no longer depends on
         where in its range the parameter happens to sit.  A spec with
         no finite width has no nominal scale; that column keeps the
@@ -2679,9 +2774,10 @@ def fim(
         zero, negative, non-finite, or underflows the residual's dtype;
         ``specs`` given without ``scale="nominal"`` or withheld with it,
         or a ``specs`` tree that does not mirror ``params``; a bounds
-        width that is not positive and finite once squared at the
-        parameters' precision; a ``mask`` selecting an integer or
-        boolean leaf, or a ``params`` with no floating-point leaf).
+        width that is not a positive, finite, normal number at the
+        parameters' precision; a ``mask`` leaf that is not a bool, a
+        ``mask`` selecting an integer or boolean leaf, or a ``params``
+        with no floating-point leaf).
     FloatingPointError
         If ``F`` comes out non-finite -- a diverged rollout, an
         overflowing Jacobian, a residual holding a ``NaN``.  There is no
@@ -2811,6 +2907,27 @@ def fim(
             PrecisionLimitWarning,
             stacklevel=2,
         )
+    rtol_in_force = _resolve_rank_rtol(eigvals_h.dtype, n_params, rank_rtol,
+                                       n_residual=n_residual)
+    if _range_limited(hi, rtol_in_force, n_residual, eigvals_h.dtype):
+        dtype = eigvals_h.dtype
+        warnings.warn(
+            f"rank={rank} of {len(names)} was decided below {dtype}'s normal "
+            f"range: the cutoff rank_rtol * max(eigvals) = "
+            f"{rtol_in_force * hi:.4g} is under {_PRECISION_WARN_FACTOR:g} * "
+            f"m * tiny = {_PRECISION_WARN_FACTOR * n_residual * float(np.finfo(dtype).tiny):.4g} "
+            f"(m = {n_residual} residual rows). F = J^T J sums m products "
+            f"per entry and the arithmetic flushes a subnormal product to "
+            f"zero, so the eigenvalues that decide the rank have lost what "
+            f"those products carried: rank, crb and cond depend on the "
+            f"residual's scale here, not on the data, and are provisional "
+            f"together. Rescale the residual -- a smaller noise_std, or "
+            f"residual units nearer one -- so that F's entries are normal "
+            f"numbers"
+            + (", or re-run under x64." if dtype == np.float32 else "."),
+            PrecisionLimitWarning,
+            stacklevel=2,
+        )
     return FIMReport(
         fim=F, eigvals=eigvals, eigvecs=eigvecs, rank=rank, cond=cond,
         crb=crb, param_names=names, zero_scaled=zero_scaled,
@@ -2841,7 +2958,16 @@ def _check_hyper(name: str, value, *, gt=None, ge=None, lt=None, le=None,
     as merely unconverged; ``lam_up <= 1`` shrinks Levenberg-Marquardt's
     damping on a *rejected* step, which is the opposite of what
     rejecting a step means.
+
+    Only a real number is read: a Python or NumPy number, or a 0-d real
+    array.  ``float()`` alone accepted a ``bool`` -- ``fit(tol=True)`` read
+    as ``tol=1.0`` and reported ``converged=True`` at an unfitted start --
+    and a numeric string, so both are refused, as is any other type.
     """
+    if not _is_real_number(value):
+        raise ValueError(
+            f"{name} must be a finite number, got {value!r} "
+            f"({type(value).__name__}).{why}")
     try:
         v = float(value)
     except (TypeError, ValueError):
@@ -2857,6 +2983,24 @@ def _check_hyper(name: str, value, *, gt=None, ge=None, lt=None, le=None,
     if le is not None and not v <= le:
         raise ValueError(f"{name} must be at most {le}, got {v!r}.{why}")
     return v
+
+
+def _is_real_number(value) -> bool:
+    """Whether ``value`` is a real number a hyper-parameter may be: an
+    ``int``/``float`` (or other non-complex :class:`numbers.Number`), a
+    NumPy integer or floating scalar, or a 0-d integer or floating array --
+    and never a ``bool`` in any of those spellings."""
+    if isinstance(value, (bool, np.bool_)):
+        return False
+    if isinstance(value, (np.ndarray, jax.Array)):
+        return (value.ndim == 0 and value.dtype != np.bool_
+                and (jnp.issubdtype(value.dtype, jnp.integer)
+                     or jnp.issubdtype(value.dtype, jnp.floating)))
+    if isinstance(value, numbers.Real):
+        return True
+    # ``decimal.Decimal`` is a number that is not registered as ``Real``;
+    # ``complex`` is ``Complex`` and has no ordering to read a bound with.
+    return isinstance(value, numbers.Number) and not isinstance(value, numbers.Complex)
 
 
 def _check_count(name: str, value, *, minimum: int = 0) -> int:
@@ -2980,6 +3124,24 @@ _HOLD_LOSS_ROUNDINGS = 4.0
 #: ulps from the iterate rather than on it; it is far below anything a
 #: float32 fit determines (16 ulps is 1.9e-6 relative).
 _STEP_TOL_ULPS = 2.0 ** 4
+
+#: Damping candidates :func:`fit_lm` tries per iteration before it gives up
+#: on the iteration -- unless the floor rule is to judge it.  The rule says
+#: "every candidate was rejected, down to one damped within ``step_tol``",
+#: and twelve rungs of ``lam_up`` need not get there: under
+#: ``jax_enable_x64`` a noiseless spring fit at loss ``2e-30`` ended its
+#: twelfth rung at ``lam = 1e5`` with a relative step of ``4.4e-15``
+#: against a tolerance of ``3.6e-15``, one rung short, and was reported
+#: unconverged.  So after a run that has lowered the loss the ladder goes
+#: on, a decade or more a rung, until a candidate is accepted or within
+#: ``step_tol`` or the damping reaches :data:`_LM_LAMBDA_MAX` (at most 24
+#: more rungs, each one residual evaluation).
+_LM_LADDER = 12
+
+#: :func:`fit_lm`'s damping cap (and ``1e-12``, its floor): the ``lam`` at
+#: which a candidate is a gradient step ``1e12`` times shorter than the
+#: Gauss-Newton one.
+_LM_LAMBDA_MAX = 1e12
 
 
 
@@ -4421,7 +4583,15 @@ def fit_lm(
         the tolerance means the same under every transform.  A parameter
         whose value is exactly ``0`` has no relative resolution and meets
         it only with a step of exactly nothing there; give such a fit a
-        ``tol``.
+        ``tol``.  The same holds for a parameter whose *truth* is exactly
+        ``0`` (a damping of 0, say): the fit lands on the residual's
+        rounding noise around it -- ``1.3e-15`` for a noiseless float64
+        spring, ``0.0`` exactly in float32, where the bound clipped it --
+        and a step relative to a value that is itself rounding noise is
+        never within ``step_tol``, so such a run stops at its floor with
+        ``converged=False`` however small its loss (``4.6e-31`` there).
+        That is the flag being exact about what it tests, not a failed
+        fit: read ``best_loss``, or pass a ``tol`` at the noise floor.
 
         The proposal is tested whether or not it was accepted, because at
         the float floor its verdict carries no information: a fit that has
@@ -4440,8 +4610,13 @@ def fit_lm(
         tolerance resolves lowers the loss, which is the rounding floor.  A
         parameter the data determine only weakly needs that rule, because
         its proposal at the floor fits the residual's rounding noise and can
-        be many ulps of it.  Changed from an absolute ``1e-8`` during 0.4.0
-        development, before any release.
+        be many ulps of it.  For that rule the twelve damped candidates of
+        an iteration are extended -- a decade or more of ``lam`` each, up
+        to the cap of ``1e12`` -- until one is within ``step_tol``: twelve
+        rungs fell one short under ``jax_enable_x64`` (a relative step of
+        ``4.4e-15`` against ``3.6e-15`` at loss ``2e-30``), so the default
+        could not be met there.  Changed from an absolute ``1e-8`` during
+        0.4.0 development, before any release.
     hold_undetermined : bool
         Keep the fitted parameters out of the directions the data does not
         determine, exactly as :func:`fit` does and by the same shared
@@ -4657,7 +4832,18 @@ def fit_lm(
         # coupled solve can point such a coordinate outward); the retries,
         # damped towards the gradient, move it inward.
         stuck_inward = bounds.inward_descent(theta, J.T @ r, _physical(theta), rel_tol)
-        for attempt in range(12):
+        attempt, cand = -1, theta
+        while True:
+            attempt += 1
+            if attempt >= _LM_LADDER and not (
+                    progressed and not stuck_inward and lam < _LM_LAMBDA_MAX
+                    and not _within_step_tol(theta, cand)):
+                # The ladder's end -- unless the floor rule below would be
+                # asked to judge a ladder that stopped short of ``step_tol``:
+                # then it is extended to the damping cap
+                # (:data:`_LM_LADDER`), so the rule can see the shortest
+                # candidate it needs.
+                break
             cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype), bounds.lo, bounds.hi)
             r_new = residual_only(cand)
             loss_new = 0.5 * float(jnp.sum(r_new * r_new))
@@ -4676,7 +4862,10 @@ def fit_lm(
                 # Nothing to retry: every further candidate is shorter still.
                 stationary = True
                 break
-            lam = min(lam * lam_up, 1e12)
+            # Past the ladder, at least a decade a rung, so the extension
+            # reaches the cap in at most 24 rungs whatever ``lam_up`` is.
+            grow = lam_up if attempt + 1 < _LM_LADDER else max(lam_up, 10.0)
+            lam = min(lam * grow, _LM_LAMBDA_MAX)
         if not accepted and not stationary and progressed and not stuck_inward:
             # The floor rule.  Every candidate was rejected, down to one damped
             # within ``step_tol``: no step the tolerance resolves lowers the
@@ -4792,8 +4981,15 @@ def fit_multiple_shooting(
     its last iterate bit for bit; the iterate the last update produced is
     evaluated once more when the budget ran out).  The parameters and the
     window states are one point of the joint objective, so they are
-    selected together: :attr:`FitResult.best_loss` is the loss of exactly
-    the pair returned.  This fitter needed the selection more than
+    selected together: :attr:`FitResult.best_loss` is the loss of that
+    selected pair, as the run evaluated it, before the
+    ``hold_undetermined`` guard.  The window states are returned exactly
+    as selected; the parameters are too unless the guard held a direction
+    (``excited_rank`` below the count, ``hold_declined`` False), in which
+    case the returned pair's loss is within the guard's tolerance of
+    ``best_loss`` -- ``2**10 * eps`` relative plus the loss cost of
+    rounding the held point (see :class:`FitResult`) -- and not
+    necessarily equal to it.  This fitter needed the selection more than
     :func:`fit` does: started at the truth, with every window state
     stepped by Adam at a rate of ``lr``, it returned a loss of ``2e-1``
     from a start of ``1e-13`` before it selected.

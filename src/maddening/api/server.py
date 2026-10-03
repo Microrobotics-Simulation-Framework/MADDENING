@@ -4395,8 +4395,10 @@ class SimulationServer:
         @app.post("/sim/profile/jax/stop", tags=["sim"], response_model=None)
         def sim_profile_jax_stop() -> dict[str, Any]:
             """End the active JAX trace and return the log directory.  A
-            409 when none is active -- naming the directory of one that
-            stopped itself at its budget."""
+            409 when none is active -- saying, for one that stopped itself
+            at its budget, after how many steps and why, and that its
+            directory is ``last_trace_dir`` in ``GET
+            /sim/profile/jax/status`` (a 4xx detail names no server path)."""
             from maddening.core.simulation.profiler import jax_trace_active
             with self._trace_lock:
                 self._stop_trace_if_out_of_time()

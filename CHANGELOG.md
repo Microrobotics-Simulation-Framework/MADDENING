@@ -351,7 +351,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **sysid round-7 fixes** (MADD-ANO-138 to 141, never released): the identifiability guard holds an exact degeneracy under x64 and with float32 leaves in an x64 graph; `windowed_loss` replays coupling predictor and IQN-IMVJ warm starts across windows (zero loss at the truth); `fim` warns when its rank cutoff is below float32's normal range;
+- **sysid round-7 fixes** (MADD-ANO-147 to 150, never released): the identifiability guard holds an exact degeneracy under x64 and with float32 leaves in an x64 graph; `windowed_loss` replays coupling predictor and IQN-IMVJ warm starts across windows (zero loss at the truth); `fim` warns when its rank cutoff is below float32's normal range;
   bool and non-number hyper-parameters and non-bool mask leaves are refused; `ParamSpec.check` refuses a `log`/`logit` value without a finite coordinate; the nominal width guard tests the width, not its square; `fit_lm` reaches its float64 floor.
   Action: pass real numbers and bool mask leaves; a fit with a predictor or IQN-IMVJ group, or under x64, may return a different (correct) point.  SYS-071 is verified; SYS-123 to 126 are new.
 - **The identifiability guard decides the same in any units** (MADD-ANO-135, never released): its tests, hold and tolerance measure an identity parameter relative to its size, as `fim(scale="relative")` does;

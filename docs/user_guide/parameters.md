@@ -217,12 +217,14 @@ of every parameter it changes what `PUT /graph/params` asks, by the same
 code: a non-finite value, one outside its `ParamSpec` bounds, one the
 node's constructor refuses with the graph's other values (a rod past its
 Fourier limit at this graph's timestep), one that moves a mapped edge's
-points -- each is a 400 and nothing is loaded.  `GraphManager.load_state`
-in Python asks the first three itself (a `ValueError`, nothing loaded):
-a leaf it changes finite and inside its bounds, as `check_params` asks, and
-the values a save would carry taken by the constructor of each node it
-changes.  Both loads ask nothing of a leaf they leave at the value the graph
-holds, so a graph built outside its bounds reloads its own checkpoint.  `POST
+points -- each is a 400 and nothing is loaded.  Finiteness and the bounds
+are asked, per element, of a value that is neither the leaf's now nor the
+node's own, so a graph built outside its bounds reloads its own
+checkpoint.  `GraphManager.load_state` in Python does not ask these: like
+a `gm.params` write, it may hold a value outside a spec's bounds on
+purpose, and a graph whose parameters Python moved outside them must
+resume its own checkpoint into a freshly built graph.  It refuses only
+text and booleans for a numeric leaf, which no save writes.  `POST
 /graph/nodes` applies the same `ParamSpec` bounds to the values it is
 given, and refuses a boolean or text for a numeric parameter.
 

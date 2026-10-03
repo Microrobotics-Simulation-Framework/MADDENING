@@ -11388,7 +11388,7 @@ anomalies:
     github_issue: null
 
   - anomaly_id: "MADD-ANO-160"
-    title: "A checkpoint load -- POST /checkpoint/load and GraphManager.load_state -- restored parameter values the write paths refuse (past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string), answered 200, and left a graph whose save did not reload and whose steps diverged"
+    title: "POST /checkpoint/load restored parameter values PUT /graph/params refuses -- past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string -- answered 200, and left a graph whose save did not reload and whose steps diverged"
     description: >
       A checkpoint carries the graph's live parameter leaves, and the
       checkpoint route checked only that they fitted the graph's shapes and
@@ -11402,28 +11402,25 @@ anomalies:
       `SpringDamperNode`'s bound of 0, loaded the same way; `POST
       /graph/nodes` applied no `ParamSpec` bounds at all, so a REST graph
       could hold such a value and save it, and took a boolean for a float
-      constant.  `GraphManager.load_state` restored the same values for a
-      Python caller, whose `check_params` refuses them, and NumPy cast a
-      boolean member to 1.0 and a numeric string to its number.  Found by
+      constant.  Both loads cast a boolean member to 1.0 and a numeric
+      string to its number (NumPy, without a word).  Found by
       the round-7 REST claims audit (REST-093, REST-085) and the domain
       acceptance oracle (`test_differential_param_acceptance.py`, B2-H1,
       B2-L10, N3).  No tagged release carried it:
       checkpoints carry parameters since 0.4.0's development, and v0.3.1's
       `PUT /graph/params` checked nothing it could disagree with.
-      Resolved in 0.4.0: `load_state` refuses, before writing anything, a
-      text or boolean member for a numeric leaf, a parameter it changes that
-      `check_params` would refuse (non-finite or outside its bounds, graph
-      overrides included) and values the constructor of a node it changes
-      refuses; a leaf left at the value the graph holds is not asked, so a
-      graph built outside its bounds reloads its own checkpoint; the REST
-      route then
-      asks of every leaf the load changes the rest of what `PUT` asks, by the
-      same code (`_params_write_refusal`: the state's layout, a value the node
-      consumed when it was constructed, a mapping's points, the graph a save
-      would reload), against the graph as it was before the load, and
-      refuses with a 400 that loads nothing; `POST /graph/nodes` applies the
-      `ParamSpec` bounds `PUT` does and refuses a boolean or text for a
-      numeric parameter.
+      Resolved in 0.4.0: both loads refuse a text or boolean member for a
+      numeric leaf; the route asks of every leaf the load changes what `PUT`
+      asks, by the same code -- finite and inside its `ParamSpec` bounds (per
+      element, of a value that is neither the leaf's now nor the node's own,
+      the FMU `set_fmu_state` rule, so a graph built outside its bounds
+      reloads its own checkpoint), then `_params_write_refusal` (the node's
+      constructor with the graph's other values, the state's layout, a value
+      the node consumed when it was constructed, a mapping's points, the
+      graph a save would reload) -- against the graph as it was before the
+      load, and refuses with a 400 that loads nothing; `POST /graph/nodes`
+      applies the `ParamSpec` bounds `PUT` does and refuses a boolean or text
+      for a numeric parameter.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -11438,7 +11435,6 @@ anomalies:
       - "maddening.api.server.SimulationServer.create_app"
       - "maddening.api.server._loaded_params_refusal"
       - "maddening.core.simulation.checkpoint.load_state"
-      - "maddening.core.graph_manager.GraphManager.load_state"
     affected_versions: "none"
     workaround: >
       Not applicable to a tagged release.  On the affected development
@@ -11447,23 +11443,31 @@ anomalies:
     resolution_status: "resolved"
     resolution_version: "0.4.0"
     residual_risk: >
-      `check_params`, the FMU sidecar and the bridge still take a value only
-      the node's constructor refuses (MADD-ANO-047's residual; documented
-      difference D5 of the acceptance oracle).  `load_state` asks no more
-      than finiteness, the bounds and the constructor; the route's other
-      checks are REST's.  Neither load asks a leaf it leaves where it was,
-      so a value already outside its bounds (by construction, or written in
-      Python) stays until something changes it.
+      `GraphManager.load_state` does not ask the route's checks, by
+      decision (documented difference D6 of the acceptance oracle): a value
+      outside a `ParamSpec`'s bounds is one Python code may hold on purpose
+      (a `gm.params` write is not checked either), and a graph so written
+      must resume its own checkpoint into a freshly built graph -- there is
+      no telling that resume from a forged file.  A Python caller loading a
+      file it did not write gets what the file holds, as with a
+      `gm.params` write; `check_params` asks the bounds on demand.
+      `check_params`, the FMU sidecar and the bridge take a value only the
+      node's constructor refuses (MADD-ANO-047's residual; difference D5).
+      The route does not ask a value the graph holds or the node owns, so a
+      value already outside its bounds stays until something changes it.
     verification:
       - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_the_constructor_refuses_at_this_timestep_is_not_loaded"
       - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_outside_its_bounds_is_not_loaded"
       - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_and_a_params_write_give_the_same_verdict_on_every_value"
       - "tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_new_node_outside_its_param_spec_bounds_is_refused_as_a_params_write_is"
-      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_graph_manager_load_state_refuses_what_check_params_and_the_constructor_refuse"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_load_state_refuses_text_and_a_boolean_for_a_number"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_load_state_restores_what_python_may_hold_and_the_route_refuses"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_weight_matrix_is_asked_about_the_entries_a_load_moves"
       - "tests/property/test_differential_param_acceptance.py::test_every_restore_door_agrees_with_the_write_doors"
       - "tests/property/test_differential_param_acceptance.py::test_a_restore_door_refuses_what_the_write_doors_refuse"
       - "tests/property/test_differential_param_acceptance.py::test_a_node_is_not_built_with_a_boolean_for_a_float_constant"
       - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_graph_built_outside_its_bounds_reloads_its_own_checkpoint"
+      - "tests/property/test_differential_param_acceptance.py::test_load_state_restores_any_number_its_leaf_holds"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-161"

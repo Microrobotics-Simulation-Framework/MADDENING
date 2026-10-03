@@ -1956,13 +1956,15 @@ claims:
     it stands -- non-finite, outside its ParamSpec bounds, refused by the
     node's constructor with the graph's other values, one a node consumed at
     construction, one that moves a mapped edge's points, text or a boolean;
-    each asked of a parameter the load changes only, so a graph built
-    outside its bounds reloads its own checkpoint"; a missing file is a 404.
+    each asked of what the load changes only, and finiteness and the bounds
+    only of a value that is neither the leaf's now nor the node's own, so a
+    graph built outside its bounds reloads its own checkpoint"; a missing
+    file is a 404.
   sources:
     - src/maddening/api/README.md:148 (Checkpoints)
     - src/maddening/api/server.py:3505 (checkpoint_load)
     - docs/user_guide/parameters.md:208 (Writing parameters over REST)
-  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member; a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint (loads, on both doors) and one moving that leaf further out (refused); for a dozen values, the same verdict as PUT /graph/params; a missing path.
+  conditions: another graph's checkpoint (other node names; a field of another shape); a stale structure; another constructed value; a moved mapped length; a value the constructor refuses at the graph's timestep; a value below its ParamSpec bound; a non-finite parameter; a boolean or numeric-string member (refused by load_state too); a leaf put back to the node's own value (loads); a graph built outside its bounds reloading its own checkpoint, also after a gm.params write moved the leaf (loads), and one moving that leaf further out (refused); a weight matrix with zeros under a log spec, moved only off its zeros (loads) or to a refused value (refused); GraphManager.load_state taking what Python may hold (out of bounds, NaN, constructor-refused) where the route refuses the same file; for a dozen values, the same verdict as PUT /graph/params; a missing path.
   oracle: 400 or 404, and the state and params unchanged.
   tests:
     - tests/api/test_routes_answer_what_they_did.py::test_a_checkpoint_of_another_graph_is_a_400_and_nothing_is_loaded
@@ -1978,25 +1980,30 @@ claims:
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_checkpoint_that_puts_a_leaf_back_to_the_nodes_own_value_loads
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_that_puts_a_baked_leaf_back_to_the_nodes_own_value_loads
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_and_a_params_write_give_the_same_verdict_on_every_value
-    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_graph_manager_load_state_refuses_what_check_params_and_the_constructor_refuse
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_load_state_refuses_text_and_a_boolean_for_a_number
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_load_state_restores_what_python_may_hold_and_the_route_refuses
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_weight_matrix_is_asked_about_the_entries_a_load_moves
+    - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_python_write_the_constructor_refuses_still_reloads_its_own_checkpoint
     - tests/property/test_differential_param_acceptance.py::test_a_restore_door_refuses_what_the_write_doors_refuse
     - tests/property/test_differential_param_acceptance.py::test_every_restore_door_agrees_with_the_write_doors
     - tests/property/test_differential_param_acceptance.py::test_a_restore_door_refuses_a_diffusivity_the_constructor_refuses
     - tests/property/test_differential_param_acceptance.py::test_a_restore_door_takes_back_the_value_the_graph_holds_whatever_its_bounds
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_graph_built_outside_its_bounds_reloads_its_own_checkpoint
+    - tests/property/test_differential_param_acceptance.py::test_load_state_restores_any_number_its_leaf_holds
   status: verified
   notes: >-
     Failing in the round-7 audit (MADD-ANO-160): the load checked shapes,
     dtypes and baked leaves only, so it restored a Fourier-unstable
     diffusivity and a damping below its bound with a 200.  Fixed by asking
     the archive's changed leaves what PUT asks, through the shared
-    _params_write_refusal; GraphManager.load_state itself refuses text and
-    booleans, a non-finite or out-of-bounds leaf it changes (as
-    check_params) and values the constructor refuses, so the domain
-    oracle's restore doors agree with its write doors.  "Fit" means: every
-    leaf the load changes passes what PUT asks of a written leaf; a leaf
-    left at the value the graph holds is not asked (documented difference
-    D3 of the oracle, shared with the FMU's set_fmu_state).
+    _params_write_refusal.  "Fit" means: every leaf the load changes passes
+    what PUT asks of a written leaf, except that finiteness and the bounds
+    are asked, per element, only of a value that is neither the leaf's now
+    nor the node's own (documented difference D3 of the domain oracle,
+    shared with the FMU's set_fmu_state).  GraphManager.load_state refuses
+    text and booleans and asks nothing else, by decision (difference D6): a
+    graph whose parameters Python moved outside their bounds must resume
+    its own checkpoint into a freshly built graph.
 
 - id: REST-094
   area: checkpoint

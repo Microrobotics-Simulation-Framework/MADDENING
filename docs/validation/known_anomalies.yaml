@@ -11817,3 +11817,45 @@ anomalies:
     verification:
       - "tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_a_loss_that_resets_a_predictor_group_differentiates_twice"
     github_issue: null
+  - anomaly_id: "MADD-ANO-170"
+    title: "run_adaptive never returns once its step-doubling error norm is NaN"
+    description: >
+      `GraphManager.run_adaptive` compares the fine and coarse attempts by
+      `|fine - coarse| / (atol + rtol max(|fine|, |coarse|))`; once the state
+      overflows, both attempts hold `inf` and the norm reads `inf / inf =
+      NaN`.  `adaptive.step_decision` then returns a NaN next step (`maximum`
+      and `clip` propagate it), `dt <= dt_min` is never true again so no
+      attempt is accepted, and the loop's `min(dt, t_end - t)` and
+      `max(dt, dt_min)` keep the NaN: the clock never advances and the call
+      never returns, with no warning.  One node `x <- 1e20 x + 1` (float32,
+      `dt_initial=0.1`, `t_end=1`) hangs from its first attempt on the tree
+      and on the extracted 0.1.0, 0.2.0 and 0.3.1 trees (CPU, empty HOME,
+      a 60 s watchdog); a coupling group whose positive eigenvalue exceeds one
+      (CPL-073) does it once its iterate overflows.  `run_adaptive_scan` is
+      bounded by `max_steps`.  Found by the coupling inventory's domain lift
+      (CPL-073's `run_adaptive` cell).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Not a wrong value -- none is ever returned -- but the process spins
+      without end or message, so a batch run burns its whole budget and the
+      divergence that caused it is never reported.  `context_dependent`
+      because what the process held is the caller's.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.simulation.adaptive.step_decision"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Use `run_adaptive_scan`, whose `max_steps` bounds the loop, or check the
+      state for non-finite values in a `callback` (called after each accepted
+      step) before it can overflow; a diverging coupling group reports
+      `converged=False` under `step()`.  Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to reject a non-finite
+      error norm (shrinking towards `dt_min` and then raising, or returning
+      the non-finite state) instead of carrying a NaN step.  Until then a
+      simulation that diverges under `run_adaptive` hangs.
+    verification:
+      - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
+    github_issue: null

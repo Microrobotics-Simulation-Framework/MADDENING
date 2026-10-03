@@ -70,6 +70,10 @@ def _criterion(domain, norm, value=None) -> dict:
     return dict(tolerance=value) if norm == "l2" else dict(rtol=value)
 
 
+#: Every domain, ``run_adaptive`` slow: it compiles its dt-parameterised step
+#: on every call (about two seconds each with diagnostics, three cores).
+EVERY = list(cd.EVERY) + [pytest.param(cd.ADAPTIVE, marks=pytest.mark.slow)]
+
 _GRAPHS: dict = {}
 
 
@@ -169,7 +173,9 @@ def test_the_dead_band_is_drawn_at_each_fields_own_resolution(label):
                 coupling_residual_interface(alone_new, alone_old, edges[:1], m, 1e-2))
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass(label):
     """CPL-011: "reports residual=0.0, converged=True after one pass however far
     it is from its fixed point" -- under all three norms -- where the same group
@@ -196,7 +202,11 @@ def test_a_group_whose_moving_fields_are_all_dead_banded_stops_after_one_pass(la
                     f"{label}/{norm}: every moving field dead-banded, yet {r}")
                 xa_star, _ = cd.fixed_point(s)
                 far = max(far, float(abs(s.x("a")[0] - xa_star[0]) / abs(xa_star[0])))
-            assert far > 0.5, f"{label}/{norm}: fixture premise: one pass is far from x*"
+            # run_adaptive's controller sees the coarse and fine one-pass solves
+            # differ, shrinks the step and so applies many single passes: each
+            # still reports one pass at residual 0.0, but the state approaches x*.
+            assert far > 0.5 or d.adaptive, (
+                f"{label}/{norm}: fixture premise: one pass is far from x*")
             for s in _solves(d, plain, [seq if (d.predictor or d.restart) else seq[0]])[0]:
                 assert s.report["iterations"] > 1, (
                     f"{label}/{norm}: the undeclared band let the group stop: {s.report}")
@@ -266,7 +276,9 @@ def test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges
                 assert float(coupling_residual_interface(flat, flat, e, 0.0, 1e-2)) == 0.0
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_a_group_at_its_dtypes_overflow_edge_converges_only_where_it_is_measured(label):
     """CPL-043 on a graph: an exact fixed point at the edge, one ulp above it, NaN.
 
@@ -318,7 +330,9 @@ def _shifts(dtype, x_star=20.0) -> tuple[int, ...]:
     return tuple(sorted({edge, max(edge, deep)}))
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_norm_edges_in_every_domain.py::test_the_verdict_does_not_change_below_the_dtypes_normal_range
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_the_verdict_does_not_change_below_the_dtypes_normal_range(label):
     """CPL-044: every norm, ``acceleration="none"``, the group scaled into the
     underflow of the dtype in hand.
@@ -387,7 +401,9 @@ def _scaled_forcing(gm, factors):
                            c=(np.asarray(_C4[0]) * f, np.asarray(_C4[1]) * f)) for f in factors]
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space(label):
     """CPL-090: Jacobi on ``x_a <- 23.66 x_b + c_a``, ``x_b <- 0.0024 x_a + c_b`` in R^2.
 
@@ -410,7 +426,10 @@ def test_a_repeated_eigenvalue_does_not_leave_the_residual_outside_the_space(lab
             x_star = np.linalg.solve(np.eye(4) - a, np.concatenate([ca, cb]))
             dist = _group_l2([(np.asarray(s.x("a"), np.float64), x_star[:2]),
                               (np.asarray(s.x("b"), np.float64), x_star[2:])])
-            assert dist > 1e-3, f"{label}: fixture premise: far above the dtype's floor"
+            # run_adaptive repeats the capped solve as its controller shrinks
+            # the step, so its state nears x*; the bound is checked all the same.
+            assert dist > 1e-3 or d.adaptive, (
+                f"{label}: fixture premise: far above the dtype's floor")
             assert r["rho_spectral"] == pytest.approx(math.sqrt(ga * gb), abs=4e-3), r
             assert r["spectral_usable"] is True, (label, r)
             assert r["spectral_error_bound"] >= dist, (
@@ -426,7 +445,9 @@ def _dead_band_loop(domain) -> tuple[float, float, float]:
     return 0.9e9, 1e-9, 1e-7
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_norm_edges_in_every_domain.py::test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_a_dead_banded_field_on_the_loop_stays_in_the_spectrum(label):
     """CPL-090: "a dead-banded field keeps a positive weight in the spectrum".
 

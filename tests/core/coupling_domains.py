@@ -32,7 +32,11 @@ rather than writing the claim again:
   loaded and run again; the step after the load is checked, and it
   must reproduce the uninterrupted run's to the bit;
 * ``adaptive``: each solve taken by ``run_adaptive`` over one step of
-  ``DT`` (slow: the stepper compiles its step on every call).
+  ``DT`` (slow: the stepper compiles its step on every call);
+* ``sharded``: member ``b`` partitioned over four CPU virtual devices by
+  ``ShardedPointwiseNode``, every field four copies of the test's entries,
+  so the group's norm, floor and spectrum read a sharded field through
+  cross-device reductions (run from ``tests/cloud/multigpu``).
 
 **The members are memoryless**: ``x <- g * u + c`` with ``g`` a scalar
 and ``c`` a vector, both parameters, so one compiled graph serves every
@@ -82,6 +86,7 @@ class Domain:
     predictor: bool = False
     restart: bool = False
     adaptive: bool = False
+    sharded: bool = False
 
     @property
     def dtypes(self) -> tuple:
@@ -105,6 +110,7 @@ DOMAINS = {d.label: d for d in (
     Domain("predictors_warm_starts", "predictors_warm_starts", predictor=True),
     Domain("checkpoint_restart", "checkpoint_restart", restart=True),
     Domain("adaptive", "adaptive", adaptive=True),
+    Domain("sharded", "sharded", sharded=True),
 )}
 #: The dtype domains, and the graph domains (float32 members, stepped differently).
 DTYPES = ("f32", "f64", "mixed_dtype", "bfloat16", "float16")
@@ -117,6 +123,13 @@ ADAPTIVE = "adaptive"
 #: members are memoryless, so the step-doubling error is zero and the
 #: step is accepted at ``dt_max``.
 ADAPTIVE_KW = dict(dt_initial=DT, dt_max=DT, dt_min=DT / 64, rtol=1e-2, atol=1e-6)
+#: The sharded domain partitions member ``b`` over this many devices, and
+#: every field is this many copies of the entries a test asks for (so the
+#: claim and its oracle are the test's, entry by entry).  Needs the CPU
+#: virtual devices ``tests/cloud/multigpu``'s conftest provides; the sharded
+#: cells run from there.
+N_SHARD = 4
+SHARDED = "sharded"
 
 
 @contextlib.contextmanager
@@ -214,8 +227,16 @@ def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, node=Lin,
     gm = GraphManager()
     da, db = domain.dtypes
     tb = DT / 2 if domain.subcycled else DT
+    if domain.sharded:
+        n, g, c = n * N_SHARD, tuple(_tiled(v) for v in g), tuple(_tiled(v) for v in c)
     gm.add_node(node("a", DT, da, n, g=g[0], c=c[0]))
-    gm.add_node(node("b", tb, db, n, g=g[1], c=c[1]))
+    member_b = node("b", tb, db, n, g=g[1], c=c[1])
+    if domain.sharded:
+        from maddening.cloud.multigpu.device_mesh import create_device_mesh
+        from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
+        member_b = ShardedPointwiseNode(member_b, create_device_mesh(shape=(N_SHARD,)),
+                                        shard_axes=0)
+    gm.add_node(member_b)
     if da == db:
         gm.add_edge("b", "a", fields[0], "u")
         gm.add_edge("a", "b", fields[1], "u")
@@ -237,12 +258,30 @@ def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, node=Lin,
     return gm
 
 
+def _tiled(v):
+    """*v* (a scalar, or one value per entry) as ``N_SHARD`` copies of its entries."""
+    a = np.asarray(v, np.float64)
+    return a if a.ndim == 0 else np.tile(a, N_SHARD)
+
+
+def _fit(v, shape):
+    """*v* broadcast to *shape*, tiled first where the sharded domain multiplied
+    the entries."""
+    a = np.asarray(v, np.float64)
+    if a.ndim and shape and a.shape[-1] != shape[-1]:
+        a = np.tile(a, shape[-1] // a.shape[-1])
+    return np.broadcast_to(a, shape)
+
+
 def set_x(gm: GraphManager, x0) -> None:
     """Start both members at *x0* (a pair of arrays or scalars)."""
     for name, v in zip(("a", "b"), x0):
         cur = gm._state[name]["x"]
-        gm._state[name] = {**gm._state[name],
-                           "x": jnp.broadcast_to(jnp.asarray(v, cur.dtype), cur.shape)}
+        new = jnp.asarray(_fit(v, cur.shape), cur.dtype)
+        sharding = getattr(cur, "sharding", None)
+        if sharding is not None and len(sharding.device_set) > 1:
+            new = jax.device_put(new, sharding)         # keep a sharded field sharded
+        gm._state[name] = {**gm._state[name], "x": new}
 
 
 def params_with(gm: GraphManager, *, g=None, c=None) -> dict:
@@ -251,11 +290,9 @@ def params_with(gm: GraphManager, *, g=None, c=None) -> dict:
     for i, name in enumerate(("a", "b")):
         leaves = p["nodes"][name]
         if g is not None:
-            leaves["g"] = jnp.broadcast_to(jnp.asarray(np.asarray(g[i], np.float64),
-                                                       leaves["g"].dtype), leaves["g"].shape)
+            leaves["g"] = jnp.asarray(_fit(g[i], leaves["g"].shape), leaves["g"].dtype)
         if c is not None:
-            leaves["c"] = jnp.broadcast_to(jnp.asarray(np.asarray(c[i], np.float64),
-                                                       leaves["c"].dtype), leaves["c"].shape)
+            leaves["c"] = jnp.asarray(_fit(c[i], leaves["c"].shape), leaves["c"].dtype)
     return p
 
 
@@ -270,6 +307,7 @@ class Solve:
     meta: dict
     report: dict
     params: dict
+    pre: dict | None = None  # the members' state the solve started from
 
     def x(self, name) -> np.ndarray:
         return np.asarray(self.state[name]["x"])
@@ -309,10 +347,15 @@ def report_of(gm: GraphManager, state=None) -> dict:
         gm._state = saved
 
 
-def _solve(gm, params, state=None) -> Solve:
+def _solve(gm, params, state=None, pre=None) -> Solve:
     full = gm._state if state is None else state
     return Solve(_host({n: full[n] for n in ("a", "b")}), _host(full.get("_meta", {})),
-                 report_of(gm, state), params)
+                 report_of(gm, state), params, pre)
+
+
+def _members(gm, state=None) -> dict:
+    full = gm._state if state is None else state
+    return _host({n: full[n] for n in ("a", "b")})
 
 
 def _stack(trees):
@@ -346,23 +389,21 @@ def run(domain: Domain, gm: GraphManager, params_seq: list, *, x0=None) -> list:
 
 
 def _one(domain: Domain, gm: GraphManager, p) -> Solve:
+    pre = _members(gm)
     if domain.adaptive:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             gm.run_adaptive(DT, params=p, **ADAPTIVE_KW)
-        return _solve(gm, p)
+        return _solve(gm, p, pre=pre)
     if domain.multirate:
         # The group fires on one of every two base steps; between firings
-        # its report and its members are the last applied solve's.
+        # its report and its members are the last applied solve's, so the
+        # pair holds exactly one solve, started from the state before it.
         gm.step(params=p)
-        first = _solve(gm, p)
         gm.step(params=p)
-        second = _solve(gm, p)
-        fired = [s for s, pre in ((first, None), (second, first))
-                 if pre is None or not all(bitwise(s.x(n), pre.x(n)) for n in ("a", "b"))]
-        return second if len(fired) else first
+        return _solve(gm, p, pre=pre)
     gm.step(params=p)
-    return _solve(gm, p)
+    return _solve(gm, p, pre=pre)
 
 
 def _run_vmap(gm, params_seq, x0):
@@ -378,7 +419,8 @@ def _run_vmap(gm, params_seq, x0):
     out = []
     for i, p in enumerate(params_seq):
         member = jax.tree.map(lambda v, i=i: v[i], new)
-        out.append(_solve(gm, p, member))
+        out.append(_solve(gm, p, member, pre=_members(gm, jax.tree.map(lambda v, i=i: v[i],
+                                                                       state))))
     return out
 
 
@@ -398,7 +440,9 @@ def moving(gm: GraphManager, steps: int, *, g=(0.5, 0.5), c0=(1.0, 0.0), dc=(1.0
     out, acc = [], 0.0
     for k in range(steps):
         acc += _MOVES[k % len(_MOVES)]
-        out.append(params_with(gm, g=g, c=tuple(scale * (c0[i] + acc * dc[i]) for i in range(2))))
+        out.append(params_with(gm, g=g, c=tuple(
+            scale * (np.asarray(c0[i], np.float64) + acc * np.asarray(dc[i], np.float64))
+            for i in range(2))))
     return out
 
 
@@ -469,3 +513,6 @@ def assert_in_domain(domain: Domain, gm: GraphManager, solves: list) -> None:
     if domain.subcycled:
         assert gm.get_node("b").delta_t == DT / 2, "member b sub-steps twice per pass"
     assert (group.predictor != "none") == domain.predictor, "predictor premise"
+    field = gm._state["b"]["x"]
+    devices = len(field.sharding.device_set) if hasattr(field, "sharding") else 1
+    assert (devices == N_SHARD) == domain.sharded, f"sharding premise: {devices} devices"

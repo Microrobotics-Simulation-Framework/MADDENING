@@ -36,6 +36,7 @@ is its closed form in float64 from the parameters as stored.
 from __future__ import annotations
 
 import math
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -60,6 +61,10 @@ def _eps(domain) -> float:
 def _sequenced(domain) -> bool:
     return domain.predictor or domain.restart
 
+
+#: Every domain, ``run_adaptive`` slow: it compiles its dt-parameterised step
+#: on every call (about two seconds each with diagnostics, three cores).
+EVERY = list(cd.EVERY) + [pytest.param(cd.ADAPTIVE, marks=pytest.mark.slow)]
 
 _GRAPHS: dict = {}
 
@@ -101,6 +106,10 @@ def _relative_distance(s, x_star) -> float:
 # ---------------------------------------------------------------------------
 # CPL-049: the estimate is the distance under any relaxation
 # ---------------------------------------------------------------------------
+# Not under run_adaptive: its report takes the per-solve keys (the estimate)
+# from the second kept half step and ``iterations`` from the larger half
+# (CPL-132), so whether the estimate is from past the first loop pass --
+# the claim's condition -- cannot be read off it.
 @pytest.mark.parametrize("label", cd.EVERY)
 def test_the_estimate_is_the_distance_for_fixed_relaxation(label):
     """CPL-049: ``x_a <- g x_b + c``, ``x_b <- g x_a`` under
@@ -146,7 +155,9 @@ def test_the_estimate_is_the_distance_for_fixed_relaxation(label):
 _RHO = 0.5
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_accelerations_in_every_domain.py::test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_an_under_relaxed_first_pass_estimate_is_not_below_the_distance(label):
     """CPL-050: ``x_a <- 0.5 x_b + c``, ``x_b <- x_a`` (one mode, rate 0.5),
     started off its fixed point by 0.2, 1.2 and 4 thresholds under
@@ -274,6 +285,14 @@ _MODES = (
 )
 
 
+def _guard_tol(domain) -> float:
+    """The draws' criterion: one the dtype resolves; on the sharded member, whose
+    fields are four copies of each entry, the L2 residual doubles, so the
+    criterion doubles with it and the iteration is the unsharded one's."""
+    tol = 0.05 if _sixteen(domain) else 1e-4
+    return tol * 2.0 if domain.sharded else tol
+
+
 def _exits(domain, label, acceleration, guard, monkeypatch, *, tol):
     """The iterations of every mode draw, on a graph traced with ``_TWO_PASS_EXIT = guard``.
 
@@ -298,7 +317,9 @@ def _exits(domain, label, acceleration, guard, monkeypatch, *, tol):
     return [[s.report for s in run] for run in runs]
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_holds_aitken_past_its_own_exit
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_the_guard_holds_aitken_past_its_own_exit(label, monkeypatch):
     """CPL-061 on a graph: the guard is live for Aitken.
 
@@ -307,7 +328,7 @@ def test_the_guard_holds_aitken_past_its_own_exit(label, monkeypatch):
     is doing something.  Every converged exit stays converged.
     """
     d = cd.DOMAINS[label]
-    tol = 0.05 if _sixteen(d) else 1e-4
+    tol = _guard_tol(d)
     with cd.entered(d):
         guarded = _exits(d, label, "aitken", ("aitken",), monkeypatch, tol=tol)
         bare = _exits(d, label, "aitken", (), monkeypatch, tol=tol)
@@ -322,7 +343,9 @@ def test_the_guard_holds_aitken_past_its_own_exit(label, monkeypatch):
     assert later, f"{label}: the guard never held Aitken past its own exit"
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_stops_on_its_first_sub_threshold_pass
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_iqn_stops_on_its_first_sub_threshold_pass(label, monkeypatch):
     """CPL-061 on a graph: IQN is not on the guard's list.
 
@@ -331,7 +354,7 @@ def test_iqn_stops_on_its_first_sub_threshold_pass(label, monkeypatch):
     sooner -- it stops on its first sub-threshold pass.
     """
     d = cd.DOMAINS[label]
-    tol = 0.05 if _sixteen(d) else 1e-4
+    tol = _guard_tol(d)
     with cd.entered(d):
         iqn = _exits(d, label, "iqn-ils", ("aitken",), monkeypatch, tol=tol)
         held = _exits(d, label, "iqn-ils", ("aitken", "iqn-ils"), monkeypatch, tol=tol)
@@ -378,6 +401,8 @@ def test_the_guard_adds_at_most_one_pass_to_aitkens_exit(label, monkeypatch):
 _STIFF = dict(g=(1.2, 1.2), c=(1.0, 0.5))
 
 
+# Not under run_adaptive: there a diverging group's step-doubling error goes
+# NaN and the stepper never returns (MADD-ANO-170, pinned below).
 @pytest.mark.parametrize("label", cd.EVERY)
 def test_a_contraction_above_one_is_reported_unconverged(label):
     """CPL-073: ``x_a <- 1.2 x_b + c_a``, ``x_b <- 1.2 x_a + c_b``: the
@@ -404,7 +429,9 @@ def test_a_contraction_above_one_is_reported_unconverged(label):
                     label, acc, extra, r)
 
 
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_converges_a_contraction_above_one
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_iqn_converges_a_contraction_above_one(label):
     """CPL-073: IQN-ILS and IQN-IMVJ converge the same group, on every step,
     onto its exact fixed point ``(I - M)^{-1} c``: within ``amp * tol`` with
@@ -423,10 +450,52 @@ def test_iqn_converges_a_contraction_above_one(label):
                 assert dist <= 4.0 * tol + 64 * _eps(d), (label, acc, dist, r)
 
 
+class _StillLooping(Exception):
+    """The adaptive controller's attempts, past any number a run of one step needs."""
+
+
+@pytest.mark.xfail(strict=True, raises=_StillLooping, reason=(
+    "MADD-ANO-170: run_adaptive never returns once the step-doubling error norm is NaN: "
+    "step_decision's next dt is NaN, no attempt is accepted again and the clock never "
+    "advances; deferred to 0.5.0"))
+def test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan(monkeypatch):
+    """CPL-073's group under ``run_adaptive``: a positive eigenvalue above one
+    under ``acceleration="none"`` grows the state 1.44-fold a pass, the fine
+    and coarse attempts overflow, and ``|fine - coarse| / (atol + rtol
+    max|.|)`` reads ``inf / inf``.  The stepper should return (or raise)
+    within a bounded number of attempts -- here, over one step of ``DT`` with
+    ``dt_min = DT / 64``, far fewer than 200.  It loops: ``step_decision``
+    turns the NaN error into a NaN ``dt``, ``dt <= dt_min`` is never true
+    again, and ``min`` / ``max`` against ``t_end`` and ``dt_min`` keep the NaN.
+    The controller is counted, not timed: its 200th attempt raises."""
+    from maddening.core.simulation import adaptive
+
+    calls = {"n": 0, "dt": []}
+    real = adaptive.step_decision
+
+    def counted(error_norm, dt, *args, **kw):
+        calls["n"] += 1
+        calls["dt"].append(dt)
+        if calls["n"] > 200:
+            assert math.isnan(calls["dt"][-1]), "premise: the controller holds a NaN step"
+            raise _StillLooping(f"{calls['n']} attempts, dt {calls['dt'][-3:]}")
+        return real(error_norm, dt, *args, **kw)
+
+    monkeypatch.setattr(adaptive, "step_decision", counted)
+    d = cd.DOMAINS["adaptive"]
+    gm = cd.pair(d, g=_STIFF["g"], c=(1e30, 1e30), acceleration="none", tolerance=1e-5,
+                 max_iterations=400)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.run_adaptive(cd.DT, **cd.ADAPTIVE_KW)
+
+
 # ---------------------------------------------------------------------------
 # CPL-074: IQN on one accelerated scalar
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_accelerations_in_every_domain.py::test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration(label):
     """CPL-074: ``accelerated_fields={"a": ("x",)}`` on a scalar pair makes the
     quasi-Newton least-squares one-dimensional (rank-deficient); IQN-ILS and
@@ -459,7 +528,9 @@ def test_iqn_on_a_single_accelerated_scalar_agrees_with_plain_iteration(label):
 # ---------------------------------------------------------------------------
 # CPL-076: a Jacobi pass seeds flux-reading producers
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("label", cd.EVERY)
+# Per push: tests/core/test_coupling_accelerations_in_every_domain.py::test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point
+# (every domain but run_adaptive, the same check)
+@pytest.mark.parametrize("label", EVERY)
 def test_flux_reading_producers_step_under_jacobi_to_the_gauss_seidel_fixed_point(label):
     """CPL-076: both members produce the flux ``q = 2 x`` and read the other's
     (``x_a <- g_a q_b + c_a``, ``x_b <- g_b q_a + c_b``): a Jacobi pass seeds

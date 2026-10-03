@@ -53,7 +53,9 @@ server was told the bind is loopback.  That backstop is why forgetting
   logged once.  If nothing reads your log — a detached container, a
   batch job — set `MADDENING_API_TOKEN` yourself, or point
   `MADDENING_API_TOKEN_FILE` at a path on a mounted volume and the
-  generated token is written there with mode `0600`.
+  generated token is written there with mode `0600`: into a new file moved
+  over the path, so a file already there -- of any mode, or held open by
+  another reader -- never holds it.
 
 ### Presenting it
 
@@ -85,12 +87,16 @@ binds `0.0.0.0` — publish the port to loopback
 what is exposed at startup
 (`maddening.api.server.warn_if_publicly_bound`).
 
-Request sizes are bounded (`n_steps` ≤ 100000, node integer parameters ≤
-10000000 and ≤ 20000000 state elements per node, bounded
-surrogate-training arguments; see `/openapi.json`) so one request cannot
-exhaust the host, but that is a backstop, not authentication.  Over-size
-is a 422; a non-finite constructor constant remains the 400 it has always
-been.
+Request sizes are bounded so one request cannot exhaust the host, but that
+is a backstop, not authentication.  An integer parameter over 10^7, more
+than 10^6 values in one request's params, `n_steps` over 100000 or an
+out-of-range training argument is a 422 from the request model, published
+in `/openapi.json`.  A node whose state would exceed 2·10^7 elements, or
+whose build would exceed 2 GiB, or that would take the graph past 10^8
+state elements, is a 400 naming the size: those caps are server constants
+(`MAX_NODE_STATE_ELEMENTS`, `MAX_NODE_BUILD_BYTES`,
+`MAX_GRAPH_STATE_ELEMENTS`), not part of the schema.  A non-finite
+constructor constant remains the 400 it has always been.
 
 ## REST Endpoints
 
@@ -144,7 +150,7 @@ already been applied.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root, and beside the file a manifest (`<path>.manifest.json`: its SHA-256 and the streams' clock, `sim_time` and step count). The checkpoint is written under a temporary name, the manifest next, and the file moved into place last: a save refused on the way (400, "nothing was written") leaves any earlier file of that name as it was. Replies `{status, path, sim_time}` |
+| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root, and beside the file a manifest (`<path>.manifest.json`: its SHA-256 and the streams' clock, `sim_time` and step count). Both are written under temporary names and moved into place after both exist, the checkpoint first and its manifest last: a save refused before that (400, "nothing was written") leaves any earlier file of either name as it was, and a name that is not a file is refused before anything is written. If only the manifest's move fails, the 400 says the checkpoint was written without it (it loads, with `sim_time` counted from zero). No 4xx detail names the server's absolute paths. Replies `{status, path, sim_time}` |
 | POST | `/checkpoint/load?path=` | Restore them. A checkpoint that does not fit this graph -- including one whose parameters carry another value of one a node consumed at construction -- is a 400, and nothing is loaded. The streams then serve the loaded state at the checkpoint's `sim_time` -- the one its manifest records, or zero, counted from the load, for a file without one or whose manifest does not hash to it (`sim_time_from_checkpoint` says which). 409 while the runner runs or a `/sim/run` is in progress |
 
 ### Simulation Control
@@ -158,9 +164,9 @@ already been applied.
 | POST | `/sim/resume` | Resume the runner, paced from the resume |
 | POST | `/sim/stop` | Stop the runner. A runner whose thread had died is reported stopped, with `error` |
 | POST | `/sim/reset` | Stop the runner and reset every node; the streams are sent the reset state at step 0. `was_running` is whether a runner was running. When the graph cannot be had in time after the runner was stopped, the 503 says the runner stays stopped, with `was_running` |
-| PUT | `/sim/stride?steps_per_frame=&relay_stride=` | The runner's steps per frame and the relay's stride; answered at once, whatever the other runner routes wait for |
+| PUT | `/sim/stride?steps_per_frame=&relay_stride=` | The runner's steps per frame and the relay's stride; a value left out keeps its current value (it used to be reset to 1). Answered at once, whatever the other runner routes wait for |
 | POST | `/sim/profile?n_steps=&n_warmup=` | A step-time profile (Perfetto JSON). The live state and parameters are restored after it, and the streams neither show nor count its steps |
-| POST | `/sim/profile/jax/start`, `/sim/profile/jax/stop` | A JAX trace of the steps between them, for at most `MAX_JAX_TRACE_STEPS` (10 000) steps or `MAX_JAX_TRACE_SECONDS` (600 s): past either it stops itself and writes its files |
+| POST | `/sim/profile/jax/start`, `/sim/profile/jax/stop` | A JAX trace of the steps between them, for at most `MAX_JAX_TRACE_STEPS` (10 000) steps or `MAX_JAX_TRACE_SECONDS` (600 s): past either it stops itself and writes its files. The time budget has its own timer, so an idle trace stops at it too |
 | GET | `/sim/profile/jax/status` | Whether a trace runs, its steps and budgets, its directory, and what stopped the last one |
 
 ### Surrogates

@@ -176,8 +176,8 @@ claims:
     - docs/validation/known_anomalies.yaml (MADD-ANO-059)
   conditions: >-
     every acceleration, both solvers; integer, unsigned, boolean and
-    typed-key leaves. Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, checkpoint restarts or sharded graphs.
+    typed-key leaves. Not claimed for mixed dtypes, 16-bit floats,
+    checkpoint restarts or sharded graphs.
   oracle: closed-form values of the non-floating leaves; compile-time refusal.
   tests:
     - tests/core/test_coupling_non_float_leaves.py::test_an_integer_field_named_in_accelerated_fields_is_left_out
@@ -198,7 +198,7 @@ claims:
     Since 0.1.0 (MADD-ANO-158).
   domains:
     f32: tests/core/test_coupling_non_float_leaves.py::test_an_integer_field_named_in_accelerated_fields_is_left_out
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit:
@@ -605,7 +605,7 @@ claims:
   conditions: >-
     acceleration="iqn-imvj", both solvers. Not claimed for float64 (x64),
     mixed dtypes, 16-bit floats, vmap, multi-rate graphs, sub-cycled groups,
-    run_adaptive, checkpoint restarts or sharded graphs.
+    run_adaptive or sharded graphs.
   oracle: bit-identity with acceleration="iqn-ils" over several steps.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_imvj_without_reuse_is_iqn_ils
@@ -623,7 +623,7 @@ claims:
     sub_cycled: narrowed
     predictors_warm_starts: tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve
     adaptive: narrowed
-    checkpoint_restart: narrowed
+    checkpoint_restart: 'tests/property/test_differential_replay.py::test_a_checkpoint_mid_adaptive_run_resumes_it[iqn-imvj-warm-start]'
     sharded: narrowed
 
 - id: CPL-015
@@ -668,9 +668,8 @@ claims:
     - src/maddening/core/coupling/group.py:137 (CouplingGroup, iteration_mode)
   conditions: >-
     both solvers; the sweep order is the compiled schedule. Not claimed for
-    float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    sub-cycled groups, predictors or warm starts, run_adaptive, checkpoint
-    restarts or sharded graphs.
+    mixed dtypes, 16-bit floats, vmap, multi-rate graphs, run_adaptive,
+    checkpoint restarts or sharded graphs.
   oracle: one pass against the float64 Gauss-Seidel and Jacobi sweep of a linear group.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_one_pass_reads_the_iterate_its_mode_documents
@@ -679,15 +678,19 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_one_pass_reads_the_iterate_its_mode_documents
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_coupling_claims_graphs.py::test_one_pass_reads_the_iterate_its_mode_documents
     grad: n/a
     vmap: narrowed
     multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r06]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r18]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r05]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r22]'
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
@@ -703,9 +706,9 @@ claims:
     - src/maddening/core/coupling/group.py:161 (CouplingGroup, subcycling)
     - src/maddening/core/graph_manager.py:985 (_subcycling_ratio_errors)
   conditions: >-
-    subcycling=True with differing member timesteps. Not claimed for float64
-    (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs, predictors
-    or warm starts, run_adaptive, checkpoint restarts or sharded graphs.
+    subcycling=True with differing member timesteps. Not claimed for mixed
+    dtypes, 16-bit floats, vmap, multi-rate graphs, run_adaptive, checkpoint
+    restarts or sharded graphs.
   oracle: refusal; the hand-written sub-stepped reference node.
   tests:
     - tests/core/test_subcycling_ratio_refusal.py::test_a_member_whose_timestep_does_not_divide_is_refused
@@ -717,7 +720,7 @@ claims:
   status: verified
   domains:
     f32: tests/property/test_differential_schedules.py::test_a_subcycled_group_steps_like_its_uniform_rate_reference
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/property/test_differential_schedules.py::test_a_subcycled_group_steps_like_its_uniform_rate_reference
@@ -725,7 +728,7 @@ claims:
     vmap: narrowed
     multi_rate: narrowed
     sub_cycled: tests/core/test_subcycling_ratio_refusal.py::test_a_member_whose_timestep_does_not_divide_is_refused
-    predictors_warm_starts: narrowed
+    predictors_warm_starts: 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r28]'
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
@@ -744,9 +747,9 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
     - docs/validation/known_anomalies.yaml (MADD-ANO-027)
   conditions: >-
-    subcycling=True with a member that sub-steps. Not claimed for float64
-    (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs, predictors
-    or warm starts, run_adaptive, checkpoint restarts or sharded graphs.
+    subcycling=True with a member that sub-steps. Not claimed for mixed
+    dtypes, 16-bit floats, vmap, multi-rate graphs, run_adaptive, checkpoint
+    restarts or sharded graphs.
   oracle: bit-identity (quadratic vs linear); float32 round-off bound (linear vs constant where documented).
   tests:
     - tests/property/test_differential_schedules.py::test_linear_interpolation_is_constant_where_documented_and_quadratic_is_linear
@@ -756,7 +759,7 @@ claims:
   status: verified
   domains:
     f32: tests/property/test_differential_schedules.py::test_linear_interpolation_is_constant_where_documented_and_quadratic_is_linear
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/property/test_differential_schedules.py::test_linear_interpolation_is_constant_where_documented_and_quadratic_is_linear
@@ -764,7 +767,7 @@ claims:
     vmap: narrowed
     multi_rate: narrowed
     sub_cycled: tests/property/test_differential_schedules.py::test_linear_interpolation_is_constant_where_documented_and_quadratic_is_linear
-    predictors_warm_starts: narrowed
+    predictors_warm_starts: 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r28]'
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
@@ -812,8 +815,8 @@ claims:
     - src/maddening/core/graph_manager.py:3886 (_run_coupled_block_impl, predictor)
   conditions: >-
     any acceleration; a multi-rate group learns only from applied solves
-    (CPL-073). Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, sub-cycled groups, run_adaptive or sharded graphs.
+    (CPL-073). Not claimed for mixed dtypes, 16-bit floats, vmap,
+    run_adaptive or sharded graphs.
   oracle: iteration counts with and without; converged state against the predictor-free run; closed-form leaves.
   tests:
     - tests/core/test_coupling_predictor.py::TestPredictorReducesIterations::test_linear_predictor_reduces_iterations
@@ -824,14 +827,14 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_predictor.py::TestPredictorReducesIterations::test_predictor_converges_to_same_result
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_coupling_predictor.py::TestPredictorReducesIterations::test_linear_predictor_reduces_iterations
     grad: n/a
     vmap: narrowed
     multi_rate: tests/core/test_multirate_group_meta_follows_firing.py::test_the_linear_predictor_learns_only_from_applied_solves
-    sub_cycled: narrowed
+    sub_cycled: 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r28]'
     predictors_warm_starts: tests/core/test_coupling_predictor.py::TestPredictorReducesIterations::test_predictor_converges_to_same_result
     adaptive: narrowed
     checkpoint_restart: tests/property/test_differential_checkpoint.py::test_a_checkpoint_of_a_graph_with_meta_slots_resumes_the_uninterrupted_run
@@ -1155,9 +1158,8 @@ claims:
     - src/maddening/core/graph_manager.py:1422 (_fixed_point_while)
   conditions: >-
     threshold above the norm's float32 floor (below it the two loops may
-    stop on different passes: CPL-063). Not claimed for float64 (x64), mixed
-    dtypes, 16-bit floats, vmap, sub-cycled groups, predictors or warm
-    starts, run_adaptive, checkpoint restarts or sharded graphs.
+    stop on different passes: CPL-063). Not claimed for mixed dtypes, 16-bit
+    floats, vmap, run_adaptive, checkpoint restarts or sharded graphs.
   oracle: state equality to float32 round-off; gradients against each other at a tight tolerance.
   tests:
     - tests/core/test_coupling_solver_equivalence.py::test_the_two_solvers_return_the_same_state_on_a_converged_exit
@@ -1168,15 +1170,21 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_solver_equivalence.py::test_the_two_solvers_return_the_same_state_on_a_converged_exit
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_coupling_solver_equivalence.py::test_the_two_solvers_return_the_same_state_on_a_converged_exit
     grad: tests/core/test_coupling_solver_equivalence.py::test_both_gradients_agree_once_the_forward_has_converged
     vmap: narrowed
     multi_rate: tests/core/test_coupling_solver_equivalence.py::test_a_converged_multirate_group_returns_one_state_from_either_solver
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r06]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r18]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r28]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r05]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r13]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r28]'
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
@@ -1279,16 +1287,15 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
   conditions: >-
     solver="ift", subcycling with waveform_iterations > 1. Not claimed for
-    float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
-    predictors or warm starts, run_adaptive, checkpoint restarts or sharded
-    graphs.
+    mixed dtypes, 16-bit floats, vmap, multi-rate graphs, run_adaptive,
+    checkpoint restarts or sharded graphs.
   oracle: the report says converged=True with iterations at the cap, and the strict group raises on the same step.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
   status: verified
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
@@ -1296,7 +1303,9 @@ claims:
     vmap: narrowed
     multi_rate: narrowed
     sub_cycled: tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
-    predictors_warm_starts: narrowed
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged[r20]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged[r60]'
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
@@ -1487,9 +1496,8 @@ claims:
     - src/maddening/core/coupling/acceleration.py:358 (coupling_residual_interface)
   conditions: >-
     convergence_norm="interface"; state edges (a flux edge is refused at
-    compile: CPL-075). Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, jit, vmap, multi-rate graphs, sub-cycled groups, predictors or
-    warm starts, run_adaptive, checkpoint restarts or sharded graphs.
+    compile: CPL-075). Not claimed for mixed dtypes, 16-bit floats, vmap,
+    multi-rate graphs, run_adaptive, checkpoint restarts or sharded graphs.
   oracle: closed form over the transformed edge values.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
@@ -1497,15 +1505,17 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
-    jit: narrowed
+    jit: 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r06]'
     grad: n/a
     vmap: narrowed
     multi_rate: narrowed
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    sub_cycled: 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r06]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r26]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r48]'
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
@@ -1871,9 +1881,8 @@ claims:
     - docs/developer_guide/coupling_algorithm_guide.md#waveform_iterations-what-the-sweeps-are-and-which-one-each-field-describes
   conditions: >-
     waveform_iterations > 1 on a sub-cycling group, solver="ift". Not
-    claimed for float64 (x64), mixed dtypes, 16-bit floats, vmap, multi-rate
-    graphs, predictors or warm starts, run_adaptive, checkpoint restarts or
-    sharded graphs.
+    claimed for mixed dtypes, 16-bit floats, vmap, multi-rate graphs,
+    run_adaptive, checkpoint restarts or sharded graphs.
   oracle: the report and the strict check on the same step.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
@@ -1885,7 +1894,7 @@ claims:
     verdicts is right is still to be decided in 0.5.0, as documented.
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
@@ -1893,7 +1902,9 @@ claims:
     vmap: narrowed
     multi_rate: narrowed
     sub_cycled: tests/core/test_coupling_claims_graphs.py::test_strict_convergence_checks_every_waveform_sweep
-    predictors_warm_starts: narrowed
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged[r20]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged[r60]'
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
@@ -2189,9 +2200,8 @@ claims:
     - src/maddening/core/graph_manager.py:8215 (coupling_diagnostics)
   conditions: >-
     threshold above the norm's float32 floor for the parity of passes and
-    verdicts. Not claimed for float64 (x64), mixed dtypes, 16-bit floats,
-    vmap, sub-cycled groups, predictors or warm starts, run_adaptive,
-    checkpoint restarts or sharded graphs.
+    verdicts. Not claimed for mixed dtypes, 16-bit floats, vmap,
+    run_adaptive, checkpoint restarts or sharded graphs.
   oracle: the two solvers side by side.
   tests:
     - tests/core/test_coupling_convergence_reporting.py::test_both_coupling_solvers_report_the_same_residual_and_converged_flag
@@ -2203,15 +2213,21 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_solver_equivalence.py::test_both_solvers_report_the_same_verdict_about_the_same_state
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_coupling_convergence_reporting.py::test_both_coupling_solvers_report_the_same_residual_and_converged_flag
     grad: n/a
     vmap: narrowed
     multi_rate: tests/core/test_coupling_solver_equivalence.py::test_the_multirate_solvers_agree_across_the_configuration_class
-    sub_cycled: narrowed
-    predictors_warm_starts: narrowed
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r06]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r18]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r28]'
+    predictors_warm_starts:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r05]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r13]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r28]'
     adaptive: narrowed
     checkpoint_restart: narrowed
     sharded: narrowed
@@ -2359,9 +2375,8 @@ claims:
     - src/maddening/core/graph_manager.py:3169 (_iqn_warm_start)
     - docs/validation/known_anomalies.yaml (MADD-ANO-045)
   conditions: >-
-    acceleration="iqn-imvj", jacobian_reuse > 0. Not claimed for float64
-    (x64), mixed dtypes, 16-bit floats, vmap, sub-cycled groups,
-    run_adaptive or sharded graphs.
+    acceleration="iqn-imvj", jacobian_reuse > 0. Not claimed for mixed
+    dtypes, 16-bit floats, vmap, run_adaptive or sharded graphs.
   oracle: pass counts across steps; the stored columns; fori against ift.
   tests:
     - tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve
@@ -2372,14 +2387,16 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve
-    f64: narrowed
+    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_coupling_imvj_solver_agreement.py::test_fori_carries_the_latching_passs_columns
     grad: n/a
     vmap: narrowed
     multi_rate: tests/core/test_multirate_group_meta_follows_firing.py::test_the_imvj_warm_start_is_carried_only_from_applied_solves
-    sub_cycled: narrowed
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r42]'
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_takes_the_same_passes_under_either_solver[r51]'
     predictors_warm_starts: tests/core/test_coupling_imvj_solver_agreement.py::test_the_warm_start_shortens_the_solve
     adaptive: narrowed
     checkpoint_restart: tests/property/test_differential_checkpoint.py::test_a_checkpoint_of_a_graph_with_meta_slots_resumes_the_uninterrupted_run
@@ -3100,8 +3117,7 @@ claims:
     returned state -- each field divided by its own max|field| at the
     returned state, the residual put in those weights (MADD-ANO-146); every
     acceleration and schedule; long Gauss-Seidel chains, sub-cycled and
-    multi-rate groups; float16 to float32. Not claimed for float64 (x64) or
-    mixed dtypes.
+    multi-rate groups; float16 to float64. Not claimed for mixed dtypes.
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
@@ -3117,7 +3133,9 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
-    f64: narrowed
+    f64:
+      - tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
+      - tests/property/test_differential_precision.py::test_the_coupling_report_agrees_across_precisions
     mixed_dtype: narrowed
     16bit:
       - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
@@ -4019,7 +4037,7 @@ claims:
   conditions: >-
     a sub-cycling group; a multi-rate graph is refused. Not claimed for
     float64 (x64), mixed dtypes, 16-bit floats, vmap, predictors or warm
-    starts, checkpoint restarts or sharded graphs.
+    starts or sharded graphs.
   oracle: every member's own clock; the compiled step.
   tests:
     - tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_advances_every_member_by_the_step
@@ -4039,7 +4057,9 @@ claims:
     sub_cycled: tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_advances_every_member_by_the_step
     predictors_warm_starts: narrowed
     adaptive: tests/core/test_adaptive_subcycled_group_dt.py::test_run_adaptive_advances_every_member_by_the_step
-    checkpoint_restart: narrowed
+    checkpoint_restart:
+      - 'tests/property/test_differential_replay.py::test_a_checkpoint_mid_adaptive_run_resumes_it[subcycled-rods]'
+      - 'tests/property/test_differential_replay.py::test_a_checkpoint_mid_adaptive_run_resumes_it[subcycled-quadratic]'
     sharded: narrowed
 
 - id: CPL-131
@@ -4095,8 +4115,7 @@ claims:
     - docs/validation/known_anomalies.yaml (MADD-ANO-095)
   conditions: >-
     both adaptive steppers. Not claimed for float64 (x64), mixed dtypes,
-    16-bit floats, vmap, predictors or warm starts, checkpoint restarts or
-    sharded graphs.
+    16-bit floats, vmap, predictors or warm starts or sharded graphs.
   oracle: the halves' own reports; the strict check on the same run.
   tests:
     - tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_a_kept_unconverged_first_half_is_reported_unconverged
@@ -4116,7 +4135,7 @@ claims:
     sub_cycled: tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_a_waveform_group_reports_the_sum_of_both_halves_passes
     predictors_warm_starts: narrowed
     adaptive: tests/core/test_adaptive_report_covers_both_kept_half_steps.py::test_a_kept_unconverged_first_half_is_reported_unconverged
-    checkpoint_restart: narrowed
+    checkpoint_restart: tests/property/test_differential_replay.py::test_a_checkpoint_mid_adaptive_run_resumes_it
     sharded: narrowed
 
 - id: CPL-133
@@ -4449,9 +4468,9 @@ claims:
     - docs/release_notes/v0.4.0.md#coupling-and-solvers
     - src/maddening/core/graph_manager.py:1745 (_ift_solve_impl)
   conditions: >-
-    solver="ift". Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, vmap, multi-rate graphs, sub-cycled groups, predictors or warm
-    starts, run_adaptive, checkpoint restarts or sharded graphs.
+    solver="ift". Not claimed for mixed dtypes, 16-bit floats, vmap,
+    multi-rate graphs, sub-cycled groups, predictors or warm starts,
+    run_adaptive, checkpoint restarts or sharded graphs.
   oracle: forward against reverse; the FMI derivative kinds; the Hessian against fori.
   tests:
     - tests/core/test_coupling_ift_forward_mode.py::TestFMIDirectionalDerivative::test_forward_kind_through_ift_step
@@ -4461,7 +4480,9 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_coupling_ift_forward_mode.py::test_forward_reverse_adjoint_identity
-    f64: narrowed
+    f64:
+      - tests/property/test_differential_precision.py::test_an_ift_gradient_agrees_across_precisions
+      - tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
     mixed_dtype: narrowed
     16bit: narrowed
     jit: tests/core/test_coupling_ift_forward_mode.py::TestFMIDirectionalDerivative::test_forward_kind_through_ift_step

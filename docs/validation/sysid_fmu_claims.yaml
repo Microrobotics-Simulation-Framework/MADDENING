@@ -77,8 +77,7 @@ claims:
   sources:
     - src/maddening/sysid.py:163 (observations_from_history)
   conditions: >-
-    any graph and n >= 1 steps. Not claimed for multi-rate graphs or
-    sub-cycled groups.
+    any graph and n >= 1 steps.
   oracle: the history and the initial state, element for element.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_observations_from_history_prepends_the_initial_state
@@ -91,8 +90,10 @@ claims:
     jit: n/a
     grad: n/a
     vmap: n/a
-    multi_rate: narrowed
-    sub_cycled: narrowed
+    multi_rate:
+      - 'tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact[multirate-chain-teacher-forced]'
+      - 'tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact[multirate-rods-teacher-forced]'
+    sub_cycled: 'tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact[subcycled-rods-teacher-forced]'
     predictors_warm_starts: n/a
     adaptive: n/a
     checkpoint_restart: n/a
@@ -303,8 +304,7 @@ claims:
     - src/maddening/sysid.py:302 (windowed_loss, window_states / continuity_weight)
   conditions: >-
     window states seeded from the truth, and one start moved. Not claimed
-    for 16-bit floats, jit, gradients, vmap, multi-rate graphs, sub-cycled
-    groups or sharded graphs.
+    for 16-bit floats, jit, gradients, vmap or sharded graphs.
   oracle: zero at the truth; the penalty affine in its weight.
   tests:
     - tests/core/test_sysid.py::test_multiple_shooting_loss_zero_at_truth_and_penalises_gaps
@@ -318,8 +318,12 @@ claims:
     jit: narrowed
     grad: narrowed
     vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: narrowed
+    multi_rate:
+      - 'tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact[multirate-chain-multiple-shooting]'
+      - 'tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact[multirate-rods-multiple-shooting]'
+    sub_cycled:
+      - 'tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact[subcycled-rods-multiple-shooting]'
+      - 'tests/property/test_differential_replay.py::test_a_replay_of_a_record_with_carried_history_is_exact[subcycled-quadratic-multiple-shooting]'
     predictors_warm_starts: tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_multiple_shooting_and_sparse_samples_replay_exactly
     adaptive: n/a
     checkpoint_restart: tests/core/test_sysid_contract_examples.py::test_the_continuity_penalty_is_affine_in_its_weight_and_charges_a_bumped_start
@@ -4264,8 +4268,7 @@ claims:
   conditions: >-
     uniform, multi-rate not dividing (0.02 / 0.03), multi-rate dividing,
     sub-cycled; a coarser advertised step; a multi-clock description; a
-    hand-built one. Not claimed for 16-bit floats, predictors or warm starts
-    or checkpoint restarts.
+    hand-built one. Not claimed for 16-bit floats.
   oracle: gm.run over the same simulated time; the ValueError.
   tests:
     - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_a_master_dt_other_than_the_graph_step_is_refused
@@ -4292,9 +4295,9 @@ claims:
     vmap: n/a
     multi_rate: tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_at_the_graph_step_the_fmu_is_the_graph_at_the_time_it_reports
     sub_cycled: tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_at_the_graph_step_the_fmu_is_the_graph_at_the_time_it_reports
-    predictors_warm_starts: narrowed
+    predictors_warm_starts: 'tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence[coupled]'
     adaptive: n/a
-    checkpoint_restart: narrowed
+    checkpoint_restart: tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence
     sharded: n/a
 
 - id: FMU-021
@@ -4391,7 +4394,7 @@ claims:
     and 1e-12 s; an importer biased by a third of the tolerance per step; an
     honest running sum and start + k * h over a million steps, from starts
     of 0, 1 and 1000 s; a restore; the compiled wrapper. Not claimed for
-    mixed dtypes, 16-bit floats, multi-rate graphs or sub-cycled groups.
+    mixed dtypes or 16-bit floats.
   oracle: the time variable and the state; the bridge's drift tolerance against the importer's clock.
   tests:
     - tests/fmi/test_communication_points.py::test_a_discontinuous_communication_point_is_refused_and_advances_nothing
@@ -4421,8 +4424,8 @@ claims:
     jit: n/a
     grad: n/a
     vmap: n/a
-    multi_rate: narrowed
-    sub_cycled: narrowed
+    multi_rate: 'tests/property/test_differential_fmu.py::test_the_bridge_the_sidecar_and_the_graph_agree_on_every_sequence[multirate]'
+    sub_cycled: 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_on_sequences_with_node_params_writes[subcycled]'
     predictors_warm_starts: n/a
     adaptive: n/a
     checkpoint_restart: tests/fmi/test_communication_points.py::test_restoring_an_fmu_state_moves_the_clock_to_the_snapshot
@@ -5036,8 +5039,7 @@ claims:
     write and not, which the description refuses until compile(); the same
     write, or a recompile, between the description and the sidecar or the
     bridge; a node or an external input added; a graph never compiled. Not
-    claimed for float64 (x64), mixed dtypes, 16-bit floats, predictors or
-    warm starts or checkpoint restarts.
+    claimed for float64 (x64), mixed dtypes or 16-bit floats.
   oracle: gm.run over the same simulated time; the start the description advertises; the refusal.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs
@@ -5072,9 +5074,11 @@ claims:
     sub_cycled:
       - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-constant-pending]'
       - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-structural-compiled]'
-    predictors_warm_starts: narrowed
+    predictors_warm_starts:
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-constant-pending]'
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-structural-compiled]'
     adaptive: n/a
-    checkpoint_restart: narrowed
+    checkpoint_restart: tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_on_sequences_with_node_params_writes
     sharded: n/a
 
 # ---------------------------------------------------------------------------

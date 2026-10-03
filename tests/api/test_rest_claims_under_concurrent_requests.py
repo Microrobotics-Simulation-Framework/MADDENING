@@ -46,7 +46,6 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import httpx
 import numpy as np
 import pytest
-import uvicorn
 
 from maddening.api import server as server_module
 from tests.api import rest_claims_support as S
@@ -54,17 +53,11 @@ from tests.property.differential import no_cloud_launch
 
 #: Copies of a check run at once.
 COPIES = 4
-#: uvicorn's own choice of WebSocket implementation, as a deployment gets
-#: it.  An older uvicorn (before its sans-I/O implementation split the
-#: ``Sec-WebSocket-Protocol`` header into the list ASGI specifies) picks the
-#: websockets library's legacy implementation, which warns that it is
-#: deprecated on the server's threads; those warnings are the library's,
-#: not the server's, and are let through below.
-_WS = "auto"
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-    import uvicorn.protocols.websockets.auto  # noqa: F401
-
+#: An older uvicorn (before its sans-I/O WebSocket implementation split the
+#: ``Sec-WebSocket-Protocol`` header into the list ASGI specifies) serves
+#: WebSockets with the websockets library's legacy implementation, which
+#: warns that it is deprecated on the server's threads: the library's
+#: warnings, not the server's, let through here.
 pytestmark = [pytest.mark.filterwarnings("ignore::DeprecationWarning:websockets.*"),
               pytest.mark.filterwarnings("ignore::DeprecationWarning:uvicorn.*")]
 
@@ -78,36 +71,6 @@ def _offline():
 # ---------------------------------------------------------------------------
 # A real server on loopback
 # ---------------------------------------------------------------------------
-
-@contextlib.contextmanager
-def loopback_server(chk: S.Check, root: Path, gm=None):
-    """``(SimulationServer, base URL)`` of the check's server served by
-    uvicorn on 127.0.0.1, in a thread; shut down as an embedded server
-    must be: ``request_shutdown()`` first, then ``should_exit``."""
-    root.mkdir(parents=True, exist_ok=True)
-    with S.patched(chk):
-        server = S.make_server("concurrent", chk, root, gm=gm)
-        app = server.create_app()
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
-        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning",
-                                lifespan="on", proxy_headers=True, ws=_WS,
-                                forwarded_allow_ips="127.0.0.1", timeout_keep_alive=5)
-        userver = uvicorn.Server(config)
-        thread = threading.Thread(target=userver.run, kwargs={"sockets": [sock]}, daemon=True)
-        thread.start()
-        try:
-            assert S.wait_for(lambda: userver.started, 20), "uvicorn never started"
-            yield server, f"http://127.0.0.1:{port}"
-        finally:
-            server.request_shutdown()
-            userver.should_exit = True
-            thread.join(30)
-            sock.close()
-            assert not thread.is_alive(), "uvicorn did not shut down"
-
 
 def _http_client(base: str, opened: list):
     def make(*, headers, peer):
@@ -193,7 +156,7 @@ def test_the_claim_holds_under_simultaneous_requests_on_a_loopback_server(row, t
     in as many threads, against one uvicorn server on loopback, while a
     reader thread reads the state concurrently the whole time."""
     chk = S.CHECKS[row]
-    with loopback_server(chk, tmp_path) as (server, base):
+    with S.loopback_server(chk, tmp_path) as (server, base):
         headers = dict(S.BEARER) if server.auth.enforced else {}
         with reading(base, headers):
             simultaneously([lambda i=i: _run_copy(chk, server, base, tmp_path, i)
@@ -217,7 +180,7 @@ def test_simultaneous_steps_are_all_taken_bit_identical_to_serial(tmp_path):
     """REST-040, REST-050: six clients each send five POST /sim/step at once
     through one server: thirty steps, the state bit-identical to thirty
     serial steps of a twin, every reply one step on."""
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         def job():
             with _client(base, server) as c:
                 return [c.post("/sim/step").status_code for _ in range(5)]
@@ -241,7 +204,7 @@ def test_simultaneous_writes_beside_a_run_in_progress_are_409s(tmp_path):
     the serial one."""
     from tests.api.test_graph_lock_refusals_cover_every_route import WRITES
 
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         with _client(base, server) as c:
             assert c.post("/checkpoint/save", params={"path": "c.npz"}).status_code == 200
         gm = server.gm
@@ -295,7 +258,7 @@ def test_simultaneous_params_writes_and_reads_beside_the_runner(tmp_path):
     same value and eight reads at once: every one answered 200, each read
     within two seconds (it waits for the step in flight, not for the
     others), and the running node computes with the value."""
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         with _client(base, server) as c:
             assert c.post("/sim/start").status_code == 200
         assert S.wait_for(lambda: server.relay.step_count > 2)
@@ -328,7 +291,7 @@ def test_simultaneous_requests_that_cannot_have_the_graph_are_503s(tmp_path):
     nothing written."""
     chk = S.Check(fn=None, rows=(), bind="any", contexts=frozenset(), server_kw={},
                   patch={"_GRAPH_LOCK_TIMEOUT": 0.3}, xfail={})
-    with loopback_server(chk, tmp_path) as (server, base):
+    with S.loopback_server(chk, tmp_path) as (server, base):
         lock = server._graph_lock
         before = (float(np.asarray(server.gm.params["nodes"]["spring"]["stiffness"])),
                   {f: float(np.asarray(v)) for f, v in server.gm.get_node_state("ball").items()})
@@ -367,7 +330,7 @@ def test_simultaneous_node_adds_cannot_take_the_graph_past_its_budget(tmp_path):
     than its budget, and no two constructors ever ran at once."""
     from maddening.nodes import SpringDamperNode
 
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         held = sum(server_module._state_elements(f) for n, f in server.gm._state.items()
                    if n != "_meta")
         running, overlaps = [0], [0]
@@ -412,7 +375,7 @@ def test_simultaneous_node_adds_cannot_take_the_graph_past_its_budget(tmp_path):
 def test_simultaneous_starts_start_one_runner(tmp_path):
     """REST-054: six POST /sim/start at once: exactly one 200, the rest 409
     "already started", and one runner thread steps the graph."""
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         def start():
             with _client(base, server) as c:
                 return c.post("/sim/start")
@@ -432,7 +395,7 @@ def test_simultaneous_stops_leave_no_runner_thread(tmp_path):
     """REST-056: the runner running, six POST /sim/stop at once: each is a
     200 "stopped" or a 409 "not started", at least one stopped it, and no
     runner thread steps the graph afterwards."""
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         with _client(base, server) as c:
             assert c.post("/sim/start").status_code == 200
         assert S.wait_for(lambda: server.relay.step_count > 1)
@@ -456,7 +419,7 @@ def test_simultaneous_saves_of_one_name_leave_a_manifest_that_hashes_to_the_file
     between steps: whichever lands last, the file and the manifest beside it
     belong together (the manifest's SHA-256 is the file's), the file loads,
     and no temporary file is left."""
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         def save():
             with _client(base, server) as c:
                 c.post("/sim/step")
@@ -475,7 +438,7 @@ def test_healthz_answers_while_every_worker_waits_for_the_graph(tmp_path):
     """REST-018: the graph held, more reads queued than anyio has worker
     threads (40), each waiting for the graph in a worker; /healthz, answered
     on the event loop, still answers within two seconds."""
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         lock = server._graph_lock
         assert lock.acquire(timeout=20)
         queued = []
@@ -510,7 +473,7 @@ def test_stop_is_answered_at_once_while_every_worker_waits_for_the_graph(tmp_pat
     the graph held by a long request, 48 reads queued for it -- more than
     anyio's 40 workers -- then POST /sim/stop and PUT /sim/stride: each
     answered within a second, not after the reads."""
-    with loopback_server(_ANY, tmp_path) as (server, base):
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
         with _client(base, server) as c:
             assert c.post("/sim/start").status_code == 200
         assert S.wait_for(lambda: server.relay.step_count > 1)
@@ -560,7 +523,7 @@ def test_simultaneous_websocket_handshakes_need_the_credential(tmp_path):
 
     chk = S.Check(fn=None, rows=(), bind="public", contexts=frozenset(), server_kw={},
                   patch={}, xfail={})
-    with loopback_server(chk, tmp_path) as (server, base):
+    with S.loopback_server(chk, tmp_path) as (server, base):
         url = base.replace("http://", "ws://") + "/ws/state"
 
         def refused(**kw):

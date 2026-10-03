@@ -34,6 +34,7 @@ import hashlib
 import json
 import math
 import signal
+import socket
 import threading
 import time
 import warnings
@@ -467,6 +468,55 @@ def mid_request_sigterm(chk: Check, ctx: Ctx) -> None:
         raise error[0]
     assert reached, "no request of the check took the graph: SIGTERM never met one"
     assert seen == [signal.SIGTERM] and shut, "the signal did not reach the server's handler"
+
+
+
+
+# ---------------------------------------------------------------------------
+# A real server on loopback
+# ---------------------------------------------------------------------------
+
+def _uvicorn():
+    """uvicorn, with its own choice of WebSocket implementation imported
+    once, quietly: an older uvicorn picks the websockets library's legacy
+    one, whose import warns (an error in this suite, on the server's
+    thread otherwise)."""
+    import uvicorn
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        import uvicorn.protocols.websockets.auto  # noqa: F401
+    return uvicorn
+
+
+@contextlib.contextmanager
+def loopback_server(chk: Check, root: Path, gm=None):
+    """``(SimulationServer, base URL)`` of the check's server served by
+    uvicorn on 127.0.0.1, in a thread; shut down as an embedded server
+    must be: ``request_shutdown()`` first, then ``should_exit``."""
+    root.mkdir(parents=True, exist_ok=True)
+    with patched(chk):
+        server = make_server("concurrent", chk, root, gm=gm)
+        app = server.create_app()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        config = _uvicorn().Config(app, host="127.0.0.1", port=port, log_level="warning",
+                                lifespan="on", proxy_headers=True, ws="auto",
+                                forwarded_allow_ips="127.0.0.1", timeout_keep_alive=5)
+        userver = _uvicorn().Server(config)
+        thread = threading.Thread(target=userver.run, kwargs={"sockets": [sock]}, daemon=True)
+        thread.start()
+        try:
+            assert wait_for(lambda: userver.started, 20), "uvicorn never started"
+            yield server, f"http://127.0.0.1:{port}"
+        finally:
+            server.request_shutdown()
+            userver.should_exit = True
+            thread.join(30)
+            sock.close()
+            assert not thread.is_alive(), "uvicorn did not shut down"
 
 
 # ---------------------------------------------------------------------------

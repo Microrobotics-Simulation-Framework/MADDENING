@@ -293,6 +293,119 @@ def test_the_documented_defaults_are_inside_the_accepted_range():
 
 
 # ---------------------------------------------------------------------------
+# A wrongly typed argument is refused, not read
+# (audit_040_p4_8/fmu-sysid/repro_hyper_and_mask_types.py)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("call", [
+    pytest.param(lambda gm: fit(gm, lambda p: jnp.asarray(0.0), n_iter=2, tol=True),
+                 id="fit-tol-True"),
+    pytest.param(lambda gm: fit(gm, lambda p: jnp.asarray(0.0), n_iter=2, lr="0.05"),
+                 id="fit-lr-string"),
+    pytest.param(lambda gm: fit(gm, lambda p: jnp.asarray(0.0), n_iter=2, eps=np.True_),
+                 id="fit-eps-numpy-bool"),
+    pytest.param(lambda gm: fit(gm, lambda p: jnp.asarray(0.0), n_iter=2,
+                                betas=(0.9, jnp.asarray(True))),
+                 id="fit-beta-jax-bool"),
+    pytest.param(lambda gm: fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1,
+                                   lam_down=True), id="fit_lm-lam_down-True"),
+    pytest.param(lambda gm: fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1,
+                                   step_tol=False), id="fit_lm-step_tol-False"),
+    pytest.param(lambda gm: fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1,
+                                   lam0=[0.01]), id="fit_lm-lam0-list"),
+    pytest.param(lambda gm: fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1,
+                                   tol=1j), id="fit_lm-tol-complex"),
+])
+def test_a_bool_or_a_non_number_hyper_parameter_is_refused(call):
+    """``float()`` reads ``True`` as ``1.0`` and ``"0.05"`` as ``0.05``:
+    ``fit(tol=True)`` stopped at its first evaluation and reported
+    ``converged=True`` with the parameters unfitted."""
+    with pytest.raises(ValueError, match="must be a finite number"):
+        call(_spring_gm())
+
+
+def test_windowed_loss_and_its_fitter_refuse_a_bool_continuity_weight(observed_spring):
+    """``continuity_weight=True`` was a weight of one."""
+    from maddening.sysid import fit_multiple_shooting
+
+    gm, obs, torn = observed_spring
+    with pytest.raises(ValueError, match="continuity_weight must be a finite number"):
+        _shooting_loss(gm, obs, torn, continuity_weight=True)
+    with pytest.raises(ValueError, match="continuity_weight must be a finite number"):
+        fit_multiple_shooting(gm, obs, obs_fn=lambda h: h["s"]["position"], window=4,
+                              continuity_weight=True, n_iter=1)
+    with pytest.raises(ValueError, match="lr_states must be a finite number"):
+        fit_multiple_shooting(gm, obs, obs_fn=lambda h: h["s"]["position"], window=4,
+                              lr_states=True, n_iter=1)
+
+
+@pytest.mark.parametrize("value", [
+    pytest.param(np.float32(0.05), id="numpy-float32"),
+    pytest.param(np.float64(0.05), id="numpy-float64"),
+    pytest.param(jnp.float32(0.05), id="jax-0d"),
+    pytest.param(np.asarray(0.05), id="numpy-0d"),
+    pytest.param(1, id="int"),
+])
+def test_a_real_number_in_any_spelling_is_still_read(value):
+    """Non-vacuity: NumPy and JAX scalars, 0-d arrays and plain ints are
+    numbers and are read as before."""
+    gm = _spring_gm()
+    fit(gm, lambda p: jnp.asarray(0.0), n_iter=1, lr=value)
+    fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1, lam0=value)
+
+
+def _a_mask(gm, damping):
+    mask = jax.tree.map(lambda _: False, gm.trainable_mask(gm.params))
+    mask["nodes"]["s"]["stiffness"] = True
+    mask["nodes"]["s"]["damping"] = damping
+    return mask
+
+
+@pytest.mark.parametrize("flag", ["False", "True", 0, 1, np.float32(1.0),
+                                  np.ones(1, dtype=bool)],
+                         ids=["str-False", "str-True", "int-0", "int-1",
+                              "float32", "bool-array-1d"])
+def test_a_mask_leaf_that_is_not_a_bool_is_refused(flag):
+    """A leaf is read by its truthiness, so ``"False"`` -- a non-empty
+    string -- selected its parameter, and ``fit_lm`` moved the damping it
+    named as not to be fitted.  Every caller-mask reader refuses it: the
+    fitters and both FIM paths."""
+    from maddening.sysid import fim_core
+
+    gm = _spring_gm()
+    mask = _a_mask(gm, flag)
+
+    def residual(p):
+        return jnp.stack([p["nodes"]["s"]["stiffness"], p["nodes"]["s"]["damping"]])
+
+    for call in (lambda: fit_lm(gm, residual, mask=mask, n_iter=1),
+                 lambda: fit(gm, lambda p: jnp.sum(residual(p) ** 2), mask=mask, n_iter=1),
+                 lambda: fim(residual, gm.params, mask=mask),
+                 lambda: fim_core(residual, gm.params, mask=mask)):
+        with pytest.raises(ValueError, match="every mask leaf must be a bool"):
+            call()
+
+
+@pytest.mark.parametrize("flag", [False, np.False_, jnp.asarray(False)],
+                         ids=["bool", "numpy-bool", "jax-0d-bool"])
+def test_a_mask_leaf_that_is_a_bool_in_any_spelling_is_read(flag):
+    """Non-vacuity: ``bool``, NumPy ``bool_`` and a 0-d boolean array are
+    flags, and ``False`` in each leaves its parameter alone."""
+    gm = _spring_gm()
+
+    def residual(p):
+        return jnp.stack([p["nodes"]["s"]["stiffness"] - 30.0,
+                          p["nodes"]["s"]["damping"] - 1.0])
+
+    res = fit_lm(gm, residual, mask=_a_mask(gm, flag), n_iter=3)
+    assert float(res.params["nodes"]["s"]["damping"]) == float(
+        gm.params["nodes"]["s"]["damping"])
+    assert fim(residual, gm.params, mask=_a_mask(gm, flag)).param_names == (
+        "['nodes']['s']['stiffness']",)
+
+
+# ---------------------------------------------------------------------------
 # windowed_loss refuses what its fitters refuse
 # (audit_040_p4_4/fmu-sysid/repro_windowed_loss_arguments.py)
 # ---------------------------------------------------------------------------

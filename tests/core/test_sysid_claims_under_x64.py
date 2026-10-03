@@ -370,6 +370,40 @@ def test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled_under_x64(
             assert r.rank == 1 and np.isinf(np.asarray(r.crb)).all(), sigma
 
 
+@pytest.mark.parametrize("leaves", LEAVES)
+def test_a_rank_below_the_normal_range_warns_under_x64(leaves):
+    """SYS-129: the verdict holds under rescaling while ``F`` can be formed;
+    once the cutoff ``rank_rtol * max(eigvals)`` falls below ``2 * m * tiny``
+    of the precision ``F`` is formed in, the smallest directions' products
+    flush to zero, and ``fim`` says so with a PrecisionLimitWarning naming that
+    precision, and ``fim_core`` (jitted) with ``precision_limited``.  For this
+    ``|J|`` of 1e-3 float64's range ends near sigma 2e143 (1e147 is past it,
+    with ``F`` still above float64's tiny); float32 leaves in an x64 process
+    end at float32's, near sigma 1e14."""
+    rng = np.random.default_rng(0)
+    m = 50
+    A = np.stack([rng.normal(size=m), 1e-2 * rng.normal(size=m)], axis=1)
+    inside, below, name = ((1.0, 1e60, 1e140), 1e147, "float64") if leaves == "float64" else \
+        ((1.0, 1e6, 1e12), 1e15, "float32")
+    with _x64():
+        dt = _dt(leaves)
+        J0 = jnp.asarray(1e-3 * A, dt)
+
+        def residual(p):
+            return J0 @ jnp.stack([p["x"], p["y"]])
+
+        p0 = {"x": jnp.asarray(1.0, dt), "y": jnp.asarray(1.0, dt)}
+        for sigma in inside:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", PrecisionLimitWarning)
+                assert fim(residual, p0, scale=None, noise_std=sigma).rank == 2, sigma
+            assert not bool(fim_core(residual, p0, scale=None, noise_std=sigma).precision_limited)
+        with pytest.warns(PrecisionLimitWarning, match=f"below {name}'s normal range"):
+            fim(residual, p0, scale=None, noise_std=below)
+        core = jax.jit(lambda q: fim_core(residual, q, scale=None, noise_std=below))(p0)
+        assert bool(core.precision_limited)
+
+
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "SYS-024: with float32 leaves in an x64 process the PrecisionLimitWarning's remedy is "
     "to re-run under x64, which is already on: the remedy is chosen on the decomposition's "
@@ -811,10 +845,11 @@ _SYS071_REASON = (
                                                     reason=_SYS071_REASON)),
     "mixed"])
 def test_multiple_shooting_best_loss_is_exactly_the_returned_pairs_under_x64(leaves):
-    """SYS-071: ``best_loss`` is the loss of exactly the pair returned, without
-    the guard -- here a run that returns its start (SYS-070), whose stiffness,
-    30.03, a ``log`` round trip moves by one float64 ulp; float32 leaves round
-    trip through the float64 optimiser's coordinates exactly."""
+    """SYS-071: without the guard the pair is exact -- the parameters and the
+    window states are returned as selected and ``best_loss`` is their loss --
+    here for a run that returns its start (SYS-070), whose stiffness, 30.03, a
+    ``log`` round trip moves by one float64 ulp; float32 leaves round-trip
+    through the float64 optimiser's coordinates exactly."""
     with _x64():
         gm = _spring(leaves)
         obs = _record(gm, leaves, 200)
@@ -1118,11 +1153,7 @@ def test_a_weakly_identified_direction_is_kept_not_held_under_x64(leaves):
             assert _bits(held.params) == _bits(raw.params)
 
 
-@pytest.mark.parametrize("leaves", [
-    pytest.param("float64", marks=pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-        "pending fix/p4-16-sysid (#214), B1-H1: under x64 the guard misses the exact "
-        "degeneracy and reports excited_rank 2 of 2"))),
-    "mixed"])
+@pytest.mark.parametrize("leaves", LEAVES)
 def test_the_guard_reads_the_iterate_the_fitter_returns_under_x64(leaves):
     """SYS-069: Adam on the flat problem with a step that overshoots ``d`` and
     climbs back out selects a mid-run iterate; the guard holds ``s`` at its

@@ -148,3 +148,28 @@ def test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn(accel
     else:
         assert not np.isfinite(d["gradient_relative_error_bound"]) or not d["spectral_usable"], \
             dict(d)
+
+
+@pytest.mark.parametrize("h", [0.0, 1e-12, 1e-9, 2e-8, 3e-8, 1e-7, 3e-7, 1e-5, 1e-3, 0.1, 0.3, 0.45,
+                               0.4999, 0.5])
+def test_the_newton_miss_is_float32_accurate_however_small_h(h):
+    """``t* - eta`` to a few float32 ulps of its float64 value, at every ``h`` up to 1/2.
+
+    The quotient form ``eta (1 - sqrt(1 - 2h)) / h - eta`` cancels: in
+    float32 it reads ``-eta`` for ``h`` below about 1.5e-8, where ``1 - 2h``
+    rounds to 1, 1-3 ``eta`` up to 3e-8 and 0.19 ``eta`` up to about 3e-7,
+    where the truth is ``h eta / 2``.  The miss is what the second-order
+    term carries and what stretches the distance to ``t*``.
+    """
+    from maddening.core.graph_manager import _kantorovich_root_and_miss
+
+    step = np.float32(0.37)
+    h32 = np.float32(h)
+    root, miss = _kantorovich_root_and_miss(jnp.asarray(step), jnp.asarray(h32))
+    hh = float(h32)
+    exact_root = np.sqrt(1.0 - 2.0 * hh)
+    exact = float(step) * 2.0 * hh / (1.0 + exact_root) ** 2      # float64, no cancellation
+    eps = float(np.finfo(np.float32).eps)
+    assert miss.dtype == jnp.float32 and root.dtype == jnp.float32
+    assert float(miss) == pytest.approx(exact, rel=8 * eps, abs=0.0), (h, float(miss), exact)
+    assert float(root) == pytest.approx(exact_root, rel=8 * eps, abs=4 * eps), (h, float(root))

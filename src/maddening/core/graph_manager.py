@@ -1064,6 +1064,23 @@ def _full_resolvent_norm_and_rows(U, M, make_transpose):
     return jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype)), R
 
 
+def _kantorovich_root_and_miss(step, h):
+    """``(sqrt(1 - 2h), t* - eta)``: Kantorovich's root and the Newton step's miss.
+
+    ``t* = eta (1 - sqrt(1 - 2h)) / h`` bounds the distance from the
+    Newton step's start to the fixed point, so ``t* - eta`` is the most the
+    step of length ``eta`` (*step*) can miss it by.  It is formed as ``eta
+    2h / (1 + root)^2`` (``1 - root = 2h / (1 + root)``), which does not
+    cancel: in float32 the quotient form read ``t* = 0`` for ``h`` below
+    about 1.5e-8 (``1 - 2h`` rounds to 1), 2-4 ``eta`` up to 3e-8 and
+    1.19 ``eta`` up to about 3e-7, where ``t*`` is ``eta`` to within ``h``.
+    The root is clipped at 0 (``h >= 1/2``, where the check fails) and the
+    miss is 0 at ``h = 0``.
+    """
+    root = jnp.sqrt(jnp.maximum(1.0 - 2.0 * h, 0.0))
+    return root, jnp.where(h > 0, step * (2.0 * h) / ((1.0 + root) * (1.0 + root)), 0.0)
+
+
 def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
                                arnoldi_residual, amplification, res):
     """The arithmetic of :func:`_gradient_error_bound_at`, on stopped inputs."""
@@ -1352,13 +1369,9 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         step > 0, numerator / jnp.where(step > 0, step, 1.0), 0.0,
     )
     certified = h < 0.5
-    root = jnp.sqrt(jnp.maximum(1.0 - 2.0 * h, 0.0))
     # ``t* - eta``, the most the Newton step can miss the fixed point by,
-    # in the form that does not cancel: ``eta (1 - root) / h`` is ``eta
-    # 2 / (1 + root)``, and ``1 - root = 2 h / (1 + root)``.  The quotient
-    # form read ``t* = 0`` in float32 for ``h`` below about 3e-8 (``1 - 2h``
-    # rounds to 1) and anything from 0.6 to 1.2 ``eta`` near 1e-7.
-    miss = jnp.where(h > 0, step * (2.0 * h) / ((1.0 + root) * (1.0 + root)), 0.0)
+    # in the form that does not cancel (see the helper).
+    root, miss = _kantorovich_root_and_miss(step, h)
     t_star = step + miss
     stretch = jnp.where(distance > 0,
                         jnp.maximum(distance, t_star) / jnp.where(distance > 0, distance, 1.0),

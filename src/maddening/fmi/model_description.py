@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 import warnings
+import weakref
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Optional
 import xml.etree.ElementTree as ET
@@ -300,6 +301,16 @@ class ModelDescription:
     # ``default_step_size`` advertises; the bridge's ``master_dt`` must be
     # it.  ``None`` for a hand-built description (not written to the XML).
     graph_timestep: Optional[float] = None
+    # The graph the description was built from (a weak reference) and which
+    # of its compiles (``GraphManager._compile_generation``).  Set by
+    # ``build_model_description``, ``None`` for a hand-built description;
+    # not written to the XML.  ``FmuTcpBridge`` refuses to serve the
+    # description once that graph has changed or been compiled again, or
+    # with a sidecar running another compile's step.
+    _graph: Optional[Callable[[], Any]] = field(
+        default=None, init=False, repr=False, compare=False)
+    _graph_generation: Optional[int] = field(
+        default=None, init=False, repr=False, compare=False)
 
     def clocks(self) -> list[FMIVariable]:
         """The ``<Clock>`` variables (empty for a single-clock FMU)."""
@@ -569,7 +580,8 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
 
     FMI's ``min`` / ``max`` are inclusive, but a ``log`` / ``logit``
     leaf's bound is *open* (``p > lo`` strictly -- ``ParamSpec.check``
-    and therefore the sidecar refuse ``p == lo``).  Advertise the
+    and therefore the sidecar refuse ``p == lo``), and a ``log`` leaf with
+    no lower bound is bounded below by 0 all the same.  Advertise the
     nearest representable value inside the interval instead, so every
     value the XML declares settable is accepted by ``set_params``.  A
     zero bound's neighbour is a float32 subnormal, which XLA:CPU flushes
@@ -579,6 +591,13 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     if spec is None:
         return None
     b = spec.bounds[side]
+    if b is None and side == 0 and spec.transform == "log":
+        # ``transform="log"`` without a lower bound is measured from 0
+        # (``ParamSpec``: "lo = bounds[0] or 0; p > lo strictly"), and the
+        # graph refuses p <= 0 there.  It used to be advertised with no
+        # ``min`` at all, so a bridge whose sidecar had no specs accepted
+        # and ran mass = -1.
+        b = 0.0
     if b is None:
         return None
     if spec.transform not in ("log", "logit"):
@@ -630,6 +649,38 @@ def _node_timesteps(graph_manager: Any) -> dict[str, float]:
     if not groups:
         return own
     return {name: float(dt) for name, dt in _scheduled_timesteps(nodes, groups).items()}
+
+
+def _graph_changed_since(graph_manager: Any,
+                         generation: Optional[int] = None) -> Optional[str]:
+    """Why ``graph_manager``'s compiled step is not the model the graph
+    runs next -- or is not its compile ``generation`` -- or ``None``.
+
+    Takes in every pending ``node.params`` write first, with the sync each
+    graph entry point runs (``_check_static_data_dirty``), so a structural
+    write -- a value the step bakes in when it is traced, such as
+    ``HeatNode``'s ``stencil_order`` -- is seen as the change it is.  An
+    object without that machinery (a duck-typed view, which has no
+    compiled step to disagree with) gives ``None``.
+    """
+    check = getattr(graph_manager, "_check_static_data_dirty", None)
+    if not callable(check):
+        return None
+    check()
+    if getattr(graph_manager, "_compiled_step", None) is None:
+        return "the graph has not been compiled"
+    if getattr(graph_manager, "_dirty", False):
+        return ("the graph has changed since its last compile() -- a structural "
+                "node.params write (a value the compiled step bakes in when it is "
+                "traced, such as HeatNode's stencil_order), a node, edge, external "
+                "input or coupling group added or removed, or a node's static_data "
+                "-- so its next run recompiles, and its compiled step is the old "
+                "model")
+    current = getattr(graph_manager, "_compile_generation", None)
+    if generation is not None and current != generation:
+        return (f"the graph has been compiled again since (its compile {current}, "
+                f"not {generation})")
+    return None
 
 
 def _master_timestep(graph_manager: Any) -> float:
@@ -697,8 +748,15 @@ def build_model_description(
     Parameters
     ----------
     graph_manager : GraphManager
-        A *compiled* graph.  The structure (nodes, edges, external
-        inputs) is read at build time.
+        A *compiled* graph, unchanged since its last ``compile()``.  The
+        structure (nodes, edges, external inputs) is read at build time.
+        Every pending ``node.params`` write is taken in first, as every
+        graph entry point takes it in; one the compiled step bakes in (a
+        structural value, such as ``HeatNode``'s ``stencil_order``) leaves
+        the graph needing a recompile, and is refused with the rest (see
+        Raises).  The description remembers the graph and its compile, and
+        :class:`~maddening.fmi.tcp_bridge.FmuTcpBridge` refuses to serve it
+        once the graph has changed or been compiled again.
     model_name : str
         Identifier the FMU will be called by.  Becomes ``modelName``
         in the XML.
@@ -711,7 +769,10 @@ def build_model_description(
         still reads it: the bridge holds it at zero on every step, as
         ``GraphManager.step`` does for an input its caller omits, and it is
         listed in :attr:`ModelDescription.held_inputs`.  A ``UserWarning``
-        names every such input.
+        names every such input.  An input whose target node is not a
+        stability level this FMU exports (see *include_evolving*) is never
+        an FMU variable: it is held at zero and listed in ``held_inputs``
+        the same way, and naming it here is a ``ValueError``.
     selected_outputs : iterable of (node, field) tuples, optional
         Which per-node state fields to expose as FMU outputs.  When
         ``None`` (default), every state field of every node is
@@ -720,7 +781,11 @@ def build_model_description(
         If ``True``, also include surfaces tagged
         ``@stability(EVOLVING)`` or ``PROVISIONAL``.  Default keeps
         the FMU's public surface minimal — only ``STABLE``-tagged
-        sources/sinks contribute.
+        sources/sinks contribute.  The filter is by node, and applies to a
+        node's outputs, its parameters and the external inputs that target
+        it alike; until 0.4.0's fix an input of an ``EXPERIMENTAL`` node
+        was exported even though the node's outputs and parameters were
+        not.
     default_step_size : float, optional
         Default fixed step size for the FMU's experiment block.  Defaults
         to one step of the graph, ``graph_manager.timestep``: the fastest
@@ -738,9 +803,13 @@ def build_model_description(
         (same stability filter as outputs), with ``description`` /
         ``unit`` from the node's :class:`~maddening.core.params.ParamSpec`.
         These are backed by the graph parameter pytree, so an importer that
-        sets one changes the next step without a recompile, and the FMU's
-        directional derivatives with respect to them are the real
-        ``jax.jvp``.  A leaf the step cannot read -- an ``initial_*``
+        sets one changes the next step without a recompile.  The sidecar's
+        Python API computes directional derivatives with respect to them
+        with ``jax.jvp`` (``FmuSidecar.get_directional_derivative``); the
+        FMU binary does not provide them: the description does not declare
+        ``providesDirectionalDerivatives``, and the C wrapper's
+        ``fmi3GetDirectionalDerivative`` returns ``fmi3Error``.  A leaf the
+        step cannot read -- an ``initial_*``
         condition (the FMU's initial state is already built), a value a
         node consumed when it was constructed (``LBMPipeNode.pipe_radius``)
         or declares in ``static_data_deps`` (``WaveletAdaptiveNode.mass``),
@@ -757,11 +826,14 @@ def build_model_description(
         10th master step.  A member of a sub-cycling coupling group is on
         its group's largest member timestep, the only rate at which its
         values change between steps.  Clocks are named ``clock_<k>`` in
-        order of increasing interval; every interval is a whole number of
-        default steps, and the fastest equals it unless the timesteps do
-        not divide each other (nodes at 0.002 and 0.003 run on a 0.001
-        step).  Off by default: no ``<Clock>``, no ``clocks=`` attribute,
-        every output continuous.
+        order of increasing interval.  Every interval is a whole number of
+        graph steps (:attr:`ModelDescription.graph_timestep`).  With the
+        default ``default_step_size`` (one graph step), the fastest clock
+        equals the default step unless the timesteps do not divide each
+        other (nodes at 0.002 and 0.003 run on a 0.001 step under clocks of
+        0.002 and 0.003); a ``default_step_size`` given explicitly need not
+        equal or divide any clock.  Off by default: no ``<Clock>``, no
+        ``clocks=`` attribute, every output continuous.
     model_identifier : str, optional
         Emit a ``<CoSimulation modelIdentifier=...>`` element naming the
         FMU binary (``maddening.fmi.package`` uses ``"maddening_fmu"``).
@@ -774,6 +846,14 @@ def build_model_description(
     Raises
     ------
     ValueError
+        If *graph_manager* has never been compiled, or has changed since
+        its last ``compile()``: a structural ``node.params`` write, a node,
+        edge, external input or coupling group added or removed, or a
+        node's ``static_data``.  The FMU's sidecar runs the compiled step,
+        so the description would describe a model the FMU does not run
+        (until 0.4.0's fix an FMU built over a pending structural write ran
+        the old model while ``gm.run`` ran the new one).  Call
+        ``compile()`` first.
         If *model_name* is exactly ``"NaN"``, ``"Infinity"`` or
         ``"-Infinity"``.  The name goes back to the importer in the
         bridge's ``hello`` reply, where the JSON codec refuses it
@@ -781,13 +861,14 @@ def build_model_description(
         the caller still has the name in its hand and can change it.
         See :data:`maddening.serialization.json_codec.NON_FINITE_TOKENS`.
         Also if *selected_inputs* names an input the graph does not
-        declare.
+        declare, or one whose target node this FMU does not export.
 
     Warns
     -----
     UserWarning
-        If *selected_inputs* leaves out a declared external input; the
-        message names each one and says it is held at zero.
+        If *selected_inputs* leaves out a declared external input, or an
+        input targets a node this FMU does not export; the message names
+        each one and says it is held at zero.
     """
     if model_name in NON_FINITE_TOKENS:
         # MADD-ANO-010's refusal is otherwise reached from the *reply*
@@ -804,6 +885,24 @@ def build_model_description(
             f"string cannot be written as unambiguous JSON.  Name the model "
             f"something else (a different spelling, such as "
             f"{model_name.lower()!r}, is fine)."
+        )
+    # The FMU's sidecar runs the graph's *compiled* step
+    # (``step_fn=gm._compiled_step``), so the description must describe the
+    # model that step computes.  A structural node.params write pending since
+    # the last compile is taken into the graph only as "dirty" (the next
+    # entry point recompiles), and an FMU built over it ran the old model --
+    # or the new one, if the step had not been traced yet -- while every
+    # graph entry point ran the new one.  Refused rather than compiled here:
+    # an export is an artefact, and compiling inside it would hide which
+    # model it froze.
+    stale = _graph_changed_since(graph_manager)
+    if stale is not None:
+        raise ValueError(
+            f"build_model_description: {stale}.  The FMU's sidecar runs the graph's "
+            "compiled step (step_fn=graph_manager._compiled_step), so this "
+            "description would describe a model the FMU does not run.  Call "
+            "graph_manager.compile(), then build the description, the sidecar and "
+            "the bridge from the compiled graph without changing it in between."
         )
     # Inputs: read external-input edges from the graph manager.  The
     # graph manager exposes them via ``_external_input_specs`` (an
@@ -856,6 +955,32 @@ def build_model_description(
             "An unknown name would export nothing and leave the input it was "
             "meant to be held at zero; fix the name."
         )
+    # The stability filter outputs and parameters go through applies to the
+    # inputs too, by their target node: an input of a node this FMU does
+    # not export (an EXPERIMENTAL one always; an EVOLVING or PROVISIONAL one
+    # without include_evolving) used to enter the FMU as a settable
+    # variable while that node's outputs and parameters were left out.  It
+    # is held at zero, as a left-out input is.  A duck-typed view whose
+    # node the graph does not hold is not judged.
+    unexported_inputs: dict[str, str] = {}
+    for ext_key, ext_spec in ext_specs.items():
+        target_spec = (getattr(graph_manager, "_nodes", {}) or {}).get(
+            getattr(ext_spec, "target_node", None))
+        target = getattr(target_spec, "node", target_spec)
+        if target is None:
+            continue
+        cls_name = f"{type(target).__module__}.{type(target).__name__}"
+        if not _ensure_stable_only_or_opt_in(cls_name, include_evolving):
+            unexported_inputs[ext_key] = type(target).__name__
+    if selected_inputs is not None:
+        refused = sorted(set(selected_inputs) & set(unexported_inputs))
+        if refused:
+            raise ValueError(
+                f"selected_inputs names {refused}, input(s) of node(s) this FMU does "
+                f"not export ({sorted({unexported_inputs[k] for k in refused})}: "
+                "only STABLE nodes, or EVOLVING / PROVISIONAL ones with "
+                "include_evolving=True, enter an FMU)")
+    selected_input_keys -= set(unexported_inputs)
     held_inputs: dict[str, tuple[str, str, tuple[int, ...], str]] = {}
     for ext_key, ext_spec in ext_specs.items():
         if ext_key in selected_input_keys:
@@ -869,10 +994,22 @@ def build_model_description(
             tuple(getattr(ext_spec, "shape", ()) or ()),
             held_dtype,
         )
-    if held_inputs:
+    if unexported_inputs:
+        warnings.warn(
+            f"build_model_description: the external input(s) "
+            f"{sorted(unexported_inputs)} feed node(s) this FMU does not export "
+            f"({sorted(set(unexported_inputs.values()))}: only STABLE nodes, or "
+            "EVOLVING / PROVISIONAL ones with include_evolving=True, enter an "
+            "FMU), so they are not FMU variables and are held at zero on every "
+            "step, as GraphManager.step holds an input it is not given.  They "
+            "are listed in ModelDescription.held_inputs.",
+            UserWarning, stacklevel=2,
+        )
+    left_out = sorted(set(held_inputs) - set(unexported_inputs))
+    if left_out:
         warnings.warn(
             f"build_model_description: selected_inputs leaves out the declared "
-            f"external input(s) {sorted(held_inputs)}, which will be held at "
+            f"external input(s) {left_out}, which will be held at "
             "zero on every step.  They are not FMU variables, so no importer "
             "can set them, but the graph still reads them; the bridge passes "
             "zero, as GraphManager.step does for an input it is not given.  "
@@ -1125,7 +1262,7 @@ def build_model_description(
         f"step:{default_step_size}",
     ])
 
-    return ModelDescription(
+    md = ModelDescription(
         model_name=model_name,
         instantiation_token=token,
         variables=variables,
@@ -1135,6 +1272,12 @@ def build_model_description(
         held_inputs=held_inputs,
         graph_timestep=graph_timestep,
     )
+    generation = getattr(graph_manager, "_compile_generation", None)
+    if callable(getattr(graph_manager, "_check_static_data_dirty", None)) \
+            and isinstance(generation, int):
+        md._graph = weakref.ref(graph_manager)
+        md._graph_generation = generation
+    return md
 
 
 __all__ = [

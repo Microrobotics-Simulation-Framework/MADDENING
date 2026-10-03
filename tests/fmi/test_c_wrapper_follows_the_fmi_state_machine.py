@@ -6,6 +6,11 @@ locale.
   ``fmi3OK``.  FMI's Terminated state allows reading, the FMU-state
   functions and ``fmi3Reset``; the bridge now refuses ``doStep``, ``set``
   and ``initialize`` there until ``fmi3Reset``.
+* The wrapper now holds FMI 3.0's co-simulation states itself: before,
+  ``fmi3DoStep`` before ``fmi3EnterInitializationMode`` advanced the model,
+  and ``fmi3ExitInitializationMode``, ``fmi3EnterStepMode`` and a
+  zero-length ``fmi3Set*`` answered ``fmi3OK`` after ``fmi3Terminate``
+  (claim FMU-025).
 * ``fmi3GetClock`` / ``fmi3SetClock`` answered ``fmi3OK`` for any value
   reference.  FMI allows them only in Event Mode, which this FMU does not
   have, so both are ``fmi3Error``.
@@ -51,6 +56,11 @@ def wrapper(binary):
     lib.fmi3Reset.argtypes = [ctypes.c_void_p]
     lib.fmi3GetFMUState.restype = ctypes.c_int
     lib.fmi3GetFMUState.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    for name in ("fmi3EnterConfigurationMode", "fmi3ExitConfigurationMode"):
+        getattr(lib, name).restype = ctypes.c_int
+        getattr(lib, name).argtypes = [ctypes.c_void_p]
+    lib.fmi3SetTime.restype = ctypes.c_int
+    lib.fmi3SetTime.argtypes = [ctypes.c_void_p, ctypes.c_double]
     for name in ("fmi3GetClock", "fmi3SetClock"):
         f = getattr(lib, name)
         f.restype = ctypes.c_int
@@ -80,25 +90,102 @@ def test_a_terminated_instance_refuses_to_step_set_and_initialize_until_reset(wr
     md, bridge, inst = instance
     lib = wrapper.lib
     pos, anchor = _vr(md, "spring.position"), _vr(md, "spring.anchor_position")
-    assert lib.fmi3EnterInitializationMode(inst, False, 0.0, 0.0, False, 0.0) == OK
+    wrapper.to_step_mode(inst)
     assert wrapper.step(inst, 0.0, DT)[0] == OK
     before = wrapper.call("Get", "Float32", inst, [pos], [0.0])
     assert lib.fmi3Terminate(inst) == OK
     status, last = wrapper.step(inst, DT, DT)
     assert status == ERROR and last == pytest.approx(DT)
-    assert "has been terminated" in wrapper.logs[-1]
+    assert "not allowed in the Terminated state" in wrapper.logs[-1]
     assert wrapper.call("Set", "Float32", inst, [anchor], [0.3])[0] == ERROR
     assert lib.fmi3EnterInitializationMode(inst, False, 0.0, 0.0, False, 0.0) == ERROR
+    # the three that answered fmi3OK here: a zero-length set, and the two
+    # mode changes that have nowhere to go from Terminated
+    assert wrapper.call("Set", "Float32", inst, [], [])[0] == ERROR
+    assert lib.fmi3ExitInitializationMode(inst) == ERROR
+    assert lib.fmi3EnterStepMode(inst) == ERROR
+    assert lib.fmi3Terminate(inst) == ERROR
+    # and the bridge, which keeps its own check, still says Terminated
+    reply = bridge.handle({"op": "step", "t": DT, "dt": DT})
+    assert reply["ok"] is False and "has been terminated" in reply["error"]
     # reading, and saving the FMU state, are what Terminated is for
     assert wrapper.call("Get", "Float32", inst, [pos], [0.0]) == before
     state = ctypes.c_void_p()
     assert lib.fmi3GetFMUState(inst, ctypes.byref(state)) == OK
     lib.fmi3FreeFMUState(inst, ctypes.byref(state))
     assert wrapper.call("Get", "Float32", inst, [anchor], [1.0]) == (OK, [0.0])
-    # fmi3Reset starts the instance again
+    # fmi3Reset starts the instance again, in the Instantiated state
     assert lib.fmi3Reset(inst) == OK
-    assert wrapper.step(inst, 0.0, DT)[0] == OK
     assert wrapper.call("Set", "Float32", inst, [anchor], [0.3])[0] == OK
+    wrapper.to_step_mode(inst)
+    assert wrapper.step(inst, 0.0, DT)[0] == OK
+
+
+def test_no_step_before_initialization_and_no_mode_change_out_of_turn(wrapper, instance):
+    """FMI 3.0's co-simulation states, held by the wrapper: ``fmi3DoStep``
+    used to advance the model straight after instantiation, before any
+    ``fmi3EnterInitializationMode`` (and report time 0.01, position
+    0.5015, ``fmi3OK``)."""
+    md, bridge, inst = instance
+    lib = wrapper.lib
+    served = bridge.requests_served
+    status, last = wrapper.step(inst, 0.0, DT)
+    assert status == ERROR and last == 0.0
+    assert "fmi3DoStep is not allowed in the Instantiated state" in wrapper.logs[-1]
+    assert wrapper.call("Get", "Float64", inst, [_vr(md, "time")], [9.0]) == (ERROR, [9.0])
+    assert lib.fmi3ExitInitializationMode(inst) == ERROR
+    assert lib.fmi3EnterStepMode(inst) == ERROR
+    assert lib.fmi3Terminate(inst) == ERROR
+    assert bridge.requests_served == served                # all answered locally
+    # nothing moved: initialize and read the start
+    assert lib.fmi3EnterInitializationMode(inst, False, 0.0, 0.0, False, 0.0) == OK
+    assert wrapper.call("Get", "Float32", inst, [_vr(md, "spring.position")], [0.0]) == (OK, [0.5])
+    assert wrapper.step(inst, 0.0, DT)[0] == ERROR          # Initialization Mode: not yet
+    assert lib.fmi3EnterInitializationMode(inst, False, 0.0, 0.0, False, 0.0) == ERROR
+    assert lib.fmi3ExitInitializationMode(inst) == OK
+    assert lib.fmi3EnterStepMode(inst) == ERROR             # Event Mode's, never this FMU's
+    assert "Event Mode" in wrapper.logs[-1]
+    assert lib.fmi3ExitInitializationMode(inst) == ERROR
+    assert wrapper.step(inst, 0.0, DT)[0] == OK
+
+
+def test_what_this_fmu_never_has_is_refused_in_every_state(wrapper, instance):
+    """No structural parameters, so no Configuration Mode; a co-simulation
+    instance, so no ``fmi3SetTime``.  All three answered ``fmi3OK`` (and
+    ``fmi3SetTime`` moved the wrapper's clock)."""
+    md, bridge, inst = instance
+    lib = wrapper.lib
+    for state in ("Instantiated", "Step Mode"):
+        assert lib.fmi3EnterConfigurationMode(inst) == ERROR, state
+        assert "no structural parameters" in wrapper.logs[-1]
+        assert lib.fmi3ExitConfigurationMode(inst) == ERROR, state
+        assert lib.fmi3SetTime(inst, 3.0) == ERROR, state
+        assert "model-exchange" in wrapper.logs[-1]
+        if state == "Instantiated":
+            wrapper.to_step_mode(inst)
+    status, last = wrapper.step(inst, 1.0, DT)              # a refused step reports the clock
+    assert status == ERROR and last == 0.0
+
+
+def test_the_wrapper_provides_no_directional_derivative(wrapper, instance):
+    """FMU-017: the sidecar's Python API computes directional derivatives with ``jax.jvp``;
+    the FMU binary does not, and says so: ``fmi3GetDirectionalDerivative`` is ``fmi3Error``
+    in Step Mode, with the sensitivity untouched and nothing asked of the bridge."""
+    md, bridge, inst = instance
+    f = wrapper.lib.fmi3GetDirectionalDerivative
+    f.restype = ctypes.c_int
+    f.argtypes = [ctypes.c_void_p, ctypes.POINTER(VR), ctypes.c_size_t, ctypes.POINTER(VR),
+                  ctypes.c_size_t, ctypes.POINTER(ctypes.c_double), ctypes.c_size_t,
+                  ctypes.POINTER(ctypes.c_double), ctypes.c_size_t]
+    wrapper.to_step_mode(inst)
+    served = bridge.requests_served
+    unknowns = (VR * 1)(_vr(md, "spring.position"))
+    knowns = (VR * 1)(_vr(md, "spring.params.stiffness"))
+    seed, sensitivity = (ctypes.c_double * 1)(1.0), (ctypes.c_double * 1)(42.0)
+    assert f(inst, unknowns, 1, knowns, 1, seed, 1, sensitivity, 1) == ERROR
+    assert sensitivity[0] == 42.0
+    assert "Python sidecar API" in wrapper.logs[-1]
+    assert bridge.requests_served == served
 
 
 def test_the_clock_functions_are_refused_for_any_value_reference(wrapper, instance):
@@ -116,7 +203,7 @@ def test_the_clock_functions_are_refused_for_any_value_reference(wrapper, instan
 def test_a_refused_step_after_a_restore_reports_the_restored_time(wrapper, instance):
     md, bridge, inst = instance
     lib = wrapper.lib
-    assert lib.fmi3EnterInitializationMode(inst, False, 0.0, 0.0, False, 0.0) == OK
+    wrapper.to_step_mode(inst)
     t = 0.0
     for _ in range(5):
         assert wrapper.step(inst, t, DT)[0] == OK
@@ -148,6 +235,7 @@ lib.fmi3InstantiateCoSimulation.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ct
     ctypes.c_void_p, LOG, ctypes.c_void_p]
 lib.fmi3EnterInitializationMode.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_double,
     ctypes.c_double, ctypes.c_bool, ctypes.c_double]
+lib.fmi3ExitInitializationMode.argtypes = [ctypes.c_void_p]
 lib.fmi3DoStep.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_bool,
     *[ctypes.POINTER(ctypes.c_bool)] * 3, ctypes.POINTER(ctypes.c_double)]
 lib.fmi3GetFloat64.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
@@ -158,6 +246,7 @@ inst = lib.fmi3InstantiateCoSimulation(b"i", token.encode(), b"", False, True, F
 out = {"decimal_point": locale.localeconv()["decimal_point"], "instantiated": bool(inst)}
 if inst:
     out["initialize"] = lib.fmi3EnterInitializationMode(inst, False, 0.0, 0.5, False, 0.0)
+    out["exit"] = lib.fmi3ExitInitializationMode(inst)
     flags = [ctypes.c_bool() for _ in range(3)]
     last = ctypes.c_double()
     steps = []
@@ -197,6 +286,6 @@ def test_an_importer_under_a_comma_decimal_locale_steps_the_fmu(binary, gm, tmp_
                           if line.startswith("RESULT "))[7:])
     assert got["decimal_point"] == ",", got        # the locale really took
     assert got["instantiated"], got
-    assert got["initialize"] == OK and got["steps"] == [OK, OK], got
+    assert got["initialize"] == got["exit"] == OK and got["steps"] == [OK, OK], got
     assert got["last"] == pytest.approx(0.52) and got["time"] == pytest.approx(0.52), got
     assert not got["logs"], got

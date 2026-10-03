@@ -3,7 +3,7 @@
 The Newton-Kantorovich check behind ``gradient_bound_usable`` takes
 ``beta = ||(I - J(x_k))^{-1}||``.  Until 0.4.0's round-5 fix it took the
 Arnoldi factor, the resolvent restricted to the Krylov space of the start
-vector and the residual, which can be several times smaller (MADD-ANO-XH1).
+vector and the residual, which can be several times smaller (MADD-ANO-138).
 The full norm comes from the range basis: with ``range(J)`` inside
 ``span(U)`` and ``B = U^T J`` the resolvent is ``I + U (I - M)^{-1} B``,
 exact from a small SVD.  Its compression to ``span(U)`` alone -- what

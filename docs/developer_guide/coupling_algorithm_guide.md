@@ -426,7 +426,7 @@ group already has or measures cheaply:
    the Arnoldi `‖(I − H)⁻¹‖₂`, which is the resolvent restricted to the
    Krylov space `span(v0, r)` and read 8.57 where the full norm is 45.2 on
    a three-relay ring whose secant lies outside that space (the bound was
-   0.19x the true error, usable; MADD-ANO-XH1);
+   0.19x the true error, usable; MADD-ANO-138);
 3. **the curvature** is a directional second difference of the
    adjoint's own matvec: `G` evaluated by the same Jacobian-vector
    product at `x_k` and at `x_k + δ`, `δ = (I − J)⁻¹ (F(x_k) − x_k)` the
@@ -1376,7 +1376,7 @@ not (rows CPL-025, CPL-077, CPL-078, CPL-180 to CPL-183 of
   round-5 fix an outside node added between two members of a group that
   is only part of a larger loop was scheduled between them, ran after the
   whole group all the same, and read the later member one step late
-  (MADD-ANO-XM2).
+  (MADD-ANO-140).
 * **A loop through outside nodes is closed where the build order puts
   it.**  When a group's members and some outside nodes form one feedback
   loop, the group does not iterate the outside part, so one of the loop's

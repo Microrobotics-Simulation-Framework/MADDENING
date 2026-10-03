@@ -527,10 +527,15 @@ def test_check_accepts_a_logit_value_exactly_when_its_coordinate_is_finite(
     existing -- ``check`` passes a float32 value if and only if
     ``unconstrain`` gives it a finite coordinate.  (Every interval drawn
     holds float32 values; a bound the cast rounds outward is stepped past,
-    not filtered.)"""
+    not filtered.  Above a bound of 0 the walk starts at the smallest
+    normal: JAX's arithmetic leaves the process flushing subnormals, under
+    which ``float()`` reads every one of them as 0 and a walk through them
+    takes 2**23 steps.)"""
     hi = lo + width
     spec = ParamSpec(bounds=(lo, hi), transform="logit")
     v = np.float32(lo if edge == "lo" else hi)
+    if v == 0.0:
+        v = np.float32(np.finfo(np.float32).tiny)
     toward = np.float32(np.inf if edge == "lo" else -np.inf)
     for _ in range(ulps):
         v = np.nextafter(v, toward)

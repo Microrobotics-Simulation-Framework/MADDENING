@@ -641,7 +641,8 @@ class _Served:
                     found.set()
             found.set()
 
-        threading.Thread(target=drain, daemon=True).start()
+        self._drain = threading.Thread(target=drain, daemon=True)
+        self._drain.start()
         found.wait(startup)
         if not self._port:
             self.stop()
@@ -664,7 +665,16 @@ class _Served:
         return "".join(self.lines[-60:])
 
     def stop(self) -> int:
-        return _stop(self.proc)
+        """Ctrl-C the server and close its output.  The pipe is closed
+        here, after the drain has read it to the end: left to the garbage
+        collector, its ``ResourceWarning`` landed in whichever later test
+        the collector ran in -- once inside pytest's own import of
+        ``tracemalloc``, which failed that test instead."""
+        code = _stop(self.proc)
+        self._drain.join(30)
+        if self.proc.stdout is not None:
+            self.proc.stdout.close()
+        return code
 
 
 def _ws_messages(url: str, n: int) -> list:

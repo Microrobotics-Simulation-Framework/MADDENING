@@ -26,6 +26,13 @@ import time.  Levels:
 | `maddening.api.server.SimulationServer.request_shutdown` | evolving |
 | `maddening.api.server.origin_is_same_site` | evolving |
 | `maddening.api.server.warn_if_publicly_bound` | evolving |
+| `maddening.api.server:GET /surrogate/status/{job_id}` | experimental |
+| `maddening.api.server:POST /surrogate/activate/{job_id}` | experimental |
+| `maddening.api.server:POST /surrogate/deactivate/{node_name}` | experimental |
+| `maddening.api.server:POST /surrogate/train` | experimental |
+| `maddening.api.server:WS /ws/render` | experimental |
+| `maddening.api.server:WS /ws/state` | experimental |
+| `maddening.api.server:WS /ws/state/binary` | experimental |
 | `maddening.cloud.multigpu.halo_unstructured.UnstructuredPartitionLayout` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.build_unstructured_partition` | evolving |
 | `maddening.cloud.multigpu.halo_unstructured.exchange_traffic` | evolving |
@@ -205,5 +212,6 @@ import time.  Levels:
 | `maddening.transport_auth.address_requires_security` | evolving |
 | `maddening.transport_auth.resolve_security` | evolving |
 | `maddening.usd.live_stage.LiveStage` | evolving |
+| `maddening.viz.relay.StateRelay` | experimental |
 
-*186 API surfaces registered.*
+*194 API surfaces registered.*

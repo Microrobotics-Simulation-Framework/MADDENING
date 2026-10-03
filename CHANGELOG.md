@@ -351,6 +351,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The identifiability guard decides the same in any units** (MADD-ANO-135, never released): its tests, hold and tolerance measure an identity parameter relative to its size, as `fim(scale="relative")` does;
+  **bounds checks compare exactly** (MADD-ANO-136): a float32 `-1e-40` no longer passes a `(0, None)` bound through XLA's subnormal flush; **a value its type flushes to 0 is refused** (MADD-ANO-137) like one it overflows.
+  Action: none; a `fit_lm` with an identity parameter in units far from 1 may return a different (correct) point.  The sysid/FMU inventory's SYS-063, -088, -109, FMU-024 and -039 are verified (144 of 147 rows).
 - **REST round-6 audit fixes** (MADD-ANO-131 to 134; 096 completed): a surrogate job re-checks its memory budget on the graph it sweeps; `POST /sim/profile` restores the live state and keeps the streams out; a reset, a state write, a node edit and a surrogate swap publish to the streams (the relay adds `run_adaptive`'s `dt`); a JAX trace stops itself at 10 000 steps or 600 s;
   `/sim/run` reports `steps_run` when a step raises; runner routes answer within one lock timeout and say when they left the runner stopped; checkpoint saves are atomic; past the stream cap a client gets 1013, not 403; `run_pod.py` records only a real commit and `--summarise` survives older files.
   Action: none; read `GET /sim/profile/jax/status` if a long trace ends early.

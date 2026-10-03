@@ -510,10 +510,12 @@ Neither fires while a parameter on its bound could lower the loss by
 moving into its range.  (`fit` and `fit_multiple_shooting` have only the
 `tol` test, so with the default `tol=0.0` their `converged` is always
 `False`; read `best_loss`.)  The solve's floor is `eps` times each
-column's own curvature, so the answer depends neither on the residual's
+column's own curvature, so the step depends neither on the residual's
 units nor on any parameter's (a floor shared across columns once crushed
 the step of a parameter measured in small units, which then read as
-converged).  And neither test fires unless the undamped Gauss-Newton step
+converged), and with the identifiability guard below making its tests in
+coordinates no change of units moves, neither does the answer `fit_lm`
+returns with its defaults.  And neither test fires unless the undamped Gauss-Newton step
 from the iterate -- least squares on the equilibrated Jacobian, with no
 damping and no floor -- would also move every parameter by no more than
 `step_tol`, or, at the floor, would not lower the loss: a shrunken step
@@ -564,7 +566,14 @@ short or fast-converging run's gradients need not span everything the data
 does determine.  So, second, the loss must have no curvature along it at the
 iterate `fit` returns, measured with Hessian-vector products there (`fit_lm`
 reads `JᵀJ` instead, with `fim`'s rank rule).  The net displacement along
-the directions that pass both is removed.
+the directions that pass both is removed.  Both tests, the hold and the loss
+check below compare parameters with each other, so they are made with each
+identity-transform parameter measured relative to its own size (a `log` or
+`logit` coordinate is relative already) — the coordinates
+`fim(scale="relative")` uses — and the guard decides the same in any units.
+Made in the optimiser's own coordinates, a damping written in units of
+`1e-5` looked undetermined beside the others and was held at its start,
+raising `fit_lm`'s loss from `1.6e-11` to `13.9`.
 
 Then the loss gets the last word.  The held point's loss is evaluated, and
 if it is above the selected iterate's by more than rounding — `2¹⁰·eps`

@@ -675,7 +675,7 @@ def _domain_topology(topo, domain):
     if domain == "sub_cycled":
         return topo.with_timesteps({members[-1]: 0.5 for members in topo.groups})
     if domain == "checkpoint_restart":
-        # ``save_state`` cannot write a typed PRNG key (MADD-ANO-168): the
+        # ``save_state`` cannot write a typed PRNG key (MADD-ANO-171): the
         # restart runs on the structure without its key leaves.
         return dataclasses.replace(topo, nodes=tuple(
             dataclasses.replace(nd, leaves=tuple(lf for lf in nd.leaves if lf != "key"))
@@ -946,7 +946,7 @@ def test_jacobi_under_a_constant_iterator_ignores_the_members_build_order(domain
 
 
 @pytest.mark.xfail(strict=True, raises=TypeError, reason=(
-    "MADD-ANO-168: save_state cannot write a typed PRNG key leaf (np.asarray of a key "
+    "MADD-ANO-171: save_state cannot write a typed PRNG key leaf (np.asarray of a key "
     "array raises TypeError), so a graph holding one cannot be checkpointed; deferred "
     "to 0.5.0"))
 def test_a_structure_with_a_typed_prng_key_survives_a_checkpoint_restart():

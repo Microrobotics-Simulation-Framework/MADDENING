@@ -11691,7 +11691,7 @@ anomalies:
       None known.
     verification:
       - "tests/api/test_profile_endpoints.py::test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept"
-  - anomaly_id: "MADD-ANO-167"
+  - anomaly_id: "MADD-ANO-170"
     title: "The Aitken two-pass guard can add two passes to Aitken's own exit, where the guide says at most one"
     description: >
       Under `acceleration="aitken"` the coupling loop stops only when two
@@ -11739,7 +11739,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit"
     github_issue: null
-  - anomaly_id: "MADD-ANO-168"
+  - anomaly_id: "MADD-ANO-171"
     title: "save_state cannot write a typed PRNG key leaf"
     description: >
       `GraphManager.save_state` (`maddening.core.simulation.checkpoint.save_state`)
@@ -11778,7 +11778,7 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_structure_with_a_typed_prng_key_survives_a_checkpoint_restart"
     github_issue: null
-  - anomaly_id: "MADD-ANO-169"
+  - anomaly_id: "MADD-ANO-172"
     title: "reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform"
     description: >
       A loss that starts each evaluation from the initial state,
@@ -11817,7 +11817,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_nonfloat_leaves_in_every_domain.py::test_a_loss_that_resets_a_predictor_group_differentiates_twice"
     github_issue: null
-  - anomaly_id: "MADD-ANO-170"
+  - anomaly_id: "MADD-ANO-173"
     title: "run_adaptive never returns once its step-doubling error norm is NaN"
     description: >
       `GraphManager.run_adaptive` compares the fine and coarse attempts by

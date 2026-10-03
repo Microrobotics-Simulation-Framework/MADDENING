@@ -11,7 +11,7 @@ domains: float64 and a float32 member beside a float64 one under x64, a
 multi-rate graph (a clock at half the group's step), a sub-cycled member
 (``a`` at half the step, sub-stepped twice per pass), a quadratic
 predictor, a checkpoint restart (the counter and the flag; a typed key
-cannot be saved, MADD-ANO-168), and ``jax.vmap`` of the gradient of a
+cannot be saved, MADD-ANO-171), and ``jax.vmap`` of the gradient of a
 ``lax.scan`` of the raw step over three parameter sets.
 
 The pair is algebraic, so every solve lands on ``x* = c / (1 - k)`` from
@@ -130,7 +130,7 @@ def _scan_loss(gm, steps):
 
 def _start(gm, restart_from):
     """The run's start, set *outside* the transform (resetting inside a
-    differentiated loss fails on a predictor group: MADD-ANO-169)."""
+    differentiated loss fails on a predictor group: MADD-ANO-172)."""
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", "the graph held JAX tracers", RuntimeWarning)
         gm.reset_state()
@@ -200,7 +200,7 @@ def test_reverse_and_forward_mode_from_a_checkpoint_restart_with_non_float_leave
     """CPL-145 after a restart: two steps saved, reset and loaded, then the
     derivatives through ``run_scan`` from the loaded state are the fixed
     point's, and the counter carries on from the checkpoint.  Without the
-    typed key, which ``save_state`` cannot write (MADD-ANO-168)."""
+    typed key, which ``save_state`` cannot write (MADD-ANO-171)."""
     d = cd.DOMAINS["checkpoint_restart"]
     gm = _pair(d, key=False)
     gm.run_scan(2)
@@ -245,7 +245,7 @@ def test_vmap_of_the_gradient_through_a_scan_with_non_float_leaves():
 
 
 @pytest.mark.xfail(strict=True, raises=jax.errors.UnexpectedTracerError, reason=(
-    "MADD-ANO-169: reset_state() inside a differentiated loss raises UnexpectedTracerError "
+    "MADD-ANO-172: reset_state() inside a differentiated loss raises UnexpectedTracerError "
     "on a predictor group once an earlier transform has left tracers in the graph; "
     "deferred to 0.5.0"))
 def test_a_loss_that_resets_a_predictor_group_differentiates_twice():

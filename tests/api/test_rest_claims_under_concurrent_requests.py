@@ -384,9 +384,11 @@ def test_simultaneous_starts_start_one_runner(tmp_path):
             replies = simultaneously([start] * 6)
             codes = sorted(r.status_code for r in replies)
             assert codes == [200, 409, 409, 409, 409, 409], [r.text for r in replies]
-            runners = [t for t in threading.enumerate() if "runner" in t.name.lower()]
+            # the realtime runner's own threads (not the runner routes' pool)
+            runners = [t for t in threading.enumerate() if getattr(
+                getattr(t, "_target", None), "__qualname__", "") == "RealtimeRunner._run"]
             assert server.runner is not None and server.runner.is_alive
-            assert len(runners) <= 1, runners
+            assert len(runners) == 1, runners
         finally:
             S.stop_runner(server)
 

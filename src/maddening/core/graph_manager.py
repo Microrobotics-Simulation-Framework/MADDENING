@@ -2954,6 +2954,97 @@ def _strict_convergence_messages(group) -> tuple[str, str]:
     )
 
 
+def _strict_error_if(value, pred, msg, mesh=None):
+    """``equinox.error_if(value, pred, msg)``, raised on every device of *mesh* at once.
+
+    ``error_if`` raises from a host callback, and in a program partitioned
+    over several devices a callback runs once, on the first device: the
+    others went on to the step's next all-reduce and waited there for a
+    device that had stopped, until XLA reported the stuck rendezvous and
+    aborted the process (SIGABRT after about a minute), so the error never
+    reached Python (MADD-ANO-162).  With *mesh* the check runs inside a
+    ``shard_map`` replicated over every device of it: *pred* is one value on
+    all of them (a verdict on the group's reduced residual), so every device
+    raises at the same program point and none is left waiting.
+
+    The callback returns a zero token rather than *value* itself: handed
+    *value*, the replicated ``shard_map`` would gather a sharded field onto
+    every device and hand it back replicated.  The token is OR-ed into the
+    bits of each floating leaf -- an exact identity no compiler can fold
+    away, which keeps the check live (a callback whose result is unused is
+    removed) without rounding, flushing or moving a sign.  Without *mesh*
+    (one device) this is ``error_if`` itself, unchanged.
+    """
+    import equinox as eqx  # noqa: PLC0415  (lineax transitive dep)
+
+    if mesh is None:
+        return eqx.error_if(value, pred, msg)
+    from jax import shard_map  # noqa: PLC0415
+    from jax.sharding import PartitionSpec  # noqa: PLC0415
+
+    token = shard_map(
+        lambda p: eqx.error_if(jnp.zeros((), jnp.uint8), p, msg),
+        mesh=mesh, in_specs=PartitionSpec(), out_specs=PartitionSpec(),
+        check_vma=False,
+    )(jnp.asarray(pred))
+
+    def tie(v):
+        v = jnp.asarray(v)
+        if not jnp.issubdtype(v.dtype, jnp.floating):
+            return v
+        bits = jnp.dtype(f"uint{jnp.finfo(v.dtype).bits}")
+        return jax.lax.bitcast_convert_type(
+            jax.lax.bitcast_convert_type(v, bits) | token.astype(bits), v.dtype)
+
+    return jax.tree.map(tie, value)
+
+
+def _multi_device_mesh(nodes, state, graph_mesh=None):
+    """The device mesh a step spans when it spans more than one device, else ``None``.
+
+    A sharded node's mesh (the ``Sharded*Node`` convention: a ``_mesh``
+    attribute), the graph's own (:meth:`GraphManager.enable_multigpu`), or
+    the mesh of a state field placed with a ``NamedSharding`` over more than
+    one device -- the first found.  :func:`_strict_error_if` raises on every
+    device of it.
+    """
+    from jax.sharding import NamedSharding  # noqa: PLC0415
+
+    candidates = [getattr(spec.node, "_mesh", None) for spec in nodes.values()]
+    candidates.append(graph_mesh)
+    for fields in state.values():
+        for leaf in (fields.values() if isinstance(fields, dict) else ()):
+            sharding = getattr(leaf, "sharding", None)
+            if isinstance(sharding, NamedSharding):
+                candidates.append(sharding.mesh)
+    for mesh in candidates:
+        if mesh is not None and int(np.prod(mesh.devices.shape)) > 1:
+            return mesh
+    return None
+
+
+def _drain_mesh(mesh) -> None:
+    """Wait until every device of *mesh* has finished what it was running.
+
+    After :func:`_strict_error_if` raised on every device, Python sees the
+    first device's error while the others may still be running their own
+    raising callback; a process that exits then aborts in teardown
+    ("terminate called without an active exception", about half the time on
+    a four-device CPU mesh).  A computation over every device of the mesh
+    runs on each after what came before it, so blocking on one waits them
+    all out.
+    """
+    from jax.sharding import NamedSharding, PartitionSpec  # noqa: PLC0415
+
+    n = int(np.prod(mesh.devices.shape))
+    probe = jax.device_put(np.zeros(n, np.float32),
+                           NamedSharding(mesh, PartitionSpec(tuple(mesh.axis_names))))
+    try:
+        jax.block_until_ready(jax.jit(jnp.sum)(probe))
+    except Exception:  # noqa: BLE001  (a drain must not replace the error it follows)
+        pass
+
+
 def _raise_if_a_kept_solve_failed(messages: dict, verdicts: Sequence[dict]) -> None:
     """``strict_convergence`` for ``run_adaptive``: raise about a kept solve.
 
@@ -3057,7 +3148,7 @@ def _run_coupled_block_impl(
     runtime_dt, *, nodes, edges_by_target, ext_by_target,
     back_edge_set, has_external, all_edges,
     multigpu_device_map=None, node_params=None, fires=None,
-    strict_sink=None, probe_sink=None,
+    strict_sink=None, probe_sink=None, strict_mesh=None,
 ):
     """Execute a coupling group with iterative fixed-point iteration.
 
@@ -3093,6 +3184,11 @@ def _run_coupled_block_impl(
     unconverged)`` predicates to it instead, for a caller that knows only
     later whether the step keeps the solve -- ``run_adaptive*``, whose
     error-estimate full step and rejected attempts are discarded.
+
+    ``strict_mesh`` is the device mesh of a step that spans more than one
+    device (:func:`_multi_device_mesh`), on every device of which
+    ``strict_convergence`` raises (:func:`_strict_error_if`); ``None`` on
+    one device.
     """
     from maddening.core.coupling.acceleration import (
         aitken_relaxation,
@@ -3272,18 +3368,15 @@ def _run_coupled_block_impl(
                                 jnp.logical_not(est <= conv_threshold_value)),
             ))
             return value
-        # Lazy for import time only: equinox is a transitive
-        # dependency of lineax, which is a base dependency.
-        import equinox as eqx  # noqa: PLC0415
-
         # Two checks with exclusive predicates, so the message names the
         # cause (``_strict_convergence_messages``).  Both are gated on the
         # step keeping this solve: a multi-rate base step computes and
         # discards it on every phase the group does not fire on, and used
-        # to raise about a solve nothing applied.
-        value = eqx.error_if(value, _gate_on_firing(nonfinite),
-                             _strict_nonfinite_msg)
-        return eqx.error_if(
+        # to raise about a solve nothing applied.  On a step spanning
+        # several devices both raise on every device (``strict_mesh``).
+        value = _strict_error_if(value, _gate_on_firing(nonfinite),
+                                 _strict_nonfinite_msg, strict_mesh)
+        return _strict_error_if(
             # ``not (r <= t)`` rather than ``r > t``: the two differ
             # exactly on NaN, which answers False to both, and a NaN
             # residual is the one case where the IFT gradient is certainly
@@ -3298,6 +3391,7 @@ def _run_coupled_block_impl(
                 jnp.logical_not(est <= conv_threshold_value),
             )),
             _strict_unconverged_msg,
+            strict_mesh,
         )
 
     _MISSING = object()
@@ -4879,6 +4973,7 @@ def _build_adaptive_scan(
     from maddening.core.simulation.adaptive import _tree_error_norm, step_decision
 
     strict_messages = dict(getattr(dt_step_fn, "strict_messages", {}))
+    strict_mesh = getattr(dt_step_fn, "strict_mesh", None)
     fold_kept_halves = getattr(dt_step_fn, "fold_kept_halves",
                                lambda _first, second: second)
 
@@ -4923,20 +5018,21 @@ def _build_adaptive_scan(
             if strict_messages:
                 # ``strict_convergence`` on the solves this iteration keeps:
                 # the two half steps, when accepted and not already done.
-                import equinox as eqx  # noqa: PLC0415
-
+                # On every device of a step spanning several (MADD-ANO-162).
                 kept = jnp.logical_and(accepted, jnp.logical_not(done))
                 for key, (nonfinite_msg, unconverged_msg) in strict_messages.items():
                     nonfinite = jnp.logical_or(verdicts_1[key][0], verdicts_2[key][0])
                     unconverged = jnp.logical_or(verdicts_1[key][1], verdicts_2[key][1])
-                    new_state = eqx.error_if(
+                    new_state = _strict_error_if(
                         new_state, jnp.logical_and(kept, nonfinite), nonfinite_msg,
+                        strict_mesh,
                     )
-                    new_state = eqx.error_if(
+                    new_state = _strict_error_if(
                         new_state,
                         jnp.logical_and(kept, jnp.logical_and(
                             jnp.logical_not(nonfinite), unconverged)),
                         unconverged_msg,
+                        strict_mesh,
                     )
             new_t = jnp.where(done, t, jnp.where(accepted, t + dt, t))
             new_dt = jnp.where(done, dt, dt_next)
@@ -8120,6 +8216,9 @@ class GraphManager:
         for group in coupling_groups:
             for name in group.nodes:
                 node_to_group[name] = group
+        # The mesh ``strict_convergence`` raises on every device of, on a
+        # step spanning several (MADD-ANO-162).
+        strict_mesh = self._strict_mesh(coupling_groups)
 
         # Build block schedule: list of (type, data) where type is
         # "node" (single node) or "coupled" (CouplingGroup, node_list)
@@ -8281,6 +8380,7 @@ class GraphManager:
                 multigpu_device_map=self._multigpu_device_map,
                 node_params=node_params, fires=fires,
                 probe_sink=self._gradient_whole_probes,
+                strict_mesh=strict_mesh,
             )
 
         if not is_multirate and not has_coupling:
@@ -9420,7 +9520,8 @@ class GraphManager:
         external_inputs = self._resolve_external_inputs(external_inputs)
         params = self._params_or_default(params)
 
-        self._store_state(step_fn(self._state, external_inputs, params))
+        self._store_state(self._call_surfacing_strict(
+            step_fn, self._state, external_inputs, params))
         user_state = self._user_state(self._state)
         self._notify(EVENT_STEP, user_state)
         return user_state
@@ -9480,13 +9581,49 @@ class GraphManager:
         params = self._params_or_default(params)
 
         for i in range(n_steps):
-            self._store_state(
-                step_fn(self._state, external_inputs, params)
-            )
+            self._store_state(self._call_surfacing_strict(
+                step_fn, self._state, external_inputs, params))
             user_state = self._user_state(self._state)
             self._notify(EVENT_STEP, user_state)
             if callback is not None:
                 callback(i, user_state)
+
+    def _strict_mesh(self, coupling_groups=None):
+        """The device mesh ``strict_convergence`` raises on every device of, or ``None``.
+
+        ``None`` unless some group checks ``strict_convergence`` under
+        ``solver="ift"`` *and* the step spans more than one device
+        (:func:`_multi_device_mesh`); see :func:`_strict_error_if`.
+        """
+        groups = self._coupling_groups if coupling_groups is None else coupling_groups
+        if not any(g.strict_convergence and g.solver == "ift" for g in groups):
+            return None
+        return _multi_device_mesh(self._nodes, self._state,
+                                  getattr(self, "_multigpu_mesh", None))
+
+    def _call_surfacing_strict(self, fn: Callable, *args):
+        """``fn(*args)``; on a step spanning several devices with a strict group,
+        blocked on, with every device drained before an error propagates.
+
+        ``strict_convergence`` raises on every device of such a step
+        (:func:`_strict_error_if`); the first device's error reaches Python
+        while the others may still be raising, and a process that exits then
+        aborts in teardown.  So the call is waited on here, where the error
+        surfaces, and the mesh drained (:func:`_drain_mesh`) before it
+        propagates.  Elsewhere -- one device, no strict group, or under a
+        transform -- this is ``fn(*args)`` and stays asynchronous.
+        """
+        mesh = self._strict_mesh()
+        if mesh is None:
+            return fn(*args)
+        try:
+            out = fn(*args)
+            if not any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree.leaves(out)):
+                jax.block_until_ready(out)
+            return out
+        except Exception:
+            _drain_mesh(mesh)
+            raise
 
     def _cached_scan(self, key: tuple, build: Callable[[], Callable]) -> Callable:
         """Return the jitted scan program for *key*, building it once.
@@ -9742,7 +9879,8 @@ class GraphManager:
             return jax.jit(scan)
 
         fn = self._cached_scan(("run_scan", int(n_steps)), build)
-        self._store_state(fn(self._state, external_inputs, params))
+        self._store_state(self._call_surfacing_strict(
+            fn, self._state, external_inputs, params))
         return self._user_state(self._state)
 
     def run_scan_with_history(
@@ -9825,7 +9963,8 @@ class GraphManager:
             return jax.jit(scan)
 
         fn = self._cached_scan(("run_scan_with_history", int(n_steps)), build)
-        final_state, history = fn(self._state, external_inputs, params)
+        final_state, history = self._call_surfacing_strict(
+            fn, self._state, external_inputs, params)
         self._store_state(final_state)
         return self._user_state(final_state), self._user_state(history)
 
@@ -9948,7 +10087,7 @@ class GraphManager:
         fn = self._cached_scan(
             ("run_sweep", int(n_steps), bool(return_history)), build,
         )
-        return fn(initial_states, external_inputs, params, meta)
+        return self._call_surfacing_strict(fn, initial_states, external_inputs, params, meta)
 
     # ------------------------------------------------------------------
     # Adaptive timestepping
@@ -9976,6 +10115,7 @@ class GraphManager:
         nodes_dict = dict(self._nodes)
         back_edge_set = set(self._back_edges)
         coupling_groups = list(self._coupling_groups)
+        strict_mesh = self._strict_mesh(coupling_groups)
 
         node_to_group: dict[str, CouplingGroup] = {}
         for group in coupling_groups:
@@ -10119,6 +10259,7 @@ class GraphManager:
                             node_params=node_params,
                             strict_sink=sink,
                             probe_sink=self._gradient_whole_probes,
+                            strict_mesh=strict_mesh,
                         )
                         if sink:
                             # One entry per checked solve (one per waveform
@@ -10143,6 +10284,9 @@ class GraphManager:
             for g in coupling_groups
             if g.strict_convergence and g.solver == "ift"
         }
+        # ``run_adaptive_scan`` raises the kept solves' verdicts in-graph,
+        # on every device of a step spanning several.
+        cast(Any, dt_step_fn).strict_mesh = strict_mesh
         # The report of an accepted attempt covers both kept half steps
         # (``_fold_kept_half_step_reports``); the steppers apply it to the
         # second half step's state.
@@ -10471,8 +10615,8 @@ class GraphManager:
             jnp.array(t_end), jnp.array(dt_initial), jnp.array(atol),
             jnp.array(rtol), jnp.array(dt_min), jnp.array(dt_max),
         )
-        (final_state, final_t, final_dt, n_accepted), history = fn(
-            self._state, external_inputs, self._params_or_default(params), knobs,
+        (final_state, final_t, final_dt, n_accepted), history = self._call_surfacing_strict(
+            fn, self._state, external_inputs, self._params_or_default(params), knobs,
         )
 
         self._store_state(final_state)

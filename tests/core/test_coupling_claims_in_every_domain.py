@@ -168,7 +168,7 @@ class Config:
     subcycled: bool = False
     runner: str = "steps"          # "steps", "vmap", "adaptive", "restart"
     #: Run the strict_convergence scenario in this process.  The sharded
-    #: domain cannot: its raise aborts the process (see its module).
+    #: domain runs it in a subprocess instead (see its module).
     strict: bool = True
 
     def group(self, kind: str) -> dict:
@@ -1303,8 +1303,9 @@ SKIP: dict = {
     # recorded state: the single-pass closed form and the jvp of one step
     # have no stepper analogue, and run_adaptive_scan's gradients stand in.
     "adaptive": {"CPL-006", "CPL-143"},
-    # strict_convergence's raise aborts a process stepping a sharded member;
-    # the sharded module checks it in a subprocess.
+    # strict_convergence's raise on a sharded member is checked in a
+    # subprocess by the sharded module: it aborted the process until
+    # MADD-ANO-162's fix, and a regression must not take the run with it.
     "sharded": {"CPL-033"},
 }
 _RUNS: dict = {}

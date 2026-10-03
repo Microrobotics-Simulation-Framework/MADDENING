@@ -1513,6 +1513,46 @@ def _loop_through_outside_nodes(schedule, edges, groups, back_edges):
     return texts
 
 
+def _staggered_across_components(schedule, edges, groups, back_edges):
+    """``UserWarning`` texts for each back edge that joins two strongly connected components.
+
+    An edge between two components always points forward (CPL-025): no
+    cycle runs through it, so an uncoupled step reads it this step.  A
+    coupling group runs as one block at its first member's place
+    (``_block_schedule``), so a group whose members are joined only through
+    an outside node -- ``a -> c -> b`` and ``a -> b``, no edge back, so no
+    cycle at all -- runs ``a`` and ``b`` together before ``c``, and
+    ``identify_back_edges`` staggers ``c -> b``: ``b`` reads ``c`` from the
+    previous step.  ``CouplingGroup`` documents that its members "form
+    (part of) a cycle"; nothing checked it, and the lag was silent
+    (MADD-ANO-159).  ``compile()`` names each such edge and the group whose
+    block forced it.
+    """
+    from maddening.core.schedule import find_strongly_connected_components  # noqa: PLC0415
+
+    component = {}
+    for i, scc in enumerate(find_strongly_connected_components(list(schedule), edges)):
+        for name in scc:
+            component[name] = i
+    texts = []
+    for e in sorted(back_edges, key=lambda e: (e.source_node, e.source_field,
+                                               e.target_node, e.target_field)):
+        if component.get(e.source_node) == component.get(e.target_node):
+            continue
+        blocks = sorted(sorted(g.nodes) for g in groups
+                        if e.source_node in g.nodes or e.target_node in g.nodes)
+        texts.append(
+            f"'{e.source_node}.{e.source_field} -> {e.target_node}.{e.target_field}' "
+            "is read from the previous step although no cycle runs through it: "
+            f"coupling group {blocks[0] if len(blocks) == 1 else blocks} runs as one "
+            "block, and its members are joined through nodes outside it rather than "
+            "on a cycle, so the block runs before the edge's source.  A coupling "
+            "group's members must form (part of) a cycle: add the nodes that join "
+            "them to the group, or split the group, or accept the one-step lag as "
+            "part of the model.")
+    return texts
+
+
 def _declared_evaluations(node):
     """``node.update_evaluations()``, validated: a finite number ``>= 1``, or ``None``."""
     own = getattr(node, "update_evaluations", None)
@@ -3870,7 +3910,17 @@ def _run_coupled_block_impl(
 
         # Determine n_dof for acceleration
         if use_acceleration:
-            n_dof_flat = _flatten(state_after_first)
+            # From the floating fields when ``accel_fields`` is ``None`` (the
+            # IFT path under ``"aitken"`` / ``"fixed"``, which relaxes its own
+            # floating vector and reads this only for the carries' dtype):
+            # flattening every field concatenated a typed PRNG key with the
+            # floats and raised ``ValueError: dtype=key<fry> is not a valid
+            # dtype for JAX type promotion`` at the first step (MADD-ANO-158).
+            # An all-floating group flattens exactly as before.
+            n_dof_flat = (_flatten(state_after_first) if accel_fields is not None
+                          else flatten_coupled_state(
+                              state_after_first, group_node_names,
+                              fields=float_fields_of(state_after_first, group_node_names)))
             n_dof = n_dof_flat.shape[0]
             # The accelerator carries (Aitken's omega and previous
             # residual, IQN's secant matrices) are seeded in the interface
@@ -7468,6 +7518,9 @@ class GraphManager:
             topological_sort(node_names, self._edges), self._coupling_groups)
         back_edges = identify_back_edges(schedule, self._edges)
         for warning_text in _loop_through_outside_nodes(
+                schedule, self._edges, self._coupling_groups, back_edges):
+            warnings.warn(warning_text, UserWarning, stacklevel=2)
+        for warning_text in _staggered_across_components(
                 schedule, self._edges, self._coupling_groups, back_edges):
             warnings.warn(warning_text, UserWarning, stacklevel=2)
 

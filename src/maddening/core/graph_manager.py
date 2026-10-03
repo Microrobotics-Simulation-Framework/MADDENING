@@ -941,9 +941,13 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        largest over the probes the fixed point responds to
        (``||t_i|| > 0``, or non-finite).
     6. **Newton-Kantorovich** with the full-operator resolvent norm
-       (:func:`_full_resolvent_norm`, exact from the range basis).
+       (:func:`_full_resolvent_norm`, exact from the range basis) and the
+       Jacobian's Lipschitz constant measured across the step as an
+       operator on its row space (``2 k`` JVPs), not along
+       ``delta`` alone; and the Newton step's second-order miss, ``t* -
+       eta``, carried into each probe's bound.
 
-    ``11 + k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``19 + 5 n_p`` forward), ``n_p``
+    ``11 + 3 k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``35 + 5 n_p`` forward), ``n_p``
     the number of probes, which is
     why it is gated behind ``diagnostics=True``; the per-probe products
     are ``vmap``-ed, so the primal is evaluated once.  Every input is
@@ -1016,7 +1020,7 @@ def _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype):
     return matvec_t
 
 
-def _full_resolvent_norm(U, M, make_transpose):
+def _full_resolvent_norm(U, M, make_transpose, with_rows=False):
     """``||(I - J)^{-1}||_2`` over the whole space, from the range basis; ``None`` without ``J^T``.
 
     With ``range(J)`` inside ``span(U)`` (orthonormal, ``n x k``) and
@@ -1031,18 +1035,30 @@ def _full_resolvent_norm(U, M, make_transpose):
     ``U`` is square (``n <= k``) the resolvent is ``U (I - M)^{-1} U^T``
     and needs no product.  ``None`` where the map has no transpose and
     ``U`` is not square.
+
+    With ``with_rows=True`` it returns ``(norm, R)`` instead, ``R`` an
+    orthonormal basis (``n x min(n, k)``) of ``J``'s row space -- ``span(B^T)``,
+    which ``B`` already computed, or the whole space where ``U`` is square --
+    so the Kantorovich check can take the Jacobian's change as an operator
+    on the directions ``J`` reads at no further reverse-mode cost; ``(None,
+    None)`` without a transpose.
     """
     n, k = U.shape
     eye_k = jnp.eye(k, dtype=M.dtype)
     if n <= k:
-        return jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2)
+        beta = jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2)
+        return (beta, jnp.eye(n, dtype=M.dtype)) if with_rows else beta
     matvec_t = make_transpose()
     if matvec_t is None:
-        return None
+        return (None, None) if with_rows else None
     B = jax.vmap(matvec_t)(U.T)                     # row i: u_i^T J
     P, _ = jnp.linalg.qr(jnp.concatenate([U, B.T], axis=1))
     T = jnp.eye(P.shape[1], dtype=M.dtype) + (P.T @ U) @ jnp.linalg.solve(eye_k - M, B @ P)
-    return jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype))
+    beta = jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype))
+    if not with_rows:
+        return beta
+    R, _ = jnp.linalg.qr(B.T)
+    return beta, R
 
 
 def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
@@ -1264,9 +1280,10 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # the *full-operator* norm (``_full_resolvent_norm``), not the
     # Krylov-restricted ``amp``, which can be several times smaller
     # (MADD-ANO-142) -- ``eta = ||delta||`` (the Newton correction) and
-    # ``L`` the Jacobian's Lipschitz constant -- estimated along ``delta``
-    # from the extra row, ``||(J(x_k + delta) - J(x_k)) delta|| /
-    # ||delta||**2`` -- the check is ``h = beta L eta < 1/2``.  (The
+    # ``L`` the Jacobian's Lipschitz constant -- estimated across the step,
+    # the larger of the extra row's ``||(J(x_k + delta) - J(x_k)) delta|| /
+    # ||delta||**2`` and the operator norm of ``J(x_k + delta) - J(x_k)``
+    # over ``||delta||`` (below) -- the check is ``h = beta L eta < 1/2``.  (The
     # affine-covariant form, the exact resolvent applied to that change
     # of the Jacobian along ``delta`` alone, was measured too and is not
     # enough: on the stiff ``x <- a + g u**2`` pair at three passes it
@@ -1285,8 +1302,9 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # point, the uncorrected bound read 0.20-0.96x the true relative
     # error with the flag True; ``h`` there is 0.48-0.58.
     step = norm(delta_s)
-    beta = _full_resolvent_norm(
-        U, M, lambda: _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype))
+    beta, rows = _full_resolvent_norm(
+        U, M, lambda: _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype),
+        with_rows=True)
     jac_change = norm(jac_secant_s)
     if beta is None:
         # No transpose to take the full norm with (a node the map cannot be
@@ -1296,18 +1314,75 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         # certified bound.
         numerator = jnp.where(jac_change > 0, jnp.inf, jnp.zeros_like(jac_change))
     else:
-        numerator = beta * jac_change
+        # **``L`` as an operator, not along ``delta`` alone.**  Kantorovich's
+        # ``L`` bounds ``||J(x) - J(y)|| / ||x - y||`` in the operator norm;
+        # its action on ``delta`` alone can be several times smaller, and
+        # then ``h`` passed where the fixed point lay outside the radius it
+        # certified: on a bilinear pair stopped two passes in, ``h = 0.37``
+        # along ``delta`` and ``0.69`` with the operator norm, the fixed
+        # point 0.568 away against ``t* = 0.552``, and the bound read 0.81x
+        # the true gradient error, usable.  So the change of the Jacobian
+        # across the step is measured as an operator on the directions the
+        # Jacobian reads (its row space, which the full resolvent norm's
+        # reverse-mode products already span, ``k`` directions): ``2 k`` more
+        # JVPs, both points through one batched evaluation and differenced after
+        # a barrier, so an affine map's change is exactly zero, as the extra
+        # row's is.  ``L`` is the larger of that and the directional value.
+        def jac_at(xx, z):
+            _, Jz = jax.jvp(lambda x_: _F_dispatch(step_pure, x_, consts_sg), (xx,),
+                            ((z * (s_inv * lift)).astype(x_dtype),))
+            return Jz
+
+        JR = jax.vmap(lambda xx: jax.vmap(lambda z: jac_at(xx, z))(rows.T))(points)
+        JR = jax.lax.optimization_barrier(JR).astype(dtype)
+        op_change = jnp.linalg.norm(live * _framed_difference(JR[1], JR[0], s / lift), ord=2)
+        numerator = beta * jnp.maximum(jac_change, op_change * step)
     h = jnp.where(
         step > 0, numerator / jnp.where(step > 0, step, 1.0), 0.0,
     )
     certified = h < 0.5
     root = jnp.sqrt(jnp.maximum(1.0 - 2.0 * h, 0.0))
-    t_star = jnp.where(h > 0, step * (1.0 - root) / jnp.where(h > 0, h, 1.0), step)
+    # ``t* - eta``, the most the Newton step can miss the fixed point by,
+    # in the form that does not cancel: ``eta (1 - root) / h`` is ``eta
+    # 2 / (1 + root)``, and ``1 - root = 2 h / (1 + root)``.  The quotient
+    # form read ``t* = 0`` in float32 for ``h`` below about 3e-8 (``1 - 2h``
+    # rounds to 1) and anything from 0.6 to 1.2 ``eta`` near 1e-7.
+    miss = jnp.where(h > 0, step * (2.0 * h) / ((1.0 + root) * (1.0 + root)), 0.0)
+    t_star = step + miss
     stretch = jnp.where(distance > 0,
                         jnp.maximum(distance, t_star) / jnp.where(distance > 0, distance, 1.0),
                         1.0)
-    factor = stretch / jnp.where(certified, jnp.where(root > 0, root, 1.0), 1.0)
-    worst = jnp.where(certified, worst * factor, jnp.full_like(worst, jnp.inf))
+    safe_root = jnp.where(certified, jnp.where(root > 0, root, 1.0), 1.0)
+    factor = stretch / safe_root
+    # **The second-order term: the Newton step's miss.**  The secant is
+    # ``G`` across ``delta``, and ``x* - x_k = delta + e`` with ``||e|| <=
+    # t* - eta`` (Kantorovich), so the error's ``G(x*) - G(x_k)`` differs
+    # from the secant by ``G(x_k + delta + e) - G(x_k + delta)``, of size at
+    # most ``Lip(G) ||e||``.  Stretching the secant to ``t*`` covers only
+    # the part of ``e`` along ``delta``; the rest can point where ``G``
+    # changes faster.  So each probe adds that term, with ``Lip(G)`` read
+    # off its own secant (``||G(x_k + delta) - G(x_k)|| / eta``, along
+    # ``delta`` as ``L`` is) and the full resolvent norm at ``x*``
+    # (``beta / root``) applied to it: ``beta ||secant_i|| (t* - eta) /
+    # (eta ||t_i|| root)``, the largest over the responding probes added
+    # to the largest leading-order term.  Exactly zero where the Jacobian
+    # does not move (``h = 0``, ``miss = 0``), so an affine group's bound
+    # is untouched.  Without it the bound read 0.986x the true gradient
+    # error, usable, on a bilinear pair stopped two passes in (``h =
+    # 0.19``): the leading-order term, its distance already stretched to
+    # ``t*`` and its resolvent to ``x*``, still took the change of ``G``
+    # along the Newton direction for its change along ``x* - x_k``.
+    if beta is None:
+        # ``h`` is 0 here or the bound is not certified: no miss to carry.
+        extra = jnp.zeros_like(worst)
+    else:
+        tangent_norm = norm(t_s)
+        took = jnp.logical_and(responds, miss > 0)
+        den = jnp.where(jnp.logical_and(took, tangent_norm > 0), step * tangent_norm, 1.0)
+        extra_i = jnp.where(took, beta * norm(secant_s) * miss / den, 0.0)
+        extra = jnp.max(extra_i)
+    worst = jnp.where(certified, worst * factor + extra / safe_root,
+                      jnp.full_like(worst, jnp.inf))
     return jnp.where(captured, worst, nan)
 
 
@@ -4398,7 +4473,7 @@ def _run_coupled_block_impl(
                 # Its distance is the spectral bound (never below the Newton
                 # step); the resolvent is applied exactly to each probe's
                 # secant, a second difference of the adjoint's own matvec.
-                # ``11 + k + 5 n_p`` more JVPs, ``n_p`` the probes (see
+                # ``11 + 3 k + 5 n_p`` more JVPs, ``n_p`` the probes (see
                 # ``_gradient_error_bound_at``).
                 grad_bound = _gradient_error_bound_at(
                     step_pure, x_star_full, consts, weights,
@@ -9114,7 +9189,20 @@ class GraphManager:
               (MADD-ANO-146) -- so the dead band's excluded
               fields are outside what it bounds and the norm's scale
               drifts with the iterate exactly as it does for
-              ``"residual"``; and its float floor is a model of the
+              ``"residual"``.  Under ``convergence_norm="interface"``
+              the "fields" are what that norm reads: each internal
+              edge's source value *after* the edge's transform, over
+              its own magnitude, and the spectrum is taken on that
+              reading (the Jacobian of the reading's own iteration,
+              ``Phi' G'`` for ``F = G o Phi``, applied through state
+              tangents, so no transform is inverted) -- taken on the
+              raw source fields instead, the bound multiplied a residual
+              in one set of coordinates by a resolvent in another and
+              read 0.0014-0.098x the true distance, usable, with an
+              offset (a unit conversion) or ``"extract_last"`` on an
+              edge.  A transform that is not affine makes the map
+              non-linear in the reading, with the asymptotic reading
+              above.  And its float floor is a model of the
               map's rounding (see
               :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`),
               which a node that cancels catastrophically inside its own
@@ -9188,7 +9276,12 @@ class GraphManager:
               of the tangent the adjoint returns for that probe, and
               reported for the worst probe.  Read it as
               ``|g_k - g*| <= bound * |g_k|`` for the gradient with
-              respect to one scalar constant.  Measured (jaxlib 0.11.0,
+              respect to one scalar constant, its norms the group's over
+              the state's own fields -- under
+              ``convergence_norm="interface"`` with a transform on an
+              internal edge, the source fields the edges read, before the
+              transform, not the reading ``"spectral_error_bound"`` is
+              taken in.  Measured (jaxlib 0.11.0,
               float32) at every cap of a ``max_iterations`` sweep that
               stops the forward early by construction (caps 3-8): never
               below the true error on a concave and a convex map,
@@ -9206,18 +9299,31 @@ class GraphManager:
               vector's resolvent image instead of the Newton correction.
               And it carries a Newton-Kantorovich check on how far the
               linearisation at ``x_k`` can be trusted at ``x*``: with
-              ``h = amp * L * ||delta||``, ``L`` the Jacobian's change
-              along the Newton correction ``delta`` per unit length
-              squared (one more pair of Jacobian-vector products), the
-              bound is multiplied by ``1 / sqrt(1 - 2h)`` (the resolvent
-              at the fixed point) with its distance at least
-              Kantorovich's radius, and is ``inf`` -- unusable -- at
+              ``h = beta * L * ||delta||``, ``beta`` the full resolvent
+              norm at ``x_k`` and ``L`` the Jacobian's change across the
+              Newton correction ``delta`` per unit length -- the larger
+              of its action on ``delta`` and its operator norm on the
+              directions the Jacobian reads (``2 k`` more
+              Jacobian-vector products) -- the bound is multiplied by
+              ``1 / sqrt(1 - 2h)`` (the resolvent at the fixed point),
+              its distance is at least Kantorovich's radius ``t*``, each
+              probe adds the Newton step's second-order miss (``beta *
+              ||secant|| * (t* - ||delta||) / (||delta|| * ||t_k|| *
+              sqrt(1 - 2h))``: the change of its linearisation over the
+              part of ``x* - x_k`` the Newton step misses, at the rate
+              its own secant shows), and it is ``inf`` -- unusable -- at
               ``h >= 1/2``, where nothing measured at ``x_k`` bounds the
               resolvent at ``x*``.  Uncorrected it read 0.20-0.96x the
               true error, flag ``True``, at ``F'(x*) = 0.99`` with the
               forward 0.65-4.5% short; ``h`` there is 0.48-0.58, so two
               of those four now read ``inf`` and two hold at 3.0-3.5x.
-              ``h`` is exactly zero on an affine map.  **Only
+              With ``L`` along ``delta`` alone and no second-order term
+              it read 0.986x the true error at ``max_iterations=2``
+              (``h = 0.19``) and 0.81x on a pair whose ``h`` read 0.37
+              along ``delta`` and is 0.69 as an operator, both on bilinear
+              pairs far from their fixed points, flag ``True``.  ``h`` is
+              exactly zero on an affine map, and so is every correction
+              here.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1``; ``inf``
@@ -9226,7 +9332,7 @@ class GraphManager:
               tangent through the group is not finite (that constant
               has no gradient to bound) and where the returned state is
               not finite.  Costs
-              ``11 + k + 5 n_p`` Jacobian-vector products per group per
+              ``11 + 3 k + 5 n_p`` Jacobian-vector products per group per
               step beside the spectral bound's eight (plus one
               linearisation and ``k`` reverse-mode products where the
               state has more than ``k`` entries), ``k <= 8`` and ``n_p``
@@ -9315,9 +9421,18 @@ class GraphManager:
               nothing was computed, where the bound is ``inf`` or NaN
               (including a group whose Jacobian range the eight-vector
               basis did not capture, and one that fails the
-              Kantorovich check, ``h >= 1/2``).  Like the other flags
-              it reports what the code checked, and not the linearity
-              or probe conditions above.
+              Kantorovich check, ``h >= 1/2``).  What it certifies is
+              that check and the bound built on it: the Kantorovich
+              radius and resolvent with ``L`` the Jacobian's change
+              across the Newton step as an operator, and the Newton
+              step's miss carried at the rate the probes' own secants
+              show.  Both rates are measured across the step, so the
+              flag rests on the map changing no faster between ``x_k``
+              and ``x*`` than across that step -- exact for an affine
+              map, and the condition a group far from its fixed point
+              (a large ``h``, a large distance) is likeliest to break.
+              Like the other flags it reports what the code checked, and
+              not the linearity or probe conditions above.
             - ``"precision_limited"`` : bool — the residual is at or
               below its own float resolution (the floor
               ``"spectral_error_bound"`` adds): the last pass moved no

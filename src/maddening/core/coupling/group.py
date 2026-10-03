@@ -131,7 +131,7 @@ class CouplingGroup:
         ``spectral_error_bound``, ``spectral_usable``) and the IFT
         gradient-error bound (``gradient_relative_error_bound``,
         ``gradient_bound_usable``), which cost ``8`` Jacobian-vector
-        products for the spectrum and ``11 + k + 5 n_p`` more for the
+        products for the spectrum and ``11 + 3 k + 5 n_p`` more for the
         bound per group per step (plus one linearisation and ``k``
         reverse-mode products where the state has more than ``k``
         entries; ``k <= 8``, ``n_p`` the probes: every entry of a

@@ -434,7 +434,8 @@ def coupling_residual_interface(
     Returns
     -------
     jnp.ndarray
-        Scalar RMS error norm.  Converged when <= 1.0.
+        Scalar RMS error norm.  Converged when <= 1.0.  Each transformed
+        value is measured in at least float32 (see :func:`_widened`).
 
     Notes
     -----
@@ -1303,8 +1304,10 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
     Returns
     -------
     jnp.ndarray
-        Scalar, in the units ``residual`` is reported in.  Traceable, so
-        it can be taken inside a jitted step as well as on the host.
+        Scalar, in the units ``residual`` is reported in, computed in at
+        least float32 whatever the fields' dtypes (each field still at its
+        own dtype's eps).  Traceable, so it can be taken inside a jitted
+        step as well as on the host.
 
     Examples
     --------

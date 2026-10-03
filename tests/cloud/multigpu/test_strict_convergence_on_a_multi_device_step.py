@@ -74,6 +74,24 @@ def test_the_token_is_an_exact_identity_on_every_value(mesh, dtype):
     assert int(out["n"]) == 3
 
 
+def test_the_token_is_an_identity_to_differentiation(mesh):
+    """A bit operation has no derivative -- ``bitcast_convert_type``'s is zero --
+    so without its own rule the tie made every gradient through a strict
+    check on several devices exactly 0.0.  ``jax.grad`` and ``jax.jvp`` see
+    the identity."""
+    x = jax.device_put(jnp.arange(1.0, 17.0, dtype=jnp.float32),
+                       NamedSharding(mesh, P("devices")))
+
+    def f(v, p):
+        return jnp.sum(_strict_error_if(3.0 * v, p, "never", mesh) ** 2)
+
+    g = jax.jit(jax.grad(f))(x, jnp.asarray(False))
+    assert np.array_equal(np.asarray(g), 18.0 * np.arange(1.0, 17.0))
+    _, t = jax.jvp(lambda v: _strict_error_if(3.0 * v, jnp.asarray(False), "never", mesh),
+                   (x,), (jnp.ones_like(x),))
+    assert np.array_equal(np.asarray(t), np.full(16, 3.0))
+
+
 def test_the_checked_state_keeps_its_partitioning(mesh):
     """The token is replicated and the OR elementwise: a field sharded over
     the mesh comes back sharded the same way, not gathered onto every
@@ -111,6 +129,33 @@ def test_a_converged_strict_step_with_a_sharded_member_is_the_unchecked_step():
     for n in ("a", "b"):
         for f in strict._state[n]:
             assert np.array_equal(_bits(strict._state[n][f]), _bits(plain._state[n][f])), (n, f)
+
+
+# Slow: two sharded graphs and their gradients (~11 s on three cores).
+# Per push: tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_the_token_is_an_identity_to_differentiation
+@pytest.mark.slow
+def test_the_gradient_through_a_strict_sharded_step_is_the_unchecked_steps():
+    """The token is OR-ed into the bits of the state, and a bit operation has no
+    derivative: the tie is an identity to differentiation as well
+    (``_bit_tie``'s rule), so ``jax.grad`` through a strict step with a
+    sharded member is the gradient of the same step unchecked, bit for bit."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grads = []
+        for strict in (True, False):
+            gm = _strict_pair(strict)
+            p = battery.params_for(gm, "steady")
+            step = gm._raw_step_fn
+            ext = gm._default_external_inputs()
+            state = gm._state
+
+            def xa(q, step=step, ext=ext, state=state):
+                return step(state, ext, q)["a"]["x"]
+
+            grads.append(jax.grad(xa)(p))
+    for a, b in zip(jax.tree.leaves(grads[0]), jax.tree.leaves(grads[1])):
+        assert np.array_equal(_bits(a), _bits(b)), (a, b)
+    assert float(grads[0]["nodes"]["a"]["b0"]) != 0.0
 
 
 def test_the_mesh_is_found_from_a_sharded_node_or_a_sharded_field(mesh):

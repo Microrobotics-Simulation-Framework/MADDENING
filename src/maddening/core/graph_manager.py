@@ -3032,11 +3032,31 @@ def _strict_error_if(value, pred, msg, mesh=None):
         v = jnp.asarray(v)
         if not jnp.issubdtype(v.dtype, jnp.floating):
             return v
-        bits = jnp.dtype(f"uint{jnp.finfo(v.dtype).bits}")
-        return jax.lax.bitcast_convert_type(
-            jax.lax.bitcast_convert_type(v, bits) | token.astype(bits), v.dtype)
+        return _bit_tie(v, token)
 
     return jax.tree.map(tie, value)
+
+
+@jax.custom_jvp
+def _bit_tie(v, token):
+    """``v`` with the zero ``token`` OR-ed into its bits: ``v`` itself, bit for bit,
+    with a data dependency on ``token`` no compiler can fold away.
+
+    A bit operation has no derivative (``bitcast_convert_type`` has none to
+    give), so the rule below makes the tie an identity to differentiation
+    as well: without it a strict step on several devices would have broken
+    ``jax.grad`` through the very solve the check guards.
+    """
+    bits = jnp.dtype(f"uint{jnp.finfo(v.dtype).bits}")
+    return jax.lax.bitcast_convert_type(
+        jax.lax.bitcast_convert_type(v, bits) | token.astype(bits), v.dtype)
+
+
+@_bit_tie.defjvp
+def _bit_tie_jvp(primals, tangents):
+    v, token = primals
+    v_dot, _token_dot = tangents
+    return _bit_tie(v, token), v_dot
 
 
 def _multi_device_mesh(nodes, state, graph_mesh=None):

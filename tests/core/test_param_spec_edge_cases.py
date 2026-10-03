@@ -537,10 +537,17 @@ def test_check_accepts_a_logit_value_exactly_when_its_coordinate_is_finite(
     if v == 0.0:
         v = np.float32(np.finfo(np.float32).tiny)
     toward = np.float32(np.inf if edge == "lo" else -np.inf)
-    for _ in range(ulps):
+
+    def inside(x):
+        return float(lo) < float(x) < float(hi)
+
+    while not inside(v):                  # a bound the cast rounded outward
         v = np.nextafter(v, toward)
-    while not float(lo) < float(v) < float(hi):
-        v = np.nextafter(v, toward)
+    for _ in range(ulps - 1):             # never past the other bound: the
+        step = np.nextafter(v, toward)    # interval (-1e6, -999999) holds 16
+        if not inside(step):              # float32 values
+            break
+        v = step
     finite = bool(np.isfinite(float(spec.to_unconstrained(jnp.asarray(v)))))
     try:
         spec.check(v)

@@ -765,7 +765,7 @@ A new inventory needs only its file: `schema_version: 1`, a `prefixes`
 list of the id prefixes it owns (two to six capital letters, owned by no
 other file) and its `claims`.
 `tests/compliance/test_claims_inventories.py` finds every
-`docs/validation/*_claims.yaml` and checks five rules, mutation-tested by
+`docs/validation/*_claims.yaml` and checks six rules, mutation-tested by
 self-tests in the same module:
 
 - every file is well-formed, and no two files own a prefix;
@@ -774,7 +774,103 @@ self-tests in the same module:
   with a `# Per push:` witness;
 - every `failing` row cites a strict xfail that names it;
 - no `verified` row cites an xfail, and every xfail that names a row is
-  strict, cited by that row, and names a row some inventory holds.
+  strict, cited by that row, and names a row some inventory holds;
+- every row of a file with a domain matrix fills it (below).
+
+### The domain matrix
+
+Audits kept breaking claims in a *domain* their conditions covered but no
+test exercised: x64, a predictor inside a windowed fit, a write pending at
+an FMU export. So an inventory can name a `domain_set` at its top level,
+and then every row carries a `domains` mapping that says, for each domain
+of the set, how the claim stands there. The coupling and sysid+FMU
+inventories use the `numeric` set; the REST inventory will get a server
+set of its own (a new set is one entry in the guard's `DOMAIN_SETS`).
+
+| domain | what it means |
+|---|---|
+| `f32` | float32 state and parameters, x64 off (the default lane) |
+| `f64` | under `jax_enable_x64`, float64 throughout |
+| `mixed_dtype` | under x64 with float32 leaves beside float64 ones |
+| `16bit` | float16 or bfloat16 leaves |
+| `jit` | the feature inside a `jax.jit` trace; a feature inside a compiled graph step is traced by `compile()` itself |
+| `grad` | reverse- and forward-mode derivatives through the feature, or a value a differentiated computation returns or consumes (a loss, a mask) |
+| `vmap` | the feature under `jax.vmap` (`run_sweep` included) |
+| `multi_rate` | a graph whose nodes fire at different rates |
+| `sub_cycled` | a coupling group with `subcycling=True` whose members sub-step |
+| `predictors_warm_starts` | coupling predictors, IQN-IMVJ warm starts |
+| `adaptive` | `run_adaptive` / `run_adaptive_scan` |
+| `checkpoint_restart` | state saved and loaded mid-run (`save_state` / `load_state`, `reset_state`, an FMU state), and `windowed_loss`'s per-window restarts |
+| `sharded` | a graph with a sharded node on CPU virtual devices |
+
+Each domain's value is one of:
+
+- **a test** (a node id, or a list of them) that exercises the claim *in
+  that domain*. The guard checks it the way it checks the row's `tests`
+  (collected, not skipped, slow only with a `# Per push:` witness, the
+  xfail rules), and that its source, read three levels into the helpers
+  it names, at least names the domain (a float64 cell's test mentions
+  x64): a floor that catches a cell citing a test from another domain,
+  not a proof that the test is apt. An equivalence oracle counts where it
+  compares every quantity the claim reads against the domain the row's own
+  tests verify (`vmap == per-member` for a report claim, say).
+- **`narrowed`**: the row's `conditions` now exclude the domain, in a
+  trailing clause that starts `Not claimed for` and names it ("Not claimed
+  for float64 (x64), vmap or sharded graphs."). The clause may name only
+  narrowed domains. Narrowing changes a documented claim, so reword the
+  source document too where it over-claims.
+- **`n/a`**: the claim cannot apply there -- a construction-time refusal
+  has no float dtype, a host-side report has no `vmap`. A domain the
+  conditions name before the clause, or cover with a phrase such as "any
+  dtype" or "any graph", cannot be `n/a`.
+
+To fill a row, decide which domains its conditions cover: unstated means
+covered. Then, for each covered domain, cite a test that runs the claim
+there. Where none exists, a row whose claim is a bound or a `*_usable`
+flag, a verdict, a gradient, write or sync semantics, an FMU value, time
+or refusal, or identifiability gets the test, written at the claim's edge
+in that domain; if it fails, it is a strict xfail naming the row, the row
+is `failing`, and its `finding` gives the reproducer. Any other row is
+narrowed, or gets the test if it is cheap. While a parallel branch that
+will cover a cell is open, the cell may read `TODO-oracle` or `TODO-fix`;
+the guard accepts both only while `PENDING_ALLOWED` is set, and a release
+has none.
+
+Most coupling cells cite one of two batteries, which state each report,
+bound and gradient claim once, as a check keyed by its row id, and run it
+in every domain on a two-member affine group whose fixed point and
+derivatives have closed forms:
+`tests/core/test_coupling_claims_in_every_domain.py` (every domain but
+one) and `tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py`
+(a sharded member). To put a row in them, add a check decorated with
+`@check("<ID>")`; it then runs in every domain unless `SKIP` or `ONLY`
+says otherwise. `tests/core/test_sysid_claims_in_every_domain.py`,
+`tests/core/test_params_claims_in_float64.py` and
+`tests/fmi/test_fmu_claims_in_float64.py` do the same for the sysid and
+FMU rows they cover, and `tests/core/test_sysid_claims_under_x64.py` holds
+the sysid rows' `f64` and `mixed_dtype` cells: each test is parametrized
+over `float64` (every leaf float64) and `mixed` (float32 leaves in the x64
+process, where the fitters' coordinates are promoted to float64 around
+them) and sits at float64's own edge where the claim has one.
+
+The cross-cutting oracles fill cells too, and a narrowed cell is
+re-examined whenever one lands: if it now runs the claim in that domain,
+the cell cites it and the domain leaves the row's clause. A parametrized
+oracle is cited at the parameter that reaches the domain, not by its
+function name. The covering array
+(`test_differential_coupling_interactions.py`) runs every oracle on its
+float64 rows in a subprocess (one test, slow) and has per-push float32
+rows with a sub-cycled group (`r06`, `r18`, `r28`) and with a predictor
+(`r05`, `r13`, `r28`). Its reference model reads the iteration mode,
+the sub-steps, the interpolation weights and the norm, so a claim about
+any of them is exercised wherever a row sets it. The replay oracle's
+checkpoint mid `run_adaptive` (`test_differential_replay.py`) is a
+`checkpoint_restart` cell for a claim about state carried in `_meta`,
+and its multi-rate and sub-cycled records are cells for the windowed
+losses. The FMU oracles' `[coupled]`, `[multirate]` and `[subcycled]`
+families do the same for the FMU rows. None of them is an `adaptive`
+cell: a restart that matches the uninterrupted run says nothing about
+the claim under `run_adaptive` itself.
 
 `tests/property/test_coupling_invariances.py` holds three metamorphic rows:
 

@@ -81,6 +81,9 @@ WF = (_WORKFLOWS,)
 PRUNE = (_PRUNE,)
 CC = (_COMPILE_CACHE,)
 SLOW_RULE = (_SLOW_RULE,)
+_CLAIMS = "tests/compliance/test_claims_inventories.py"
+CLAIMS = (_CLAIMS,)
+CPL = "docs/validation/coupling_claims.yaml"
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
@@ -435,6 +438,20 @@ MUTANTS: tuple[Mutant, ...] = (
        "exempt the next slow test written there"),
     _M("W12", _XF, f"\n\ndef {_LM}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_LM}():", SLOW_RULE,
        "the named witness skip-marked: it is collected and never runs"),
+    # --- K: the claims inventories' domain matrix, tests/compliance/test_claims_inventories.py
+    _M("K1", CPL, "    multi-rate groups; float16 to float64. Not claimed for mixed dtypes.\n",
+       "    multi-rate groups; float16 to float64.\n", CLAIMS,
+       "a narrowed domain whose conditions no longer exclude it: the row reads as claimed there"),
+    _M("K2", CPL, "    f64: tests/core/test_coupling_accelerators_under_x64.py::"
+       "test_a_float64_group_keeps_float64_carries_under_x64\n",
+       "    f64: tests/core/test_coupling_claims_graphs.py::test_imvj_without_reuse_is_iqn_ils\n",
+       CLAIMS, "a float64 cell citing a test that never runs under x64"),
+    _M("K3", _CLAIMS, "    return tests + [t for _, t in domain_targets(row)]\n", "    return tests\n",
+       CLAIMS, "a domain cell's test left out of the collection and xfail rules: a strict xfail "
+       "cited only in a domain would not make its row failing"),
+    _M("K4", _CLAIMS, "        if value == NOT_APPLICABLE and d in covered:\n", "        if False:\n",
+       CLAIMS, "n/a accepted for a domain the conditions name: an untested domain hidden as "
+       "inapplicable"),
 )
 
 

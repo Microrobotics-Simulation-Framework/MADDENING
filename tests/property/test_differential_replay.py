@@ -31,10 +31,12 @@ differs.  (Measured exactly ``0.0`` for every family without carried
 history on jaxlib 0.11.0, as ``tests/core/test_sysid_claims_edges.py``
 already asserts for a single spring on every CI jaxlib.)
 
-**Known failing: B1-H2** -- ``windowed_loss`` restarts every window with
-``_meta`` zeroed (``_state_from_obs``), so a group whose next step reads
-carried history (a predictor, IMVJ warm starts) is replayed from another
-state: the loss at the truth is not zero and a fit started there walks off.
+It found B1-H2, fixed in 0.4.0: ``windowed_loss`` restarted every window
+with ``_meta`` zeroed (``_state_from_obs``), so a group whose next step reads
+carried history (a predictor, IMVJ warm starts) was replayed from another
+state -- the loss at the truth was not zero and a fit started there walked
+off.  The history families run as tests, and the fixtures are checked to
+carry history their next step reads.
 
 What it cannot see: a defect the record and the replay share (both call the
 compiled step), and anything outside ``gm._state``.
@@ -193,10 +195,6 @@ MULTIRATE = {"multirate-chain", "multirate-rods"}
 #: ``run_adaptive`` advances every node by one ``dt``: no multi-rate graph.
 ADAPTIVE = sorted(set(FAMILIES) - MULTIRATE)
 
-_H2_REASON = ("B1-H2: windowed_loss zeroes the carried _meta (predictor history, IQN warm "
-              "starts) at every window start (sysid.py _state_from_obs), so the replay "
-              "starts from another state; pending fix")
-
 _BUILT: dict[str, GraphManager] = {}
 
 
@@ -344,8 +342,9 @@ def test_a_replay_of_a_graphs_own_record_is_exact(name, multiple_shooting):
 @pytest.mark.parametrize("multiple_shooting", [False, True], ids=["teacher-forced",
                                                                    "multiple-shooting"])
 @pytest.mark.parametrize("name", sorted(HISTORY))
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_H2_REASON)
 def test_a_replay_of_a_record_with_carried_history_is_exact(name, multiple_shooting):
+    """B1-H2's families: a predictor short of convergence, IMVJ warm starts,
+    a sub-cycled group with a predictor."""
     check_windowed_replay(name, start=0, multiple_shooting=multiple_shooting, **_PER_PUSH)
 
 
@@ -375,7 +374,6 @@ def test_a_fit_started_at_the_truth_stays_there(fitter):
 
 
 @pytest.mark.parametrize("fitter", ["fit", "fit_multiple_shooting"])
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_H2_REASON)
 def test_a_fit_started_at_the_truth_stays_there_with_a_predictor(fitter):
     check_fit_stays_at_the_truth("quadratic-predictor", fitter)
 
@@ -406,7 +404,7 @@ def replays(draw, names):
 # Per push: tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact
 @pytest.mark.slow  # a windowed loss traced and compiled per drawn window shape
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
-@given(case=replays(PLAIN))
+@given(case=replays(FAMILIES))
 def test_a_replay_of_a_graphs_own_record_is_exact_in_every_configuration(case):
     check_windowed_replay(**case)
 

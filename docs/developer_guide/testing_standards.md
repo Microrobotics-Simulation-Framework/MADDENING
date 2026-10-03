@@ -956,9 +956,14 @@ recover it within its own, so a float64 run that computed in float32 fails.
 | `coupling_diagnostics()` on a pair contracting at 0.06-0.48 with a tolerance two orders above the float32 floor | Each state within its `spectral_error_bound` of the step's exact fixed point; `rho_spectral` to its Arnoldi residuals plus `sqrt(8 eps32)` | A precision-limited group, where the two read differently by design |
 | An IFT gradient (slow) | Each within its own `gradient_relative_error_bound`, plus `2 * 8 eps32 / (1 - rho)` | |
 
-Known failing: B1-H1 (under x64 the identifiability guard misses the spring's
+It found B1-H1 (under x64 the identifiability guard missed the spring's
 exact scale degeneracy, with float64 leaves and with float32 ones) and B1-L1
-(`fit_lm` reports `converged=False` at its float64 floor).
+(`fit_lm` reported `converged=False` at its float64 floor), both fixed in
+0.4.0.  Two differences are documented, and pinned as such: a parameter
+whose truth is exactly 0 (float32 lands on 0.0 and converges, float64 on
+rounding noise no relative step resolves), and a direction whose gradients
+lie below float32's cutoff and above float64's -- so a drawn problem holds
+`excited_rank` to "float64's is at least float32's", not to equality.
 
 #### Replay and restart
 
@@ -973,9 +978,10 @@ the oracle does not claim through); and a checkpoint taken mid
 `run_adaptive` resumes it with the same `dt_history` and state.  Drawn over
 no predictor, `linear` and `quadratic`, Aitken, IQN-ILS, IQN-IMVJ with
 Jacobian reuse, multi-rate graphs and sub-cycling.  Tolerance: none.
-Known failing: B1-H2 (`windowed_loss` zeroes the carried `_meta`, so a group
-whose next step reads predictor history or IMVJ warm starts replays from
-another state).  Cannot see: a defect the record and the replay share.
+It found B1-H2 (`windowed_loss` zeroed the carried `_meta`, so a group
+whose next step reads predictor history or IMVJ warm starts replayed from
+another state), fixed in 0.4.0; the history families are checked to carry
+history their next step reads.  Cannot see: a defect the record and the replay share.
 `run` and `step` resumes are the checkpoint oracle's (State and I/O).
 
 #### Acceptance: every door that writes or restores a parameter

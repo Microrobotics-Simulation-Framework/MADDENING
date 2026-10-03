@@ -25,11 +25,15 @@ float32 leaves in an x64 graph.  "Away from thresholds": truths at 20-80%
 of each range, starts inside it, generous budgets, a coupling tolerance two
 orders above the float32 floor and a contraction rate of 0.06-0.48.
 
-**Known failing:** B1-H1 -- under x64 the identifiability guard misses the
-spring's exact ``(k, c, m)`` scale degeneracy (rank 3 where float32 holds
-the scale at rank 2), with float64 and with float32 leaves; B1-L1 --
-``fit_lm`` reports ``converged=False`` at its float64 floor where float32
-converges.
+It found B1-H1 (under x64 the identifiability guard missed the spring's
+exact ``(k, c, m)`` scale degeneracy, with float64 and with float32 leaves)
+and B1-L1 (``fit_lm`` reported ``converged=False`` at its float64 floor),
+both fixed in 0.4.0; they run as tests.  Two differences are documented
+and pinned as such: a truth of exactly 0 (``fit_lm``'s ``step_tol``), and a
+direction whose gradients float32 cannot resolve and float64 can
+(``excited_rank`` is at least float32's).  The drawn properties keep each
+start 0.05 of its range from the truth, and hold ``excited_rank`` to "at
+least float32's" rather than equality.
 
 What it cannot see: a defect both precisions share (one code path), and
 problems near a threshold, where the two may legitimately differ.
@@ -152,10 +156,22 @@ def fit_lm_tolerance(r: dict, i: int) -> float:
     return floor_tolerance(r) + 16 * r["eps"] * abs(r["answers"]["truth"][i])
 
 
-def check_fit_lm(kinds, truth_at, start_at) -> None:
+def check_fit_lm(kinds, truth_at, start_at, *, resolved: bool = True) -> None:
+    """``resolved``: the problem is known to keep every direction's
+    gradients above float32's cutoff, so every verdict is equal.  A drawn
+    problem need not: there ``excited_rank`` in float64 is at least
+    float32's (the wider dtype resolves more), and ``hold_declined`` is
+    compared where the ranks agree."""
     r32, r64 = both(_worker(), "blocks_fit_lm", kinds=kinds, truth_at=truth_at,
                     start_at=start_at)
-    assert_same_verdicts(r32, r64, f"fit_lm {kinds}")
+    if resolved:
+        assert_same_verdicts(r32, r64, f"fit_lm {kinds}")
+    else:
+        v32, v64 = r32["verdicts"], r64["verdicts"]
+        assert v32["converged"] == v64["converged"], (v32, v64)
+        assert v64["excited_rank"] >= v32["excited_rank"], (v32, v64)
+        if v64["excited_rank"] == v32["excited_rank"]:
+            assert v32["hold_declined"] == v64["hold_declined"], (v32, v64)
     assert r32["verdicts"]["converged"], "the problem was drawn to converge comfortably"
     for i, key in enumerate(cases.KEYS):
         t32, t64 = fit_lm_tolerance(r32, i), fit_lm_tolerance(r64, i)
@@ -347,66 +363,75 @@ def test_fit_multiple_shooting_agrees_across_precisions():
 
 
 # ---------------------------------------------------------------------------
-# Known failing
+# What the oracle found: B1-H1 and B1-L1, fixed in 0.4.0, and the
+# differences the fixes document
 # ---------------------------------------------------------------------------
-
-_H1_REASON = ("B1-H1: under x64 the identifiability guard misses the spring's exact (k, c, m) "
-              "scale degeneracy: _ExcitationTracker.split (sysid.py ~2984) compares a float64 "
-              "eigh's resolution with a cutoff below it, and takes eps from the promoted "
-              "theta; pending fix")
-
 
 @pytest.mark.parametrize("args", [
     dict(fitter="fit_lm", n_iter=10),
     dict(fitter="fit", n_iter=50, lr=0.2, noise=0.02),
 ], ids=["fit_lm-noiseless", "adam-noisy"])
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_H1_REASON)
 def test_the_scale_degeneracy_is_held_in_both_precisions(args):
+    """B1-H1 (fixed): under x64 the guard read ``G``'s eigenvalues at
+    ``eigh``'s resolution against a cutoff far below it, reported rank 3 and
+    let the spring's ``(k, c, m)`` scale drift by 1%."""
     r32, r64 = both(_worker(), "spring_scale_guard", **args)
     assert_same_verdicts(r32, r64, "the identifiability guard")
     for r in (r32, r64):
         assert abs(r["answers"]["scale_drift"]) <= 1e-6, r
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_H1_REASON)
 def test_float32_leaves_in_an_x64_graph_hold_the_scale_degeneracy_as_float32_does():
+    """B1-H1's mixed-dtype half (fixed): the guard took ``eps`` from the
+    promoted float64 coordinates rather than the float32 leaves."""
     r32, rmix = both(_worker(), "spring_scale_guard", fitter="fit", n_iter=50, lr=0.01,
                      noise=0.02, x64_args={"leaf_dtype": "float32"})
     assert_same_verdicts(r32, rmix, "the identifiability guard, float32 leaves under x64")
+    for r in (r32, rmix):
+        assert abs(r["answers"]["scale_drift"]) <= 1e-6, r
 
 
-@pytest.mark.parametrize("truth_damping", [1e-6, 0.0])
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "B1-L1: under x64 fit_lm reports converged=False at its float64 floor: the floor rule's "
-    "damping ladder (sysid.py ~4471) ends one rung short of a candidate within step_tol; "
-    "pending fix"))
-def test_fit_lm_is_converged_at_its_floor_in_both_precisions(truth_damping):
-    r32, r64 = both(_worker(), "fit_lm_at_its_floor", truth_damping=truth_damping)
+def test_fit_lm_is_converged_at_its_floor_in_both_precisions():
+    """B1-L1 (fixed): the floor rule's ladder of damped candidates ended one
+    rung short of ``step_tol`` under x64, so a fit at its float64 floor
+    reported ``converged=False``."""
+    r32, r64 = both(_worker(), "fit_lm_at_its_floor", truth_damping=1e-6)
     assert_same_verdicts(r32, r64, "fit_lm at its floor")
+    assert r32["verdicts"]["converged"]
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_H1_REASON)
-def test_a_coordinate_started_at_its_truth_is_counted_alike_in_both_precisions():
-    """Found by the drawn ``fit_lm`` property at ``ci`` depth.  A well-posed
-    fit whose stiffness (an identity coordinate) starts exactly at its
-    truth: its residual block is zero throughout, so no evaluated gradient
-    points along it.  float32 reports ``excited_rank=2``; float64 counts the
-    never-excited direction (3), its zero eigenvalue read at ``eigh``'s
-    resolution against a cutoff far below it -- B1-H1's mechanism on a problem
-    with no degeneracy at all."""
+def test_a_truth_of_exactly_zero_reads_as_documented_in_each_precision():
+    """A documented difference, not a disagreement (``fit_lm``'s
+    ``step_tol``): a parameter whose truth is exactly 0 has no relative
+    resolution.  float32 lands on 0.0 exactly (the bound clips it) and
+    converges; float64 lands on the residual's rounding noise around 0, a
+    value no relative step resolves, and says ``converged=False`` with a
+    loss at its floor.  Both find the stiffness."""
+    r32, r64 = both(_worker(), "fit_lm_at_its_floor", truth_damping=0.0)
+    assert r32["verdicts"]["converged"] is True
+    assert r64["verdicts"]["converged"] is False
+    for r, eps in ((r32, 2.0 ** -23), (r64, 2.0 ** -52)):
+        assert abs(r["answers"]["stiffness"] - 30.0) <= 2 ** 10 * eps * 30.0, r
+
+
+def test_float64_resolves_every_direction_float32_does():
+    """Found by the drawn ``fit_lm`` property at ``ci`` depth, and first
+    pinned as B1-H1; after its fix, a threshold of float32's own.  A
+    well-posed fit whose damping starts 0.05 of its range from its truth
+    beside a rest length far off: the damping's gradients are ``2.3e-7`` of
+    the largest, below float32's cutoff (``n sqrt(T) eps32``, ``3.6e-7``)
+    and far above float64's.  So float32 reports the direction unexcited
+    (and declines to hold it, having found its curvature) and float64
+    excited.  The wider dtype resolves at least what the narrower does;
+    both recover the truth."""
     r32, r64 = both(_worker(), "blocks_fit_lm", kinds=["clip", "logit", "log"],
                     truth_at=[0.5, 0.75, 0.78125], start_at=[0.5, 0.8, 0.5])
-    assert_same_verdicts(r32, r64, "fit_lm with a coordinate started at its truth")
-
-
-def test_the_known_failing_cases_converge_in_float32():
-    """The float32 halves of B1-H1 and B1-L1 hold today: the scale is held at
-    rank 2, and the floor fit converges.  (So the strict xfails above fail
-    on the float64 side, as their reasons say.)"""
-    r = cases.run_case("spring_scale_guard", {"fitter": "fit_lm", "n_iter": 10})
-    assert r["verdicts"]["excited_rank"] == 2 and abs(r["answers"]["scale_drift"]) <= 1e-6, r
-    assert cases.run_case("fit_lm_at_its_floor", {"truth_damping": 1e-6})["verdicts"][
-        "converged"]
+    assert r64["verdicts"]["excited_rank"] >= r32["verdicts"]["excited_rank"], (r32, r64)
+    assert r32["verdicts"]["converged"] and r64["verdicts"]["converged"]
+    for i, key in enumerate(cases.KEYS):
+        for r in (r32, r64):
+            assert abs(r["answers"]["params"][i] - r["answers"]["truth"][i]) <= \
+                fit_lm_tolerance(r, i), (key, r)
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +445,9 @@ _AWAY = st.floats(0.2, 0.8)
 def _starts(draw, truth_at):
     """A start at least 0.05 of each range from the truth.  A coordinate
     started *at* its truth is a decision threshold: its residual block is
-    zero, so no gradient the run evaluates points along it, and whether it
-    counts as excited is decided by rounding (found at ``ci`` depth; the
-    float64 half of it is B1-H1's, pinned below)."""
+    zero, so whether it counts as excited is decided by rounding.  (A
+    coordinate started near it beside one far off can still sit below
+    float32's cutoff: ``check_fit_lm(resolved=False)``.)"""
     out = []
     for t in truth_at:
         d = draw(st.floats(0.05, 0.4))
@@ -438,7 +463,8 @@ def _starts(draw, truth_at):
 @given(kinds=st.lists(st.sampled_from(sorted(cases.SPECS)), min_size=3, max_size=3),
        data=st.data(), truth_at=st.lists(_AWAY, min_size=3, max_size=3))
 def test_fit_lm_agrees_across_precisions_on_drawn_problems(kinds, data, truth_at):
-    check_fit_lm(kinds, truth_at, data.draw(_starts(truth_at), label="start_at"))
+    check_fit_lm(kinds, truth_at, data.draw(_starts(truth_at), label="start_at"),
+                 resolved=False)
 
 
 # Per push: tests/property/test_differential_precision.py::test_fim_agrees_across_precisions

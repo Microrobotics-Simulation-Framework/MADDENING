@@ -3632,7 +3632,9 @@ def summarise(directory: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def _parser() -> argparse.ArgumentParser:
+    """The CLI.  Kept apart from :func:`parse_args` so a test can list its
+    options."""
     # No abbreviations: _pre_import_setup() runs before argparse and pins the
     # CPU backend only for the literal ``--dry-run``, so an accepted
     # ``--dry`` used to start a "dry run" on whatever accelerator was there.
@@ -3668,6 +3670,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="synthetic mesh when no --mesh is given")
     ap.add_argument("--mesh", help=".npz (edges[, partition]) or .npy edges of a real mesh")
     ap.add_argument("--partition", choices=("auto", "metis", "rcm", "contiguous"), default="auto")
+    return ap
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    ap = _parser()
     args = ap.parse_args(argv)
     if args.summarise is None and (args.goal is None or args.out is None):
         ap.error("--goal and --out are required unless --summarise is given")

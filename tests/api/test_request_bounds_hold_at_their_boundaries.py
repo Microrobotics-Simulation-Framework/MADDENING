@@ -10,9 +10,11 @@ plus one is refused, for
 * the request body (``MAX_REQUEST_BODY_BYTES``), declared and streamed;
 * ``POST /sim/run?n_steps=`` (``MAX_RUN_STEPS``), with the bound read
   when the app is built;
-* an integer parameter's magnitude (``MAX_NODE_PARAM_INT``) and the values
-  in one request's params (``MAX_NODE_PARAM_ELEMENTS``), on both request
-  models;
+* an integer parameter's magnitude (``MAX_NODE_PARAM_INT``), on both
+  routes, for a parameter that is an integer (an integral JSON number for
+  a float parameter is a float), and the values in one request's params
+  (``MAX_NODE_PARAM_ELEMENTS``), on both request models;
+* a new node's ``ParamSpec`` bounds, as ``PUT /graph/params`` applies them;
 * the whole graph's state (``MAX_GRAPH_STATE_ELEMENTS``).
 
 The bounds that allocate are exercised at a small value
@@ -28,6 +30,7 @@ import warnings
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import jax.numpy as jnp
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -43,6 +46,7 @@ from maddening.api.server import (
     _graph_budget_refusal,
 )
 from maddening.core.graph_manager import GraphManager
+from maddening.core.node import SimulationNode
 from maddening.nodes.spring import SpringDamperNode
 from tests.property.differential import no_cloud_launch
 
@@ -117,18 +121,100 @@ MODELS = {
 }
 
 
+class Counted(SimulationNode):
+    """Integer, integer-list and float parameters, none of which allocates:
+    the integer bound is exercised at its value without building anything
+    of that size."""
+
+    def __init__(self, name, timestep, count: int = 3, dims: tuple = (2, 2),
+                 gain: float = 1.0):
+        super().__init__(name, timestep, count=count, dims=list(dims), gain=gain)
+
+    def initial_state(self):
+        return {"x": jnp.zeros((), jnp.float32)}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"x": state["x"] + self.params["gain"] * dt}
+
+
+def _counted_client() -> tuple[SimulationServer, TestClient]:
+    gm = GraphManager()
+    gm.add_node(Counted("c", 0.01))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        gm.compile()
+    server = SimulationServer({"Counted": Counted, "SpringDamperNode": SpringDamperNode},
+                              graph_manager=gm)
+    return server, TestClient(server.create_app(), raise_server_exceptions=False)
+
+
 @pytest.mark.parametrize("model", sorted(MODELS))
-@pytest.mark.parametrize("sign", [1, -1])
-def test_an_integer_of_exactly_the_bound_is_taken_and_one_more_is_refused(model, sign):
+def test_the_request_models_bound_the_value_count_not_an_integers_magnitude(model):
+    """A request model knows no parameter's type, and a JSON number does
+    not say whether it is an integer, so the models bound only the number
+    of values; the routes bound an integer where its parameter is one."""
     make = MODELS[model]
-    assert make({"n": sign * MAX_NODE_PARAM_INT}).params["n"] == sign * MAX_NODE_PARAM_INT
-    assert make({"n": {"deep": [sign * MAX_NODE_PARAM_INT]}})
-    with pytest.raises(ValidationError, match="integer magnitude"):
-        make({"n": sign * (MAX_NODE_PARAM_INT + 1)})
-    with pytest.raises(ValidationError, match="integer magnitude"):
-        make({"n": {"deep": [0, sign * (MAX_NODE_PARAM_INT + 1)]}})
-    # A float is a constant, not a dimension; a boolean is not a number.
-    assert make({"n": float(10 * MAX_NODE_PARAM_INT), "b": True})
+    assert make({"n": 10 * MAX_NODE_PARAM_INT}).params["n"] == 10 * MAX_NODE_PARAM_INT
+    assert make({"n": {"deep": [-10 * MAX_NODE_PARAM_INT]}})
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+@pytest.mark.parametrize("key, shape", [("count", lambda v: v), ("dims", lambda v: [2, v])])
+def test_an_integer_parameter_takes_exactly_the_bound_and_refuses_one_more(sign, key, shape):
+    """``POST /graph/nodes`` and ``PUT /graph/params``, top-level and
+    inside a list: the bound itself is taken and one more is a 422 that
+    adds or writes nothing.  An integral float for an integer parameter is
+    the integer it spells, and bounded the same."""
+    server, client = _counted_client()
+    at, over = sign * MAX_NODE_PARAM_INT, sign * (MAX_NODE_PARAM_INT + 1)
+    resp = client.post("/graph/nodes", json={"type": "Counted", "name": "a", "timestep": 0.01,
+                                             "params": {key: shape(at)}})
+    assert resp.status_code == 201, resp.text
+    for i, value in enumerate((over, float(over))):
+        resp = client.post("/graph/nodes", json={"type": "Counted", "name": f"b{i}",
+                                                 "timestep": 0.01, "params": {key: shape(value)}})
+        assert resp.status_code == 422 and "integer magnitude must be at most" in resp.text, \
+            resp.text
+        assert f"b{i}" not in server.gm._nodes
+        resp = client.put("/graph/params/c", json={"params": {key: shape(value)}})
+        assert resp.status_code == 422 and "integer magnitude must be at most" in resp.text, \
+            resp.text
+        assert server.gm.get_node("c").params[key] == ([2, 2] if key == "dims" else 3)
+
+
+@pytest.mark.parametrize("body", ['{"params": {"gain": 20000000}}',
+                                  '{"params": {"gain": 20000000.0}}',
+                                  '{"params": {"gain": 2e7}}'])
+def test_an_integral_number_for_a_float_parameter_is_a_float_on_both_routes(body):
+    """A browser's ``JSON.stringify(2e7)`` is ``20000000``: one JSON number
+    for a float parameter, written however the client spells it.  The
+    integer bound refused it with a 422 on both routes (it is a constant,
+    not a dimension)."""
+    server, client = _counted_client()
+    resp = client.put("/graph/params/c", content=body,
+                      headers={"content-type": "application/json"})
+    assert resp.status_code == 200, resp.text
+    assert server.gm.get_node("c").params["gain"] == 2e7
+    assert type(server.gm.get_node("c").params["gain"]) is float
+    post = body.replace('{"params"', '{"type": "Counted", "name": "n", "timestep": 0.01, "params"')
+    resp = client.post("/graph/nodes", content=post,
+                       headers={"content-type": "application/json"})
+    assert resp.status_code == 201, resp.text
+    assert server.gm.get_node("n").params["gain"] == 2e7
+
+
+def test_a_float_leaf_takes_an_integral_json_number_past_the_integer_bound():
+    """The auditor's case: ``SpringDamperNode.stiffness`` (a params-pytree
+    leaf) of 2e7 N/m, sent as ``20000000``."""
+    server, client = _client()
+    resp = client.put("/graph/params/spring", content='{"params": {"stiffness": 20000000}}',
+                      headers={"content-type": "application/json"})
+    assert resp.status_code == 200, resp.text
+    assert float(server.gm.params["nodes"]["spring"]["stiffness"]) == 2e7
+    resp = client.post("/graph/nodes", content=(
+        '{"type": "SpringDamperNode", "name": "s2", "timestep": 0.01, '
+        '"params": {"stiffness": 20000000}}'), headers={"content-type": "application/json"})
+    assert resp.status_code == 201, resp.text
 
 
 @pytest.mark.parametrize("model", sorted(MODELS))
@@ -141,14 +227,49 @@ def test_exactly_the_value_bound_is_taken_and_one_value_more_is_refused(model):
 
 
 def test_the_integer_bound_is_a_422_on_both_routes():
-    server, client = _client()
+    """For an integer parameter (``mass`` is a float, and takes any
+    integral number since the bound reads the parameter's type)."""
+    server, client = _counted_client()
     over = MAX_NODE_PARAM_INT + 1
-    resp = client.post("/graph/nodes", json={"type": "SpringDamperNode", "name": "n2",
-                                             "timestep": 0.01, "params": {"mass": over}})
+    resp = client.post("/graph/nodes", json={"type": "Counted", "name": "n2",
+                                             "timestep": 0.01, "params": {"count": over}})
     assert resp.status_code == 422, resp.text
-    resp = client.put("/graph/params/spring", json={"params": {"mass": over}})
+    resp = client.put("/graph/params/c", json={"params": {"count": over}})
     assert resp.status_code == 422, resp.text
     assert "n2" not in server.gm._nodes
+
+
+def test_a_parameter_whose_default_says_nothing_is_bounded_as_written():
+    """Fail closed: a parameter with no default (or ``None``) could be a
+    dimension, so an integer for it is bounded."""
+    server, client = _counted_client()
+    resp = client.post("/graph/nodes", json={"type": "Counted", "name": "n3", "timestep": 0.01,
+                                             "params": {"extra": MAX_NODE_PARAM_INT + 1}})
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.parametrize("params, refusal", [
+    ({"damping": -5.0}, "damping=-5.0 below bound 0.0"),
+    ({"stiffness": 0.0}, "stiffness"),
+    ({"mass": -1.0}, "mass"),
+])
+def test_a_new_node_outside_its_param_spec_bounds_is_refused_as_a_params_write_is(params,
+                                                                                  refusal):
+    """``POST /graph/nodes`` applied no ``ParamSpec`` bounds: a spring with
+    a damping of -5 was added, which ``PUT /graph/params`` refuses to
+    write, and a checkpoint of the graph then carried the value.  Both
+    routes refuse it now, naming the bound, and nothing is added."""
+    server, client = _client()
+    resp = client.post("/graph/nodes", json={"type": "SpringDamperNode", "name": "n4",
+                                             "timestep": 0.01, "params": params})
+    assert resp.status_code == 400, resp.text
+    assert refusal in resp.json()["detail"]
+    assert "n4" not in server.gm._nodes
+    put = client.put("/graph/params/spring", json={"params": params})
+    assert put.status_code == 400 and refusal in put.json()["detail"], put.text
+    ok = client.post("/graph/nodes", json={"type": "SpringDamperNode", "name": "n5",
+                                           "timestep": 0.01, "params": {"damping": 0.0}})
+    assert ok.status_code == 201, ok.text
 
 
 # ---------------------------------------------------------------------------

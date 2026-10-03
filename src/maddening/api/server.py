@@ -346,17 +346,27 @@ MAX_STREAM_CONNECTIONS = 16
 #: waiting requests from holding the server's worker threads.
 _GRAPH_LOCK_TIMEOUT = 30.0
 
-#: Threads of the small pool the runner routes (``POST /sim/start``,
-#: ``/sim/stop``, ``/sim/pause``, ``/sim/resume``, ``/sim/reset``, ``PUT
-#: /sim/stride``) run
-#: their blocking work on, apart from the worker pool every other route
-#: shares.  They used to run on that pool, so behind a queue of requests
-#: waiting for the graph a stop waited for a free worker before its own
-#: deadline even started (5.6 s behind 240 queued reads, at a 1 s lock
-#: timeout).  Each takes the runner lock with a deadline counted from its
-#: arrival, so a request queued here behind others is answered within
-#: about one :data:`_GRAPH_LOCK_TIMEOUT` of arriving all the same.
+#: Threads of the small pool the runner routes ``POST /sim/start``,
+#: ``/sim/stop``, ``/sim/pause`` and ``/sim/resume`` run their blocking work
+#: on, apart from the worker pool every other route shares (``POST
+#: /sim/reset`` has a pool of its own, :data:`_RESET_ROUTE_WORKERS`, since
+#: it waits for the graph without holding the runner lock; ``PUT
+#: /sim/stride`` waits for nothing and runs on the event loop).  They used
+#: to run on the shared pool, so behind a queue of requests waiting for the
+#: graph a stop waited for a free worker before its own deadline even
+#: started (5.6 s behind 240 queued reads, at a 1 s lock timeout).  Each
+#: takes the runner lock with a deadline counted from its arrival, and a
+#: start holds that lock while it waits for the graph, so everything queued
+#: here is bounded by the deadline of a request that arrived earlier: a
+#: request is answered within about one :data:`_GRAPH_LOCK_TIMEOUT` of its
+#: arrival however many are queued.
 _RUNNER_ROUTE_WORKERS = 4
+
+#: Threads of ``POST /sim/reset``'s own pool (see
+#: :data:`_RUNNER_ROUTE_WORKERS`): a reset waits for the graph with a
+#: deadline counted from its arrival, and on the runner routes' pool a few
+#: of them would keep a stop waiting for a thread.
+_RESET_ROUTE_WORKERS = 2
 
 #: ``POST /sim/run`` steps in slices of about this many seconds, taking
 #: the graph lock for each and checking between them whether the server
@@ -2358,9 +2368,12 @@ class SimulationServer:
         # for a few assignments, never across a wait, so the stride answers
         # at once whatever the runner routes are waiting for.
         self._stride_lock = threading.Lock()
-        # The runner routes' own threads (_RUNNER_ROUTE_WORKERS).
+        # The runner routes' own threads (_RUNNER_ROUTE_WORKERS), and the
+        # reset's (_RESET_ROUTE_WORKERS).
         self._runner_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=_RUNNER_ROUTE_WORKERS, thread_name_prefix="maddening-runner-route")
+        self._reset_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_RESET_ROUTE_WORKERS, thread_name_prefix="maddening-reset-route")
         # A JAX trace this server started: its step and time budget
         # (MAX_JAX_TRACE_STEPS / _SECONDS), counted by _on_graph_event.
         self._trace_lock = threading.Lock()
@@ -4122,16 +4135,16 @@ class SimulationServer:
                              "steps_run": done, "n_steps": n_steps})
             return state
 
-        async def on_runner_pool(fn, *args) -> Any:
+        async def on_runner_pool(fn, *, pool=None) -> Any:
             """Run a runner route's blocking *fn* on the runner routes' own
-            threads (:data:`_RUNNER_ROUTE_WORKERS`), with the deadline its
-            waits share counted from now -- the request's arrival on the
-            event loop -- as its first argument.  Its ``HTTPException``
-            propagates to the route as if raised there."""
+            threads (:data:`_RUNNER_ROUTE_WORKERS`, or *pool*), with the
+            deadline its waits share counted from now -- the request's
+            arrival on the event loop -- as its argument.  Its
+            ``HTTPException`` propagates to the route as if raised there."""
             deadline = time.monotonic() + _GRAPH_LOCK_TIMEOUT
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
-                self._runner_pool, functools.partial(fn, deadline, *args))
+                pool or self._runner_pool, functools.partial(fn, deadline))
 
         @app.post("/sim/start", tags=["sim"], response_model=None)
         async def sim_start() -> Any:
@@ -4245,13 +4258,13 @@ class SimulationServer:
 
             The runner is stopped first and the graph lock taken after,
             within about one graph-lock timeout of the request's arrival in
-            all (it runs on the runner routes' own threads); when the
+            all (it runs on threads of its own, not the shared workers); when the
             runner will not stop in time, or the graph cannot be had in
             time, the 503 (or a 409) says that the runner it stopped stays
             stopped, with ``was_running``.  The streams are sent the reset
             state at step 0.
             """
-            return await on_runner_pool(sim_reset_blocking)
+            return await on_runner_pool(sim_reset_blocking, pool=self._reset_pool)
 
         def sim_reset_blocking(deadline: float) -> Any:
             with self._runner_control("reset the graph", deadline):
@@ -4313,13 +4326,11 @@ class SimulationServer:
             dict
                 The values in force, as the runner and the relay hold them.
 
-            Run on the runner routes' own threads, like start and stop.
+            Answered on the event loop: it waits for nothing (the stride
+            lock is held for a few assignments, never across a wait), so it
+            does not queue for a worker thread behind requests waiting for
+            the graph.
             """
-            return await on_runner_pool(sim_set_stride_blocking, steps_per_frame,
-                                        relay_stride)
-
-        def sim_set_stride_blocking(_deadline: float, steps_per_frame: Optional[int],
-                                    relay_stride: Optional[int]) -> dict[str, int]:
             # The stride lock alone, held for these assignments: the runner
             # lock is held by routes waiting for the graph, and the stride
             # waited behind them.

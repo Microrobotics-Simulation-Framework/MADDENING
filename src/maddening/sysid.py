@@ -482,7 +482,7 @@ def windowed_loss(
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
                  why=_CONTINUITY_WEIGHT_WHY)
     if start_step is not None:
-        _check_count("start_step", start_step)
+        start_step = _check_count("start_step", start_step)
     # As every run method does first: a ``node.params`` write or a changed
     # static since the last compile makes the graph recompile, so this loss
     # traces the same model ``gm.step`` runs.  A caller that passed the live
@@ -3015,8 +3015,25 @@ def _is_real_number(value) -> bool:
 
 
 def _check_count(name: str, value, *, minimum: int = 0) -> int:
-    """Reject a non-integer or too-small iteration/interval count."""
-    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+    """Reject a non-integer or too-small iteration/interval count.
+
+    An integer in every spelling reads, as a real number does for
+    :func:`_check_hyper`: a Python or NumPy integer, a JAX integer scalar,
+    or a 0-d integer array of either library.  Earlier 0.4.0 development
+    builds accepted only a :class:`numbers.Integral`, so ``n_iter=
+    jnp.int32(5)`` and ``np.asarray(5)`` were refused while
+    ``lr=jnp.asarray(0.05)`` read.  A ``bool`` in any spelling, a float
+    (even ``5.0``) and anything else are still refused.
+    """
+    if isinstance(value, (bool, np.bool_, jax.core.Tracer)):
+        # A tracer has no value to count with (``windowed_loss`` under
+        # ``jax.jit`` with a traced ``start_step``): refused as before.
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    if isinstance(value, (np.ndarray, jax.Array)):
+        if value.ndim != 0 or not jnp.issubdtype(value.dtype, jnp.integer):
+            raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+        value = int(value)
+    elif not isinstance(value, numbers.Integral):
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
     if int(value) < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
@@ -3044,10 +3061,10 @@ def _adam_frame(g0):
     return pow2_frame(g0)
 
 
-def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
+def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> tuple[int, int]:
     """The hyper-parameters :func:`fit` and :func:`fit_multiple_shooting`
-    share."""
-    _check_count("n_iter", n_iter)
+    share; returns ``(n_iter, notify_every)`` as Python ints."""
+    n_iter = _check_count("n_iter", n_iter)
     _check_hyper("lr", lr, gt=0.0,
                  why=" A non-positive learning rate descends nothing: at 0 the "
                      "step vanishes, below it the step climbs the loss.")
@@ -3065,7 +3082,7 @@ def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
     _check_hyper("eps", eps, gt=0.0,
                  why=" eps is the floor of Adam's denominator; at 0 the first "
                      "step is 0/0 and the NaN is reported against the loss.")
-    _check_count("notify_every", notify_every)
+    return n_iter, _check_count("notify_every", notify_every)
 
 
 #: Largest trainable-parameter count for which :func:`fit` accumulates the
@@ -4338,7 +4355,7 @@ def fit(
         stopped by ``tol`` returns the iterate that met it, which is the
         lowest by construction.
     """
-    _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
+    n_iter, notify_every = _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
     _check_hold_undetermined(hold_undetermined)
     _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
@@ -4690,7 +4707,7 @@ def fit_lm(
         held all three and returned parameters at a loss of 0.22 from a
         fit that had reached 0.0.
     """
-    _check_count("n_iter", n_iter)
+    n_iter = _check_count("n_iter", n_iter)
     _check_hyper("lam0", lam0, gt=0.0,
                  why=" lambda multiplies diag(J^T J): at 0 or below the solve is "
                      "the undamped Gauss-Newton one and there is nothing for a "
@@ -4711,7 +4728,7 @@ def fit_lm(
                          "negative one can never be met and 'converged' could only "
                          "ever mean the loss reached tol; None is the parameters' "
                          "own float resolution.")
-    _check_count("notify_every", notify_every)
+    notify_every = _check_count("notify_every", notify_every)
     _check_hold_undetermined(hold_undetermined)
     _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
@@ -5058,16 +5075,16 @@ def fit_multiple_shooting(
         such a direction is left unheld (fail-open) rather than held at a
         loss the fixed window states would make it pay.
     """
-    _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
+    n_iter, notify_every = _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
     if lr_states is not None:
         _check_hyper("lr_states", lr_states, gt=0.0,
                      why=" The window starts are decision variables like the "
                          "parameters; a non-positive rate moves them the wrong way.")
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
                  why=_CONTINUITY_WEIGHT_WHY)
-    _check_count("sample_every", sample_every, minimum=1)
+    sample_every = _check_count("sample_every", sample_every, minimum=1)
     if start_step is not None:
-        _check_count("start_step", start_step)
+        start_step = _check_count("start_step", start_step)
     _check_hold_undetermined(hold_undetermined)
     _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001

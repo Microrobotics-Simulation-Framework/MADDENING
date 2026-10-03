@@ -355,6 +355,54 @@ def test_a_real_number_in_any_spelling_is_still_read(value):
     fit_lm(gm, lambda p: jnp.ones(3, jnp.float32), n_iter=1, lam0=value)
 
 
+@pytest.mark.parametrize("value", [
+    pytest.param(3, id="int"),
+    pytest.param(np.int64(3), id="numpy-int64"),
+    pytest.param(np.asarray(3), id="numpy-0d"),
+    pytest.param(jnp.int32(3), id="jax-int32"),
+    pytest.param(jnp.asarray(3), id="jax-0d"),
+])
+def test_an_integer_count_in_any_spelling_is_read(value, observed_spring):
+    """``n_iter`` and ``notify_every`` read an integer in every spelling, as
+    ``lr`` reads a real number in every spelling (SYS-061): a 0-d NumPy array
+    and a JAX integer used to be refused (audit_040_p4_10/fmu-sysid/
+    repro_count_hyper_spellings.py)."""
+    from maddening.sysid import fit_multiple_shooting
+
+    _, obs, _ = observed_spring
+    gm = _spring_gm()
+    events = []
+    gm.add_observer(lambda kind, payload: events.append(payload))
+    res = fit(gm, lambda p: jnp.sum(p["nodes"]["s"]["stiffness"] ** 2), n_iter=value,
+              notify_every=value, hold_undetermined=False)
+    assert res.n_iter == 3 and type(res.n_iter) is int
+    assert [e["iteration"] for e in events] == [3]
+    res = fit_lm(gm, lambda p: jnp.stack([p["nodes"]["s"]["stiffness"] - 31.0]),
+                 n_iter=value, notify_every=value, hold_undetermined=False)
+    assert type(res.n_iter) is int and res.n_iter <= 3
+    res, _ = fit_multiple_shooting(gm, obs, obs_fn=lambda h: h["s"]["position"], window=4,
+                                   n_iter=value, notify_every=value, start_step=value,
+                                   hold_undetermined=False)
+    assert res.n_iter == 3 and type(res.n_iter) is int
+
+
+@pytest.mark.parametrize("value", [
+    pytest.param(3.0, id="float"),
+    pytest.param(np.float32(3.0), id="numpy-float"),
+    pytest.param(jnp.asarray(3.0), id="jax-float-0d"),
+    pytest.param(np.asarray([3]), id="numpy-1d"),
+    pytest.param(True, id="bool"),
+    pytest.param(np.True_, id="numpy-bool"),
+    pytest.param(jnp.asarray(True), id="jax-bool"),
+    pytest.param("3", id="string"),
+])
+def test_a_count_that_is_not_an_integer_is_refused(value):
+    with pytest.raises(ValueError, match="n_iter must be an integer"):
+        fit(_spring_gm(), lambda p: jnp.asarray(0.0), n_iter=value)
+    with pytest.raises(ValueError, match="n_iter must be an integer"):
+        fit_lm(_spring_gm(), lambda p: jnp.ones(3, jnp.float32), n_iter=value)
+
+
 def _a_mask(gm, damping):
     mask = jax.tree.map(lambda _: False, gm.trainable_mask(gm.params))
     mask["nodes"]["s"]["stiffness"] = True

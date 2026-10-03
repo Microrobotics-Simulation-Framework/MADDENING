@@ -6,9 +6,10 @@ Three pieces, the first two pure JAX so they compose with ``jax.jit`` /
 * :func:`windowed_loss` — a teacher-forced, windowed trajectory loss.
   Long rollouts of stiff or chaotic dynamics give exploding gradients; the
   standard remedy is to reset the simulation to the measured state every
-  ``window`` samples and sum the per-window losses.  Each window is an
-  independent ``lax.scan``, so memory is O(window) and gradients cannot
-  compound across windows.
+  ``window`` samples and sum the per-window losses.  Each window is its
+  own ``lax.scan``, so memory is O(window) and gradients cannot compound
+  across windows: the coupling warm starts a window inherits from the one
+  before it (see :func:`windowed_loss`) enter with their gradient stopped.
 * :func:`fim` — the Fisher information matrix ``J^T J`` of a residual
   function, from ``jax.jacfwd`` sensitivities.  Its eigen-decomposition
   says which parameter *combinations* the data cannot distinguish; the
@@ -289,6 +290,31 @@ def _refuse_unmaskable_groups(gm, meta0, thresholds) -> None:
         )
 
 
+def _warm_start_slots(gm, meta0) -> tuple[str, ...]:
+    """The ``_meta`` slots a step reads as *state*, other than ``step_count``.
+
+    A coupling group's predictor history (``coupling_<key>_pred_*``) and its
+    IQN-IMVJ secant matrices (``coupling_<key>_V`` / ``_W``): the step
+    starts its fixed-point iteration from them, so with a finite
+    ``max_iterations`` they change the state it returns.  The diagnostics
+    slots are outputs of a step and never read by the next one, and
+    ``step_count`` is set from ``start_step``.  Named exactly, from the
+    groups that own them, in sorted order (the carry's structure must not
+    depend on dict order); only slots ``meta0`` actually holds.
+    """
+    if not meta0:
+        return ()
+    slots = []
+    for group in gm._coupling_groups:  # noqa: SLF001
+        key = "+".join(sorted(group.nodes))
+        if group.acceleration == "iqn-imvj":
+            slots += [f"coupling_{key}_V", f"coupling_{key}_W"]
+        if group.predictor != "none":
+            slots += [f"coupling_{key}_pred_count"]
+            slots += [f"coupling_{key}_pred_{pi}" for pi in range(3)]
+    return tuple(sorted(s for s in set(slots) if s in meta0))
+
+
 def _sync_compiled(gm) -> None:
     """Compile ``gm`` if a run method would: dirty, never compiled, a
     changed static, or a ``node.params`` write the compiled step has not
@@ -322,6 +348,30 @@ def windowed_loss(
     continuity penalty ties each window's end to the next window's start,
     so the fitted trajectory is a single continuous solution at the
     optimum instead of ``n_windows`` teacher-forced pieces.
+
+    **Coupling warm starts are replayed, not reset.**  A coupling group
+    with a ``predictor`` or ``acceleration="iqn-imvj"`` carries state the
+    user state does not hold -- its predictor history and its IQN-IMVJ
+    secant matrices -- and with a finite ``max_iterations`` it changes the
+    state a step returns.  The observations cannot carry it, so it is
+    replayed: window ``w`` starts from the warm starts window ``w - 1``
+    ended with, and window ``0`` from the cold ones ``compile()`` and
+    ``reset_state()`` leave.  At the parameters that generated a record
+    taken from ``compile()`` or ``reset_state()`` each window therefore
+    reproduces it exactly and the loss is exactly zero, whatever the
+    predictor, the acceleration or ``max_iterations``.  The inherited warm
+    starts enter a window with their gradient stopped, so the gradient of
+    each window's loss is that of its own scan and gradients still cannot
+    compound across windows; a window ``mask_unconverged`` drops hands the
+    next one cold warm starts rather than its own, which may have
+    diverged.  (0.4.0 development builds zeroed them at every window start:
+    with ``max_iterations=1`` and a quadratic predictor the loss at the
+    generating parameters was 1.7e-2 over 10-sample windows, and a fit
+    started there walked 6.4% away.)  A record that began after the graph
+    had stepped (``start_step > 0``) was made with warm starts that are not
+    known, and the replay warns (``UserWarning``) that it cannot be exact.
+    A ``"_meta"`` entry in ``observations`` or ``window_states`` is
+    ignored.
 
     Parameters
     ----------
@@ -404,8 +454,10 @@ def windowed_loss(
         replayed on the wrong phase in every window, and the loss at the
         generating parameters is not zero (1.3e-2 for a ball and table).
         ``None`` (the default) assumes ``0`` and, on a multi-rate graph,
-        warns (``UserWarning``) that it is assuming it.  It has no effect on
-        a single-rate graph.
+        warns (``UserWarning``) that it is assuming it.  On a single-rate
+        graph it moves no schedule; on a graph whose coupling groups carry
+        warm starts, a ``start_step > 0`` warns that the record's warm
+        starts at sample ``0`` are not known (see above).
 
     Returns
     -------
@@ -475,17 +527,52 @@ def windowed_loss(
                 UserWarning, stacklevel=2,
             )
         start_step = 0
+    # The coupling warm starts are replayed, not reset: window ``w`` starts
+    # from the predictor history and IQN-IMVJ secant matrices window
+    # ``w - 1`` ended with, and window 0 from the cold ones ``compile()`` and
+    # ``reset_state()`` leave.  Zeroing them at every window start (as
+    # 0.4.0 development builds did) replayed a different scheme from the
+    # one that made the record: with ``max_iterations=1`` and a quadratic
+    # predictor the loss at the generating parameters was 1.7e-2, and a fit
+    # started there walked 6.4% away.  They enter each window with their
+    # gradient stopped, so gradients still cannot compound across windows.
+    warm_slots = _warm_start_slots(gm, meta0)
+    cold = {slot: jnp.zeros_like(meta0[slot]) for slot in warm_slots}
+    if warm_slots and start_step > 0:
+        warnings.warn(
+            f"windowed_loss: the record began at base step {start_step}, "
+            "after the graph had stepped, so the coupling warm starts it was "
+            "made with (predictor history, IQN-IMVJ secant matrices) are not "
+            "known at its first sample. Window 0 starts them cold, as "
+            "compile() and reset_state() leave them, and every later window "
+            "from where the previous one left them, so the record is not "
+            "replayed exactly: the loss at the generating parameters is not "
+            "zero. Record from compile() or reset_state() for an exact replay.",
+            UserWarning, stacklevel=2,
+        )
 
-    def _state_from_obs(obs_k, k):
+    def _state_from_obs(obs_k, k, warm):
         s = {nn: dict(fields) for nn, fields in obs_k.items()}
         if meta0 is not None:
             m = jax.tree.map(jnp.zeros_like, meta0)
+            m.update(warm)
             if "step_count" in m:
                 m["step_count"] = jnp.asarray(
                     start_step + k * sample_every, dtype=meta0["step_count"].dtype,
                 )
             s[_META_KEY] = m
         return s
+
+    def _next_warm(final, ok=None):
+        """The warm starts the next window starts from: those this one ended
+        with, gradient stopped -- or, for a window the mask dropped (whose
+        state may have diverged), the cold ones."""
+        warm = {slot: jax.lax.stop_gradient(final[_META_KEY][slot])
+                for slot in warm_slots}
+        if ok is not None:
+            warm = {slot: jnp.where(ok, value, cold[slot])
+                    for slot, value in warm.items()}
+        return warm
 
     def _converged(state):
         ok = jnp.array(True)
@@ -504,8 +591,9 @@ def windowed_loss(
                 f"window_states has leading axis {n_ws}, expected n_windows={n_windows}"
             )
 
-    def _simulate(w, p, ws):
-        """Window ``w`` under params ``p``: ``(final state, converged, samples)``."""
+    def _simulate(w, p, ws, warm):
+        """Window ``w`` under params ``p``, from the warm starts ``warm``:
+        ``(final state, converged, samples)``."""
         def _advance_one_sample(carry, _):
             def inner(c, _):
                 s, ok = c
@@ -527,7 +615,7 @@ def windowed_loss(
                 lambda x: jax.lax.dynamic_index_in_dim(x, w, keepdims=False),
                 ws,
             )
-        state0 = _state_from_obs(obs_start, start)
+        state0 = _state_from_obs(obs_start, start, warm)
         (final, ok), sim = jax.lax.scan(
             _advance_one_sample, (state0, jnp.array(True)), None, length=window,
         )
@@ -563,14 +651,19 @@ def windowed_loss(
         frozen_ws = (None if window_states is None
                      else jax.lax.stop_gradient(window_states))
 
-        def _verdict(w, _):
-            return w + 1, _simulate(w, frozen_p, frozen_ws)[1]
+        def _verdict(carry, _):
+            w, warm = carry
+            final, ok, _sim = _simulate(w, frozen_p, frozen_ws, warm)
+            return (w + 1, _next_warm(final, ok)), ok
 
-        _, window_ok = jax.lax.scan(_verdict, jnp.int32(0), None, length=n_windows)
+        _, window_ok = jax.lax.scan(
+            _verdict, (jnp.int32(0), cold), None, length=n_windows)
 
-    def _window(w, _):
+    def _window(carry, _):
+        w, warm = carry
         start = w * window
         p, ws = params, window_states
+        ok = None
         if mask_unconverged:
             ok = window_ok[w]
 
@@ -580,7 +673,7 @@ def windowed_loss(
             p = jax.tree.map(gate, params)
             if ws is not None:
                 ws = jax.tree.map(gate, ws)
-        final, _ok, sim = _simulate(w, p, ws)
+        final, _ok, sim = _simulate(w, p, ws, warm)
         truth = jax.tree.map(
             lambda x: jax.lax.dynamic_slice_in_dim(x, start + 1, window),
             observations,
@@ -616,9 +709,9 @@ def windowed_loss(
             gap = jax.tree.map(lambda a, b: jnp.sum((a - b) ** 2), end_user, nxt)
             pen = sum(jax.tree.leaves(gap))
             loss_w = loss_w + continuity_weight * pen * (w < n_windows - 1)
-        return w + 1, loss_w
+        return (w + 1, _next_warm(final, ok)), loss_w
 
-    _, losses = jax.lax.scan(_window, jnp.int32(0), None, length=n_windows)
+    _, losses = jax.lax.scan(_window, (jnp.int32(0), cold), None, length=n_windows)
     return jnp.sum(losses)
 
 

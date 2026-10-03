@@ -187,6 +187,8 @@ CLASSIFY = "Classify changed files"
 NOT_A_DOCS_READ: dict[str, str] = {
     "tests/api/test_bearer_auth.py: /docs":
         "the URL route of the API server's generated docs page, not a file",
+    "tests/api/test_auth_and_host_rules_hold_at_their_edges.py: /docs":
+        "the URL route of the API server's generated docs page, not a file",
 }
 
 

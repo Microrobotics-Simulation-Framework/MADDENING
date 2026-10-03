@@ -732,6 +732,7 @@ audit area that a user could rely on:
 |------|----------|--------|
 | `coupling_claims.yaml` | `CPL` | coupling groups, their solvers, schedules and accelerations; sub-cycling, multi-rate groups and the adaptive steppers on coupled graphs; `coupling_diagnostics()`, `coupling_report()` and `strict_convergence`; the precision floor and every bound and `*_usable` flag; IFT gradients; the profiler's coupling statistics; `windowed_loss`'s convergence mask |
 | `sysid_fmu_claims.yaml` | `SYS`, `FMU` | `maddening.sysid` (`windowed_loss`, `fim`, `fim_core`, the three fitters and their results, truth recovery and units); `ParamSpec` bounds and transforms; `node.params` and `gm.params` as fitting and export see them; the FMI 3.0 export: model description, TCP bridge, sidecar, FMU state, C wrapper, conformance, refusals, timeouts, tokens and the terminated state |
+| `rest_runpod_claims.yaml` | `REST`, `RPD` | the HTTP API: authentication, the `Host` and `Origin` rules, request bounds and budgets, the graph lock and its 409/503, `/graph/*`, `/sim/*`, `/checkpoint/*`, shutdown and the runner behind `/sim/start` (not the experimental surrogate and streaming endpoints); `benchmarks/multigpu/run_pod.py`, its runbook, records, verdicts and exit codes |
 
 Each row records:
 

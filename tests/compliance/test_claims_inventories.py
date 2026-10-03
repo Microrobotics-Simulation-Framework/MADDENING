@@ -57,7 +57,7 @@ VALIDATION = REPO_ROOT / "docs" / "validation"
 #: anyone remembering to add it here.
 INVENTORIES = sorted(VALIDATION.glob("*_claims.yaml"))
 #: The inventories the repository must hold; a guard over nothing is no guard.
-EXPECTED = ("coupling_claims.yaml", "sysid_fmu_claims.yaml")
+EXPECTED = ("coupling_claims.yaml", "sysid_fmu_claims.yaml", "rest_runpod_claims.yaml")
 
 SCHEMA_VERSION = 1
 TOP_LEVEL = ("schema_version", "prefixes", "claims")

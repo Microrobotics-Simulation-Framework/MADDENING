@@ -167,6 +167,27 @@ def test_what_this_fmu_never_has_is_refused_in_every_state(wrapper, instance):
     assert status == ERROR and last == 0.0
 
 
+def test_the_wrapper_provides_no_directional_derivative(wrapper, instance):
+    """FMU-017: the sidecar's Python API computes directional derivatives with ``jax.jvp``;
+    the FMU binary does not, and says so: ``fmi3GetDirectionalDerivative`` is ``fmi3Error``
+    in Step Mode, with the sensitivity untouched and nothing asked of the bridge."""
+    md, bridge, inst = instance
+    f = wrapper.lib.fmi3GetDirectionalDerivative
+    f.restype = ctypes.c_int
+    f.argtypes = [ctypes.c_void_p, ctypes.POINTER(VR), ctypes.c_size_t, ctypes.POINTER(VR),
+                  ctypes.c_size_t, ctypes.POINTER(ctypes.c_double), ctypes.c_size_t,
+                  ctypes.POINTER(ctypes.c_double), ctypes.c_size_t]
+    wrapper.to_step_mode(inst)
+    served = bridge.requests_served
+    unknowns = (VR * 1)(_vr(md, "spring.position"))
+    knowns = (VR * 1)(_vr(md, "spring.params.stiffness"))
+    seed, sensitivity = (ctypes.c_double * 1)(1.0), (ctypes.c_double * 1)(42.0)
+    assert f(inst, unknowns, 1, knowns, 1, seed, 1, sensitivity, 1) == ERROR
+    assert sensitivity[0] == 42.0
+    assert "Python sidecar API" in wrapper.logs[-1]
+    assert bridge.requests_served == served
+
+
 def test_the_clock_functions_are_refused_for_any_value_reference(wrapper, instance):
     md, bridge, inst = instance
     served = bridge.requests_served

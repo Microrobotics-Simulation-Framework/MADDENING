@@ -38,6 +38,22 @@ bridge = FmuTcpBridge(sidecar, md, master_dt=gm.timestep, port=5555).start()
 write_fmu(md, "plant.fmu", binary=binary, endpoint=bridge.endpoint)
 ```
 
+Build the description, the sidecar and the bridge from a graph that is
+compiled and unchanged since.  The sidecar runs the graph's compiled step,
+which bakes in every structural value it reads when it is traced, so each
+of the three refuses a graph that has changed since its `compile()`.  That
+covers a structural `node.params` write (`HeatNode`'s `stencil_order`, say),
+a node, edge, external input or coupling group added or removed, and a
+node's `static_data`.  `build_model_description` refuses such a graph, and
+so it does a graph never compiled.  `FmuSidecar` refuses a graph's compiled
+step once that graph has changed or been compiled again.  `FmuTcpBridge`
+refuses a description or a sidecar step whose graph has.  The message says to
+call `compile()` and build all three again.  A write to a leaf `gm.params`
+carries needs no recompile and is exported as written.  Until 0.4.0's fix an
+FMU built over a pending structural write ran the old model if the step had
+been traced before the write, 6.35 K off the graph after 50 steps of a
+heated rod, and the new one if it had not (MADD-ANO-138).
+
 `python -m maddening.examples.advanced.fmu_export_demo` runs the
 build-and-check half of this without a TCP port: the description (with
 the parameters it leaves fixed, and why), the binary and the package in
@@ -86,25 +102,72 @@ time: the previous communication point plus the previous step size, or
 first the start time.  The tolerance is a millionth of a master step, which
 absorbs any importer's floating-point accumulation.  A step size is held to
 the same absolute tolerance off a whole number of master steps, so a step
-the FMU accepts never makes the next legal `doStep` fail; until 0.4.0
-shipped, the step size was allowed a millionth per master step it covered.
-A point inside it is
-adopted, so the importer's clock and the FMU's never drift apart.  A point
-outside it is `fmi3Error` with nothing advanced: an importer that jumped
-from 0.01 to 100 used to get one master step of physics labelled 100.01.
-To go back in time, restore an FMU state; the clock moves with it.
+the FMU accepts never makes the next legal communication point fail; until
+0.4.0 shipped, the step size was allowed a millionth per master step it
+covered.  A point inside it is adopted, so the importer's clock and the
+FMU's never drift apart.  A point outside it is `fmi3Error` with nothing
+advanced: an importer that jumped from 0.01 to 100 used to get one master
+step of physics labelled 100.01.  To go back in time, restore an FMU
+state; the clock moves with it.
+
+Both tolerances are a millionth of the master step at any master step.
+Their rounding slack is a few ulps of the times involved; it used to be
+ulps of at least 1.0 s, so below a master step of about 1e-9 s the
+tolerance was that floor, and 8.9e-4 of a 1e-12 s step was accepted.  And
+the time the FMU reports stays with the time it has simulated: the
+communication point and the step's end `t + h` must each lie within the
+tolerance of the start time plus the master steps taken since, plus a few
+ulps of the time per step, the rounding a running sum of step sizes
+gathers.  An importer whose every step size is a little long is refused,
+with nothing advanced, once its errors add up past the tolerance.
+Adopting each point used to let the reported time move ahead of the
+physics without bound: 1.6 master steps after 2000 steps at a 1e-12 s
+step (MADD-ANO-140).  An importer that steps at the description's
+`stepSize`, keeping a running sum or computing `start + k * h`, stays
+inside however long it runs: its rounding grows no faster than the slack.
+
+The wrapper holds FMI 3.0's co-simulation states and refuses a call its
+state does not allow, with `fmi3Error`, a log message naming the state, and
+nothing sent to the bridge.  An instance starts Instantiated.
+`fmi3EnterInitializationMode` takes it to Initialization Mode, and
+`fmi3ExitInitializationMode` to Step Mode; without Event Mode there is no
+`fmi3EnterStepMode`, which is always refused.  `fmi3DoStep` is allowed in
+Step Mode only, so a step straight after instantiation is refused (it used
+to advance the model).  `fmi3Get*` is allowed in Initialization Mode, Step
+Mode and Terminated.  `fmi3Set*` is allowed in Instantiated, Initialization
+Mode and Step Mode, a zero-length call included.  `fmi3Terminate` is allowed
+in Step Mode.  The FMU-state functions are allowed in every state, and
+`fmi3Reset` returns to Instantiated from any of them.  The FMU has no
+structural parameters and no model exchange, so
+`fmi3EnterConfigurationMode`, `fmi3ExitConfigurationMode` and `fmi3SetTime`
+are refused too; `fmi3SetTime` used to move the wrapper's clock.
 
 `fmi3Terminate` puts the instance in FMI 3.0's Terminated state.  There,
 `fmi3Get*`, the FMU-state functions and `fmi3Reset` are allowed, and
 `fmi3DoStep`, `fmi3Set*` and `fmi3EnterInitializationMode` are `fmi3Error`
 with nothing written, until `fmi3Reset` (or a new instance) starts it again.
-A step after terminate used to advance the model.  Restoring an FMU state
-does not leave Terminated.
+A step after terminate used to advance the model.  A zero-length `fmi3Set*`,
+`fmi3ExitInitializationMode` and `fmi3EnterStepMode` used to answer `fmi3OK`
+there.  Restoring an FMU state does not leave Terminated.  The bridge keeps
+its own check of the Terminated state, for clients other than the wrapper.
 
 **Variables.**  Outputs are `<node>.<field>`.  External inputs are
 `<node>.<field>` of the target boundary field (start value 0, description
 and unit from the target node's `boundary_input_spec`).  Parameters are
-`<node>.params.<key>`, with the `ParamSpec` bounds as `min` / `max`.
+`<node>.params.<key>`, with the `ParamSpec` bounds as `min` / `max`.  A
+`log` or `logit` bound is open, so it is advertised as the nearest value
+inside it, and a `log` leaf with no lower bound is bounded by 0 all the
+same: its `min` is the smallest positive normal of its type.  It used to
+carry no `min`, and a bridge whose sidecar had no `param_specs` accepted
+and ran `mass = -1` (MADD-ANO-139).
+
+The stability filter is by node: a node's outputs, parameters and external
+inputs enter the FMU only if the node is `STABLE`, or `EVOLVING` /
+`PROVISIONAL` with `include_evolving=True`.  An input of any other node is
+held at zero and listed in `md.held_inputs`, like an input
+`selected_inputs` leaves out, and the builder warns.  Naming it in
+`selected_inputs` is a `ValueError`.  Until 0.4.0's fix an `EXPERIMENTAL`
+node's input was exported while its outputs and parameters were not.
 
 Every `start`, `min` and `max` is written in its type's lexical form, which
 FMI 3.0's schema requires: `true` / `false` for a Boolean, an integer
@@ -457,8 +520,13 @@ flag would move into the header).
 increasing interval, `intervalVariability="constant"`), and tags every
 output and external input of a node with its clock (`clocks=` attribute,
 `variability="discrete"`).  An importer then knows that a node on a five
-times coarser rate only changes on every fifth master step.  The fastest
-clock equals the default experiment step size.  Clocks are off by default:
+times coarser rate only changes on every fifth master step.  Every clock
+interval is a whole number of graph steps (`md.graph_timestep`).  With the
+default `stepSize`, one graph step, the fastest clock equals it when the
+node timesteps divide each other.  When they do not, the graph step is
+their GCD: nodes at 0.02 and 0.03 run on a 0.01 step under clocks of 0.02
+and 0.03.  A `default_step_size=` given explicitly need not equal or divide
+any clock.  Clocks are off by default:
 a single-clock FMU has no `<Clock>` variable and no `clocks=` attribute,
 and every output is continuous.  The clocks
 are constant-interval and tick with time.  `fmi3GetClock` and

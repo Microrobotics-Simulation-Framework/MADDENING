@@ -1646,11 +1646,15 @@ claims:
     - tests/core/test_node_params_writes_are_observed.py::test_windowed_loss_runs_the_written_model_as_gm_step_does
     - tests/core/test_node_params_writes_are_observed.py::test_a_fitter_starts_from_the_written_value
     - tests/property/test_differential_entry_points_after_a_node_write.py::test_every_reader_reads_the_written_model
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_description_over_a_pending_structural_write_is_refused
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_after_compile_the_fmu_runs_the_written_model
   status: verified
   notes: >-
     Rewritten for #203, which replaced "takes effect at the next run of any
     entry point ... or at the next compile()" with a sync on every read of
-    gm.params (MADD-ANO-122).
+    gm.params (MADD-ANO-122).  B1 round 7 found the FMU export, which reads
+    gm.params, running the old model after a structural write; it now
+    refuses the dirty graph (MADD-ANO-138), and parameters.md says so.
 
 - id: SYS-116
   area: params pytree
@@ -1822,13 +1826,26 @@ claims:
   sources:
     - src/maddening/fmi/model_description.py:1 (module docstring)
     - src/maddening/fmi/model_description.py:683 (build_model_description, include_evolving)
-  conditions: an evolving node; a stable one.
-  oracle: the variables emitted.
+  conditions: >-
+    an evolving node; a stable one; an experimental node's external input,
+    with and without include_evolving; an evolving node's input with and
+    without it; such an input named in selected_inputs; multi_clock.
+  oracle: the variables emitted; held_inputs; the bridge against gm.step with the input omitted.
   tests:
     - tests/fmi/test_model_description.py::TestStabilityGating::test_evolving_nodes_excluded_by_default
     - tests/fmi/test_model_description.py::TestStabilityGating::test_stable_surfaces_always_included
     - tests/fmi/test_params_the_step_cannot_read.py::test_an_experimental_node_exports_no_parameter_and_lists_every_leaf_as_fixed
+    - tests/fmi/test_an_fmu_exports_no_input_of_a_node_it_does_not_export.py::test_an_experimental_nodes_input_is_held_at_zero_not_exported
+    - tests/fmi/test_an_fmu_exports_no_input_of_a_node_it_does_not_export.py::test_an_evolving_nodes_input_follows_include_evolving
+    - tests/fmi/test_an_fmu_exports_no_input_of_a_node_it_does_not_export.py::test_naming_such_an_input_is_refused
+    - tests/fmi/test_an_fmu_exports_no_input_of_a_node_it_does_not_export.py::test_a_multi_clock_description_tags_no_input_of_such_a_node
+    - tests/fmi/test_an_fmu_exports_no_input_of_a_node_it_does_not_export.py::test_the_bridge_holds_it_at_zero_as_gm_step_does
   status: verified
+  notes: >-
+    Failing on 04bc3e5 (B1 round 7): the inputs loop never asked, so an
+    EXPERIMENTAL HeartPumpNode's backpressure input was exported, even with
+    include_evolving=True, while its outputs and parameters were not.  Such
+    an input is now held at zero and listed in held_inputs.
 
 - id: FMU-004
   area: model description
@@ -1996,30 +2013,34 @@ claims:
   claim: >-
     multi_clock=True: one constant-interval <Clock> per distinct node
     timestep, clock_0, clock_1 ... by increasing interval, every output and
-    external input of a node tagged with its clock and discrete; "The
-    fastest clock equals the default experiment step size."
+    external input of a node tagged with its clock and discrete; "Every
+    clock interval is a whole number of graph steps (md.graph_timestep).
+    With the default stepSize, one graph step, the fastest clock equals it
+    when the node timesteps divide each other.  When they do not, the graph
+    step is their GCD ... A default_step_size= given explicitly need not
+    equal or divide any clock."
   sources:
     - docs/user_guide/fmu_export.md (Multi-rate graphs, clocks)
-    - src/maddening/fmi/model_description.py:683 (build_model_description, multi_clock)
+    - src/maddening/fmi/model_description.py:784 (build_model_description, multi_clock)
     - docs/release_notes/v0.4.0.md (Multi-clock export)
   conditions: >-
-    unstated in the guide and the release notes: timesteps that do not divide each other; the
-    docstring states it ("the fastest equals it unless the timesteps do not
-    divide each other").
-  oracle: the clocks against the default step, for 0.01 / 0.05 and for 0.02 / 0.03.
+    timesteps that divide each other (0.01 / 0.05) and that do not (0.02 /
+    0.03), at the default step; an explicit default_step_size.
+  oracle: the clocks against the default step and the graph step.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_the_fastest_clock_is_the_default_step_only_where_the_timesteps_divide
     - tests/fmi/test_multi_clock.py::test_one_clock_per_distinct_timestep_and_outputs_tagged
     - tests/fmi/test_multi_clock.py::test_xml_clock_elements_and_attributes
     - tests/fmi/test_multi_clock.py::test_fmpy_validates_a_multi_clock_description
     - tests/fmi/test_default_step_is_one_graph_step.py::test_every_clock_is_a_whole_number_of_default_steps
-  status: ambiguous
-  proposed_wording: >-
-    Every clock interval is a whole number of default steps, and the
-    fastest clock equals the default step when the node timesteps divide
-    each other; otherwise the default step is their GCD (nodes at 0.02 and
-    0.03 run on a 0.01 step under clocks of 0.02 and 0.03).
-  notes: The guide and build_model_description's docstring disagree; the docstring is right.
+    - tests/fmi/test_fmu_claims_edges.py::test_a_clock_is_a_whole_number_of_graph_steps_whatever_the_default_step
+  status: verified
+  notes: >-
+    Ambiguous until B1 round 7: the guide and the release notes said the
+    fastest clock equals the default step, and the docstring said every
+    interval is a whole number of default steps, false with an explicit
+    default_step_size (0.04 against clocks of 0.01 and 0.02).  All three now
+    say graph steps.
 
 - id: FMU-013
   area: model description
@@ -2089,45 +2110,46 @@ claims:
     advertised as the nearest representable value inside it.
   sources:
     - src/maddening/fmi/model_description.py:83 (FMIVariable, min / max)
-  conditions: log with a zero and a non-zero lower bound; logit; inclusive identity bounds; no bounds.
+  conditions: >-
+    log with a zero, a non-zero and no lower bound (float32 and float64);
+    logit; inclusive identity bounds; no bounds.
   oracle: the advertised attribute against the float32 envelope.
   tests:
+    - tests/fmi/test_advertised_bounds.py::test_a_log_leaf_without_a_lower_bound_advertises_the_smallest_normal
     - tests/fmi/test_advertised_bounds.py::test_log_leaf_with_zero_bound_advertises_smallest_normal
     - tests/fmi/test_advertised_bounds.py::test_log_leaf_with_nonzero_bound_advertises_next_float
     - tests/fmi/test_advertised_bounds.py::test_logit_leaf_advertises_both_open_bounds
     - tests/fmi/test_advertised_bounds.py::test_inclusive_identity_bounds_are_unchanged
     - tests/fmi/test_advertised_bounds.py::test_a_parameter_the_description_bounds_nowhere_stays_unbounded
   status: verified
+  notes: >-
+    Failing on 04bc3e5 (B1 round 7): a log leaf with no lower bound, which
+    ParamSpec measures from 0, was advertised with no min (MADD-ANO-139).
 
 - id: FMU-017
   area: model description
   claim: >-
-    include_parameters: "the FMU's directional derivatives with respect to
-    them are the real jax.jvp"; the guide: "Directional derivatives with
-    respect to a parameter are the same jax.jvp the graph uses
-    everywhere."
+    include_parameters: "The sidecar's Python API computes directional
+    derivatives with respect to them with jax.jvp
+    (FmuSidecar.get_directional_derivative); the FMU binary does not
+    provide them: the description does not declare
+    providesDirectionalDerivatives, and the C wrapper's
+    fmi3GetDirectionalDerivative returns fmi3Error."
   sources:
-    - src/maddening/fmi/model_description.py:683 (build_model_description, include_parameters)
+    - src/maddening/fmi/model_description.py:784 (build_model_description, include_parameters)
     - docs/user_guide/parameters.md (Persistence and FMI)
     - src/maddening/fmi/__init__.py:1 (module docstring)
-  conditions: >-
-    unstated: which surface.  The fmi package docstring says "The FMU
-    cannot reach it: the C wrapper's fmi3GetDirectionalDerivative returns
-    fmi3Error, and the bridge protocol has no derivative request."
-  oracle: the sidecar's get_dd against jax.grad; the description's capability flags.
+  conditions: the sidecar's Python API; the description; the compiled wrapper.
+  oracle: the sidecar's get_dd against jax.grad; the description's capability flags; the wrapper's status.
   tests:
     - tests/fmi/test_params_causality.py::TestDirectionalDerivativeWrtParameter::test_forward_mode_wrt_stiffness_matches_grad
     - tests/fmi/test_fmu_claims_edges.py::test_the_description_offers_no_directional_derivative
-  status: ambiguous
-  proposed_wording: >-
-    The sidecar's Python API (FmuSidecar get_dd, maddening.fmi.
-    get_directional_derivative) computes directional derivatives with
-    respect to parameters with jax.jvp.  The FMU binary does not provide
-    them: the description does not claim providesDirectionalDerivative,
-    and fmi3GetDirectionalDerivative returns fmi3Error.
+    - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_the_wrapper_provides_no_directional_derivative
+  status: verified
   notes: >-
-    The C stub's fmi3Error is in maddening_fmu.c (fmi3GetDirectionalDerivative);
-    no test calls it.
+    Ambiguous until B1 round 7, which found the docstring and the
+    parameters guide saying the FMU gives the real jax.jvp; both now say
+    which surface does.
 
 - id: FMU-018
   area: model description
@@ -2170,7 +2192,13 @@ claims:
     - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_a_multi_clock_description_is_served_at_the_graph_step
     - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_master_dt_must_be_a_positive_finite_number
     - tests/fmi/test_bridge_security_and_stepping.py::test_step_must_be_a_whole_multiple_of_master_dt
+    - tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance
   status: verified
+  notes: >-
+    "at the graph step the FMU is the graph at the time it reports" failed
+    on 04bc3e5 (B1 round 7) for an importer whose step sizes were all a
+    little long: the reported time left the simulated time behind by up to
+    the tolerance per step (MADD-ANO-140).
 
 - id: FMU-021
   area: bridge stepping
@@ -2219,12 +2247,23 @@ claims:
     FMU's current time ... The tolerance is a millionth of a master step
     ... A step size is held to the same absolute tolerance ... A point
     inside it is adopted ... A point outside it is fmi3Error with nothing
-    advanced ... restore an FMU state; the clock moves with it."
+    advanced ... restore an FMU state; the clock moves with it"; "Both
+    tolerances are a millionth of the master step at any master step ...
+    the communication point and the step's end t + h must each lie within
+    the tolerance of the start time plus the master steps taken since, plus
+    a few ulps of the time per step ... An importer whose every step size
+    is a little long is refused, with nothing advanced, once its errors add
+    up past the tolerance."
   sources:
     - docs/user_guide/fmu_export.md (Instances and time)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Instances)
-  conditions: a jump; a point inside the tolerance; rounded points over a long run; step sizes either side of the tolerance; a restore; the compiled wrapper.
-  oracle: the time variable and the state.
+  conditions: >-
+    a jump; a point inside the tolerance; rounded points over a long run;
+    step sizes either side of the tolerance at master steps of 1e-2, 1e-9
+    and 1e-12 s; an importer biased by a third of the tolerance per step;
+    an honest running sum and start + k * h over a million steps, from
+    starts of 0, 1 and 1000 s; a restore; the compiled wrapper.
+  oracle: the time variable and the state; the bridge's drift tolerance against the importer's clock.
   tests:
     - tests/fmi/test_communication_points.py::test_a_discontinuous_communication_point_is_refused_and_advances_nothing
     - tests/fmi/test_communication_points.py::test_a_point_within_the_tolerance_is_adopted
@@ -2234,7 +2273,16 @@ claims:
     - tests/fmi/test_communication_points.py::test_a_step_inside_the_tolerance_leaves_the_next_legal_point_accepted
     - tests/fmi/test_communication_points.py::test_a_step_outside_the_tolerance_is_refused_and_advances_nothing
     - tests/fmi/test_communication_points.py::test_the_wrapper_reports_the_start_time_and_refuses_a_jump
+    - tests/fmi/test_communication_points.py::test_the_tolerance_is_a_millionth_of_the_master_step_at_any_step
+    - tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance
+    - tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance
   status: verified
+  notes: >-
+    Failing on 04bc3e5 (B1 round 7) below a master step of about 1e-9 s,
+    where an absolute floor on the rounding slack was the tolerance (8.9e-4
+    of a 1e-12 s step accepted), and for a biased importer, whose reported
+    time ran 1.6 master steps ahead of the physics after 2000 steps at
+    1e-12 s (MADD-ANO-140).
 
 - id: FMU-025
   area: bridge stepping
@@ -2243,17 +2291,35 @@ claims:
     fmi3Get*, the FMU-state functions and fmi3Reset are allowed, and
     fmi3DoStep, fmi3Set* and fmi3EnterInitializationMode are fmi3Error
     with nothing written, until fmi3Reset (or a new instance) starts it
-    again ... Restoring an FMU state does not leave Terminated."
+    again ... Restoring an FMU state does not leave Terminated"; "The
+    wrapper holds FMI 3.0's co-simulation states and refuses a call its
+    state does not allow, with fmi3Error, a log message naming the state,
+    and nothing sent to the bridge."
   sources:
     - docs/user_guide/fmu_export.md (Instances and time)
-  conditions: the bridge and the compiled wrapper.
-  oracle: each call's status and the unchanged model.
+    - src/maddening/fmi/c/maddening_fmu.c:1 (header comment, State machine)
+  conditions: >-
+    the bridge and the compiled wrapper; every call in every state the
+    wrapper holds (Instantiated, Initialization Mode, Step Mode,
+    Terminated, and an unknown one); a zero-length set; a failed terminate
+    and reset; fmi3EnterStepMode, the configuration-mode pair and
+    fmi3SetTime.
+  oracle: each call's status, its log message and the unchanged model.
   tests:
     - tests/fmi/test_a_terminated_instance_only_reads_until_reset.py::test_step_set_and_initialize_are_refused_after_terminate
     - tests/fmi/test_a_terminated_instance_only_reads_until_reset.py::test_reading_and_the_fmu_state_functions_stay_allowed
     - tests/fmi/test_a_terminated_instance_only_reads_until_reset.py::test_reset_and_a_new_instance_start_it_again
     - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_a_terminated_instance_refuses_to_step_set_and_initialize_until_reset
+    - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_no_step_before_initialization_and_no_mode_change_out_of_turn
+    - tests/fmi/test_c_wrapper_follows_the_fmi_state_machine.py::test_what_this_fmu_never_has_is_refused_in_every_state
+    - tests/fmi/test_c_unit.py::test_c_unit_tests
   status: verified
+  notes: >-
+    Failing on 04bc3e5 (B1 round 7): the wrapper held no state of its own,
+    so fmi3DoStep before fmi3EnterInitializationMode advanced the model,
+    and a zero-length fmi3Set*, fmi3ExitInitializationMode and
+    fmi3EnterStepMode answered fmi3OK after fmi3Terminate.  The C unit
+    test's test_the_fmi_state_machine walks every state.
 
 # ---------------------------------------------------------------------------
 # FMU: values, types and the write doors
@@ -2432,10 +2498,13 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (Variables)
     - src/maddening/fmi/sidecar.py:364 (SidecarConfig, param_specs)
-  conditions: a sidecar without param_specs behind a bridge; one with its own specs.
+  conditions: >-
+    a sidecar without param_specs behind a bridge; one with its own specs;
+    a log leaf with no lower bound, either way.
   oracle: the refusal; the specs object untouched.
   tests:
     - tests/fmi/test_advertised_bounds.py::test_the_bridge_enforces_the_advertised_bounds_without_param_specs
+    - tests/fmi/test_advertised_bounds.py::test_no_bridge_takes_a_log_leaf_to_zero_or_below
     - tests/fmi/test_advertised_bounds.py::test_the_sidecars_own_specs_are_kept_and_not_written_into
     - tests/fmi/test_params_causality.py::TestBoundsThroughFMI::test_sidecar_without_specs_keeps_old_behaviour
   status: verified
@@ -2556,10 +2625,12 @@ claims:
     - src/maddening/fmi/sidecar.py:596 (FmuSidecar.set_params)
   conditions: >-
     a value below an advertised min of 0 by less than the smallest normal
-    float32.
+    float32; -1, 0 and a negative subnormal for a log leaf with no lower
+    bound, through set and set_state, with and without param_specs.
   oracle: the reply, and the value read back against the advertised min.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_a_parameter_cannot_be_set_below_its_advertised_min_by_a_subnormal
+    - tests/fmi/test_advertised_bounds.py::test_no_bridge_takes_a_log_leaf_to_zero_or_below
     - tests/fmi/test_a_value_its_type_rounds_to_zero_is_refused.py::test_a_parameter_cannot_be_set_below_its_bound_by_a_subnormal
   status: verified
   notes: >-
@@ -2578,17 +2649,33 @@ claims:
     - docs/user_guide/fmu_export.md (Verification)
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - docs/validation/known_anomalies.yaml (MADD-ANO-122)
-  conditions: a node.params write pending since the last compile when the description and the sidecar are built.
-  oracle: gm.run over the same simulated time; the start the description advertises.
+  conditions: >-
+    a node.params write pending since the last compile when the description
+    and the sidecar are built: a leaf write, which is exported as written;
+    a structural one (HeatNode stencil_order), with the step traced before
+    the write and not, which the description refuses until compile(); the
+    same write, or a recompile, between the description and the sidecar or
+    the bridge; a node or an external input added; a graph never compiled.
+  oracle: gm.run over the same simulated time; the start the description advertises; the refusal.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs
     - tests/core/test_node_params_writes_are_observed.py::test_the_fmu_export_reads_a_pending_node_write
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_description_over_a_pending_structural_write_is_refused
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_after_compile_the_fmu_runs_the_written_model
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_every_change_that_makes_the_graph_recompile_is_refused
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_leaf_write_is_taken_in_and_not_refused
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_sidecar_refuses_a_step_its_graph_has_left
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_bridge_refuses_a_description_or_a_step_its_graph_has_left
+    - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_what_carries_no_graph_is_not_judged
   status: verified
   notes: >-
     Failing in the first edition: the description advertised start 30.0 and
     the bridge ran it (0.52176 after five steps) while gm.run ran the
     written 60 (0.54321).  #203's sync on reading gm.params (MADD-ANO-122)
-    closed it.
+    closed it.  Failing again on 04bc3e5 (B1 round 7) for a structural
+    write: the sync only marks the graph dirty, and the FMU ran the old
+    model, 6.35 K off after 50 steps, when the step had been traced before
+    the write (MADD-ANO-138).
 
 # ---------------------------------------------------------------------------
 # FMU: transport
@@ -2740,7 +2827,7 @@ claims:
   sources:
     - docs/user_guide/fmu_export.md (The trust boundary)
     - src/maddening/fmi/tcp_bridge.py:1 (module docstring, Connection lifetime)
-  conditions: the defaults.
+  conditions: the defaults; the communication point at master steps of 1e-2, 1e-9 and 1e-12 s.
   oracle: the module's constants; the behaviour at shortened budgets.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_the_bridges_waits_and_limits_are_the_documented_numbers
@@ -2748,7 +2835,12 @@ claims:
     - tests/fmi/test_bridge_connection_lifecycle.py::test_a_peer_that_stalls_mid_frame_is_dropped_at_the_frame_deadline
     - tests/fmi/test_bridge_connection_lifecycle.py::test_a_peer_that_dribbles_a_frame_is_dropped_at_the_frame_deadline
     - tests/fmi/test_bridge_connection_lifecycle.py::test_an_established_connection_that_goes_silent_is_dropped
+    - tests/fmi/test_communication_points.py::test_the_tolerance_is_a_millionth_of_the_master_step_at_any_step
   status: verified
+  notes: >-
+    "a communication point within a millionth of a master step" failed on
+    04bc3e5 (B1 round 7) below a master step of about 1e-9 s, where an
+    absolute floor on the rounding slack was the tolerance (MADD-ANO-140).
 
 - id: FMU-051
   area: trust boundary

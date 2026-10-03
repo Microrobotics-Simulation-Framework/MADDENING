@@ -231,7 +231,10 @@ whichever comes first: one sync point takes it in.  A constant
 `gm.params` carries is copied into it (no recompile); anything else --
 a structural value, any constant of a node on the three-argument
 contract -- marks the graph dirty, and the next run recompiles, so every
-entry point runs the same model.  `node.params` counts its writes, so
+entry point runs the same model.  An export cannot recompile the step it
+hands out, so the FMU export refuses a graph left dirty this way, asking
+for `compile()` first; until 0.4.0's fix it ran the old model.
+`node.params` counts its writes, so
 writing a constructor value back is a write (it reverts a calibration).
 A `gm.params` write reads `gm.params` first, which takes in any pending
 node write, so the two are always ordered and the later wins; the one
@@ -689,8 +692,12 @@ linearises, it never steps a parameter.)
   takes effect on the next step without recompiling, a value outside
   the declared bounds is rejected before anything is written (the same
   rule as `PUT /graph/params`), and `GetFMUState` / `SetFMUState`
-  snapshots carry the parameters.  Directional derivatives with respect to a
-  parameter are the same `jax.jvp` the graph uses everywhere.  A leaf the
+  snapshots carry the parameters.  The sidecar's Python API computes
+  directional derivatives with respect to a parameter with `jax.jvp`
+  (`FmuSidecar.get_directional_derivative`); the FMU binary does not
+  provide them: the description does not declare
+  `providesDirectionalDerivatives`, and the C wrapper's
+  `fmi3GetDirectionalDerivative` returns `fmi3Error`.  A leaf the
   step cannot read -- an `initial_*` condition, a value a node consumed at
   construction or declares in `static_data_deps`, one only an unconnected
   input would read -- is not exported (an FMU's graph is frozen, so it is a
@@ -700,6 +707,10 @@ linearises, it never steps a parameter.)
   `set_fmu_state` and the bridge's `set_state` refuse a new value for one of
   them before anything is written.  The sidecar holds only the compiled
   step, so a standalone sidecar built without `fixed_params` cannot tell.
+  The description, the sidecar and the bridge each refuse a graph that has
+  changed since its `compile()`: a structural `node.params` write is taken
+  into the graph only as a pending recompile, which the compiled step the
+  FMU runs would never see.  Compile first.
 
 ## Mapping weights
 

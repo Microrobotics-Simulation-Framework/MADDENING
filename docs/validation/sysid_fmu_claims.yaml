@@ -145,7 +145,7 @@ claims:
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     single-rate graph, with or without coupling groups -- their predictor
-    history and IQN-IMVJ warm starts are replayed, not reset (SYS-123) --
+    history and IQN-IMVJ warm starts are replayed, not reset (SYS-127) --
     for a record taken from compile() or reset_state(); for multi-rate see
     SYS-011.
   oracle: the loss over the record against the sum of the losses over each window's own slice of it; zero at the truth.
@@ -278,7 +278,7 @@ claims:
     - tests/core/test_sysid.py::test_recovers_stiffness_from_20_percent_perturbation
   status: verified
 
-- id: SYS-123
+- id: SYS-127
   area: windowed_loss
   claim: >-
     "Coupling warm starts are replayed, not reset": "window w starts from
@@ -381,7 +381,7 @@ claims:
     matrices; while the cutoff rank_rtol * max(eigvals) is at least
     2 * m * tiny.  Below that F = J^T J flushes the products the smallest
     directions are built from and the verdict moves with the scale, which
-    fim reports with a PrecisionLimitWarning (SYS-125).
+    fim reports with a PrecisionLimitWarning (SYS-129).
   oracle: rank and the +inf pattern of crb at every sigma.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled
@@ -652,7 +652,7 @@ claims:
     - tests/core/test_sysid_claims_edges.py::test_fim_core_cannot_be_built_positionally
   status: verified
 
-- id: SYS-125
+- id: SYS-129
   area: fim
   claim: >-
     The rank verdict holds under rescaling "while F can be formed: once the
@@ -1014,7 +1014,7 @@ claims:
     at its first evaluation and reported converged=True at the unfitted
     start -- and so did a numeric string (MADD-ANO-150).
 
-- id: SYS-124
+- id: SYS-128
   area: fitters
   claim: >-
     A caller's mask: "Every leaf must be a bool (a NumPy bool_ or a 0-d
@@ -1307,7 +1307,7 @@ claims:
     a noiseless fit at its optimum in float32 and under x64; a run of
     rejected candidates; a residual reading nothing trainable.  Not a
     parameter whose truth is exactly 0: it has no relative resolution, and
-    such a run stops at its floor unconverged unless given a tol (SYS-126).
+    such a run stops at its floor unconverged unless given a tol (SYS-130).
   oracle: the flag and the iteration it stopped on.
   tests:
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
@@ -1482,7 +1482,7 @@ claims:
     RuntimeWarning at 1e-3.  Root cause SYS-063's; closed with it
     (MADD-ANO-135).
 
-- id: SYS-126
+- id: SYS-130
   area: fit_lm
   claim: >-
     step_tol: "a parameter whose truth is exactly 0 (a damping of 0, say):

@@ -241,7 +241,7 @@ def test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled():
 
 
 def test_a_rank_decided_below_the_normal_range_warns():
-    """SYS-125: once the cutoff falls below ``2 * m * tiny``, ``F = J^T J``
+    """SYS-129: once the cutoff falls below ``2 * m * tiny``, ``F = J^T J``
     flushes the products of the smallest directions and the verdict moves
     with the scale -- here a determined direction drops out, rank 2 to 1,
     every ``crb`` ``inf`` -- and that is now said (a

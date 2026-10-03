@@ -10903,7 +10903,7 @@ anomalies:
       - "tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance"
       - "tests/fmi/test_communication_points.py::test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside"
       - "tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance"
-  - anomaly_id: "MADD-ANO-150"
+  - anomaly_id: "MADD-ANO-154"
     title: "The IFT tangent and adjoint of a coupling group read exactly 0.0, reported successful, when the tangent or cotangent had a NaN or infinite entry"
     description: >
       Under `solver="ift"` the derivative of a coupling group's fixed point
@@ -10975,7 +10975,7 @@ anomalies:
       - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_no_krylov_backend_is_handed_a_non_finite_rhs"
       - "tests/property/test_differential_ift_derivatives.py::test_a_non_finite_rhs_gives_a_non_finite_derivative_at_every_scale"
     github_issue: null
-  - anomaly_id: "MADD-ANO-151"
+  - anomaly_id: "MADD-ANO-155"
     title: "sharded_cg returned zeros with converged=True for a right-hand side with a NaN or infinite entry, and ift_linear_solve returned zeros with no error"
     description: >
       The public Krylov solvers stopped on a test relative to the
@@ -10997,7 +10997,7 @@ anomalies:
       the cases into zeros too: `sharded_gmres` on lineax with
       `converged=True`, `ift_linear_solve` under GMRES, and the tangent
       and cotangent through `differentiable=True`.  Found with
-      MADD-ANO-150, whose mechanism it shares.  Resolved in 0.4.0: a right-hand side, tangent or
+      MADD-ANO-154, whose mechanism it shares.  Resolved in 0.4.0: a right-hand side, tangent or
       cotangent with a non-finite entry is answered with NaN in every
       entry, the backend being handed zeros in its place; the sharded
       result reads `converged=False` and a NaN `residual_norm`.

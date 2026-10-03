@@ -1285,7 +1285,7 @@ entry, on every backend.  The relative tolerance is the reason it has to
 be said: `rtol * max|b|` is NaN or `inf` there, the zero initial guess
 passed lineax's test at once, and until 0.4.0's fix the derivative came
 back exactly zero, "successful", where `"dense"` and `solver="fori"` read
-NaN (MADD-ANO-150).  The Krylov backend is now handed zeros in place of
+NaN (MADD-ANO-154).  The Krylov backend is now handed zeros in place of
 such a `b`, so it does not iterate on NaN, and the answer is NaN -- which
 is also what an honest Krylov iteration gives, its first basis vector
 being `b / ||b||`.  The check is per right-hand side: under `jacfwd` or

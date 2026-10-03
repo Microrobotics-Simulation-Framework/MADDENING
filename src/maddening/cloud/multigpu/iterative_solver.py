@@ -195,7 +195,7 @@ def _framed(solve, b, x0, atol):
     lineax's relative ``atol`` NaN or ``inf`` and the zero initial guess
     passed its test at once, and the loop CG's tolerance went ``inf`` with
     ``||b||``: CG (both backends) and lineax GMRES returned zeros, mostly
-    reported ``converged=True`` (MADD-ANO-151).
+    reported ``converged=True`` (MADD-ANO-155).
     """
     p = jax.lax.stop_gradient(pow2_frame(b))
     finite = jnp.all(jnp.isfinite(b))
@@ -646,7 +646,7 @@ def sharded_cg(
         under ``differentiable=True`` a non-finite tangent or cotangent a
         NaN derivative).  Until 0.4.0 it gave zeros, on lineax and for
         ``+-inf`` on the loop backend with ``converged=True``
-        (MADD-ANO-151).
+        (MADD-ANO-155).
 
     Stability
     ---------
@@ -735,7 +735,7 @@ def sharded_gmres(
 
     See :func:`sharded_cg` for the matvec / mesh / in_specs contract, and
     for the answer to a ``b`` with a NaN or infinite entry: NaN, with
-    ``converged=False`` (MADD-ANO-151).
+    ``converged=False`` (MADD-ANO-155).
 
     Parameters
     ----------

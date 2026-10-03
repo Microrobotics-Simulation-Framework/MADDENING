@@ -164,7 +164,7 @@ def ift_linear_solve(
     Krylov iteration does (its first basis vector is ``b / ||b||``);
     ``"dense"`` is non-finite wherever its LU propagates the entry.  Until
     0.4.0 the Krylov backends returned zeros with no error there
-    (MADD-ANO-151).
+    (MADD-ANO-155).
 
     For ``solver="gmres"`` the internal restart is clamped to
     ``min(N, 50)`` to guard against the silent-low-rank-adjoint bug
@@ -263,7 +263,7 @@ def ift_linear_solve(
         solution, the tangent and the gradient came back as zeros with no
         error (CG did so under an explicit ``atol`` as well), and an
         explicit ``atol`` under GMRES raised lineax's "non-finite output"
-        error instead (MADD-ANO-151).
+        error instead (MADD-ANO-155).
         """
         p = pow2_frame(b)
         finite = jnp.all(jnp.isfinite(b))

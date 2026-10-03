@@ -1,7 +1,7 @@
 """On a 4-device mesh, a right-hand side with a NaN or infinite entry in any shard gives NaN, not converged.
 
 The single-device cases are in
-``tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py`` (MADD-ANO-151).
+``tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py`` (MADD-ANO-155).
 Here ``b`` is laid out across the mesh with the bad entry in a shard other
 than the first, so the finiteness check is a reduction across devices, and
 the matvec exchanges ghost cells with ``ppermute``: the answer must be NaN

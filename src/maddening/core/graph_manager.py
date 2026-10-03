@@ -2317,7 +2317,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
     ``inf`` and lineax passed its test at the zero initial guess, so a
     non-finite tangent or cotangent came back as an exactly zero
     derivative, reported successful, where ``"dense"`` and
-    ``solver="fori"`` read NaN (MADD-ANO-150).  NaN everywhere is also
+    ``solver="fori"`` read NaN (MADD-ANO-154).  NaN everywhere is also
     what an honest Krylov iteration produces -- its first basis vector
     is ``b / ||b||`` -- and ``"dense"`` agrees wherever its LU
     propagates the entry.  Memory is
@@ -2437,7 +2437,7 @@ def _ift_linear_solve(matvec, rhs, linear_solver):
         # itself, ``max|b|`` made ``atol`` NaN or ``inf``, the zero initial
         # guess passed lineax's test at once and the solve returned zeros
         # reported successful: a NaN tangent or cotangent came back as an
-        # exactly zero derivative (MADD-ANO-150).  The zeros keep the
+        # exactly zero derivative (MADD-ANO-154).  The zeros keep the
         # Krylov loop from iterating on NaN, and a non-finite rhs is
         # neither "failed" (no dense re-solve, no adjoint error above
         # the fallback's size) nor "zero".

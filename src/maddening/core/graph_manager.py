@@ -8954,11 +8954,21 @@ class GraphManager:
               programs, their difference twelve ulps -- against a true
               relative error of 9.5e-07, so both hold.  That is the
               float32 resolution of the gradient itself (about
-              ``amplification * eps``), not a defect of batching: under
-              ``vmap`` the forward state, ``iterations``, ``residual``
-              and ``amplification`` are bit-identical, and the spectral
-              keys agree to a few ulps (the Arnoldi's batched linear
-              algebra rounds differently too).
+              ``amplification * eps``), not a defect of batching.
+              Under ``vmap`` the step is XLA's batched program, which
+              may associate a reduction or lower a divide differently
+              from the unbatched one, so ``residual`` can differ by an
+              ulp, ``amplification`` -- a ratio of residuals -- by more
+              (470 ulps measured, the residual's ulp magnified by
+              ``1 / (1 - rho)**2``), and the spectral keys by a few
+              ulps.  The verdict is built from those, so a member whose
+              estimate lies within that rounding of the threshold can
+              stop on a different pass in a batch than alone (19 against
+              20 measured, at a threshold placed an ulp from the
+              estimate), and its state then differs by one pass's
+              change -- inside the tolerance.  Away from that window the
+              forward state and ``iterations`` are bit-identical on
+              every configuration measured.
 
               **This is a statement about the gradient, not about the
               solve.**  On a map that is affine in its state with

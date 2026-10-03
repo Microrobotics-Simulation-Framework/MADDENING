@@ -1842,10 +1842,14 @@ claims:
 - id: CPL-096
   area: report
   claim: >-
-    "under vmap the forward state, iterations, residual and amplification are
-    bit-identical, and the spectral keys agree to a few ulps"; the gradient
-    bound "can differ from the unbatched value in its leading digit
-    (2.01e-06 against 1.84e-06 on one step, both above the true 9.5e-07)".
+    Under vmap residual can differ from the unbatched step's by an ulp and
+    amplification by more (470 ulps measured), the spectral keys by a few
+    ulps; a member whose estimate lies within that rounding of its threshold
+    can stop on a different pass (19 against 20 measured), inside the
+    tolerance; away from that window the forward state and iterations are
+    bit-identical.  The gradient bound "can differ from the unbatched value
+    in its leading digit (2.01e-06 against 1.84e-06 on one step, both above
+    the true 9.5e-07)".
   sources:
     - src/maddening/core/graph_manager.py:8104 (coupling_diagnostics, its own rounding)
   conditions: jax.vmap over states.

@@ -267,30 +267,6 @@ def test_the_private_solve_answers_a_non_finite_rhs_with_nan_on_every_backend(so
                 k_fn(v), d_fn(v), what=(solver, n, name, kind))
 
 
-def test_lineax_is_never_handed_a_non_finite_rhs(monkeypatch):
-    """The Krylov backend gets zeros in place of a non-finite rhs, so it never
-    iterates on NaN and its status cannot route the solve to the dense
-    re-solve or the adjoint error.  A spy that raises on a non-finite vector
-    stands in for ``lineax.linear_solve``."""
-    import equinox as eqx
-    import lineax as lx
-
-    real = lx.linear_solve
-
-    def spy(op, vector, *args, **kwargs):
-        vector = eqx.error_if(vector, jnp.logical_not(jnp.all(jnp.isfinite(vector))),
-                              "a non-finite right-hand side reached lineax")
-        return real(op, vector, *args, **kwargs)
-
-    monkeypatch.setattr(lx, "linear_solve", spy)
-    mv = _operator(5)
-    for solver in ("gmres", "bicgstab"):
-        solve = jax.jit(lambda bb, s=solver: _ift_linear_solve(mv, bb, s))
-        for bad in BAD:
-            out = solve(jnp.ones(5, jnp.float32).at[2].set(bad))
-            assert np.all(np.isnan(np.asarray(out))), (solver, bad)
-
-
 def test_a_zero_and_a_finite_rhs_are_answered_as_before():
     """The neighbours of the new branch: a zero rhs is exact zeros (not NaN),
     and a finite one is the dense answer."""
@@ -434,3 +410,53 @@ def test_a_loop_cg_handed_a_non_finite_rhs_does_not_iterate_from_its_start():
         assert int(r.iters) == 0 and np.all(np.isnan(np.asarray(r.value))), r
     r = sharded_cg(_mv, B0, x0=x0, backend="loop")
     assert bool(r.converged) and int(r.iters) > 0
+
+
+# ---------------------------------------------------------------------------
+# No backend sees the non-finite rhs
+# ---------------------------------------------------------------------------
+
+def _refuse_a_non_finite_rhs(real, position):
+    """``real`` with an ``equinox.error_if`` on its right-hand side argument."""
+    import equinox as eqx
+
+    def spy(*args, **kwargs):
+        args = list(args)
+        args[position] = eqx.error_if(
+            args[position], jnp.logical_not(jnp.all(jnp.isfinite(args[position]))),
+            "a non-finite right-hand side reached the Krylov backend")
+        return real(*args, **kwargs)
+
+    return spy
+
+
+def test_no_krylov_backend_is_handed_a_non_finite_rhs(monkeypatch):
+    """Each backend gets zeros in place of a non-finite rhs, so none iterates
+    on NaN (an explicit ``atol`` ran lineax GMRES to its step budget and
+    raised), and no backend's status can route the solve to the dense
+    re-solve or the adjoint error.  Spies that raise on a non-finite vector
+    stand in for ``lineax.linear_solve`` and the sharded loop backends."""
+    import lineax as lx
+
+    from maddening.cloud.multigpu import iterative_solver
+
+    monkeypatch.setattr(lx, "linear_solve", _refuse_a_non_finite_rhs(lx.linear_solve, 1))
+    monkeypatch.setattr(iterative_solver, "_cg_loop",
+                        _refuse_a_non_finite_rhs(iterative_solver._cg_loop, 1))
+    monkeypatch.setattr(iterative_solver, "_gmres_loop",
+                        _refuse_a_non_finite_rhs(iterative_solver._gmres_loop, 1))
+    mv5 = _operator(5)
+    solves = {
+        "_ift_linear_solve/gmres": lambda b: _ift_linear_solve(mv5, b, "gmres"),
+        "_ift_linear_solve/bicgstab": lambda b: _ift_linear_solve(mv5, b, "bicgstab"),
+        "ift_linear_solve/gmres+atol": lambda b: ift_linear_solve(_mv, b, solver="gmres", atol=1e-8),
+        "ift_linear_solve/cg": lambda b: ift_linear_solve(_mv, b, solver="cg"),
+    }
+    for name, (fn, backend) in SHARDED.items():
+        solves[name] = lambda b, fn=fn, backend=backend: fn(_mv, b, backend=backend, atol=1e-8).value
+    for name, solve in solves.items():
+        size = 5 if name.startswith("_ift") else N
+        jitted = jax.jit(solve)
+        for bad in BAD:
+            out = jitted(jnp.ones(size, jnp.float32).at[2].set(bad))
+            assert np.all(np.isnan(np.asarray(out))), (name, bad)

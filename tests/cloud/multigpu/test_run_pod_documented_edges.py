@@ -176,23 +176,21 @@ def test_the_checklist_items_are_decided_by_the_runbooks_goals(rp):
 
 
 def test_every_seeded_fault_the_runbook_names_is_a_seed():
-    """RPD-024: the runner's docstring and the runbook count the seeded faults, and the
-    count is the seeded test's: eight, the last of them domain integrals summed over the
-    first mesh axis only (both documents used to count seven and leave it out)."""
+    """RPD-024: the runner's docstring counts the seeded faults, and the count is the
+    seeded test's: eight, the last of them domain integrals summed over the first mesh
+    axis only (it used to count seven and leave it out).  The runbook's count is
+    ``tests/compliance/test_run_pod_runbook_counts_its_seeds.py``'s, since a docs-only
+    change runs only the compliance tests."""
     import re
 
     faults = _load(Path(__file__).resolve().parent / "test_run_pod_seeded_faults.py",
                    "run_pod_seeded_faults_for_their_names")
     words = {"seven": 7, "eight": 8, "nine": 9}
     runner = _RUNNER.read_text(encoding="utf-8")
-    runbook = (_RUNNER.parent / "README.md").read_text(encoding="utf-8")
     in_runner = re.search(r"broken in any of (\w+) ways", runner)
-    in_runbook = re.search(r"test_run_pod_seeded_faults\.py` holds (\w+) faults", runbook)
-    assert in_runner and in_runbook
-    assert words[in_runner.group(1)] == words[in_runbook.group(1)] == len(faults._SEEDS)
-    assert "domain integrals summed\nover the first mesh axis only" in runner \
-        or "domain integrals summed over the first mesh axis only" in runner.replace("\n", " ")
-    assert "domain integrals summed over the first mesh axis only" in runbook.replace("\n", " ")
+    assert in_runner
+    assert words[in_runner.group(1)] == len(faults._SEEDS)
+    assert "domain integrals summed over the first mesh axis only" in runner.replace("\n", " ")
 
 
 # ---------------------------------------------------------------------------

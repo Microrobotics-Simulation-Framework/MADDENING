@@ -2685,6 +2685,7 @@ claims:
   oracle: the count both documents give against the seeds, and the eighth named in both.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_every_seeded_fault_the_runbook_names_is_a_seed
+    - tests/compliance/test_run_pod_runbook_counts_its_seeds.py::test_the_runbook_counts_every_seed_and_names_the_eighth
     - tests/cloud/multigpu/test_run_pod_seeded_faults.py::test_every_seed_applies_once_to_the_wrapper_as_it_stands
   status: verified
   notes: >-

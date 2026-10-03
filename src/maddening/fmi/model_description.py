@@ -27,8 +27,8 @@ What's deferred:
 * ``<TypeDefinitions>``-level ``<ClockType>``; clocks are emitted as
   ``<Clock>`` variables (``build_model_description(multi_clock=True)``:
   one constant-interval clock per distinct node timestep, every output
-  / input of a node tagged with its clock, off by default so the
-  single-clock v0.3.0 surface is unchanged).
+  / input of a node tagged with its clock; off by default, when the
+  description has no ``<Clock>`` and no ``clocks=`` attribute).
 """
 
 from __future__ import annotations
@@ -760,8 +760,8 @@ def build_model_description(
         order of increasing interval; every interval is a whole number of
         default steps, and the fastest equals it unless the timesteps do
         not divide each other (nodes at 0.002 and 0.003 run on a 0.001
-        step).  Off by default (single-clock, every output continuous),
-        so existing FMUs are unchanged.
+        step).  Off by default: no ``<Clock>``, no ``clocks=`` attribute,
+        every output continuous.
     model_identifier : str, optional
         Emit a ``<CoSimulation modelIdentifier=...>`` element naming the
         FMU binary (``maddening.fmi.package`` uses ``"maddening_fmu"``).

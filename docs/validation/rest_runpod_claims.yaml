@@ -6,9 +6,9 @@
 # is known, and a pytest node id that fails if it stops being true.  An
 # audit attacks this list; a new claim in a docstring, the REST guide, the
 # runbook or the release notes gets a row here in the same change
-# (docs/developer_guide/testing_standards.md, "The coupling claims
-# inventory", which names this file).
-# The inventory guard checks every row: its fields, that each cited test is
+# (docs/developer_guide/testing_standards.md, "The claims inventories").
+# tests/compliance/test_claims_inventories.py checks every row: its fields,
+# its id against this file's prefixes, that each cited test is
 # collected and runs on every push (or is slow-marked and names a per-push
 # witness), that a `failing` row cites a strict xfail and that a `verified`
 # row cites none.

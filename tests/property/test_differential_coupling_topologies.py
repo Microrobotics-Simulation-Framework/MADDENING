@@ -87,15 +87,18 @@ def _values(draw, topo, knobs):
                           group_cfgs=ct.group_cfgs_of(knobs))
 
 
-def assert_reproduces_the_reference(topo, knobs, built, values, steps=_STEPS):
+def assert_reproduces_the_reference(topo, knobs, built, values, steps=_STEPS, traj=None,
+                                    dtype="float32"):
+    """Every step of *built*'s run (or of *traj*, a run taken elsewhere) on the
+    monolithic reference, in the graph's *dtype*."""
     model = ct.LinearModel(topo, values, node_order=built.node_order,
-                           group_cfgs=ct.group_cfgs_of(knobs))
-    traj = ct.run(built, values, steps)
+                           group_cfgs=ct.group_cfgs_of(knobs), dtype=dtype)
+    traj = ct.run(built, values, steps) if traj is None else traj
     for k, step in enumerate(traj, start=1):
         where = f"{topo.label} step {k}"
         model.check_step(step.pre, step.state, step.reports,
                          thresholds=ct.thresholds_of(knobs), where=where)
-        ct.check_leaves(topo, step.state, k, where=where)
+        ct.check_leaves(topo, step.state, k, dividers=model.divider, where=where)
     return traj
 
 
@@ -600,3 +603,397 @@ def test_the_build_order_of_an_ungrouped_cycle_picks_the_edge_read_late():
         runs.append(assert_reproduces_the_reference(topo, [], built, values))
     assert cg.bitwise_differences(runs[0][-1].state, runs[1][-1].state)
 
+
+
+# ---------------------------------------------------------------------------
+# The invariances in the other numeric domains, per push
+#
+# The renaming, build-order and identity-relay invariances (CPL-180 to
+# CPL-183) and Jacobi's indifference to its members' order under a constant
+# iterator (CPL-078) are stated for float32 single-rate graphs above.  Here
+# each runs again on the named structures in eight more domains, comparing two
+# builds of one structure bit for bit as above:
+#
+# * ``f64``: every relay float64, under x64;
+# * ``bfloat16`` and ``float16`` (the ``16bit`` domain): every relay in the
+#   16-bit dtype;
+# * ``multi_rate``: an isolated clock at half the base step, so the graph is
+#   multi-rate and every group fires on every other base step;
+# * ``sub_cycled``: the last member of every group at half the group's step,
+#   ``subcycling=True``, sub-stepped twice per pass;
+# * ``vmap``: three draws through one ``jax.vmap`` of the step, each member's
+#   state and report compared;
+# * ``predictors_warm_starts``: every group with ``predictor="quadratic"``
+#   (IQN-IMVJ keeps its Jacobian reuse), over four steps;
+# * ``checkpoint_restart``: each run saved after two steps, run on, reset,
+#   loaded and run again; the steps after the load must reproduce the
+#   uninterrupted run's, and are what is compared.
+#
+# Three fixed draws per case rather than Hypothesis examples: one compile
+# per build, the draws cheap after it.
+# ---------------------------------------------------------------------------
+
+import contextlib  # noqa: E402
+import dataclasses  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
+
+DOMAINS = ("f64", "bfloat16", "float16", "multi_rate", "sub_cycled", "vmap",
+           "predictors_warm_starts", "checkpoint_restart")
+#: An isolated relay at half the step: the graph's base step halves, so it is
+#: multi-rate and every other node fires on every other base step.
+_TICK = ct.TNode("tick", n=1, alpha=1.0, beta=1.0, timestep=0.5)
+_DRAWS = ((3, 0.3), (17, 0.6), (29, 0.9))
+#: Per push the domains run on ``chain-into-ring`` (the cheapest structure,
+#: and the one configuration 2 puts the interface norm on); the other three
+#: structures are slow, two compiles each per domain.
+_DOMAIN_NAMES = [n if n == "chain-into-ring" else pytest.param(n, marks=pytest.mark.slow)
+                 for n in sorted(NAMED)]
+
+
+@contextlib.contextmanager
+def _x64(on: bool):
+    previous = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", on)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", previous)
+
+
+def _domain_dtype(domain) -> str:
+    return {"f64": "float64", "bfloat16": "bfloat16", "float16": "float16"}.get(domain,
+                                                                              "float32")
+
+
+def _domain_topology(topo, domain):
+    if domain == "multi_rate":
+        return dataclasses.replace(topo, nodes=topo.nodes + (_TICK,))
+    if domain == "sub_cycled":
+        return topo.with_timesteps({members[-1]: 0.5 for members in topo.groups})
+    if domain == "checkpoint_restart":
+        # ``save_state`` cannot write a typed PRNG key (MADD-ANO-171): the
+        # restart runs on the structure without its key leaves.
+        return dataclasses.replace(topo, nodes=tuple(
+            dataclasses.replace(nd, leaves=tuple(lf for lf in nd.leaves if lf != "key"))
+            for nd in topo.nodes))
+    return topo
+
+
+def _domain_knobs(knobs, domain):
+    if domain == "sub_cycled":
+        return [dict(g, subcycling=True, boundary_interpolation="constant") for g in knobs]
+    if domain == "predictors_warm_starts":
+        return [dict(g, predictor="quadratic") for g in knobs]
+    return knobs
+
+
+def _domain_steps(domain) -> int:
+    return {"multi_rate": 4, "predictors_warm_starts": 4}.get(domain, 2)
+
+
+@functools.lru_cache(maxsize=48)
+def _built_in(domain: str, name: str, choice: int, node_order=None, edge_order=None,
+              rename=None, relay=None, constant: str | None = None) -> tuple:
+    """``(topology, knobs, Built)`` of a named structure in *domain*.
+
+    *constant* is ``"gauss-seidel"`` or ``"jacobi"``: every group under no
+    acceleration and a criterion only exact stationarity meets.
+    """
+    topo = _domain_topology(NAMED[name], domain)
+    names = topo.names
+    if relay is not None:
+        topo = ct.with_identity_relay(topo, relay)
+        names = topo.names
+    knobs = ct.topology_knobs(topo, choice)
+    if constant:
+        knobs = [dict(max_iterations=8, tolerance=0.0, convergence_norm="l2",
+                      acceleration="none", iteration_mode=constant) for _ in knobs]
+    knobs = _domain_knobs(knobs, domain)
+    if rename is not None:
+        mapping = dict(rename)
+        topo = topo.renamed(mapping)
+        node_order = tuple(mapping[n] for n in (node_order or names))
+    with _x64(domain == "f64"):
+        built = ct.build(topo, knobs, dtype=_domain_dtype(domain), node_order=node_order,
+                         edge_order=edge_order)
+    return topo, knobs, built
+
+
+def _domain_values(topo, knobs, domain) -> list:
+    with _x64(domain == "f64"):
+        return [ct.draw_values(topo, np.random.default_rng(seed), rho,
+                               dtype=_domain_dtype(domain), group_cfgs=ct.group_cfgs_of(knobs))
+                for seed, rho in _DRAWS]
+
+
+_BATCHED: dict = {}
+
+
+def _batched_runs(built, values_list, steps, rename):
+    """One trajectory per draw, all three through one ``jax.vmap`` of the step."""
+    gm = built.gm
+    rename = rename or {}
+    back = {v: k for k, v in rename.items()}
+    if id(gm) not in _BATCHED:
+        _BATCHED[id(gm)] = (gm, jax.jit(jax.vmap(gm._raw_step_fn, in_axes=(0, None, 0))))
+    step = _BATCHED[id(gm)][1]
+    states, params = [], []
+    for v in values_list:
+        ct.set_initial(built, v, rename)
+        states.append(gm._state)
+        params.append(ct.params_for(built, v, rename))
+    state = jax.tree.map(lambda *xs: jnp.stack(xs), *states)
+    p = jax.tree.map(lambda *xs: jnp.stack(xs), *params)
+    ext = gm._default_external_inputs()
+    out = [[] for _ in values_list]
+    pres = [None] * len(values_list)
+    saved = gm._state
+    try:
+        for _ in range(steps):
+            state = step(state, ext, p)
+            for i in range(len(values_list)):
+                gm._state = jax.tree.map(lambda x, i=i: x[i], state)
+                snap = ct._snapshot(gm, back)
+                diag = gm.coupling_diagnostics()
+                reports = {gi: dict(diag[built.topo.group_key(gi)])
+                           for gi in range(len(built.topo.groups))
+                           if built.topo.group_key(gi) in diag}
+                out[i].append(ct.Step(pres[i], snap, reports, {}))
+                pres[i] = snap
+    finally:
+        gm._state = saved
+    return out
+
+
+def _restarted_runs(built, values_list, steps, rename):
+    """Each draw run two steps, saved, run on, reset, loaded and run again."""
+    out = []
+    for v in values_list:
+        straight = ct.run(built, v, steps + 2, rename=rename)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "checkpoint.npz"
+            first = ct.run(built, v, 2, rename=rename)      # leaves the graph at step 2
+            built.gm.save_state(path)
+            built.gm.reset_state()
+            built.gm.load_state(path)
+            assert not cg.bitwise_differences(first[-1].state, straight[1].state)
+            back = {b: a for a, b in (rename or {}).items()}
+            after = []
+            for k in range(steps):
+                built.gm.step(params=ct.params_for(built, v, rename))
+                snap = ct._snapshot(built.gm, back)
+                diag = built.gm.coupling_diagnostics()
+                reports = {gi: dict(diag[built.topo.group_key(gi)])
+                           for gi in range(len(built.topo.groups))
+                           if built.topo.group_key(gi) in diag}
+                after.append(ct.Step(None, snap, reports, {}))
+        for k, (a, b) in enumerate(zip(straight[2:], after)):
+            diff = cg.bitwise_differences(a.state, b.state)
+            assert not diff, f"the run after the checkpoint restart left the straight one: {diff}"
+        out.append(after)
+    return out
+
+
+def _runs_in(domain, built, values_list, rename=None) -> list:
+    """One trajectory per draw, in *domain*."""
+    steps = _domain_steps(domain)
+    with _x64(domain == "f64"):
+        if domain == "vmap":
+            runs = _batched_runs(built, values_list, steps, rename)
+        elif domain == "checkpoint_restart":
+            runs = _restarted_runs(built, values_list, steps, rename)
+        else:
+            runs = [ct.run(built, v, steps, rename=rename) for v in values_list]
+    _assert_in_domain(domain, built, runs)
+    return runs
+
+
+def _assert_in_domain(domain, built, runs):
+    """The premise: the graph is in *domain* (a fixture that fell back to the
+    default lane would check float32 single-rate twice)."""
+    gm = built.gm
+    assert bool(gm._is_multirate) == (domain == "multi_rate"), "multi-rate premise"
+    groups = gm._committed_coupling_groups.values()
+    assert all(g.subcycling == (domain == "sub_cycled") for g in groups), "sub-cycling premise"
+    assert all((g.predictor == "quadratic") == (domain == "predictors_warm_starts")
+               for g in groups), "predictor premise"
+    want = jnp.dtype(_domain_dtype(domain))
+    for run in runs:
+        for step in run:
+            for fields in step.state.values():
+                assert fields["x"].dtype == want, (domain, fields["x"].dtype)
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_renaming_a_named_topology_changes_nothing_in_every_domain
+# (on chain-into-ring, in every domain; the slow structures are the same check)
+@pytest.mark.parametrize("name", _DOMAIN_NAMES)
+@pytest.mark.parametrize("domain", DOMAINS)
+def test_renaming_a_named_topology_changes_nothing_in_every_domain(domain, name):
+    """CPL-180 in *domain*: every node renamed, bit-identical states and reports."""
+    topo, knobs, built = _built_in(domain, name, 0)
+    rename = _renaming(topo, 11)
+    _rt, _rk, renamed = _built_in(domain, name, 0, rename=rename)
+    values = _domain_values(topo, knobs, domain)
+    for k, (a, b) in enumerate(zip(_runs_in(domain, built, values),
+                                   _runs_in(domain, renamed, values, rename=dict(rename)))):
+        assert_same_runs(a, b, what=f"{domain}/{name} draw {k} renamed")
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain
+# (on chain-into-ring, in every domain; the slow structures are the same check)
+@pytest.mark.parametrize("name", _DOMAIN_NAMES)
+@pytest.mark.parametrize("domain", DOMAINS)
+def test_the_build_order_of_a_named_topology_changes_nothing_in_every_domain(domain, name):
+    """CPL-181 and CPL-182 in *domain*: nodes and edges added in another order
+    (the documented exceptions kept), bit-identical states and reports.
+    Configuration 2 puts Aitken and the interface norm on ``chain-into-ring``,
+    whose residual used to sum in the edges' insertion order (CPL-182)."""
+    topo, knobs, built = _built_in(domain, name, 2)
+    if name == "chain-into-ring":
+        assert any(g.get("convergence_norm") == "interface" for g in knobs), (
+            "premise: CPL-182's interface norm is on this structure's group")
+    node_order, edge_order = _orders(topo, 5)
+    _t, _k, reordered = _built_in(domain, name, 2, node_order=node_order,
+                                  edge_order=edge_order)
+    assert reordered.gm.schedule != built.gm.schedule or edge_order != tuple(
+        range(len(topo.edges))), "the permutation must reach the graph"
+    values = _domain_values(topo, knobs, domain)
+    for k, (a, b) in enumerate(zip(_runs_in(domain, built, values),
+                                   _runs_in(domain, reordered, values))):
+        assert_same_runs(a, b, what=f"{domain}/{name} draw {k} reordered")
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain
+# (on chain-into-ring, in every domain; the slow structures are the same check)
+@pytest.mark.parametrize("name", _DOMAIN_NAMES)
+@pytest.mark.parametrize("domain", DOMAINS)
+def test_an_identity_relay_on_a_named_topology_moves_no_bit_in_every_domain(domain, name):
+    """CPL-183's strongest statement in *domain*: Gauss-Seidel, no acceleration,
+    a criterion only exact stationarity meets; every other node's state is
+    bit-identical with the relay, and the relay holds what it relays."""
+    topo = _domain_topology(NAMED[name], domain)
+    k = _relayable(topo)
+    t0, knobs, plain = _built_in(domain, name, 0, constant="gauss-seidel")
+    t1, _k1, relayed = _built_in(domain, name, 0, relay=k, constant="gauss-seidel")
+    values = _domain_values(t0, knobs, domain)
+    with _x64(domain == "f64"):
+        relay_values = [ct.relay_values(t0, v, t1, k) for v in values]
+    others = list(t0.names)
+    for d, (a, b) in enumerate(zip(_runs_in(domain, plain, values),
+                                   _runs_in(domain, relayed, relay_values))):
+        for step, (sa, sb) in enumerate(zip(a, b), start=1):
+            diff = cg.bitwise_differences({n: sa.state[n] for n in others},
+                                          {n: sb.state[n] for n in others})
+            assert not diff, f"{domain}/{name} draw {d} step {step}: the relay moved {diff}"
+
+
+#: The structures whose groups are each a strongly connected component of
+#: their own, so their members' build order is free to move (in the other
+#: two an outside node or a second group shares the component, and the
+#: order picks the edge read late: CPL-181's exclusion).
+_FREE_MEMBERS = ("chain-into-ring", "star-and-ungrouped-ring")
+
+
+def _member_orders(topo, seed):
+    """A node order that moves the groups' members among themselves too."""
+    keep_nodes, _keep_edges = ct.invariant_orders(topo)
+    keep = [k for k in keep_nodes if not any(set(k) == set(g) for g in topo.groups)]
+    rng = np.random.default_rng(seed)
+    for _ in range(50):
+        order = tuple(ct.ordered_permutation(topo.names, keep, rng))
+        if any([m for m in order if m in g] != list(g) for g in topo.groups):
+            return order
+    raise AssertionError("no draw moved the members' order")
+
+
+@pytest.mark.parametrize("name", _FREE_MEMBERS)
+@pytest.mark.parametrize("domain", ("f32",) + DOMAINS)
+def test_jacobi_under_a_constant_iterator_ignores_the_members_build_order(domain, name):
+    """CPL-078: under ``iteration_mode="jacobi"`` with no acceleration every
+    member reads the stored previous iterate, so the order the members were
+    added in -- free to move here -- cannot reach the states or the
+    verdicts; with a criterion only exact stationarity meets, both builds
+    run the same passes and return the same bits.  The norm sums the
+    members in the schedule's order, so the residual agrees to round-off
+    (and the amplification and estimate derived from its ratios move with
+    it), as documented."""
+    domain_ = domain
+    topo = _domain_topology(NAMED[name], domain_)
+    order = _member_orders(topo, 7)
+    _t, knobs, built = _built_in(domain_, name, 0, constant="jacobi")
+    _t2, _k2, moved = _built_in(domain_, name, 0, node_order=order, constant="jacobi")
+    values = _domain_values(topo, knobs, domain_)
+    eps = float(jnp.finfo(jnp.dtype(_domain_dtype(domain_))).eps)
+    for k, (a, b) in enumerate(zip(_runs_in(domain_, built, values),
+                                   _runs_in(domain_, moved, values))):
+        for step, (sa, sb) in enumerate(zip(a, b), start=1):
+            where = f"{domain}/{name} draw {k} step {step} members moved"
+            diff = cg.bitwise_differences(sa.state, sb.state)
+            assert not diff, f"{where}: states differ in {diff}"
+            for gi in sa.reports:
+                ra, rb = sa.reports[gi], sb.reports[gi]
+                assert (ra["iterations"], ra["converged"]) == (rb["iterations"],
+                                                               rb["converged"]), (where, ra, rb)
+                # The norm sums the members in the schedule's order: the
+                # residual -- and what is derived from its ratios -- may
+                # move in its last bits, nothing else.
+                assert ra["residual"] == pytest.approx(rb["residual"], rel=16 * eps,
+                                                       abs=1e-300), (where, ra, rb)
+
+
+@pytest.mark.xfail(strict=True, raises=TypeError, reason=(
+    "MADD-ANO-171: save_state cannot write a typed PRNG key leaf (np.asarray of a key "
+    "array raises TypeError), so a graph holding one cannot be checkpointed; deferred "
+    "to 0.5.0"))
+def test_a_structure_with_a_typed_prng_key_survives_a_checkpoint_restart():
+    """A typed key is a supported leaf (CPL-145: keys travel as their uint32 data),
+    and ``save_state`` persists "all node states": the named structure with key
+    leaves in and around its group, saved after two steps and loaded, must
+    step on as the uninterrupted run does.  The checkpoint domain above runs
+    the structures without their key leaves until it can."""
+    topo, knobs, built = _built("nested-loop-additive", 0)
+    assert any("key" in nd.leaves for nd in topo.nodes), "premise: a typed key leaf"
+    values = ct.draw_values(topo, np.random.default_rng(3), 0.6,
+                            group_cfgs=ct.group_cfgs_of(knobs))
+    straight = ct.run(built, values, 3)
+    ct.run(built, values, 2)            # leaves the graph at step 2
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "checkpoint.npz"
+        built.gm.save_state(path)
+        built.gm.reset_state()
+        built.gm.load_state(path)
+    built.gm.step(params=ct.params_for(built, values))
+    after = ct._snapshot(built.gm, {})
+    assert not cg.bitwise_differences(after, straight[-1].state)
+
+
+#: The domains the monolithic reference models: a float64 graph, a sub-cycled
+#: member (its update composed with the inputs held), and a predictor's other
+#: starting guess.
+_REFERENCE_DOMAINS = ("f64", "sub_cycled", "predictors_warm_starts")
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_domain
+# (on chain-into-ring, in each domain; the slow structures are the same check)
+@pytest.mark.parametrize("name", _DOMAIN_NAMES)
+@pytest.mark.parametrize("domain", _REFERENCE_DOMAINS)
+def test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_domain(
+        domain, name):
+    """CPL-183 under configuration 1 (IQN-ILS under Jacobi and the mixed norm
+    first) in *domain*: the relayed graph reproduces the exact solve of the
+    same structure, every group within what its reported residual allows."""
+    topo = _domain_topology(NAMED[name], domain)
+    k = _relayable(topo)
+    t1, knobs, relayed = _built_in(domain, name, 1, relay=k)
+    base_knobs = _domain_knobs(ct.topology_knobs(topo, 1), domain)
+    for values in _domain_values(topo, base_knobs, domain):
+        with _x64(domain == "f64"):
+            rv = ct.relay_values(topo, values, t1, k)
+        traj, = _runs_in(domain, relayed, [rv])
+        with _x64(domain == "f64"):
+            assert_reproduces_the_reference(t1, knobs, relayed, rv, traj=traj,
+                                            dtype=_domain_dtype(domain))

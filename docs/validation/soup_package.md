@@ -232,6 +232,10 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-167 | A ParamSpec changed between the FMU description and its sidecar was enforced in place of the advertised min / max: the bridge accepted values its XML forbids, or refused values it declares settable | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-168 | At a large ratio of time to master step the FMU bridge's ulp slacks exceeded a master step: a doStep a whole step ahead was adopted, and a clock running 40% fast was never refused | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-169 | One in-limit get frame drove the FMU bridge past 6 GB and held the instance for about 45 s before its reply was refused | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-170 | The Aitken two-pass guard can add two passes to Aitken's own exit, where the guide says at most one | `minor` | `not_safety_relevant` | `open` | >=0.4.0.dev0 |
+| MADD-ANO-171 | save_state cannot write a typed PRNG key leaf | `minor` | `not_safety_relevant` | `open` | >=0.1.0 |
+| MADD-ANO-172 | reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform | `minor` | `not_safety_relevant` | `open` | >=0.4.0.dev0 |
+| MADD-ANO-173 | run_adaptive never returns once its step-doubling error norm is NaN | `major` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-174 | A PUT /graph/params that wrote a leaf back to the node's own value skipped the combined checks: after a fit or a checkpoint load, a 200 left a rod past its Fourier limit and a save that did not reload | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-175 | X-Forwarded-For let a web page past a loopback-bound API's DNS-rebinding defence and its peer backstop: uvicorn's default proxy headers made the peer any string a request named | `critical` | `safety_relevant` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-176 | PUT /graph/state wrote every field as float32 whatever its dtype, and parsed text and booleans as numbers | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
@@ -241,7 +245,7 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-180 | A request refused by its model for a NaN or infinite value answered 500 | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 | MADD-ANO-181 | A checkpoint load decompressed every archive member before it checked any name or shape: a small archive cost as much memory as its members declared | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 
-*177 anomalies registered.  32 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 24 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*181 anomalies registered.  36 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 28 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

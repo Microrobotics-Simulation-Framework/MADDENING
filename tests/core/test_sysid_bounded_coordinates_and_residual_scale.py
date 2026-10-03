@@ -353,8 +353,9 @@ def test_a_shrunken_step_never_reads_as_stationary(monkeypatch):
 
     real = sysid._marquardt_step  # noqa: SLF001
 
-    def crushed(th, r, J, lam, lo, hi):
-        return th + 1e-6 * (real(th, r, J, lam, lo, hi) - th)
+    def crushed(th, r, J, lam, lo, hi, held):
+        cand, ok = real(th, r, J, lam, lo, hi, held)
+        return th + 1e-6 * (cand - th), ok
 
     monkeypatch.setattr(sysid, "_marquardt_step", crushed)
     m, k, c_true = _UNITS["tonnes"]
@@ -368,18 +369,26 @@ def test_a_run_of_stalled_candidates_is_not_the_rounding_floor(monkeypatch):
     down to one within ``step_tol`` reads as the rounding floor only if the
     undamped Gauss-Newton step does not lower the loss either.  Simulated by
     candidates that stop moving after the first (accepted) step: they all
-    tie and are rejected, but the fit is nowhere near its floor."""
+    tie and are rejected, but the fit is nowhere near its floor.
+
+    The Gauss-Newton step that lowers the loss is now taken as the iterate
+    (MADD-ANO-163) rather than ending the run unconverged, so a run whose
+    damped candidates all stall is carried on by it, and converges only
+    where that step is within ``step_tol`` -- at the truth."""
     from maddening import sysid
 
     real = sysid._marquardt_step  # noqa: SLF001
     calls = []
 
-    def stalls(th, r, J, lam, lo, hi):
+    def stalls(th, r, J, lam, lo, hi, held):
         calls.append(1)
-        return real(th, r, J, lam, lo, hi) if len(calls) == 1 else th
+        return real(th, r, J, lam, lo, hi, held) if len(calls) == 1 else (th, True)
 
     monkeypatch.setattr(sysid, "_marquardt_step", stalls)
     m, k, c_true = _UNITS["tonnes"]
     res = _unit_fit(m, k, c_true)
     assert len(res.losses) >= 2 and res.losses[1] < res.losses[0]     # it progressed
-    assert not res.converged
+    assert len(calls) > 2                                              # and stalled
+    assert res.converged
+    assert _damping(res) == pytest.approx(c_true, rel=2e-4)
+    assert float(res.params["nodes"]["s"]["stiffness"]) == pytest.approx(k, rel=1e-5)

@@ -1388,6 +1388,22 @@ class _CoordinateBounds:
         lo_all = np.concatenate(los) if los else np.zeros(0)
         hi_all = np.concatenate(his) if his else np.zeros(0)
         lo_np, hi_np = lo_all[idx], hi_all[idx]
+        # A coordinate of a narrower leaf (a float32 constant in an x64
+        # graph) lives on its leaf's grid (:func:`_leaf_grid`), and
+        # ``constrain`` clips the leaf at its bound rounded to the leaf's
+        # dtype; so is the bound here, or an iterate on the grid would read
+        # as off a bound it sits on.  Unchanged for every other coordinate.
+        narrow, to_leaf_grid = _leaf_grid(start, idx, dtype)
+        if narrow.any():
+            with np.errstate(over="ignore"):
+                lo_np = np.where(np.isfinite(lo_np),
+                                 np.asarray(to_leaf_grid(jnp.asarray(
+                                     np.where(np.isfinite(lo_np), lo_np, 0.0), dtype))),
+                                 lo_np)
+                hi_np = np.where(np.isfinite(hi_np),
+                                 np.asarray(to_leaf_grid(jnp.asarray(
+                                     np.where(np.isfinite(hi_np), hi_np, 0.0), dtype))),
+                                 hi_np)
         #: The physical values the edges of each coordinate's range map to.
         self.p_lo = (np.concatenate(p_los) if p_los else np.zeros(0))[idx]
         self.p_hi = (np.concatenate(p_his) if p_his else np.zeros(0))[idx]
@@ -3238,6 +3254,52 @@ def _float_resolution(tree) -> np.ndarray:
     return np.concatenate(parts) if parts else np.zeros(0)
 
 
+def _leaf_grid(tree, idx, dtype):
+    """``(narrow, to_leaf_grid)`` for an optimiser over the trainable entries
+    ``idx`` (in ``ravel_pytree(tree)`` order) held in ``dtype``.
+
+    ``narrow`` flags the coordinates whose leaf is a narrower float than
+    ``dtype`` -- a float32 constant in an x64 graph, which ``ravel_pytree``
+    promotes to float64 beside a float64 one -- and ``to_leaf_grid(theta)``
+    rounds exactly those to their leaf's dtype, as ``unravel`` does before
+    the model sees them.  :func:`fit_lm` keeps its iterate there, so the
+    coordinate it carries is the value the model computes with.  Earlier
+    0.4.0 development builds did not: a step that moved such a coordinate by
+    less than one float32 ulp left the leaf where it was, the joint step's
+    compensation in the other parameters (computed for a move that never
+    happened) raised the loss and was rejected, and the float64 coordinate
+    crept by ~1e-11 an iteration until it crossed a rounding boundary --
+    five times the iterations of the all-float64 fit, and some runs
+    unconverged.  ``narrow`` is all False, and ``to_leaf_grid`` the
+    identity, when no leaf is narrower than ``dtype``.
+    """
+    groups: list = []
+    offset = 0
+    selected = np.zeros(sum(_leaf_size(leaf) for leaf in jax.tree.leaves(tree)), dtype=bool)
+    selected[np.asarray(idx, dtype=np.intp)] = True
+    position = np.full(selected.size, -1, dtype=np.intp)
+    position[np.asarray(idx, dtype=np.intp)] = np.arange(len(idx))
+    wide_eps = float(np.finfo(dtype).eps) if jnp.issubdtype(dtype, jnp.floating) else 0.0
+    narrow = np.zeros(len(idx), dtype=bool)
+    for leaf in jax.tree.leaves(tree):
+        n = _leaf_size(leaf)
+        leaf_dtype = jnp.result_type(leaf)
+        if (jnp.issubdtype(leaf_dtype, jnp.floating)
+                and float(jnp.finfo(leaf_dtype).eps) > wide_eps):
+            pos = position[offset:offset + n][selected[offset:offset + n]]
+            if pos.size:
+                narrow[pos] = True
+                groups.append((jnp.asarray(pos), leaf_dtype))
+        offset += n
+
+    def to_leaf_grid(theta):
+        for pos, leaf_dtype in groups:
+            theta = theta.at[pos].set(theta[pos].astype(leaf_dtype).astype(theta.dtype))
+        return theta
+
+    return narrow, to_leaf_grid
+
+
 def _coarsest_dtype(tree, idx) -> np.dtype:
     """The floating dtype of the trainable entries ``idx`` (in
     ``ravel_pytree(tree)`` order) whose ``eps`` is largest.
@@ -4516,21 +4578,110 @@ def fit(
     )
 
 
+def _column_frame(J):
+    """One power of two per column of ``J`` bringing its largest entry into
+    ``[0.5, 1)`` (:func:`~maddening.core._pow2_frame.pow2_frame`,
+    ``"entrywise"``); ``1`` for a column of zeros."""
+    return pow2_frame(jnp.max(jnp.abs(J), axis=0), mode="entrywise")
+
+
+def _pow2_exponent(frame):
+    """``k`` with ``frame == 2**k`` (an integer array), for unframing by
+    :func:`jax.numpy.ldexp`: exact, and with no intermediate that can
+    overflow or flush where the unframed result itself does not."""
+    return jnp.frexp(frame)[1] - 1
+
+
+def _half_squared_norm(r) -> float:
+    """``0.5 * ||r||²`` as a Python float, computed on ``r`` framed by a
+    power of two (its largest entry into ``[0.5, 1)``) and unframed in
+    float64.
+
+    :func:`fit_lm`'s loss.  ``r * r`` in the residual's own dtype flushes to
+    zero below ``sqrt(tiny)`` -- ``1.1e-19`` in float32 -- and overflows
+    above ``sqrt(max)``, ``1.8e19``: a residual written in small units (a
+    particle volume in cubic metres) had every loss ``0.0``, so no step
+    could lower it, and a large one had an infinite loss.  Framed, the sum
+    is of normal numbers at any scale, and the power of two makes it the
+    same number, bit for bit, wherever the bare sum was normal.  The
+    unframing is in float64, which holds it for any float32 residual; a
+    float64 residual below about ``1e-162`` still underflows there, and
+    :func:`fit_lm` refuses to call that converged (``r`` is not zero).
+    """
+    if r.size == 0:
+        return 0.0
+    f = pow2_frame(r)
+    framed = r * f
+    scale = float(f)
+    return 0.5 * float(jnp.sum(framed * framed)) / scale / scale
+
+
+def _framed_gradient(J, r) -> np.ndarray:
+    """``Jᵀr`` in float64, from ``J`` and ``r`` framed by powers of two
+    (every column's largest entry, and the residual's, into ``[0.5, 1)``)
+    and unframed in float64.
+
+    The gradient :func:`fit_lm` hands its identifiability guard and its
+    on-bound test.  Formed bare in the working precision its products
+    ``J_ij r_i`` flush below ``tiny`` -- a residual of ``1e-19`` with a
+    Jacobian of ``1e-19`` read a gradient of exactly zero -- and the
+    frames make it the same number, bit for bit, wherever the bare
+    products were normal.
+    """
+    c = _column_frame(J)
+    f = pow2_frame(r)
+    g = (J * c[None, :]).T @ (r * f)
+    return (np.asarray(g, dtype=np.float64)
+            / (np.asarray(c, dtype=np.float64) * float(f)))
+
+
 @jax.jit
-def _marquardt_step(th, r, J, lam, lo, hi):
+def _marquardt_step(th, r, J, lam, lo, hi, held):
     """One Levenberg-Marquardt candidate from ``th``, projected onto
-    ``[lo, hi]`` (:class:`_CoordinateBounds`).
+    ``[lo, hi]`` (:class:`_CoordinateBounds`), and whether every column it
+    solved for was representable.
 
     Module-level, so its compiled form is shared by every :func:`fit_lm`
     call of the same shapes rather than compiled again per call.
+
+    **The solve is equilibrated and framed.**  ``J``'s columns are each
+    multiplied by the power of two that brings their largest entry into
+    ``[0.5, 1)`` and ``r`` by the one that brings its own there, and the
+    step is unframed by the same powers (:func:`jax.numpy.ldexp`, exact).
+    Forming ``A = JᵀJ`` and ``g = Jᵀr`` bare in the working precision
+    flushed to zero or overflowed for a residual or a parameter far from
+    unit scale -- XLA's CPU backend flushes a subnormal product -- and in
+    float32 that is any ``|J|`` below about ``1e-19`` or above ``1e19``: a
+    residual of ``1e-19`` (a nanoparticle's mass in kilograms) solved for
+    nothing, and a parameter whose natural scale is ``1e-23`` (a 10 nm
+    particle's volume in cubic metres) had ``diag(A)`` overflow to ``inf``
+    and its step vanish.  Framed, every column of ``A`` that ``J`` does
+    not leave at zero has a diagonal entry in ``[0.25, m]``.  The
+    Marquardt step is invariant to a column scaling, so in exact
+    arithmetic nothing moves; in floating point the equilibrated system
+    is solved with different pivots, so ordinary problems move in the
+    last bits.  ``representable`` (a 0-d bool) is False when a column with
+    a nonzero entry of ``J``, not held, still has a ``diag(A)`` that is
+    zero or not finite: :func:`fit_lm` never reports such a step as
+    converged.
+
+    ``held`` (a boolean mask) holds coordinates at ``th`` -- the
+    mixed-precision coordinates whose step rounds away at their leaf's
+    dtype -- as a coordinate on its bound whose gradient points out of the
+    range is held: its row and column replaced by the identity and its
+    gradient by 0, so the step for the rest is solved without it rather
+    than compensating for a move it cannot make.
     """
-    A = J.T @ J
-    g = J.T @ r
+    c = _column_frame(J)
+    f = pow2_frame(r)
+    Jh = J * c[None, :]
+    A = Jh.T @ Jh
+    g = Jh.T @ (r * f)
     # A coordinate on its bound whose gradient points out of the range is
     # held (its row and column replaced by the identity, its gradient by 0):
     # that is the constraint active, and solving for it as if free would
     # couple a step it cannot take into the others.
-    hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+    hold = held | ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
     free = jnp.where(hold, 0.0, 1.0).astype(A.dtype)
     A = A * free[:, None] * free[None, :]
     g = g * free
@@ -4548,14 +4699,18 @@ def _marquardt_step(th, r, J, lam, lo, hi):
     # A column of exact zeros gets 1.0 (its gradient entry is 0 as well).
     floor = jnp.where(d > 0, jnp.finfo(A.dtype).eps * d, 1.0)
     A_damped = A + jnp.diag(lam * d + floor + (1.0 - free))
-    delta = jnp.linalg.solve(A_damped, g)
-    return jnp.clip(th - delta, lo, hi)
+    dh = jnp.linalg.solve(A_damped, g)
+    delta = jnp.ldexp(dh, _pow2_exponent(c) - _pow2_exponent(f))
+    live = jnp.any(J != 0.0, axis=0) & ~hold
+    representable = ~jnp.any(live & ~(jnp.isfinite(d) & (d > 0.0)))
+    return jnp.clip(th - delta, lo, hi), representable
 
 
 @jax.jit
-def _gauss_newton_step(th, r, J, lo, hi):
+def _gauss_newton_step(th, r, J, lo, hi, held):
     """The undamped Gauss-Newton candidate from ``th``, projected onto
-    ``[lo, hi]``: least squares on the column-equilibrated Jacobian.
+    ``[lo, hi]``: least squares on the column-equilibrated Jacobian; and
+    whether every column it solved for was representable.
 
     The stationarity test :func:`fit_lm`'s ``converged`` also requires.  It
     shares nothing with the Marquardt solve -- no ``lambda``, no floor, a
@@ -4564,15 +4719,31 @@ def _gauss_newton_step(th, r, J, lo, hi):
     from the iterate would still move a parameter by more than
     ``step_tol``, the iterate is not stationary.  Equilibrating the columns
     (each scaled to unit norm) makes it invariant to the units of every
-    parameter and of the residual.  A coordinate held on its bound (its
-    gradient pointing out of the range) is left out, as in the step.
+    parameter and of the residual.  The norms are taken of columns first
+    framed by a power of two (largest entry into ``[0.5, 1)``), and ``r``
+    is framed the same way: bare, a column of ``1e-23`` had a norm that
+    flushed to zero (``1e23``: overflowed to ``inf``), the column was left
+    out as if ``J`` did not read the parameter, and the iterate read as
+    stationary with the parameter unmoved.  The frames are powers of two,
+    so wherever the bare norms were normal the candidate is the same, bit
+    for bit.  ``representable`` is False when a column with a nonzero entry
+    of ``J``, not held, still has a norm that is zero or not finite.  A
+    coordinate held on its bound (its gradient pointing out of the range)
+    is left out, as in the step, and so is one ``held`` holds.
     """
-    g = J.T @ r
-    hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
-    norms = jnp.sqrt(jnp.sum(J * J, axis=0))
-    scale = jnp.where((norms > 0) & ~hold, 1.0 / jnp.where(norms > 0, norms, 1.0), 0.0)
-    y = jnp.linalg.lstsq(J * scale[None, :], -r)[0]
-    return jnp.clip(th + scale * y, lo, hi)
+    c = _column_frame(J)
+    f = pow2_frame(r)
+    Jc = J * c[None, :]
+    g = Jc.T @ (r * f)
+    hold = held | ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+    norms = jnp.sqrt(jnp.sum(Jc * Jc, axis=0))
+    usable = (norms > 0) & jnp.isfinite(norms)
+    scale = jnp.where(usable & ~hold, 1.0 / jnp.where(usable, norms, 1.0), 0.0)
+    y = jnp.linalg.lstsq(Jc * scale[None, :], -(r * f))[0]
+    step = jnp.ldexp(scale * y, _pow2_exponent(c) - _pow2_exponent(f))
+    live = jnp.any(J != 0.0, axis=0) & ~hold
+    representable = ~jnp.any(live & ~usable)
+    return jnp.clip(th + step, lo, hi), representable
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -4819,6 +4990,33 @@ def fit_lm(
     rel_tol = (_STEP_TOL_ULPS * _float_resolution(start)[idx] if step_tol is None
                else float(step_tol))
 
+    # Mixed precision: a float32 leaf beside a float64 one is a float64
+    # coordinate here (``ravel_pytree`` promotes), but ``unravel`` rounds it
+    # back to float32 before the model sees it (:func:`_leaf_grid`).
+    narrow, to_leaf_grid = _leaf_grid(start, idx, theta0.dtype)
+    no_hold = jnp.zeros(theta0.shape, dtype=bool)
+
+    def _quantised(solve):
+        """``(candidate, representable)`` from ``solve(held)``, with every
+        narrow coordinate on its leaf's grid.  A narrow coordinate whose
+        proposed move rounds away there is held and the step solved again
+        without it, so the others do not compensate for a move the model
+        never sees (:func:`_leaf_grid`).  The identity, bit for bit, when no
+        leaf is narrower than the coordinates."""
+        cand, ok = solve(no_hold)
+        if not narrow.any():
+            return cand, bool(ok)
+        held = np.zeros(narrow.shape, dtype=bool)
+        th = np.asarray(theta)
+        for _ in range(int(narrow.sum())):
+            c = np.asarray(cand)
+            lost = narrow & ~held & (np.asarray(to_leaf_grid(cand)) == th) & (c != th)
+            if not lost.any():
+                break
+            held |= lost
+            cand, ok = solve(jnp.asarray(held))
+        return to_leaf_grid(cand), bool(ok)
+
     def _physical(th) -> np.ndarray:
         p = gm.constrain(unravel(flat_u.at[idx].set(th)))
         return np.asarray(ravel_pytree(p)[0][idx], dtype=np.float64)
@@ -4826,6 +5024,39 @@ def fit_lm(
     def _within_step_tol(th, cand) -> bool:
         before, after = _physical(th), _physical(cand)
         return bool(np.all(np.abs(after - before) <= rel_tol * np.abs(before)))
+
+    # Whether every solve a convergence verdict of this iteration rests on
+    # was representable (``_marquardt_step``, ``_gauss_newton_step``).
+    verdict = {"representable": True}
+
+    def _resolvable(th, g, J) -> np.ndarray:
+        """``g`` with every entry zeroed whose coordinate's own Newton step,
+        ``g_i / ||J[:, i]||²`` (the others held), moves its parameter by no
+        more than ``step_tol`` -- for the on-bound test only.
+
+        On its bound a coordinate whose gradient points into the range
+        could lower the loss by moving there, and no converged test fires
+        while it can (:meth:`_CoordinateBounds.inward_descent`).  At a fit
+        whose truth is *on* the bound, that gradient is the residual's
+        rounding, and its sign is a coin flip: a noiseless fit to a truth
+        on ``(0.5, 2.0)`` converged on one bound and not on the other (and
+        the other way round under x64).  A pull whose own step is within
+        the tolerance moves nothing the tolerance resolves, so it is that
+        noise and counts as zero.  The step is measured physically, so a
+        ``logit`` coordinate at the flat edge of its sigmoid -- a large step
+        in ``u`` for a small one in the value -- is judged by the value's
+        move, as :func:`_within_step_tol` judges every step.
+        """
+        if not bounds.active:
+            return g
+        curvature = np.sum(np.square(np.asarray(J, dtype=np.float64)), axis=0)
+        step = np.where(curvature > 0.0, g / np.where(curvature > 0.0, curvature, 1.0), 0.0)
+        moved = np.clip(np.asarray(th, dtype=np.float64) - step,
+                        np.asarray(bounds.lo, dtype=np.float64),
+                        np.asarray(bounds.hi, dtype=np.float64))
+        before = _physical(th)
+        after = _physical(to_leaf_grid(jnp.asarray(moved, dtype=th.dtype)))
+        return np.where(np.abs(after - before) <= rel_tol * np.abs(before), 0.0, g)
 
     def _gauss_newton_stationary(th, r, J, loss_at_th=None) -> bool:
         """Whether ``th`` is stationary by the undamped, equilibrated
@@ -4843,13 +5074,14 @@ def fit_lm(
         structured rounding, whose cosines with the columns measured 0.5-0.9
         on a spring -- so the second test evaluates the step.
         """
-        candidate = _gauss_newton_step(th, r, J, bounds.lo, bounds.hi)
+        candidate, ok = _quantised(
+            lambda held: _gauss_newton_step(th, r, J, bounds.lo, bounds.hi, held))
+        verdict["representable"] &= ok
         if _within_step_tol(th, candidate):
             return True
         if loss_at_th is None:
             return False
-        r_gn = residual_only(candidate)
-        loss_gn = 0.5 * float(jnp.sum(r_gn * r_gn))
+        loss_gn = _half_squared_norm(residual_only(candidate))
         return not (np.isfinite(loss_gn) and loss_gn < loss_at_th)
 
     lam = float(lam0)
@@ -4874,23 +5106,25 @@ def fit_lm(
     i = 0
     for i in range(1, n_iter + 1):
         r, J = residual_and_jac(theta)
-        loss = 0.5 * float(jnp.sum(r * r))
+        # On the framed residual (``_half_squared_norm``): ``r * r`` in the
+        # working precision flushed a residual of 1e-19 to a loss of 0.0.
+        loss = _half_squared_norm(r)
         if not np.isfinite(loss) or not bool(jnp.all(jnp.isfinite(J))):
             raise FloatingPointError(f"non-finite residual or Jacobian at iteration {i}")
         losses.append(loss)
         theta_iteration, theta_loss = i - 1, loss
         rJ, rJ_iteration = (r, J), i - 1
+        # ``Jᵀr`` framed (``_framed_gradient``), in float64, for the tracker
+        # and the on-bound test: bare, it flushed to zero with the residual.
+        grad = _framed_gradient(J, r)
         if tracker is not None:
-            # ``J.T @ r`` is the same ``g`` ``_lm_step`` forms, recomputed
-            # here rather than returned from it: the tracker must not
-            # change the step, and ``_lm_step``'s own ``g`` lives inside a
-            # ``jax.jit`` whose fusion decides ``A``'s last bits (PR 101).
-            # Contracted on the device so only the ``n``-vector is read
-            # back, not the whole ``m x n`` Jacobian.  Folded in before
-            # the ``tol`` break, as in ``fit``: this gradient is
-            # information about the loss surface whether or not a step
-            # was taken on it.
-            tracker.observe(J.T @ r)
+            # The same ``g`` ``_lm_step`` forms, recomputed here rather than
+            # returned from it: the tracker must not change the step, and
+            # ``_lm_step``'s own ``g`` lives inside a ``jax.jit`` whose
+            # fusion decides ``A``'s last bits (PR 101).  Folded in before
+            # the ``tol`` break, as in ``fit``: this gradient is information
+            # about the loss surface whether or not a step was taken on it.
+            tracker.observe(grad)
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
@@ -4908,12 +5142,19 @@ def fit_lm(
         # shorter only because it is damped more, so it is not tested.
         accepted = False
         stationary = False
+        verdict["representable"] = True
+        # A loss of exactly 0.0 from a residual that is not: the framed
+        # sum's unframing underflowed float64 (a float64 residual below
+        # ~1e-162).  No step can lower it, so nothing about the iterate can
+        # be read from the step tests.
+        vanished = loss == 0.0 and bool(jnp.any(r != 0.0))
         # A coordinate on its bound that could lower the loss by moving into
         # the range makes this no constrained stationary point, so its
         # proposal cannot converge the run even if it moves nothing (the
         # coupled solve can point such a coordinate outward); the retries,
         # damped towards the gradient, move it inward.
-        stuck_inward = bounds.inward_descent(theta, J.T @ r, _physical(theta), rel_tol)
+        stuck_inward = bounds.inward_descent(theta, _resolvable(theta, grad, J),
+                                             _physical(theta), rel_tol)
         attempt, cand = -1, theta
         while True:
             attempt += 1
@@ -4926,9 +5167,13 @@ def fit_lm(
                 # (:data:`_LM_LADDER`), so the rule can see the shortest
                 # candidate it needs.
                 break
-            cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype), bounds.lo, bounds.hi)
-            r_new = residual_only(cand)
-            loss_new = 0.5 * float(jnp.sum(r_new * r_new))
+            lam_t = jnp.asarray(lam, theta.dtype)
+            cand, cand_ok = _quantised(
+                lambda held, lam_t=lam_t: _lm_step(theta, r, J, lam_t, bounds.lo,
+                                                   bounds.hi, held))
+            if attempt == 0:
+                verdict["representable"] &= cand_ok
+            loss_new = _half_squared_norm(residual_only(cand))
             proposal_within = (attempt == 0 and not stuck_inward
                                and _within_step_tol(theta, cand)
                                and _gauss_newton_stationary(theta, r, J))
@@ -4962,8 +5207,51 @@ def fit_lm(
             # fit unconverged at loss 1e-13.  A run that never lowered the
             # loss gets no such reading: a residual whose Jacobian is wrong
             # rejects every candidate from its start.
-            stationary = (_within_step_tol(theta, cand)
-                          and _gauss_newton_stationary(theta, r, J, loss))
+            #
+            # The rule asks the undamped Gauss-Newton step last, and when it
+            # moves a parameter by more than ``step_tol`` *and* lowers the
+            # loss, it is taken as the iterate rather than ending the run:
+            # it is a candidate like the damped ones (``lam -> 0``), and
+            # the strict decrease is the acceptance test every candidate
+            # meets.  Near the floor of the loss's own evaluation -- a
+            # noisy residual whose rounding moves the loss by more than a
+            # few ulps of a parameter do -- the damped candidates' verdicts
+            # are rounding, while the Gauss-Newton step, built from ``r``
+            # and ``J`` linearly, still points at the optimum.  Earlier 0.4.0
+            # development builds ended such a run unconverged there, 40 ulps
+            # short, or converged a few ulps away, by which of the two the
+            # parameters' units happened to round to (MADD-ANO-163).
+            if _within_step_tol(theta, cand):
+                gn_cand, gn_ok = _quantised(
+                    lambda held: _gauss_newton_step(theta, r, J, bounds.lo,
+                                                    bounds.hi, held))
+                verdict["representable"] &= gn_ok
+                if _within_step_tol(theta, gn_cand):
+                    stationary = True
+                else:
+                    loss_gn = _half_squared_norm(residual_only(gn_cand))
+                    if np.isfinite(loss_gn) and loss_gn < loss:
+                        theta = gn_cand
+                        theta_iteration, theta_loss = i, loss_gn
+                        lam = max(lam * lam_down, 1e-12)
+                        accepted = True
+                    else:
+                        stationary = True
+        if stationary and (vanished or not verdict["representable"]):
+            # Never a converged verdict the arithmetic could not form: with
+            # the frames neither can happen to a float32 problem, but the
+            # verdict must not rest on them if one does.
+            warnings.warn(
+                "fit_lm: stopped at an iterate whose stationarity could not be "
+                "read -- "
+                + ("the loss 0.5 * ||r||^2 underflows float64 although r is not "
+                   "zero" if vanished else
+                   "a column of the Jacobian that is not zero has a curvature "
+                   "diag(J^T J) that is zero or not finite even after framing")
+                + "; converged=False. Rescale the residual or the parameter "
+                  "towards unit size.",
+                RuntimeWarning, stacklevel=2)
+            break
         if stationary and accepted and tracker is not None:
             # Stopping on an accepted proposal leaves the run at an iterate
             # whose gradient no iteration formed.  A run that kept going
@@ -4974,7 +5262,7 @@ def fit_lm(
             # the same ``J`` (``_rj_selected``), so it is formed once.
             r_end, J_end = residual_and_jac(theta)
             if bool(jnp.all(jnp.isfinite(r_end))) and bool(jnp.all(jnp.isfinite(J_end))):
-                tracker.observe(J_end.T @ r_end)
+                tracker.observe(_framed_gradient(J_end, r_end))
                 rJ, rJ_iteration = (r_end, J_end), theta_iteration
         if stationary or not accepted:
             converged = stationary
@@ -4995,12 +5283,11 @@ def fit_lm(
         return at_selected["rJ"]
 
     def _loss(th):
-        r_th = residual_only(th)
-        return 0.5 * float(jnp.sum(r_th * r_th))
+        return _half_squared_norm(residual_only(th))
 
     def _reference():
         r_sel, J_sel = _rj_selected()
-        return _loss(selected), np.asarray(J_sel.T @ r_sel, dtype=np.float64)
+        return _loss(selected), _framed_gradient(J_sel, r_sel)
 
     def _flatness(candidates, spanned, scale):
         return _gauss_newton_flatness(_rj_selected()[1], candidates, coarse,

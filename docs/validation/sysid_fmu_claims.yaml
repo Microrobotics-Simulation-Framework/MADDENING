@@ -239,8 +239,8 @@ claims:
   notes: The memory claim (O(window)) is not measured here.
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows_under_x64
     16bit: narrowed
     jit: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
     grad: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
@@ -301,8 +301,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid.py::test_multiple_shooting_loss_zero_at_truth_and_penalises_gaps
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_multiple_shooting_loss_is_zero_at_the_truth_and_penalises_gaps_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_multiple_shooting_loss_is_zero_at_the_truth_and_penalises_gaps_under_x64
     16bit: narrowed
     jit: narrowed
     grad: narrowed
@@ -459,8 +459,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_loss_gradient_is_finite_and_matches_a_difference_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_loss_gradient_is_finite_and_matches_a_difference_under_x64
     16bit: narrowed
     jit: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
     grad: tests/core/test_sysid.py::test_recovers_stiffness_from_20_percent_perturbation
@@ -496,7 +496,7 @@ claims:
   domains:
     f32: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_finite_difference_of_a_spring_rollout
     f64: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_central_finite_difference_and_its_bound_is_the_inverse
-    mixed_dtype: TODO-oracle
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fim_is_jtj_of_a_float32_spring_rollout_in_an_x64_process
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid_contract_examples.py::test_fim_matches_a_finite_difference_of_a_spring_rollout
@@ -526,8 +526,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_fim_reaches_through_a_coupled_step
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_fim_reaches_through_a_coupled_step_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fim_reaches_through_a_coupled_step_under_x64
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid_claims_edges.py::test_fim_reaches_through_a_coupled_step
@@ -559,8 +559,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_the_default_cutoff_is_max_of_n_and_sqrt_m
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_rank_cutoff_is_max_of_n_and_sqrt_m_times_the_decompositions_eps
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_rank_cutoff_is_max_of_n_and_sqrt_m_times_the_decompositions_eps
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -589,8 +589,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_rank_verdict_does_not_move_when_the_residual_is_rescaled_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -624,11 +624,28 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_rank_rtol_zero_leaves_no_threshold_to_sit_near
     - tests/core/test_sysid_degenerate_inputs.py::test_a_raised_rank_rtol_is_a_modelling_choice_not_a_precision_limit
     - tests/core/test_sysid_degenerate_inputs.py::test_the_warning_names_the_eigenvalue_nearest_the_cutoff
-  status: verified
+  status: failing
+  finding: >-
+    mixed_dtype domain: with float32 leaves in an x64 process the
+    PrecisionLimitWarning names the ratio and the cutoff, but its remedy is
+    to re-run under x64 -- jax.config.update('jax_enable_x64', True) or
+    JAX_ENABLE_X64=1 -- which is already on and changes nothing: the
+    decomposition is float32 because the leaves (and the residual they make)
+    are. The remedy that settles it is float64 leaves. The remedy is chosen
+    on the decomposition's dtype alone, not on whether x64 is enabled. Loud
+    (an advisory warning whose advice loops), so minor and no registry
+    entry. Reproducer: under jax_enable_x64, fim of a float32 linear
+    residual whose Fisher matrix has eigenvalue ratio 2.08e-7 (cutoff
+    2.38e-7) warns 'Settle it by re-running under x64'. Pinned by
+    tests/core/test_sysid_claims_under_x64.py::test_a_float32_rank_at_the_floor_in_an_x64_process_names_a_remedy_that_settles_it
+    (strict xfail). Guess: src/maddening/sysid.py ~2694, the remedy's 'if
+    dtype == np.float32' should also ask jax.config.jax_enable_x64 and, when
+    it is set, name float64 leaves (cast the parameters and the state)
+    instead.
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_a_rank_decided_at_the_float32_floor_warns_with_the_numbers
     f64: tests/core/test_sysid_degenerate_inputs.py::test_under_x64_the_warning_stops_recommending_x64
-    mixed_dtype: TODO-oracle
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_a_float32_rank_at_the_floor_in_an_x64_process_names_a_remedy_that_settles_it
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -660,8 +677,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_springs_scale_direction_is_unidentifiable_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_springs_scale_direction_is_unidentifiable_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -692,8 +709,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_the_bound_is_in_the_parameters_units
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_bound_is_in_the_parameters_units_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_bound_is_in_the_parameters_units_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -722,8 +739,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_fim_names_the_parameters_relative_scaling_zeroed
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_fim_names_the_parameters_relative_scaling_zeroed_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fim_names_the_parameters_relative_scaling_zeroed_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -759,8 +776,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_fim_nominal_scale.py::TestThePolicyTable::test_finite_bounds_scale_by_the_width_whatever_the_transform
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_nominal_policy_table_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_nominal_policy_table_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1021,8 +1038,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid.py::test_fim_flags_unidentifiable_scale_direction
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_springs_scale_direction_is_unidentifiable_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_springs_scale_direction_is_unidentifiable_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1160,8 +1177,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_fim_core.py::TestCoreAgreesWithReport::test_rank_and_crb_infinities_match_fim
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_fim_and_fim_core_agree_on_rank_and_infinities_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fim_and_fim_core_agree_on_rank_and_infinities_under_x64
     16bit: narrowed
     jit: tests/core/test_sysid_fim_core.py::TestFimUnchangedByJitting::test_report_is_bit_identical_to_the_pre_jit_pipeline
     grad: n/a
@@ -1297,8 +1314,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_losses_zero_is_the_starting_points_loss
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_losses_zero_is_the_starting_points_loss_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_losses_zero_is_the_starting_points_loss_under_x64
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid_claims_edges.py::test_losses_zero_is_the_starting_points_loss
@@ -1328,8 +1345,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_the_final_evaluation_is_invisible_but_for_the_best_fields
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_the_lowest_loss_iterate_is_returned_and_indexed_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_lowest_loss_iterate_is_returned_and_indexed_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1367,8 +1384,12 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_the_returned_params_are_the_iterate_with_the_lowest_loss
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64:
+      - tests/core/test_sysid_claims_under_x64.py::test_the_lowest_loss_iterate_is_returned_and_indexed_under_x64
+      - tests/core/test_sysid_claims_under_x64.py::test_a_tie_and_a_tol_stop_return_the_right_iterate_under_x64
+    mixed_dtype:
+      - tests/core/test_sysid_claims_under_x64.py::test_the_lowest_loss_iterate_is_returned_and_indexed_under_x64
+      - tests/core/test_sysid_claims_under_x64.py::test_a_tie_and_a_tol_stop_return_the_right_iterate_under_x64
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_every_fitter_returns_an_iterate_no_worse_than_any_it_evaluated
@@ -1400,8 +1421,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_with_the_default_tol_fit_never_reports_converged
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_converged_is_the_tol_test_alone_for_fit_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_converged_is_the_tol_test_alone_for_fit_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1433,8 +1454,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_takes_no_step_returns_its_input_bit_for_bit
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_every_leaf_no_step_moved_is_the_value_that_went_in_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_every_leaf_no_step_moved_is_the_value_that_went_in_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1533,8 +1554,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
@@ -1571,7 +1592,7 @@ claims:
   domains:
     f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_brings_a_clipped_coordinate_back_into_its_range
     f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_brings_a_clipped_coordinate_back_into_its_range[float64]'
-    mixed_dtype: TODO-oracle
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_a_clipped_float32_coordinate_comes_back_in_an_x64_process
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_brings_a_clipped_coordinate_back_into_its_range
@@ -1754,8 +1775,8 @@ claims:
     (MADD-ANO-135; tests/core/test_sysid_hold_in_any_units.py).
   domains:
     f32: tests/core/test_sysid_hold_never_raises_the_loss.py::test_a_hold_that_would_raise_the_loss_is_declined_and_said_so
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_a_hold_that_would_raise_the_loss_is_declined_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_a_hold_that_would_raise_the_loss_is_declined_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1827,8 +1848,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_undetermined_directions.py::test_fewer_iterations_than_parameters_answers_none_not_full_rank
-    f64: TODO-fix
-    mixed_dtype: TODO-fix
+    f64: tests/core/test_sysid_claims_under_x64.py::test_excited_rank_none_means_the_question_was_not_answered_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_excited_rank_none_means_the_question_was_not_answered_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1863,8 +1884,12 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_undetermined_directions.py::test_a_rotating_null_direction_is_reported_as_full_rank
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64:
+      - tests/core/test_sysid_claims_under_x64.py::test_a_rotating_null_direction_is_reported_as_full_rank_under_x64
+      - tests/core/test_sysid_claims_under_x64.py::test_a_weakly_identified_direction_is_kept_not_held_under_x64
+    mixed_dtype:
+      - tests/core/test_sysid_claims_under_x64.py::test_a_rotating_null_direction_is_reported_as_full_rank_under_x64
+      - tests/core/test_sysid_claims_under_x64.py::test_a_weakly_identified_direction_is_kept_not_held_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1930,8 +1955,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_undetermined_directions.py::test_multiple_shooting_scale_does_not_depend_on_the_schedule
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: TODO-fix
+    mixed_dtype: TODO-fix
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1958,8 +1983,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_hold_never_raises_the_loss.py::test_each_fitter_hands_the_hold_its_selected_point
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: TODO-fix
+    mixed_dtype: 'tests/core/test_sysid_claims_under_x64.py::test_the_guard_reads_the_iterate_the_fitter_returns_under_x64[mixed]'
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -1994,8 +2019,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_multiple_shooting_that_walks_away_returns_its_start_and_seed_states
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_that_walks_away_returns_its_start_and_seed_states_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_that_walks_away_returns_its_start_and_seed_states_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -2027,16 +2052,32 @@ claims:
     and window states.  The window states are returned as selected; the
     parameters are too unless the guard held a direction, in which case
     the returned pair's loss is within the guard's tolerance of best_loss
-    (2**10 * eps relative, plus the rounding of the held point).
+    (2**10 * eps relative, plus the rounding of the held point).  A leaf
+    no step moved is returned as it went in, while best_loss was evaluated
+    after its round trip through the optimiser's coordinates, so for a
+    log leaf the two can differ by the loss's change over one ulp of it.
   notes: >-
     The two docstrings disagree.  Measured on the spring scale degeneracy
     (60 iterations, lr 0.05): exact without the guard; with it (excited
     rank 2, drift 0.041) the recomputed loss matched to the last bit,
-    which the guard's tolerance does not promise.
+    which the guard's tolerance does not promise.  Domain matrix
+    (f64): a run that returns its start (SYS-070) returns the start's
+    bits (SYS-054), but best_loss is the loss at exp(log(k)), one float64
+    ulp from k = 30.03, and near the optimum that is 5.2e-13 relative
+    (2357 ulps of the loss); pinned by
+    test_multiple_shooting_best_loss_is_exactly_the_returned_pairs_under_x64[float64]
+    (strict xfail).  float32 leaves round-trip exactly through the
+    float64 optimiser's coordinates; in float32 the same happens for any
+    value whose exp(log(p)) moves (30.0 does).  Guess: sysid.py ~4790,
+    best.loss beside to_params(theta), which restores unmoved leaves.
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64:
+      - 'tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_best_loss_is_exactly_the_returned_pairs_under_x64[float64]'
+      - 'tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_best_loss_is_the_returned_pairs_with_the_guard_under_x64[float64]'
+    mixed_dtype:
+      - 'tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_best_loss_is_exactly_the_returned_pairs_under_x64[mixed]'
+      - 'tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_best_loss_is_the_returned_pairs_with_the_guard_under_x64[mixed]'
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -2064,8 +2105,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid.py::test_fit_multiple_shooting_recovers_from_noisy_window_starts
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_recovers_from_noisy_window_starts_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_multiple_shooting_recovers_from_noisy_window_starts_under_x64
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid.py::test_fit_multiple_shooting_recovers_from_noisy_window_starts
@@ -2116,7 +2157,7 @@ claims:
   domains:
     f32: tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
     f64: TODO-fix
-    mixed_dtype: TODO-fix
+    mixed_dtype: tests/core/test_sysid_fit_lm_step_tol.py::test_the_default_step_tol_follows_the_working_precision
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -2181,8 +2222,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on_the_bound
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_no_converged_test_fires_while_a_bound_coordinate_could_descend_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_no_converged_test_fires_while_a_bound_coordinate_could_descend_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -2222,7 +2263,7 @@ claims:
   domains:
     f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual
     f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system[float64]'
-    mixed_dtype: TODO-oracle
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_for_every_scaling_with_float32_leaves_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -2263,7 +2304,7 @@ claims:
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter
     f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system[float64]'
-    mixed_dtype: TODO-oracle
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_the_marquardt_step_does_not_depend_on_the_units_of_a_float32_parameter_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -2295,8 +2336,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid_fit_returns_lowest_loss_iterate.py::test_fit_lm_ending_on_an_accepted_step_reports_that_step
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_reports_the_iterate_each_ending_returns_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_reports_the_iterate_each_ending_returns_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a
@@ -2358,8 +2399,8 @@ claims:
   status: verified
   domains:
     f32: tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_fit_recovers_stiffness_and_damping_with_mass_frozen_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fit_recovers_stiffness_and_damping_with_mass_frozen_under_x64
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid.py::test_fit_recovers_k_c_with_mass_frozen_by_spec
@@ -2397,8 +2438,8 @@ claims:
     (MADD-ANO-135).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults
-    f64: TODO-oracle
-    mixed_dtype: TODO-oracle
+    f64: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults_under_x64
     16bit: narrowed
     jit: n/a
     grad: n/a

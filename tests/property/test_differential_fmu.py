@@ -51,7 +51,7 @@ wrapper as a fourth path, through ``ctypes`` against a bridge of its own, and
 without ``compile()`` before ``build_model_description`` -- on a multi-rate
 graph and on a sub-cycled coupling group, each write followed by an export
 wired as the guide wires one.  The graph path takes the same write and runs
-what ``gm.step`` runs.  Known failing: H3, a structural write pending at the
+what ``gm.step`` runs.  Known failing: B1-H3, a structural write pending at the
 export (the FMU runs the model from before the write).
 
 Tolerance: none -- the paths call one compiled computation with the same
@@ -1366,7 +1366,7 @@ def _ops_around_a_write(write: tuple, compile_first: bool) -> list:
             ("reset",), ("step", 1), ("reinstantiate",), ("step", 2)]
 
 
-_H3_REASON = ("H3: an FMU built over a pending structural node.params write runs the old "
+_H3_REASON = ("B1-H3: an FMU built over a pending structural node.params write runs the old "
               "model: build_model_description and the guide's sidecar wiring "
               "(step_fn=gm._compiled_step) never check gm._dirty; pending fix")
 
@@ -1419,7 +1419,7 @@ def _write_ops(draw, model: Model, graph: str):
         kind = draw(st.sampled_from(["constant", "structural"]))
         node, key, value = writes[kind]
         compile_first = True if kind == "structural" else draw(st.booleans())
-        # The structural write pending at export is H3's; drawn only by the
+        # The structural write pending at export is B1-H3's; drawn only by the
         # pinned cases above until it is fixed.
         at = draw(st.integers(min_value=0, max_value=len(ops)))
         ops.insert(at, ("write", node, key, value, compile_first))

@@ -25,9 +25,9 @@ float32 leaves in an x64 graph.  "Away from thresholds": truths at 20-80%
 of each range, starts inside it, generous budgets, a coupling tolerance two
 orders above the float32 floor and a contraction rate of 0.06-0.48.
 
-**Known failing:** H1 -- under x64 the identifiability guard misses the
+**Known failing:** B1-H1 -- under x64 the identifiability guard misses the
 spring's exact ``(k, c, m)`` scale degeneracy (rank 3 where float32 holds
-the scale at rank 2), with float64 and with float32 leaves; L1 --
+the scale at rank 2), with float64 and with float32 leaves; B1-L1 --
 ``fit_lm`` reports ``converged=False`` at its float64 floor where float32
 converges.
 
@@ -350,7 +350,7 @@ def test_fit_multiple_shooting_agrees_across_precisions():
 # Known failing
 # ---------------------------------------------------------------------------
 
-_H1_REASON = ("H1: under x64 the identifiability guard misses the spring's exact (k, c, m) "
+_H1_REASON = ("B1-H1: under x64 the identifiability guard misses the spring's exact (k, c, m) "
               "scale degeneracy: _ExcitationTracker.split (sysid.py ~2984) compares a float64 "
               "eigh's resolution with a cutoff below it, and takes eps from the promoted "
               "theta; pending fix")
@@ -377,7 +377,7 @@ def test_float32_leaves_in_an_x64_graph_hold_the_scale_degeneracy_as_float32_doe
 
 @pytest.mark.parametrize("truth_damping", [1e-6, 0.0])
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "L1: under x64 fit_lm reports converged=False at its float64 floor: the floor rule's "
+    "B1-L1: under x64 fit_lm reports converged=False at its float64 floor: the floor rule's "
     "damping ladder (sysid.py ~4471) ends one rung short of a candidate within step_tol; "
     "pending fix"))
 def test_fit_lm_is_converged_at_its_floor_in_both_precisions(truth_damping):
@@ -392,7 +392,7 @@ def test_a_coordinate_started_at_its_truth_is_counted_alike_in_both_precisions()
     truth: its residual block is zero throughout, so no evaluated gradient
     points along it.  float32 reports ``excited_rank=2``; float64 counts the
     never-excited direction (3), its zero eigenvalue read at ``eigh``'s
-    resolution against a cutoff far below it -- H1's mechanism on a problem
+    resolution against a cutoff far below it -- B1-H1's mechanism on a problem
     with no degeneracy at all."""
     r32, r64 = both(_worker(), "blocks_fit_lm", kinds=["clip", "logit", "log"],
                     truth_at=[0.5, 0.75, 0.78125], start_at=[0.5, 0.8, 0.5])
@@ -400,7 +400,7 @@ def test_a_coordinate_started_at_its_truth_is_counted_alike_in_both_precisions()
 
 
 def test_the_known_failing_cases_converge_in_float32():
-    """The float32 halves of H1 and L1 hold today: the scale is held at
+    """The float32 halves of B1-H1 and B1-L1 hold today: the scale is held at
     rank 2, and the floor fit converges.  (So the strict xfails above fail
     on the float64 side, as their reasons say.)"""
     r = cases.run_case("spring_scale_guard", {"fitter": "fit_lm", "n_iter": 10})
@@ -422,7 +422,7 @@ def _starts(draw, truth_at):
     started *at* its truth is a decision threshold: its residual block is
     zero, so no gradient the run evaluates points along it, and whether it
     counts as excited is decided by rounding (found at ``ci`` depth; the
-    float64 half of it is H1's, pinned below)."""
+    float64 half of it is B1-H1's, pinned below)."""
     out = []
     for t in truth_at:
         d = draw(st.floats(0.05, 0.4))

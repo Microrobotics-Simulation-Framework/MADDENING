@@ -52,7 +52,7 @@ Documented differences, which the oracle allows and nothing else:
 
 Known disagreements, pinned as strict xfails:
 
-* **M2** -- ``transform="log"`` with no lower bound advertises no ``min``,
+* **B1-M2** -- ``transform="log"`` with no lower bound advertises no ``min``,
   so a bridge whose sidecar has no specs accepts ``<= 0``.
 * **N1** -- the REST route stores a numeric string (``"1.5"``) in a float
   leaf as the number, while every FMU door refuses a string and the
@@ -61,6 +61,16 @@ Known disagreements, pinned as strict xfails:
   spacing is subnormal (``TINY <= |b| < 2**-102``) is advertised one float
   inside it, a distance XLA flushes to zero, where ``ParamSpec.check``
   refuses; a bridge whose sidecar has no specs takes it.
+
+The restore and construction doors and the wrapper nodes (the end of the
+module) add: **B2-H1** -- a checkpoint load (``load_state``,
+``POST /checkpoint/load``) restores what PUT refuses: out of bounds,
+non-finite, a boolean, a value the constructor refuses; **B2-L10** --
+``POST /graph/nodes`` applies no ``ParamSpec`` bounds; **B2-H2** -- a write
+to a ``HybridNode`` is lost; **N3** -- ``POST /graph/nodes`` takes a boolean
+for a float constant; **N4** -- the FMU doors and ``check_params`` take a
+value the node's constructor refuses (a ``HeatNode`` past its Fourier
+limit).  The sharded wrappers agree.
 
 Tolerance: none.  Acceptance is a yes or no, and a stored value is compared
 bit for bit.
@@ -77,6 +87,7 @@ import io
 import json
 import math
 import warnings
+from pathlib import Path
 from typing import Any, Optional
 
 import jax
@@ -93,17 +104,22 @@ from maddening.core.params import ParamSpec
 from maddening.fmi import build_model_description
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
 from maddening.fmi.tcp_bridge import FmuTcpBridge, state_of
-from maddening.nodes import SpringDamperNode
+from maddening.core.simulation.hybrid_node import HybridNode
+from maddening.nodes import HeatNode, SpringDamperNode
 
 from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY, EXAMPLES_STANDARD
-from tests.property.differential import no_cloud_launch, note, tmp_dir
+from tests.property.differential import (
+    assert_nothing_written,
+    graph_snapshot,
+    no_cloud_launch,
+    note,
+    tmp_dir,
+)
 
-NODE, KEY = "spring", "stiffness"
-NAME = f"{NODE}.params.{KEY}"
 LEAF_DTYPE = np.dtype(np.float32)
 TINY = float(np.finfo(np.float32).tiny)
 SUBNORMAL_MIN = float(np.nextafter(np.float32(0), np.float32(1)))
-#: The leaf's value when every FMU in this module is instantiated.
+#: The spring's stiffness when every FMU in this module is instantiated.
 INITIAL_VALUE = np.float32(30.0)
 
 
@@ -113,36 +129,52 @@ def _no_cloud():
         yield
 
 
-def _graph() -> GraphManager:
+def _spring_graph() -> GraphManager:
     gm = GraphManager()
-    gm.add_node(SpringDamperNode(NODE, 0.01, stiffness=float(INITIAL_VALUE), damping=2.0,
-                                 rest_length=0.4,
-                                 initial_position=0.5))
-    gm.add_external_input(NODE, "anchor_position")
+    gm.add_node(SpringDamperNode("spring", 0.01, stiffness=float(INITIAL_VALUE), damping=2.0,
+                                 rest_length=0.4, initial_position=0.5))
+    gm.add_external_input("spring", "anchor_position")
     gm.compile()
     return gm
 
 
-class Doors:
-    """One compiled graph and one REST client over it, for the module."""
+class Subject:
+    """One compiled graph, the leaf the doors write (``node``, ``key``), and
+    a REST client over the graph with a checkpoint root of its own."""
 
-    def __init__(self, root: str) -> None:
-        self.gm = _graph()
+    def __init__(self, label: str, factory, node: str, key: str, root: str) -> None:
+        self.label, self.node, self.key = label, node, key
+        self.name = f"{node}.params.{key}"
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)    # a lone node is "disconnected"
+            self.gm = factory()
         self.initial = jax.tree.map(lambda x: x, self.gm.params)
+        self.initial_value = np.asarray(self.initial["nodes"][node][key])
+        self.root = root
         self.client = TestClient(
             SimulationServer(node_registry={"SpringDamperNode": SpringDamperNode},
                              graph_manager=self.gm, checkpoint_root=root).create_app(),
             raise_server_exceptions=False)
 
-    def reset(self, spec: ParamSpec) -> None:
+    def __repr__(self) -> str:
+        return f"Subject({self.label})"
+
+    def reset(self, spec: Optional[ParamSpec]) -> None:
+        """Back to the compiled state and parameters; ``spec`` declared on the
+        leaf (``None``: the node's own declaration is kept)."""
         self.gm.params = jax.tree.map(lambda x: x, self.initial)
-        self.gm.set_param_spec(NODE, KEY, spec)
+        self.gm.reset_state()
+        if spec is not None:
+            self.gm.set_param_spec(self.node, self.key, spec)
+
+    def leaf(self) -> np.ndarray:
+        return np.asarray(self.gm.params["nodes"][self.node][self.key])
 
 
 @pytest.fixture(scope="module")
 def doors(_no_cloud):
     with tmp_dir() as root:
-        yield Doors(root)
+        yield Subject("spring", _spring_graph, "spring", "stiffness", root)
 
 
 # ---------------------------------------------------------------------------
@@ -160,17 +192,17 @@ def _refused(message: str) -> Outcome:
     return False, None, message
 
 
-def door_check_params(gm: GraphManager, value) -> Outcome:
+def door_check_params(s: Subject, value) -> Outcome:
     """``check_params`` of the live tree with the leaf at ``value`` held in
     the leaf's dtype (D1).  A value that is not a number is not asked (D2)."""
     if not is_number(value):
         return _refused("not asked: not a number (D2)")
     with np.errstate(over="ignore", under="ignore", invalid="ignore"):
         held = np.asarray(value, np.float64).astype(LEAF_DTYPE)
-    tree = jax.tree.map(lambda x: x, gm.params)
-    tree["nodes"][NODE][KEY] = jnp.asarray(held)
+    tree = jax.tree.map(lambda x: x, s.gm.params)
+    tree["nodes"][s.node][s.key] = jnp.asarray(held)
     try:
-        gm.check_params(tree)
+        s.gm.check_params(tree)
     except ValueError as exc:
         return _refused(str(exc))
     return _accepted(held)
@@ -188,13 +220,13 @@ def _sidecar(gm: GraphManager, md, *, specs: bool) -> FmuSidecar:
     ))
 
 
-def door_sidecar(gm: GraphManager, md, value) -> Outcome:
-    side = _sidecar(gm, md, specs=True)
+def door_sidecar(s: Subject, md, value) -> Outcome:
+    side = _sidecar(s.gm, md, specs=True)
     try:
-        side.set_params({NAME: value})
+        side.set_params({s.name: value})
     except (KeyError, ValueError) as exc:
         return _refused(str(exc))
-    return _accepted(side.params["nodes"][NODE][KEY])
+    return _accepted(side.params["nodes"][s.node][s.key])
 
 
 class BridgeRefusedToStart(Exception):
@@ -219,12 +251,12 @@ def _stored_by_bridge(bridge: FmuTcpBridge, vr: int) -> np.ndarray:
     return np.asarray(reply["values"][0], np.float64).astype(LEAF_DTYPE)
 
 
-def door_bridge_set(gm: GraphManager, md, value, *, specs: bool) -> Outcome:
+def door_bridge_set(s: Subject, md, value, *, specs: bool) -> Outcome:
     try:
-        bridge = _bridge(gm, md, specs=specs)
+        bridge = _bridge(s.gm, md, specs=specs)
     except BridgeRefusedToStart as exc:
         return _refused(f"the bridge refused to start: {exc}")
-    vr = next(v.value_reference for v in md.variables if v.name == NAME)
+    vr = next(v.value_reference for v in md.variables if v.name == s.name)
     try:
         reply = bridge.handle({"op": "set", "vr": [vr], "values": [value]})
         if not reply["ok"]:
@@ -235,34 +267,31 @@ def door_bridge_set(gm: GraphManager, md, value, *, specs: bool) -> Outcome:
 
 
 def _archive_member(value) -> Any:
-    """``value`` as an FMU-state archive member: in its own dtype (a Python
-    float is float64, as an importer's double), so the bridge's
-    representability check sees the value and not a float32 already cast."""
-    if isinstance(value, (bool, int, float)):
-        return np.asarray(value)
-    if isinstance(value, str):
+    """``value`` as an archive member (an FMU state or a checkpoint): in its
+    own dtype (a Python float is float64, as an importer's double), so a
+    representability check sees the value and not a float32 already cast;
+    ``None`` for what no archive can carry (``None``, a mapping)."""
+    if isinstance(value, (bool, int, float, str)):
         return np.asarray(value)
     if isinstance(value, list):
         return np.asarray(value, dtype=np.float64)
-    return None                                         # not writable into an archive
+    return None
 
 
-def door_bridge_set_state(gm: GraphManager, md, value, *, specs: bool) -> Outcome:
+def door_bridge_set_state(s: Subject, md, value, *, specs: bool) -> Outcome:
     member = _archive_member(value)
     if member is None:
-        # ``None`` or a mapping cannot be an npz member at all: an archive
-        # cannot carry it, so this door is refused by construction.
         return _refused("not representable in an FMU-state archive")
     try:
-        bridge = _bridge(gm, md, specs=specs)
+        bridge = _bridge(s.gm, md, specs=specs)
     except BridgeRefusedToStart as exc:
         return _refused(f"the bridge refused to start: {exc}")
-    vr = next(v.value_reference for v in md.variables if v.name == NAME)
+    vr = next(v.value_reference for v in md.variables if v.name == s.name)
     try:
         blob = state_of(bridge.handle({"op": "get_state"}))
         with np.load(io.BytesIO(blob), allow_pickle=False) as data:
             members = {k: data[k] for k in data.files}
-        members[f"p/nodes/{NODE}/{KEY}"] = member
+        members[f"p/nodes/{s.node}/{s.key}"] = member
         buf = io.BytesIO()
         np.savez(buf, **members)
         reply = bridge.handle({"op": "set_state",
@@ -274,34 +303,120 @@ def door_bridge_set_state(gm: GraphManager, md, value, *, specs: bool) -> Outcom
         bridge.stop()
 
 
-def door_rest(doors: Doors, value) -> Outcome:
-    body = json.dumps({"params": {KEY: value}}, allow_nan=True)
-    resp = doors.client.put(f"/graph/params/{NODE}", content=body,
-                            headers={"content-type": "application/json"})
+def _refusal_changed_nothing(s: Subject, before: dict, door: str, value) -> None:
+    assert_nothing_written(s.gm, before, what=f"{door} refused {value!r}")
+
+
+def door_rest(s: Subject, value) -> Outcome:
+    before = graph_snapshot(s.gm)
+    body = json.dumps({"params": {s.key: value}}, allow_nan=True)
+    resp = s.client.put(f"/graph/params/{s.node}", content=body,
+                        headers={"content-type": "application/json"})
     assert resp.status_code < 500, f"{resp.status_code}: {resp.text}"
     if resp.status_code != 200:
+        _refusal_changed_nothing(s, before, "PUT /graph/params", value)
         return _refused(f"{resp.status_code}: {resp.json().get('detail')}")
-    return _accepted(np.asarray(doors.gm.params["nodes"][NODE][KEY]))
+    return _accepted(s.leaf())
 
 
-def every_door(doors: Doors, spec: ParamSpec, value) -> dict[str, Outcome]:
+def _checkpoint_with(s: Subject, value) -> Optional[str]:
+    """A checkpoint of the graph as it stands with the leaf's member
+    replaced by ``value``, as a file under the subject's checkpoint root;
+    ``None`` for a value no archive can carry."""
+    member = _archive_member(value)
+    if member is None:
+        return None
+    base = s.gm.save_state(Path(s.root) / "base.npz")
+    with np.load(base, allow_pickle=False) as data:
+        members = {k: data[k] for k in data.files}
+    key = f"_params/{s.node}/{s.key}"
+    assert key in members, sorted(members)
+    members[key] = member
+    np.savez(Path(s.root) / "edited.npz", **members)
+    return "edited.npz"
+
+
+def door_load_state(s: Subject, value) -> Outcome:
+    name = _checkpoint_with(s, value)
+    if name is None:
+        return _refused("not representable in a checkpoint")
+    before = graph_snapshot(s.gm)
+    try:
+        s.gm.load_state(Path(s.root) / name)
+    except (ValueError, TypeError, KeyError) as exc:
+        _refusal_changed_nothing(s, before, "load_state", value)
+        return _refused(f"{type(exc).__name__}: {exc}")
+    return _accepted(s.leaf())
+
+
+def door_rest_load(s: Subject, value) -> Outcome:
+    name = _checkpoint_with(s, value)
+    if name is None:
+        return _refused("not representable in a checkpoint")
+    before = graph_snapshot(s.gm)
+    resp = s.client.post("/checkpoint/load", params={"path": name})
+    assert resp.status_code < 500, f"{resp.status_code}: {resp.text}"
+    if resp.status_code != 200:
+        _refusal_changed_nothing(s, before, "POST /checkpoint/load", value)
+        return _refused(f"{resp.status_code}: {resp.json().get('detail')}")
+    return _accepted(s.leaf())
+
+
+def door_post_node(s: Subject, value) -> Outcome:
+    """``POST /graph/nodes`` building a node of the subject's class with
+    ``key`` at ``value``, into a graph of its own (the class's own specs)."""
+    gm = GraphManager()
+    with tmp_dir() as root:
+        client = TestClient(SimulationServer(node_registry={"SpringDamperNode": SpringDamperNode},
+                                             graph_manager=gm, checkpoint_root=root).create_app(),
+                            raise_server_exceptions=False)
+        body = json.dumps({"type": "SpringDamperNode", "name": "built", "timestep": 0.01,
+                           "params": {s.key: value}}, allow_nan=True)
+        resp = client.post("/graph/nodes", content=body,
+                           headers={"content-type": "application/json"})
+    assert resp.status_code < 500, f"{resp.status_code}: {resp.text}"
+    if resp.status_code not in (200, 201):
+        assert "built" not in gm._nodes, "a refused POST left its node behind"  # noqa: SLF001
+        return _refused(f"{resp.status_code}: {resp.json().get('detail')}")
+    built = gm.get_node("built")
+    # A value the class does not treat as a float constant (a boolean) is
+    # not a leaf of its pytree: what the node holds is then what it stores.
+    return _accepted(built.params_pytree().get(s.key, np.asarray(built.params[s.key])))
+
+
+WRITE_DOORS = ("check_params", "sidecar.set_params", "bridge.set (specs)",
+               "bridge.set (no specs)", "bridge.set_state (specs)",
+               "bridge.set_state (no specs)", "REST PUT")
+RESTORE_DOORS = ("load_state", "POST /checkpoint/load")
+
+
+def every_door(s: Subject, spec: Optional[ParamSpec], value, *, restore: bool = False,
+               construct: bool = False) -> dict[str, Outcome]:
     """Each door's answer to writing ``value`` under ``spec``, on a graph
-    put back where it started."""
-    doors.reset(spec)
-    gm = doors.gm
+    put back where it started.  The FMU doors are asked only where the
+    description exports the leaf (a wrapper class need not be ``STABLE``)."""
+    s.reset(spec)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        md = build_model_description(gm, model_name="Acceptance")
-    out = {
-        "check_params": door_check_params(gm, value),
-        "sidecar.set_params": door_sidecar(gm, md, value),
-        "bridge.set (specs)": door_bridge_set(gm, md, value, specs=True),
-        "bridge.set (no specs)": door_bridge_set(gm, md, value, specs=False),
-        "bridge.set_state (specs)": door_bridge_set_state(gm, md, value, specs=True),
-        "bridge.set_state (no specs)": door_bridge_set_state(gm, md, value, specs=False),
-        "REST PUT": door_rest(doors, value),
-    }
-    doors.reset(spec)
+        md = build_model_description(s.gm, model_name="Acceptance")
+    out = {"check_params": door_check_params(s, value)}
+    if any(v.name == s.name for v in md.variables):
+        out.update({
+            "sidecar.set_params": door_sidecar(s, md, value),
+            "bridge.set (specs)": door_bridge_set(s, md, value, specs=True),
+            "bridge.set (no specs)": door_bridge_set(s, md, value, specs=False),
+            "bridge.set_state (specs)": door_bridge_set_state(s, md, value, specs=True),
+            "bridge.set_state (no specs)": door_bridge_set_state(s, md, value, specs=False),
+        })
+    out["REST PUT"] = door_rest(s, value)
+    s.reset(spec)
+    if restore:
+        out["load_state"] = door_load_state(s, value)
+        s.reset(spec)
+        out["POST /checkpoint/load"] = door_rest_load(s, value)
+        s.reset(spec)
+    if construct:
+        out["POST /graph/nodes"] = door_post_node(s, value)
     return out
 
 
@@ -323,9 +438,13 @@ def lost_in_the_dtype(value) -> bool:
     return bool(not np.isfinite(held) or held == 0)
 
 
-def check_acceptance(doors: Doors, spec: ParamSpec, value) -> str:
-    outcomes = every_door(doors, spec, value)
-    note(f"spec={spec!r} value={value!r}")
+def check_acceptance(s: Subject, spec: Optional[ParamSpec], value, *, restore: bool = False,
+                     construct: bool = False, only: Optional[tuple[str, ...]] = None) -> str:
+    """Hold every door (or ``only`` these) to the oracle for one value."""
+    outcomes = every_door(s, spec, value, restore=restore, construct=construct)
+    if only is not None:
+        outcomes = {door: o for door, o in outcomes.items() if door in only}
+    note(f"{s!r} spec={spec!r} value={value!r}")
     for door, (ok, stored, message) in outcomes.items():
         note(f"  {door:28} {'accepted ' + repr(stored) if ok else 'refused: ' + message[:140]}")
     compared = dict(outcomes)
@@ -335,8 +454,9 @@ def check_acceptance(doors: Doors, spec: ParamSpec, value) -> str:
         if lost_in_the_dtype(value):
             with np.errstate(over="ignore", under="ignore"):
                 held = np.float64(value).astype(LEAF_DTYPE)
+            declared = spec if spec is not None else s.gm.param_specs()["nodes"][s.node][s.key]
             try:
-                spec.check(jnp.asarray(held), name=KEY)
+                declared.check(jnp.asarray(held), name=s.key)
                 expected = True
             except ValueError:
                 expected = False
@@ -348,27 +468,37 @@ def check_acceptance(doors: Doors, spec: ParamSpec, value) -> str:
         # D4: the REST request model bounds every JSON integer, whatever the
         # leaf it is for (``SetNodeParamsRequest``: a node may turn one into
         # an array dimension), so it is a 422 there.
-        ok, _, message = compared.pop("REST PUT")
-        assert not ok and message.startswith("422"), message
+        for door in ("REST PUT", "POST /graph/nodes"):
+            if door in compared:
+                ok, _, message = compared.pop(door)
+                assert not ok and message.startswith("422"), (door, message)
     if is_number(value) and math.isfinite(value) and not lost_in_the_dtype(value) \
-            and np.float32(value) == INITIAL_VALUE:
+            and np.float32(value) == s.initial_value:
         # D3: a snapshot restores a parameter at the value the FMU was
         # instantiated with whatever its bounds (``set_fmu_state``).
         for door in ("bridge.set_state (specs)", "bridge.set_state (no specs)"):
-            ok, _, message = compared.pop(door)
-            assert ok or "refused to start" in message, (door, message)
+            if door in compared:
+                ok, _, message = compared.pop(door)
+                assert ok or "refused to start" in message, (door, message)
     verdicts = {door: ok for door, (ok, _, _) in compared.items()}
+    assert verdicts, "no door was compared"
     assert len(set(verdicts.values())) == 1, (
-        f"the doors disagree on {value!r} under {spec!r}: "
+        f"the doors disagree on {value!r} under {spec!r} ({s!r}): "
         + "; ".join(f"{d}: {'accepted' if ok else 'refused (' + compared[d][2][:100] + ')'}"
                     for d, ok in verdicts.items()))
     accepted = next(iter(verdicts.values()))
     if accepted:
-        stored = {door: s for door, (_, s, _) in compared.items()}
-        reference = stored["sidecar.set_params"]
-        for door, s in stored.items():
-            assert s.dtype == reference.dtype and s.tobytes() == reference.tobytes(), (
-                f"{door} stored {s!r}, the sidecar {reference!r}")
+        # The same resulting model: every door that took the value holds
+        # the same leaf, bit for bit.
+        stored = {door: st_ for door, (_, st_, _) in compared.items()}
+        reference_door = next(d for d in ("sidecar.set_params", "check_params", "REST PUT")
+                              if d in stored) if any(
+            d in stored for d in ("sidecar.set_params", "check_params", "REST PUT")) else next(
+            iter(stored))
+        reference = stored[reference_door]
+        for door, st_ in stored.items():
+            assert st_.dtype == reference.dtype and st_.tobytes() == reference.tobytes(), (
+                f"{door} holds {st_!r} after accepting {value!r}, {reference_door} {reference!r}")
     return "accepted" if accepted else "refused"
 
 
@@ -408,7 +538,7 @@ def specs(draw, *, domain: str = "main") -> ParamSpec:
     """A valid ``ParamSpec`` of every shape.
 
     ``domain="main"`` leaves out the two known disagreements' domains: a
-    ``log`` spec with no lower bound (M2) and a ``log`` / ``logit`` bound in
+    ``log`` spec with no lower bound (B1-M2) and a ``log`` / ``logit`` bound in
     the flushed band (N2).  ``"M2"`` and ``"N2"`` draw only theirs."""
     if domain == "M2":
         return ParamSpec(bounds=(None, None), transform="log")
@@ -496,14 +626,14 @@ def test_every_door_agrees_at_a_subnormal_lower_bound_of_a_log_coordinate(doors,
 
 @pytest.mark.parametrize("value", [-1.0, 0.0, -0.0, -1e-40, 1e-40])
 @pytest.mark.xfail(strict=True, reason=(
-    "M2: ParamSpec(transform='log') with no lower bound advertises no min, so a bridge "
+    "B1-M2: ParamSpec(transform='log') with no lower bound advertises no min, so a bridge "
     "whose sidecar has no specs accepts a value <= 0; pending fix"))
 def test_a_log_spec_without_a_lower_bound_is_held_by_every_door(doors, value):
     check_acceptance(doors, ParamSpec(transform="log"), value)
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "M2: ParamSpec(transform='log') with no lower bound advertises no min, so a bridge "
+    "B1-M2: ParamSpec(transform='log') with no lower bound advertises no min, so a bridge "
     "whose sidecar has no specs accepts a value <= 0; pending fix"))
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
@@ -576,6 +706,276 @@ def test_a_number_written_as_text_is_refused_by_the_fmu_doors(doors):
     for door, (ok, _, message) in outcomes.items():
         if door.startswith(("sidecar", "bridge")):
             assert not ok and ("number" in message or "string" in message), (door, message)
+
+
+# ===========================================================================
+# Restore doors, construction, and wrapper nodes
+# ===========================================================================
+#
+# Every write *and restore* path either accepts a value with the same
+# resulting model or refuses it with nothing changed: ``GraphManager.load_state``
+# and ``POST /checkpoint/load`` of a checkpoint carrying the value (the
+# checkpoint is the graph's own, with the leaf's member replaced), and
+# ``POST /graph/nodes`` building a node of the class with the value (against
+# the class's own specs).  A refusal by a door on the graph -- PUT, either
+# load -- must leave every node's params, every ``gm.params`` leaf, the whole
+# state and the dirty flag where they were.
+
+_B2_H1 = ("B2-H1: GraphManager.load_state and POST /checkpoint/load restore a parameter "
+          "value PUT /graph/params refuses -- outside its ParamSpec bounds, non-finite, a "
+          "boolean, a numeric string, or one the node's constructor refuses -- and answer "
+          "200; pending fix")
+_B2_L10 = ("B2-L10: POST /graph/nodes builds a node with a parameter outside its class's "
+           "ParamSpec bounds (it applies none); pending fix")
+_B2_H2 = ("B2-H2: a write to a HybridNode is lost: PUT /graph/params answers 200, and the "
+          "next read of gm.params syncs the wrapped node's unchanged value over it "
+          "(HybridNode copies its physics node's params at construction); pending fix")
+_N3 = ("N3: POST /graph/nodes builds a node with a boolean for a float constant, which "
+       "then drops out of the params pytree (structural), where PUT refuses a boolean "
+       "and every FMU door takes numbers only; pending fix")
+_N4 = ("N4: check_params, FmuSidecar.set_params and the bridge's set and set_state accept "
+       "a value the node's constructor refuses (a HeatNode thermal_diffusivity past its "
+       "Fourier limit, so the rod diverges), which PUT /graph/params refuses; pending fix")
+
+
+@pytest.mark.parametrize("value", [45.0, 0.5, float(INITIAL_VALUE)])
+def test_a_restore_door_takes_what_every_write_door_takes(doors, value):
+    """A checkpoint carrying a value every write door takes restores it,
+    and the restored graph holds the leaf the write doors store."""
+    assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value,
+                            restore=True) == "accepted"
+
+
+@pytest.mark.parametrize("value", ["abc", [1.0], None, 1e39, 1e-50])
+def test_a_restore_door_refuses_what_no_door_takes_with_nothing_changed(doors, value):
+    """A string that is no number, a misshapen member, a value no archive
+    holds, and values float32 overflows or flushes: every door refuses, and
+    the graph a refused load leaves is the graph before it."""
+    assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value,
+                            restore=True) == "refused"
+
+
+# (A numeric string is left to N1's test: PUT takes one too, so it could not
+# show B2-H1's fix.)
+@pytest.mark.parametrize("value", [-1.0, -5.0, math.nan, math.inf, True],
+                         ids=["below-bound", "damping-like", "nan", "inf", "bool"])
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H1)
+def test_a_restore_door_refuses_what_the_write_doors_refuse(doors, value):
+    check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value, restore=True)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H1)
+@settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
+@given(data=st.data())
+def test_every_restore_door_agrees_with_the_write_doors(doors, data):
+    spec = data.draw(specs(), label="spec")
+    check_acceptance(doors, spec, data.draw(values(spec), label="value"), restore=True)
+
+
+def _rod_graph() -> GraphManager:
+    """A rod at a Fourier number of 0.25: ``thermal_diffusivity`` 0.4 puts
+    it at 2.0, which the constructor refuses (limit 0.5)."""
+    gm = GraphManager()
+    gm.add_node(HeatNode("rod", 0.05, n_cells=10, length=1.0, thermal_diffusivity=0.05))
+    gm.add_external_input("rod", "heat_source", shape=(10,))
+    gm.compile()
+    return gm
+
+
+@pytest.fixture(scope="module")
+def rod(_no_cloud):
+    with tmp_dir() as root:
+        yield Subject("rod", _rod_graph, "rod", "thermal_diffusivity", root)
+
+
+def test_a_stable_diffusivity_is_taken_by_every_door(rod):
+    """The rod's own neighbourhood: a diffusivity inside the stability limit
+    is accepted and held alike by every write and restore door."""
+    assert check_acceptance(rod, None, 0.06, restore=True) == "accepted"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H1)
+def test_a_restore_door_refuses_a_diffusivity_the_constructor_refuses(rod):
+    """B2-H1's second case: the loads against PUT alone (the FMU doors'
+    answer to the same value is N4's)."""
+    check_acceptance(rod, None, 0.4, restore=True,
+                     only=("REST PUT", "load_state", "POST /checkpoint/load"))
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_N4)
+def test_every_write_door_refuses_a_diffusivity_the_constructor_refuses(rod):
+    check_acceptance(rod, None, 0.4)
+
+
+# -- construction ---------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def own_specs(_no_cloud):
+    """The spring with its class's own declaration on ``damping``
+    (``bounds=(0, None)``): what ``POST /graph/nodes`` builds against."""
+    with tmp_dir() as root:
+        yield Subject("spring, own specs", _spring_graph, "spring", "damping", root)
+
+
+@pytest.mark.parametrize("value", [1.5, 0.0, 2.0])
+def test_a_node_built_with_a_value_every_door_takes_holds_it(own_specs, value):
+    assert check_acceptance(own_specs, None, value, construct=True) == "accepted"
+
+
+@pytest.mark.parametrize("value", [math.nan, "abc", [1.0, 2.0]])
+def test_a_node_is_not_built_with_a_value_no_door_takes(own_specs, value):
+    assert check_acceptance(own_specs, None, value, construct=True) == "refused"
+
+
+@pytest.mark.parametrize("value", [-5.0, -1e-30])
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_L10)
+def test_a_node_is_not_built_with_a_value_outside_its_bounds(own_specs, value):
+    check_acceptance(own_specs, None, value, construct=True)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_N3)
+def test_a_node_is_not_built_with_a_boolean_for_a_float_constant(own_specs):
+    check_acceptance(own_specs, None, True, construct=True)
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_L10)
+@settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
+@given(data=st.data())
+def test_every_construction_door_agrees_with_the_write_doors(own_specs, data):
+    spec = own_specs.gm.param_specs()["nodes"]["spring"]["damping"]
+    value = data.draw(values(spec, kinds=("near_bound", "inside", "special")), label="value")
+    check_acceptance(own_specs, None, value, construct=True)
+
+
+# -- wrapper and composite nodes ----------------------------------------------------
+
+def _zero_correction(state, boundary_inputs, dt):
+    return {}
+
+
+def _hybrid_graph() -> GraphManager:
+    gm = GraphManager()
+    gm.add_node(HybridNode(SpringDamperNode("spring", 0.01, stiffness=float(INITIAL_VALUE),
+                                            initial_position=0.5), _zero_correction))
+    gm.compile()
+    return gm
+
+
+def _one_device_mesh():
+    from maddening.cloud.multigpu.device_mesh import create_device_mesh
+
+    return create_device_mesh(shape=(1,))
+
+
+def _sharded_stencil_graph() -> GraphManager:
+    """The sharding harness's generated stencil node (``decay`` declared
+    ``bounds=(0, None)``) inside ``ShardedStencilNode`` on one device."""
+    from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
+    from tests.cloud.multigpu import differential_sharding_support as D
+
+    cfg = D.StencilConfig(
+        mesh_shape=(1,), axis_names=("devices",), axis_map=(("devices", 0),), shape=(4,),
+        halo=(1,), fill="periodic", declares=True, contract="params", integral=None,
+        integral_name="a_total", integral_listed=False, reads_shard_info=False, kappa=None,
+        kappa_axis=0, table=None, source="none", misshapen_shape=(), gain=False, faces=False,
+        dtype="float32", wrapping="single", steps=1, seed=0, surface="run_scan")
+    gm = GraphManager()
+    gm.add_node(ShardedStencilNode(D.make_stencil_node(cfg), _one_device_mesh(),
+                                   {"devices": 0}, boundary="periodic"))
+    gm.compile()
+    return gm
+
+
+def _sharded_unstructured_graph() -> GraphManager:
+    from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
+    from tests.cloud.multigpu import differential_sharding_support as D
+
+    cfg = D.UnstructuredConfig(
+        n_devices=1, n_cells=5, assignment=(0,) * 5, partition="uneven", chords=(),
+        contract="params", integral=None, integral_name="a_total", integral_listed=False,
+        weight=None, source="none", misshapen_len=0, gain=False, dtype="float32",
+        wrapping="single", steps=1, seed=2, surface="run_scan")
+    layout = D.unstructured_layout(cfg)
+    gm = GraphManager()
+    gm.add_node(ShardedUnstructuredNode(D.unstructured_node_class("params")(cfg, layout),
+                                        _one_device_mesh(), layout))
+    gm.compile()
+    return gm
+
+
+def _sharded_rod_graph() -> GraphManager:
+    from maddening.cloud.multigpu.sharded_node import ShardedStencilNode
+
+    gm = GraphManager()
+    gm.add_node(ShardedStencilNode(HeatNode("rod", 0.01, n_cells=8, thermal_diffusivity=0.01),
+                                   _one_device_mesh(), {"devices": 0}))
+    gm.compile()
+    return gm
+
+
+WRAPPERS = {
+    "hybrid": (_hybrid_graph, "spring", "stiffness"),
+    "sharded-stencil": (_sharded_stencil_graph, "gen", "decay"),
+    "sharded-unstructured": (_sharded_unstructured_graph, "gen", "decay"),
+    "sharded-heat-rod": (_sharded_rod_graph, "rod", "thermal_diffusivity"),
+}
+_WRAPPED: dict[str, Subject] = {}
+
+
+@pytest.fixture(scope="module")
+def wrapper_root(_no_cloud):
+    with tmp_dir() as root:
+        yield root
+    _WRAPPED.clear()
+
+
+def wrapped(label: str, root: str) -> Subject:
+    if label not in _WRAPPED:
+        factory, node, key = WRAPPERS[label]
+        directory = Path(root) / label
+        directory.mkdir(parents=True, exist_ok=True)
+        _WRAPPED[label] = Subject(label, factory, node, key, str(directory))
+    return _WRAPPED[label]
+
+
+@pytest.mark.parametrize("label, value", [
+    ("sharded-stencil", 0.5), ("sharded-unstructured", 0.5), ("sharded-heat-rod", 0.02),
+])
+def test_a_wrapper_node_holds_a_write_and_a_restore_of_a_value_every_door_takes(
+        wrapper_root, label, value):
+    assert check_acceptance(wrapped(label, wrapper_root), None, value,
+                            restore=True) == "accepted"
+
+
+@pytest.mark.parametrize("label", sorted(WRAPPERS))
+def test_a_wrapper_node_refuses_a_value_outside_its_bounds_with_nothing_changed(
+        wrapper_root, label):
+    assert check_acceptance(wrapped(label, wrapper_root), None, -1.0) == "refused"
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H2)
+def test_a_hybrid_node_holds_a_write_every_door_takes(wrapper_root):
+    check_acceptance(wrapped("hybrid", wrapper_root), None, 45.0)
+
+
+@pytest.mark.parametrize("label", ["sharded-stencil", "sharded-unstructured"])
+@settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
+@given(data=st.data())
+def test_a_sharded_wrapper_takes_a_parameter_write_as_every_door_does(wrapper_root, label,
+                                                                      data):
+    s = wrapped(label, wrapper_root)
+    spec = data.draw(specs(), label="spec")
+    check_acceptance(s, spec, data.draw(values(spec), label="value"))
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_B2_H2)
+@settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
+@given(data=st.data())
+def test_a_hybrid_node_takes_a_parameter_write_as_every_door_does(wrapper_root, data):
+    s = wrapped("hybrid", wrapper_root)
+    spec = data.draw(specs(), label="spec")
+    check_acceptance(s, spec, data.draw(values(spec, kinds=("near_bound", "inside")),
+                                        label="value"))
 
 
 # Per push: tests/property/test_differential_param_acceptance.py::test_every_door_accepts_or_refuses_a_parameter_value_together

@@ -30,7 +30,7 @@ Changing one class's level between two assignments is then the metamorphic
 statement: the two descriptions differ by that class's surfaces only.
 
 Each surface is its own test, so a defect in one is pinned without hiding
-the others.  **Known failing: M1** -- inputs are not filtered.
+the others.  **Known failing: B1-M1** -- inputs are not filtered.
 
 Tolerance: none (names and attributes compared exactly).
 
@@ -265,7 +265,7 @@ def test_a_class_level_filters_exactly_its_own_surfaces(surface, data):
 
 
 @pytest.mark.xfail(strict=True, reason=(
-    "M1: build_model_description's stability filter is not applied to external inputs "
+    "B1-M1: build_model_description's stability filter is not applied to external inputs "
     "(the inputs loop, model_description.py ~949, never calls "
     "_ensure_stable_only_or_opt_in); pending fix"))
 @settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
@@ -288,7 +288,7 @@ def test_inputs_of_exported_classes_are_all_kept():
 def test_changing_one_class_changes_only_its_own_variables():
     """The metamorphic statement on its own: the spring's class between
     STABLE and EXPERIMENTAL, everything else STABLE.  Outputs, parameters
-    and clocks differ by the spring's surfaces only (its input is M1's)."""
+    and clocks differ by the spring's surfaces only (its input is B1-M1's)."""
     gm = plant()
     base = {class_key(spec.node): StabilityLevel.STABLE for spec in gm._nodes.values()}  # noqa: SLF001
     spring = class_key(gm.get_node("spring"))

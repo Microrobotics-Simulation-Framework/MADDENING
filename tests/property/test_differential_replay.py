@@ -31,7 +31,7 @@ differs.  (Measured exactly ``0.0`` for every family without carried
 history on jaxlib 0.11.0, as ``tests/core/test_sysid_claims_edges.py``
 already asserts for a single spring on every CI jaxlib.)
 
-**Known failing: H2** -- ``windowed_loss`` restarts every window with
+**Known failing: B1-H2** -- ``windowed_loss`` restarts every window with
 ``_meta`` zeroed (``_state_from_obs``), so a group whose next step reads
 carried history (a predictor, IMVJ warm starts) is replayed from another
 state: the loss at the truth is not zero and a fit started there walks off.
@@ -193,7 +193,7 @@ MULTIRATE = {"multirate-chain", "multirate-rods"}
 #: ``run_adaptive`` advances every node by one ``dt``: no multi-rate graph.
 ADAPTIVE = sorted(set(FAMILIES) - MULTIRATE)
 
-_H2_REASON = ("H2: windowed_loss zeroes the carried _meta (predictor history, IQN warm "
+_H2_REASON = ("B1-H2: windowed_loss zeroes the carried _meta (predictor history, IQN warm "
               "starts) at every window start (sysid.py _state_from_obs), so the replay "
               "starts from another state; pending fix")
 
@@ -351,7 +351,7 @@ def test_a_replay_of_a_record_with_carried_history_is_exact(name, multiple_shoot
 
 @pytest.mark.parametrize("name", sorted(HISTORY))
 def test_every_history_family_carries_history_its_next_step_reads(name):
-    """The fixtures can express H2: in each history family, a step from a
+    """The fixtures can express B1-H2: in each history family, a step from a
     state whose ``_meta`` is zeroed lands somewhere else than the step from
     the recorded state."""
     gm = family(name)

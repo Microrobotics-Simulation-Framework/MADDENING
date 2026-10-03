@@ -330,8 +330,10 @@ claims:
   area: configuration
   claim: >-
     The diagnostics cost "8 Jacobian-vector products for the spectrum and
-    11 + k + 4 n_c more for the bound per group per step (k <= 8, n_c the
-    group's floating constants)"; arnoldi_spectral_radius's n_steps "is the
+    11 + k + 5 n_p more for the bound per group per step (plus one
+    linearisation and k reverse-mode products where the state has more than
+    k entries; k <= 8, n_p the probes: every entry of a floating constant of
+    at most 64 entries, one per larger constant)"; arnoldi_spectral_radius's n_steps "is the
     number of Jacobian-vector products the call costs, with or without
     v_extra".
   sources:
@@ -342,7 +344,7 @@ claims:
   oracle: Jacobian-vector products counted by evaluating the analysis eagerly with vmap unrolled.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_jacobian_vector_products
-    - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_k_plus_four_n_c_products
+    - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_k_plus_five_n_p_products
   status: verified
 
 - id: CPL-014

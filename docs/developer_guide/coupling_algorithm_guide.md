@@ -445,9 +445,16 @@ read 0.0 on the stiff spring pair while its stiffness gradient was
 the same relative amount, and the dynamics see only their ratio.  The
 tangents and `δ` come from a Woodbury solve on an eight-vector basis of
 the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
-the cost is `11 + k + 4 n_c` Jacobian-vector products per group per step
-(`k ≤ 8`, `n_c` the floating constants) beside the spectral bound's
-eight — which is why it shares its gate.
+the cost is `11 + k + 5 n_p` Jacobian-vector products per group per step
+(`k ≤ 8`, `n_p` the probes: every entry of a floating constant of at most
+64 entries, one for a larger one) beside the spectral bound's eight, plus
+one linearisation and `k` reverse-mode products for the full resolvent
+norm where the state has more than `k` entries — which is why it shares
+its gate.  Since 0.4.0's round-5 fix the resolvent is applied exactly to
+each probe's secant (one more JVP per probe) rather than bounded by the
+Arnoldi factor, which is the resolvent restricted to the Krylov space and
+read the bound 0.19x the true error on a ring whose secant falls outside
+it; and Newton-Kantorovich takes the full-operator resolvent norm.
 
 Measured `bound / true` (jaxlib 0.11.0, float32), the fixed point's
 gradient from tight `ift` and `fori` arms that agree, every point a

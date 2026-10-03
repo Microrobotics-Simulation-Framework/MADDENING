@@ -767,19 +767,22 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        :func:`~maddening.core.coupling.acceleration.resolvent_apply`
        then solves ``(I - J) t = w`` for one JVP each.  A group whose
        range the basis did not capture reports NaN.
-    2. **One probe per floating constant** the closure-converted map
-       captures -- every parameter leaf, the pre-step states, the
-       states of nodes outside the group it reads -- each perturbed by
-       its own magnitude with a fixed-seed random sign, the others
-       held (:func:`_probe_direction`).  One JVP of ``F`` in the
-       constants per probe gives ``w_i = F_c(x_k) c_dot_i`` (and, as
-       its primal, ``F(x_k)``).  Per constant, because a relative error
-       is a different number for each and a combined direction can
-       cancel: one probe over every constant read ``0.0`` at every cap
-       on the stiff spring pair while its stiffness gradient was
-       0.8-4.8% off -- the random signs moved each node's stiffness and
-       mass by the same relative amount, and the dynamics see only
-       their ratio.
+    2. **One probe per scalar entry** of every floating constant the
+       closure-converted map captures -- every parameter leaf, the
+       pre-step states, the states of nodes outside the group it reads
+       -- each entry moved by its own magnitude, the others held; a
+       constant of more than :data:`GRADIENT_PROBE_ENTRY_LIMIT` entries
+       is probed as a whole, along one fixed-seed direction weighted by
+       its magnitudes (:func:`_probe_direction`), and ``coupling_report()``
+       names it.  One JVP of ``F`` in the constants per probe gives
+       ``w_i = F_c(x_k) c_dot_i`` (and, as its primal, ``F(x_k)``),
+       brought to the state's relative size by an exact power of two.
+       Per entry, because a relative error is a different number for
+       each and a combined direction can cancel or be dominated: one
+       probe over every constant read ``0.0`` at every cap on the stiff
+       spring pair while its stiffness gradient was 0.8-4.8% off, and
+       one |c|-weighted probe of a two-entry gain read 23.6x under the
+       error of its small entry (MADD-ANO-131).
     3. **The tangents and the direction to the fixed point.**
        ``t_i = (I - J(x_k))^{-1} w_i`` (one JVP each) is what the
        adjoint returns for probe ``i``; ``delta = (I - J(x_k))^{-1} r``
@@ -792,19 +795,24 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        per probe, so the difference is exactly zero on a map whose
        JVP does not depend on the point, rather than rounding noise
        amplified by the resolvent).
-    5. **The distance and the resolvent from the spectral bound**:
-       ``distance`` is
+    5. **The distance, and the resolvent applied to each secant**:
+       ``distance`` is the larger of
        :func:`~maddening.core.coupling.acceleration.spectral_error_bound`
-       of ``||r||`` and ``amplification`` the factor it applies, both
-       from the Arnoldi triple :func:`_spectral_rate_at` already
-       computed at ``x_k``.  Per probe the bound is
-       ``amplification * distance * ||G_i(x_k + delta) - G_i(x_k)||
-       / (||delta|| * ||t_i||)``, and the reported value is the largest
-       over the probes the fixed point responds to (``||t_i|| > 0``).
+       of ``||r||`` (the Arnoldi triple :func:`_spectral_rate_at`
+       already computed at ``x_k``) and ``||delta||``.  Per probe the
+       bound is ``distance * ||(I - J(x_k))^{-1} (G_i(x_k + delta) -
+       G_i(x_k))|| / (||delta|| * ||t_i||)`` -- the resolvent applied
+       exactly to the secant (one JVP), not its norm times the
+       Arnoldi factor, which is the resolvent restricted to the Krylov
+       space and read 0.19x the true error on a ring whose secant lies
+       outside it (MADD-ANO-131) -- and the reported value is the
+       largest over the probes the fixed point responds to
+       (``||t_i|| > 0``, or non-finite).
+    6. **Newton-Kantorovich** with the full-operator resolvent norm
+       (:func:`_full_resolvent_norm`, exact from the range basis).
 
-    ``11 + k + 4 n_c`` Jacobian-vector products in all (at most
-    ``19 + 4 n_c``, two of them for the Kantorovich check), ``n_c``
-    the number of floating constants, which is
+    ``11 + k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``19 + 5 n_p`` forward), ``n_p``
+    the number of probes, which is
     why it is gated behind ``diagnostics=True``; the per-probe products
     are ``vmap``-ed, so the primal is evaluated once.  Every input is
     ``stop_gradient``-ed: forward-only bookkeeping, and the adjoint of
@@ -876,7 +884,7 @@ def _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype):
     return matvec_t
 
 
-def _full_resolvent_norm(U, M, matvec_t):
+def _full_resolvent_norm(U, M, make_transpose):
     """``||(I - J)^{-1}||_2`` over the whole space, from the range basis; ``None`` without ``J^T``.
 
     With ``range(J)`` inside ``span(U)`` (orthonormal, ``n x k``) and
@@ -886,15 +894,17 @@ def _full_resolvent_norm(U, M, matvec_t):
     span(U, B^T)`` (at most ``2k`` dimensions) into itself and is the
     identity on ``W``'s orthogonal complement, so its norm is the larger
     of ``1`` and the norm of its compression to ``W`` -- exact, from a
-    ``2k x 2k`` SVD.  ``B`` costs ``k`` reverse-mode products
-    (``matvec_t``).  Where ``U`` is square (``n <= k``) the resolvent is
-    ``U (I - M)^{-1} U^T`` and needs no product.  ``None`` where
-    ``matvec_t`` is ``None`` and ``U`` is not square.
+    ``2k x 2k`` SVD.  ``B`` costs one linearisation of the map and ``k``
+    reverse-mode products (``make_transpose()``, called only here).  Where
+    ``U`` is square (``n <= k``) the resolvent is ``U (I - M)^{-1} U^T``
+    and needs no product.  ``None`` where the map has no transpose and
+    ``U`` is not square.
     """
     n, k = U.shape
     eye_k = jnp.eye(k, dtype=M.dtype)
     if n <= k:
         return jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2)
+    matvec_t = make_transpose()
     if matvec_t is None:
         return None
     B = jax.vmap(matvec_t)(U.T)                     # row i: u_i^T J
@@ -963,7 +973,6 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         return (s / lift) * Jv.astype(dtype)
 
     U, M, captured = jacobian_range_basis(matvec, x_sg.shape[0], dtype=dtype)
-    matvec_t = _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype)
 
     def rhs_for(row):
         return jax.jvp(
@@ -1010,13 +1019,27 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     resolved = norm(r_s) > _floor_of(jnp.full_like(res, coarse), live)
     r_dir = jnp.where(resolved, r_s, floor_dir)
     delta_s = resolvent_apply(U, M, r_dir, matvec(r_dir))
-    t_s = jax.vmap(lambda ws: resolvent_apply(U, M, ws, matvec(ws)))(s * w)
+    # Each probe's response brought to the state's own relative size by an
+    # exact power of two (``pow2_frame``), and its constant's tangent with
+    # it: every quantity below is linear in the probe, and the bound is a
+    # ratio of two of them, so the scale cancels exactly.  A probe is sized
+    # by its constant's magnitude, which says nothing about the state's:
+    # an all-zero bias probed at 1.0 beside a state near 1e-30 handed the
+    # map a tangent 1e30 times the state, and a node's ``1/u`` derivative
+    # overflowed (a non-finite tangent, which read NaN, unusable).
+    probe_frame = jax.vmap(lambda v: pow2_frame(v, mode="common"))(s * w)
+    t_s = jax.vmap(lambda ws: resolvent_apply(U, M, ws, matvec(ws)))(
+        (s * w) * probe_frame[:, None])
+    frame_ext = jnp.concatenate([probe_frame, jnp.ones((1,), dtype)])
 
     def linearisation(xx, row, ts):
         """``G_row(xx)``: the map's JVP at ``xx`` along ``(t_row, c_dot_row)``."""
+        c_dot = tuple(
+            c if c.dtype == jax.dtypes.float0 else (c * frame_ext[row]).astype(c.dtype)
+            for c in tangent_for(row))
         _, out = jax.jvp(
             lambda x_, c_: _F_dispatch(step_pure, x_, c_),
-            (xx, consts_sg), ((ts * s_inv).astype(x_dtype), tangent_for(row)),
+            (xx, consts_sg), ((ts * s_inv).astype(x_dtype), c_dot),
         )
         return out
 
@@ -1094,7 +1117,10 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # whose bound is NaN (a non-finite secant) poisons the maximum
     # rather than dropping out of it; NaN where nothing responds, or
     # where the basis did not capture the range.
-    responds = norm(t_s) > 0
+    # A probe whose tangent could not be computed (non-finite) counts as
+    # responding, so its NaN bound poisons the maximum; it used to drop
+    # out silently where the tangent was NaN (``NaN > 0`` is False).
+    responds = jnp.logical_or(norm(t_s) > 0, jnp.logical_not(jnp.isfinite(norm(t_s))))
     worst = jnp.max(jnp.where(responds, per_probe, -jnp.inf))
     worst = jnp.where(jnp.any(responds), worst, nan)
 
@@ -1127,7 +1153,8 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # point, the uncorrected bound read 0.20-0.96x the true relative
     # error with the flag True; ``h`` there is 0.48-0.58.
     step = norm(delta_s)
-    beta = _full_resolvent_norm(U, M, matvec_t)
+    beta = _full_resolvent_norm(
+        U, M, lambda: _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype))
     jac_change = norm(jac_secant_s)
     if beta is None:
         # No transpose to take the full norm with (a node the map cannot be
@@ -3983,11 +4010,11 @@ def _run_coupled_block_impl(
                     step_pure, x_star_full, consts, weights, spec_weights,
                     resolution=resolution,
                 )
-                # Its distance is the spectral bound and its resolvent
-                # factor the one that bound applies; the curvature is a
-                # second difference of the adjoint's own matvec.
-                # ``11 + k + 4 n_c`` more JVPs, ``n_c`` the floating
-                # constants (see ``_gradient_error_bound_at``).
+                # Its distance is the spectral bound (never below the Newton
+                # step); the resolvent is applied exactly to each probe's
+                # secant, a second difference of the adjoint's own matvec.
+                # ``11 + k + 5 n_p`` more JVPs, ``n_p`` the probes (see
+                # ``_gradient_error_bound_at``).
                 grad_bound = _gradient_error_bound_at(
                     step_pure, x_star_full, consts, weights,
                     rho_spec, spec_resid, spec_amp, resolution=resolution,
@@ -8755,9 +8782,12 @@ class GraphManager:
               or NaN where ``"spectral_error_bound"`` is; NaN where the
               fixed point responds to no constant and where the returned
               state is not finite.  Costs
-              ``11 + k + 4 n_c`` Jacobian-vector products per group per
-              step beside the spectral bound's eight, ``k <= 8`` and
-              ``n_c`` the number of floating constants (see
+              ``11 + k + 5 n_p`` Jacobian-vector products per group per
+              step beside the spectral bound's eight (plus one
+              linearisation and ``k`` reverse-mode products where the
+              state has more than ``k`` entries), ``k <= 8`` and ``n_p``
+              the number of probes: every entry of a floating constant of
+              at most 64 entries, one for a larger constant (see
               ``_gradient_error_bound_at``).
 
               *Why a bound*: each factor is taken on its conservative

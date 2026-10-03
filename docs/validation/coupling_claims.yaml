@@ -3549,7 +3549,13 @@ claims:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_range_larger_than_the_basis_reports_no_gradient_bound
     - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_helper_never_reports_a_number_where_none_was_computed
     - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit
+    - tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn
   status: verified
+  notes: >-
+    The round-6 audit found the check passing along delta at h = 0.19
+    and 0.37 with the bound 0.986x and 0.65x the true error, usable; h
+    now also takes the affine-covariant constant, and the bound the
+    Newton step's second-order miss (MADD-ANO-165).
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-095]'

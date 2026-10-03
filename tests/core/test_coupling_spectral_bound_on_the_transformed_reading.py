@@ -330,6 +330,47 @@ def test_a_usable_bound_holds_on_a_transformed_pair():
         _assert_bound_holds(d, true, (ab, ba))
 
 
+def test_on_the_reading_path_the_gradient_bound_stands_only_on_the_states_settled_spectrum(
+        monkeypatch):
+    """The gradient bound rests on the state's own spectral triple, not the reading's.
+
+    ``gradient_bound_usable`` is read off the report's ``spectral_usable``,
+    which is the reading's on this path; the gradient bound takes its
+    distance and resolvent from the state's triple, in the weights its own
+    norms use, so it is withdrawn (NaN) where that one did not settle.  The
+    two operators share their non-zero spectrum and their rank (the state's
+    Jacobian factors through the reading), so the triples part only where
+    the reading has more scalars than the Arnoldi takes steps, or in
+    rounding; here the state's Arnoldi residual is inflated to four times
+    the settled fraction, which leaves its bound finite and contracting, to
+    reach the gate.
+    """
+    from maddening.core import graph_manager as gm_mod
+    from maddening.core.coupling.acceleration import SPECTRAL_SETTLED_FRACTION
+
+    ab, ba = "unit-of-first", "last"
+    values = _values(np.random.default_rng(11), ab, ba, 0.9)
+    plain = _run(_mat_graph(ab, ba), values)
+    # The control: the same pair, unpatched, carries a usable gradient bound.
+    assert plain["spectral_usable"] and plain["gradient_bound_usable"], dict(plain)
+
+    real = gm_mod._spectral_rate_at
+
+    def state_triple_unsettled(*args, **kwargs):
+        out = real(*args, **kwargs)
+        if "field_reference" in kwargs:     # the untransformed path's call: untouched
+            return out
+        rho, resid, amp = out
+        return rho, jnp.maximum(resid, 4.0 * SPECTRAL_SETTLED_FRACTION * (1.0 - rho)), amp
+
+    monkeypatch.setattr(gm_mod, "_spectral_rate_at", state_triple_unsettled)
+    d = _run(_mat_graph(ab, ba), values)
+    assert d["spectral_usable"], dict(d)                    # the reading's triple settled
+    assert d["spectral_error_bound"] == plain["spectral_error_bound"], dict(d)
+    assert math.isnan(d["gradient_relative_error_bound"]), dict(d)
+    assert not d["gradient_bound_usable"], dict(d)
+
+
 # Per push: tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_transformed_pair
 @pytest.mark.slow
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)

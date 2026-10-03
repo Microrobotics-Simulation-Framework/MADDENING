@@ -70,7 +70,12 @@ import numpy as np
 from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.core.transforms import scale
 from tests.property import coupled_graphs as cg
+
+# The scaling transforms are registered on first use; the generator names them.
+scale(2.0)
+scale(0.5)
 
 #: The linear transforms an edge may carry, and the factor each applies.
 #: Powers of two (and the identity), so a transform rounds nothing.
@@ -315,12 +320,14 @@ def fixed_constants(topo: Topology, dtype="float32") -> dict:
     A three-argument node reads its gains from ``self.params`` when the
     step is traced, so they cannot be drawn per example on one compiled
     graph.  Small (``0.2 / n`` scale), so that a group the other gains are
-    rescaled around still has room to reach its drawn rate.
+    rescaled around still has room to reach its drawn rate.  Seeded by the
+    node's place among the three-argument nodes and its shape -- not by its
+    name or its index -- so a renamed topology, or one with a relay
+    inserted, holds the same constants.
     """
     out = {}
-    for k, nd in enumerate(topo.nodes):
-        if not nd.three_arg:
-            continue
+    three = [nd for nd in topo.nodes if nd.three_arg]
+    for k, nd in enumerate(three):
         rng = np.random.default_rng(10_000 + 97 * k + 13 * nd.ports + nd.n)
         G = [np.asarray(rng.normal(size=(nd.n, nd.n)) * 0.2 / nd.n, _dt(dtype))
              for _ in range(nd.ports)]
@@ -567,7 +574,7 @@ def run(built: Built, values: dict, steps: int, *, rename: Optional[dict] = None
         reports, metas = {}, {}
         diag = gm.coupling_diagnostics() if report else {}
         for gi in range(len(built.topo.groups)):
-            key = built.topo.group_key(gi, rename)
+            key = built.topo.group_key(gi)
             if key in diag:
                 reports[gi] = dict(diag[key])
             metas[gi] = cg.group_meta(gm, key)
@@ -1071,8 +1078,29 @@ class LinearModel:
         bound = K_up * R2 + float(np.linalg.norm(w * (S @ eps_vec)))
         dnorm = float(np.linalg.norm(w * (S @ d)))
         scale = np.sqrt(N) if rms else 1.0
+        # The other direction: the reported residual *is* ``||F(x) - x||`` of
+        # the returned state (``coupling_diagnostics``: "for the state x this
+        # step returned").  The float pass is within ``eta`` of ``F`` per
+        # entry, which moves the norm by at most ``||D S eta||`` (``D`` the
+        # returned-state weights, never below the residual's own); the
+        # residual's weights move by at most ``max eta / ref`` per field; the
+        # norm's own evaluation by ``(N + 4) eps``.
+        r_true = F - x
+        w_true = np.zeros(N)
+        delta = 0.0
+        for row, (node, idx) in enumerate(rows):
+            sl = slice(off[node], off[node] + self.topo.node(node).n)
+            ref = max(float(np.max(np.abs(x[sl]))), float(np.max(np.abs(F[sl]))))
+            w_true[row] = 1.0 / (rtol_eff * ref) if ref > 0 else 0.0
+            if ref > 0:
+                delta = max(delta, float(np.max(eta[sl])) / ref)
+        R_true = float(np.linalg.norm(w_true * (S @ r_true))) / scale
+        R_tol = (float(np.linalg.norm(w * (S @ eta))) / scale
+                 + 2.0 * delta * R_true
+                 + (N + 4) * self.eps * max(float(residual), R_true))
         return dnorm / scale, bound / scale, dict(K_up=K_up, eps=float(np.max(eps_vec)),
-                                                  residual=float(residual), d=d)
+                                                  residual=float(residual), d=d,
+                                                  residual_true=R_true, residual_tol=R_tol)
 
     def converged_distance(self, gi: int, pre: dict, state: dict, threshold: float):
         """``(distance, tolerance)``: the returned state against the group's exact fixed point.
@@ -1159,6 +1187,12 @@ class LinearModel:
                     allowance[m] = None
                 continue
             dnorm, bound, det = self.group_report_consistency(gi, pre, state, rep["residual"])
+            gap = abs(float(rep["residual"]) - det["residual_true"])
+            assert gap <= det["residual_tol"], (
+                f"{where}: group {gi} {members} reports residual {rep['residual']:.6e}, but "
+                f"||F(x) - x|| of the state it returned is {det['residual_true']:.6e} "
+                f"(rounding allows {det['residual_tol']:.3e}; iterations="
+                f"{rep.get('iterations')}, converged={rep.get('converged')})")
             assert dnorm <= bound, (
                 f"{where}: group {gi} {members}: the returned state's defect is {dnorm:.4e} in "
                 f"its norm, beyond the {bound:.4e} its reported residual "
@@ -1210,15 +1244,358 @@ def check_leaves(topo: Topology, state: dict, step: int, dividers: Optional[dict
                 f"{where}: {nd.name}.{field} = {got!r} after {updates} updates, want {want!r}")
 
 
-def permutations_keeping(seq: Sequence, fixed_relative: Sequence[Sequence], rng) -> list:
-    """A random permutation of *seq* in which each list in *fixed_relative* keeps its order."""
+# ---------------------------------------------------------------------------
+# The topology generator
+# ---------------------------------------------------------------------------
+
+
+class TopologyBuilder:
+    """Assemble a :class:`Topology` by name: nodes, edges (ports assigned) and groups.
+
+    ``edge(src, dst)`` opens a new port on *dst*; ``port=`` adds to an
+    existing one (every edge into a shared port is additive).  An edge
+    between nodes of different sizes is mapped; ``mapped=True`` maps one
+    between equal sizes too.
+    """
+
+    def __init__(self):
+        self._nodes: dict = {}
+        self._edges: list = []
+        self._groups: list = []
+        self._ports: dict = {}
+
+    def node(self, name, n=1, *, alpha=0.5, beta=0.0, leaves=(), flux=False,
+             three_arg=False) -> str:
+        assert name not in self._nodes, name
+        self._nodes[name] = dict(name=name, n=n, alpha=alpha, beta=beta, leaves=tuple(leaves),
+                                 flux=flux, three_arg=three_arg)
+        self._ports[name] = 0
+        return name
+
+    def edge(self, src, dst, *, field="x", transform=None, mapped=None, port=None) -> int:
+        if port is None:
+            port = self._ports[dst]
+            self._ports[dst] += 1
+            additive = False
+        else:
+            additive = True
+            for k, e in enumerate(self._edges):
+                if e.dst == dst and e.port == port and not e.additive:
+                    self._edges[k] = dataclasses.replace(e, additive=True)
+        if mapped is None:
+            mapped = self._nodes[src]["n"] != self._nodes[dst]["n"]
+        self._edges.append(TEdge(src, dst, port, field, transform, additive, bool(mapped)))
+        return port
+
+    def group(self, *members) -> int:
+        self._groups.append(tuple(members))
+        return len(self._groups) - 1
+
+    def build(self, label="") -> Topology:
+        nodes = tuple(TNode(ports=self._ports[name], **spec) for name, spec in self._nodes.items())
+        topo = Topology(nodes, tuple(self._edges), tuple(self._groups), label)
+        topo.check()
+        return topo
+
+
+def _nested_cycle_shape(b: TopologyBuilder, members, *, transform=None):
+    """A ring through *members* plus a chord closing a shorter inner cycle."""
+    m = len(members)
+    for i in range(m):
+        b.edge(members[i], members[(i + 1) % m])
+    if m >= 3:
+        b.edge(members[m - 1], members[1], transform=transform)
+
+
+def _star_shape(b: TopologyBuilder, hub, leaves, *, flux_leaf=None):
+    """``hub <-> leaf`` for every leaf (a flux edge back from *flux_leaf*)."""
+    for leaf in leaves:
+        b.edge(hub, leaf)
+        b.edge(leaf, hub, field="q" if leaf == flux_leaf else "x")
+
+
+def named_topologies() -> dict:
+    """The per-push structures, each a shape the coupled_graphs generator never draws.
+
+    * ``nested-loop-additive``: a nested-cycle group (a ring and an inner
+      chord) with members of two sizes joined by mapped edges, an outside
+      node inside its strongly connected component (so ``compile()`` warns
+      and one edge of that loop is staggered), three additive edges into
+      one port, a forward flux edge between two drivers, a three-argument
+      node, and a reader added before the group's members (CPL-025);
+    * ``two-groups-one-scc``: a ring and a star joined both ways (two groups
+      in one component, both warn), a flux edge inside the star, two
+      additive edges into a three-argument member, a mapped reader;
+    * ``star-and-ungrouped-ring``: a star group feeding an ungrouped ring
+      (a cycle outside every group, staggered by its build order) and a
+      reader;
+    * ``chain-into-ring``: a chain of outside nodes into a two-member ring,
+      a node beside the group reading the chain and the group additively,
+      and a reader added first.
+    """
+    out = {}
+
+    b = TopologyBuilder()
+    b.node("early", 2, alpha=0.5, leaves=("key",))
+    b.node("d0", 1, alpha=1.0, beta=1.0, flux=True)
+    b.node("d1", 1, alpha=0.25, leaves=("tag",))
+    b.node("d2", 1, alpha=-0.5, beta=0.5, three_arg=True)
+    b.node("g0", 2, alpha=0.5, beta=1.0, leaves=("count", "tag"))
+    b.node("g1", 2, alpha=-0.25, leaves=("flag", "key"))
+    b.node("g2", 1, alpha=0.0, beta=-0.5)
+    b.node("o", 2, alpha=0.5, leaves=("count",), three_arg=True)
+    b.edge("d0", "d1", field="q")
+    _nested_cycle_shape(b, ("g0", "g1", "g2"), transform="negate")
+    b.edge("g2", "o")
+    b.edge("o", "g1", transform="scale_0.5")
+    p = b.edge("d0", "g0", transform="scale_2.0")
+    b.edge("d1", "g0", port=p)
+    b.edge("d2", "g0", port=p, transform="scale_0.5")
+    b.edge("g1", "early", transform="scale_0.5")
+    b.group("g0", "g1", "g2")
+    out["nested-loop-additive"] = b.build("nested-loop-additive")
+
+    b = TopologyBuilder()
+    b.node("u", 2, alpha=1.0, beta=1.0, leaves=("count",))
+    b.node("a0", 2, alpha=0.5, three_arg=True)
+    b.node("a1", 2, alpha=0.0, beta=1.0, leaves=("key", "flag"))
+    b.node("b0", 2, alpha=0.25, leaves=("tag",))
+    b.node("b1", 2, alpha=0.0, flux=True)
+    b.node("b2", 2, alpha=-0.5, leaves=("count",))
+    b.node("r", 1, alpha=0.5, leaves=("tag",))
+    b.edge("a0", "a1")
+    b.edge("a1", "a0")
+    _star_shape(b, "b0", ("b1", "b2"), flux_leaf="b1")
+    b.edge("a1", "b0")
+    p = b.edge("b2", "a0")
+    b.edge("u", "a0", port=p, transform="negate")
+    b.edge("b1", "r")
+    b.group("a0", "a1")
+    b.group("b0", "b1", "b2")
+    out["two-groups-one-scc"] = b.build("two-groups-one-scc")
+
+    b = TopologyBuilder()
+    b.node("h", 2, alpha=0.5, beta=1.0, leaves=("count", "key"))
+    b.node("l0", 2, alpha=0.0)
+    b.node("l1", 1, alpha=0.25, leaves=("flag",))
+    b.node("l2", 2, alpha=-0.25, three_arg=True)
+    b.node("r0", 2, alpha=0.5, leaves=("tag",))
+    b.node("r1", 2, alpha=0.25)
+    b.node("z", 1, alpha=0.5, leaves=("key",))
+    _star_shape(b, "h", ("l0", "l1", "l2"))
+    b.edge("l0", "r0", transform="scale_2.0")
+    b.edge("r0", "r1")
+    b.edge("r1", "r0")
+    b.edge("r1", "z")
+    b.group("h", "l0", "l1", "l2")
+    out["star-and-ungrouped-ring"] = b.build("star-and-ungrouped-ring")
+
+    b = TopologyBuilder()
+    b.node("q", 1, alpha=0.5, leaves=("flag",))
+    b.node("c0", 1, alpha=1.0, beta=1.0, flux=True, leaves=("count",))
+    b.node("c1", 2, alpha=0.5, three_arg=True)
+    b.node("c2", 2, alpha=0.0, leaves=("key",))
+    b.node("g0", 2, alpha=0.5, beta=1.0, leaves=("tag",))
+    b.node("g1", 2, alpha=-0.5)
+    b.node("w", 2, alpha=0.25, leaves=("count", "flag"))
+    b.edge("c0", "c1", field="q")
+    b.edge("c1", "c2", transform="negate")
+    b.edge("c2", "g0")
+    b.edge("g0", "g1")
+    b.edge("g1", "g0", transform="scale_0.5")
+    p = b.edge("c1", "w")
+    b.edge("g0", "w", port=p)
+    b.edge("g1", "q")
+    b.group("g0", "g1")
+    out["chain-into-ring"] = b.build("chain-into-ring")
+    return out
+
+
+def topology_knobs(topo: Topology, choice: int = 0) -> list:
+    """One quiet, converging configuration per group, rotated by *choice*.
+
+    Every acceleration, both schedules and every norm appear across the
+    groups and choices; the interface norm is never paired with a
+    group-internal flux edge (``compile()`` refuses it, CPL-075), and
+    Aitken and fixed relaxation are never paired with a typed PRNG key in
+    a member (that pairing fails to trace: see the strict xfail in
+    ``test_differential_coupling_topologies.py``).
+    """
+    table = [
+        dict(acceleration="none", iteration_mode="gauss-seidel", convergence_norm="l2",
+             tolerance=1e-6),
+        dict(acceleration="iqn-ils", iteration_mode="jacobi", convergence_norm="mixed",
+             rtol=1e-4),
+        dict(acceleration="aitken", iteration_mode="gauss-seidel", convergence_norm="interface",
+             rtol=1e-4),
+        dict(acceleration="fixed", relaxation=0.7, iteration_mode="jacobi",
+             convergence_norm="l2", tolerance=1e-6),
+        dict(acceleration="iqn-imvj", jacobian_reuse=2, iteration_mode="gauss-seidel",
+             convergence_norm="mixed", rtol=1e-4, predictor="linear"),
+    ]
+    out = []
+    for gi, members in enumerate(topo.groups):
+        has_flux = any(topo.edges[i].field == "q" for i in topo.internal_edges(gi))
+        has_key = any("key" in topo.node(m).leaves for m in members)
+        k = (choice + 2 * gi) % len(table)
+        while True:
+            cfg = dict(table[k], max_iterations=200)
+            bad = (has_flux and cfg["convergence_norm"] == "interface") or (
+                has_key and cfg["acceleration"] in ("aitken", "fixed"))
+            if not bad:
+                break
+            k = (k + 1) % len(table)
+        out.append(cfg)
+    return out
+
+
+def group_cfgs_of(knobs) -> list:
+    """:class:`LinearModel`'s per-group view of ``CouplingGroup`` configurations."""
+    return [dict(iteration_mode=g.get("iteration_mode", "gauss-seidel"),
+                 subcycling=bool(g.get("subcycling", False)),
+                 boundary_interpolation=g.get("boundary_interpolation", "linear"),
+                 convergence_norm=g.get("convergence_norm", "l2"),
+                 rtol=g.get("rtol", 1e-6), tolerance=g.get("tolerance", 1e-6)) for g in knobs]
+
+
+def thresholds_of(knobs) -> list:
+    return [float(g.get("tolerance", 1e-6)) if g.get("convergence_norm", "l2") == "l2" else 1.0
+            for g in knobs]
+
+
+def invariant_orders(topo: Topology):
+    """``(node groups that keep their relative order, edge groups that keep theirs)``.
+
+    The documented exceptions to build-order invariance (CPL-181): a
+    group's members keep their relative order (a Gauss-Seidel sweep follows
+    it, CPL-077); so does every node of a strongly connected component that
+    is not exactly one group -- an ungrouped cycle, or a loop through a
+    group and outside nodes -- because which of its edges is read from the
+    previous step follows that order; and three or more additive edges
+    into one port keep theirs, because their sum does.
+    """
+    comp = strongly_connected_components(list(topo.names), topo.edges)
+    keep_nodes = [list(g) for g in topo.groups]
+    by_comp: dict = {}
+    for name in topo.names:
+        by_comp.setdefault(comp[name], []).append(name)
+    for members in by_comp.values():
+        if len(members) == 1:
+            continue
+        if any(set(members) == set(g) for g in topo.groups):
+            continue
+        keep_nodes.append(members)
+    keep_edges = []
+    ports: dict = {}
+    for i, e in enumerate(topo.edges):
+        ports.setdefault((e.dst, e.port), []).append(i)
+    for idx in ports.values():
+        if len(idx) >= 3:
+            keep_edges.append(idx)
+    return keep_nodes, keep_edges
+
+
+def merge_keep(groups: list) -> list:
+    """Overlapping keep-groups merged, so one relative order is imposed on their union."""
+    merged: list = []
+    for g in groups:
+        g = list(g)
+        hit = [m for m in merged if set(m) & set(g)]
+        for m in hit:
+            merged.remove(m)
+            g = [x for x in m if x not in g] + g
+        merged.append(g)
+    return merged
+
+
+def ordered_permutation(seq: Sequence, keep: list, rng: np.random.Generator) -> list:
+    """A random permutation of *seq* in which each list in *keep* keeps its order in *seq*."""
+    keep = merge_keep(keep)
     perm = list(seq)
     rng.shuffle(perm)
-    for group in fixed_relative:
-        slots = iter(sorted((perm.index(x) for x in group)))
-        positions = list(slots)
-        for pos, x in zip(positions, group):
+    for group in keep:
+        order = [x for x in seq if x in set(group)]
+        slots = sorted(perm.index(x) for x in order)
+        for pos, x in zip(slots, order):
             perm[pos] = x
     return perm
 
 
+def with_identity_relay(topo: Topology, edge_index: int):
+    """*topo* with an identity relay ``rly`` on internal edge *edge_index*, added after its source.
+
+    The edge's field and transform move onto ``src -> rly``; ``rly -> dst``
+    is plain, on the original port (additive as it was).  ``rly`` joins the
+    group straight after the source, and the build order straight after
+    the source too.  Mapped edges are not relayed (the relay's start value
+    would be a float matrix product the reference cannot reproduce bit for
+    bit).
+    """
+    e = topo.edges[edge_index]
+    assert topo.internal(e) and not e.mapped, e
+    src, dst = topo.node(e.src), topo.node(e.dst)
+    relay = TNode("rly", dst.n, ports=1, alpha=0.0, beta=0.0)
+    nodes = list(topo.nodes)
+    nodes.insert([nd.name for nd in nodes].index(e.src) + 1, relay)
+    edges = list(topo.edges)
+    edges[edge_index] = TEdge(e.src, "rly", 0, e.field, e.transform, False, False)
+    edges.insert(edge_index + 1, TEdge("rly", e.dst, e.port, "x", None, e.additive, False))
+    groups = []
+    for g in topo.groups:
+        g = list(g)
+        if e.src in g:
+            g.insert(g.index(e.src) + 1, "rly")
+        groups.append(tuple(g))
+    del src
+    return Topology(tuple(nodes), tuple(edges), tuple(groups), topo.label + "+relay")
+
+
+def relay_values(topo: Topology, values: dict, relayed: Topology, edge_index: int) -> dict:
+    """*values* for the relayed topology: the relay is ``x <- I u``, started at what it relays."""
+    e = topo.edges[edge_index]
+    n = topo.node(e.dst).n
+    dtype = np.asarray(values["nodes"][e.src]["x0"]).dtype
+    fac = TRANSFORM_FACTORS[e.transform] * (2.0 if e.field == "q" else 1.0)
+    out = {"nodes": dict(values["nodes"]), "H": {}}
+    out["nodes"]["rly"] = {"G": [np.eye(n, dtype=dtype)], "b": np.zeros(n, dtype),
+                           "x0": np.asarray(np.asarray(values["nodes"][e.src]["x0"]) * dtype.type(fac),
+                                            dtype)}
+    # Re-index the mapping matrices past the inserted edge.
+    for i, H in values["H"].items():
+        out["H"][i if i <= edge_index else i + 1] = H
+    return out
+
+
+def interleaved_order(topo: Topology) -> tuple:
+    """A build order made of the shapes the schedule has got wrong before.
+
+    Every node downstream of a cycle is added first, before the cycle it
+    reads (CPL-025, MADD-ANO-120); every outside node of a group's
+    strongly connected component is added between the group's first two
+    members (MADD-ANO-144).  The members keep their relative order.
+    """
+    comp = strongly_connected_components(list(topo.names), topo.edges)
+    sizes: dict = {}
+    for n in topo.names:
+        sizes[comp[n]] = sizes.get(comp[n], 0) + 1
+    cyclic = {n for n in topo.names if sizes[comp[n]] > 1}
+    succ: dict = {n: [] for n in topo.names}
+    for e in topo.edges:
+        succ[e.src].append(e.dst)
+    downstream, todo = set(), list(cyclic)
+    while todo:
+        n = todo.pop()
+        for m in succ[n]:
+            if m not in cyclic and m not in downstream:
+                downstream.add(m)
+                todo.append(m)
+    order = [n for n in topo.names if n not in downstream]
+    for gi, members in enumerate(topo.groups):
+        cid = comp[members[0]]
+        outside = [n for n in topo.names if comp[n] == cid and topo.group_of(n) != gi]
+        if not outside or len(members) < 2:
+            continue
+        order = [n for n in order if n not in outside]
+        at = order.index(members[0]) + 1
+        order[at:at] = outside
+    return tuple([n for n in topo.names if n in downstream] + order)

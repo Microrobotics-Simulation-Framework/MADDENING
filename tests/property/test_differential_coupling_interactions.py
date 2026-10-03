@@ -345,8 +345,16 @@ def assert_strict_convergence_agrees_with_the_report(index: int) -> None:
             CouplingGroup(nodes=frozenset(structure(False).groups[0]), solver="fori",
                           strict_convergence=True)
         return
-    _b, g_loose, loose = _run(index)
-    built, _g = built_for(index, strict_convergence=True)
+    # The row's own budget, and two passes -- which leaves a group at rate
+    # 0.6 or 0.9 short of its threshold -- so both outcomes are seen.
+    for budget in ({}, {"max_iterations": 2, "diagnostics": False}):
+        _strict_against_the_report(index, **budget)
+
+
+def _strict_against_the_report(index: int, **override) -> None:
+    row = ROWS[index]
+    _b, g_loose, loose = _run(index, **override)
+    built, _g = built_for(index, strict_convergence=True, **override)
     values = _values(index)
     ct.set_initial(built, values)
     params = ct.params_for(built, values)

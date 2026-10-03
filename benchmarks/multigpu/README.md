@@ -146,7 +146,10 @@ The dry run takes about 80 s on three shared cores (about 100 s with
 `--cells 256 1024`; 44 s and 65 s before schema 6 added the meshes), most
 of it XLA compiling the `stencil` cases and the coupled group's adjoint on
 each of the four meshes.  It must print `checks n/n passed` for all eight goals, no
-`CHECK NOT RUN` line, and exit 0.  The summary must
+`CHECK NOT RUN` line, and exit 0.  Spell every option out: the runner
+takes no abbreviations (`--dry` is refused with exit 2), because the CPU
+pin of a dry run reads the literal `--dry-run` before the options are
+parsed, and an abbreviated one used to run on the GPUs.  The summary must
 exit 0, show every checklist item as `open: passed on CPU / dry run only`
 (a dry run never closes an item), list nothing under "Records that cannot
 decide", and show the transport recommendation as `undecided`.  Anything
@@ -277,7 +280,11 @@ a goal that raises is then recorded as one failed `goal raised` check,
 with the exception's type, message and traceback under `raised`, and the
 next goal runs; do not use it on the pod).  Defaults on GPUs:
 cells `1e5 3e5 1e6` (2-D fields of `ny × (ny + 4)` for the stencil goals,
-never square, both a multiple of the device count), 5 warmup + 20 timed
+never square, both a multiple of the device count; for the unstructured
+goals' default `--synthetic grid`, the smallest square holding at least
+that many cells -- 317² = 100 489, 548² = 300 304 and 1000² -- so no row
+has fewer cells than it was asked for: the grid used to round, and the
+"1e5" exchange row measured 316² = 99 856 cells and could never decide), 5 warmup + 20 timed
 repeats, 20 steps per
 timed block, 5 differentiated steps, `--n-devices 4`.  The checklist goals
 refuse one device.  Re-run `exchange` with `--fields 5 --out
@@ -385,7 +392,9 @@ none -- every file recording none included, which used to exit 0; a recorded
 commit that is not a full SHA counts as none -- (below), and 1 when the
 directory holds no goal JSON.  A file this runner cannot read in full (an
 older runner's) reads `INVALID` and is left out of the tables, which say
-so; it used to stop the summary on a traceback.  A goal that raised under
+so; it used to stop the summary on a traceback.  So does a file named for
+a goal (`halo_rerun.json` beside `halo.json`) that records another goal,
+or none: it used to be dropped without a word.  A goal that raised under
 `--keep-going` reads `FAIL`, its one `goal raised` check naming the
 exception; its record is valid only with no results and exactly that
 check.  It does not
@@ -400,7 +409,7 @@ evidence only if it is what `run_pod.py`, as it stands, would have
 written; otherwise its goal reads `INVALID` and it closes nothing.  A
 file must:
 
-* be on the current `schema_version` (6);
+* be on the current `schema_version` (7);
 * record an `n_devices` no larger than the devices its `environment`
   lists (`n_devices_visible`, which must count `devices`), and the same
   `n_devices` in its `config` and in every result entry;
@@ -469,10 +478,16 @@ keep the default, record the numbers in the docs paragraph.  **`tie`**:
 keep `all_to_all` (one collective) unless the byte savings (`bytes_total`
 columns) matter for the target mesh; write that down.  **`undecided`**: no
 row decides.  A row decides only when it comes from a real accelerator
-run (not `--dry-run`), has ≥ 1e5 cells, ran on ≥ 4 devices (≥ 2 if that
-run recorded `allow_fewer_devices`) and has a finite speedup (a 0 ms
-median is below timer resolution).  The `decides` column of the table and
-the reason line say what each row lacked.
+run (not `--dry-run`) whose file reads `PASS`, was requested at ≥ 1e5
+cells (its `requested_cells`; the `asked` column) and measured at no fewer
+(`cells`), ran on ≥ 4 devices (≥ 2 if that run recorded
+`allow_fewer_devices`) and has a finite speedup, which the summary
+derives from the two medians rather than reading the file's
+`ppermute_speedup_median` (a 0 ms median is below timer resolution).  The
+`decides` column of the table says which rows decide; every row that does
+not is listed under **Rows that do not decide** with what it lacked
+(`WARNING:` for a real-GPU row), and when some rows decide and others do
+not, the recommendation line says "decided on N of M row(s)".
 
 The timings are secondary to the checks but worth reading:
 `wrapper_step` (public `update()`, which re-uploads the partitioned
@@ -484,7 +499,7 @@ unsharded one" is a statement about the compiled step, not about Python;
 and in `coupled`, the sharded against the unsharded `value_and_grad`
 time, which is where the device-0 gather above shows its cost at scale.
 
-## Schema of the JSON (schema_version 6)
+## Schema of the JSON (schema_version 7)
 
 Common: `goal`, `dry_run`, `allow_fewer_devices`, `n_devices` (the mesh
 size), `environment` (`hostname`, `timestamp_utc`, `python`, `jax`,
@@ -543,7 +558,8 @@ compile without execution.
   (`run_scan_first_call_s`, `partitioned`, `compile_s`, `value_and_grad`
   timing, `loss`, `grad`), `correction_rel`, `parity_f`,
   `parity_averages`, `parity_loss`, `parity_grad`.
-* `exchange.json` results: `cells`, `mesh`, `partition`, `n_devices`,
+* `exchange.json` results: `cells` (measured), `requested_cells` (the
+  `--cells` entry it was measured for), `mesh`, `partition`, `n_devices`,
   `fields_per_cell`, `n_local_max`, `n_ghost_max`, `layout_build_s`,
   `traffic_cells_per_shard` (`exchange_traffic()` output),
   `input_sharding`, `input_presharded`,

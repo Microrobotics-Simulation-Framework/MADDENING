@@ -695,3 +695,52 @@ def test_a_wrappers_own_update_keeps_its_compiled_step_until_the_cache_is_droppe
     wrapped.invalidate_static_cache()
     np.testing.assert_allclose(read(wrapped.update(state, {}, 0.1)), at_new,
                                rtol=1e-6, atol=1e-7)
+
+
+@pytest.mark.skipif(not _HAS_4, reason="needs 4 CPU-virtual devices")
+@pytest.mark.parametrize("kind", ["stencil", "pointwise"])
+def test_a_rest_param_write_to_a_hybrid_over_a_sharded_node_changes_the_trajectory(kind):
+    """``HybridNode(Sharded*Node(inner))`` -- the run_pod ``hybrid`` goal's
+    shape: one params dict through both wrappers since the hybrid stopped
+    copying its own, so a ``PUT /graph/params`` 200 changes the physics
+    (it used to be echoed and lost)."""
+    from maddening.core.simulation.hybrid_node import HybridNode
+
+    def build(value):
+        from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode
+        from maddening.nodes.heat import HeatNode
+        from maddening.nodes.spring import SpringDamperNode
+
+        mesh = create_device_mesh(shape=(4,))
+        if kind == "stencil":
+            node = ShardedStencilNode(
+                HeatNode("h", 1e-2, n_cells=16, length=1.3, thermal_diffusivity=value,
+                         initial_temperature=[300.0 + 3 * i for i in range(16)]),
+                mesh, {"devices": 0})
+        else:
+            node = ShardedPointwiseNode(SpringDamperNode("s", 0.01, stiffness=value,
+                                                         **_SPRINGS),
+                                        mesh, shard_axes=(0,))
+        gm = GraphManager()
+        gm.add_node(HybridNode(node, lambda s, b, dt: {}))
+        gm.compile()
+        return gm
+
+    key, old, new = (("thermal_diffusivity", 0.02, 0.04) if kind == "stencil"
+                     else ("stiffness", 10.0, 1000.0))
+    field = "temperature" if kind == "stencil" else "position"
+    name = "h" if kind == "stencil" else "s"
+
+    def after(gm):
+        gm.reset_state()
+        return np.asarray(gm.run_scan(5)[name][field])
+
+    gm = build(old)
+    hybrid = gm._nodes[name].node
+    assert hybrid.params is hybrid.physics_node.params is hybrid.physics_node._inner.params
+    response = _client(gm).put(f"/graph/params/{name}", json={"params": {key: new}})
+    assert response.status_code == 200, response.text
+    assert float(gm.params["nodes"][name][key]) == pytest.approx(new)
+    written = after(gm)
+    np.testing.assert_allclose(written, after(build(new)), rtol=1e-6)
+    assert not np.allclose(written, after(build(old)), rtol=1e-6)

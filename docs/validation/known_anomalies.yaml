@@ -11238,6 +11238,7 @@ anomalies:
       - "tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py::test_a_non_finite_entry_in_one_shard_gives_nan_in_every_shard"
       - "tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py::test_a_non_finite_cotangent_on_a_mesh_gives_a_nan_gradient"
     github_issue: null
+
   - anomaly_id: "MADD-ANO-156"
     title: "A flux edge that crosses a coupling group's boundary -- from an outside producer into a member, or from a member to an outside reader -- fails to trace with a bare KeyError"
     description: >
@@ -11484,4 +11485,210 @@ anomalies:
     resolution_status: "open"
     verification:
       - "tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_strict_convergence_raises_with_a_sharded_member"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-163"
+    title: "POST /checkpoint/load restored parameter values PUT /graph/params refuses -- past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string -- answered 200, and left a graph whose save did not reload and whose steps diverged"
+    description: >
+      A checkpoint carries the graph's live parameter leaves, and the
+      checkpoint route checked only that they fitted the graph's shapes and
+      dtypes and that the step could read them.  It did not ask what
+      `PUT /graph/params` asks of the same value: a rod saved at
+      `timestep=0.01` with `thermal_diffusivity=0.4` (Fourier number 0.4)
+      loaded into a rod built at `timestep=0.05` -- Fourier number 2.0, which
+      the node's constructor refuses and `PUT` refuses with it -- answered
+      200, `GET /graph` then served a config that did not reload, and 40
+      steps later the rod's temperatures were 4e32.  A damping of -5, below
+      `SpringDamperNode`'s bound of 0, loaded the same way; `POST
+      /graph/nodes` applied no `ParamSpec` bounds at all, so a REST graph
+      could hold such a value and save it, and took a boolean for a float
+      constant.  Both loads cast a boolean member to 1.0 and a numeric
+      string to its number (NumPy, without a word).  Found by
+      the round-7 REST claims audit (REST-093, REST-085) and the domain
+      acceptance oracle (`test_differential_param_acceptance.py`, B2-H1,
+      B2-L10, N3).  No tagged release carried it:
+      checkpoints carry parameters since 0.4.0's development, and v0.3.1's
+      `PUT /graph/params` checked nothing it could disagree with.
+      Resolved in 0.4.0: both loads refuse a text or boolean member for a
+      numeric leaf; the route asks of every leaf the load changes what `PUT`
+      asks, by the same code -- finite and inside its `ParamSpec` bounds (per
+      element, of a value that is neither the leaf's now nor the node's own,
+      the FMU `set_fmu_state` rule, so a graph built outside its bounds
+      reloads its own checkpoint), then `_params_write_refusal` (the node's
+      constructor with the graph's other values, the state's layout, a value
+      the node consumed when it was constructed, a mapping's points, the
+      graph a save would reload) -- against the graph as it was before the
+      load, and refuses with a 400 that loads nothing; `POST /graph/nodes`
+      applies the `ParamSpec` bounds `PUT` does and refuses a boolean or text
+      for a numeric parameter.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A 200 for a load that left the graph running an unstable model, with
+      nothing said, is a silent wrong result, never `minor`; registered
+      although no release carried it, because it is major.  Not `critical`:
+      the divergence is visible within steps on the cases found, and a
+      bounds violation is a value the client itself saved.
+      `context_dependent` because what the simulated values feed is the
+      program's choice.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.api.server._loaded_params_refusal"
+      - "maddening.core.simulation.checkpoint.load_state"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: load a checkpoint only into the graph that saved it, and keep
+      parameter values inside their `ParamSpec` bounds.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `GraphManager.load_state` does not ask the route's checks, by
+      decision (documented difference D6 of the acceptance oracle): a value
+      outside a `ParamSpec`'s bounds is one Python code may hold on purpose
+      (a `gm.params` write is not checked either), and a graph so written
+      must resume its own checkpoint into a freshly built graph -- there is
+      no telling that resume from a forged file.  A Python caller loading a
+      file it did not write gets what the file holds, as with a
+      `gm.params` write; `check_params` asks the bounds on demand.
+      `check_params`, the FMU sidecar and the bridge take a value only the
+      node's constructor refuses (MADD-ANO-047's residual; difference D5).
+      The route does not ask a value the graph holds or the node owns, so a
+      value already outside its bounds stays until something changes it.
+    verification:
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_the_constructor_refuses_at_this_timestep_is_not_loaded"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_outside_its_bounds_is_not_loaded"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_load_and_a_params_write_give_the_same_verdict_on_every_value"
+      - "tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_new_node_outside_its_param_spec_bounds_is_refused_as_a_params_write_is"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_load_state_refuses_text_and_a_boolean_for_a_number"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_load_state_restores_what_python_may_hold_and_the_route_refuses"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_weight_matrix_is_asked_about_the_entries_a_load_moves"
+      - "tests/property/test_differential_param_acceptance.py::test_every_restore_door_agrees_with_the_write_doors"
+      - "tests/property/test_differential_param_acceptance.py::test_a_restore_door_refuses_what_the_write_doors_refuse"
+      - "tests/property/test_differential_param_acceptance.py::test_a_node_is_not_built_with_a_boolean_for_a_float_constant"
+      - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_graph_built_outside_its_bounds_reloads_its_own_checkpoint"
+      - "tests/property/test_differential_param_acceptance.py::test_load_state_restores_any_number_its_leaf_holds"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-164"
+    title: "A parameter write to a HybridNode was answered and then lost: the hybrid held a copy of its physics node's params, so PUT /graph/params echoed the new value and the step kept the old one"
+    description: >
+      `HybridNode.__init__` passed its physics node's params to
+      `SimulationNode.__init__`, which stores them in a dict of its own, and
+      every step reads the physics node's.  A write to `hybrid.params` --
+      which is what `PUT /graph/params` writes, and what Python code writes
+      -- therefore never reached the step.  Reproduced identically at
+      v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag,
+      CPU, FastAPI `TestClient`, a `HybridNode(SpringDamperNode)`): `PUT
+      stiffness=50` answered 200 echoing 50, and the next five steps were
+      bit-identical to the unchanged stiffness of 100.  On the 0.4.0
+      development tree the graph's own parameter sync then copied the
+      physics node's unchanged value back over the leaf the route had
+      written, so a `GET` after the next compile read the old value as
+      well.  Found by the round-7 REST claims audit (REST-086).
+      Resolved in 0.4.0: the hybrid shares its physics node's params dict,
+      as the sharded wrappers do, so a write through any surface reaches
+      the step, and the params route's checks (the constructor, the saved
+      graph) are asked of the physics node.  No other wrapper or composite
+      node in the tree copies its inner node's params.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A write answered as taken that the simulation never used is a silent
+      wrong result, never `minor`.  `context_dependent` because what the
+      simulated values feed is the program's choice.
+    affected_components:
+      - "maddening.core.simulation.hybrid_node.HybridNode"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: write the physics node's params (`hybrid.physics_node.params`)
+      and recompile, or rebuild the hybrid with the new value.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  A wrapper written outside the tree that copies its inner
+      node's params has the same defect; share the dict.
+    verification:
+      - "tests/core/test_hybrid_node.py::test_a_hybrid_node_shares_its_physics_nodes_params_dict"
+      - "tests/core/test_hybrid_node.py::test_a_node_params_write_on_a_hybrid_reaches_the_step"
+      - "tests/core/test_hybrid_node.py::test_a_rest_params_write_to_a_hybrid_node_is_kept"
+      - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_hybrid_over_a_sharded_node_changes_the_trajectory"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-165"
+    title: "POST /sim/run that could not have the graph part-way through answered 503 'Nothing was changed; retry shortly' after it had stepped, so a client that retried stepped the graph twice; its final read waited with no timeout"
+    description: >
+      A run steps in slices and takes the graph lock for each.  When a slice
+      could not have the lock within `_GRAPH_LOCK_TIMEOUT` -- another request
+      admitted between slices held it, a large checkpoint save, say -- the
+      run answered the generic 503 "Nothing was changed; retry shortly", with
+      no `steps_run`, after the slices before it had stepped and stored the
+      graph (240 steps in the audit's reproducer).  A client following the
+      reply's advice ran them again.  The run's last access to the graph --
+      the final state's read, and the compile of `n_steps=0` -- took the
+      lock with no timeout at all, and waited as long as a holder held it.
+      Found by the round-7 REST claims audit (REST-043).  No tagged release
+      carried it: v0.3.1's run neither sliced nor timed out.
+      Resolved in 0.4.0: every wait is bounded, and one that runs out
+      answers the `interrupted` 503 the shutdown path gives, `steps_run`
+      saying how many steps were taken and the detail how many remain, with
+      `Retry-After` only when none was taken.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A reply saying nothing was changed after the graph was stepped leads a
+      client that follows it to a state further on than it asked for, with
+      nothing said: a silent wrong result, never `minor`; registered
+      although no release carried it, because it is major.
+      `context_dependent` because what the simulated values feed is the
+      program's choice.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: read `GET /graph/state` (and the relay's step count) before
+      retrying a `/sim/run` that answered 503.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_run_that_cannot_have_the_graph_between_slices_says_how_many_steps_it_took"
+      - "tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_the_final_state_read_is_bounded_and_says_every_step_was_taken"
+      - "tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_zero_step_run_behind_a_long_holder_is_a_503_that_took_nothing"
+    github_issue: null
+
+  - anomaly_id: "MADD-ANO-166"
+    title: "POST /sim/profile answered 500 for a graph that could not compile with any error but a RuntimeError"
+    description: >
+      The profile route caught `RuntimeError` alone around the profiler,
+      which compiles and steps the graph; every other error a graph that
+      cannot step raises -- a `ValueError` from a node's update, the
+      `ExceptionGroup` the compile raises for an edge between fields of
+      mismatched shapes (which `POST /graph/edges` accepts) -- was a 500.
+      Reproduced at v0.2.0 and v0.3.1 (`git archive` of each tag, CPU,
+      FastAPI `TestClient`, a node whose update raises `ValueError`): 500;
+      the route was added in v0.2.0.  MADD-ANO-110's resolution made such a
+      graph a 400 on `/sim/step` and the other routes that step, and left
+      this one.  Found by the round-7 REST claims audit (REST-090).
+      Resolved in 0.4.0: the route catches the errors `/sim/step` catches
+      and answers their 400; the live state is restored as before.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A loud failure (a 500) of a diagnostic route, on a graph that cannot
+      step anyway; no value is wrong and nothing is written.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.2.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: `POST /sim/step` first; a graph that cannot step cannot
+      be profiled.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_profile_endpoints.py::test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept"
     github_issue: null

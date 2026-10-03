@@ -125,3 +125,32 @@ def test_starting_the_runner_on_a_graph_with_no_nodes_is_refused():
         assert client.post("/sim/start").status_code == 200
     finally:
         assert client.post("/sim/stop").status_code == 200
+
+
+def test_the_201_body_of_a_node_holding_a_non_finite_default_is_a_reply(tmp_path):
+    """The 201 body is encoded as every reply is (``_json_reply``): a
+    class whose own default is non-finite -- the route asks finiteness of
+    the values a request gives, not of a class's defaults -- is answered
+    with the quoted token, never a 500 after the node was added."""
+    import jax.numpy as jnp
+
+    from maddening.core.node import SimulationNode
+
+    class InfiniteDefault(SimulationNode):
+        def __init__(self, name, timestep, ceiling=float("inf"), **kw):
+            super().__init__(name, timestep, ceiling=ceiling, **kw)
+
+        def initial_state(self):
+            return {"x": jnp.zeros(())}
+
+        def update(self, state, boundary_inputs, dt):
+            return {"x": state["x"] + dt}
+
+    gm = GraphManager()
+    server = SimulationServer({"InfiniteDefault": InfiniteDefault}, graph_manager=gm,
+                              checkpoint_root=str(tmp_path))
+    client = TestClient(server.create_app(), raise_server_exceptions=False)
+    resp = client.post("/graph/nodes", json={"type": "InfiniteDefault", "name": "c",
+                                             "timestep": 0.01, "params": {}})
+    assert resp.status_code == 201, resp.text
+    assert json.loads(resp.text)["node"]["params"]["ceiling"] == "Infinity"

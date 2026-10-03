@@ -1045,7 +1045,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-030]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-155. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-157. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -1064,7 +1064,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-154.
+    step does not. MADD-ANO-156.
   domains:
     f32: tests/core/test_coupling_ift_forward_mode.py::test_forward_reverse_adjoint_identity
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-030]'
@@ -1189,7 +1189,7 @@ claims:
     (strict xfail, in a subprocess). Guess: the eqx.error_if in the IFT
     forward's strict check (graph_manager.py, _run_ift_forward ~3756) inside
     a sharded program; reduce the verdict across devices before the
-    callback, or raise on the host after the step. MADD-ANO-156.
+    callback, or raise on the host after the step. MADD-ANO-158.
   domains:
     f32: tests/core/test_strict_convergence_threshold.py::test_strict_convergence_raises_at_twice_the_threshold
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-033]'
@@ -3304,7 +3304,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-093]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-155. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-157. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -3323,7 +3323,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-154.
+    step does not. MADD-ANO-156.
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_takes_its_distance_from_the_spectral_bound_against_the_exact_gradient
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-093]'
@@ -3373,7 +3373,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-094]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-155. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-157. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -3392,7 +3392,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-154.
+    step does not. MADD-ANO-156.
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_on_an_affine_map_the_bound_reads_zero_against_the_exact_gradient
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-094]'
@@ -4201,7 +4201,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-140]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-155. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-157. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -4220,7 +4220,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-154.
+    step does not. MADD-ANO-156.
   domains:
     f32: tests/core/test_coupling_solver_equivalence.py::test_the_ift_adjoint_is_the_sensitivity_of_the_fixed_point
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-140]'
@@ -4271,7 +4271,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-141]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-155. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-157. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -4290,7 +4290,7 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-154.
+    step does not. MADD-ANO-156.
   notes: >-
     Ambiguous until 0.4.0's claims fix ("the derivative is identical for all of
     them").  Reworded.
@@ -4353,7 +4353,8 @@ claims:
     - docs/release_notes/v0.4.0.md#the-iqn-family-corrected
   conditions: >-
     any rhs scale with a normal largest entry; a zero rhs is answered with
-    zeros. Not claimed for run_adaptive.
+    zeros; a rhs with a NaN or infinite entry is answered with NaN in every
+    entry (CPL-185). Not claimed for run_adaptive.
   oracle: the gradient of s * sum(x*) divided by s, against the analytic 1 / (1 - g) at s = 1e-12.
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_the_ift_gradient_is_scale_equivariant_in_the_cotangent
@@ -4380,7 +4381,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-143]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-155.
+    in _analysis_dtype and cast back. MADD-ANO-157.
   notes: >-
     Failing until 0.4.0's round-4 fix (MADD-ANO-113, since 0.3.0): atol was
     1e-8 + rtol * max|b|, so a cotangent below about 1e-8 met the GMRES
@@ -4489,6 +4490,7 @@ claims:
   tests:
     - tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises
     - tests/core/test_solver_ift_lineax_is_core.py::test_default_coupling_group_differentiable_with_no_extra_installed
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
   status: failing
   finding: >-
     16bit domain: jax.grad and jax.jvp through a coupled step raise
@@ -4508,7 +4510,7 @@ claims:
     tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-146]
     (strict xfail). Guess: _ift_linear_solve
     (src/maddening/core/graph_manager.py ~2085; _dense ~2096) should solve
-    in _analysis_dtype and cast back. MADD-ANO-155. adaptive domain:
+    in _analysis_dtype and cast back. MADD-ANO-157. adaptive domain:
     jax.grad through run_adaptive_scan is exactly 0.0 where the derivative
     is 1 / (1 - g_a g_b) = 1.5625, under acceleration 'aitken', 'iqn-ils' or
     'iqn-imvj', when a member carries a field that changes from step to step
@@ -4527,7 +4529,12 @@ claims:
     graph_manager.py ~9518, which calls _run_coupled_block_impl with
     runtime_dt): at a zero first-pass residual the accelerator's exit hands
     back an iterate with no dependence on the parameters, where run_scan's
-    step does not. MADD-ANO-154.
+    step does not. MADD-ANO-156.
+  notes: >-
+    It lied for a non-finite cotangent until 0.4.0's fix (MADD-ANO-154):
+    the gradient read exactly 0.0, reported successful, where dense and
+    fori read NaN.  The generated cotangents of the property test are
+    finite; the non-finite case is CPL-185's.
   domains:
     f32: tests/property/test_coupling_adjoint_solve.py::test_grad_through_the_default_coupling_solver_never_raises
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-146]'
@@ -4542,6 +4549,59 @@ claims:
     adaptive: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-146]'
     checkpoint_restart: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_a_checkpoint_restart[CPL-146]'
     sharded: 'tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-146]'
+
+- id: CPL-185
+  area: ift gradients
+  claim: >-
+    "A right-hand side with a NaN or infinite entry is answered with NaN in
+    every entry, under every backend": a non-finite tangent (jax.jvp,
+    jacfwd) or cotangent (jax.grad) gives a NaN derivative, never an
+    exactly zero one reported successful, and it neither re-solves densely
+    nor raises the adjoint error.
+  sources:
+    - src/maddening/core/graph_manager.py:2313 (_ift_linear_solve)
+    - docs/release_notes/v0.4.0.md#krylov-solves-of-a-non-finite-right-hand-side
+  conditions: >-
+    solver="ift", every linear_solver (and the BiCGStab arm, reachable
+    through _ift_linear_solve only); below and above the dense fallback's 50
+    coupled DOF; both iteration modes; NaN, +inf and -inf; at every scale of
+    the finite entries from 2**-100 to 2**60. Not claimed for 16-bit floats,
+    multi-rate graphs, sub-cycled groups, predictors or warm starts,
+    run_adaptive, checkpoint restarts or sharded graphs.
+  oracle: NaN in every entry of the default path's derivative, and non-finite wherever linear_solver="dense" or solver="fori" is (each non-finite somewhere); a spy that lineax is never handed the non-finite rhs; the other columns of a jacfwd left at the dense answer.
+  tests:
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_tangent_gives_a_nan_tangent_not_zero
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_constant_with_no_derivative_gives_a_nan_column_and_leaves_the_others_right
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_the_private_solve_answers_a_non_finite_rhs_with_nan_on_every_backend
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_under_vmap_only_the_non_finite_column_is_nan
+    - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_no_krylov_backend_is_handed_a_non_finite_rhs
+    - tests/property/test_differential_ift_derivatives.py::test_a_non_finite_rhs_gives_a_non_finite_derivative_at_every_scale
+  status: verified
+  notes: >-
+    Failing until 0.4.0's fix (MADD-ANO-154, never in a release): the solve
+    was posed on b framed by max|b| with the tolerance rtol * max|b|, which
+    a non-finite entry made NaN or inf, and the zero initial guess passed
+    lineax's test at once -- the derivative read 0.0 at both sizes and in
+    both modes.  NaN fills every entry, including any the non-finite entry
+    cannot reach, as an honest Krylov iteration does (its first basis
+    vector is b / ||b||); the dense LU can keep such an entry finite.
+  domains:
+    f32:
+      - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_tangent_gives_a_nan_tangent_not_zero
+      - tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
+    f64: tests/core/test_coupling_non_finite_rhs_under_x64.py::test_a_non_finite_tangent_or_cotangent_gives_nan_at_sixty_dof_under_x64
+    mixed_dtype: tests/core/test_coupling_non_finite_rhs_under_x64.py::test_a_non_finite_tangent_or_cotangent_gives_nan_at_sixty_dof_under_x64
+    16bit: narrowed
+    jit: tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
+    grad: tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
+    vmap: tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_under_vmap_only_the_non_finite_column_is_nan
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: narrowed
+    adaptive: narrowed
+    checkpoint_restart: narrowed
+    sharded: narrowed
 
 # ---------------------------------------------------------------------------
 # profile_graph's coupling statistics

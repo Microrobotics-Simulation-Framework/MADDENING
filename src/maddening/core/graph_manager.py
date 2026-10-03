@@ -782,7 +782,7 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        probe over every constant read ``0.0`` at every cap on the stiff
        spring pair while its stiffness gradient was 0.8-4.8% off, and
        one |c|-weighted probe of a two-entry gain read 23.6x under the
-       error of its small entry (MADD-ANO-131).
+       error of its small entry (MADD-ANO-XM1).
     3. **The tangents and the direction to the fixed point.**
        ``t_i = (I - J(x_k))^{-1} w_i`` (one JVP each) is what the
        adjoint returns for probe ``i``; ``delta = (I - J(x_k))^{-1} r``
@@ -805,7 +805,7 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        exactly to the secant (one JVP), not its norm times the
        Arnoldi factor, which is the resolvent restricted to the Krylov
        space and read 0.19x the true error on a ring whose secant lies
-       outside it (MADD-ANO-131) -- and the reported value is the
+       outside it (MADD-ANO-XH1) -- and the reported value is the
        largest over the probes the fixed point responds to
        (``||t_i|| > 0``, or non-finite).
     6. **Newton-Kantorovich** with the full-operator resolvent norm
@@ -1091,7 +1091,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # which need not: on an affine scalar Gauss-Seidel ring stopped at
     # three passes it was 8.57 where the full resolvent norm is 45.2, and
     # the bound read 0.19x the true gradient error with
-    # ``gradient_bound_usable=True`` (MADD-ANO-131).  The range basis
+    # ``gradient_bound_usable=True`` (MADD-ANO-XH1).  The range basis
     # applies the resolvent exactly for one more JVP per probe
     # (``resolvent_apply``), so the per-probe bound is
     # ``distance * ||(I - J)^{-1} secant_i|| / (||delta|| * ||t_i||)``.
@@ -1131,7 +1131,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # what is already measured.  With ``beta = ||(I - J(x_k))^{-1}||`` --
     # the *full-operator* norm (``_full_resolvent_norm``), not the
     # Krylov-restricted ``amp``, which can be several times smaller
-    # (MADD-ANO-131) -- ``eta = ||delta||`` (the Newton correction) and
+    # (MADD-ANO-XH1) -- ``eta = ||delta||`` (the Newton correction) and
     # ``L`` the Jacobian's Lipschitz constant -- estimated along ``delta``
     # from the extra row, ``||(J(x_k + delta) - J(x_k)) delta|| /
     # ||delta||**2`` -- the check is ``h = beta L eta < 1/2``.  (The
@@ -8751,11 +8751,12 @@ class GraphManager:
               float32) at every cap of a ``max_iterations`` sweep that
               stops the forward early by construction (caps 3-8): never
               below the true error on a concave and a convex map,
-              1.2-2.4x it for the parameter whose error is the larger
-              and up to 11x for the other, which reads its gap to the
-              worst probe; 1.81x for a parameter multiplying the state
-              of an affine map; 7-11x for a spring pair's stiffness and
-              mass; 83x on a hidden slow mode.  The distance carries the
+              1.1-2.1x it for the parameter whose error is the larger
+              and up to 10.5x for the other, which reads its gap to the
+              worst probe; 1.35x for a parameter multiplying the state
+              of an affine map; 1.19-1.70x for a spring pair's
+              stiffnesses and masses (``k = 6000``, ``c = 60``, ``dt =
+              0.01``, caps 2-6); 25x on a hidden slow mode.  The distance carries the
               residual's float resolution, as ``"spectral_error_bound"``
               does, so a stalled iterate no longer reads ``0.0`` (it did,
               against true errors of 1.5-3% at ``F'(x*) = 0.999``); where

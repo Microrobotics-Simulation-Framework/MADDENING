@@ -410,12 +410,16 @@ so the error is the resolvent applied to how much the linearisation
 moves between the two points.  Each factor is bounded by something the
 group already has or measures cheaply:
 
-1. **the distance** `‖x_k − x*‖` is `spectral_error_bound` — not the
-   residual and never `error_estimate`, which reads 100x short on a
-   hidden slow mode where this bound holds;
-2. **the resolvent** is bounded by the factor `spectral_error_bound`
-   applies to a residual, the larger of `‖(I − H)⁻¹‖₂` and
-   `1/(1 − rho_spectral)`;
+1. **the distance** `‖x_k − x*‖` is `spectral_error_bound`, never below
+   the Newton step `‖δ‖` — not the residual and never `error_estimate`,
+   which reads 100x short on a hidden slow mode where this bound holds;
+2. **the resolvent** is applied exactly to each probe's secant through
+   the range basis (`resolvent_apply`); until 0.4.0's round-5 fix it was
+   bounded by the factor `spectral_error_bound` applies to a residual,
+   the Arnoldi `‖(I − H)⁻¹‖₂`, which is the resolvent restricted to the
+   Krylov space `span(v0, r)` and read 8.57 where the full norm is 45.2 on
+   a three-relay ring whose secant lies outside that space (the bound was
+   0.19x the true error, usable; MADD-ANO-XH1);
 3. **the curvature** is a directional second difference of the
    adjoint's own matvec: `G` evaluated by the same Jacobian-vector
    product at `x_k` and at `x_k + δ`, `δ = (I − J)⁻¹ (F(x_k) − x_k)` the
@@ -463,17 +467,25 @@ construction:
 
 | fixture | `bound / true` |
 |---|---|
-| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.21–2.37 for `d/da`, 9.4–11.5 for `d/dg` |
-| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.29–1.36 for `d/dg`, 3.57–3.80 for `d/da` |
-| affine `a + g u`, `d/dg` (`d/da` is exact) | 1.81 at every cap |
-| stiff spring pair, stiffness and mass, caps 2–6 | 7–11 |
-| two-mode, concave slow mode, `converged=True` | 83 (with `error_estimate`'s distance: 12x short) |
+| concave `a + g log(1 + u)`, caps 3–8 (26% → 0.2% from `x*`) | 1.10–2.10 for `d/da`, 8.5–10.5 for `d/dg` |
+| convex `a + g u²`, caps 3–8 (6.8% → 0.3%) | 1.12–1.16 for `d/dg`, 3.06–3.30 for `d/da` |
+| affine `a + g u`, `d/dg` (`d/da` is exact) | 1.35 at every cap |
+| spring pair (`k = 6000`, `c = 60`, `dt = 0.01`), stiffness and mass of each node, caps 2–6 | 1.19–1.70 |
+| two-mode, concave slow mode (`q = -0.014`), `converged=True` | 25 (with `error_estimate`'s distance: 40x short) |
 
-The parameter with the larger relative error reads near the product of
-the two conservative factors (the distance 1.1x, the relay's resolvent
-1.22x) from cap 4 on, and more at cap 3 (2.37 on the concave map),
-where the Newton–Kantorovich factor below is largest; the other reads
-its gap to the worst probe as well.
+Re-measured after 0.4.0's round-5 fix (the resolvent applied exactly to
+each secant, one probe per entry, full-operator Kantorovich).  Before it
+the same table read 1.21–2.37 and 9.4–11.5 (concave), 1.29–1.36 and
+3.57–3.80 (convex), 1.81 (affine) and 83 on the two-mode case at
+`q = -0.02` -- which the full-operator Kantorovich check no longer
+certifies (`h = 0.56`), so the fixture moved to `q = -0.014`; the stiff
+spring pair of the first edition (7–11x) is not in the tree, and the pair
+above, with the same stiffness-to-damping balance and stable as a coupled
+pair (MADD-ANO-098), reads 1.34–2.71x on the old bound.  The parameter
+with the larger relative error reads near the distance's own margin from
+cap 4 on, and more at cap 3 (2.10 on the concave map), where the
+Newton–Kantorovich factor below is largest; the other reads its gap to
+the worst probe as well.
 
 **What it is not — read this before using it.**  It is a statement
 about the gradient, not about the solve.  On a map affine in its state

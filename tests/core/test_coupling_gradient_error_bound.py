@@ -549,8 +549,9 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt():
     per-constant probe sees that where a curvature of ``F`` in the state
     alone would read zero.  On this map the secant is exact (the change
     is linear in the distance), so the ratio is the two conservative
-    factors alone and does not move with the cap: measured 1.814 at
-    every cap from 2 to 14 (jaxlib 0.11.0).
+    factors alone and does not move with the cap: measured 1.347 at
+    every cap from 2 to 14 (1.814 before 0.4.0's round-5 fix applied the
+    resolvent to the secant exactly; jaxlib 0.11.0).
     """
     _, exact = _analytic_curved("affine")
     for m in (3, 6):
@@ -564,8 +565,8 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt():
         true = abs(float(g_k["g"]) - exact["g"]) / abs(float(g_k["g"]))
         assert true > 0.5, "fixture premise: the multiplicative one is far off"
         ratio = d["gradient_relative_error_bound"] / true
-        assert 1.0 <= ratio <= 1.814 * 1.1, (
-            f"m={m}: bound / true = {ratio:.4f}; recorded 1.814")
+        assert 1.0 <= ratio <= 1.347 * 1.1, (
+            f"m={m}: bound / true = {ratio:.4f}; recorded 1.347")
 
 
 def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap():
@@ -584,7 +585,7 @@ def test_an_affine_map_with_a_multiplicative_parameter_is_not_exempt_at_one_cap(
     true = abs(float(g_k["g"]) - exact["g"]) / abs(float(g_k["g"]))
     assert true > 0.5, "fixture premise: the multiplicative one is far off"
     ratio = d["gradient_relative_error_bound"] / true
-    assert 1.0 <= ratio <= 1.814 * 1.1, f"bound / true = {ratio:.4f}; recorded 1.814"
+    assert 1.0 <= ratio <= 1.347 * 1.1, f"bound / true = {ratio:.4f}; recorded 1.347"
 
 
 # ---------------------------------------------------------------------------

@@ -455,7 +455,13 @@ anomalies:
       convex map, 1.2-2.4x the true error for the parameter whose error is
       the larger (up to 11x for the other, which reads its gap to the worst
       probe), and 83x on a hidden slow mode where error_estimate's distance
-      would have made it 12x short.  It is a statement about the
+      would have made it 12x short.  (Those figures are the first
+      edition's; after 0.4.0's round-5 fix to the bound -- the resolvent
+      applied exactly to each secant, one probe per entry, full-operator
+      Kantorovich, MADD-ANO-XH1 -- the same maps read 1.1-2.1x and up to
+      10.5x, and the hidden slow mode, moved to a curvature the
+      full-operator check certifies, 25x, with error_estimate's distance
+      40x short.)  It is a statement about the
       gradient, not the solve: on an affine map with additive parameters
       the IFT gradient is exact wherever the forward stops, so it reads
       0.0 while the state is 1.1e-2 from the fixed point with

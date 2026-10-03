@@ -385,6 +385,20 @@ def test_fit_lm_is_converged_at_its_floor_in_both_precisions(truth_damping):
     assert_same_verdicts(r32, r64, "fit_lm at its floor")
 
 
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=_H1_REASON)
+def test_a_coordinate_started_at_its_truth_is_counted_alike_in_both_precisions():
+    """Found by the drawn ``fit_lm`` property at ``ci`` depth.  A well-posed
+    fit whose stiffness (an identity coordinate) starts exactly at its
+    truth: its residual block is zero throughout, so no evaluated gradient
+    points along it.  float32 reports ``excited_rank=2``; float64 counts the
+    never-excited direction (3), its zero eigenvalue read at ``eigh``'s
+    resolution against a cutoff far below it -- H1's mechanism on a problem
+    with no degeneracy at all."""
+    r32, r64 = both(_worker(), "blocks_fit_lm", kinds=["clip", "logit", "log"],
+                    truth_at=[0.5, 0.75, 0.78125], start_at=[0.5, 0.8, 0.5])
+    assert_same_verdicts(r32, r64, "fit_lm with a coordinate started at its truth")
+
+
 def test_the_known_failing_cases_converge_in_float32():
     """The float32 halves of H1 and L1 hold today: the scale is held at
     rank 2, and the floor fit converges.  (So the strict xfails above fail
@@ -400,17 +414,31 @@ def test_the_known_failing_cases_converge_in_float32():
 # ---------------------------------------------------------------------------
 
 _AWAY = st.floats(0.2, 0.8)
-_START = st.floats(0.1, 0.9)
+
+
+@st.composite
+def _starts(draw, truth_at):
+    """A start at least 0.05 of each range from the truth.  A coordinate
+    started *at* its truth is a decision threshold: its residual block is
+    zero, so no gradient the run evaluates points along it, and whether it
+    counts as excited is decided by rounding (found at ``ci`` depth; the
+    float64 half of it is H1's, pinned below)."""
+    out = []
+    for t in truth_at:
+        d = draw(st.floats(0.05, 0.4))
+        sign = draw(st.sampled_from([1.0, -1.0]))
+        s = t + sign * d
+        out.append(s if 0.02 <= s <= 0.98 else t - sign * d)
+    return out
 
 
 # Per push: tests/property/test_differential_precision.py::test_fit_lm_agrees_across_precisions
 @pytest.mark.slow  # a fit compiled in each process per example
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
 @given(kinds=st.lists(st.sampled_from(sorted(cases.SPECS)), min_size=3, max_size=3),
-       truth_at=st.lists(_AWAY, min_size=3, max_size=3),
-       start_at=st.lists(_START, min_size=3, max_size=3))
-def test_fit_lm_agrees_across_precisions_on_drawn_problems(kinds, truth_at, start_at):
-    check_fit_lm(kinds, truth_at, start_at)
+       data=st.data(), truth_at=st.lists(_AWAY, min_size=3, max_size=3))
+def test_fit_lm_agrees_across_precisions_on_drawn_problems(kinds, data, truth_at):
+    check_fit_lm(kinds, truth_at, data.draw(_starts(truth_at), label="start_at"))
 
 
 # Per push: tests/property/test_differential_precision.py::test_fim_agrees_across_precisions

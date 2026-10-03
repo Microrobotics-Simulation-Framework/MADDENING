@@ -14,6 +14,9 @@ narrative release notes — measurements, design rationale and migration
 guidance; the itemized changes follow.
 
 ### Added
+- **Domain oracles** (`tests/property/test_differential_{precision,replay,param_acceptance,fmu}.py`, `test_metamorphic_fmu_stability_filter.py`): float32 against float64 (a worker under x64),
+  replay from recorded state, every parameter-writing door against the others, the FMU four ways (C wrapper included) across `node.params` writes, and the
+  stability filter; known disagreements are strict xfails naming their finding (`testing_standards.md`, "Domains the claims cover").
 - **REST and run_pod claims inventory** (`docs/validation/rest_runpod_claims.yaml`, prefixes `REST`, `RPD`): every documented claim about the HTTP API and the multi-GPU session runner with its conditions, oracle and a test that can fail -- 143 rows, 132 verified, 5 failing (strict xfails), 5 ambiguous, 1 untested; the surrogate and streaming endpoints are out of scope (experimental).
   Read the failing and ambiguous rows before relying on those claims; a new REST or `run_pod.py` claim gets a row in the same change (`testing_standards.md`).
 - **System identification and FMU claims inventory** (`docs/validation/sysid_fmu_claims.yaml`, `SYS-NNN` / `FMU-NNN`): every documented `sysid`, `ParamSpec` and FMU-export claim with its conditions, oracle and a test that can fail -- 147 rows, 139 verified, 4 failing (strict xfails), 4 ambiguous.

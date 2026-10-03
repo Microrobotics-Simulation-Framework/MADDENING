@@ -225,12 +225,16 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-160 | jax.grad through run_adaptive_scan of an accelerated coupling group is 0.0 when a member carries a step-dependent field and the iterate starts at its fixed point | `major` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-161 | jax.grad through a 16-bit coupling group under solver="ift" raises NotImplementedError | `minor` | `not_safety_relevant` | `open` | >=0.3.0 |
 | MADD-ANO-162 | strict_convergence on a coupling group with a sharded member aborts the process | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
+| MADD-ANO-163 | POST /checkpoint/load restored parameter values PUT /graph/params refuses -- past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string -- answered 200, and left a graph whose save did not reload and whose steps diverged | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-164 | A parameter write to a HybridNode was answered and then lost: the hybrid held a copy of its physics node's params, so PUT /graph/params echoed the new value and the step kept the old one | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-165 | POST /sim/run that could not have the graph part-way through answered 503 'Nothing was changed; retry shortly' after it had stepped, so a client that retried stepped the graph twice; its final read waited with no timeout | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-166 | POST /sim/profile answered 500 for a graph that could not compile with any error but a RuntimeError | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.2.0, <0.4.0 |
 | MADD-ANO-167 | fit_lm reported converged=True at a wrong point, or at its unmoved start, for a float32 residual or parameter far from unit scale; fit returned its start | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-168 | node.params writes that never reached gm.params: every write into a replaced mapping, and an in-place element write to a list or array | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-169 | fim and fim_core reported rank 0 silently when F = J^T J flushed to exactly zero from a Jacobian that was not | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-170 | A logit ParamSpec whose width overflows the leaf's dtype was accepted, and constrain mapped the midpoint to the upper edge and far coordinates to NaN | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 
-*166 anomalies registered.  32 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 23 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*170 anomalies registered.  32 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 23 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence
@@ -268,7 +272,7 @@ graph is included, and the root's edges are exactly the direct dependencies
 | File | Install | What it covers |
 |---|---|---|
 | `maddening-0.4.0.dev0-core.cdx.json` | `pip install maddening` | The base dependencies: what every user gets, and the SOUP items of §1 |
-| `maddening-0.4.0.dev0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `terminal`, `viz` and `compression` extras |
+| `maddening-0.4.0.dev0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal (`rich`) and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `viz` and `compression` extras, and of `terminal` except `termaid`, which draws the graph diagram on an operator's terminal (below) |
 | `maddening-0.4.0.dev0-surrogates.cdx.json` | `pip install maddening[surrogates]` | Neural surrogate training (`optax`).  A trained surrogate replaces a physics node, so this code is in the computed result |
 | `maddening-0.4.0.dev0-usd.cdx.json` | `pip install maddening[usd]` | OpenUSD stage read and write (`usd-core`, a binary wheel that bundles OpenUSD's C++ libraries) |
 
@@ -293,7 +297,9 @@ the geometry import path.  The rest are left out on purpose:
 - The cloud extras (`runpod`, `lambda`, `aws`, `gcp`, `cloud`, `cloud-all`)
   are launch tooling on the operator's machine, not code in the simulation's
   process.  `viz3d`, `gpu-viz` and `streaming` are display-side
-  visualisation.  `verify` and `sbom` are tooling, and `ift` is empty.
+  visualisation, and so is the `terminal` extra's `termaid`, which draws
+  `GraphManager.print_graph_diagram` and computes nothing.  `verify` and
+  `sbom` are tooling, and `ift` is empty.
 
 **What an SBOM records, and what it does not.**  Each file records the
 Python version and platform it was resolved on (the PEP 508 marker

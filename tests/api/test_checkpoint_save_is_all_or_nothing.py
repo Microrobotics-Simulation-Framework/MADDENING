@@ -77,3 +77,66 @@ def test_a_save_still_writes_the_checkpoint_and_its_manifest(tmp_path):
     assert resp.status_code == 200, resp.text
     verify_manifest(tmp_path / "ok.npz")
     assert sorted(p.name for p in tmp_path.iterdir()) == ["ok.npz", "ok.npz.manifest.json"]
+
+
+def _listing(root) -> list[str]:
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+def _name_max(root) -> int:
+    try:
+        return os.pathconf(root, "PC_NAME_MAX")
+    except (OSError, ValueError):
+        return 255
+
+
+def test_every_name_the_filesystem_holds_saves_with_its_manifest(tmp_path):
+    """The longest checkpoint name whose manifest name still fits saves and
+    loads.  The temporary names carried the checkpoint's name and some 50
+    bytes more, so a valid 183-byte name was refused."""
+    client = _client(tmp_path)
+    limit = _name_max(tmp_path)
+    longest = "x" * (limit - len(".npz.manifest.json")) + ".npz"
+    for name in ("x" * 150 + ".npz", "x" * 200 + ".npz", longest):
+        resp = client.post("/checkpoint/save", params={"path": f"d/sub/{name}"})
+        assert resp.status_code == 200, (len(name), resp.text)
+        assert (tmp_path / "d" / "sub" / name).is_file()
+        assert (tmp_path / "d" / "sub" / (name + ".manifest.json")).is_file()
+        assert client.post("/checkpoint/load",
+                           params={"path": f"d/sub/{name}"}).status_code == 200
+    assert not [p for p in _listing(tmp_path) if "partial" in p]
+
+
+def test_a_name_too_long_is_refused_before_any_directory_is_made(tmp_path):
+    """A name the filesystem cannot hold -- the checkpoint's, a directory's
+    or its manifest's -- is a 400 that writes nothing: its directories used
+    to be made first and left behind by the 400 that said "nothing was
+    written"."""
+    client = _client(tmp_path)
+    limit = _name_max(tmp_path)
+    before = _listing(tmp_path)
+    for path in ("new/dirs/" + "x" * (limit - len(".npz.manifest.json") + 1) + ".npz",
+                 "new/dirs/" + "x" * (limit - 3) + ".npz",
+                 "new/" + "d" * (limit + 1) + "/c.npz"):
+        resp = client.post("/checkpoint/save", params={"path": path})
+        assert resp.status_code == 400, resp.text
+        assert "nothing was written" in resp.json()["detail"]
+        assert "this filesystem takes at most" in resp.json()["detail"]
+        assert _listing(tmp_path) == before, path
+
+
+def test_a_save_refused_after_its_directories_were_made_removes_them(tmp_path, monkeypatch):
+    """A refusal after the directories exist (the graph's own save fails)
+    removes the ones this save made, and only those."""
+    client = _client(tmp_path)
+    (tmp_path / "kept").mkdir()
+    before = _listing(tmp_path)
+
+    def refuse(self, path):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(GraphManager, "save_state", refuse)
+    resp = client.post("/checkpoint/save", params={"path": "kept/a/b/c.npz"})
+    assert resp.status_code == 400, resp.text
+    assert "nothing was written: No space left on device" in resp.json()["detail"]
+    assert _listing(tmp_path) == before

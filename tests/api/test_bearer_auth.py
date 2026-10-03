@@ -504,16 +504,14 @@ def test_a_generated_token_can_be_written_to_a_file(tmp_path, monkeypatch):
     import stat as _stat
 
     path = tmp_path / "token"
-    monkeypatch.setenv("MADDENING_API_TOKEN_FILE", str(path))
-    auth = APIAuth(bind_host="0.0.0.0", environ={})
+    auth = APIAuth(bind_host="0.0.0.0", environ={"MADDENING_API_TOKEN_FILE": str(path)})
     auth.announce(8000)
     assert path.read_text().strip() == auth.token
     assert _stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
 def test_an_unwritable_token_file_does_not_stop_the_server(tmp_path, monkeypatch):
-    monkeypatch.setenv("MADDENING_API_TOKEN_FILE", str(tmp_path / "no" / "such" / "dir"))
-    auth = APIAuth(bind_host="0.0.0.0", environ={})
+    auth = APIAuth(bind_host="0.0.0.0", environ={"MADDENING_API_TOKEN_FILE": str(tmp_path / "no" / "such" / "dir")})
     assert auth.announce(8000) is True
 
 

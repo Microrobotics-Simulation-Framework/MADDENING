@@ -314,3 +314,100 @@ class TestHybridCorrectionIntegration:
             f"Corrected error {err_corrected} should be reasonable vs "
             f"coarse error {err_coarse}"
         )
+
+
+# ---------------------------------------------------------------------------
+# One params dict: a write to the hybrid is a write to the node it wraps
+# ---------------------------------------------------------------------------
+
+def _no_correction(state, boundary_inputs, dt):
+    return {}
+
+
+def _spring(stiffness=100.0):
+    return SpringDamperNode("s", 0.01, stiffness=stiffness, initial_position=0.5,
+                            rest_length=0.0)
+
+
+def _velocity_after(node, steps=3):
+    gm = GraphManager()
+    gm.add_node(node)
+    gm.compile()
+    return float(gm.run_scan(steps)["s"]["velocity"])
+
+
+def test_a_hybrid_node_shares_its_physics_nodes_params_dict():
+    """As the sharded wrappers do: ``params_pytree()`` reads the physics
+    node's dict, so the hybrid's own must be that dict.  It was a copy."""
+    spring = _spring()
+    hybrid = HybridNode(spring, _no_correction)
+    assert hybrid.params is spring.params
+    hybrid.params["stiffness"] = 50.0
+    assert spring.params["stiffness"] == 50.0
+    assert float(hybrid.params_pytree()["stiffness"]) == 50.0
+
+
+@pytest.mark.parametrize("compiled_first", [False, True])
+def test_a_node_params_write_on_a_hybrid_reaches_the_step(compiled_first):
+    """``hybrid.params[key] = v`` (what ``PUT /graph/params`` also writes)
+    used to be undone by the graph's next read of ``gm.params``, which took
+    ``params_pytree()``'s unchanged value back over it."""
+    hybrid = HybridNode(_spring(), _no_correction)
+    gm = GraphManager()
+    gm.add_node(hybrid)
+    if compiled_first:
+        gm.compile()
+    hybrid.params["stiffness"] = 50.0
+    gm.compile()
+    assert float(gm.params["nodes"]["s"]["stiffness"]) == 50.0
+    assert float(gm.run_scan(3)["s"]["velocity"]) == pytest.approx(
+        _velocity_after(_spring(50.0)), rel=1e-6)
+    assert float(gm.run_scan(3)["s"]["velocity"]) != pytest.approx(
+        _velocity_after(_spring(100.0)), rel=1e-6)
+
+
+@pytest.mark.parametrize("compiled_first", [False, True])
+def test_a_rest_params_write_to_a_hybrid_node_is_kept(compiled_first):
+    """The auditor's case: ``PUT /graph/params`` to a ``HybridNode``
+    answered 200, echoed the new value, and lost it -- before and after
+    ``POST /graph/compile``."""
+    from fastapi.testclient import TestClient
+
+    from maddening.api.server import SimulationServer
+
+    gm = GraphManager()
+    gm.add_node(HybridNode(_spring(), _no_correction))
+    if compiled_first:
+        gm.compile()
+    client = TestClient(SimulationServer({}, graph_manager=gm).create_app())
+    reply = client.put("/graph/params/s", json={"params": {"stiffness": 50.0}})
+    assert reply.status_code == 200 and reply.json()["params"]["stiffness"] == 50.0
+    assert client.get("/graph/params/s").json()["stiffness"] == 50.0
+    assert client.post("/graph/compile").status_code == 200
+    assert client.get("/graph/params/s").json()["stiffness"] == 50.0
+    assert float(gm.params["nodes"]["s"]["stiffness"]) == 50.0
+    assert float(gm.run_scan(3)["s"]["velocity"]) == pytest.approx(
+        _velocity_after(_spring(50.0)), rel=1e-6)
+
+
+def test_a_rest_write_to_a_hybrid_is_checked_against_the_node_it_wraps():
+    """What sharing newly enables: the write reaches the physics node, so
+    the params route asks *its* constructor -- a rod past its Fourier limit
+    behind a hybrid used to answer 200 (and be lost); it is refused, and
+    nothing is written."""
+    from fastapi.testclient import TestClient
+
+    from maddening.api.server import SimulationServer
+
+    rod = HeatNode("rod", 0.05, n_cells=10, length=1.0, thermal_diffusivity=0.05)
+    gm = GraphManager()
+    gm.add_node(HybridNode(rod, _no_correction))
+    gm.compile()
+    client = TestClient(SimulationServer({}, graph_manager=gm).create_app())
+    reply = client.put("/graph/params/rod", json={"params": {"thermal_diffusivity": 0.4}})
+    assert reply.status_code == 400 and "constructor refuses" in reply.json()["detail"]
+    assert rod.params["thermal_diffusivity"] == 0.05
+    assert float(gm.params["nodes"]["rod"]["thermal_diffusivity"]) == pytest.approx(0.05)
+    ok = client.put("/graph/params/rod", json={"params": {"thermal_diffusivity": 0.04}})
+    assert ok.status_code == 200, ok.text
+    assert float(gm.params["nodes"]["rod"]["thermal_diffusivity"]) == pytest.approx(0.04)

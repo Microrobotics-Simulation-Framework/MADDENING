@@ -212,7 +212,21 @@ later passes, so a node that bakes a parameter should declare it in
 `POST /checkpoint/load` refuses, and undoes, a checkpoint whose parameters
 include another value of one the node consumed at construction (a
 checkpoint of a pipe built with another radius); before, the load
-succeeded and every later `/sim/step` failed.
+succeeded and every later `/sim/step` failed.  More generally the load asks
+of every parameter it changes what `PUT /graph/params` asks, by the same
+code: a non-finite value, one outside its `ParamSpec` bounds, one the
+node's constructor refuses with the graph's other values (a rod past its
+Fourier limit at this graph's timestep), one that moves a mapped edge's
+points -- each is a 400 and nothing is loaded.  Finiteness and the bounds
+are asked, per element, of a value that is neither the leaf's now nor the
+node's own, so a graph built outside its bounds reloads its own
+checkpoint.  `GraphManager.load_state` in Python does not ask these: like
+a `gm.params` write, it may hold a value outside a spec's bounds on
+purpose, and a graph whose parameters Python moved outside them must
+resume its own checkpoint into a freshly built graph.  It refuses only
+text and booleans for a numeric leaf, which no save writes.  `POST
+/graph/nodes` applies the same `ParamSpec` bounds to the values it is
+given, and refuses a boolean or text for a numeric parameter.
 
 ### Live values, recompiles and partial pytrees
 

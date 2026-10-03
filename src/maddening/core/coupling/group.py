@@ -23,6 +23,7 @@ rather than turning silently; the rules are in ``_INERT_RULES``.
 
 from __future__ import annotations
 
+import math
 import sys
 import warnings
 from collections.abc import Callable, Mapping
@@ -36,6 +37,8 @@ from typing import (
     get_origin,
     get_type_hints,
 )
+
+import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
@@ -121,9 +124,12 @@ class CouplingGroup:
         ``spectral_error_bound``, ``spectral_usable``) and the IFT
         gradient-error bound (``gradient_relative_error_bound``,
         ``gradient_bound_usable``), which cost ``8`` Jacobian-vector
-        products for the spectrum and ``11 + k + 4 n_c`` more for the
-        bound per group per step (``k <= 8``, ``n_c`` the group's
-        floating constants).  Under ``solver="fori"`` ``True`` is what
+        products for the spectrum and ``11 + k + 5 n_p`` more for the
+        bound per group per step (plus one linearisation and ``k``
+        reverse-mode products where the state has more than ``k``
+        entries; ``k <= 8``, ``n_p`` the probes: every entry of a
+        floating constant of at most 64 entries, one per larger
+        constant).  Under ``solver="fori"`` ``True`` is what
         stores the iteration count, residual and amplification at all;
         the spectral and gradient keys stay NaN there.
     acceleration : str
@@ -231,7 +237,11 @@ class CouplingGroup:
         ``"linear"`` uses linear extrapolation from the last two
         converged states, ``"quadratic"`` uses quadratic extrapolation
         from the last three converged states.  Reduces iteration count
-        for smoothly varying problems.
+        for smoothly varying problems.  Only floating fields are
+        extrapolated.  The fixed point does not move; the returned
+        iterate, which starts the solve from another guess, moves within
+        the solve's tolerance (measured up to 4.5e-5 relative on a linear
+        group converged to ``tolerance=1e-4`` with ``"linear"``).
     solver : {"ift", "fori"}
         How the fixed-point iteration is solved.  ``"ift"`` (default)
         runs a ``jax.lax.while_loop`` that exits as soon as the
@@ -351,6 +361,51 @@ class CouplingGroup:
     strict_convergence: bool = False
     linear_solver: Literal["gmres", "dense"] = "gmres"
 
+    def _refuse_out_of_range_numbers(self) -> None:
+        """Raise ``ValueError`` for a count or a threshold outside the range it has a meaning in.
+
+        Each of these was accepted and solved silently wrong, or not at
+        all.  ``waveform_iterations=0`` (or negative) on a sub-cycling
+        group ran *no* sweep: the members never stepped, the state stayed
+        at its initial value, and ``coupling_diagnostics()`` had no entry
+        -- nothing raised or warned.  A ``max_iterations`` below one is
+        the same for a plain group; a negative ``jacobian_reuse`` keeps
+        no secant pairs; a non-finite or negative ``tolerance``, ``rtol``
+        or ``atol`` makes ``converged`` mean nothing; a ``relaxation``
+        that is zero, negative or non-finite never moves the iterate
+        toward the fixed point.  The counts must be integers (a ``bool``
+        is not one), the thresholds finite and non-negative, and the
+        relaxation finite and positive.
+        """
+        def _is_int(value) -> bool:
+            return isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_))
+
+        for name, lowest in (("max_iterations", 1), ("waveform_iterations", 1),
+                             ("jacobian_reuse", 0)):
+            value = getattr(self, name)
+            if not _is_int(value) or int(value) < lowest:
+                raise ValueError(
+                    f"CouplingGroup.{name}={value!r}: it must be an integer >= {lowest}."
+                    + (" A sub-cycling group runs this many waveform sweeps per step, "
+                       "and at 0 it ran none: its members never stepped."
+                       if name == "waveform_iterations" else "")
+                )
+        for name in ("tolerance", "rtol", "atol"):
+            value = getattr(self, name)
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                    value, (int, float, np.integer, np.floating)) \
+                    or not math.isfinite(float(value)) or float(value) < 0.0:
+                raise ValueError(
+                    f"CouplingGroup.{name}={value!r}: it must be a finite number >= 0."
+                )
+        value = self.relaxation
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+                value, (int, float, np.integer, np.floating)) \
+                or not math.isfinite(float(value)) or float(value) <= 0.0:
+            raise ValueError(
+                f"CouplingGroup.relaxation={value!r}: it must be a finite number > 0."
+            )
+
     def to_dict(self) -> dict[str, Any]:
         """Every field of this group as JSON-compatible plain data.
 
@@ -412,6 +467,7 @@ class CouplingGroup:
                     f"CouplingGroup.{f.name}={value!r} is not a valid "
                     f"option; expected one of {valid!r}"
                 )
+        self._refuse_out_of_range_numbers()
         if self.accelerated_fields is not None:
             # Shape, before anything reads the mapping.  A non-mapping
             # used to reach ``.values()`` and surface as

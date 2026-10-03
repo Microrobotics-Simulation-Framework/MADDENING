@@ -136,16 +136,24 @@ def _count_map_evaluations(analysis):
     return counts
 
 
-def test_the_gradient_bound_costs_eleven_plus_k_plus_four_n_c_products():
-    """CPL-013: ``11 + k + 4 n_c`` Jacobian-vector products beside the spectrum's eight."""
+def test_the_gradient_bound_costs_eleven_plus_k_plus_five_n_p_products():
+    """CPL-013: ``11 + k + 5 n_p`` Jacobian-vector products beside the spectrum's eight.
+
+    ``n_p`` is the number of probes: every entry of a constant of at most
+    ``GRADIENT_PROBE_ENTRY_LIMIT`` entries, one for a larger constant --
+    here a three-entry and a scalar constant, four probes.  Five per probe
+    since 0.4.0's round-5 fix (the exact resolvent applied to each secant;
+    it was four, and the probes one per constant).  A state of at most
+    ``k`` entries needs no reverse-mode product for the resolvent norm.
+    """
     def bound(step, x, consts, w):
         return _gradient_error_bound_at(step, x, consts, w, jnp.asarray(0.5, F32),
                                         jnp.asarray(0.0, F32), jnp.asarray(2.0, F32))
 
     counts = _count_map_evaluations(bound)
-    k, n_c = 3, 2
-    assert counts["jvp"] == 11 + k + 4 * n_c, counts
-    assert counts["jvp"] <= 19 + 4 * n_c
+    k, n_p = 3, 4
+    assert counts["jvp"] == 11 + k + 5 * n_p, counts
+    assert counts["jvp"] <= 19 + 5 * n_p
 
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,9 @@
 """Read-only inspection of a :class:`~maddening.core.graph_manager.GraphManager`.
 
 The logic behind ``GraphManager.format_graph`` / ``print_graph``,
-``to_mermaid`` / ``to_dot``, ``state_summary``, ``params_table``,
-``coupling_report`` and ``memory_estimate``.  The methods on the graph
-are thin delegates to the functions here.
+``to_mermaid`` / ``to_dot``, ``print_graph_diagram``, ``state_summary``,
+``params_table``, ``coupling_report`` and ``memory_estimate``.  The
+methods on the graph are thin delegates to the functions here.
 
 Every function in this module is **strictly read-only**.  None of them
 writes the graph's state, ``_meta``, ``params``, node parameters, the
@@ -48,9 +48,10 @@ for.
 from __future__ import annotations
 
 import math
+import re
 import sys
 import textwrap
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, fields as dc_fields
 from typing import TYPE_CHECKING, Any, Optional, TextIO, overload
 
@@ -932,19 +933,27 @@ def _export_layout(gm: "GraphManager"):
     return ids, groups, grouped
 
 
-@stability(StabilityLevel.EXPERIMENTAL)
-def to_mermaid(gm: "GraphManager", *, direction: str = "LR") -> str:
-    """The graph as a Mermaid flowchart.  See :meth:`GraphManager.to_mermaid`."""
+def _flowchart(gm: "GraphManager", direction: str, *, text: Callable[[str], str],
+               line_break: str, subgraph: str) -> str:
+    """The flowchart :func:`to_mermaid` writes, in a given label dialect.
+
+    ``text`` makes a name safe inside a quoted label, ``line_break``
+    separates a node's name from its type, and ``subgraph`` is a coupling
+    group's opening line (``{id}`` and ``{title}`` filled in).  One
+    builder serves both dialects, so the terminal diagram cannot draw a
+    different graph from the Mermaid export.
+    """
     ids, groups, grouped = _export_layout(gm)
     lines = [f"flowchart {_check_direction(direction)}"]
 
     def node_line(name: str, indent: str) -> str:
         spec = gm._nodes[name]
-        label = _mermaid_text(name) + "<br/>" + _mermaid_text(_type_text(spec.node))
+        label = text(name) + line_break + text(_type_text(spec.node))
         return f'{indent}{ids[name]}["{label}"]'
 
     for gi, group in enumerate(groups):
-        lines.append(f'    subgraph g{gi}["{_mermaid_text("coupling group " + _group_key(group))}"]')
+        title = text("coupling group " + _group_key(group))
+        lines.append("    " + subgraph.format(id=f"g{gi}", title=title))
         for name in gm._nodes:
             if name in group.nodes:
                 lines.append(node_line(name, "        "))
@@ -956,15 +965,126 @@ def to_mermaid(gm: "GraphManager", *, direction: str = "LR") -> str:
         if edge.source_node not in ids or edge.target_node not in ids:
             continue
         arrow = "-.->" if _edge_kind(gm, edge) == "flux" else "-->"
-        lines.append(f'    {ids[edge.source_node]} {arrow}|"{_mermaid_text(_edge_label(edge))}"| '
+        lines.append(f'    {ids[edge.source_node]} {arrow}|"{text(_edge_label(edge))}"| '
                      f"{ids[edge.target_node]}")
     externals = sorted(gm._external_inputs, key=lambda e: (e.target_node, e.target_field))
     for i, ei in enumerate(externals):
         if ei.target_node not in ids:
             continue
-        lines.append(f'    x{i}[/"{_mermaid_text("external: " + ei.target_field)}"/]')
+        lines.append(f'    x{i}[/"{text("external: " + ei.target_field)}"/]')
         lines.append(f"    x{i} -.-> {ids[ei.target_node]}")
     return "\n".join(lines) + "\n"
+
+
+@stability(StabilityLevel.EXPERIMENTAL)
+def to_mermaid(gm: "GraphManager", *, direction: str = "LR") -> str:
+    """The graph as a Mermaid flowchart.  See :meth:`GraphManager.to_mermaid`."""
+    return _flowchart(gm, direction, text=_mermaid_text, line_break="<br/>",
+                      subgraph='subgraph {id}["{title}"]')
+
+
+# ----------------------------------------------------------------------
+# Terminal diagram (termaid)
+# ----------------------------------------------------------------------
+
+_TERMAID_HINT = ("print_graph_diagram needs the optional 'termaid' package: "
+                 'pip install "maddening[terminal]"')
+_DIAGRAM_RICH_HINT = ("a diagram theme is a colouring, which needs the optional 'rich' "
+                      'package: pip install "maddening[terminal]"; theme=None draws '
+                      "the diagram uncoloured without it")
+
+#: The colour themes termaid 0.9 ships (``termaid.renderer.themes.THEMES``;
+#: ``tests/core/test_inspection_diagram.py`` holds this tuple to it).
+#: termaid itself falls back to ``default`` for a name it does not know,
+#: so the name is checked here rather than silently ignored.
+_DIAGRAM_THEMES: tuple[str, ...] = (
+    "default", "terra", "neon", "mono", "amber", "phosphor",
+    "gruvbox", "monokai", "dracula", "nord", "solarized",
+)
+
+# termaid parses Mermaid but decodes no entity codes (``#quot;`` would
+# print as typed), so nothing is escaped.  A few sequences act even
+# inside a quoted label; each becomes a look-alike instead.
+_TERMAID_LOOKALIKES = (
+    (re.compile(r'["`]'), "'"),          # a quote ends the label; "`...`" is Markdown
+    (re.compile(r"%(?=%)"), "% "),       # %% starts a comment anywhere on the line
+    (re.compile(r":(?=::)"), ": "),      # ::: starts a class suffix on a node
+    (re.compile(r"\\(?=n)"), "\\ "),     # a literal \n breaks a node's label
+    (re.compile(r"\r\n|\r|\n"), " "),    # a line break ends the statement
+)
+
+
+def _termaid_text(text: str) -> str:
+    """Make arbitrary text safe inside a quoted label that termaid parses.
+
+    Where :func:`_mermaid_text` escapes, this replaces each sequence
+    termaid's parser acts on inside quotes with a look-alike
+    (:data:`_TERMAID_LOOKALIKES`): a double quote or backtick becomes
+    ``'``, ``%%`` becomes ``% %``, ``:::`` becomes ``: ::``, a literal
+    backslash-n becomes ``\\ n`` and a line break a space.  The diagram
+    is for reading; :func:`to_mermaid` and :func:`format_graph` carry
+    names exactly.
+    """
+    out = text
+    for pattern, replacement in _TERMAID_LOOKALIKES:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+def _termaid_mermaid(gm: "GraphManager", *, direction: str = "LR",
+                     use_ascii: bool = False) -> str:
+    """:func:`to_mermaid`'s flowchart in the dialect termaid draws cleanly.
+
+    Two differences, both forced by termaid 0.9's parser: a coupling
+    group opens as ``subgraph g0 ["title"]``, because termaid reads a
+    title only when a space separates it from the id and otherwise prints
+    ``g0["coupling group a+b"]`` verbatim; and a node's name and type are
+    joined by ``" :: "``, because termaid does not understand ``<br/>``.
+    ``use_ascii`` also writes the edge labels' ``→`` as ``->``, so an
+    ASCII drawing does not need Unicode for its own arrows.
+    """
+    def text(raw: str) -> str:
+        out = _termaid_text(raw)
+        return out.replace("→", "->") if use_ascii else out
+
+    return _flowchart(gm, direction, text=text, line_break=" :: ",
+                      subgraph='subgraph {id} ["{title}"]')
+
+
+def _termaid() -> Any:
+    try:
+        import termaid  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError(_TERMAID_HINT) from exc
+    return termaid
+
+
+@stability(StabilityLevel.EXPERIMENTAL)
+def print_graph_diagram(gm: "GraphManager", *, theme: Optional[str] = None,
+                        direction: str = "LR", use_ascii: bool = False,
+                        file: Optional[TextIO] = None) -> None:
+    """Draw the graph as boxes and arrows.  See :meth:`GraphManager.print_graph_diagram`."""
+    _check_direction(direction)
+    if theme is not None and theme not in _DIAGRAM_THEMES:
+        raise ValueError(f"theme must be None or one of {_DIAGRAM_THEMES}, got {theme!r}")
+    termaid = _termaid()
+    out = sys.stdout if file is None else file
+    if not gm._nodes:
+        out.write("(empty graph: no nodes to draw)\n")
+        return
+    source = _termaid_mermaid(gm, direction=direction, use_ascii=use_ascii)
+    try:
+        from rich.console import Console  # noqa: PLC0415
+    except ImportError:
+        if theme is not None:
+            raise ImportError(_DIAGRAM_RICH_HINT) from None
+        out.write(termaid.render(source, use_ascii=use_ascii) + "\n")
+        return
+    drawing = termaid.render_rich(source, use_ascii=use_ascii, theme=theme or "default")
+    # soft_wrap: rich must neither wrap nor crop a line wider than its
+    # console, or the boxes come apart.  Colour reaches only a terminal;
+    # rich writes plain text to any other file.
+    Console(file=out).print(drawing, soft_wrap=True)
 
 
 @stability(StabilityLevel.EXPERIMENTAL)

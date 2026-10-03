@@ -255,14 +255,17 @@ def check_windowed_replay(name: str, *, window: int, sample_every: int, start: i
 def check_fit_stays_at_the_truth(name: str, fitter: str) -> None:
     """A fit of two stiffnesses, started at the generating values.
 
-    In identity coordinates: under a ``log`` spec the fitters work in,
+    In identity coordinates.  Under a ``log`` spec the fitters work in,
     ``constrain(unconstrain(100.0))`` is ``100.00000763`` -- one float32 ulp
-    off -- so the loss the fitter evaluates at its start is that of a
-    neighbouring point (1.3e-13 here), and Adam, which normalises the
-    gradient, takes a full-``lr`` step from it.  That is the transform's
-    rounding, not a replay defect, so the oracle states the claim where no
-    transform rounds: there the loss at the start is exactly zero, so is
-    its gradient, and so is every Adam step."""
+    off -- and until SYS-071's fix the fitters evaluated their start there,
+    at a neighbouring point (1.3e-13 here), from which Adam, which
+    normalises the gradient, took a full-``lr`` step.  That was the
+    transform's rounding, not a replay defect, so the oracle states the
+    claim where no transform rounds: there the loss at the start is exactly
+    zero, so is its gradient, and so is every Adam step.  It also pins that
+    the fitters' objective computes a leaf whose round trip is exact as it
+    always did: selecting it in the objective as well moved this zero to
+    1.3e-12 on jaxlib 0.11.2, through XLA's fusion alone."""
     gm = FAMILIES[name]()
     stiff = [(n, "stiffness") for n in gm.node_names
              if "stiffness" in (gm.params["nodes"].get(n) or {})]

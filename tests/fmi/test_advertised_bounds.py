@@ -1,6 +1,8 @@
 """The FMI ``min`` / ``max`` attributes are the *settable* envelope: for a
 strict (log / logit) bound the description advertises the next
-representable float inside, for an inclusive one the bound itself.
+representable float inside -- or, where the spec refuses that one, the
+outermost float inside it the spec accepts -- for an inclusive one the bound
+itself.
 
 Originally written from the independent audit of 2026-09-16 (round 1; report and
 reproducers under ``benchmarks/results/audit1/``).
@@ -83,6 +85,48 @@ def test_logit_leaf_advertises_both_open_bounds(gm):
     sc.set_params({"ball.params.elasticity": var.max})
     with pytest.raises(ValueError, match="above bound"):
         sc.set_params({"ball.params.elasticity": 1.0})
+
+
+def _accepted(spec, value):
+    try:
+        spec.check(np.asarray(value, dtype=np.float32))
+    except ValueError:
+        return False
+    return True
+
+
+#: Open bounds whose neighbour inside is not a value the spec takes, beside the
+#: ones ``test_the_bridge_enforces_the_envelope_its_description_advertises``
+#: covers: a ``logit`` bound of zero, whose neighbour ``-TINY`` / ``TINY`` has
+#: a coordinate that rounds onto the bound (the base advertised ``max = -TINY``
+#: under ``(-1, 0)``, which a bridge over a sidecar with no specs took while
+#: every other door refused it), the far ends of those ranges, and a negative
+#: ``log`` bound one and a half ``TINY`` below zero, whose first accepted value
+#: is a subnormal that flushes to zero.
+_OUTERMOST_ACCEPTED = [
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), 1),
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), 0),
+    (ParamSpec(bounds=(0.0, 1.0), transform="logit"), 0),
+    (ParamSpec(bounds=(0.0, 1.0), transform="logit"), 1),
+    (ParamSpec(bounds=(-1.5 * float(F32.tiny), None), transform="log"), 0),
+]
+
+
+@pytest.mark.parametrize("spec, side", _OUTERMOST_ACCEPTED,
+                         ids=["logit-upper-at-zero", "logit-lower-at-minus-one",
+                              "logit-lower-at-zero", "logit-upper-at-one", "log-below-zero"])
+def test_an_open_bound_at_zero_advertises_the_outermost_value_its_spec_accepts(spec, side):
+    """FMI's ``min`` / ``max`` are inclusive, so the advertised value must be one
+    the spec accepts and the float just outside it one the spec refuses: then a
+    bridge whose sidecar has no specs, holding only the advertised envelope,
+    takes exactly what the graph takes.  Under ``(-1, 0)`` the advertised
+    ``max`` is ``-2**-25``, not ``-TINY``."""
+    from maddening.fmi.model_description import _advertised_bound
+
+    m = np.float32(_advertised_bound(spec, side, "float32"))
+    outward = np.nextafter(m, np.float32(-np.inf) if side == 0 else np.float32(np.inf))
+    assert _accepted(spec, m), (spec, m)
+    assert not _accepted(spec, outward), (spec, outward)
 
 
 def test_inclusive_identity_bounds_are_unchanged(gm):

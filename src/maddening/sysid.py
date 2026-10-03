@@ -161,6 +161,13 @@ _CONTINUITY_WEIGHT_WHY = (
 _PRECISION_WARN_FACTOR = 2.0
 
 
+def _x64_enabled() -> bool:
+    """Whether ``jax_enable_x64`` is on: a float32 decomposition then comes
+    from float32 leaves, and its precision remedy is float64 leaves rather
+    than the x64 re-run (SYS-024)."""
+    return bool(jax.config.jax_enable_x64)
+
+
 @stability(StabilityLevel.EVOLVING)
 def observations_from_history(
     initial_state: dict[str, dict], history: dict[str, dict],
@@ -2746,7 +2753,9 @@ def fim(
         ``_PRECISION_WARN_FACTOR`` of the cutoff, i.e. the verdict rests
         on a difference the matrix's own precision cannot resolve.  The
         message names the ratio, the cutoff and the remedy: re-run under
-        ``jax_enable_x64``.  x64 is not the default and is not going to
+        ``jax_enable_x64`` -- or, when x64 is already on and the
+        decomposition is float32 because the parameters are, hold the
+        parameters and the state in float64.  x64 is not the default and is not going to
         be -- it is process-global, set before the first JAX import, and
         fp64 measures 91x slower than fp32 on the reference RTX A2000
         (155 vs 14,135 GFLOP/s, the fp32 figure being TF32 tensor
@@ -2882,7 +2891,18 @@ def fim(
         # would send a user round a loop they have finished.  There is
         # no third precision to escalate to, so say what is left: the
         # comparison is at the floor of the best precision available.
+        # A float32 decomposition *in an x64 process* comes from float32
+        # leaves (the residual they make is float32 too), so turning x64
+        # on -- the float32 remedy -- is already done and changes nothing:
+        # what settles it there is float64 leaves (SYS-024).
         remedy = (
+            "x64 is already on, but the decomposition is float32 because "
+            "the parameters (and the residual they produce) are float32: "
+            "settle it by holding them in float64 -- cast the parameters "
+            "and the state, e.g. jax.tree.map(lambda v: jnp.asarray(v, "
+            "jnp.float64), params) -- which moves the cutoff to "
+            "max(n, sqrt(m)) * 2.22e-16 and computes the ratio to match."
+            if dtype == np.float32 and _x64_enabled() else
             "Settle it by re-running under x64 -- "
             "jax.config.update('jax_enable_x64', True) before the first "
             "array is made, or JAX_ENABLE_X64=1 -- which moves the "
@@ -2935,7 +2955,10 @@ def fim(
             f"together. Rescale the residual -- a smaller noise_std, or "
             f"residual units nearer one -- so that F's entries are normal "
             f"numbers"
-            + (", or re-run under x64." if dtype == np.float32 else "."),
+            + ((", or hold the parameters and the state in float64 (x64 is "
+                "already on; the decomposition is float32 because they are)."
+                if _x64_enabled() else ", or re-run under x64.")
+               if dtype == np.float32 else "."),
             PrecisionLimitWarning,
             stacklevel=2,
         )

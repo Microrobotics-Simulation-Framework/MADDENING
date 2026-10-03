@@ -55,7 +55,10 @@ or blank string is a configuration error and raises**: it is what
 exists to remove.  Unset the variable if you want a generated token.
 A token with whitespace before or after it raises too: a client's
 ``Authorization`` header is read with that whitespace stripped, so such
-a token could never be presented.
+a token could never be presented.  So does one holding a character that
+is not printable ASCII: a header carries latin-1 bytes, which clients
+either refuse to send or send in another encoding than the one the
+server compares.
 
 A generated token is only useful to somebody who can read the log.
 When nothing can — a detached container, a job whose stdout goes
@@ -344,11 +347,20 @@ def bearer_from_subprotocols(offered: Iterable[str]) -> str:
     -------
     str
         The first decodable ``maddening.bearer.*`` value, else ``""``.
+
+    Notes
+    -----
+    ASGI specifies ``scope["subprotocols"]`` as a list of names, but some
+    servers pass the ``Sec-WebSocket-Protocol`` header as one
+    comma-joined entry (uvicorn 0.50.0 does); each entry is split on
+    commas, so the browser carrier is read either way.  A subprotocol
+    name is an HTTP token and holds no comma.
     """
-    for name in offered:
-        token = decode_ws_bearer(name.strip())
-        if token:
-            return token
+    for entry in offered:
+        for name in str(entry).split(","):
+            token = decode_ws_bearer(name.strip())
+            if token:
+                return token
     return ""
 
 
@@ -365,7 +377,8 @@ class APIAuth:
         A non-loopback value turns authentication on for every request.
     token : str, optional
         An explicit token, overriding the environment.  Must be a
-        non-blank string without whitespace before or after it.
+        non-blank string of printable ASCII characters without whitespace
+        before or after it.
     environ : mapping, optional
         Environment to read (``MADDENING_HOST``, ``MADDENING_API_TOKEN``,
         ``MADDENING_API_TOKEN_FILE``); defaults to :data:`os.environ`.
@@ -391,7 +404,8 @@ class APIAuth:
         the module docstring: an empty token is a configuration mistake,
         and silently reading it as "no authentication" is the defect
         this class exists to fix.  Also if it has whitespace before or
-        after it, which no ``Authorization`` header can present.
+        after it, or a character that is not printable ASCII, neither of
+        which an ``Authorization`` header can present.
 
     Examples
     --------
@@ -439,6 +453,24 @@ class APIAuth:
                 "the server strips it from what a client presents -- so no "
                 "client could ever present this token. Set it without the "
                 "surrounding whitespace (a trailing newline from a file, say)."
+            )
+        unpresentable = next((ch for ch in source if not " " <= ch <= "~"), None) \
+            if source is not None else None
+        if unpresentable is not None:
+            # An HTTP header carries latin-1 bytes, which Starlette decodes as
+            # such, and verify() compares UTF-8: a token outside printable
+            # ASCII was accepted here and then refused to every client --
+            # curl's UTF-8 bytes arrive as other characters, httpx and
+            # requests will not encode the header at all, and a latin-1
+            # token matched only a client sending latin-1 bytes.
+            raise ValueError(
+                f"{origin} holds the character {unpresentable!r} "
+                f"(U+{ord(unpresentable):04X}), which is not printable ASCII. An "
+                "'Authorization: Bearer' header cannot carry it as this server "
+                "reads one -- clients send header bytes the server decodes as "
+                "latin-1, or refuse to send them -- so no client could ever present "
+                "this token. Set it to printable ASCII characters only (a generated "
+                "token is URL-safe base64)."
             )
         self.generated = source is None
         self._environ = env
@@ -563,7 +595,6 @@ class APIAuth:
                 self.bind_host, port, TOKEN_ENV,
             )
             return False
-        self._write_token_file()
         logger.warning(
             "\n"
             "============================================================\n"
@@ -588,6 +619,10 @@ class APIAuth:
             self.bind_host, port, self.token,
             TOKEN_ENV,
         )
+        # After the token is logged: a file that cannot be written says the
+        # token "is in the log line above", which it was not when the file
+        # was written first.
+        self._write_token_file()
         return True
 
     def _write_token_file(self) -> None:

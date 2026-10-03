@@ -72,7 +72,7 @@ import uuid
 import warnings
 import weakref
 from pathlib import Path
-from typing import Annotated, Any, Iterable, Optional
+from typing import Annotated, Any, Iterable, Mapping, Optional
 from urllib.parse import urlsplit
 
 import jax
@@ -1997,6 +1997,15 @@ _CROSS_ORIGIN_DETAIL = (
 )
 
 
+def _is_port(text: str) -> bool:
+    """Whether *text* is a port as a ``Host`` header spells one: ASCII
+    digits only.  ``str.isdigit`` is true of ``"\u00b2"`` (superscript two,
+    a latin-1 byte a client can send) and ``int`` refuses it, so a Host
+    ``localhost:\u00b2`` was a 500 on every route and on the WebSocket
+    handshake."""
+    return text.isascii() and text.isdigit()
+
+
 def _host_and_port(host_header: Optional[str]) -> Optional[tuple[str, Optional[int]]]:
     """``(host, port)`` of a ``Host`` header as :func:`urllib.parse.urlsplit`
     reads an origin's authority -- lowercased, an IPv6 literal without its
@@ -2014,15 +2023,25 @@ def _host_and_port(host_header: Optional[str]) -> Optional[tuple[str, Optional[i
         name, rest = value[1:end], value[end + 1:]
         if not rest:
             return name, None
-        if not (rest.startswith(":") and rest[1:].isdigit()):
+        if not (rest.startswith(":") and _is_port(rest[1:])):
             return None
         return name, int(rest[1:])
     if value.count(":") > 1:           # a bare IPv6 address is not a valid Host
         return None
     name, colon, port = value.partition(":")
-    if not name or (colon and not port.isdigit()):
+    if not name or (colon and not _is_port(port)):
         return None
     return name, (int(port) if colon else None)
+
+
+def _offered_subprotocols(scope: Mapping[str, Any]) -> list[str]:
+    """The subprotocol names a WebSocket handshake offered.  ASGI specifies
+    ``scope["subprotocols"]`` as a list of names; uvicorn 0.50.0 passes the
+    ``Sec-WebSocket-Protocol`` header as one comma-joined entry, which left
+    the browser's bearer carrier unread and ``maddening.v1`` unselected.
+    Each entry is split on commas (a subprotocol name holds none)."""
+    return [name.strip() for entry in (scope.get("subprotocols") or ())
+            for name in str(entry).split(",") if name.strip()]
 
 
 def _host_name(host_header: str) -> Optional[str]:
@@ -2035,13 +2054,13 @@ def _host_name(host_header: str) -> Optional[str]:
     if value.startswith("["):
         end = value.find("]")
         rest = value[end + 1:] if end > 0 else None
-        if rest is None or (rest and not (rest.startswith(":") and rest[1:].isdigit())):
+        if rest is None or (rest and not (rest.startswith(":") and _is_port(rest[1:]))):
             return None
         return value[1:end]
     if value.count(":") > 1:           # a bare IPv6 address is not a valid Host
         return None
     name, colon, port = value.partition(":")
-    if colon and not port.isdigit():
+    if colon and not _is_port(port):
         return None
     return name.rstrip(".") or None
 
@@ -2177,7 +2196,7 @@ class _WebSocketAuthMiddleware:
             key.decode("latin-1").lower(): value.decode("latin-1")
             for key, value in (scope.get("headers") or ())
         }
-        offered = list(scope.get("subprotocols") or [])
+        offered = _offered_subprotocols(scope)
         presented = bearer_from_headers(headers) or bearer_from_subprotocols(offered)
         authenticated = self._auth.verify(presented)
         # A DNS-rebinding page passes the origin check below (its Origin
@@ -2620,7 +2639,7 @@ class SimulationServer:
             select one of the offered names, and a browser aborts the
             connection when it selects none.
         """
-        offered = list(websocket.scope.get("subprotocols") or [])
+        offered = _offered_subprotocols(websocket.scope)
         selected = WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None
         peer = websocket.client.host if websocket.client else None
         if not self.auth._required_for_request(peer, websocket.headers):  # noqa: SLF001

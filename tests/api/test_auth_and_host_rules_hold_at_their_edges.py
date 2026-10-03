@@ -397,3 +397,149 @@ def test_a_token_file_that_cannot_be_written_is_left_alone_and_logged(tmp_path, 
     finally:
         directory.chmod(0o755)
 
+
+#: Characters ``str.isdigit`` accepts that ``int`` refuses -- the latin-1
+#: superscripts a client can send as obs-text -- and other non-ASCII digits.
+NON_ASCII_DIGITS = ["²", "³", "¹", "1²", "٣", "１"]
+
+
+@pytest.mark.parametrize("port", NON_ASCII_DIGITS)
+def test_a_host_port_of_non_ascii_digits_is_not_a_port(port):
+    from maddening.api.server import _host_and_port, _host_name
+    for host in (f"localhost:{port}", f"[::1]:{port}", f"127.0.0.1:{port}"):
+        assert _host_and_port(host) is None, host
+        assert _host_name(host) is None, host
+    assert _host_and_port("localhost:12") == ("localhost", 12)
+    assert _host_name("[::1]:8000") == "::1"
+
+
+def _asgi(app, scope_type: str, host: bytes, *, origin: bytes = b"http://evil.example"):
+    """One request or handshake straight into the app, its Host and Origin
+    as raw latin-1 bytes (an in-process client rewrites the Host from its
+    URL); the messages the app sent."""
+    import asyncio
+
+    async def call():
+        scope = {"type": scope_type, "asgi": {"version": "3.0"}, "http_version": "1.1",
+                 "scheme": "http" if scope_type == "http" else "ws", "path": "/sim/step"
+                 if scope_type == "http" else "/ws/state", "query_string": b"",
+                 "root_path": "", "headers": [(b"host", host), (b"origin", origin)],
+                 "client": LOOPBACK_PEER, "server": ("127.0.0.1", 8000), "subprotocols": []}
+        if scope_type == "http":
+            scope["method"] = "POST"
+        scope["raw_path"] = scope["path"].encode()
+        sent, first = [], [True]
+
+        async def receive():
+            if scope_type == "websocket":
+                if first[0]:
+                    first[0] = False
+                    return {"type": "websocket.connect"}
+                return {"type": "websocket.disconnect", "code": 1000}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        await app(scope, receive, send)
+        return sent
+    return asyncio.run(call())
+
+
+@pytest.mark.parametrize("port", ["²", "³", "¹"])
+def test_a_host_port_of_a_latin1_superscript_is_refused_not_a_500(port):
+    """``Host: localhost:\\u00b2`` raised ``ValueError`` in the origin check:
+    a 500 on HTTP and on the WebSocket handshake.  It is not a name of this
+    server, so the Host rule refuses it: 403, and a closed handshake."""
+    app = _server("127.0.0.1").create_app()
+    host = f"localhost:{port}".encode("latin-1")
+    sent = _asgi(app, "http", host)
+    assert next(m["status"] for m in sent if m["type"] == "http.response.start") == 403
+    sent = _asgi(app, "websocket", host)
+    assert sent and sent[0]["type"] == "websocket.close", sent
+    # The control: the same request with an ASCII port reaches the origin check.
+    sent = _asgi(app, "http", b"localhost:2")
+    assert next(m["status"] for m in sent if m["type"] == "http.response.start") == 403
+
+
+@pytest.mark.parametrize("token", ["пароль-0123456789",
+                                   "pässwört-0123456789", "a\tb", "a\x7fb",
+                                   "a b", "\U0001f511-key"])
+def test_a_token_no_client_can_present_is_refused_at_construction(token):
+    """A token outside printable ASCII was accepted, logged nothing, and
+    then refused every client: a header's bytes are decoded as latin-1, so
+    curl's UTF-8 bytes arrive as other characters, httpx and requests will
+    not encode the header at all, and a latin-1 token matched only a client
+    sending latin-1 bytes.  Refused like a blank token, from ``token=`` and
+    from the environment, naming the character and not the token."""
+    for kwargs in ({"token": token, "environ": {}},
+                   {"environ": {"MADDENING_API_TOKEN": token}}):
+        with pytest.raises(ValueError, match="not printable ASCII") as info:
+            APIAuth(bind_host="0.0.0.0", **kwargs)
+        assert "no client could ever present this token" in str(info.value)
+        assert token not in str(info.value)
+
+
+@pytest.mark.parametrize("token", ["a b", "!#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", "~" * 64])
+def test_a_printable_ascii_token_is_taken_and_can_be_presented(token):
+    server = SimulationServer(REGISTRY, graph_manager=_graph(), bind_host="0.0.0.0",
+                              api_token=token)
+    client = TestClient(server.create_app())
+    assert client.get("/graph", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+
+def test_a_token_file_failure_points_at_the_token_logged_above_it(tmp_path, caplog):
+    """The warning for a token file that cannot be written says the token
+    "is in the log line above"; the token used to be logged after it."""
+    path = tmp_path / "missing-dir" / "token"
+    auth = APIAuth(bind_host="0.0.0.0", environ={TOKEN_FILE_ENV: str(path)})
+    with caplog.at_level("INFO", logger="maddening.api.auth"):
+        assert auth.announce(8000) is True
+    messages = [r.getMessage() for r in caplog.records]
+    token_at = next(i for i, m in enumerate(messages) if auth.token in m)
+    failure_at = next(i for i, m in enumerate(messages)
+                      if "Could not write the generated API token" in m)
+    assert token_at < failure_at, messages
+    assert "log line above" in messages[failure_at]
+
+
+def test_a_comma_joined_subprotocol_entry_still_carries_the_browser_token():
+    """uvicorn 0.50.0 hands the app ``Sec-WebSocket-Protocol`` as one
+    comma-joined entry, not the list ASGI specifies; the bearer carrier and
+    ``maddening.v1`` were then not found, and the handshake was refused."""
+    import asyncio
+
+    from maddening.api.auth import bearer_from_subprotocols, websocket_credentials
+    from maddening.api.server import _offered_subprotocols
+
+    joined = ", ".join(websocket_credentials(TOKEN))
+    assert bearer_from_subprotocols([joined]) == TOKEN
+    assert bearer_from_subprotocols(websocket_credentials(TOKEN)) == TOKEN
+    assert _offered_subprotocols({"subprotocols": [joined]})[-1] == "maddening.v1"
+    app = _server("0.0.0.0").create_app()
+
+    async def handshake(subprotocols):
+        scope = {"type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws",
+                 "path": "/ws/state", "raw_path": b"/ws/state", "query_string": b"",
+                 "root_path": "", "headers": [(b"host", b"127.0.0.1")],
+                 "client": LOOPBACK_PEER, "server": ("127.0.0.1", 8000),
+                 "subprotocols": subprotocols}
+        sent, inbox = [], [{"type": "websocket.connect"}]
+
+        async def receive():
+            if inbox:
+                return inbox.pop(0)
+            await asyncio.sleep(0.05)
+            return {"type": "websocket.disconnect", "code": 1000}
+
+        async def send(message):
+            sent.append(message)
+
+        await asyncio.wait_for(app(scope, receive, send), timeout=30)
+        return sent
+
+    accepted = asyncio.run(handshake([joined]))
+    assert accepted[0]["type"] == "websocket.accept", accepted
+    assert accepted[0].get("subprotocol") == "maddening.v1"
+    refused_ = asyncio.run(handshake(["maddening.bearer.d3Jvbmc, maddening.v1"]))
+    assert refused_[0]["type"] == "websocket.close", refused_

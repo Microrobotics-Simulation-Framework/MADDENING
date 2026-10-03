@@ -140,7 +140,7 @@ claims:
     key included (src/maddening/core/graph_manager.py:3726).  "none", the
     IQN pair and solver="fori" step the same group.  Reproducer:
     tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation.
-    Since 0.1.0 (MADD-ANO-149).
+    Since 0.1.0 (MADD-ANO-152).
 
 - id: CPL-004
   area: configuration
@@ -2833,11 +2833,11 @@ claims:
     A member's flux is resolved in a dictionary local to
     _run_coupled_block_impl and an outside node's in _build_step_fn's
     flux_state; neither reads the other, so drv.q -> member and
-    member.q -> reader raise (graph_manager.py:3259 _resolve_value and
-    8125 _resolve_and_update_node).  A back edge reads the old state, which
+    member.q -> reader raise (graph_manager.py:3252 _resolve_value and
+    8125 _resolve_and_update_node).  A back edge reads the old state (8119), which
     holds no flux, so an ungrouped ring a.q -> b, b -> a raises when built
     b, a and steps when built a, b.  Reproducers: the three strict xfails
-    cited.  Since 0.1.0 (MADD-ANO-147, MADD-ANO-148).
+    cited.  Since 0.1.0 (MADD-ANO-150, MADD-ANO-151).
 
 - id: CPL-186
   area: configuration
@@ -2866,4 +2866,4 @@ claims:
     _loop_through_outside_nodes, which looks at components only, says
     nothing: b = 0.25 after one step where reading c this step gives 2.75
     (graph_manager.py:1447 and 1478).  Reproducer: the strict xfail cited.
-    Since 0.1.0 (MADD-ANO-150).
+    Since 0.1.0 (MADD-ANO-153).

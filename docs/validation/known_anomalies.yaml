@@ -10756,7 +10756,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_spectral_bound_in_returned_weights.py::test_the_bound_holds_in_the_returned_states_weights_on_a_growing_group"
     github_issue: null
-  - anomaly_id: "MADD-ANO-147"
+  - anomaly_id: "MADD-ANO-150"
     title: "A flux edge that crosses a coupling group's boundary -- from an outside producer into a member, or from a member to an outside reader -- fails to trace with a bare KeyError"
     description: >
       A flux is a value `compute_boundary_fluxes` returns, not a field of
@@ -10797,7 +10797,7 @@ anomalies:
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_an_outside_node_into_a_group_member_steps"
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps"
     github_issue: null
-  - anomaly_id: "MADD-ANO-148"
+  - anomaly_id: "MADD-ANO-151"
     title: "A flux edge that an ungrouped cycle reads from the previous step fails to trace with a bare KeyError, so whether the graph runs depends on the order its nodes were added"
     description: >
       A cycle of nodes outside every coupling group is staggered: the edge
@@ -10830,7 +10830,7 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps"
     github_issue: null
-  - anomaly_id: "MADD-ANO-149"
+  - anomaly_id: "MADD-ANO-152"
     title: "A typed PRNG key in a coupling group member fails to trace under solver='ift' with acceleration='aitken' or 'fixed'"
     description: >
       `CouplingGroup.accelerated_fields` documents that only floating
@@ -10867,7 +10867,7 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation"
     github_issue: null
-  - anomaly_id: "MADD-ANO-150"
+  - anomaly_id: "MADD-ANO-153"
     title: "A coupling group whose members are joined only through an outside node, on no cycle, reads that node one step late with no warning"
     description: >
       `CouplingGroup` documents that its members "form (part of) a cycle";

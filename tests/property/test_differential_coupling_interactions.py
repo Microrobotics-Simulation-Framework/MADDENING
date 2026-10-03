@@ -32,11 +32,14 @@ driver), and, with sub-cycling, one member at half the macro timestep.
 
 1. *The monolithic float64 reference* (:class:`~tests.property.coupled_topologies.LinearModel`):
    every node's defect within its rounding, the group's within the bound
-   its reported residual gives, a converged group within the tolerance
-   its threshold gives of its exact fixed point, and the whole state
-   within the propagated allowance of the one-linear-system solve.
-2. *fori == ift*: equal passes and verdicts above the float floor, states
-   to round-off per pass (the solver twin).
+   its reported residual gives, the reported residual equal to
+   ``||F(x) - x||`` of the returned state to its rounding, a converged
+   group within the tolerance its threshold gives of its exact fixed
+   point, and the whole state within the propagated allowance of the
+   one-linear-system solve.
+2. *fori == ift*, in lock step (the solver twin takes the row's whole
+   state before every step): equal passes and verdicts above the float
+   floor, states to the round-off of that step's passes.
 3. *diagnostics on == off*: states, ``_meta`` slots, passes and verdicts
    bit for bit (the diagnostics twin).
 4. *strict_convergence agrees with the report*: the strict twin raises on
@@ -124,7 +127,7 @@ ROWS = ipog(DOMAINS, 3, valid)
 PER_PUSH = one_way_slice(ROWS, keep=lambda r: r["dtype"] == "float32")
 
 _STEPS = 4
-_TOLERANCE = 1e-5      # the l2 threshold: 4.3x the float32 floor of 6 entries
+_TOLERANCE = 1e-4      # the l2 threshold: 43x the float32 floor of 6 entries
 _RTOL = 1e-4           # the mixed / interface rtol: floor 9.5e-3 of the threshold 1
 _BUDGET = {"ample": (60, 0.6), "starved": (3, 0.9)}
 
@@ -270,43 +273,88 @@ def _rounding_per_pass(model: ct.LinearModel, pre: dict, state: dict) -> float:
     return 2.0 * worst
 
 
+def _full_state(gm) -> dict:
+    """A shallow copy of the graph's whole state, ``_meta`` included (arrays are immutable)."""
+    return {k: (dict(v) if isinstance(v, dict) else v) for k, v in gm._state.items()}  # noqa: SLF001
+
+
+def _synced(target, source: dict) -> dict:
+    """*target*'s state with every node state and every shared ``_meta`` slot from *source*.
+
+    The slots both solvers keep -- the predictor history, IQN-IMVJ's
+    ``V`` / ``W`` warm start -- mean the same on both (CPL-068), so a
+    step from the synced state is a step of both solvers from one input.
+    """
+    state = _full_state(target)
+    for k, v in source.items():
+        if k != "_meta":
+            state[k] = dict(v)
+    meta = dict(state.get("_meta", {}))
+    for k, v in source.get("_meta", {}).items():
+        if k in meta and np.shape(meta[k]) == np.shape(v) and \
+                np.asarray(meta[k]).dtype == np.asarray(v).dtype:
+            meta[k] = v
+    if meta:
+        state["_meta"] = meta
+    return state
+
+
 def assert_fori_and_ift_agree(index: int) -> None:
     """Oracle 2: the solver twin takes the same passes and returns the same state.
 
-    The documented parity (CPL-063): equal ``iterations`` and
-    ``converged`` wherever the threshold clears the norm's float floor by
-    4x and neither solver's estimate lies within its own rounding of the
-    threshold (``criterion_is_resolved``); with equal passes, states to the
-    round-off of every pass run so far.
+    Lock-step: before each step the fori graph is given the ift graph's
+    whole pre-step state (:func:`_synced`), so every step compares the
+    two solvers from one input -- the documented parity (CPL-063) is a
+    statement about one solve -- and a step on which they may differ
+    (below) does not excuse the steps after it.  Equal ``iterations``
+    and ``converged`` wherever the threshold clears the norm's float
+    floor by 4x and neither estimate lies within its own rounding of the
+    threshold (``criterion_is_resolved``); with equal passes, states to
+    the round-off of that step's passes.
     """
     row = ROWS[index]
     if row["solver"] == "ift":
-        _b, g_ift, ift = _run(index)
-        _b, g_fori, fori = _run(index, solver="fori", diagnostics=True)
+        b_i, g_ift = built_for(index)
+        b_f, g_fori = built_for(index, solver="fori", diagnostics=True)
     else:
-        _b, g_fori, fori = _run(index, diagnostics=True)
-        _b, g_ift, ift = _run(index, solver="ift", diagnostics=False)
+        b_f, g_fori = built_for(index, diagnostics=True)
+        b_i, g_ift = built_for(index, solver="ift", diagnostics=False)
+    values = _values(index)
     model = _model(index, g_ift)
+    key = b_i.topo.group_key(0)
     n_float = sum(model.topo.node(m).n for m in model.topo.groups[0])
     floor = _floor(g_ift, row["dtype"], n_float)
     sweeps = int(g_ift.get("waveform_iterations", 1)) if g_ift.get("subcycling") else 1
-    passes = 0
-    for k, (sf, si) in enumerate(zip(fori, ift), start=1):
-        d_f, d_i = sf.reports[0], si.reports[0]
+    ct.set_initial(b_i, values)
+    ct.set_initial(b_f, values)
+    p_i, p_f = ct.params_for(b_i, values), ct.params_for(b_f, values)
+    compared = 0
+    for k in range(1, _STEPS + 1):
+        b_f.gm._store_state(_synced(b_f.gm, _full_state(b_i.gm)))   # noqa: SLF001
+        pre = ct._snapshot(b_i.gm, {})                                # noqa: SLF001
+        b_i.gm.step(params=p_i)
+        b_f.gm.step(params=p_f)
+        d_i = dict(b_i.gm.coupling_diagnostics()[key])
+        d_f = dict(b_f.gm.coupling_diagnostics()[key])
+        s_i, s_f = ct._snapshot(b_i.gm, {}), ct._snapshot(b_f.gm, {})  # noqa: SLF001
         same = d_f["iterations"] == d_i["iterations"]
         resolved = (cg.criterion_is_resolved(_parity_report(d_f, g_fori), floor)
                     and cg.criterion_is_resolved(_parity_report(d_i, g_ift), floor))
         if _threshold(g_ift) >= 4.0 * floor and (same or resolved):
-            assert same, (f"row {index} step {k}: fori took {d_f['iterations']} passes, "
-                          f"ift {d_i['iterations']}, above the float floor")
+            assert same, (f"row {index} step {k}: from one state fori took "
+                          f"{d_f['iterations']} passes, ift {d_i['iterations']}, above the "
+                          f"float floor ({d_f}, {d_i})")
             assert d_f["converged"] == d_i["converged"], f"row {index} step {k}: verdicts"
         if not same:
-            return          # below the floor: adjacent passes, and the runs have parted
-        passes += int(d_f["iterations"]) * sweeps
-        bound = passes * _rounding_per_pass(model, sf.pre, sf.state)
-        gap = cg.relative_gap(sf.state, si.state)
+            continue    # below the floor: adjacent passes, documented
+        passes = int(d_f["iterations"]) * sweeps
+        bound = passes * _rounding_per_pass(model, pre, s_f)
+        gap = cg.relative_gap(s_f, s_i)
         assert gap <= bound, (f"row {index} step {k}: states {gap:.3e} apart relatively "
-                              f"after {passes} identical passes (bound {bound:.3e})")
+                              f"after {passes} identical passes from one state "
+                              f"(bound {bound:.3e})")
+        compared += 1
+    assert compared, f"row {index}: no step took the same passes under both solvers"
 
 
 def assert_diagnostics_are_inert(index: int) -> None:

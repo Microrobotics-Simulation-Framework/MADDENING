@@ -964,7 +964,9 @@ oracle is local:
 - a node outside every group is within its float rounding of its update
   at the values it read;
 - a group's defect `x - Phi(x)` is within what its *reported* residual
-  allows, `-(I - L)(F(x) - x) + epsilon` for an affine pass;
+  allows, `-(I - L)(F(x) - x) + epsilon` for an affine pass, and the
+  reported residual is `||F(x) - x||` of the returned state to its
+  rounding;
 - a converged group is within its threshold's tolerance of its exact
   fixed point;
 - the whole state is within `|(I - M)^{-1}|` of those allowances of the
@@ -978,12 +980,12 @@ is not exactly one group, and three or more additive edges into one port.
 | Oracle | Paths | Tolerance | Cannot see |
 |---|---|---|---|
 | monolithic reference | the step against the extended-precision solve of the whole graph, per step from the library's own pre-step state, for every array row and every structure | A node's float rounding, `T eps sum|term|`. `T` counts the rounding chain: the constants, and per port the product, the additive sum and a mapping's inner product. `T eps` is twice `T u`, which covers `1 / (1 - T u)` and any reassociation or FMA. A group adds `||D S (I - L) S^+ diag(rho_up)||` times its reported residual, and its float evaluation `(N + 4) eps` | Non-linear nodes. Multi-rate and adaptive stepping. A fault the restated schedule shares with the documentation |
-| fori == ift | the array row against its solver twin | The coupling-and-numerics oracle's parity rule; with equal passes, round-off per pass counted over every pass of the run | As above |
+| fori == ift | the array row against its solver twin, in lock step: before each step the twin takes the row's whole state, node states and the shared warm-start slots, so each step compares one solve from one input | The coupling-and-numerics oracle's parity rule, at every step; with equal passes, round-off of that step's passes | As above |
 | diagnostics on == off | the row against its diagnostics twin | Bitwise: states, `_meta` slots, passes, verdicts | A fault that moves both settings the same way |
 | strict == report | the row with `strict_convergence` against without | It raises on exactly the steps reported unconverged. With `waveform_iterations > 1` it also raises where an earlier sweep hit the cap (CPL-052). Where it does not raise, bitwise | A raise that happens to fall on a step that is also unconverged |
 | usable bounds | `spectral_error_bound` against the distance in the returned state's weights; `gradient_relative_error_bound` against central differences of the exact fixed point in every member's gains and biases (slow) | None: the bound must be at least the truth | Constants outside the group |
 
-The harness found MADD-ANO-147 to 150, which are strict xfails naming
+The harness found MADD-ANO-150 to 153, which are strict xfails naming
 CPL-003, CPL-185 and CPL-186.  Each oracle was mutation-tested against a
 scratch copy of `src/` with a seeded fault, and the PR that added the
 harness lists them:
@@ -992,11 +994,15 @@ harness lists them:
 - readers downstream of a cycle scheduled in build order;
 - an understated residual;
 - the ift loop returning the iterate after the measured one;
-- Aitken dropping its relaxation carry;
+- Aitken dropping its relaxation carry (caught in the slow lane, by the
+  rows whose Aitken runs past three passes);
+- IQN-IMVJ ignoring `jacobian_reuse` under `"ift"`;
 - the fori loop not freezing the converged iterate;
 - diagnostics nudging the state;
 - `strict_convergence` that never raises;
-- a spectral bound reported at a tenth of its value.
+- a spectral bound reported at a tenth of its value, and a gradient bound
+  at a hundredth (caught in the slow lane);
+- a group swept in its members' name order (caught by renaming).
 
 ### System identification and the params machinery
 

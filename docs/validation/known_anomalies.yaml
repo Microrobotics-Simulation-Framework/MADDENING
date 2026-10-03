@@ -10287,7 +10287,7 @@ anomalies:
       - "tests/api/test_params_endpoint_small_values.py::test_a_value_float32_flushes_to_zero_is_refused_before_the_cast"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-138"
+  - anomaly_id: "MADD-ANO-142"
     title: "An FMU built over a pending structural node.params write ran the old model, while every graph entry point ran the new one"
     description: >
       A structural `node.params` write after `compile()` -- a value the
@@ -10341,7 +10341,7 @@ anomalies:
       - "tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_bridge_refuses_a_description_or_a_step_its_graph_has_left"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-139"
+  - anomaly_id: "MADD-ANO-143"
     title: "A log parameter with no lower bound was advertised with no FMI min, and a bridge whose sidecar had no specs accepted and ran mass = -1"
     description: >
       `ParamSpec(transform="log")` with no lower bound is measured from 0
@@ -10384,7 +10384,7 @@ anomalies:
       - "tests/fmi/test_advertised_bounds.py::test_no_bridge_takes_a_log_leaf_to_zero_or_below"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-140"
+  - anomaly_id: "MADD-ANO-144"
     title: "The FMU bridge's time tolerance had an absolute floor, and a biased importer's reported time left the simulated time behind without bound"
     description: >
       `FmuTcpBridge._time_tolerance` added ulps of `max(|t|, 1.0)` to a

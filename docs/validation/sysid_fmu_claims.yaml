@@ -1654,7 +1654,7 @@ claims:
     entry point ... or at the next compile()" with a sync on every read of
     gm.params (MADD-ANO-122).  B1 round 7 found the FMU export, which reads
     gm.params, running the old model after a structural write; it now
-    refuses the dirty graph (MADD-ANO-138), and parameters.md says so.
+    refuses the dirty graph (MADD-ANO-142), and parameters.md says so.
 
 - id: SYS-116
   area: params pytree
@@ -2124,7 +2124,7 @@ claims:
   status: verified
   notes: >-
     Failing on 04bc3e5 (B1 round 7): a log leaf with no lower bound, which
-    ParamSpec measures from 0, was advertised with no min (MADD-ANO-139).
+    ParamSpec measures from 0, was advertised with no min (MADD-ANO-143).
 
 - id: FMU-017
   area: model description
@@ -2198,7 +2198,7 @@ claims:
     "at the graph step the FMU is the graph at the time it reports" failed
     on 04bc3e5 (B1 round 7) for an importer whose step sizes were all a
     little long: the reported time left the simulated time behind by up to
-    the tolerance per step (MADD-ANO-140).
+    the tolerance per step (MADD-ANO-144).
 
 - id: FMU-021
   area: bridge stepping
@@ -2283,7 +2283,7 @@ claims:
     where an absolute floor on the rounding slack was the tolerance (8.9e-4
     of a 1e-12 s step accepted), and for a biased importer, whose reported
     time ran 1.6 master steps ahead of the physics after 2000 steps at
-    1e-12 s (MADD-ANO-140).
+    1e-12 s (MADD-ANO-144).
 
 - id: FMU-025
   area: bridge stepping
@@ -2676,7 +2676,7 @@ claims:
     closed it.  Failing again on 04bc3e5 (B1 round 7) for a structural
     write: the sync only marks the graph dirty, and the FMU ran the old
     model, 6.35 K off after 50 steps, when the step had been traced before
-    the write (MADD-ANO-138).
+    the write (MADD-ANO-142).
 
 # ---------------------------------------------------------------------------
 # FMU: transport
@@ -2841,7 +2841,7 @@ claims:
   notes: >-
     "a communication point within a millionth of a master step" failed on
     04bc3e5 (B1 round 7) below a master step of about 1e-9 s, where an
-    absolute floor on the rounding slack was the tolerance (MADD-ANO-140).
+    absolute floor on the rounding slack was the tolerance (MADD-ANO-144).
 
 - id: FMU-051
   area: trust boundary

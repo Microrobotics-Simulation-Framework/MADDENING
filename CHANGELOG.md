@@ -351,7 +351,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **FMU export, round-7 audit fixes** (MADD-ANO-138 to 140, never released): `build_model_description`, `FmuSidecar` and `FmuTcpBridge` refuse a graph changed since its `compile()` (an FMU built over a pending structural `node.params` write ran the old model); a `log` parameter without a lower bound advertises the smallest normal as `min`; the bridge's time tolerance is a millionth of the master step at any step, and the reported time stays within it of the simulated time;
+- **FMU export, round-7 audit fixes** (MADD-ANO-142 to 144, never released): `build_model_description`, `FmuSidecar` and `FmuTcpBridge` refuse a graph changed since its `compile()` (an FMU built over a pending structural `node.params` write ran the old model); a `log` parameter without a lower bound advertises the smallest normal as `min`; the bridge's time tolerance is a millionth of the master step at any step, and the reported time stays within it of the simulated time;
   an input of a node the FMU does not export is held at zero, not exported; the C wrapper holds FMI 3.0's co-simulation state machine (no `fmi3DoStep` before initialization, no set once terminated, no `fmi3EnterStepMode`, configuration mode or `fmi3SetTime`).  FMU-012 and -017's wording is fixed.
   Action: `compile()` before exporting; initialize an FMU instance before reading or stepping it; re-package an FMU whose graph has a `log` parameter without a lower bound (its token changed).
 - **The identifiability guard decides the same in any units** (MADD-ANO-135, never released): its tests, hold and tolerance measure an identity parameter relative to its size, as `fim(scale="relative")` does;

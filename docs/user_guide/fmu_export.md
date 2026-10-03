@@ -52,7 +52,7 @@ call `compile()` and build all three again.  A write to a leaf `gm.params`
 carries needs no recompile and is exported as written.  Until 0.4.0's fix an
 FMU built over a pending structural write ran the old model if the step had
 been traced before the write, 6.35 K off the graph after 50 steps of a
-heated rod, and the new one if it had not (MADD-ANO-138).
+heated rod, and the new one if it had not (MADD-ANO-142).
 
 `python -m maddening.examples.advanced.fmu_export_demo` runs the
 build-and-check half of this without a TCP port: the description (with
@@ -122,7 +122,7 @@ gathers.  An importer whose every step size is a little long is refused,
 with nothing advanced, once its errors add up past the tolerance.
 Adopting each point used to let the reported time move ahead of the
 physics without bound: 1.6 master steps after 2000 steps at a 1e-12 s
-step (MADD-ANO-140).  An importer that steps at the description's
+step (MADD-ANO-144).  An importer that steps at the description's
 `stepSize`, keeping a running sum or computing `start + k * h`, stays
 inside however long it runs: its rounding grows no faster than the slack.
 
@@ -161,7 +161,7 @@ and unit from the target node's `boundary_input_spec`).  Parameters are
 inside it, and a `log` leaf with no lower bound is bounded by 0 all the
 same: its `min` is the smallest positive normal of its type.  It used to
 carry no `min`, and a bridge whose sidecar had no `param_specs` accepted
-and ran `mass = -1` (MADD-ANO-139).
+and ran `mass = -1` (MADD-ANO-143).
 
 The stability filter is by node: a node's outputs, parameters and external
 inputs enter the FMU only if the node is `STABLE`, or `EVOLVING` /

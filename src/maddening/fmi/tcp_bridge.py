@@ -35,9 +35,16 @@ the start time -- to within a millionth of a master step
 (``_COMM_POINT_TOLERANCE``); a point inside it is adopted, one outside it
 is refused with nothing advanced.  The step size ``h`` is held to the same
 absolute tolerance off a whole number of master steps, so a step the bridge
-accepts never makes the next legal one fail.  ``t``, ``h`` and every entry
-of ``values`` must be JSON numbers: a string or a boolean is refused, not
-parsed.
+accepts never makes the next legal point fail.  And the point, and the
+step's end ``t + h``, must stay within that tolerance of the time the FMU
+has simulated -- the start time plus the master steps taken since -- plus a
+few ulps of the time per step, the rounding an importer's running sum of
+step sizes gathers (``_DRIFT_ULPS_PER_STEP``): an importer whose every step
+size is a little long is refused once its errors add up past the tolerance,
+where the reported time used to move ahead of the physics without bound.
+Every tolerance is relative to the master step, at any master step.  ``t``,
+``h`` and every entry of ``values`` must be JSON numbers: a string or a
+boolean is refused, not parsed.
 
 **Types.**  ``type`` (optional) is the FMI 3.0 type of the ``fmi3Get`` /
 ``fmi3Set`` function the request comes from (``"Float32"``, ``"Boolean"``,
@@ -159,6 +166,7 @@ from maddening.fmi.model_description import (
     FMIVariable,
     ModelDescription,
     _fmi_kind,
+    _graph_changed_since,
     _parse_xs_value,
 )
 from maddening.fmi.sidecar import (
@@ -167,6 +175,7 @@ from maddening.fmi.sidecar import (
     _declared_inputs_resolver,
     _key_set_error,
     _restored_leaf,
+    _step_compile,
 )
 from maddening.serialization.json_codec import decode_non_finite
 from maddening.serialization.json_codec import dumps as _json_dumps
@@ -308,7 +317,10 @@ far below any real discontinuity, which the physics could not honour anyway
 (it advances whole master steps).  A point inside the tolerance is
 *adopted* -- the step ends at ``t + n * master_dt`` on the importer's clock,
 so the two clocks never drift apart -- and one outside it is refused with
-nothing advanced."""
+nothing advanced.  Adoption alone let the importer's clock, and the time the
+FMU reports, drift from the time it has simulated by up to the tolerance per
+step, so both are also held to the simulated time
+(``FmuTcpBridge._check_drift``, :data:`_DRIFT_ULPS_PER_STEP`)."""
 _STEP_SIZE_ULPS = 4
 """Rounding slack, in ulps of the larger of ``h`` and ``n * master_dt``, on
 a step size's distance from a whole number of master steps."""
@@ -317,6 +329,14 @@ _COMM_POINT_ULPS = 16
 point's distance from the FMU's time.  Larger than :data:`_STEP_SIZE_ULPS`
 so that the rounding of ``t + h`` and of ``t + n * master_dt`` cannot carry
 an accepted step's error outside it."""
+_DRIFT_ULPS_PER_STEP = 4
+"""Rounding slack on the drift between the importer's clock and the
+simulated time, in ulps of the times involved *per step since the reference
+point*: an importer that keeps a running sum of its step sizes rounds once
+per step (half an ulp of the time), and may hold the step size itself an
+ulp or so off the master step.  A clock biased by more than that per step
+gathers drift faster than the slack grows, and is refused once the drift
+passes :data:`_COMM_POINT_TOLERANCE` of a master step plus the slack."""
 _MASTER_DT_RTOL = 1e-9
 """How far ``master_dt`` may sit from the graph step the model description
 records, relatively: a different spelling of the same step (``0.01``
@@ -797,8 +817,10 @@ class FmuTcpBridge:
         If ``master_dt`` is not a positive finite number, differs from the
         graph step the description records, or does not divide the
         description's ``default_step_size`` into a whole number of steps
-        no larger than ``max_steps_per_request``; if
-        ``max_steps_per_request`` is not a positive integer; or if
+        no larger than ``max_steps_per_request``; if the graph the
+        description was built from, or the graph whose compiled step is
+        the sidecar's ``step_fn``, has changed or been compiled again
+        since; if ``max_steps_per_request`` is not a positive integer; or if
         ``idle_timeout`` is neither ``None`` nor a positive finite number.
     """
 
@@ -831,6 +853,7 @@ class FmuTcpBridge:
         if self._dt <= 0:
             raise ValueError(f"master_dt must be positive, got {master_dt!r}")
         self._check_master_dt(model_description)
+        self._check_one_compile(model_description, sidecar)
         self._vars: dict[int, FMIVariable] = {
             v.value_reference: v for v in model_description.variables
         }
@@ -840,6 +863,14 @@ class FmuTcpBridge:
         # (HeatNode's T_left = T[0]) behaves like the graph.
         self._inputs: dict[str, dict[str, Any]] = self._zero_inputs()
         self._time = 0.0
+        # The time the physics has reached, as a count of graph steps since a
+        # reference point (the start time, a reset, a restored snapshot):
+        # ``_t_ref + _n_ref * master_dt``.  ``_time`` adopts the importer's
+        # point within the tolerance; this does not, so the drift between
+        # the time the FMU reports and the time it has simulated is bounded
+        # (``_drift_tolerance``).
+        self._t_ref = 0.0
+        self._n_ref = 0
         # Has the instance taken a step since it was instantiated or reset?
         # (FMI's "Instantiated" state is the one in which it has not, and
         # the only one in which ``initialize`` is accepted.)
@@ -1438,7 +1469,7 @@ class FmuTcpBridge:
                 # point that jumped -- 0.01 to 100, say -- used to be
                 # accepted: the physics advanced one master step and ``time``
                 # read 100.01, a state labelled with a time it never reached.
-                tolerance = self._time_tolerance(t0, self._time, ulps=_COMM_POINT_ULPS)
+                tolerance = self._time_tolerance(t0, self._time, h, ulps=_COMM_POINT_ULPS)
                 if abs(t0 - self._time) > tolerance:
                     raise ValueError(
                         f"communication point {t0!r} is not the FMU's current time "
@@ -1448,6 +1479,15 @@ class FmuTcpBridge:
                         "time given to initialize (fmi3EnterInitializationMode).  "
                         "Restore an FMU state to go back in time; nothing was advanced"
                     )
+                # And the importer's clock must stay where the physics is.
+                # Adopting each point within the tolerance of the previous one
+                # let a biased importer -- every step size a little long --
+                # move the reported time ahead of the simulated time by up to
+                # the tolerance per step, without bound: 1.6 master steps
+                # after 2000 steps at a 1e-12 s step.  Both the point and the
+                # next legal one (t + h) are held to the simulated time, to
+                # the tolerance plus the rounding a running sum can gather.
+                self._check_drift(t0, h, n)
                 self._refuse_if_terminated("step")
                 # Every sub-step runs on a local state and the result is
                 # committed once, at the end: a failed sub-step leaves no
@@ -1474,6 +1514,7 @@ class FmuTcpBridge:
                     # On the importer's clock: the point it sent, adopted
                     # within the tolerance, plus the master steps taken.
                     self._time = t0 + n * self._dt
+                    self._n_ref += n
                     self._stepped = True
                     return {"ok": True, "t": self._time}
             if op == "initialize":
@@ -1491,6 +1532,7 @@ class FmuTcpBridge:
                 self._refuse_if_terminated("initialize")
                 with self._committing("initialize"):
                     self._time = t_start
+                    self._t_ref, self._n_ref = t_start, 0
                 return {"ok": True, "t": t_start}
             if op == "get_state":
                 return {"ok": True, "state": self._encode_state()}
@@ -1530,9 +1572,52 @@ class FmuTcpBridge:
     # ------------------------------------------------------------------- time
     def _time_tolerance(self, *times: float, ulps: int) -> float:
         """The bridge's one tolerance on time (:data:`_COMM_POINT_TOLERANCE`
-        of a master step), plus ``ulps`` ulps of the largest of ``times``."""
-        biggest = max([abs(t) for t in times] + [1.0])
+        of a master step), plus ``ulps`` ulps of the largest of ``times``.
+
+        Relative to the master step all the way down: the rounding slack is
+        in ulps of the times involved, with no floor.  It used to be in ulps
+        of ``max(|t|, 1.0)``, an absolute ~3.6e-15 s, so below a master step
+        of about 1e-9 s the tolerance was that floor, not a millionth of a
+        step: 8.9e-4 of a 1e-12 s step was accepted.
+        """
+        biggest = max(abs(t) for t in times)
         return _COMM_POINT_TOLERANCE * self._dt + ulps * float(np.spacing(biggest))
+
+    def _drift_tolerance(self, t: float, steps: int) -> float:
+        """How far the importer's clock ``t`` may sit from the simulated time
+        ``_t_ref + steps * master_dt``: the communication point's own
+        tolerance (:data:`_COMM_POINT_TOLERANCE` of a master step plus
+        :data:`_COMM_POINT_ULPS` ulps), plus :data:`_DRIFT_ULPS_PER_STEP` ulps
+        of the times involved for every graph step since the reference point
+        -- the rounding an importer's running sum of step sizes gathers,
+        which an honest importer stays inside however long it runs."""
+        simulated = self._t_ref + steps * self._dt
+        biggest = max(abs(t), abs(simulated), abs(self._t_ref), steps * self._dt)
+        ulps = _COMM_POINT_ULPS + _DRIFT_ULPS_PER_STEP * steps
+        return _COMM_POINT_TOLERANCE * self._dt + ulps * float(np.spacing(biggest))
+
+    def _check_drift(self, t0: float, h: float, n: int) -> None:
+        """Refuse a step whose point ``t0``, or whose end on the importer's
+        clock ``t0 + h``, has drifted from the simulated time by more than
+        :meth:`_drift_tolerance`.
+
+        The end is checked so that a step the bridge accepts never makes
+        the next legal step fail: its point is ``t0 + h``, judged at the
+        next step against the same simulated time with the same arguments.
+        """
+        for label, t, steps in (("communication point", t0, self._n_ref),
+                                ("end of the step (t + h)", t0 + h, self._n_ref + n)):
+            simulated = self._t_ref + steps * self._dt
+            tolerance = self._drift_tolerance(t, steps)
+            if abs(t - simulated) > tolerance:
+                raise ValueError(
+                    f"the {label} {t!r} is {(t - simulated) / self._dt:.3g} master steps "
+                    f"from the time the FMU has simulated, {simulated!r} (tolerance "
+                    f"{tolerance:.3g}): every step size this importer sent was within "
+                    f"{_COMM_POINT_TOLERANCE:g} of a master step, but their errors add up, "
+                    "and the time the FMU reports would leave the physics behind.  Step "
+                    "at whole multiples of the master step (the description's stepSize); "
+                    "nothing was advanced")
 
     def _master_steps(self, h: float, what: str) -> int:
         """The number of master steps ``h`` is, refused unless it is a whole
@@ -1547,7 +1632,7 @@ class FmuTcpBridge:
                 "steps")
         n = int(round(ratio))
         if n < 1 or abs(h - n * self._dt) > self._time_tolerance(
-                h, n * self._dt, ulps=_STEP_SIZE_ULPS):
+                h, n * self._dt, self._dt, ulps=_STEP_SIZE_ULPS):
             raise ValueError(
                 f"{what} {h!r} is not a whole multiple of the master timestep "
                 f"{self._dt!r} (to within {_COMM_POINT_TOLERANCE:g} of a master step)")
@@ -1589,6 +1674,44 @@ class FmuTcpBridge:
                 f"{exc}; an importer steps at the advertised size "
                 "(canHandleVariableCommunicationStepSize is false), and every doStep "
                 "would be refused") from None
+
+    @staticmethod
+    def _check_one_compile(md: ModelDescription, sidecar: FmuSidecar) -> None:
+        """Refuse a description or a sidecar step whose graph has changed, or
+        been compiled again, since it was built.
+
+        The FMU advertises the description and runs the sidecar's step, so
+        each must still be the model its graph runs.  The description
+        records its graph and compile (``build_model_description``), and a
+        graph's compiled step carries its own (``GraphManager.compile``);
+        either may be missing -- a hand-built description, a step that is
+        not a graph's -- and is then not judged.  Both built from one graph
+        and both current means both are its current compile.  An FMU whose
+        graph took a structural ``node.params`` write between the
+        description and the bridge used to run the old model while the
+        graph ran the new one.
+        """
+        owner = _step_compile(getattr(getattr(sidecar, "_config", None), "step_fn", None))
+        if owner is not None and owner[0] is not None:
+            stale = _graph_changed_since(owner[0], owner[1])
+            if stale is not None:
+                raise ValueError(
+                    f"the sidecar's step_fn is compile {owner[1]} of its graph, and "
+                    f"{stale}.  The FMU would run a model the graph does not run.  Call "
+                    "compile() on the graph and build the description, the sidecar and "
+                    "the bridge again")
+        ref = getattr(md, "_graph", None)
+        graph = ref() if ref is not None else None
+        if graph is None:
+            return
+        generation = getattr(md, "_graph_generation", None)
+        stale = _graph_changed_since(graph, generation)
+        if stale is not None:
+            raise ValueError(
+                f"the model description was built from compile {generation} of its "
+                f"graph, and {stale}.  The FMU would advertise a model the graph does "
+                "not run.  Call compile() on the graph and build the description, the "
+                "sidecar and the bridge again")
 
     # ------------------------------------------------- the description's contract
     @staticmethod
@@ -1699,6 +1822,7 @@ class FmuTcpBridge:
             if params is not None:
                 self._sidecar._params = params                    # noqa: SLF001
             self._inputs, self._time, self._stepped = inputs, 0.0, False
+            self._t_ref, self._n_ref = 0.0, 0
             self._terminated = False
 
     def _refuse_if_terminated(self, op: str) -> None:
@@ -1925,6 +2049,7 @@ class FmuTcpBridge:
             if new_params is not None:
                 self._sidecar._params = new_params            # noqa: SLF001
             self._inputs, self._time = inputs, t
+            self._t_ref, self._n_ref = t, 0
 
     # ----------------------------------------------------------- vr mapping
     def _set(self, vrs: list[int], values, fmi_type: Any = None) -> None:

@@ -296,11 +296,12 @@ def _guard_tol(domain) -> float:
 def _exits(domain, label, acceleration, guard, monkeypatch, *, tol):
     """The iterations of every mode draw, on a graph traced with ``_TWO_PASS_EXIT = guard``.
 
-    The list is read when the step is traced, so the graph is built,
-    and its step (and the batch domain's vmap of it) traced, under the
-    patch, which is then undone.
+    ``guard=None`` is the list as shipped.  The list is read when the step
+    is traced, so the graph is built, and its step (and the batch domain's
+    vmap of it) traced, under the patch, which is then undone.
     """
-    monkeypatch.setattr(gm_mod, "_TWO_PASS_EXIT", guard)
+    if guard is not None:
+        monkeypatch.setattr(gm_mod, "_TWO_PASS_EXIT", guard)
     try:
         gm = cd.pair(domain, n=3, g=(np.ones(3), np.ones(3)), c=(np.ones(3), np.zeros(3)),
                      acceleration=acceleration, max_iterations=60, tolerance=tol)
@@ -323,14 +324,14 @@ def _exits(domain, label, acceleration, guard, monkeypatch, *, tol):
 def test_the_guard_holds_aitken_past_its_own_exit(label, monkeypatch):
     """CPL-061 on a graph: the guard is live for Aitken.
 
-    Aitken with its guard never stops before Aitken compiled without it
+    Aitken as shipped never stops before Aitken compiled without its guard
     (``_TWO_PASS_EXIT`` emptied), and on some draw stops later: the guard
     is doing something.  Every converged exit stays converged.
     """
     d = cd.DOMAINS[label]
     tol = _guard_tol(d)
     with cd.entered(d):
-        guarded = _exits(d, label, "aitken", ("aitken",), monkeypatch, tol=tol)
+        guarded = _exits(d, label, "aitken", None, monkeypatch, tol=tol)     # as shipped
         bare = _exits(d, label, "aitken", (), monkeypatch, tol=tol)
     later = 0
     for g_run, b_run in zip(guarded, bare):
@@ -349,14 +350,14 @@ def test_the_guard_holds_aitken_past_its_own_exit(label, monkeypatch):
 def test_iqn_stops_on_its_first_sub_threshold_pass(label, monkeypatch):
     """CPL-061 on a graph: IQN is not on the guard's list.
 
-    IQN-ILS stops where IQN-ILS with the guard forced on
+    IQN-ILS as shipped stops where IQN-ILS with the guard forced on
     (``_TWO_PASS_EXIT`` extended) would not: never later, and on some draw
     sooner -- it stops on its first sub-threshold pass.
     """
     d = cd.DOMAINS[label]
     tol = _guard_tol(d)
     with cd.entered(d):
-        iqn = _exits(d, label, "iqn-ils", ("aitken",), monkeypatch, tol=tol)
+        iqn = _exits(d, label, "iqn-ils", None, monkeypatch, tol=tol)        # as shipped
         held = _exits(d, label, "iqn-ils", ("aitken", "iqn-ils"), monkeypatch, tol=tol)
     sooner = 0
     for i_run, h_run in zip(iqn, held):
@@ -388,7 +389,7 @@ def test_the_guard_adds_at_most_one_pass_to_aitkens_exit(label, monkeypatch):
     """
     d = cd.DOMAINS[label]
     with cd.entered(d):
-        guarded = _exits(d, label, "aitken", ("aitken",), monkeypatch, tol=1e-4)
+        guarded = _exits(d, label, "aitken", None, monkeypatch, tol=1e-4)
         bare = _exits(d, label, "aitken", (), monkeypatch, tol=1e-4)
     extra = [g["iterations"] - b["iterations"] for g_run, b_run in zip(guarded, bare)
              for g, b in zip(g_run, b_run) if b["converged"]]

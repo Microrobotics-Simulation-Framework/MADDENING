@@ -2079,6 +2079,9 @@ class SimulationServer:
         self._trace_steps = 0
         self._trace_started: Optional[float] = None
         self._trace_stopped_by: Optional[str] = None
+        # The time budget's own clock: a timer started with the trace, so
+        # the trace stops at its budget whether or not a step is recorded.
+        self._trace_timer: Optional[threading.Timer] = None
         # A ``POST /sim/run`` is stepping the graph slice by slice.
         self._sync_run_active = False
         # Set when the server shuts down (the lifespan hook, a chained
@@ -2439,8 +2442,31 @@ class SimulationServer:
             self._trace_steps += 1
             if self._trace_steps >= MAX_JAX_TRACE_STEPS:
                 self._stop_trace(f"its step budget, {MAX_JAX_TRACE_STEPS} steps")
-            elif time.monotonic() - self._trace_started >= MAX_JAX_TRACE_SECONDS:
-                self._stop_trace(f"its time budget, {MAX_JAX_TRACE_SECONDS:g} s")
+            else:
+                self._stop_trace_if_out_of_time()
+
+    def _stop_trace_if_out_of_time(self) -> None:
+        """Stop the trace if it has run :data:`MAX_JAX_TRACE_SECONDS`;
+        call it holding the trace lock.  The elapsed time is read here, so
+        a timer left over from an earlier trace -- which a stop cancels, but
+        which may already be firing -- stops a later one only once that one
+        is out of time too.
+
+        The time used to be read only when a step was recorded, so a trace
+        started on an idle simulation ran past its budget until the next
+        step, or for ever.  It is now read by a timer set when the trace
+        starts, and again by every status, stop and step, whichever comes
+        first."""
+        if self._trace_started is None:
+            return
+        budget = MAX_JAX_TRACE_SECONDS
+        if time.monotonic() - self._trace_started >= budget:
+            self._stop_trace(f"its time budget, {budget:g} s")
+
+    def _trace_time_is_up(self) -> None:
+        """The time budget's timer: stop the trace if it is out of time."""
+        with self._trace_lock:
+            self._stop_trace_if_out_of_time()
 
     def _stop_trace(self, by: str) -> Optional[str]:
         """Stop the JAX trace this server started, holding the trace lock;
@@ -2459,6 +2485,9 @@ class SimulationServer:
             self._last_jax_trace_dir = log_dir
         self._trace_started = None
         self._trace_stopped_by = by
+        timer, self._trace_timer = self._trace_timer, None
+        if timer is not None and timer is not threading.current_thread():
+            timer.cancel()
         if by != "a request":
             logger.warning("The JAX trace stopped itself after %d steps (%s); its "
                            "trace is in %s", self._trace_steps, by, log_dir)
@@ -3405,8 +3434,8 @@ class SimulationServer:
             root = self.checkpoint_root
             outside = HTTPException(
                 status_code=400,
-                detail=(f"checkpoint path must stay under {root}, naming a file "
-                        f"inside it (got {name!r})"),
+                detail=(f"checkpoint path must stay under the checkpoint root, naming "
+                        f"a file inside it (got {name!r})"),
             )
             if not name or "\x00" in name:
                 raise outside
@@ -3422,11 +3451,24 @@ class SimulationServer:
             except (OSError, ValueError, RuntimeError) as exc:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"checkpoint path {name!r} is not usable: {exc}",
+                    detail=f"checkpoint path {name!r} is not usable: {_checkpoint_reason(exc)}",
                 ) from None
             if root == target or root not in target.parents:
                 raise outside
             return target
+
+        def _checkpoint_reason(exc: BaseException) -> str:
+            """Why a checkpoint route failed, for its 4xx detail, naming no
+            absolute server path.  An ``OSError`` is told by its
+            ``strerror`` ("Is a directory"), not by its text, which carries
+            the absolute file name; any other message has the checkpoint
+            root cut out of it, so a file inside it is named as the client
+            named it and one outside it as ``<checkpoint root>/..``."""
+            if isinstance(exc, OSError) and exc.strerror:
+                return exc.strerror
+            text = str(exc)
+            root = str(self.checkpoint_root)
+            return text.replace(root + os.sep, "").replace(root, "<checkpoint root>")
 
         def _manifest_path(target: Path) -> Optional[Path]:
             """The manifest beside checkpoint *target*
@@ -3476,30 +3518,56 @@ class SimulationServer:
             )
             target = _checkpoint_path(path)
             manifest = _manifest_path(target)
+            name = target.relative_to(self.checkpoint_root).as_posix()
             with self._graph_access("save a checkpoint"):
                 self._ensure_relay_attached()
                 clock = {"sim_time": self.relay.elapsed,
                          "step_count": self.relay.step_count}
-                # Written beside the target under a temporary name, the
-                # manifest next, and the checkpoint moved into place last
-                # (os.replace, atomic on one filesystem): a save refused at
-                # its manifest used to answer 400 having already written
-                # the checkpoint over the file of that name.
-                partial = target.with_name(f".{target.name}.{uuid.uuid4().hex}.partial.npz")
+                # Both files are written under temporary names first and
+                # moved into place after both exist -- the checkpoint, then
+                # its manifest -- so a save refused before the first move
+                # writes nothing at all.  The manifest used to be written
+                # beside the target before the checkpoint's move, so a save
+                # refused at that move (its name a directory) answered
+                # "nothing was written" having replaced the manifest of
+                # that name.  A name that is not a file is refused before
+                # anything is written; the one failure left after the first
+                # move -- the manifest's own move -- is answered as what it
+                # is: the checkpoint written, without its clock.
+                uid = uuid.uuid4().hex
+                partial = target.with_name(f".{target.name}.{uid}.partial.npz")
+                manifest_partial = (None if manifest is None else
+                                    manifest.with_name(f".{manifest.name}.{uid}.partial"))
+                placed = False
                 try:
+                    for existing in (target, manifest):
+                        if existing is not None and (existing.exists() or existing.is_symlink()) \
+                                and not existing.is_file():
+                            raise IsADirectoryError(
+                                21, f"{existing.name!r} exists and is not a file")
                     target.parent.mkdir(parents=True, exist_ok=True)
                     self.gm.save_state(str(partial))
-                    if manifest is not None:
+                    if manifest_partial is not None:
                         write_manifest(partial, extra={"server_clock": clock},
-                                       manifest_path=manifest)
+                                       manifest_path=manifest_partial)
                     os.replace(partial, target)
+                    placed = True
+                    if manifest_partial is not None:
+                        os.replace(manifest_partial, manifest)
                 except Exception as exc:  # noqa: BLE001
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"could not save checkpoint, nothing was written: {exc}")
+                    reason = _checkpoint_reason(exc)
+                    if placed:
+                        detail = (f"checkpoint {name!r} was written, but its manifest "
+                                  f"could not be: {reason}; it loads, with sim_time "
+                                  "counted from zero")
+                    else:
+                        detail = f"could not save checkpoint {name!r}, nothing was written: {reason}"
+                    raise HTTPException(status_code=400, detail=detail) from None
                 finally:
-                    with contextlib.suppress(OSError):
-                        partial.unlink(missing_ok=True)
+                    for leftover in (partial, manifest_partial):
+                        if leftover is not None:
+                            with contextlib.suppress(OSError):
+                                leftover.unlink(missing_ok=True)
             return {"status": "ok", "path": str(target), "sim_time": clock["sim_time"]}
 
         @app.post("/checkpoint/load", tags=["checkpoint"], response_model=None)
@@ -3525,6 +3593,7 @@ class SimulationServer:
                 if not found:
                     raise HTTPException(status_code=404, detail=f"no checkpoint {path!r}")
                 from maddening.core.simulation.checkpoint import (  # noqa: PLC0415
+                    CheckpointFormatError,
                     _restore_state_and_params,
                     _state_and_params_snapshot,
                 )
@@ -3536,8 +3605,17 @@ class SimulationServer:
                         self.gm.compile()
                     undo = _state_and_params_snapshot(self.gm)
                     self.gm.load_state(str(target))
-                except ValueError as exc:
-                    raise HTTPException(status_code=400, detail=str(exc))
+                except CheckpointFormatError:
+                    # NumPy's own reasons -- how to load the file unsafely --
+                    # are not the client's business.
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"could not load checkpoint {path!r}: it is not an .npz "
+                                "archive of plain arrays saved by this API"),
+                    ) from None
+                except ValueError as exc:   # load_state's own: what does not fit
+                    raise HTTPException(status_code=400,
+                                        detail=_checkpoint_reason(exc)) from None
                 except Exception:  # noqa: BLE001 - do not leak file/parse internals
                     raise HTTPException(status_code=400, detail=f"could not load checkpoint {path!r}")
                 # A checkpoint of a graph whose node was built with another
@@ -3785,17 +3863,18 @@ class SimulationServer:
 
         @app.put("/sim/stride", tags=["sim"], response_model=None)
         def sim_set_stride(
-            steps_per_frame: int = Query(
-                1, ge=1, le=MAX_STEPS_PER_FRAME,
+            steps_per_frame: Optional[int] = Query(
+                None, ge=1, le=MAX_STEPS_PER_FRAME,
                 description="Physics steps batched per wall-clock frame in the "
                             "runner, at most MAX_STEPS_PER_FRAME (one POST "
                             "/sim/run's worth).  Kept for a runner started "
-                            "later.",
+                            "later.  Left out: the current value is kept.",
             ),
-            relay_stride: int = Query(
-                1, ge=1, le=MAX_RELAY_STRIDE,
+            relay_stride: Optional[int] = Query(
+                None, ge=1, le=MAX_RELAY_STRIDE,
                 description="Capture only every Nth step in the relay, at "
-                            "least 1 and at most MAX_RELAY_STRIDE.",
+                            "least 1 and at most MAX_RELAY_STRIDE.  Left out: "
+                            "the current value is kept.",
             ),
         ) -> dict[str, int]:
             """Adjust physics-to-render rate decoupling.
@@ -3814,6 +3893,12 @@ class SimulationServer:
                 :data:`MAX_RELAY_STRIDE`.  ``0`` used to be echoed as ``0``
                 and applied as ``1``; it is a 422 now.
 
+            A value left out of the query keeps its current value, so a
+            call that changes one leaves the other as it was.  Until 0.4.0
+            each defaulted to ``1``: a call naming only ``steps_per_frame``
+            reset the relay's stride to ``1``, and the reverse the runner's
+            steps per frame, without a word.
+
             Returns
             -------
             dict
@@ -3823,11 +3908,13 @@ class SimulationServer:
             # lock is held by routes waiting for the graph, and the stride
             # waited behind them.
             with self._stride_lock:
-                self._steps_per_frame = steps_per_frame
-                runner = self.runner
-                if runner is not None:
-                    runner.steps_per_frame = steps_per_frame
-                self.relay.stride = relay_stride
+                if steps_per_frame is not None:
+                    self._steps_per_frame = steps_per_frame
+                    runner = self.runner
+                    if runner is not None:
+                        runner.steps_per_frame = steps_per_frame
+                if relay_stride is not None:
+                    self.relay.stride = relay_stride
                 return {
                     "steps_per_frame": self._steps_per_frame,
                     "relay_stride": self.relay.stride,
@@ -4297,22 +4384,30 @@ class SimulationServer:
                 self._trace_steps = 0
                 self._trace_stopped_by = None
                 self._trace_started = time.monotonic()
+                timer = threading.Timer(MAX_JAX_TRACE_SECONDS, self._trace_time_is_up)
+                timer.daemon = True
+                self._trace_timer = timer
+                timer.start()
             return {"status": "tracing", "log_dir": log_dir,
                     "max_steps": MAX_JAX_TRACE_STEPS, "max_seconds": MAX_JAX_TRACE_SECONDS}
 
         @app.post("/sim/profile/jax/stop", tags=["sim"], response_model=None)
         def sim_profile_jax_stop() -> dict[str, Any]:
             """End the active JAX trace and return the log directory.  A
-            409 when none is active -- naming the directory of one that
-            stopped itself at its budget."""
+            409 when none is active -- saying, for one that stopped itself
+            at its budget, after how many steps and why, and that its
+            directory is ``last_trace_dir`` in ``GET
+            /sim/profile/jax/status`` (a 4xx detail names no server path)."""
             from maddening.core.simulation.profiler import jax_trace_active
             with self._trace_lock:
+                self._stop_trace_if_out_of_time()
                 if not jax_trace_active():
                     detail = "No JAX trace is active."
                     if self._trace_stopped_by not in (None, "a request"):
                         detail += (f" The last one stopped itself after "
                                    f"{self._trace_steps} steps ({self._trace_stopped_by}); "
-                                   f"its trace is in {self._last_jax_trace_dir}.")
+                                   "its directory is last_trace_dir in GET "
+                                   "/sim/profile/jax/status.")
                     raise HTTPException(status_code=409, detail=detail)
                 log_dir = self._stop_trace("a request")
             return {"status": "stopped", "log_dir": log_dir, "steps": self._trace_steps}
@@ -4320,6 +4415,8 @@ class SimulationServer:
         @app.get("/sim/profile/jax/status", tags=["sim"], response_model=None)
         def sim_profile_jax_status() -> dict[str, Any]:
             from maddening.core.simulation.profiler import jax_trace_active
+            with self._trace_lock:
+                self._stop_trace_if_out_of_time()
             return {
                 "active": jax_trace_active(),
                 "last_trace_dir": getattr(self, "_last_jax_trace_dir", None),

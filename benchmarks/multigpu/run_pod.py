@@ -82,14 +82,18 @@ as ``CHECK FAILED``, and the runner exits 1 when any check failed.  A case
 the device count cannot express (the 2-D pencil mesh below 4 or on an odd
 count; a spatial axis no case splits over three or more devices, where a
 halo from the wrong neighbour cannot show) is recorded as a check *not
-run* and printed as ``CHECK NOT RUN``: not a failure, but the goal does
-not read complete; the halo, stencil, hybrid and coupled goals record
+run* and printed as ``CHECK NOT RUN``: it does not fail its goal when
+another check of the goal ran and passed (the run exits 0 for it and the
+goal reads ``INCOMPLETE``), but a goal none of whose checks ran is counted
+as failed and the run exits 1, as for a goal with no checks; the halo,
+stencil, hybrid and coupled goals record
 those cases that way on such a count.  Each of the wrapper goals must fail
-on a stencil wrapper broken in any of seven ways (a static's halos NaN,
-grid-shaped inputs zeroed, domain integrals halved, sharded axes after the
-first zero-filled at the global edges, halos taken from the wrong
-neighbour along spatial axis 1, ``shard_info``'s extent divided by the
-first mesh axis's size or read off spatial axis 0):
+on a stencil wrapper broken in any of eight ways (a static's halos NaN,
+grid-shaped inputs zeroed, domain integrals halved, domain integrals summed
+over the first mesh axis only, sharded axes after the first zero-filled at
+the global edges, halos taken from the wrong neighbour along spatial axis
+1, ``shard_info``'s extent divided by the first mesh axis's size or read
+off spatial axis 0):
 ``tests/cloud/multigpu/test_run_pod_seeded_faults.py`` seeds each into a
 scratch copy of the library and requires it.  ``--summarise DIR`` reads
 the JSON files back and prints
@@ -1086,9 +1090,11 @@ def check_not_run(name: str, why: str) -> dict:
 
     Recorded rather than silently skipped, so that the goal cannot read
     as complete: ``passed`` is ``False`` for any reader that looks only at
-    that, the runner reports it as ``NOT RUN`` rather than as a failure
-    (it exits 0 for it), and ``--summarise`` keeps the checklist items the
-    goal decides open.
+    that, and ``--summarise`` keeps the checklist items the goal decides
+    open.  The runner reports it as ``NOT RUN`` rather than as a failure --
+    it exits 0 for it -- when at least one other check of the goal ran and
+    passed; a goal none of whose checks ran is counted as failed and the
+    run exits 1, as for a goal with no checks.
     """
     return {"name": name, "value": None, "limit": None, "sense": None, "passed": False,
             "not_run": True, "detail": why}
@@ -2717,10 +2723,30 @@ def check_checklist_device_count(n_devices: int) -> None:
 
 
 def _load_results(directory: Path, goal: str) -> list[dict]:
+    """Every ``<goal>*.json`` under *directory* that records *goal*.
+
+    A file that cannot be read as a JSON object -- one ``timeout`` killed the
+    runner in the middle of writing, an empty one, one holding a list -- is
+    kept as a stand-in that records *goal* and why it cannot be read
+    (``_unreadable``): :func:`record_problems` reads it ``INVALID``, so the
+    summary says which file and exits 3.  It used to end the summary on the
+    ``JSONDecodeError`` (or ``AttributeError``) with exit status 1, the one
+    the runbook gives for "no goal JSON".
+    """
     docs = []
     for path in sorted(directory.glob(f"{goal}*.json")):
-        with open(path, encoding="utf-8") as f:
-            doc = json.load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                doc = json.load(f)
+            why = None if isinstance(doc, dict) else \
+                f"it holds a JSON {type(doc).__name__}, not an object"
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
+            why = f"{type(exc).__name__}: {exc}"
+        if why is not None:
+            # Read as a file with no results and no checks, recorded as not
+            # passed, so every verdict below lands on INVALID for it.
+            doc = {"goal": goal, "_unreadable": why, "results": [], "checks": [],
+                   "passed": False}
         if doc.get("goal") == goal:
             doc["_file"] = path.name          # for the reader; never part of a record
             docs.append(doc)
@@ -2921,6 +2947,9 @@ def record_problems(doc: dict) -> list[str]:
     written, one line each; empty when they are.  See the block comment
     above for what is checked and why."""
     problems: list[str] = []
+    if "_unreadable" in doc:
+        return [f"the file cannot be read as a JSON object ({doc['_unreadable']}): "
+                "a run killed while writing it leaves one like this"]
     goal = doc.get("goal")
     if goal not in GOAL_CHECKS:
         return [f"unknown goal {goal!r}"]
@@ -3650,8 +3679,10 @@ def main(argv: list[str] | None = None) -> int:
                   + (f" -- {c['detail']}" if c.get("detail") else ""))
         for c in not_run:
             print(f"CHECK NOT RUN [{goal}] {c['name']} -- {c['detail']}")
-        # A check not run is not a failure (the exit status stays 0 for
-        # it), but it keeps the goal from reading complete in --summarise.
+        # A check not run is not a failure while another check of the goal
+        # ran (the exit status stays 0 for it), but it keeps the goal from
+        # reading complete in --summarise; a goal none of whose checks ran
+        # is a failure, like one with no checks.
         if failed or not ran:
             failed_goals.append(goal)
             if len(goals) > 1 and not args.keep_going and goal != goals[-1]:

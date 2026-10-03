@@ -1196,7 +1196,7 @@ _REPORT_KEYS = ("iterations", "total_iterations", "converged", "residual", "erro
                 "spectral_error_bound", "spectral_usable")
 
 
-def _coupling_flags(group: Any, d: Mapping[str, Any]) -> list[str]:
+def _coupling_flags(group: Any, d: Mapping[str, Any], whole: tuple = ()) -> list[str]:
     flags = []
     cap = int(group.max_iterations)
     if int(d["iterations"]) >= cap:
@@ -1216,6 +1216,11 @@ def _coupling_flags(group: Any, d: Mapping[str, Any]) -> list[str]:
     rho = d.get("rho_spectral")
     if isinstance(rho, float) and not math.isnan(rho) and not d.get("spectral_usable"):
         flags.append("spectral_usable=False: the spectral bound is not settled or not finite")
+    if whole and d.get("gradient_bound_usable"):
+        named = ", ".join(f"{name} ({size} entries)" for name, size in whole)
+        flags.append("gradient bound: constants larger than the entry-probe limit were probed "
+                     "as a whole, along one fixed direction weighted by their magnitudes, so for "
+                     f"them it bounds that directional derivative, not each entry's: {named}")
     return flags
 
 
@@ -1254,7 +1259,8 @@ def coupling_report(gm: "GraphManager") -> InspectionTable:
         if d is not None:
             for k in _REPORT_KEYS:
                 row[k] = d.get(k)
-            row[_FLAGS] = tuple(_coupling_flags(ran, d))
+            row[_FLAGS] = tuple(_coupling_flags(
+                ran, d, (getattr(gm, "_gradient_whole_probes", {}) or {}).get(key, ())))
         elif status.traced or not status.ever_compiled:
             row[_FLAGS] = ()
         elif group.solver == "fori" and not group.diagnostics:

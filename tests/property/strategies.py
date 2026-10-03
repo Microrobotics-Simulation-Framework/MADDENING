@@ -623,7 +623,7 @@ class GraphRecipe:
         with warnings.catch_warnings():
             # A drawn group can be part of a larger feedback loop through
             # nodes outside it, and compile() names the edge that closes
-            # that loop one step late (CPL-181, MADD-ANO-140) -- a property
+            # that loop one step late (CPL-181, MADD-ANO-144) -- a property
             # of the structure, not a mistake in the draw.  The recipe fixes
             # the order nodes are added in, so the graph it builds, and the
             # edge read late, are the same on every call.

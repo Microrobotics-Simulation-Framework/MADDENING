@@ -351,7 +351,7 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
-- **Coupling round-5 audit fixes** (MADD-ANO-138 to 142; new, resolved): the gradient bound applies the exact resolvent to each secant (it read 5.2x below the true error, usable), probes each entry of an array constant, and certifies Kantorovich with the full resolvent norm; the spectral bound is in the returned state's weights;
+- **Coupling round-5 audit fixes** (MADD-ANO-142 to 146; new, resolved): the gradient bound applies the exact resolvent to each secant (it read 5.2x below the true error, usable), probes each entry of an array constant, and certifies Kantorovich with the full resolvent norm; the spectral bound is in the returned state's weights;
   a group is one block in the schedule (an outside node between its members read it a step late, since 0.1.0) and compile() warns when a group is part of a larger loop; CouplingGroup refuses out-of-range counts and thresholds (waveform_iterations=0 froze a sub-cycling group, since 0.1.0).
   Action: re-read diagnostics=True bounds; expect a UserWarning for a group inside a larger feedback loop; fix any out-of-range CouplingGroup knob.
 - **The identifiability guard decides the same in any units** (MADD-ANO-135, never released): its tests, hold and tolerance measure an identity parameter relative to its size, as `fim(scale="relative")` does;

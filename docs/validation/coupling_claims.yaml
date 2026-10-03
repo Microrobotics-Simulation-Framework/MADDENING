@@ -1692,7 +1692,7 @@ claims:
     F linear; solver="ift", diagnostics=True; at most eight independent
     interface scalars (spectral_usable); the group's own norm at the
     returned state -- each field divided by its own max|field| at the
-    returned state, the residual put in those weights (MADD-ANO-142); every
+    returned state, the residual put in those weights (MADD-ANO-146); every
     acceleration and schedule; long Gauss-Seidel chains, sub-cycled and
     multi-rate groups; float16 to float32.
   oracle: exact float64 fixed point of the evaluated map.
@@ -1815,7 +1815,7 @@ claims:
     probed along one |c|-weighted fixed-seed direction and named by
     coupling_report(), and for it the bound covers that directional
     derivative only.  The resolvent is applied exactly to each probe's
-    secant (MADD-ANO-138; per-entry probes MADD-ANO-139).
+    secant (MADD-ANO-142; per-entry probes MADD-ANO-143).
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep
@@ -1853,7 +1853,7 @@ claims:
     multiplied by 1 / sqrt(1 - 2h) ... and is inf -- unusable -- at
     h >= 1/2 ... h is exactly zero on an affine map", with h = beta L eta
     and beta the full-operator resolvent norm (exact from the range basis;
-    not the Krylov-restricted factor, MADD-ANO-138); gradient_bound_usable
+    not the Krylov-restricted factor, MADD-ANO-142); gradient_bound_usable
     is "finite and spectral_usable is True"; NaN "for "fori", for
     diagnostics=False, at max_iterations=1 ... where the fixed point responds
     to no constant, where a constant's tangent through the group is not
@@ -2680,7 +2680,7 @@ claims:
     closed by an edge read from the previous step, which follows the
     build order, and compile() warns naming it.  An outside node added
     between two members is scheduled after the group and reads it this
-    step (a group is one block in the schedule; MADD-ANO-140).
+    step (a group is one block in the schedule; MADD-ANO-144).
   oracle: bit-identity against the original build order.
   tests:
     - tests/property/test_coupling_invariances.py::test_the_build_order_changes_nothing

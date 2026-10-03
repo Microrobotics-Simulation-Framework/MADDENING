@@ -463,7 +463,7 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
     the last pass, and ``coupling_diagnostics()`` multiplies the bound's
     resolvent factor by it so that ``spectral_error_bound`` bounds the
     distance in the returned state's weights, the norm it documents
-    (MADD-ANO-142).
+    (MADD-ANO-146).
 
     ``weights`` is the flat vector of per-entry factors the group's
     convergence norm multiplies a state change by at ``x_star`` --
@@ -810,7 +810,7 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        probe over every constant read ``0.0`` at every cap on the stiff
        spring pair while its stiffness gradient was 0.8-4.8% off, and
        one |c|-weighted probe of a two-entry gain read 23.6x under the
-       error of its small entry (MADD-ANO-139).
+       error of its small entry (MADD-ANO-143).
     3. **The tangents and the direction to the fixed point.**
        ``t_i = (I - J(x_k))^{-1} w_i`` (one JVP each) is what the
        adjoint returns for probe ``i``; ``delta = (I - J(x_k))^{-1} r``
@@ -833,7 +833,7 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        exactly to the secant (one JVP), not its norm times the
        Arnoldi factor, which is the resolvent restricted to the Krylov
        space and read 0.19x the true error on a ring whose secant lies
-       outside it (MADD-ANO-138) -- and the reported value is the
+       outside it (MADD-ANO-142) -- and the reported value is the
        largest over the probes the fixed point responds to
        (``||t_i|| > 0``, or non-finite).
     6. **Newton-Kantorovich** with the full-operator resolvent norm
@@ -1119,7 +1119,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # which need not: on an affine scalar Gauss-Seidel ring stopped at
     # three passes it was 8.57 where the full resolvent norm is 45.2, and
     # the bound read 0.19x the true gradient error with
-    # ``gradient_bound_usable=True`` (MADD-ANO-138).  The range basis
+    # ``gradient_bound_usable=True`` (MADD-ANO-142).  The range basis
     # applies the resolvent exactly for one more JVP per probe
     # (``resolvent_apply``), so the per-probe bound is
     # ``distance * ||(I - J)^{-1} secant_i|| / (||delta|| * ||t_i||)``.
@@ -1159,7 +1159,7 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # what is already measured.  With ``beta = ||(I - J(x_k))^{-1}||`` --
     # the *full-operator* norm (``_full_resolvent_norm``), not the
     # Krylov-restricted ``amp``, which can be several times smaller
-    # (MADD-ANO-138) -- ``eta = ||delta||`` (the Newton correction) and
+    # (MADD-ANO-142) -- ``eta = ||delta||`` (the Newton correction) and
     # ``L`` the Jacobian's Lipschitz constant -- estimated along ``delta``
     # from the extra row, ``||(J(x_k + delta) - J(x_k)) delta|| /
     # ||delta||**2`` -- the check is ``h = beta L eta < 1/2``.  (The
@@ -8813,7 +8813,7 @@ class GraphManager:
               round-5 fix the bound used it as it was, which on a group
               still growing toward its fixed point read 0.94x the true
               distance in the returned state's weights, usable
-              (MADD-ANO-142) -- so the dead band's excluded
+              (MADD-ANO-146) -- so the dead band's excluded
               fields are outside what it bounds and the norm's scale
               drifts with the iterate exactly as it does for
               ``"residual"``; and its float floor is a model of the

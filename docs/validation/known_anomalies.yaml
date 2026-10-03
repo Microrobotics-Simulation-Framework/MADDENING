@@ -458,7 +458,7 @@ anomalies:
       would have made it 12x short.  (Those figures are the first
       edition's; after 0.4.0's round-5 fix to the bound -- the resolvent
       applied exactly to each secant, one probe per entry, full-operator
-      Kantorovich, MADD-ANO-138 -- the same maps read 1.1-2.1x and up to
+      Kantorovich, MADD-ANO-142 -- the same maps read 1.1-2.1x and up to
       10.5x, and the hidden slow mode, moved to a curvature the
       full-operator check certifies, 25x, with error_estimate's distance
       40x short.)  It is a statement about the
@@ -10292,7 +10292,7 @@ anomalies:
       - "tests/fmi/test_a_value_its_type_rounds_to_zero_is_refused.py::test_every_write_path_refuses_a_value_that_would_be_stored_as_zero"
       - "tests/api/test_params_endpoint_small_values.py::test_a_value_float32_flushes_to_zero_is_refused_before_the_cast"
     github_issue: null
-  - anomaly_id: "MADD-ANO-138"
+  - anomaly_id: "MADD-ANO-142"
     title: "gradient_relative_error_bound read up to 5.2x below the true gradient error with gradient_bound_usable=True: the resolvent applied to each secant was the Krylov-restricted Arnoldi factor, and Newton-Kantorovich used it too"
     description: >
       The gradient bound is, per probe, the resolvent applied to the change
@@ -10371,7 +10371,7 @@ anomalies:
       - "tests/core/test_coupling_gradient_bound_poisoned_by_a_non_finite_tangent.py::test_a_constant_with_no_finite_tangent_leaves_no_usable_bound"
       - "tests/core/test_coupling_bounds_in_any_units.py::test_a_nonlinear_group_never_reports_a_usable_bound_its_control_disowns"
     github_issue: null
-  - anomaly_id: "MADD-ANO-139"
+  - anomaly_id: "MADD-ANO-143"
     title: "For an array-valued constant the gradient bound covered one |c|-weighted random direction, not each entry: the gradient in a small entry read 23.6x above the bound, usable"
     description: >
       `gradient_relative_error_bound` is documented as a bound for "the
@@ -10418,7 +10418,7 @@ anomalies:
       - "tests/core/test_coupling_gradient_bound_applies_the_full_resolvent.py::test_a_constant_above_the_entry_limit_is_probed_whole_and_named"
       - "tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit"
     github_issue: null
-  - anomaly_id: "MADD-ANO-140"
+  - anomaly_id: "MADD-ANO-144"
     title: "An outside node added between two members of a coupling group that is part of a larger feedback loop read the group one step late"
     description: >
       The step runs a coupling group as one block at its first member's
@@ -10471,7 +10471,7 @@ anomalies:
       - "tests/core/test_coupling_block_schedule.py::test_a_group_inside_a_larger_loop_warns_naming_the_edge_read_late"
       - "tests/core/test_coupling_block_schedule.py::test_two_groups_on_one_loop_each_warn"
     github_issue: null
-  - anomaly_id: "MADD-ANO-141"
+  - anomaly_id: "MADD-ANO-145"
     title: "CouplingGroup accepted waveform_iterations <= 0, which ran no sweep and froze a sub-cycling group, and other out-of-range counts and thresholds"
     description: >
       A sub-cycling group with `waveform_iterations=0` (or negative) ran
@@ -10509,7 +10509,7 @@ anomalies:
       - "tests/core/test_coupling_group_refuses_out_of_range_numbers.py::test_an_out_of_range_number_is_refused_naming_its_knob"
       - "tests/core/test_coupling_group_refuses_out_of_range_numbers.py::test_a_sub_cycling_group_with_no_waveform_sweep_is_refused_before_it_freezes"
     github_issue: null
-  - anomaly_id: "MADD-ANO-142"
+  - anomaly_id: "MADD-ANO-146"
     title: "spectral_error_bound read 0.94x the true distance in the norm it documents (the returned state's weights) on a group still growing toward its fixed point, spectral_usable=True"
     description: >
       `spectral_error_bound` is documented as a bound on `||x - x*||` in

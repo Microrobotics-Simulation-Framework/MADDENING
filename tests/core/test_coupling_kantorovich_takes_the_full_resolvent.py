@@ -5,7 +5,7 @@
 the group's norm, ``eta`` the Newton step and ``L`` the change of the
 Jacobian along it.  Until 0.4.0's round-5 fix ``beta`` was the Arnoldi
 factor, the resolvent restricted to the Krylov space of the start vector
-and the residual (MADD-ANO-138).  On the round-5 audit's rank-one ring
+and the residual (MADD-ANO-142).  On the round-5 audit's rank-one ring
 made nonlinear (``x0 <- b0 + g0 u + q u**2``) that factor is several times
 smaller than the full norm, and with it the check passed at a float64
 ``h`` of 0.67-1.75: every case below that must read unusable read usable

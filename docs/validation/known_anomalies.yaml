@@ -11613,17 +11613,18 @@ anomalies:
       `max_iterations=2` the check passed at `h = 0.19` and the bound read
       0.986x the true gradient error with `gradient_bound_usable=True`; on a
       pair 57% from its fixed point `h` read 0.37 along `delta` where the
-      operator norm of the same change gives 0.69 -- past Kantorovich's 1/2;
-      the fixed point lay 0.568 away against the certified radius 0.552 --
-      and the bound read 0.65x, flag set.  Found by the round-6 coupling
-      audit (CPL-093).  Resolved in 0.4.0: `L` is the larger of the
-      directional value and the operator norm of the Jacobian's change
-      across the step on its row space (`2 k` more Jacobian-vector
-      products), each probe adds the Newton step's second-order miss
+      affine-covariant form of the same change gives 0.65 -- past
+      Kantorovich's 1/2; the fixed point lay 0.568 away against the
+      certified radius 0.552 -- and the bound read 0.65x, flag set.  Found
+      by the round-6 coupling audit (CPL-093).  Resolved in 0.4.0: `h` is
+      the larger of the directional value and Deuflhard's affine-covariant
+      `||(I - J)^{-1} (J(x_k + delta) - J(x_k))||` as an operator on the
+      Jacobian's row space (`3 k` more Jacobian-vector products), each
+      probe adds the Newton step's second-order miss
       (`beta ||secant|| (t* - ||delta||) / (||delta|| ||t|| sqrt(1 - 2h))`),
       and Kantorovich's radius is formed without cancellation.  Over 240
       random bilinear pairs at caps 2-4 every usable bound holds; the first
-      pair reads 1.24x and the second fails the check (unusable).
+      pair reads 1.21x and the second fails the check (unusable).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >

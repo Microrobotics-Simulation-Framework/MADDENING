@@ -9,14 +9,14 @@ round-6 coupling audit (CPL-093) on pairs whose map is bilinear in the state:
   secant across the Newton step ``delta`` stood in for the change across
   ``x* - x_k``, and the part of ``x* - x_k`` the Newton step misses was not
   carried at all;
-* ``L``, the Jacobian's Lipschitz constant, was its change along ``delta``
-  alone.  On a pair 57% from its fixed point it read ``h = 0.37`` where the
-  operator norm of the same change gives 0.69 -- past Kantorovich's 1/2 --
-  the fixed point lay outside the radius the check certified, and the bound
-  read 0.81x (0.65x before the first fix) with the flag set.
+* ``h`` took the Jacobian's change along ``delta`` alone.  On a pair 57%
+  from its fixed point it read ``h = 0.37`` where the affine-covariant form
+  of the same change, an operator norm, gives 0.65 -- past Kantorovich's
+  1/2 -- the fixed point lay outside the radius the check certified, and
+  the bound read 0.81x (0.65x before the first fix) with the flag set.
 
-The bound now adds the Newton step's second-order miss and takes ``L`` as
-an operator across the step.  The oracle is the IFT tangent at the float64
+The bound now adds the Newton step's second-order miss and takes ``h`` as
+the larger of the directional value and the affine-covariant one.  The oracle is the IFT tangent at the float64
 fixed point, by central differences of the float64 map, measured in the
 group's L2 norm at the returned state.
 """
@@ -132,9 +132,9 @@ def test_a_usable_gradient_bound_holds_on_the_audit_pair_at_every_cap(cap):
 def test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn(acceleration):
     """The pair 57% from its fixed point: never a usable bound below the true error.
 
-    Its Kantorovich ``h`` is 0.69 with ``L`` as an operator, so the check
-    fails and the bound is withdrawn (``inf``, unusable); with ``L`` along
-    ``delta`` it read 0.37, passed, and the bound read 0.65-0.81x.
+    Its affine-covariant Kantorovich ``h`` is 0.65, so the check fails and
+    the bound is withdrawn (``inf``, unusable); along ``delta`` it read
+    0.37, passed, and the bound read 0.65-0.81x.
     """
     gm = _graph("far", 2, acceleration)
     with warnings.catch_warnings():

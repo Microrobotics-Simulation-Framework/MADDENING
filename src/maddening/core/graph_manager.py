@@ -941,13 +941,14 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        largest over the probes the fixed point responds to
        (``||t_i|| > 0``, or non-finite).
     6. **Newton-Kantorovich** with the full-operator resolvent norm
-       (:func:`_full_resolvent_norm`, exact from the range basis) and the
-       Jacobian's Lipschitz constant measured across the step as an
-       operator on its row space (``2 k`` JVPs), not along
-       ``delta`` alone; and the Newton step's second-order miss, ``t* -
-       eta``, carried into each probe's bound.
+       (:func:`_full_resolvent_norm`, exact from the range basis), ``h``
+       the larger of ``beta`` times the Jacobian's change along ``delta``
+       and the affine-covariant constant
+       ``||(I - J(x_k))^{-1} (J(x_k + delta) - J(x_k))||`` as an operator on
+       the Jacobian's row space (``3 k`` JVPs); and the Newton step's
+       second-order miss, ``t* - eta``, carried into each probe's bound.
 
-    ``11 + 3 k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``35 + 5 n_p`` forward), ``n_p``
+    ``11 + 4 k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``43 + 5 n_p`` forward), ``n_p``
     the number of probes, which is
     why it is gated behind ``diagnostics=True``; the per-probe products
     are ``vmap``-ed, so the primal is evaluated once.  Every input is
@@ -1314,20 +1315,28 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         # certified bound.
         numerator = jnp.where(jac_change > 0, jnp.inf, jnp.zeros_like(jac_change))
     else:
-        # **``L`` as an operator, not along ``delta`` alone.**  Kantorovich's
-        # ``L`` bounds ``||J(x) - J(y)|| / ||x - y||`` in the operator norm;
-        # its action on ``delta`` alone can be several times smaller, and
-        # then ``h`` passed where the fixed point lay outside the radius it
+        # **The affine-covariant constant, as an operator.**  ``h`` was
+        # ``beta * ||(J(x_k + delta) - J(x_k)) delta|| / ||delta||``: the
+        # Jacobian's change along ``delta`` alone, which can be much smaller
+        # than its change in the directions ``delta`` hardly moves.  Then
+        # ``h`` passed where the fixed point lay outside the radius it
         # certified: on a bilinear pair stopped two passes in, ``h = 0.37``
-        # along ``delta`` and ``0.69`` with the operator norm, the fixed
-        # point 0.568 away against ``t* = 0.552``, and the bound read 0.81x
-        # the true gradient error, usable.  So the change of the Jacobian
-        # across the step is measured as an operator on the directions the
-        # Jacobian reads (its row space, which the full resolvent norm's
-        # reverse-mode products already span, ``k`` directions): ``2 k`` more
-        # JVPs, both points through one batched evaluation and differenced after
-        # a barrier, so an affine map's change is exactly zero, as the extra
-        # row's is.  ``L`` is the larger of that and the directional value.
+        # with the fixed point 0.568 away against ``t* = 0.552``, and the
+        # bound read 0.81x the true gradient error, usable.  So the check
+        # also takes Deuflhard's affine-covariant Kantorovich constant,
+        # ``omega = ||(I - J(x_k))^{-1} (J(x_k + delta) - J(x_k))|| /
+        # ||delta||`` -- an operator norm, on the directions the Jacobian
+        # reads (its row space, which the full resolvent norm's reverse-mode
+        # products already span, ``k`` of them), with the resolvent applied
+        # exactly through the range basis -- and ``h`` is the larger of the
+        # two: 0.65 on that pair, no certified bound.  ``beta`` times the
+        # Jacobian's operator change would also have caught it, but reads
+        # 3.5-16x the directional value on a ring whose Jacobian depends on
+        # one field the Newton step barely moves, withdrawing bounds that
+        # hold; the resolvent in front measures the change where it lands.
+        # ``3 k`` more JVPs, both points through one batched evaluation and
+        # differenced after a barrier, so an affine map's change is exactly
+        # zero, as the extra row's is.
         def jac_at(xx, z):
             _, Jz = jax.jvp(lambda x_: _F_dispatch(step_pure, x_, consts_sg), (xx,),
                             ((z * (s_inv * lift)).astype(x_dtype),))
@@ -1335,8 +1344,9 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
 
         JR = jax.vmap(lambda xx: jax.vmap(lambda z: jac_at(xx, z))(rows.T))(points)
         JR = jax.lax.optimization_barrier(JR).astype(dtype)
-        op_change = jnp.linalg.norm(live * _framed_difference(JR[1], JR[0], s / lift), ord=2)
-        numerator = beta * jnp.maximum(jac_change, op_change * step)
+        change = live * _framed_difference(JR[1], JR[0], s / lift)
+        op_change = jnp.linalg.norm(live * jax.vmap(resolve)(change), ord=2)
+        numerator = jnp.maximum(beta * jac_change, op_change * step)
     h = jnp.where(
         step > 0, numerator / jnp.where(step > 0, step, 1.0), 0.0,
     )
@@ -4473,7 +4483,7 @@ def _run_coupled_block_impl(
                 # Its distance is the spectral bound (never below the Newton
                 # step); the resolvent is applied exactly to each probe's
                 # secant, a second difference of the adjoint's own matvec.
-                # ``11 + 3 k + 5 n_p`` more JVPs, ``n_p`` the probes (see
+                # ``11 + 4 k + 5 n_p`` more JVPs, ``n_p`` the probes (see
                 # ``_gradient_error_bound_at``).
                 grad_bound = _gradient_error_bound_at(
                     step_pure, x_star_full, consts, weights,
@@ -9298,13 +9308,14 @@ class GraphManager:
               direction, the curvature is taken along a floor-sized
               vector's resolvent image instead of the Newton correction.
               And it carries a Newton-Kantorovich check on how far the
-              linearisation at ``x_k`` can be trusted at ``x*``: with
-              ``h = beta * L * ||delta||``, ``beta`` the full resolvent
-              norm at ``x_k`` and ``L`` the Jacobian's change across the
-              Newton correction ``delta`` per unit length -- the larger
-              of its action on ``delta`` and its operator norm on the
-              directions the Jacobian reads (``2 k`` more
-              Jacobian-vector products) -- the bound is multiplied by
+              linearisation at ``x_k`` can be trusted at ``x*``: ``h`` is
+              the larger of ``beta * ||(J(x_k + delta) - J(x_k)) delta||
+              / ||delta||`` (``beta`` the full resolvent norm at ``x_k``,
+              the Jacobian's change along the Newton correction
+              ``delta``) and Deuflhard's affine-covariant ``||(I -
+              J(x_k))^{-1} (J(x_k + delta) - J(x_k))||``, an operator
+              norm on the directions the Jacobian reads (``3 k`` more
+              Jacobian-vector products); the bound is multiplied by
               ``1 / sqrt(1 - 2h)`` (the resolvent at the fixed point),
               its distance is at least Kantorovich's radius ``t*``, each
               probe adds the Newton step's second-order miss (``beta *
@@ -9317,13 +9328,13 @@ class GraphManager:
               true error, flag ``True``, at ``F'(x*) = 0.99`` with the
               forward 0.65-4.5% short; ``h`` there is 0.48-0.58, so two
               of those four now read ``inf`` and two hold at 3.0-3.5x.
-              With ``L`` along ``delta`` alone and no second-order term
+              With ``h`` along ``delta`` alone and no second-order term
               it read 0.986x the true error at ``max_iterations=2``
               (``h = 0.19``) and 0.81x on a pair whose ``h`` read 0.37
-              along ``delta`` and is 0.69 as an operator, both on bilinear
-              pairs far from their fixed points, flag ``True``.  ``h`` is
-              exactly zero on an affine map, and so is every correction
-              here.  **Only
+              along ``delta`` and is 0.65 in the affine-covariant form,
+              both on bilinear pairs far from their fixed points, flag
+              ``True``.  ``h`` is exactly zero on an affine map, and so
+              is every correction here.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1``; ``inf``
@@ -9332,7 +9343,7 @@ class GraphManager:
               tangent through the group is not finite (that constant
               has no gradient to bound) and where the returned state is
               not finite.  Costs
-              ``11 + 3 k + 5 n_p`` Jacobian-vector products per group per
+              ``11 + 4 k + 5 n_p`` Jacobian-vector products per group per
               step beside the spectral bound's eight (plus one
               linearisation and ``k`` reverse-mode products where the
               state has more than ``k`` entries), ``k <= 8`` and ``n_p``
@@ -9423,10 +9434,10 @@ class GraphManager:
               basis did not capture, and one that fails the
               Kantorovich check, ``h >= 1/2``).  What it certifies is
               that check and the bound built on it: the Kantorovich
-              radius and resolvent with ``L`` the Jacobian's change
-              across the Newton step as an operator, and the Newton
-              step's miss carried at the rate the probes' own secants
-              show.  Both rates are measured across the step, so the
+              radius and resolvent with the Jacobian's change across the
+              Newton step taken as an operator (affine-covariantly), and
+              the Newton step's miss carried at the rate the probes' own
+              secants show.  Both rates are measured across the step, so the
               flag rests on the map changing no faster between ``x_k``
               and ``x*`` than across that step -- exact for an affine
               map, and the condition a group far from its fixed point

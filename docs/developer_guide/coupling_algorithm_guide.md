@@ -466,23 +466,28 @@ group already has or measures cheaply:
    `‖δ‖`.  No Hessian is formed.  Where the residual is at its float
    resolution it carries no direction, and a floor-sized vector's
    resolvent image — the slow mode — stands in;
-4. **how far the linearisation reaches**, by Newton–Kantorovich: with
-   `h = β · L · ‖δ‖`, `β` the full resolvent norm at `x_k` and `L` the
-   Jacobian's change across `δ` per unit length — the larger of its
-   action on `δ` and its operator norm on the directions the Jacobian
-   reads (`2k` more Jacobian-vector products) — the resolvent at `x*`
-   is at most `β / √(1 − 2h)` and a fixed point lies within Kantorovich's
-   radius `t*`, so the bound carries that factor and at least that
-   distance — and is `inf`, unusable, at `h ≥ ½`, where nothing measured
-   at `x_k` bounds the resolvent at the fixed point.  On a convex map at
-   `F'(x*) = 0.99`, 0.65–4.5% short, the bound without it read 0.20–0.96x
-   the true error with the flag true; `h` there is 0.48–0.58, so two of
-   those points now read `inf` and two hold at 3.0–3.5x.  `L` was once
-   taken along `δ` alone, which can be several times the operator norm's
-   smaller: on a bilinear pair stopped two passes in, `h` read 0.37 along
-   `δ` and is 0.69 as an operator, the fixed point lay 0.568 away against
-   a radius of 0.552, and the bound read 0.81x the true error, usable
-   (round-6 audit).  `h` is exactly zero on an affine map;
+4. **how far the linearisation reaches**, by Newton–Kantorovich: `h` is
+   the larger of `β · L · ‖δ‖` — `β` the full resolvent norm at `x_k`, `L`
+   the Jacobian's change along `δ` per unit length — and Deuflhard's
+   affine-covariant `‖(I − J(x_k))⁻¹ (J(x_k + δ) − J(x_k))‖`, an operator
+   norm on the directions the Jacobian reads (`3k` more Jacobian-vector
+   products).  Below one half the resolvent at `x*` is at most
+   `β / √(1 − 2h)` and a fixed point lies within Kantorovich's radius
+   `t*`, so the bound carries that factor and at least that distance — and
+   is `inf`, unusable, at `h ≥ ½`, where nothing measured at `x_k` bounds
+   the resolvent at the fixed point.  On a convex map at `F'(x*) = 0.99`,
+   0.65–4.5% short, the bound without it read 0.20–0.96x the true error
+   with the flag true; `h` there is 0.48–0.58, so two of those points now
+   read `inf` and two hold at 3.0–3.5x.  Along `δ` alone the Jacobian's
+   change can be far smaller than in the directions `δ` hardly moves: on a
+   bilinear pair stopped two passes in, `h` read 0.37 along `δ` and is 0.65
+   affine-covariantly, the fixed point lay 0.568 away against a radius of
+   0.552, and the bound read 0.81x the true error, usable (round-6 audit).
+   `β` times the Jacobian's operator change would have caught it too, but
+   reads 3.5–16x the directional value on a ring whose Jacobian depends on
+   one field the Newton step barely moves, withdrawing bounds that hold;
+   the resolvent in front measures the change where it lands.  `h` is
+   exactly zero on an affine map;
 5. **what the Newton step misses**: `x* − x_k = δ + e` with `‖e‖ ≤ t* −
    ‖δ‖`, and stretching the secant to `t*` covers only the part of `e`
    along `δ`.  Each probe adds `β ‖G(x_k + δ) − G(x_k)‖ (t* − ‖δ‖) /
@@ -501,7 +506,7 @@ read 0.0 on the stiff spring pair while its stiffness gradient was
 the same relative amount, and the dynamics see only their ratio.  The
 tangents and `δ` come from a Woodbury solve on an eight-vector basis of
 the Jacobian's range (`jacobian_range_basis`, `resolvent_apply`), so
-the cost is `11 + 3k + 5 n_p` Jacobian-vector products per group per step
+the cost is `11 + 4k + 5 n_p` Jacobian-vector products per group per step
 (`k ≤ 8`, `n_p` the probes: every entry of a floating constant of at most
 64 entries, one for a larger one) beside the spectral bound's eight, plus
 one linearisation and `k` reverse-mode products for the full resolvent

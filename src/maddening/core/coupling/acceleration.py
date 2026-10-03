@@ -1057,8 +1057,8 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     measured coordinates, which the space continues from at a breakdown as
     :func:`arnoldi_spectral_radius` continues from ``v_extra``.  Returns
     ``(rho, residual, amplification)`` with the meanings, conventions and
-    breakdown rule of :func:`arnoldi_spectral_radius`, and reads the same
-    as it when ``measure`` is the identity.
+    breakdown rule of :func:`arnoldi_spectral_radius`, and agrees with it,
+    to rounding, when ``measure`` is the identity.
     """
     if n_steps < 1:
         raise ValueError(

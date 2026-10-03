@@ -30,6 +30,13 @@ state) to ``2**60`` (about 1e18, below where the loss's squares overflow).
 Each path is jitted once per graph through the compiled step itself
 (``gm._compiled_step``, a pure function of the state and the parameters),
 so a scale sweep reuses one compile.
+
+The same oracle holds the non-finite right-hand side: a tangent seed or an
+observation with a NaN or infinite entry made the default solve's
+tolerance NaN or ``inf``, and the derivative came back exactly zero,
+reported successful, where ``"dense"`` and ``"fori"`` read NaN
+(MADD-ANO-147).  At every scale the default path is now NaN in every entry,
+so in particular wherever either reference is not finite.
 """
 
 from __future__ import annotations
@@ -128,12 +135,23 @@ def _derivative_fns(path, n, mode):
         p["nodes"][first]["G0"] = t * p["nodes"][first]["G0"]
         return run(p, x0s)[first]["x"]
 
-    return jax.jit(jax.grad(loss)), jax.jit(jax.jacfwd(state_of)), gm
+    def fields_along(b0, b0_dot, params, x0s):
+        # The tangent of every group field along a tangent in the first
+        # node's bias: its rhs is the tangent itself, entry by entry.
+        def fields(b):
+            p = jax.tree.map(lambda v: v, params)
+            p["nodes"][_GDEF.group_nodes[0]]["b"] = b
+            out = run(p, x0s)
+            return jnp.concatenate([out[nm]["x"] for nm in _GDEF.group_nodes])
+        return jax.jvp(fields, (b0,), (b0_dot,))[1]
+
+    return (jax.jit(jax.grad(loss)), jax.jit(jax.jacfwd(state_of)), gm,
+            jax.jit(fields_along))
 
 
 def _derivatives(path, n, mode, values, k):
     _GDEF = _GDEFS[n]
-    grad_fn, jac_fn, gm = _derivative_fns(path, n, mode)
+    grad_fn, jac_fn, gm, _ = _derivative_fns(path, n, mode)
     s = np.float32(2.0 ** k)
     scaled = {nm: {"G": v["G"], "b": np.asarray(v["b"] * s, np.float32),
                    "x0": np.asarray(v["x0"] * s, np.float32)} for nm, v in values.items()}
@@ -181,3 +199,67 @@ def test_the_ift_derivatives_agree_with_dense_and_fori_at_every_scale(n, mode, d
     nonnormal = n < 20 and data.draw(st.booleans())
     values = cg.draw_values(np.random.default_rng(seed), _GDEFS[n], rho, nonnormal=nonnormal)
     assert_derivatives_agree_at_every_scale(n, mode, _at_iteration_rate(_GDEFS[n], values, rho, mode))
+
+
+#: ``2**k`` for these ``k``: the bottom, the middle and the top of the sweep.
+NON_FINITE_SCALE_EXPONENTS = (-100, 0, 60)
+
+
+def _scaled_problem(n, mode, values, k):
+    """``(params, x0s, b0, obs)`` at scale ``2**k`` for the graph of ``(dense, n, mode)``."""
+    _GDEF = _GDEFS[n]
+    gm = _derivative_fns("dense", n, mode)[2]
+    s = np.float32(2.0 ** k)
+    scaled = {nm: {"G": v["G"], "b": np.asarray(v["b"] * s, np.float32),
+                   "x0": np.asarray(v["x0"] * s, np.float32)} for nm, v in values.items()}
+    params = cg.params_for(gm, scaled)
+    x0s = tuple(jnp.asarray(scaled[nm]["x0"]) for nm in _GDEF.group_nodes)
+    pre = {nm: {"x": np.asarray(scaled[nm]["x0"], np.float64)} for nm in _GDEF.group_nodes}
+    exact = cg.exact_fixed_point(_GDEF, scaled, pre, {}, dt=1.0)
+    obs = tuple(jnp.asarray(1.05 * exact[nm], jnp.float32) for nm in _GDEF.group_nodes)
+    return params, x0s, params["nodes"][_GDEF.group_nodes[0]]["b"], obs
+
+
+def assert_a_non_finite_rhs_is_non_finite_on_the_default_path(n, mode, values, bad, entry):
+    """At every scale: the default path is NaN in every entry, and the
+    references are not finite somewhere (so the case tests something)."""
+    for k in NON_FINITE_SCALE_EXPONENTS:
+        params, x0s, b0, obs = _scaled_problem(n, mode, values, k)
+        s = np.float32(2.0 ** k)
+        # A tangent seed in the first node's bias, one entry of it non-finite.
+        b0_dot = (jnp.ones_like(b0) * s).at[entry].set(bad)
+        # An observation of the first node with one entry non-finite: the
+        # cotangent ``2 (x - obs)`` is not finite there.
+        bad_obs = (obs[0].at[entry].set(bad),) + obs[1:]
+        got = {}
+        for path in ("gmres", "dense", "fori"):
+            grad_fn, _, _, jvp_fn = _derivative_fns(path, n, mode)
+            got[path] = (np.asarray(grad_fn(b0, params, x0s, bad_obs)),
+                         np.asarray(jvp_fn(b0, b0_dot, params, x0s)))
+        for i, kind in enumerate(("grad", "jvp")):
+            default = got["gmres"][i]
+            assert np.all(np.isnan(default)), (k, kind, bad, default)
+            for ref in ("dense", "fori"):
+                r = got[ref][i]
+                assert not np.all(np.isfinite(r)), (k, kind, ref, "the reference is finite", r)
+                assert np.all(~np.isfinite(default[~np.isfinite(r)])), (k, kind, ref, default, r)
+
+
+# Slow: the same six jitted programs per (size, mode) as the oracle above,
+# plus the tangent program; each example runs three scales on them.
+# Per push: tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_tangent_gives_a_nan_tangent_not_zero
+# Per push: tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_non_finite_cotangent_gives_a_nan_gradient_not_zero
+@pytest.mark.slow
+@pytest.mark.parametrize("mode", ["gauss-seidel", "jacobi"])
+@pytest.mark.parametrize("n", sorted(_GDEFS), ids=lambda n: f"{3 * n}dof")
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_non_finite_rhs_gives_a_non_finite_derivative_at_every_scale(n, mode, data):
+    rho = data.draw(st.sampled_from([0.3, 0.6, 0.9]))
+    seed = data.draw(st.integers(0, 2 ** 32 - 1))
+    bad = data.draw(st.sampled_from([float("nan"), float("inf"), float("-inf")]))
+    entry = data.draw(st.integers(0, n - 1))
+    nonnormal = n < 20 and data.draw(st.booleans())
+    values = cg.draw_values(np.random.default_rng(seed), _GDEFS[n], rho, nonnormal=nonnormal)
+    assert_a_non_finite_rhs_is_non_finite_on_the_default_path(
+        n, mode, _at_iteration_rate(_GDEFS[n], values, rho, mode), bad, entry)

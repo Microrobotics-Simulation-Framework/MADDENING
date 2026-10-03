@@ -113,8 +113,9 @@ SBOM_DIR = REPO_ROOT / "docs" / "validation" / "sbom"
 #: The installs that get a committed SBOM.  ``core`` is the base install,
 #: what every user gets; the rest are extras.  Why these and not others is
 #: argued in ``soup_package.md`` §6: ``server`` is the network-facing
-#: bundle (and a superset of ``api``, ``network``, ``terminal``, ``viz``
-#: and ``compression``), ``surrogates`` puts a trained network in the
+#: bundle (and a superset of ``api``, ``network``, ``viz`` and
+#: ``compression``, and of ``terminal`` except the display-side
+#: ``termaid``), ``surrogates`` puts a trained network in the
 #: computed result, and ``usd`` reads geometry into a graph.
 SBOM_INSTALLS: tuple[str, ...] = ("core", "server", "surrogates", "usd")
 

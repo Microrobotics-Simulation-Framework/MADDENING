@@ -86,8 +86,14 @@ cloud-all = ["skypilot[all]>=0.11"]
 # Matplotlib-based visualization (time-series, 2D scene renderers)
 viz = ["matplotlib>=3.5"]
 
-# Rich-based terminal renderer (works over SSH, no GUI needed)
-terminal = ["rich>=12.0"]
+# Rich-based terminal renderer (works over SSH, no GUI needed), and
+# termaid for GraphManager.print_graph_diagram (a box-and-arrow drawing of
+# the graph; MIT, pure Python, no dependencies).  termaid is pinned below
+# 1.0 because the diagram leans on its 0.x parser: the subgraph-title form
+# it reads, the sequences it acts on inside a quoted label, and its theme
+# names.  tests/core/test_inspection_diagram.py pins each of those, so
+# raising the ceiling is a deliberate step taken after they pass.
+terminal = ["rich>=12.0", "termaid>=0.9,<1"]
 
 # ZMQ network transport for remote visualization and command channels
 network = ["pyzmq>=25.0"]
@@ -148,6 +154,7 @@ client = [
 all = [
     "matplotlib>=3.5",
     "rich>=12.0",
+    "termaid>=0.9,<1",
     "pyzmq>=25.0",
     "fastapi>=0.100",
     "uvicorn>=0.20",
@@ -177,6 +184,7 @@ ci = [
     "httpx2>=2.0",
     "matplotlib>=3.5",
     "rich>=12.0",
+    "termaid>=0.9,<1",  # print_graph_diagram (the terminal extra); see there
     "pyzmq>=25.0",
     "fastapi>=0.100",
     # 1.7.0 is the first release whose testclient imports

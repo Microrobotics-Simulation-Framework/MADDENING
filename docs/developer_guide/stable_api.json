@@ -1567,6 +1567,36 @@
           ],
           "returns": "None"
         },
+        "print_graph_diagram": {
+          "kind": "method",
+          "parameters": [
+            {
+              "annotation": "Optional[str]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "theme"
+            },
+            {
+              "annotation": "str",
+              "default": "'LR'",
+              "kind": "KEYWORD_ONLY",
+              "name": "direction"
+            },
+            {
+              "annotation": "bool",
+              "default": "False",
+              "kind": "KEYWORD_ONLY",
+              "name": "use_ascii"
+            },
+            {
+              "annotation": "Optional[TextIO]",
+              "default": "None",
+              "kind": "KEYWORD_ONLY",
+              "name": "file"
+            }
+          ],
+          "returns": "None"
+        },
         "print_memory_estimate": {
           "kind": "method",
           "parameters": [

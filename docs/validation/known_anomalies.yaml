@@ -10903,7 +10903,7 @@ anomalies:
       - "tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance"
       - "tests/fmi/test_communication_points.py::test_a_point_that_has_drifted_is_refused_even_if_the_step_would_end_back_inside"
       - "tests/fmi/test_communication_points.py::test_an_honest_importers_clock_stays_inside_the_drift_tolerance"
-  - anomaly_id: "MADD-ANO-150"
+  - anomaly_id: "MADD-ANO-154"
     title: "A flux edge that crosses a coupling group's boundary -- from an outside producer into a member, or from a member to an outside reader -- fails to trace with a bare KeyError"
     description: >
       A flux is a value `compute_boundary_fluxes` returns, not a field of
@@ -10944,7 +10944,7 @@ anomalies:
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_an_outside_node_into_a_group_member_steps"
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_from_a_group_member_to_an_outside_reader_steps"
     github_issue: null
-  - anomaly_id: "MADD-ANO-151"
+  - anomaly_id: "MADD-ANO-155"
     title: "A flux edge that an ungrouped cycle reads from the previous step fails to trace with a bare KeyError, so whether the graph runs depends on the order its nodes were added"
     description: >
       A cycle of nodes outside every coupling group is staggered: the edge
@@ -10977,7 +10977,7 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps"
     github_issue: null
-  - anomaly_id: "MADD-ANO-152"
+  - anomaly_id: "MADD-ANO-156"
     title: "A typed PRNG key in a coupling group member fails to trace under solver='ift' with acceleration='aitken' or 'fixed'"
     description: >
       `CouplingGroup.accelerated_fields` documents that only floating
@@ -11014,7 +11014,7 @@ anomalies:
     verification:
       - "tests/property/test_differential_coupling_topologies.py::test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation"
     github_issue: null
-  - anomaly_id: "MADD-ANO-153"
+  - anomaly_id: "MADD-ANO-157"
     title: "A coupling group whose members are joined only through an outside node, on no cycle, reads that node one step late with no warning"
     description: >
       `CouplingGroup` documents that its members "form (part of) a cycle";

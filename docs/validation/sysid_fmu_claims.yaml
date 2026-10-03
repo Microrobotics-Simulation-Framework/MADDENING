@@ -3273,7 +3273,7 @@ claims:
   conditions: >-
     every mutation through the mapping; each reader and entry point; a
     structural write. Not claimed for float64 (x64), mixed dtypes, 16-bit
-    floats, vmap, predictors or warm starts, run_adaptive or sharded graphs.
+    floats, vmap, run_adaptive or sharded graphs.
   oracle: each reader's and entry point's result against gm.step's.
   tests:
     - tests/core/test_node_params_writes_are_observed.py::test_every_mutation_through_the_mapping_counts
@@ -3306,7 +3306,9 @@ claims:
     sub_cycled:
       - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-constant-pending]'
       - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-structural-compiled]'
-    predictors_warm_starts: narrowed
+    predictors_warm_starts:
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-constant-pending]'
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-structural-compiled]'
     adaptive: narrowed
     checkpoint_restart: tests/core/test_node_params_writes_are_observed.py::test_load_state_supersedes_an_earlier_node_write
     sharded: narrowed

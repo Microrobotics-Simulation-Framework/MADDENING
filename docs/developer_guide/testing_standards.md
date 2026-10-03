@@ -993,7 +993,9 @@ Documented differences: **D1** `check_params` judges the value held in the
 leaf's dtype (a value the dtype overflows or flushes is "does not fit its
 type" to every other door); **D2** it is not asked about a value that is
 not a number; **D3** a snapshot restores a parameter at the value the FMU
-was instantiated with whatever its bounds.  Known failing: M2 (a `log`
+was instantiated with whatever its bounds; **D4** the REST request model
+refuses a JSON integer above `MAX_NODE_PARAM_INT` in magnitude (422)
+whatever the leaf.  Known failing: M2 (a `log`
 spec without a lower bound advertises no `min`), N1 (the REST route stores
 a numeric string as the number) and N2 (an open bound in the band where a
 float32's spacing flushes is advertised one float inside it, where

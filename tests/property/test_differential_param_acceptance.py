@@ -40,6 +40,15 @@ Documented differences, which the oracle allows and nothing else:
   caller hands JAX what it likes, and ``gm.params`` makes a number of
   ``True`` -- not documented anywhere; recorded in the PR that added this
   harness).
+* **D3 -- the instantiation value.**  A snapshot restores a parameter at
+  the value the FMU was instantiated with (or holds now) whatever its
+  bounds (``FmuSidecar.set_fmu_state``), so ``set_state`` of exactly that
+  value is accepted where the bounds would refuse it.
+* **D4 -- REST bounds an integer.**  The route's request model refuses a
+  JSON integer above ``MAX_NODE_PARAM_INT`` in magnitude (422) whatever the
+  leaf it is for, as ``POST /graph/nodes`` does: a node may turn an integer
+  into an array dimension.  The other doors take ``2**24 + 1`` and store
+  the float32 it rounds to.
 
 Known disagreements, pinned as strict xfails:
 
@@ -48,6 +57,10 @@ Known disagreements, pinned as strict xfails:
 * **N1** -- the REST route stores a numeric string (``"1.5"``) in a float
   leaf as the number, while every FMU door refuses a string and the
   route's own comment says a string is a 400.
+* **N2** -- a ``log`` / ``logit`` bound in the band where a float32's
+  spacing is subnormal (``TINY <= |b| < 2**-102``) is advertised one float
+  inside it, a distance XLA flushes to zero, where ``ParamSpec.check``
+  refuses; a bridge whose sidecar has no specs takes it.
 
 Tolerance: none.  Acceptance is a yes or no, and a stored value is compared
 bit for bit.
@@ -74,7 +87,7 @@ from fastapi.testclient import TestClient
 from hypothesis import event, given, settings
 from hypothesis import strategies as st
 
-from maddening.api.server import SimulationServer
+from maddening.api.server import MAX_NODE_PARAM_INT, SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.core.params import ParamSpec
 from maddening.fmi import build_model_description
@@ -330,6 +343,13 @@ def check_acceptance(doors: Doors, spec: ParamSpec, value) -> str:
             assert check[0] is expected, (
                 f"check_params of the cast {held!r} answered {check[0]}, "
                 f"ParamSpec.check {expected}")
+    if isinstance(value, int) and not isinstance(value, bool) \
+            and abs(value) > MAX_NODE_PARAM_INT:
+        # D4: the REST request model bounds every JSON integer, whatever the
+        # leaf it is for (``SetNodeParamsRequest``: a node may turn one into
+        # an array dimension), so it is a 422 there.
+        ok, _, message = compared.pop("REST PUT")
+        assert not ok and message.startswith("422"), message
     if is_number(value) and math.isfinite(value) and not lost_in_the_dtype(value) \
             and np.float32(value) == INITIAL_VALUE:
         # D3: a snapshot restores a parameter at the value the FMU was
@@ -344,7 +364,7 @@ def check_acceptance(doors: Doors, spec: ParamSpec, value) -> str:
                     for d, ok in verdicts.items()))
     accepted = next(iter(verdicts.values()))
     if accepted:
-        stored = {door: s for door, (_, s, _) in outcomes.items()}
+        stored = {door: s for door, (_, s, _) in compared.items()}
         reference = stored["sidecar.set_params"]
         for door, s in stored.items():
             assert s.dtype == reference.dtype and s.tobytes() == reference.tobytes(), (
@@ -539,6 +559,13 @@ def test_a_logit_range_no_value_can_enter_is_refused_by_every_door(doors, value)
     "FMU door refuses a string; pending fix"))
 def test_a_numeric_string_is_refused_by_every_door(doors, value):
     check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value)
+
+
+def test_a_large_integer_is_refused_by_the_rest_route_alone(doors):
+    """D4, per push (the broad draw found it): ``2**24 + 1`` is stored as
+    the float32 it rounds to by every door but the REST route, whose
+    request model bounds a JSON integer whatever the leaf."""
+    assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), 2 ** 24 + 1) == "accepted"
 
 
 def test_a_number_written_as_text_is_refused_by_the_fmu_doors(doors):

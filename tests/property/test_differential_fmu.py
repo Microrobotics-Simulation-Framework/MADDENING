@@ -1091,16 +1091,35 @@ class WrapperPath:
         return ok
 
     def reinstantiate(self) -> None:
+        """``fmi3FreeInstance`` and a new instance.  The FMU states saved so
+        far go across the way an importer carries them: serialized before
+        the free (``fmi3SerializeFMUState``) and deserialized into the new
+        instance -- the TCP path's snapshots survive a new instance too."""
+        blobs = []
+        for handle in self.states:
+            size = ctypes.c_size_t()
+            assert self.w.lib.fmi3SerializedFMUStateSize(self.inst, handle,
+                                                          ctypes.byref(size)) == self.OK
+            buf = (ctypes.c_char * size.value)()
+            assert self.w.lib.fmi3SerializeFMUState(self.inst, handle, buf,
+                                                    size.value) == self.OK
+            blobs.append(bytes(buf))
         self._free_states()
         self.w.lib.fmi3FreeInstance(self.inst)
         self.inst = self._instantiate()
         self.time = 0.0
+        for blob in blobs:
+            handle = ctypes.c_void_p()
+            assert self.w.lib.fmi3DeserializeFMUState(self.inst, blob, len(blob),
+                                                      ctypes.byref(handle)) == self.OK
+            self.states.append(handle)
 
     def initialize(self, start: float) -> bool:
         ok = self.w.lib.fmi3EnterInitializationMode(self.inst, False, 0.0, start,
                                                     False, 0.0) == self.OK
         if ok:
             assert self.w.lib.fmi3ExitInitializationMode(self.inst) == self.OK
+            self.time = start
         return ok
 
 
@@ -1121,6 +1140,12 @@ def _load_wrapper():
         getattr(lib, name).argtypes = [ctypes.c_void_p]
     lib.fmi3GetFMUState.restype = ctypes.c_int
     lib.fmi3GetFMUState.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    lib.fmi3SerializedFMUStateSize.restype = ctypes.c_int
+    lib.fmi3SerializedFMUStateSize.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                               ctypes.POINTER(ctypes.c_size_t)]
+    lib.fmi3SerializeFMUState.restype = ctypes.c_int
+    lib.fmi3SerializeFMUState.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p,
+                                          ctypes.c_size_t]
     return wrapper
 
 

@@ -1,6 +1,8 @@
 """The FMI ``min`` / ``max`` attributes are the *settable* envelope: for a
 strict (log / logit) bound the description advertises the next
-representable float inside, for an inclusive one the bound itself.
+representable float inside -- or, where the spec refuses that one, the
+first float inside it the spec accepts -- for an inclusive one the bound
+itself.
 
 Originally written from the independent audit of 2026-09-16 (round 1; report and
 reproducers under ``benchmarks/results/audit1/``).
@@ -83,6 +85,76 @@ def test_logit_leaf_advertises_both_open_bounds(gm):
     sc.set_params({"ball.params.elasticity": var.max})
     with pytest.raises(ValueError, match="above bound"):
         sc.set_params({"ball.params.elasticity": 1.0})
+
+
+def _accepted(spec, value):
+    try:
+        spec.check(np.asarray(value, dtype=np.float32))
+    except ValueError:
+        return False
+    return True
+
+
+#: Open bounds where one float inside is not a value the spec takes: the band
+#: ``TINY <= |b| < 2**-102``, where that float is a subnormal distance from the
+#: bound and the step's arithmetic flushes the distance to zero; a negative
+#: bound one and a half ``TINY`` below zero, whose first accepted value is a
+#: subnormal that flushes to zero; and a ``logit`` edge whose neighbour's
+#: coordinate rounds onto the bound.
+_FIRST_ACCEPTED = [
+    (ParamSpec(bounds=(float(F32.tiny), None), transform="log"), 0),
+    (ParamSpec(bounds=(1e-35, None), transform="log"), 0),
+    (ParamSpec(bounds=(1e-35, 1.0), transform="logit"), 0),
+    (ParamSpec(bounds=(-1.0, -1e-35), transform="logit"), 1),
+    (ParamSpec(bounds=(-1.5 * float(F32.tiny), None), transform="log"), 0),
+    (ParamSpec(bounds=(-1.0, 1.0), transform="logit"), 1),
+]
+
+
+@pytest.mark.parametrize("spec, side", _FIRST_ACCEPTED,
+                         ids=["log-at-TINY", "log-at-1e-35", "logit-lower-in-band",
+                              "logit-upper-in-band", "log-below-zero", "logit-coordinate"])
+def test_an_open_bound_advertises_the_first_value_its_spec_accepts(spec, side):
+    """FMI's ``min`` / ``max`` are inclusive, so the advertised value must be one
+    the spec accepts, and the float just outside it one the spec refuses: then
+    a bridge whose sidecar has no specs, holding only the advertised envelope,
+    takes exactly what the graph takes.  One float inside the bound was
+    advertised, which in the band ``TINY <= |b| < 2**-102`` is a distance the
+    step's arithmetic flushes to zero: ``ParamSpec.check`` refused it and such
+    a bridge took it (the acceptance oracle's N2)."""
+    from maddening.fmi.model_description import _advertised_bound
+
+    m = np.float32(_advertised_bound(spec, side, "float32"))
+    outward = np.nextafter(m, np.float32(-np.inf) if side == 0 else np.float32(np.inf))
+    assert _accepted(spec, m), (spec, m)
+    assert not _accepted(spec, outward), (spec, outward)
+
+
+@pytest.mark.parametrize("bound", [8.0, 1.0, 2.0 ** -102, 1e-20])
+def test_an_open_bound_whose_neighbour_is_accepted_still_advertises_the_neighbour(bound):
+    """Outside the band the advertised value is unchanged: the next float inside
+    the bound, which the spec accepts."""
+    from maddening.fmi.model_description import _advertised_bound
+
+    spec = ParamSpec(bounds=(bound, None), transform="log")
+    assert _advertised_bound(spec, 0, "float32") == float(
+        np.nextafter(np.float32(bound), np.float32(np.inf)))
+
+
+def test_a_flushed_band_bound_is_held_by_the_graph_and_the_description_alike(gm):
+    """Through the description: a ``log`` spec at ``TINY`` advertises ``2 * TINY``,
+    which the sidecar built with the graph's specs accepts, and refuses the
+    float below it -- the value the description used to advertise."""
+    tiny = float(F32.tiny)
+    gm.set_param_spec("s", "stiffness", ParamSpec(bounds=(tiny, None), transform="log"))
+    md = build_model_description(gm, model_name="m", include_evolving=True)
+    var = next(v for v in md.variables if v.name == "s.params.stiffness")
+    assert var.min == 2 * tiny
+    sc = _sidecar(gm, md)
+    sc.set_params({"s.params.stiffness": var.min})
+    old = float(np.nextafter(np.float32(tiny), np.float32(np.inf)))
+    with pytest.raises(ValueError, match="below bound"):
+        sc.set_params({"s.params.stiffness": old})
 
 
 def test_inclusive_identity_bounds_are_unchanged(gm):

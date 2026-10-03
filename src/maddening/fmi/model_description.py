@@ -586,7 +586,13 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     value the XML declares settable is accepted by ``set_params``.  A
     zero bound's neighbour is a float32 subnormal, which XLA:CPU flushes
     to zero (``jnp.asarray(1e-45) <= 0.0`` is ``True``), so the margin
-    is never smaller than the smallest normal.
+    is never smaller than the smallest normal.  Where the spec refuses
+    even that value -- a bound whose spacing is below the smallest normal,
+    or a ``logit`` edge whose neighbour's coordinate rounds onto the bound
+    -- the first value inside the bound the spec accepts is advertised
+    (:func:`_first_accepted`), and the float just outside it is one the
+    spec refuses: the envelope an importer and a bridge without specs see
+    is exactly the spec's.
     """
     if spec is None:
         return None
@@ -613,7 +619,73 @@ def _advertised_bound(spec, side: int, dtype: str) -> Optional[float]:
     m = np.nextafter(dt.type(b), towards)
     if abs(m) < fi.tiny:
         m = dt.type(fi.tiny if side == 0 else -fi.tiny)
+    if not _accepts(spec, m, dt):
+        # One float inside is not always a value the spec takes.  A bound
+        # whose spacing is below the smallest normal (``TINY <= |b| <
+        # 2**-102`` in float32) is one subnormal step from its neighbour,
+        # a distance the step's arithmetic flushes to zero, so
+        # ``ParamSpec.check`` refuses it as on the bound -- while a bridge
+        # whose sidecar has no specs, holding only this ``min``, took it.
+        # Advertise the first value the spec accepts instead.
+        m = _first_accepted(spec, m, side, dt)
     return float(m)
+
+
+def _accepts(spec, value, dt) -> bool:
+    """Whether ``spec.check`` takes ``value`` held in dtype ``dt``."""
+    try:
+        spec.check(np.asarray(value, dtype=dt))
+    except ValueError:
+        return False
+    return True
+
+
+def _float_order_key(value, dt) -> int:
+    """An integer that orders the floats of ``dt`` as the reals do (``-0.0``
+    and ``0.0`` adjacent): their bits, with the negative half reflected."""
+    bits = np.dtype(f"int{dt.itemsize * 8}")
+    i = int(np.asarray(value, dtype=dt).view(bits))
+    return i if i >= 0 else -(i & ((1 << (dt.itemsize * 8 - 1)) - 1)) - 1
+
+
+def _float_of_order_key(key: int, dt):
+    """The float of ``dt`` whose :func:`_float_order_key` is ``key``."""
+    bits = np.dtype(f"int{dt.itemsize * 8}")
+    i = key if key >= 0 else -(key + 1) | -(1 << (dt.itemsize * 8 - 1))
+    return np.asarray(i, dtype=bits).view(dt)[()]
+
+
+def _first_accepted(spec, refused, side: int, dt):
+    """The float of ``dt`` nearest the bound on ``side`` that ``spec`` accepts.
+
+    ``refused`` is a value just inside the bound that the spec refuses.
+    Acceptance is monotone inside an open ``log`` / ``logit`` bound (the
+    distance from the bound and the coordinate both grow inward), so the
+    first accepted float is found by bisection on the floats' order, between
+    ``refused`` and a value well inside -- the interval's midpoint, or for a
+    ``log`` leaf one unit (or its bound's magnitude) above its bound.  Where
+    even that is refused the interval holds no value, and ``refused`` is
+    returned: the description then advertises a ``min`` the spec refuses, and
+    a bridge refuses to start when it lies above the ``max``.
+    """
+    lo, hi = spec.bounds
+    if spec.transform == "log":
+        base = 0.0 if lo is None else float(lo)
+        inner = base + max(1.0, abs(base))
+    else:
+        inner = 0.5 * (float(lo) + float(hi))
+    inner = dt.type(inner)
+    if not np.isfinite(inner) or not _accepts(spec, inner, dt):
+        return refused
+    a, b = _float_order_key(refused, dt), _float_order_key(inner, dt)
+    # Invariant: the float at ``a`` is refused, the one at ``b`` accepted.
+    while abs(b - a) > 1:
+        mid = (a + b) // 2
+        if _accepts(spec, _float_of_order_key(mid, dt), dt):
+            b = mid
+        else:
+            a = mid
+    return _float_of_order_key(b, dt)
 
 
 @dataclass(frozen=True)

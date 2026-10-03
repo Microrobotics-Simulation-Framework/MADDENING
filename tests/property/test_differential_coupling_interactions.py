@@ -394,8 +394,12 @@ def assert_strict_convergence_agrees_with_the_report(index: int) -> None:
                           strict_convergence=True)
         return
     # The row's own budget, and two passes -- which leaves a group at rate
-    # 0.6 or 0.9 short of its threshold -- so both outcomes are seen.
-    for budget in ({}, {"max_iterations": 2, "diagnostics": False}):
+    # 0.6 or 0.9 short of its threshold -- so both outcomes are seen.  Per
+    # push the strict twin runs without diagnostics (their spectral
+    # machinery is most of a compile, 11.7 s on CI for the row that has
+    # them); the slow lane holds the strict twin with the row's own.
+    own = {} if index not in PER_PUSH else {"diagnostics": False}
+    for budget in (own, {"max_iterations": 2, "diagnostics": False}):
         _strict_against_the_report(index, **budget)
 
 

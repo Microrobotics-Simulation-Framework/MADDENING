@@ -144,7 +144,16 @@ def _tree_error_norm(state_fine, state_coarse, atol, rtol):
         count += scaled.size
 
     jax.tree.map(_accumulate, state_fine, state_coarse)
-    return jnp.sqrt(sum_sq / jnp.maximum(count, 1))
+    mean_sq = sum_sq / jnp.maximum(count, 1)
+    # The square root's derivative is infinite at zero, so two estimates
+    # that agree exactly (a memoryless or steady state, where the full step
+    # and the two half steps land on one value) gave ``inf`` there, and
+    # ``run_adaptive_scan``'s backward pass multiplied it by the zero the
+    # controller's ``max(error_norm, 1e-10)`` sends back: NaN in every
+    # gradient through the scan.  The double ``where`` keeps the value and
+    # gives the zero-error case the zero derivative of ``max``'s flat side.
+    nonzero = mean_sq > 0
+    return jnp.where(nonzero, jnp.sqrt(jnp.where(nonzero, mean_sq, 1.0)), 0.0)
 
 
 def build_adaptive_step(

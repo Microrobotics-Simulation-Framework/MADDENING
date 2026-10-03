@@ -286,13 +286,30 @@ def test_a_truth_of_exactly_zero_has_no_relative_resolution():
     assert told.converged and told.best_loss <= 1e-25
 
 
-def test_the_ladder_extension_does_not_depend_on_lam_up():
+def test_the_ladder_extension_does_not_depend_on_lam_up(monkeypatch):
     """A small ``lam_up`` damps the twelve rungs by little (``1.5**12`` is
     130); the extension grows ``lam`` by at least a decade a rung, so it
     still reaches a candidate within ``step_tol`` -- in at most 24 more
     rungs, rather than the ``log(1e24) / log(lam_up)`` a ladder of
-    ``lam_up`` rungs would need -- and the floor rule fires."""
+    ``lam_up`` rungs would need -- and the floor rule fires.  The
+    candidates are counted per iteration (``callback`` marks each one's
+    start): measured 22 in the last, 12 and 10; a ladder extended by
+    ``lam_up`` would have needed 69."""
+    from maddening import sysid
+
+    per_iteration: dict[int, int] = {}
+    current = {"i": 0}
+    step = sysid._marquardt_step                      # noqa: SLF001
+
+    def counted(*args):
+        per_iteration[current["i"]] = per_iteration.get(current["i"], 0) + 1
+        return step(*args)
+
+    monkeypatch.setattr(sysid, "_marquardt_step", counted)
     with _x64():
-        res = _x64_noiseless_fit(1e-6, lam_up=1.5)
+        res = _x64_noiseless_fit(1e-6, lam_up=1.5,
+                                 callback=lambda i, *_: current.__setitem__("i", i))
     assert res.converged, (res.n_iter, res.best_loss)
     assert res.best_loss < 1e-25
+    assert max(per_iteration.values()) > 12, ("the extension never ran", per_iteration)
+    assert max(per_iteration.values()) <= 12 + 24, per_iteration

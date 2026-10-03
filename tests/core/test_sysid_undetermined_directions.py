@@ -876,6 +876,48 @@ def test_a_well_posed_fit_under_x64_gets_its_iterate_back_bit_for_bit(leaves):
                     runner.__name__, key)
 
 
+def test_fit_lm_holds_a_float32_residuals_degeneracy_in_an_x64_process():
+    """The curvature test reads its precision from the leaves too.  A
+    residual simulated in float32 from float32 constants has a Jacobian whose
+    null combination is float32 rounding -- ``||J v|| = 8e-8`` of ``||J||``
+    here, the force's ``k * x`` divided by ``m`` -- so by the float64 cutoff
+    of the promoted vector it is not flat and the degeneracy went unheld;
+    by float32's it is.  (The graph's own scans need a float64 state under
+    x64, MADD-ANO-017, which puts the spring's arithmetic in float64; this
+    residual is the spring's update, written out in float32.)"""
+    def simulate(k, c, m):
+        dt = jnp.float32(DT)
+
+        def body(state, _):
+            x, v = state
+            a = (-k * (x - jnp.float32(1.0)) - c * v) / m
+            v = v + dt * a
+            x = x + dt * v
+            return (x, v), x
+
+        _, xs = jax.lax.scan(body, (jnp.float32(0.5), jnp.float32(0.0)), None,
+                             length=60)
+        return xs
+
+    with _x64():
+        gm = _spring_x64("mixed")
+        data = simulate(*(jnp.float32(TRUTH[k]) for k in ("stiffness", "damping", "mass")))
+
+        def residual(p):
+            s = p["nodes"]["s"]
+            return simulate(s["stiffness"], s["damping"], s["mass"]) - data
+
+        assert residual(gm.params).dtype == jnp.float32
+        s0 = _start_scale_x64(gm)
+        res = fit_lm(gm, residual, params=_with_x64(gm, START), n_iter=30,
+                     notify_every=0)
+        raw = fit_lm(gm, residual, params=_with_x64(gm, START), n_iter=30,
+                     notify_every=0, hold_undetermined=False)
+    assert res.excited_rank == 2 and res.hold_declined is False, res
+    assert abs(_scale(res.params) / s0 - 1.0) < _HELD["mixed"], _scale(res.params) / s0 - 1.0
+    assert abs(_scale(raw.params) / s0 - 1.0) > 1e-3, "no drift for the guard to remove"
+
+
 def _orthogonal_gradients(dtype, n_grad=20):
     """``n_grad`` gradients exactly orthogonal to ``(1, 1, 1)`` in exact
     arithmetic, rounded to ``dtype`` (which leaves ``~eps`` along it)."""

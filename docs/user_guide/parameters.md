@@ -333,7 +333,13 @@ at, which needs to know where the record began: pass `start_step=` (0
 for a record taken from `compile()` or `reset_state()`, `n` after
 `gm.run(n)`; experimental).  A multi-rate graph without it warns that 0
 is assumed; a record that began elsewhere would be replayed on the wrong
-phase in every window.
+phase in every window.  A coupling group's predictor history and IQN-IMVJ
+warm starts are not in the observations either, so they are replayed:
+each window starts from the ones the previous window ended with (gradient
+stopped), the first from the cold ones `compile()` and `reset_state()`
+leave, and the loss is exactly zero at the parameters that generated a
+record taken from either.  A record that began after the graph had
+stepped (`start_step > 0`) cannot be replayed exactly, and says so.
 
 Before fitting, ask what the data can identify:
 

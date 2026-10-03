@@ -476,8 +476,8 @@ def _quadratic_residual(p):
 
 
 @pytest.mark.parametrize("fitter", ["fit", "fit_lm", "fit_multiple_shooting"])
-@pytest.mark.parametrize("stopped_at_start", [True, False])
-def test_best_loss_is_the_loss_of_exactly_the_params_returned(fitter, stopped_at_start):
+@pytest.mark.parametrize("case", ["stopped-at-the-start", "an-unmasked-leaf", "the-leaf-moves"])
+def test_best_loss_is_the_loss_of_exactly_the_params_returned(fitter, case):
     """SYS-071 for every fitter: without the guard, ``best_loss`` (and the entry of
     ``losses`` it indexes) is the loss of exactly the parameters returned.
 
@@ -486,16 +486,20 @@ def test_best_loss_is_the_loss_of_exactly_the_params_returned(fitter, stopped_at
     the start bit for bit, and the run used to evaluate the round trip: a
     ``best_loss`` an ulp's worth of loss away from the returned start's.  Fit
     in ``damping`` only, ``stiffness`` is never a coordinate and was
-    round-tripped in every evaluation while returned as it went in."""
+    round-tripped in every evaluation while returned as it went in.  Fit in
+    ``stiffness`` itself, the leaf moves, so the selection's derivative --
+    the round trip's -- is what steps it."""
     gm = _spring(stiffness=29.0)
     obs = _record(gm)
     start = jax.tree.map(lambda x: x, gm.params)
     start["nodes"]["s"]["stiffness"] = jnp.float32(30.0)
     k = jnp.float32(30.0)
     assert float(jnp.exp(jnp.log(k))) != 30.0, "fixture premise: the round trip moves 30.0"
-    mask = _only(gm, "stiffness", "damping") if stopped_at_start else _only(gm, "damping")
+    mask = {"stopped-at-the-start": _only(gm, "stiffness", "damping"),
+            "an-unmasked-leaf": _only(gm, "damping"),
+            "the-leaf-moves": _only(gm, "stiffness")}[case]
     kw = dict(params=start, mask=mask, hold_undetermined=False)
-    if stopped_at_start:
+    if case == "stopped-at-the-start":
         kw.update(tol=1e9, n_iter=5)
     else:
         kw.update(n_iter=3)
@@ -509,12 +513,16 @@ def test_best_loss_is_the_loss_of_exactly_the_params_returned(fitter, stopped_at
         res, ws = fit_multiple_shooting(gm, obs, obs_fn=_position, window=WINDOW, lr=0.01, **kw)
         again = float(windowed_loss(gm, res.params, obs, obs_fn=_position, window=WINDOW,
                                     window_states=ws, continuity_weight=1.0))
-    if stopped_at_start:
+    stiffness = np.asarray(res.params["nodes"]["s"]["stiffness"])
+    if case == "stopped-at-the-start":
         assert res.best_iteration == 0
-        assert np.asarray(res.params["nodes"]["s"]["stiffness"]).tobytes() == k.tobytes()
+        assert stiffness.tobytes() == k.tobytes()
+    elif case == "an-unmasked-leaf":
+        assert res.best_iteration > 0
+        assert stiffness.tobytes() == k.tobytes()
     else:
         assert res.best_iteration > 0
-        assert np.asarray(res.params["nodes"]["s"]["stiffness"]).tobytes() == k.tobytes()
+        assert stiffness.tobytes() != k.tobytes(), "the gradient did not move the leaf"
     assert again == float(res.best_loss), (again, res.best_loss)
     if res.best_iteration < len(res.losses):
         assert float(res.losses[res.best_iteration]) == float(res.best_loss)

@@ -1368,26 +1368,37 @@ def _exact_physical_params(gm, start: dict, flat_u, unravel, idx):
     ``log`` leaf whose ``exp(log(p))`` lands an ulp away (``30.03`` in
     float64, ``30.0`` in float32) the run therefore evaluated a point it did
     not return: ``best_loss`` read 5.364755728149608e-06 for a returned
-    start whose loss is 5.364755728152416e-06 (SYS-071).  Here a leaf with
-    no optimiser coordinate is the value that went in, and a leaf whose
-    coordinates are bit for bit where they started is that value too, its
+    start whose loss is 5.364755728152416e-06 (SYS-071).  Here a leaf whose
+    coordinates are bit for bit where they started -- every leaf with no
+    optimiser coordinate among them -- is the value that went in, its
     derivative still the round trip's (:func:`_with_tangent_of`), so the
     gradient the optimiser steps on is unchanged and every loss the run
     records -- ``losses``, ``best_loss`` -- is the loss of exactly the
-    parameters that iterate returns.
+    parameters that iterate returns.  A leaf whose round trip is exact is
+    passed through as before: selecting it as well changed nothing it
+    computes but let XLA fuse the rest of the objective differently, and a
+    replay at the truth that read exactly 0.0 read 1.3e-12 on jaxlib 0.11.2.
     """
     leaves_start, treedef = jax.tree.flatten(start)
     edges = np.cumsum([0] + [int(np.asarray(leaf).size) for leaf in leaves_start])
-    coordinate = np.zeros(int(edges[-1]), dtype=bool)
-    coordinate[np.asarray(idx, dtype=np.int64)] = True
+    # Which leaves the round trip moves at all, decided once on the host.  A
+    # leaf it returns bit for bit (every identity leaf; a ``log`` value whose
+    # ``exp(log(p))`` is exact) goes through the objective exactly as it
+    # always did -- the program, and so XLA's fusion of everything
+    # downstream, is unchanged for it -- and only a leaf the round trip moves
+    # takes the selection below.
+    round_trip = jax.tree.leaves(gm.constrain(unravel(flat_u)))
+    moves = [np.asarray(c).tobytes() != np.asarray(jnp.asarray(u, jnp.result_type(c))).tobytes()
+             for u, c in zip(leaves_start, round_trip)]
 
     def physical(theta):
         flat_new = flat_u.at[idx].set(theta)
         full = jax.tree.leaves(gm.constrain(unravel(flat_new)))
         out = []
-        for untouched, fitted, lo, hi in zip(leaves_start, full, edges[:-1], edges[1:]):
-            if not coordinate[lo:hi].any():
-                out.append(untouched)
+        for untouched, fitted, lo, hi, moved_by_round_trip in zip(
+                leaves_start, full, edges[:-1], edges[1:], moves):
+            if not moved_by_round_trip:
+                out.append(fitted)
                 continue
             unmoved = jnp.all(flat_new[lo:hi] == flat_u[lo:hi])
             value = jnp.where(unmoved, jnp.asarray(untouched, jnp.result_type(fitted)), fitted)

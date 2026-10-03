@@ -32,11 +32,11 @@ import pytest
 from maddening.core import inspection
 from tests.core.inspection_graphs import BUILDERS, UNCOMPILED, build, graph
 from tests.core.inspection_guard_support import (
-    HAS_RICH as _HAS_RICH,
     INSPECTION_CALLS,
     assert_read_only,
     compile_events,
     eager_first_call,
+    unavailable,
 )
 
 
@@ -50,8 +50,8 @@ def _eager_first_call(method: str, kind: str) -> bool:
 @pytest.mark.parametrize("method", sorted(METHODS))
 @pytest.mark.parametrize("kind", sorted(BUILDERS))
 def test_inspection_method_changes_nothing_and_compiles_nothing(kind, method):
-    if method.endswith("_rich") and not _HAS_RICH:
-        pytest.skip("rich is not installed; the rich renderer is an optional extra")
+    if (reason := unavailable(method)) is not None:
+        pytest.skip(reason)
     gm = graph(kind)
     call = METHODS[method]
     assert_read_only(gm, call, allow_eager_compile=_eager_first_call(method, kind))
@@ -63,7 +63,7 @@ def test_a_traced_graph_stays_traced_after_every_method():
     putting it back is a write (and ``coupling_diagnostics`` would do it)."""
     gm = graph("after_grad")
     for name, call in METHODS.items():
-        if name.endswith("_rich") and not _HAS_RICH:
+        if unavailable(name) is not None:
             continue
         with warnings.catch_warnings():
             warnings.simplefilter("error")      # the recovery warning would fire here
@@ -74,7 +74,7 @@ def test_a_traced_graph_stays_traced_after_every_method():
 def test_an_uncompiled_graph_stays_uncompiled_after_every_method():
     gm = graph("single_uncompiled")
     for name, call in METHODS.items():
-        if name.endswith("_rich") and not _HAS_RICH:
+        if unavailable(name) is not None:
             continue
         call(gm)
         assert gm._compiled_step is None and gm._dirty, name     # noqa: SLF001

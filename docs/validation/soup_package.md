@@ -267,7 +267,7 @@ graph is included, and the root's edges are exactly the direct dependencies
 | File | Install | What it covers |
 |---|---|---|
 | `maddening-0.4.0.dev0-core.cdx.json` | `pip install maddening` | The base dependencies: what every user gets, and the SOUP items of §1 |
-| `maddening-0.4.0.dev0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `terminal`, `viz` and `compression` extras |
+| `maddening-0.4.0.dev0-server.cdx.json` | `pip install maddening[server]` | The network-facing bundle: the HTTP/WebSocket API, the ZeroMQ transports, terminal (`rich`) and matplotlib rendering, zstd frames.  A superset of the `api`, `network`, `viz` and `compression` extras, and of `terminal` except `termaid`, which draws the graph diagram on an operator's terminal (below) |
 | `maddening-0.4.0.dev0-surrogates.cdx.json` | `pip install maddening[surrogates]` | Neural surrogate training (`optax`).  A trained surrogate replaces a physics node, so this code is in the computed result |
 | `maddening-0.4.0.dev0-usd.cdx.json` | `pip install maddening[usd]` | OpenUSD stage read and write (`usd-core`, a binary wheel that bundles OpenUSD's C++ libraries) |
 
@@ -292,7 +292,9 @@ the geometry import path.  The rest are left out on purpose:
 - The cloud extras (`runpod`, `lambda`, `aws`, `gcp`, `cloud`, `cloud-all`)
   are launch tooling on the operator's machine, not code in the simulation's
   process.  `viz3d`, `gpu-viz` and `streaming` are display-side
-  visualisation.  `verify` and `sbom` are tooling, and `ift` is empty.
+  visualisation, and so is the `terminal` extra's `termaid`, which draws
+  `GraphManager.print_graph_diagram` and computes nothing.  `verify` and
+  `sbom` are tooling, and `ift` is empty.
 
 **What an SBOM records, and what it does not.**  Each file records the
 Python version and platform it was resolved on (the PEP 508 marker

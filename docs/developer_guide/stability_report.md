@@ -71,6 +71,7 @@ import time.  Levels:
 | `maddening.core.graph_manager.GraphManager.params_table` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_coupling_report` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_graph` | experimental |
+| `maddening.core.graph_manager.GraphManager.print_graph_diagram` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_memory_estimate` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_params_table` | experimental |
 | `maddening.core.graph_manager.GraphManager.print_state_summary` | experimental |
@@ -84,6 +85,7 @@ import time.  Levels:
 | `maddening.core.inspection.memory_estimate` | experimental |
 | `maddening.core.inspection.params_table` | experimental |
 | `maddening.core.inspection.print_graph` | experimental |
+| `maddening.core.inspection.print_graph_diagram` | experimental |
 | `maddening.core.inspection.state_summary` | experimental |
 | `maddening.core.inspection.to_dot` | experimental |
 | `maddening.core.inspection.to_mermaid` | experimental |
@@ -214,4 +216,4 @@ import time.  Levels:
 | `maddening.usd.live_stage.LiveStage` | evolving |
 | `maddening.viz.relay.StateRelay` | experimental |
 
-*194 API surfaces registered.*
+*196 API surfaces registered.*

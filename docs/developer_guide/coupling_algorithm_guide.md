@@ -493,8 +493,14 @@ group already has or measures cheaply:
    along `δ`.  Each probe adds `β ‖G(x_k + δ) − G(x_k)‖ (t* − ‖δ‖) /
    (‖δ‖ ‖t_k‖ √(1 − 2h))` — the change of its linearisation over the
    missed part, at the rate its own secant shows, through the resolvent at
-   `x*` — which is zero on an affine map.  Without it the bound read
-   0.986x the true error, usable, at `max_iterations=2` (`h = 0.19`).
+   `x*` — which is zero on an affine map.  With `h` along `δ` alone and
+   without this term the bound read 0.986x the true error, usable, at
+   `max_iterations=2` (`h = 0.19`).  Once `h` takes the affine-covariant
+   form (0.22 there) the leading term alone reads 1.07x, and on 294 usable
+   drawn bilinear pairs it never fell below the true error, so no measured
+   case needs this term (it adds up to 42% of the leading term); it is
+   kept because it is the part of the argument the stretch to `t*` does
+   not cover.
 
 The bound is `amplification · distance · ‖G(x_k + δ) − G(x_k)‖ / (‖δ‖ ‖t_k‖)`,
 relative to the tangent, taken for **one probe per floating constant**

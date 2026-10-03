@@ -1393,11 +1393,16 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # does not move (``h = 0``, ``miss = 0``), so an affine group's bound
     # is the one it was, to its last bit or so (the extra operations can
     # move how XLA fuses the rest: one ulp on one of 125 configurations
-    # measured).  Without it the bound read 0.986x the true gradient
-    # error, usable, on a bilinear pair stopped two passes in (``h =
-    # 0.19``): the leading-order term, its distance already stretched to
-    # ``t*`` and its resolvent to ``x*``, still took the change of ``G``
-    # along the Newton direction for its change along ``x* - x_k``.
+    # measured).  With ``h`` along ``delta`` alone and without it, the
+    # bound read 0.986x the true gradient error, usable, on a bilinear
+    # pair stopped two passes in (``h = 0.19``): the leading-order term
+    # took the change of ``G`` along the Newton direction for its change
+    # along ``x* - x_k``.  With the affine-covariant ``h`` (0.22 there)
+    # the leading-order term alone reads 1.07x, and on 294 usable drawn
+    # bilinear pairs it never fell below the true error; this term adds up
+    # to 42% of it.  It stays because it is the part of Kantorovich's
+    # argument the stretch to ``t*`` does not cover, not because a
+    # measured case needed it.
     if beta is None:
         # ``h`` is 0 here or the bound is not certified: no miss to carry.
         extra = jnp.zeros_like(worst)

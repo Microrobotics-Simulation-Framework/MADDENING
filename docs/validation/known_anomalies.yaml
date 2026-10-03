@@ -11855,7 +11855,7 @@ anomalies:
       - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_repeated_reference_is_answered_in_place_from_one_read"
       - "tests/fmi/test_a_get_is_bounded_by_what_one_reply_frame_carries.py::test_a_json_reply_too_long_to_send_is_abandoned_while_it_is_encoded"
     github_issue: null
-  - anomaly_id: "MADD-ANO-170"
+  - anomaly_id: "MADD-ANO-174"
     title: "A bfloat16 or float16 coupling group's norms and floor were computed in its own dtype: residual 0.0 above 65,504 active entries, inf on a finite state at the default rtol"
     description: >
       `coupling_residual_mixed` and `coupling_residual_interface` square
@@ -11917,7 +11917,7 @@ anomalies:
       - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_is_four_eps_over_rtol"
       - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_the_cap_on_a_finite_float16_state"
     github_issue: null
-  - anomaly_id: "MADD-ANO-171"
+  - anomaly_id: "MADD-ANO-175"
     title: "spectral_error_bound under convergence_norm='interface' with a transform on an internal edge read 0.0014-0.098x the true distance, spectral_usable=True"
     description: >
       The interface norm measures each internal edge's source value after
@@ -11972,7 +11972,7 @@ anomalies:
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_transformed_pair"
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_an_identity_transform_reads_the_bound_an_untransformed_edge_does"
     github_issue: null
-  - anomaly_id: "MADD-ANO-172"
+  - anomaly_id: "MADD-ANO-176"
     title: "gradient_relative_error_bound read 0.65-0.986x the true gradient error, gradient_bound_usable=True, on a group stopped far from its fixed point"
     description: >
       The gradient bound is leading-order in the distance and carries a

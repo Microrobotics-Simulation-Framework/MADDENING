@@ -1416,6 +1416,74 @@ def _group_waveform_sweeps(group, nodes) -> int:
     return int(group.waveform_iterations) if _group_dividers(group, nodes) else 1
 
 
+def _block_schedule(schedule, groups):
+    """*schedule* with each coupling group's members moved together, at its first member's place.
+
+    The step runs a coupling group as one block where its first member
+    is scheduled (``_build_step_fn``), so a node scheduled *between* two
+    members -- possible where the group is only part of a larger feedback
+    loop, whose strongly connected component ``topological_sort`` keeps in
+    ``add_node`` order -- in fact ran after the whole group.  Back edges
+    were decided over the node order all the same: that node's read of a
+    later member was staggered to the previous step although the member
+    had already run this step, and the same graph built with the outside
+    nodes added in another order stepped differently (the round-5 audit's
+    case: one outside node added between the members, ``A, D, B, E``,
+    read ``B`` one step late).  Deciding them over the block order, which
+    is what this reorder makes the schedule, reads a source whose block
+    already ran fresh.  A graph whose groups are already contiguous --
+    every graph built without such an interleaving -- keeps its schedule.
+    """
+    member_of = {nn: id(g) for g in groups for nn in g.nodes}
+    out: list[str] = []
+    placed: set[int] = set()
+    for nn in schedule:
+        gid = member_of.get(nn)
+        if gid is None:
+            out.append(nn)
+        elif gid not in placed:
+            placed.add(gid)
+            out.extend(m for m in schedule if member_of.get(m) == gid)
+    return out
+
+
+def _loop_through_outside_nodes(schedule, edges, groups, back_edges):
+    """``UserWarning`` texts for each coupling group that is a strict subset of a feedback loop.
+
+    Where a group's members and some outside nodes form one strongly
+    connected component, the loop through the outside nodes is closed by
+    a back edge, read from the previous step, and *which* edge that is
+    depends on the order the nodes were added: another order staggers
+    another edge and steps differently (CPL-181).  The step is right for
+    the order it was given, but the result depends on a choice the user
+    did not know they were making, so ``compile()`` names it.
+    """
+    from maddening.core.schedule import find_strongly_connected_components  # noqa: PLC0415
+
+    names = list(schedule)
+    texts = []
+    for scc in find_strongly_connected_components(names, edges):
+        component = set(scc)
+        for g in groups:
+            if not (set(g.nodes) <= component) or set(g.nodes) == component:
+                continue
+            outside = sorted(component - set(g.nodes))
+            staggered = sorted(
+                f"{e.source_node}.{e.source_field} -> {e.target_node}.{e.target_field}"
+                for e in back_edges
+                if e.source_node in component and e.target_node in component
+                and not (e.source_node in g.nodes and e.target_node in g.nodes))
+            texts.append(
+                f"coupling group {sorted(g.nodes)} is part of a larger feedback loop "
+                f"through {outside}, which the group does not iterate: that loop is "
+                f"closed by reading {staggered} from the previous step, and which edge "
+                "is read late depends on the order the nodes were added (another order "
+                "staggers another edge and steps differently).  Add those nodes to the "
+                "group to iterate the whole loop, or accept the one-step lag as part of "
+                "the model.")
+    return texts
+
+
 def _declared_evaluations(node):
     """``node.update_evaluations()``, validated: a finite number ``>= 1``, or ``None``."""
     own = getattr(node, "update_evaluations", None)
@@ -7175,8 +7243,12 @@ class GraphManager:
         # bit-identical to what it was -- not describing a step that was
         # never built.  See ``_StepPlan``.
         node_names = list(self._nodes.keys())
-        schedule = topological_sort(node_names, self._edges)
+        schedule = _block_schedule(
+            topological_sort(node_names, self._edges), self._coupling_groups)
         back_edges = identify_back_edges(schedule, self._edges)
+        for warning_text in _loop_through_outside_nodes(
+                schedule, self._edges, self._coupling_groups, back_edges):
+            warnings.warn(warning_text, UserWarning, stacklevel=2)
 
         # Explicit accelerated_fields must name state fields of the group's
         # nodes (a boundary flux is not a state field; use the default,

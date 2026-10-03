@@ -1,7 +1,7 @@
 """The FMI ``min`` / ``max`` attributes are the *settable* envelope: for a
 strict (log / logit) bound the description advertises the next
 representable float inside -- or, where the spec refuses that one, the
-first float inside it the spec accepts -- for an inclusive one the bound
+outermost float inside it the spec accepts -- for an inclusive one the bound
 itself.
 
 Originally written from the independent audit of 2026-09-16 (round 1; report and
@@ -95,97 +95,38 @@ def _accepted(spec, value):
     return True
 
 
-#: Open bounds where one float inside is not a value the spec takes: the band
-#: ``TINY <= |b| < 2**-102``, where that float is a subnormal distance from the
-#: bound and the step's arithmetic flushes the distance to zero; a negative
-#: bound one and a half ``TINY`` below zero, whose first accepted value is a
-#: subnormal that flushes to zero; and a ``logit`` edge whose neighbour's
-#: coordinate rounds onto the bound.
-_FIRST_ACCEPTED = [
-    (ParamSpec(bounds=(float(F32.tiny), None), transform="log"), 0),
-    (ParamSpec(bounds=(1e-35, None), transform="log"), 0),
-    (ParamSpec(bounds=(1e-35, 1.0), transform="logit"), 0),
-    (ParamSpec(bounds=(-1.0, -1e-35), transform="logit"), 1),
-    (ParamSpec(bounds=(-1.5 * float(F32.tiny), None), transform="log"), 0),
-    (ParamSpec(bounds=(-1.0, 1.0), transform="logit"), 1),
+#: Open bounds whose neighbour inside is not a value the spec takes, beside the
+#: ones ``test_the_bridge_enforces_the_envelope_its_description_advertises``
+#: covers: a ``logit`` bound of zero, whose neighbour ``-TINY`` / ``TINY`` has
+#: a coordinate that rounds onto the bound (the base advertised ``max = -TINY``
+#: under ``(-1, 0)``, which a bridge over a sidecar with no specs took while
+#: every other door refused it), the far ends of those ranges, and a negative
+#: ``log`` bound one and a half ``TINY`` below zero, whose first accepted value
+#: is a subnormal that flushes to zero.
+_OUTERMOST_ACCEPTED = [
     (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), 1),
     (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), 0),
     (ParamSpec(bounds=(0.0, 1.0), transform="logit"), 0),
+    (ParamSpec(bounds=(0.0, 1.0), transform="logit"), 1),
+    (ParamSpec(bounds=(-1.5 * float(F32.tiny), None), transform="log"), 0),
 ]
 
 
-@pytest.mark.parametrize("spec, side", _FIRST_ACCEPTED,
-                         ids=["log-at-TINY", "log-at-1e-35", "logit-lower-in-band",
-                              "logit-upper-in-band", "log-below-zero", "logit-coordinate",
-                              "logit-upper-at-zero", "logit-lower-at-minus-one",
-                              "logit-lower-at-zero"])
-def test_an_open_bound_advertises_the_first_value_its_spec_accepts(spec, side):
+@pytest.mark.parametrize("spec, side", _OUTERMOST_ACCEPTED,
+                         ids=["logit-upper-at-zero", "logit-lower-at-minus-one",
+                              "logit-lower-at-zero", "logit-upper-at-one", "log-below-zero"])
+def test_an_open_bound_at_zero_advertises_the_outermost_value_its_spec_accepts(spec, side):
     """FMI's ``min`` / ``max`` are inclusive, so the advertised value must be one
-    the spec accepts, and the float just outside it one the spec refuses: then
-    a bridge whose sidecar has no specs, holding only the advertised envelope,
-    takes exactly what the graph takes.  One float inside the bound was
-    advertised, which in the band ``TINY <= |b| < 2**-102`` is a distance the
-    step's arithmetic flushes to zero: ``ParamSpec.check`` refused it and such
-    a bridge took it (the acceptance oracle's N2).  So, at a ``logit`` bound
-    of zero, was ``-TINY`` under ``(-1, 0)``, whose coordinate rounds onto the
-    bound: the advertised ``max`` is now ``-2**-25``."""
+    the spec accepts and the float just outside it one the spec refuses: then a
+    bridge whose sidecar has no specs, holding only the advertised envelope,
+    takes exactly what the graph takes.  Under ``(-1, 0)`` the advertised
+    ``max`` is ``-2**-25``, not ``-TINY``."""
     from maddening.fmi.model_description import _advertised_bound
 
     m = np.float32(_advertised_bound(spec, side, "float32"))
     outward = np.nextafter(m, np.float32(-np.inf) if side == 0 else np.float32(np.inf))
     assert _accepted(spec, m), (spec, m)
     assert not _accepted(spec, outward), (spec, outward)
-
-
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_the_bisection_key_orders_the_floats_as_the_reals_and_inverts(dtype):
-    """``_first_accepted`` bisects on an integer key of each float: it must order
-    the floats as the reals do, put ``-0.0`` just below ``0.0``, and come back
-    to the same bits -- an off-by-one on the negative half moves the
-    advertised bound one float, onto a value the spec refuses."""
-    from maddening.fmi.model_description import _float_of_order_key, _float_order_key
-
-    dt = np.dtype(dtype)
-    fi = np.finfo(dt)
-    sub = fi.smallest_subnormal
-    values = [-fi.max, -1.0, -fi.tiny, -sub, -0.0, 0.0, sub, fi.tiny, 1.0, fi.max]
-    keys = [_float_order_key(dt.type(v), dt) for v in values]
-    assert keys == sorted(keys) and len(set(keys)) == len(keys), keys
-    assert keys[5] - keys[4] == 1        # 0.0 (index 5) just above -0.0 (index 4)
-    for v, k in zip(values, keys):
-        back = _float_of_order_key(k, dt)
-        assert np.asarray(back, dt).tobytes() == np.asarray(v, dt).tobytes(), (v, back)
-    # Adjacent keys are adjacent floats, across zero as well.
-    for v in (-fi.tiny, -sub, 1.0, -1.0):
-        k = _float_order_key(dt.type(v), dt)
-        assert _float_of_order_key(k + 1, dt) == np.nextafter(dt.type(v), dt.type(np.inf))
-
-
-@pytest.mark.parametrize("bound", [8.0, 1.0, 2.0 ** -102, 1e-20])
-def test_an_open_bound_whose_neighbour_is_accepted_still_advertises_the_neighbour(bound):
-    """Outside the band the advertised value is unchanged: the next float inside
-    the bound, which the spec accepts."""
-    from maddening.fmi.model_description import _advertised_bound
-
-    spec = ParamSpec(bounds=(bound, None), transform="log")
-    assert _advertised_bound(spec, 0, "float32") == float(
-        np.nextafter(np.float32(bound), np.float32(np.inf)))
-
-
-def test_a_flushed_band_bound_is_held_by_the_graph_and_the_description_alike(gm):
-    """Through the description: a ``log`` spec at ``TINY`` advertises ``2 * TINY``,
-    which the sidecar built with the graph's specs accepts, and refuses the
-    float below it -- the value the description used to advertise."""
-    tiny = float(F32.tiny)
-    gm.set_param_spec("s", "stiffness", ParamSpec(bounds=(tiny, None), transform="log"))
-    md = build_model_description(gm, model_name="m", include_evolving=True)
-    var = next(v for v in md.variables if v.name == "s.params.stiffness")
-    assert var.min == 2 * tiny
-    sc = _sidecar(gm, md)
-    sc.set_params({"s.params.stiffness": var.min})
-    old = float(np.nextafter(np.float32(tiny), np.float32(np.inf)))
-    with pytest.raises(ValueError, match="below bound"):
-        sc.set_params({"s.params.stiffness": old})
 
 
 def test_inclusive_identity_bounds_are_unchanged(gm):

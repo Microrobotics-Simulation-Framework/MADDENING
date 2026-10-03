@@ -67,16 +67,16 @@ Documented differences, which the oracle allows and nothing else:
   dtype cannot hold, as every door does.  A decision, recorded in
   ``MADD-ANO-163``.
 
-No known disagreement is pinned.
+Known disagreements, pinned as strict xfails: none left.
 
 Fixed, and run as tests: **N2** -- a ``log`` / ``logit`` bound in the band
 where a float32's spacing is subnormal (``TINY <= |b| < 2**-102``) was
-advertised one float inside it, a distance XLA flushes to zero, which
-``ParamSpec.check`` refuses and a bridge whose sidecar has no specs took;
-so was a ``logit`` edge whose neighbour's coordinate rounds onto the bound
-(``max = -TINY`` under ``(-1, 0)``).  The description now advertises the
-first value inside each bound the spec accepts
-(``model_description._first_accepted``).  **N1** -- the REST route stored a numeric string
+advertised one float inside it, a distance XLA flushes to zero, where
+``ParamSpec.check`` refuses, and a bridge whose sidecar had no specs took
+it; so did a ``logit`` edge whose neighbour's coordinate rounds onto the
+bound (``max = -TINY`` under ``(-1, 0)``).  An open bound is now advertised
+as the outermost value inside it that ``check`` accepts.  **N1** -- the REST
+route stored a numeric string
 (``"1.5"``) in a float leaf as the number; **B2-H1** -- ``POST
 /checkpoint/load`` restored what PUT refuses: out of bounds, non-finite, a
 boolean, a numeric string, a value the constructor refuses

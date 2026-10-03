@@ -19,11 +19,12 @@ to it over HTTP with ``httpx``:
   runner starts and stops, checkpoint saves of one name, the worker pool
   -- once each, against several simultaneous requests.
 
-A peer here is always ``127.0.0.1``, an IP address, so the loopback bind's
-Host rule is asked of every request (httpx sends the server's own
-``127.0.0.1:<port>``).  A routable peer is presented the way a reverse
-proxy on the same machine presents one: ``X-Forwarded-For``, which uvicorn
-trusts from ``127.0.0.1`` (``forwarded_allow_ips``, set explicitly).
+A peer here is ``127.0.0.1`` (httpx sends the server's own
+``127.0.0.1:<port>`` as Host).  Any other peer is presented the way a
+reverse proxy on the same machine presents one: ``X-Forwarded-For``, which
+uvicorn trusts from ``127.0.0.1`` (``forwarded_allow_ips``, set
+explicitly) -- and which the server answers by asking the token, whatever
+peer it names.
 
 Nothing here can reach a cloud provider: no request goes to ``/cloud/*``,
 and the module runs under :func:`tests.property.differential.no_cloud_launch`.
@@ -75,7 +76,10 @@ def _offline():
 def _http_client(base: str, opened: list):
     def make(*, headers, peer):
         headers = dict(headers)
-        if peer == S.REMOTE_PEER:
+        if peer is not None and peer != S.LOOPBACK_PEER:
+            # Any peer but a direct loopback connection is presented through
+            # uvicorn's proxy headers, which trust 127.0.0.1 here; the
+            # header itself makes the server ask the token, as the peer does.
             headers["X-Forwarded-For"] = peer[0]
         client = httpx.Client(base_url=base, headers=headers, timeout=60.0)
         opened.append(client)

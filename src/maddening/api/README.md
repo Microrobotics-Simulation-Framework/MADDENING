@@ -18,7 +18,7 @@ app = server.create_app()
 Run with uvicorn:
 
 ```bash
-uvicorn module:app --host 127.0.0.1 --port 8000
+uvicorn module:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 # Interactive docs at http://localhost:8000/docs
 ```
 
@@ -42,7 +42,26 @@ uvicorn.run(server.create_app(), host=host, port=port)
 
 A request that arrives from a routable IP is challenged even when the
 server was told the bind is loopback.  That backstop is why forgetting
-`bind_host` costs you a 401, not an open API.
+`bind_host` costs you a 401, not an open API.  On a loopback bind only a
+**direct connection from a loopback address** is served without the
+token: a peer that is not a loopback IP literal (Starlette's in-process
+`TestClient` reports `"testclient"`, a Unix socket reports none) and any
+request carrying `X-Forwarded-For` or `Forwarded` must present it.  The
+peer is `scope["client"]` as the ASGI server reports it, and under
+uvicorn's `proxy_headers` (on by default, trusting `127.0.0.1`) that is a
+trusted proxy's `X-Forwarded-For` value -- which any request arriving over
+loopback, a DNS-rebinding page's included, can set.  **Never configure
+loopback as a trusted proxy for a loopback-bound server**; the library's
+own launch paths pass `proxy_headers=False`.  A reverse proxy in front of a
+loopback bind needs its name in `allowed_hosts` and its clients need the
+token.  In-process, present `server.auth.token`, or build the client as a
+loopback one: `TestClient(app, base_url="http://127.0.0.1",
+client=("127.0.0.1", 50000))`.
+
+On a loopback bind a request without a valid token is also asked its
+`Host`: only `localhost`, a `127.0.0.0/8` or `::1` literal and the names
+in `allowed_hosts` are served (403 otherwise), whatever its peer.  A valid
+token is served under any `Host`.
 
 ### The token
 

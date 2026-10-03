@@ -38,7 +38,7 @@ import warnings
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 from starlette.routing import Route
 
 from maddening.api import server as server_module
@@ -213,8 +213,9 @@ def test_a_foreign_host_is_refused_on_every_route_the_exempt_ones_included():
 
 def test_a_request_with_no_host_header_is_not_refused_for_its_host():
     auth = APIAuth(bind_host="127.0.0.1", token=TOKEN, environ={})
-    assert _rebinding_refusal(auth, "127.0.0.1", None, frozenset()) is None
-    assert _rebinding_refusal(auth, "127.0.0.1", "attacker.example", frozenset()) is not None
+    assert _rebinding_refusal(auth, None, frozenset(), authenticated=False) is None
+    assert _rebinding_refusal(auth, "attacker.example", frozenset(),
+                              authenticated=False) is not None
 
 
 def test_an_allowed_host_is_matched_whatever_port_either_side_names():
@@ -395,3 +396,4 @@ def test_a_token_file_that_cannot_be_written_is_left_alone_and_logged(tmp_path, 
                    for r in caplog.records)
     finally:
         directory.chmod(0o755)
+

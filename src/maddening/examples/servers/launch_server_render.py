@@ -187,7 +187,7 @@ def main(argv=None):
 
     import uvicorn
     try:
-        uvicorn.Server(uvicorn.Config(app, log_level="info")).run(sockets=[sock])
+        uvicorn.Server(uvicorn.Config(app, log_level="info", proxy_headers=False)).run(sockets=[sock])
     except KeyboardInterrupt:   # uvicorn re-raises Ctrl-C after shutting down
         pass
 

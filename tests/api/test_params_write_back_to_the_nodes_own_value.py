@@ -29,7 +29,7 @@ import warnings
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager

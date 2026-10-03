@@ -32,7 +32,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax.numpy as jnp
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 from pydantic import ValidationError
 
 from maddening.api import server as server_module

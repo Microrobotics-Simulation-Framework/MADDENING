@@ -17,7 +17,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
 from fastapi.routing import APIRoute, APIWebSocketRoute
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api.server import ROUTE_STABILITY, SimulationServer
 from maddening.core.compliance.metadata import StabilityLevel

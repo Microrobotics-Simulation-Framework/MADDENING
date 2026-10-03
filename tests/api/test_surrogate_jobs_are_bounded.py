@@ -33,7 +33,7 @@ from pathlib import Path
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 pytest.importorskip("equinox", reason="surrogate training needs the surrogates extra")
 pytest.importorskip("optax", reason="surrogate training needs the surrogates extra")
@@ -283,7 +283,7 @@ def test_a_running_runner_keeps_running_through_a_job():
 _EXIT_WITH_A_JOB_ALIVE = textwrap.dedent('''
     import sys, time, warnings
     warnings.simplefilter("ignore")
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
     from maddening.api.server import SimulationServer
     from maddening.core.graph_manager import GraphManager
     from maddening.nodes import BallNode

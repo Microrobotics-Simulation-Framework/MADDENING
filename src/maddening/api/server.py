@@ -23,12 +23,17 @@ Usage
 
 Security
 --------
-A **loopback bind is unauthenticated**, exactly as it always was: bind
-``127.0.0.1`` and nothing changes for local development.  It answers only
-to the names this machine is reached by (``localhost``, ``127.0.0.1``,
-``[::1]``, and any ``allowed_hosts``) and refuses a state change from a
-foreign ``Origin``, so a web page in the developer's browser -- DNS
-rebinding included -- cannot drive it.  **Any other
+A **loopback bind is unauthenticated** for a direct connection from a
+loopback address, exactly as it always was: bind ``127.0.0.1`` and nothing
+changes for local development.  It answers only to the names this machine
+is reached by (``localhost``, ``127.0.0.1``, ``[::1]``, and any
+``allowed_hosts``) and refuses a state change from a foreign ``Origin``,
+so a web page in the developer's browser -- DNS rebinding included --
+cannot drive it.  A peer that is not a loopback IP literal, or a request
+that carries ``X-Forwarded-For`` / ``Forwarded``, must present the token
+(:mod:`maddening.api.auth`: under uvicorn's default ``proxy_headers`` the
+peer is whatever a request arriving over loopback says it is; never
+configure loopback as a trusted proxy).  **Any other
 bind requires a bearer token on every route** except ``/healthz`` and
 the static ``/viz/*`` pages -- see :mod:`maddening.api.auth` for where
 the token comes from and how a client presents it.  Tell the server
@@ -93,6 +98,7 @@ from maddening.api.auth import (
     UNAUTHENTICATED_PATHS,
     WS_SUBPROTOCOL,
     APIAuth,
+    _carries_forwarding_header,
     bearer_from_headers,
     bearer_from_subprotocols,
     is_loopback,
@@ -1997,10 +2003,10 @@ def _is_ip_address(peer: Optional[str]) -> bool:
     return True
 
 
-def _rebinding_refusal(auth: APIAuth, peer: Optional[str], host_header: Optional[str],
-                       allowed_hosts: frozenset) -> Optional[str]:
-    """Why a request that reached a loopback-bound API without a token is
-    refused for its ``Host``, or ``None``.
+def _rebinding_refusal(auth: APIAuth, host_header: Optional[str],
+                       allowed_hosts: frozenset, *, authenticated: bool) -> Optional[str]:
+    """Why a request that reached a loopback-bound API without a valid
+    token is refused for its ``Host``, or ``None``.
 
     The ``Origin`` check compares the ``Origin`` with the ``Host``, and a
     DNS-rebinding page sends both naming its own domain: served from
@@ -2012,16 +2018,22 @@ def _rebinding_refusal(auth: APIAuth, peer: Optional[str], host_header: Optional
     the names this machine is reached by: ``localhost``, a ``127.0.0.0/8``
     or ``::1`` literal (any port), and the names in *allowed_hosts*.
 
-    Asked only where nothing else authenticates the caller: a request that
-    must present the bearer token (a non-loopback bind, or a routable peer)
-    is not, since the token is what a rebound page does not hold.  And
-    only of a peer that is an IP address, because a browser reaches the API
-    over TCP: an in-process client (Starlette's ``TestClient`` reports the
-    peer ``"testclient"``) or a Unix-socket connection (no peer address) is
-    not a browser's.  A request with no ``Host`` at all is not a browser's
-    either and is served.
+    Asked of every request to a loopback bind that did not present a
+    valid token (*authenticated*), whatever its peer: the token is what a
+    rebound page does not hold.  It keys on the bind and the ``Host``
+    header, never on the peer.  It used to be asked only of a peer that
+    was an IP address, on the grounds that a browser reaches the API over
+    TCP; but the peer is ``scope["client"]`` as the ASGI server reports
+    it, which uvicorn's default ``proxy_headers`` rewrites from
+    ``X-Forwarded-For`` for every request arriving over loopback, and a
+    rebound page's ``fetch()`` may set that header.  ``X-Forwarded-For: x``
+    made the peer the string ``"x"``, which skipped this check and the
+    peer backstop both, and the page could step, read, add nodes and save
+    checkpoints.  A non-loopback bind demands the token of every request
+    and is not asked.  A request with no ``Host`` at all is not a
+    browser's and is served.
     """
-    if auth.required_for_peer(peer) or not _is_ip_address(peer) or host_header is None:
+    if authenticated or auth.enforced or host_header is None:
         return None
     name = _host_name(host_header)
     if name is not None and (is_loopback(name) or name in allowed_hosts):
@@ -2114,11 +2126,15 @@ class _WebSocketAuthMiddleware:
             key.decode("latin-1").lower(): value.decode("latin-1")
             for key, value in (scope.get("headers") or ())
         }
+        offered = list(scope.get("subprotocols") or [])
+        presented = bearer_from_headers(headers) or bearer_from_subprotocols(offered)
+        authenticated = self._auth.verify(presented)
         # A DNS-rebinding page passes the origin check below (its Origin
         # and Host both name its own domain); its Host is what gives it
-        # away.  See _rebinding_refusal.
-        if _rebinding_refusal(self._auth, peer, headers.get("host"),
-                              self._allowed_hosts) is not None:
+        # away.  Asked of every handshake without a valid token, whatever
+        # its peer.  See _rebinding_refusal.
+        if _rebinding_refusal(self._auth, headers.get("host"), self._allowed_hosts,
+                              authenticated=authenticated) is not None:
             logger.warning(
                 "Refused WebSocket %s for host %r: not a name of this "
                 "loopback-bound server", scope.get("path", "?"), headers.get("host"),
@@ -2139,20 +2155,14 @@ class _WebSocketAuthMiddleware:
             )
             await self._refuse(receive, send)
             return
-        if self._auth.required_for_peer(peer):
-            offered = list(scope.get("subprotocols") or [])
-            presented = (
-                bearer_from_headers(headers)
-                or bearer_from_subprotocols(offered)
+        if not authenticated and self._auth._required_for_request(peer, headers):  # noqa: SLF001
+            logger.warning(
+                "Refused WebSocket %s from %s: %s bearer token",
+                scope.get("path", "?"), peer or "?",
+                "invalid" if presented else "missing",
             )
-            if not self._auth.verify(presented):
-                logger.warning(
-                    "Refused WebSocket %s from %s: %s bearer token",
-                    scope.get("path", "?"), peer or "?",
-                    "invalid" if presented else "missing",
-                )
-                await self._refuse(receive, send)
-                return
+            await self._refuse(receive, send)
+            return
         await self.app(scope, receive, send)
 
     @staticmethod
@@ -2366,8 +2376,12 @@ class SimulationServer:
         ``/etc/hosts`` alias); ports are ignored.  On a loopback bind the
         API is unauthenticated, and a request whose ``Host`` names
         anything else is refused with 403: that is how a DNS-rebinding web
-        page reaches it.  Not consulted where the bearer token is demanded
-        (a non-loopback bind, or a routable peer).  Each entry must be a
+        page reaches it.  Asked of every request without a valid token,
+        whatever its peer; not consulted on a non-loopback bind (the token
+        decides there) nor for a request that presents the token.  A
+        reverse proxy in front of a loopback bind needs its name here, and
+        its forwarded requests (``X-Forwarded-For`` / ``Forwarded``) need
+        the token.  Each entry must be a
         host name -- an IP literal (an IPv6 one in brackets) or DNS labels
         of letters, digits, hyphens and underscores, optionally with a
         port, nothing around it -- or the constructor raises
@@ -2505,7 +2519,8 @@ class SimulationServer:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _unauthorized_detail(self, peer: Optional[str]) -> str:
+    def _unauthorized_detail(self, peer: Optional[str],
+                             headers: Optional[Any] = None) -> str:
         """The 401 body: why a token is needed and where to find it."""
         if self.auth.enforced:
             return (
@@ -2513,10 +2528,18 @@ class SimulationServer:
                 "route requires 'Authorization: Bearer <token>'. The token "
                 "is $MADDENING_API_TOKEN, or was logged once at start-up."
             )
+        if _carries_forwarding_header(headers):
+            why = ("the request carried a forwarding header (X-Forwarded-For or "
+                   "Forwarded), so it did not come straight from this machine")
+        else:
+            why = (f"the request arrived from {peer!r}, which is not a loopback "
+                   "address (an in-process client such as Starlette's TestClient "
+                   "reports a name: present server.auth.token, or construct it with "
+                   "base_url='http://127.0.0.1' and client=('127.0.0.1', <port>))")
         return (
             f"This server was configured for a loopback bind "
-            f"({self.auth.bind_host!r}) but the request arrived from "
-            f"{peer!r}. A request from off-host needs "
+            f"({self.auth.bind_host!r}), and a token is needed without a direct "
+            f"connection from a loopback address: {why}. Present "
             f"'Authorization: Bearer <token>'. If the bind really is "
             f"public, pass bind_host to SimulationServer (or set "
             f"MADDENING_HOST) so the token is logged at start-up."
@@ -2549,7 +2572,7 @@ class SimulationServer:
         offered = list(websocket.scope.get("subprotocols") or [])
         selected = WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None
         peer = websocket.client.host if websocket.client else None
-        if not self.auth.required_for_peer(peer):
+        if not self.auth._required_for_request(peer, websocket.headers):  # noqa: SLF001
             return True, selected
         presented = (
             bearer_from_headers(websocket.headers)
@@ -3125,24 +3148,27 @@ class SimulationServer:
             # the Host header, and a malformed one (``[::1]x``) raised
             # inside this middleware -- a 500 where the refusal is a 403.
             path = request.scope.get("path", "")
-            if (self.auth.required_for_peer(peer)
-                    and path not in UNAUTHENTICATED_PATHS):
-                if not self.auth.verify(bearer_from_headers(request.headers)):
-                    logger.warning(
-                        "Refused %s %s from %s: %s bearer token",
-                        request.method, path, peer or "?",
-                        "invalid" if request.headers.get("authorization")
-                        else "missing",
-                    )
-                    return JSONResponse(
-                        status_code=401,
-                        content={"detail": self._unauthorized_detail(peer)},
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
+            authenticated = self.auth.verify(bearer_from_headers(request.headers))
+            if (not authenticated
+                    and path not in UNAUTHENTICATED_PATHS
+                    and self.auth._required_for_request(peer, request.headers)):  # noqa: SLF001
+                logger.warning(
+                    "Refused %s %s from %s: %s bearer token",
+                    request.method, path, peer or "?",
+                    "invalid" if request.headers.get("authorization")
+                    else "missing",
+                )
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": self._unauthorized_detail(peer, request.headers)},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
             # Every method, GET included: a rebound page is same-origin to
-            # its browser, so it can read the replies it gets.
-            rebinding = _rebinding_refusal(self.auth, peer, request.headers.get("host"),
-                                           self.allowed_hosts)
+            # its browser, so it can read the replies it gets.  Asked of
+            # every request without a valid token, whatever its peer (which
+            # a proxy header can rewrite): see _rebinding_refusal.
+            rebinding = _rebinding_refusal(self.auth, request.headers.get("host"),
+                                           self.allowed_hosts, authenticated=authenticated)
             if rebinding is not None:
                 logger.warning(
                     "Refused %s %s for host %r: not a name of this "

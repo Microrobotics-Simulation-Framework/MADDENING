@@ -1006,8 +1006,9 @@ type" to every other door); **D2** it is not asked about a value that is
 not a number; **D3** a snapshot restores a parameter at the value the FMU
 was instantiated with whatever its bounds; **D4** the REST request model
 refuses a JSON integer above `MAX_NODE_PARAM_INT` in magnitude (422)
-whatever the leaf.  Known failing: B1-M2 (a `log` spec without a lower
-bound advertises no `min`), B2-H1 (a checkpoint load restores what PUT
+whatever the leaf.  B1-M2 (a `log` spec without a lower bound advertised
+no `min`) is fixed in 0.4.0 and its cases run as tests.  Known failing:
+B2-H1 (a checkpoint load restores what PUT
 refuses: out of bounds, non-finite, a boolean, a value the constructor
 refuses), B2-L10 (`POST /graph/nodes` applies no `ParamSpec` bounds), B2-H2
 (a write to a `HybridNode` is lost), N1 (the REST route stores a numeric
@@ -1030,8 +1031,9 @@ each followed by an export wired as the guide wires one.  The graph path
 takes the same write and runs what `gm.step` runs.  Every value read
 through `fmi3Get*` must equal the bridge's, the C wrapper's bridge's full
 state the TCP bridge's, and every operation the C API can express must
-succeed exactly when the bridge's does.  Tolerance: none.  Known failing:
-B1-H3 (a structural write pending at the export: the FMU runs the old model).
+succeed exactly when the bridge's does.  Tolerance: none.  A structural write pending at the export must be
+refused, naming `compile()` (B1-H3, fixed in 0.4.0: the FMU ran the old
+model); the sequence then follows the advice and exports again.
 Cannot see: an operation the C API cannot express (a string time), and a
 defect every path shares.  Without a C compiler it compares three paths,
 and `test_the_c_wrapper_is_a_fourth_path_here` says so by skipping.
@@ -1044,7 +1046,8 @@ and untagged), `include_evolving` and `multi_clock` must equal the full
 export (every class `STABLE`) filtered by the documented rule, surface by
 surface: inputs, outputs, parameters with `fixed_parameters`' reasons, and
 clocks.  Changing one class's level then changes exactly its own
-surfaces.  Tolerance: none.  Known failing: B1-M1 (inputs are not filtered).
+surfaces.  Tolerance: none.  It found B1-M1 (the inputs were not filtered;
+fixed in 0.4.0).
 Cannot see: a defect in the full export itself, which the FMU oracles
 check against the graph.
 
@@ -1055,7 +1058,7 @@ check against the graph.
 | A checkpoint load restores the state and leaves the parameters where they were | acceptance | `test_a_restore_door_takes_what_every_write_door_takes`, the refusal cases (the leaf is never cast, so nothing is refused), the rod and every sharded wrapper's restore case |
 | An open `log` / `logit` bound advertised as itself (inclusive) rather than one float inside | acceptance | `test_every_door_accepts_or_refuses_a_parameter_value_together`; every `test_a_logit_range_no_value_can_enter_is_refused_by_every_door` case |
 | The C wrapper's `fmi3DoStep` reports the step's start as `lastSuccessfulTime` | FMU four ways | `test_four_fmu_paths_agree_after_a_node_params_write`, every case that passes today |
-| A structural `node.params` write no longer marks the graph dirty | FMU four ways | the compiled structural cases (the graph path keeps the old model), and the pending ones pass, so their strict xfails fail |
+| A structural `node.params` write no longer marks the graph dirty | FMU four ways | the compiled structural cases (the graph path keeps the old model), and the pending ones (the export no longer refuses) |
 | The clocks ignore the stability filter | stability | `test_a_class_level_filters_exactly_its_own_surfaces[clocks]`, `test_changing_one_class_changes_only_its_own_variables` |
 
 Three first attempts survived and were replaced, each for a reason worth

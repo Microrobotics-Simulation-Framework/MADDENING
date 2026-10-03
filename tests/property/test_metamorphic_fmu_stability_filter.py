@@ -30,7 +30,7 @@ Changing one class's level between two assignments is then the metamorphic
 statement: the two descriptions differ by that class's surfaces only.
 
 Each surface is its own test, so a defect in one is pinned without hiding
-the others.  **Known failing: B1-M1** -- inputs are not filtered.
+the others.  The inputs were not filtered until 0.4.0's fix (B1-M1).
 
 Tolerance: none (names and attributes compared exactly).
 
@@ -253,7 +253,7 @@ def assignments(draw, gm: GraphManager, *, flip_an_input_target: bool = False):
 # Tests
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("surface", ["outputs", "parameters", "clocks"])
+@pytest.mark.parametrize("surface", ["inputs", "outputs", "parameters", "clocks"])
 @settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
 @given(data=st.data())
 def test_a_class_level_filters_exactly_its_own_surfaces(surface, data):
@@ -264,13 +264,12 @@ def test_a_class_level_filters_exactly_its_own_surfaces(surface, data):
     check_filter(gm, assignment, include_evolving, multi_clock, surface)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "B1-M1: build_model_description's stability filter is not applied to external inputs "
-    "(the inputs loop, model_description.py ~949, never calls "
-    "_ensure_stable_only_or_opt_in); pending fix"))
 @settings(max_examples=EXAMPLES_STANDARD, derandomize=True)
 @given(data=st.data())
-def test_a_class_level_filters_exactly_its_own_inputs(data):
+def test_a_class_level_drops_the_inputs_of_a_class_it_stops_exporting(data):
+    """B1-M1's case drawn on purpose: a class some input targets is made
+    not exported, so its input must go (an EXPERIMENTAL node's input used
+    to be exported)."""
     gm = plant()
     assignment, include_evolving = data.draw(
         assignments(gm, flip_an_input_target=True), label="levels")
@@ -287,8 +286,8 @@ def test_inputs_of_exported_classes_are_all_kept():
 
 def test_changing_one_class_changes_only_its_own_variables():
     """The metamorphic statement on its own: the spring's class between
-    STABLE and EXPERIMENTAL, everything else STABLE.  Outputs, parameters
-    and clocks differ by the spring's surfaces only (its input is B1-M1's)."""
+    STABLE and EXPERIMENTAL, everything else STABLE.  Inputs, outputs,
+    parameters and clocks differ by the spring's surfaces only."""
     gm = plant()
     base = {class_key(spec.node): StabilityLevel.STABLE for spec in gm._nodes.values()}  # noqa: SLF001
     spring = class_key(gm.get_node("spring"))
@@ -296,7 +295,7 @@ def test_changing_one_class_changes_only_its_own_variables():
         before = describe(gm, include_evolving=False, multi_clock=True)
     with levels({**base, spring: StabilityLevel.EXPERIMENTAL}):
         after = describe(gm, include_evolving=False, multi_clock=True)
-    for surface in ("outputs", "parameters"):
+    for surface in ("inputs", "outputs", "parameters"):
         gone = set(before.surfaces[surface]) - set(after.surfaces[surface])
         assert gone and all(before.owner[n] == "spring" for n in gone), (surface, gone)
         assert set(after.surfaces[surface]) <= set(before.surfaces[surface])
@@ -311,7 +310,7 @@ def test_changing_one_class_changes_only_its_own_variables():
 
 # Per push: tests/property/test_metamorphic_fmu_stability_filter.py::test_a_class_level_filters_exactly_its_own_surfaces
 @pytest.mark.slow  # a graph compiled and two descriptions built per example
-@pytest.mark.parametrize("surface", ["outputs", "parameters", "clocks"])
+@pytest.mark.parametrize("surface", ["inputs", "outputs", "parameters", "clocks"])
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
 def test_a_class_level_filters_exactly_its_own_surfaces_on_generated_graphs(surface, data):

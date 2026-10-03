@@ -51,8 +51,9 @@ wrapper as a fourth path, through ``ctypes`` against a bridge of its own, and
 without ``compile()`` before ``build_model_description`` -- on a multi-rate
 graph and on a sub-cycled coupling group, each write followed by an export
 wired as the guide wires one.  The graph path takes the same write and runs
-what ``gm.step`` runs.  Known failing: B1-H3, a structural write pending at the
-export (the FMU runs the model from before the write).
+what ``gm.step`` runs.  A structural write pending at the export must be
+refused, naming ``compile()`` (B1-H3, fixed in 0.4.0: the FMU ran the
+model from before the write).
 
 Tolerance: none -- the paths call one compiled computation with the same
 arguments.
@@ -1010,6 +1011,11 @@ class WrapperPath:
         self.inst = self._instantiate()
         self.time = 0.0
 
+    #: FMI 3.0's co-simulation state, as the wrapper enforces it:
+    #: ``"instantiated"`` (after instantiation or ``fmi3Reset``: no ``Get``,
+    #: no ``DoStep``), ``"initialization"`` and ``"step"``.
+    phase = "instantiated"
+
     def _instantiate(self):
         assert self.bridge is not None
         saved = os.environ.get("MADDENING_FMU_ENDPOINT")
@@ -1022,6 +1028,7 @@ class WrapperPath:
             else:
                 os.environ["MADDENING_FMU_ENDPOINT"] = saved
         assert inst, self.w.logs[-3:]
+        self.phase = "instantiated"
         return inst
 
     def _free_states(self) -> None:
@@ -1041,7 +1048,25 @@ class WrapperPath:
 
     # -- the operations ---------------------------------------------------
 
-    def values(self) -> np.ndarray:
+    def _into_step_mode(self) -> None:
+        """Where an importer is before its first ``fmi3DoStep``: from
+        Instantiated, ``fmi3EnterInitializationMode`` at the FMU's time and
+        ``fmi3ExitInitializationMode``; from Initialization Mode, the exit."""
+        if self.phase == "instantiated":
+            assert self.w.lib.fmi3EnterInitializationMode(
+                self.inst, False, 0.0, self.time, False, 0.0) == self.OK, self.w.logs[-2:]
+            self.phase = "initialization"
+        if self.phase == "initialization":
+            assert self.w.lib.fmi3ExitInitializationMode(self.inst) == self.OK, \
+                self.w.logs[-2:]
+            self.phase = "step"
+
+    def values(self) -> Optional[np.ndarray]:
+        """Every value through ``fmi3Get*``; ``None`` in the Instantiated
+        state, where FMI 3.0 allows no getter (the bridge's state is still
+        compared)."""
+        if self.phase == "instantiated":
+            return None
         out = []
         for var in self.m.md.variables:
             if var.is_clock:
@@ -1065,6 +1090,7 @@ class WrapperPath:
         return status == self.OK
 
     def step(self, t: float, h: float) -> bool:
+        self._into_step_mode()
         status, last = self.w.step(self.inst, t, h)
         if status == self.OK:
             self.time = last
@@ -1092,6 +1118,7 @@ class WrapperPath:
         ok = self.w.lib.fmi3Reset(self.inst) == self.OK
         if ok:
             self.time = 0.0
+            self.phase = "instantiated"
         return ok
 
     def reinstantiate(self) -> None:
@@ -1119,10 +1146,21 @@ class WrapperPath:
             self.states.append(handle)
 
     def initialize(self, start: float) -> bool:
-        ok = self.w.lib.fmi3EnterInitializationMode(self.inst, False, 0.0, start,
-                                                    False, 0.0) == self.OK
+        """The bridge's ``initialize``.  From Instantiated it is
+        ``fmi3EnterInitializationMode``.  A second one before the first
+        step, which the bridge protocol allows and FMI 3.0 does not, is
+        applied to the wrapper's bridge in process (the C API cannot express
+        it); in Step Mode the wrapper refuses it, as the bridge refuses an
+        ``initialize`` after a step."""
+        if self.phase == "initialization":
+            assert self.bridge is not None
+            ok = self.bridge.handle({"op": "initialize", "t": start}).get("ok") is True
+        else:
+            ok = self.w.lib.fmi3EnterInitializationMode(self.inst, False, 0.0, start,
+                                                        False, 0.0) == self.OK
+            if ok:
+                self.phase = "initialization"
         if ok:
-            assert self.w.lib.fmi3ExitInitializationMode(self.inst) == self.OK
             self.time = start
         return ok
 
@@ -1196,8 +1234,9 @@ class FourPaths(Paths):
         super().assert_agree(what)
         if self.cw is None:
             return
+        read = self.cw.values()
         wire = _nan_canonical(self.values()["bridge"])
-        mine = _nan_canonical(self.cw.values())
+        mine = wire if read is None else _nan_canonical(read)
         names = [v.name for v in self.m.md.variables if not v.is_clock
                  for _ in range(int(np.prod(v.shape)) if v.shape else 1)]
         if wire.tobytes() != mine.tobytes():
@@ -1214,16 +1253,29 @@ def op_write_and_export(paths: FourPaths, node: str, key: str, value: Any,
                         compile_first: bool) -> None:
     """``node.params[key] = value`` on the graph the FMU comes from and on
     the graph path; ``compile()`` the former or not; export again as the
-    guide does, and serve the new export on every FMU path."""
+    guide does, and serve the new export on every FMU path.
+
+    A structural write (an ``int``: ``stencil_order``) pending at the export
+    is refused, naming ``compile()`` (B1-H3's fix, FMU-040): the FMU would
+    otherwise be built over the step from before the write.  The advice is
+    then followed and the export made again."""
     m = paths.m
     for gm in (m.ref, m.direct):
         gm.get_node(node).params[key] = value
     if compile_first:
         m.ref.compile()
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message=".*will be held at zero", category=UserWarning)
-        m.md = build_model_description(m.ref, model_name="Diff",
-                                       model_identifier=MODEL_IDENTIFIER, **m.md_kw)
+
+    def export():
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=".*will be held at zero",
+                                    category=UserWarning)
+            return build_model_description(m.ref, model_name="Diff",
+                                           model_identifier=MODEL_IDENTIFIER, **m.md_kw)
+    if isinstance(value, int) and not compile_first:
+        with pytest.raises(ValueError, match=r"compile\(\)"):
+            export()
+        m.ref.compile()
+    m.md = export()
     m.initial_state = {n: dict(f) for n, f in m.ref._state.items()}       # noqa: SLF001
     m.initial_params = _copy_params(m.ref.params)
     paths.restart()
@@ -1370,19 +1422,11 @@ def _ops_around_a_write(write: tuple, compile_first: bool) -> list:
             ("reset",), ("step", 1), ("reinstantiate",), ("step", 2)]
 
 
-_H3_REASON = ("B1-H3: an FMU built over a pending structural node.params write runs the old "
-              "model: build_model_description and the guide's sidecar wiring "
-              "(step_fn=gm._compiled_step) never check gm._dirty; pending fix")
-
-
 def _write_cases():
     for graph in sorted(WRITE_GRAPHS):
         for kind in ("constant", "structural"):
             for compile_first in (False, True):
-                marks = ([pytest.mark.xfail(strict=True, raises=AssertionError,
-                                            reason=_H3_REASON)]
-                         if kind == "structural" and not compile_first else [])
-                yield pytest.param(graph, kind, compile_first, marks=marks,
+                yield pytest.param(graph, kind, compile_first,
                                    id=f"{graph}-{kind}-{'compiled' if compile_first else 'pending'}")
 
 
@@ -1422,9 +1466,7 @@ def _write_ops(draw, model: Model, graph: str):
     for _ in range(n_writes):
         kind = draw(st.sampled_from(["constant", "structural"]))
         node, key, value = writes[kind]
-        compile_first = True if kind == "structural" else draw(st.booleans())
-        # The structural write pending at export is B1-H3's; drawn only by the
-        # pinned cases above until it is fixed.
+        compile_first = draw(st.booleans())
         at = draw(st.integers(min_value=0, max_value=len(ops)))
         ops.insert(at, ("write", node, key, value, compile_first))
     return [op for op in ops if op[0] != "misspelt_input"]

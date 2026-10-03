@@ -52,8 +52,6 @@ Documented differences, which the oracle allows and nothing else:
 
 Known disagreements, pinned as strict xfails:
 
-* **B1-M2** -- ``transform="log"`` with no lower bound advertises no ``min``,
-  so a bridge whose sidecar has no specs accepts ``<= 0``.
 * **N1** -- the REST route stores a numeric string (``"1.5"``) in a float
   leaf as the number, while every FMU door refuses a string and the
   route's own comment says a string is a 400.
@@ -537,16 +535,18 @@ _BAND_BOUND = st.one_of(st.sampled_from([TINY, -TINY, 2 * TINY, 1e-35, -1e-35, 1
 def specs(draw, *, domain: str = "main") -> ParamSpec:
     """A valid ``ParamSpec`` of every shape.
 
-    ``domain="main"`` leaves out the two known disagreements' domains: a
-    ``log`` spec with no lower bound (B1-M2) and a ``log`` / ``logit`` bound in
-    the flushed band (N2).  ``"M2"`` and ``"N2"`` draw only theirs."""
+    ``domain="main"`` leaves out N2's domain, a ``log`` / ``logit`` bound in
+    the flushed band; ``"N2"`` draws only that.  ``"M2"`` draws only a
+    ``log`` spec with no lower bound (B1-M2's domain, fixed in 0.4.0, which
+    ``"main"`` draws too)."""
     if domain == "M2":
         return ParamSpec(bounds=(None, None), transform="log")
     transform = draw(st.sampled_from(["log", "logit"] if domain == "N2"
                                      else [None, "log", "logit"]))
     strict = _BAND_BOUND if domain == "N2" else _STRICT_BOUND
     if transform == "log":
-        return ParamSpec(bounds=(draw(strict), None), transform="log")
+        lo = draw(strict) if domain == "N2" else draw(st.one_of(st.none(), strict))
+        return ParamSpec(bounds=(lo, None), transform="log")
     if transform == "logit":
         a = draw(strict)
         b = draw(_STRICT_BOUND)
@@ -624,17 +624,14 @@ def test_every_door_agrees_at_a_subnormal_lower_bound_of_a_log_coordinate(doors,
     check_acceptance(doors, ParamSpec(bounds=(1e-40, None), transform="log"), value)
 
 
-@pytest.mark.parametrize("value", [-1.0, 0.0, -0.0, -1e-40, 1e-40])
-@pytest.mark.xfail(strict=True, reason=(
-    "B1-M2: ParamSpec(transform='log') with no lower bound advertises no min, so a bridge "
-    "whose sidecar has no specs accepts a value <= 0; pending fix"))
+@pytest.mark.parametrize("value", [-1.0, 0.0, -0.0, -1e-40, 1e-40, TINY, 1.0])
 def test_a_log_spec_without_a_lower_bound_is_held_by_every_door(doors, value):
+    """B1-M2's case (fixed in 0.4.0): ``log`` with no lower bound is measured
+    from 0, and a bridge whose sidecar has no specs used to take ``<= 0``,
+    the description advertising no ``min``."""
     check_acceptance(doors, ParamSpec(transform="log"), value)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "B1-M2: ParamSpec(transform='log') with no lower bound advertises no min, so a bridge "
-    "whose sidecar has no specs accepts a value <= 0; pending fix"))
 @settings(max_examples=EXAMPLES_COSTLY, derandomize=True)
 @given(data=st.data())
 def test_every_door_agrees_on_a_log_spec_without_a_lower_bound(doors, data):

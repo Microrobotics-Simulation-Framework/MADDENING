@@ -48,7 +48,7 @@ def _graph_for(case) -> GraphManager:
 
 
 def _client(gm: GraphManager, case):
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
 
     from maddening.api.server import SimulationServer
 

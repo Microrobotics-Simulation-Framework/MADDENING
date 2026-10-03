@@ -371,7 +371,7 @@ def test_a_rest_params_write_to_a_hybrid_node_is_kept(compiled_first):
     """The auditor's case: ``PUT /graph/params`` to a ``HybridNode``
     answered 200, echoed the new value, and lost it -- before and after
     ``POST /graph/compile``."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
 
     from maddening.api.server import SimulationServer
 
@@ -395,7 +395,7 @@ def test_a_rest_write_to_a_hybrid_is_checked_against_the_node_it_wraps():
     the params route asks *its* constructor -- a rod past its Fourier limit
     behind a hybrid used to answer 200 (and be lost); it is refused, and
     nothing is written."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
 
     from maddening.api.server import SimulationServer
 

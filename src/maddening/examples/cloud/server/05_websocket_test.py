@@ -104,7 +104,8 @@ sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.bind((HOST, PORT))
 print(f"Serving on {HOST}:{sock.getsockname()[1]}", flush=True)
 try:
-    uvicorn.Server(uvicorn.Config(server.create_app(), log_level="warning")).run(
+    uvicorn.Server(uvicorn.Config(server.create_app(), log_level="warning",
+                                  proxy_headers=False)).run(
         sockets=[sock])
 except KeyboardInterrupt:
     pass

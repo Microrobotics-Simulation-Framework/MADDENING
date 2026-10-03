@@ -12022,3 +12022,332 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null
+  - anomaly_id: "MADD-ANO-174"
+    title: "A PUT /graph/params that wrote a leaf back to the node's own value skipped the combined checks: after a fit or a checkpoint load, a 200 left a rod past its Fourier limit and a save that did not reload"
+    description: >
+      The params route counted a leaf as changed when it differed from the
+      node's own value (`node.params`), not from the live leaf the graph runs
+      with, and dropped an unchanged one from the write's checks while still
+      writing it.  After a fit, or a `POST /checkpoint/load` (which moves
+      `gm.params` and leaves `node.params`), the two differ: a leaf written
+      back to the node's own value was then dropped, and every combined check
+      -- the constructor asked with every key at once, the graph a save
+      would reload -- was asked with the leaf's old live value.  A HeatNode
+      rod (16 cells, Fourier number 0.45 as built) whose diffusivity a fit
+      had moved to 0.05 took `{thermal_diffusivity: <its own>, length: 1/1.2}`
+      with a 200: the rod then ran at Fourier number 0.648, reached NaN
+      within 400 steps, and its saved config was refused by the constructor.
+      Plain REST reached it: PUT, save, PUT, load, then PUT the original value
+      back, alone or with another key.  Found by the B2 round-8 audit of the
+      REST and RunPod claims inventory (finding 1, rows REST-077, REST-081
+      and REST-089, on 1227637).  No tagged release carried it: the combined
+      checks are new in 0.4.0 (v0.3.x asked the constructor of no write).
+      Resolved in 0.4.0: a leaf is a change when it differs from the live
+      leaf, and one that goes back to the node's own value is passed to the
+      shared decision as `at_own_value`, as a checkpoint load already passed
+      it: skipped by the per-key checks (the node was built with it), asked
+      by the combined ones with every other key's live value.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the route answered 200 for a configuration the node's own
+      constructor refuses, the simulation diverged and the saved graph did
+      not load.  Graded `major` as MADD-ANO-048 and MADD-ANO-163 are.  Not
+      `critical`: it needed a live leaf moved away from the node's own value
+      (a fit, a load) and a write of that value together with a value the
+      moved leaf made valid.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.api.server._params_write_refusal"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The per-key checks are not asked of a key at its own value; every one
+      of them is satisfied by the value the node was built with, unless the
+      graph was changed around the node since (an interface mapping rebuilt
+      from points of another value), which the mapping's own check refuses
+      at the next run.
+    verification:
+      - "tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_write_back_after_a_fit_is_asked_with_the_fitted_values"
+      - "tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_single_key_written_back_after_a_load_is_asked_with_the_loaded_values"
+      - "tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_two_key_write_back_after_a_load_is_asked_with_the_loaded_values"
+      - "tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_write_back_the_live_values_take_is_still_a_200_whose_save_reloads"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-175"
+    title: "X-Forwarded-For let a web page past a loopback-bound API's DNS-rebinding defence and its peer backstop: uvicorn's default proxy headers made the peer any string a request named"
+    description: >
+      The loopback bind's Host allowlist (MADD-ANO-076's fix) was asked only
+      of a peer that was an IP address, and the peer backstop demanded the
+      token only of a routable IP.  The peer is `scope["client"]` as the ASGI
+      server reports it, and uvicorn's defaults (`proxy_headers=True`,
+      `forwarded_allow_ips="127.0.0.1"`) rewrite it from `X-Forwarded-For`
+      for every request arriving over loopback -- which is how a
+      DNS-rebinding page's requests arrive, and `X-Forwarded-For` is a header
+      a page's `fetch()` may set.  With `X-Forwarded-For: x` the peer was the
+      string `x`: the Host check was skipped and no token was asked, so a
+      rebound page could step the simulation, read every reply, add nodes,
+      save checkpoints and open the streams of a server started with the
+      README's own `uvicorn.run(app, host="127.0.0.1")`.  Under
+      `forwarded_allow_ips="*"` a routable peer's 401 became a 200 the same
+      way.  Found by the B2 round-8 audit (finding 2, rows REST-005, REST-025
+      and REST-027, on 1227637; reproduced over a real loopback uvicorn
+      0.35.0 with its defaults).  No tagged release carried it: the token,
+      the backstop and the Host allowlist are all new in 0.4.0 (v0.3.x had
+      no authentication, MADD-ANO-051 and MADD-ANO-076).
+      Resolved in 0.4.0: no decision keys on a peer's name.  A peer that is
+      not a loopback IP literal (a name such as Starlette's `testclient`, a
+      Unix socket's empty peer) and a request carrying `X-Forwarded-For` or
+      `Forwarded` must present the token; on a loopback bind the Host check
+      is asked of every request without a valid token, HTTP and WebSocket
+      handshake, whatever its peer.  The library's launch paths pass
+      `proxy_headers=False`, and the docs say loopback must not be a trusted
+      proxy.
+    severity: "critical"
+    safety_relevance: "safety_relevant"
+    safety_relevance_rationale: >
+      Graded `critical` as MADD-ANO-076 is, of which it is a bypass:
+      unauthorised access through HTTP routes the library opens -- a web
+      page the user visited changing the simulation, writing checkpoints and
+      reading the state -- on the default deployment (`uvicorn` with its
+      default proxy settings on a loopback bind).
+    affected_components:
+      - "maddening.api.auth.APIAuth.required_for_peer"
+      - "maddening.api.server.SimulationServer.create_app"
+      - "maddening.cloud.entrypoint.main"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A reverse proxy in front of a loopback bind forwards requests that now
+      need the token (its name in `allowed_hosts` is no longer enough for a
+      client on the same machine whose request the proxy marks with
+      `X-Forwarded-For`).  An in-process client (Starlette's `TestClient`)
+      presents `server.auth.token` or is built as a loopback client.
+    verification:
+      - "tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_rebound_page_with_a_forwarding_header_is_refused"
+      - "tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_forwarding_header_needs_the_token_even_naming_this_machine"
+      - "tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_forwarded_websocket_handshake_is_refused"
+      - "tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_routable_peer_cannot_forge_its_way_past_the_backstop"
+      - "tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_starlettes_own_in_process_client_must_present_the_token"
+      - "tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_every_launch_path_the_library_ships_passes_proxy_headers"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-176"
+    title: "PUT /graph/state wrote every field as float32 whatever its dtype, and parsed text and booleans as numbers"
+    description: >
+      From v0.1.0 to v0.3.1 the state route converted every value with
+      `jnp.array(value, dtype=float32)`: an integer field such as LBMNode's
+      `uint8` wall mask was replaced by a float32 array holding 0.5 or 256
+      with a 200, and `"1.5"`, `" 2 "` and `true` were stored as numbers in
+      any field.  Reproduced at v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git
+      archive` of each tag, CPU, FastAPI `TestClient`): wall mask entries of
+      0.5, 256 and `"1"` each answered 200 and were stored as float32; at
+      v0.1.0 the route was the same and LBMNode had no wall-mask field, and
+      text was parsed there too.  0.4.0's development tree coerced each value
+      to the live field's dtype, which truncated 0.5 and 1.7 to 0 and 1 in
+      the mask with a 200 and made 256, -1 or 1e10 a 500 (`OverflowError`),
+      and still parsed text.  Found by the B2 round-8 audit (finding 3, rows
+      REST-071 and REST-090, on 1227637).
+      Resolved in 0.4.0: every element is asked the rule the other write
+      surfaces apply (`PUT /graph/params`, a checkpoint load's
+      `_checked_cast`, the FMU): text, a boolean for a numeric field and
+      null are refused, and an integer field takes only integral values in
+      its dtype's range; a 400 names the field and nothing is written.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: a state write answered 200 and stored a value of another type
+      or one the field cannot hold (a wall-mask entry of 0.5), and the
+      simulation ran with it.  Not `critical`: it needed a value the field's
+      dtype does not hold, or text, written by the caller.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: write each field in its own dtype, and integral values
+      in range for an integer field.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_refuses_what_its_dtype_cannot_hold_exactly"
+      - "tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_takes_integral_values_in_its_range"
+      - "tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_a_float_field_refuses_text_booleans_and_what_float_cannot_hold"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-177"
+    title: "A node whose timestep was zero, negative or non-finite was added: it stepped not at all or backwards with every reply a 200, and NaN broke every later step"
+    description: >
+      Neither `POST /graph/nodes` nor `GraphManager.add_node` checked a
+      node's timestep.  From v0.1.0 to v0.3.1 (each tag, `git archive`, CPU,
+      FastAPI `TestClient`), a BallNode with timestep 0 was added (201) and
+      did not move while the graph stepped, one with -0.01 was added and
+      stepped backwards, both in-process too; NaN or Infinity added the node
+      and answered 500, and every later step was a 500 (a 400 on the 0.4.0
+      tree) until the node was deleted.  Found by the B2 round-8 audit
+      (finding 4, rows REST-065, REST-066 and REST-090, on 1227637).
+      Resolved in 0.4.0: the request model bounds the timestep (a finite
+      number > 0; a 422 that adds nothing), the 201 body is encoded as every
+      reply is, and `GraphManager.add_node` refuses a timestep that is not a
+      finite number > 0 for every caller.  No node in the library runs with
+      one (HeatNode's constructor already refused it).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent for zero and negative timesteps: the graph reported steps the
+      node did not take, or took backwards, and answered 200.  Not
+      `critical`: it needed such a timestep given to the node.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.add_node"
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: give every node a finite timestep > 0.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.  A node built with such a timestep can still be stepped by
+      calling its own update in Python; only the graph refuses it.
+    verification:
+      - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused"
+      - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_add_node_refuses_a_timestep_that_is_not_a_finite_positive_number"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-178"
+    title: "A node named _meta (or _params, _params_mappings) was added and broke every later step and save"
+    description: >
+      `GraphManager.add_node` refused the names that delimit checkpoint keys,
+      mapping slots and edge keys, and the non-finite JSON tokens, but not
+      the keys the graph reserves for itself: `_meta` holds the coupling and
+      multirate carries in the state, and a checkpoint keeps the params
+      under `_params` and `_params_mappings`.  A node named `_meta` was
+      added (201); the next compile dropped its state, every step was a
+      500 (a 400 with `KeyError: '_meta'` on the 0.4.0 tree) and a
+      checkpoint save was refused, until the node was deleted.  Reproduced
+      at v0.1.0, v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive`, CPU,
+      FastAPI `TestClient`).  Found by the B2 round-8 audit (finding 5).
+      Resolved in 0.4.0: `add_node` refuses the three names in the words it
+      refuses the others ("Node name ... is invalid"); a lookalike is taken.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: every step after the compile failed, and nothing computed a
+      wrong value.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.add_node"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: do not name a node `_meta`, `_params` or
+      `_params_mappings`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_reserved_state_key_is_refused_as_a_node_name"
+      - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_lookalike_of_a_reserved_key_is_taken"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-179"
+    title: "POST /sim/start on a graph with no nodes answered 'started' and its runner thread died on its first frame"
+    description: >
+      The route started a runner on any graph; on one with no nodes (a
+      server started on an empty graph, as the cloud entry point does, or
+      one whose nodes were all removed) the runner thread read
+      `gm.timestep` on its first frame and died with "No nodes registered.",
+      after the route had answered 200 `{"status": "started"}`.  Reproduced
+      at v0.1.0, v0.2.0, v0.3.0 and v0.3.1 (`git archive`, CPU, FastAPI
+      `TestClient`).  Found by the B2 round-8 audit (finding 6).
+      Resolved in 0.4.0: a graph with no nodes is a 409 saying there is
+      nothing to run, and no runner is started.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Nothing ran and nothing was wrong but the reply; the thread's death
+      was logged, and the next pause said it had stopped.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: add a node before starting the runner.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_starting_the_runner_on_a_graph_with_no_nodes_is_refused"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-180"
+    title: "A request refused by its model for a NaN or infinite value answered 500"
+    description: >
+      FastAPI answers a request its model refuses with a 422 that echoes the
+      refused value, and hands that body to a JSON encoder that refuses NaN
+      and the infinities: a request whose refused field held one -- `"type":
+      NaN` on `POST /graph/nodes`, and on the 0.4.0 tree a NaN timestep --
+      was a 500 instead.  Reproduced at v0.1.0, v0.2.0, v0.3.0 and v0.3.1
+      (`git archive`, CPU, FastAPI `TestClient`).  Found while fixing the
+      B2 round-8 audit's finding 4.
+      Resolved in 0.4.0: the app encodes a 422 as it encodes every reply
+      (`_json_reply`: a non-finite number as its quoted token).
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      Loud: a refused request answered 500 instead of 422; nothing was
+      written.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: read a 500 for a request with a non-finite value as the
+      422 it should have been.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      None known.
+    verification:
+      - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-181"
+    title: "A checkpoint load decompressed every archive member before it checked any name or shape: a small archive cost as much memory as its members declared"
+    description: >
+      `GraphManager.load_state` (and so `POST /checkpoint/load` and the cloud
+      entry point's resume) read every member of the `.npz` into memory
+      before it compared one name or shape with the graph.  A 2 MB archive
+      holding one extra member of 2 GiB of zeros filled 2 GiB before it was
+      refused as "node mismatch".  Reproduced at v0.1.0, v0.2.0, v0.3.0 and
+      v0.3.1 (`git archive`, CPU, under an 8 GB address cap): a 398 KiB
+      archive with a 400 MiB extra member raised the peak resident memory
+      by 402 MiB before the refusal.  At those tags the REST route also
+      loaded any path on the host (MADD-ANO-052).  Found by the B2 round-8
+      audit (finding 10).
+      Resolved in 0.4.0: every member's name, shape and dtype are read from
+      its `.npy` header first and checked against the live graph, and only a
+      member the load restores is read; what a load reads is bounded by the
+      live graph's own sizes.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A denial of service, never a wrong result, so not `critical`.  Graded
+      `major` as MADD-ANO-169 is: memory followed the archive's declarations
+      at about a thousand times its size on disk, and the OOM killer picks
+      the largest process, which need not be the server.
+      `context_dependent`: it needed an archive the user did not write
+      (a download, a shared directory).
+    affected_components:
+      - "maddening.core.simulation.checkpoint.load_state"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0: load only archives this library saved, or check an
+      archive's member headers before loading it.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Reading the headers costs one small read per member, and the zip
+      directory is read whole (its size is bounded by the file's).
+    verification:
+      - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_an_extra_node_is_refused_before_any_member_is_read"
+      - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_members_the_load_ignores_are_never_read"
+      - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it"
+    github_issue: null

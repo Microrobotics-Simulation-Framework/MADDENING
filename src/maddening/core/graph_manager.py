@@ -2613,6 +2613,10 @@ _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
 
 # Key for internal multi-rate metadata in the full state dict.
 _META_KEY = "_meta"
+#: State and checkpoint keys a node may not be named: the graph's own state
+#: (``_meta``) and a checkpoint's params prefixes
+#: (``maddening.core.simulation.checkpoint``).
+_RESERVED_STATE_KEYS = frozenset({_META_KEY, "_params", "_params_mappings"})
 
 #: The ``_meta`` slots ``coupling_diagnostics()`` reads a group's report
 #: from, as ``coupling_{group key}_{suffix}``.  A step writes them; they
@@ -6594,6 +6598,33 @@ class GraphManager:
         from maddening.serialization.json_codec import (  # noqa: PLC0415
             NON_FINITE_TOKENS,
         )
+        if node.name in _RESERVED_STATE_KEYS:
+            # The graph's own state lives under ``_meta`` (coupling and
+            # multirate carries) and a checkpoint keeps the params under
+            # ``_params`` and ``_params_mappings``.  A node named for one of
+            # them was taken (POST /graph/nodes answered 201), the next
+            # compile dropped its state, every step was a KeyError and a
+            # checkpoint save was refused until the node was deleted.
+            raise ValueError(
+                f"Node name {node.name!r} is invalid: it is a key the graph "
+                f"reserves for its own state and checkpoints "
+                f"({', '.join(sorted(_RESERVED_STATE_KEYS))}).  A different "
+                f"spelling ({node.name.lstrip('_')!r}, say) is fine."
+            )
+        try:
+            timestep = float(node.delta_t)
+        except (TypeError, ValueError):
+            timestep = math.nan
+        if not (math.isfinite(timestep) and timestep > 0.0):
+            # NaN or an infinity made every step a 400 until the node was
+            # deleted (the multirate schedule takes an integer ratio of the
+            # timesteps), and 0 or a negative value stepped the node not at
+            # all, or backwards, with every reply a 200.  No node in the
+            # library runs with a timestep that is not a positive number.
+            raise ValueError(
+                f"Node {node.name!r} has timestep {node.delta_t!r}: a node's "
+                "timestep must be a finite number > 0."
+            )
         if node.name in NON_FINITE_TOKENS:
             # MADD-ANO-010: the JSON surfaces refuse a string that spells a
             # non-finite token, and a node name is a JSON *value* in

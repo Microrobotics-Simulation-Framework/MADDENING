@@ -207,6 +207,9 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **`GraphManager.add_node` refuses a timestep that is not a finite number > 0 and the names `_meta`, `_params`, `_params_mappings`; a loopback-bound API asks the token of a non-loopback peer and of a forwarded request** (MADD-ANO-175, 177, 178): each was accepted, then ran silently wrong or broke later.
+  `run_pod.py` exits 2 when it refuses a run and 5 when a goal raises (both were 1, "a check failed"); `--summarise`'s statuses are unchanged.
+  Action: give every node a finite timestep > 0; in-process REST clients present `server.auth.token`; read a goal's exit status by the runbook's table.
 - **REST refusals agree with `PUT /graph/params`, and the runner routes stay off the shared workers**: `POST /checkpoint/load` and `POST /graph/nodes` refuse a parameter value `PUT` refuses (outside its `ParamSpec` bounds, a boolean or text for a number; on a load also non-finite or refused by the constructor), `GraphManager.load_state` refuses text and booleans for a number, and `PUT` refuses a numeric string (it stored `"1.5"` as 1.5); an integer is bounded at 10^7 only for an integer parameter (an integral JSON number for a float one is a float); a token with surrounding whitespace and an `allowed_hosts` entry that is not a host name raise at construction.
   Start, stop, pause, resume and reset run on pools of their own with deadlines from arrival (`PUT /sim/stride` on the event loop); `run_pod.py` takes no option abbreviations and writes schema 7 (`requested_cells`; a synthetic grid holds at least the requested cells).
   Action: keep parameters inside their bounds; strip the token; spell `run_pod.py` options out; re-run a session recorded at schema 6.
@@ -370,6 +373,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **REST round-8 audit fixes** (MADD-ANO-174, 176 to 181): a params write back to a node's own value is asked the combined checks (174); `PUT /graph/state` refuses text, booleans and integers its field cannot hold (176, since 0.1.0); zero, negative or non-finite timesteps (177), a node named `_meta` (178), `/sim/start` of an empty graph (179) are refused; a 422 holding NaN is no 500 (180); a checkpoint load checks member headers before reading (181).
+  Also: a non-ASCII `Host` port is a 403, not a 500; a token outside printable ASCII is refused at start-up; a comma-joined `Sec-WebSocket-Protocol` carries the token; `run_pod.py --summarise` reads any goal file's shape as INVALID and counts a file with no checks.
+  Action: write state in its field's dtype; choose a printable ASCII token; re-run a summary that a mistyped file used to stop.
 - **FMU export, round-8 audit fixes** (MADD-ANO-167 to 169, never released): the bridge refuses to start when a `set_param_spec` since the description (or a sidecar spec) would enforce another `min` / `max` than the XML advertises, and holds every write to the advertised bounds too; a start, step end or restored time whose 16 ulps pass a tenth of the master step is refused, and no time slack exceeds a tenth of a step;
   a `get` past what one reply frame carries is refused before anything is read (one 64 MiB frame took 6 GB), a repeated reference is read once; an open `log` / `logit` bound is advertised as the outermost value `ParamSpec.check` accepts (a float32 `logit(-1, 1)` max was refused).
   Action: build the description, sidecar and bridge after the last `set_param_spec`; start an FMU at a time its master step resolves; compute communication points as `start + k * h`; re-package an FMU with a float32 `logit` leaf (its token may change).
@@ -756,6 +762,9 @@ guidance; the itemized changes follow.
   their dense and `fori` references in both differentiation modes
 
 ### Security
+- **`X-Forwarded-For` no longer gets a request past a loopback-bound API's `Host` check or its peer backstop** (CRITICAL, MADD-ANO-175, never released): uvicorn's default proxy headers let any request over loopback name its own peer, so a rebound page sending `X-Forwarded-For: x` drove every route;
+  a peer that is not a loopback IP literal and any request carrying `X-Forwarded-For` / `Forwarded` now need the token, the `Host` check asks every request without one, and the library's launch paths pass `proxy_headers=False`.
+  Action: never configure loopback as a trusted proxy; an in-process `TestClient` presents `server.auth.token` (or uses `base_url="http://127.0.0.1", client=("127.0.0.1", 50000)`); a reverse proxy to a loopback bind presents the token.
 - **A loopback-bound API answers only to loopback host names** (CRITICAL, MADD-ANO-076, now resolved): a DNS-rebinding page's `Host` and
   `Origin` agree, so it passed the Origin check and could drive every route, `/cloud/launch` included; any other `Host` is now a 403.
   Action: pass `SimulationServer(allowed_hosts=)` to serve a loopback-bound server under a proxy's name or an `/etc/hosts` alias
@@ -789,6 +798,7 @@ guidance; the itemized changes follow.
   (bearer token, see the Security entry above); loopback is unchanged
 
 ### Known Anomalies
+- **MADD-ANO-174 to 181 (new, resolved in this release)**: the REST round-8 audit's defects (see `### Security` and `### Fixed`): 174 (params write back) and 175 (forwarded peer, critical) never released; 176 to 181 carried from v0.1.0 to v0.3.1.
 - **MADD-ANO-163 to 166 (new, resolved in this release)**: a checkpoint load restored parameter values `PUT /graph/params` refuses (163, never released); a `HybridNode` parameter write was lost (164, since 0.1.0); `/sim/run`'s 503 said nothing changed after it had stepped (165, never released); `/sim/profile` was a 500 for a graph that cannot step (166, since 0.2.0).  See `### Fixed`.
 - **MADD-ANO-075 to 082 (new)**: defects this release fixes that had no entry, five of them carried by releases — a USD stage imported the module it named (075, since 0.1.0); the API checked no `Origin` (076, critical, since 0.1.0, `partially_resolved`: a DNS-rebinding page still drives a loopback bind, so run the API only while you use it); a surrogate swap dropped edges' `additive` and units (077, since 0.1.0); FMI export of a real graph had no inputs and a 1e-3 step (078, since 0.3.0); a recompile re-phased a multi-rate graph (079, since 0.1.0) — and three majors never released (080, 081, 082; see `### Fixed`, `### Security`).
   **MADD-ANO-048** is `partially_resolved`: a `gm.params` write or a fit still saves a value the constructor refuses, and the saved graph then does not load; bound such a parameter inside the constructor's range.  **MADD-ANO-058** now also covers `propeller_radius > 1`.

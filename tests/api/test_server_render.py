@@ -16,7 +16,7 @@ from maddening.api.frame_renderer import (
 )
 
 try:
-    from starlette.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
     HAS_TESTCLIENT = True
 except ImportError:
     HAS_TESTCLIENT = False

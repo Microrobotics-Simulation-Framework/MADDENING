@@ -27,7 +27,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
 from fastapi import WebSocket
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 from starlette.routing import Route, WebSocketRoute
 
 from maddening.api.auth import (
@@ -562,7 +562,8 @@ def test_loopback_classification(host, loopback):
 @pytest.mark.parametrize("peer,routable", [
     ("203.0.113.5", True), ("10.0.0.1", True), ("2001:db8::1", True),
     ("127.0.0.1", False), ("::1", False),
-    # Not IPs: an in-process or Unix-socket transport, not a remote peer.
+    # Not IPs, so not routable -- and not loopback either: the backstop asks
+    # them the token (test_forwarded_headers_cannot_name_a_trusted_peer.py).
     ("testclient", False), ("", False), (None, False),
 ])
 def test_routable_peer_classification(peer, routable):

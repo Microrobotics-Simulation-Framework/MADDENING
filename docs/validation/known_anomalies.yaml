@@ -11485,3 +11485,51 @@ anomalies:
     verification:
       - "tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_strict_convergence_raises_with_a_sharded_member"
     github_issue: null
+  - anomaly_id: "MADD-ANO-163"
+    title: "The Aitken two-pass guard can add two passes to Aitken's own exit, where the guide says at most one"
+    description: >
+      Under `acceleration="aitken"` the coupling loop stops only when two
+      consecutive passes meet the threshold (`_TWO_PASS_EXIT`), and
+      `coupling_algorithm_guide.md` says the guard "adds at most one pass to
+      Aitken's own exit" (CPL-062; CPL-061 quotes "the guard costs at most
+      one extra pass").  The rule holds the current pass to its error
+      estimate and its predecessor to its raw residual, and an Aitken
+      estimate can rise back above the threshold on the pass after Aitken's
+      own exit while the raw residuals keep falling, so the guard can stop
+      two passes late.  On three independent modes, `x_a <- g_a x_b + c`,
+      `x_b <- s x_a` entry by entry with `g_a = (-0.02, 0.92, 0.53)`,
+      `s = (-1, -1, 1)`, `c = (1.82, 1.27, 1.02)`, Gauss-Seidel,
+      `tolerance=1e-4`, float32: without the guard Aitken stops at pass 9
+      (estimate 6.9e-5); pass 8's raw residual is 9.2e-4, pass 10's estimate
+      is 1.9e-4 over a raw residual of 4.6e-5, and the guard stops at pass
+      11.  The same holds in float64, with a float32 member under x64, under
+      `vmap`, on multi-rate and sub-cycled graphs, with a predictor and after
+      a checkpoint restart.  The state returned is converged and nearer the
+      fixed point than the unguarded one: what fails is the documented cost,
+      not a result.  The guard and the sentence are new in 0.4.0.  Found by
+      the coupling inventory's domain lift.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      A pass count, not a value: every state, verdict and gradient the
+      guarded loop returns is the one its criterion describes, and the extra
+      pass moves the state nearer the fixed point.  A caller who budgets
+      iterations from the guide's sentence can run one pass more than
+      planned, which `iterations` reports.
+    affected_components:
+      - "maddening.core.graph_manager._fixed_point_while"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      Budget Aitken's iterations from the reported `iterations`, not from the
+      guide's one-pass sentence; `acceleration="none"` or `"fixed"` carry no
+      guard.  Deferred to 0.5.0, which rewords the sentence or changes the
+      rule.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0: either the guide's sentence is
+      reworded to the rule the loop applies, or the predecessor is held to
+      its estimate too.  Until then Aitken's cost over its own exit is not
+      bounded by one pass.
+    verification:
+      - "tests/core/test_coupling_accelerations_in_every_domain.py::test_the_guard_adds_at_most_one_pass_to_aitkens_exit"
+    github_issue: null

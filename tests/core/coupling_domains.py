@@ -148,7 +148,9 @@ class Lin(SimulationNode):
 
     def __init__(self, name, timestep, dtype, n, *, g, c):
         c = np.broadcast_to(np.asarray(c, np.float64), (n,))
-        super().__init__(name, timestep, g=jnp.asarray(g, dtype), c=jnp.asarray(c, dtype))
+        # ``g`` a scalar, or one gain per entry (independent modes).
+        super().__init__(name, timestep, g=jnp.asarray(np.asarray(g, np.float64), dtype),
+                         c=jnp.asarray(c, dtype))
         self._dtype, self._n = dtype, n
 
     def initial_state(self):
@@ -168,6 +170,14 @@ class Lin(SimulationNode):
 
     def update_evaluations(self):
         return 1
+
+
+class Flux(Lin):
+    """A :class:`Lin` that also produces the flux ``q = 2 x`` (a function of
+    its state alone), for flux edges inside the group."""
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+        return {"q": jnp.asarray(2.0, self._dtype) * state["x"]}
 
 
 class Ticker(SimulationNode):
@@ -192,23 +202,26 @@ def group_kwargs(domain: Domain, **kw) -> dict:
     return kw
 
 
-def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, **group_kw) -> GraphManager:
+def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, node=Lin,
+         fields=("x", "x"), **group_kw) -> GraphManager:
     """``x_a <- g_a x_b + c_a``, ``x_b <- g_b x_a + c_b`` in *domain*, compiled.
 
     Build it inside :func:`entered`.  *group_kw* go to the group, with the
-    domain's settings added by :func:`group_kwargs`.
+    domain's settings added by :func:`group_kwargs`.  *node* is the
+    members' class (:class:`Lin` or :class:`Flux`) and *fields* the source
+    fields of the edges ``b -> a`` and ``a -> b`` (``"q"`` is a flux edge).
     """
     gm = GraphManager()
     da, db = domain.dtypes
     tb = DT / 2 if domain.subcycled else DT
-    gm.add_node(Lin("a", DT, da, n, g=g[0], c=c[0]))
-    gm.add_node(Lin("b", tb, db, n, g=g[1], c=c[1]))
+    gm.add_node(node("a", DT, da, n, g=g[0], c=c[0]))
+    gm.add_node(node("b", tb, db, n, g=g[1], c=c[1]))
     if da == db:
-        gm.add_edge("b", "a", "x", "u")
-        gm.add_edge("a", "b", "x", "u")
+        gm.add_edge("b", "a", fields[0], "u")
+        gm.add_edge("a", "b", fields[1], "u")
     else:
-        gm.add_edge("b", "a", "x", "u", transform=lambda v: v.astype(da))
-        gm.add_edge("a", "b", "x", "u", transform=lambda v: v.astype(db))
+        gm.add_edge("b", "a", fields[0], "u", transform=lambda v: v.astype(da))
+        gm.add_edge("a", "b", fields[1], "u", transform=lambda v: v.astype(db))
     if domain.multirate:
         gm.add_node(Ticker("tick", DT / 2))
     with warnings.catch_warnings():
@@ -238,7 +251,8 @@ def params_with(gm: GraphManager, *, g=None, c=None) -> dict:
     for i, name in enumerate(("a", "b")):
         leaves = p["nodes"][name]
         if g is not None:
-            leaves["g"] = jnp.asarray(g[i], leaves["g"].dtype)
+            leaves["g"] = jnp.broadcast_to(jnp.asarray(np.asarray(g[i], np.float64),
+                                                       leaves["g"].dtype), leaves["g"].shape)
         if c is not None:
             leaves["c"] = jnp.broadcast_to(jnp.asarray(np.asarray(c[i], np.float64),
                                                        leaves["c"].dtype), leaves["c"].shape)
@@ -261,8 +275,12 @@ class Solve:
         return np.asarray(self.state[name]["x"])
 
     def gains(self) -> tuple:
-        return tuple(float(np.asarray(self.params["nodes"][n]["g"], np.float64))
-                     for n in ("a", "b"))
+        """``(g_a, g_b)`` in float64 as stored: floats, or arrays for per-entry gains."""
+        out = []
+        for n in ("a", "b"):
+            g = np.asarray(self.params["nodes"][n]["g"], np.float64)
+            out.append(float(g) if g.ndim == 0 else g)
+        return tuple(out)
 
     def forcing(self) -> tuple:
         return tuple(np.asarray(self.params["nodes"][n]["c"], np.float64) for n in ("a", "b"))

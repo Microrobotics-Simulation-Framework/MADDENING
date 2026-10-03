@@ -257,7 +257,7 @@ claims:
     grad: tests/core/test_sysid.py::test_loss_gradient_finite_and_nonzero
     vmap: 'tests/core/test_sysid_claims_in_every_domain.py::test_the_claim_holds_under_vmap[SYS-006]'
     multi_rate: tests/core/test_sysid_windows_keep_the_multirate_phase.py::test_a_window_on_an_odd_base_step_runs_the_slow_node_on_its_own_phase
-    sub_cycled: TODO-oracle
+    sub_cycled: 'tests/property/test_differential_replay.py::test_a_replay_of_a_graphs_own_record_is_exact[subcycled-rods-teacher-forced]'
     predictors_warm_starts: tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_loss_is_exactly_zero_and_stationary_at_the_truth
     adaptive: n/a
     checkpoint_restart: tests/core/test_sysid_claims_edges.py::test_the_teacher_forced_loss_is_the_sum_of_independent_windows
@@ -537,7 +537,9 @@ claims:
     grad: tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_inherited_warm_starts_carry_no_gradient
     vmap: narrowed
     multi_rate: tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_loss_is_exactly_zero_and_stationary_at_the_truth
-    sub_cycled: TODO-oracle
+    sub_cycled:
+      - 'tests/property/test_differential_replay.py::test_a_replay_of_a_record_with_carried_history_is_exact[subcycled-quadratic-teacher-forced]'
+      - 'tests/property/test_differential_replay.py::test_a_replay_of_a_record_with_carried_history_is_exact[subcycled-quadratic-multiple-shooting]'
     predictors_warm_starts:
       - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_the_loss_is_exactly_zero_and_stationary_at_the_truth
       - tests/core/test_sysid_windowed_loss_replays_coupling_warm_starts.py::test_a_fit_started_at_the_truth_stays_there
@@ -3294,8 +3296,12 @@ claims:
     jit: tests/property/test_differential_entry_points_after_a_node_write.py::test_every_reader_reads_the_written_model
     grad: tests/property/test_differential_entry_points_after_a_node_write.py::test_every_reader_reads_the_written_model
     vmap: narrowed
-    multi_rate: TODO-oracle
-    sub_cycled: TODO-oracle
+    multi_rate:
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[multirate-constant-pending]'
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[multirate-structural-compiled]'
+    sub_cycled:
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-constant-pending]'
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-structural-compiled]'
     predictors_warm_starts: narrowed
     adaptive: narrowed
     checkpoint_restart: tests/core/test_node_params_writes_are_observed.py::test_load_state_supersedes_an_earlier_node_write
@@ -5060,8 +5066,12 @@ claims:
     jit: n/a
     grad: n/a
     vmap: n/a
-    multi_rate: TODO-oracle
-    sub_cycled: TODO-oracle
+    multi_rate:
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[multirate-constant-pending]'
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[multirate-structural-compiled]'
+    sub_cycled:
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-constant-pending]'
+      - 'tests/property/test_differential_fmu.py::test_four_fmu_paths_agree_after_a_node_params_write[subcycled-structural-compiled]'
     predictors_warm_starts: narrowed
     adaptive: n/a
     checkpoint_restart: narrowed

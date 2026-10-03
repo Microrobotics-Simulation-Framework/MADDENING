@@ -110,7 +110,7 @@ NARROWED = "narrowed"
 #: fix PR whose tests will.  Temporary while those branches are open; the
 #: matrix is complete only when none is left (PENDING_ALLOWED False).
 PENDING = ("TODO-oracle", "TODO-fix")
-PENDING_ALLOWED = True
+PENDING_ALLOWED = False
 #: A narrowed domain is excluded by a clause that starts with this and runs
 #: to the end of the row's ``conditions``.
 NARROWING_LEAD = "Not claimed for"

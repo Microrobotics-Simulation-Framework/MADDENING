@@ -462,6 +462,7 @@ claims:
     - tests/api/test_cross_origin_requests.py::test_a_cross_origin_state_change_is_refused
     - tests/api/test_cross_origin_requests.py::test_a_cross_origin_checkpoint_write_never_reaches_the_filesystem
     - tests/api/test_cross_origin_requests.py::test_the_refusal_says_what_to_do
+    - tests/api/test_cross_origin_requests.py::test_a_cross_origin_delete_is_refused_and_removes_nothing
   status: verified
 
 - id: REST-022
@@ -875,6 +876,7 @@ claims:
     - tests/api/test_runner_pacing_and_status.py::test_a_structural_edit_while_the_runner_runs_is_a_409
     - tests/api/test_runner_stop_and_stride.py::test_while_the_runner_runs_state_writes_are_409s_and_params_still_go_through
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_runner_running_returns_409
+    - tests/api/test_concurrent_requests_are_serialised.py::test_a_write_queued_before_a_run_began_is_refused_once_it_has_the_lock
   status: verified
 
 - id: REST-042
@@ -915,86 +917,88 @@ claims:
 - id: REST-044
   area: lock
   claim: >-
-    "A request waits at most _GRAPH_LOCK_TIMEOUT (30 s) for the lock and then
-    answers 503" -- of the runner routes (/sim/start, /sim/reset,
-    /sim/stop, /sim/pause, /sim/resume, PUT /sim/stride).
+    "The runner routes (/sim/start, /sim/stop, /sim/pause, /sim/resume,
+    /sim/reset, surrogate activate and deactivate) answer within about one
+    _GRAPH_LOCK_TIMEOUT of their arrival, a 503 past it: the runner's own
+    lock is taken with a deadline, and a reset or a surrogate swap lets go of
+    it before waiting for the graph."
   sources:
-    - src/maddening/api/README.md:210 (Concurrency, limits and shutdown)
+    - src/maddening/api/README.md:225 (Concurrency, limits and shutdown)
+    - docs/release_notes/v0.4.0.md:4684 (The REST round-6 audit, Smaller fixes)
+    - src/maddening/api/server.py:2281 (SimulationServer._runner_control)
     - src/maddening/api/server.py:3672 (sim_start)
     - src/maddening/api/server.py:3755 (sim_reset)
   conditions: >-
     a long holder of the graph lock, a POST /sim/start waiting for it, then
-    runner routes arriving 20 ms apart; the timeout patched to 0.25 s.
+    runner routes (two resets; start, three resets, stride and stop) arriving
+    20 ms apart; the timeout patched to 0.25 s.  The surrogate routes are
+    out of scope.
   oracle: each request answered within 1.6 timeouts of its arrival.
   tests:
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout
-  status: failing
-  finding: >-
-    /sim/start and /sim/reset hold the runner lock (taken with no timeout)
-    while they wait up to a timeout for the graph lock, so a runner route
-    queued behind them first waits for the runner lock and then for the
-    graph: measured at 0.25 s, a reset behind a waiting start answered after
-    0.48 s and a second reset after 0.72 s (about k timeouts for the k-th),
-    and PUT /sim/stride and POST /sim/stop, which need no graph lock, after
-    0.85-0.9 s at 1 s.  Reproducer: hold server._graph_lock, POST /sim/start
-    in a thread, then POST /sim/reset twice.  Guess:
-    src/maddening/api/server.py:3449 and 3531 (take the runner lock with a
-    deadline, and release it before waiting for the graph).
-  notes: fix/p4-13-rest addresses this ("the runner routes answer within about one _GRAPH_LOCK_TIMEOUT").
+    - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_each_request_behind_a_long_holder_answers_within_about_one_timeout
+  status: verified
+  notes: >-
+    failing until fix/p4-13-rest (#205): the runner lock was taken with no
+    timeout while /sim/start and /sim/reset waited for the graph inside it,
+    so the k-th request answered after about k timeouts.
 
 - id: REST-045
   area: lock
   claim: >-
-    "The lock is never held while waiting for the runner's thread, and the
-    runner waits for it in slices that watch its stop flag, so POST /sim/stop
-    is answered at once even while a long request holds the graph."
+    "POST /sim/stop is answered at once even while a long request holds the
+    graph" (the runner waits for the graph lock in slices that watch its
+    stop flag); and, as a runner route, it is answered "within about one
+    _GRAPH_LOCK_TIMEOUT of [its] arrival".
   sources:
     - docs/release_notes/v0.4.0.md:4581 (Concurrent requests use the graph one at a time)
+    - src/maddening/api/README.md:225 (Concurrency, limits and shutdown)
     - src/maddening/api/server.py:2006 (SimulationServer, Notes)
     - src/maddening/viz/runner.py:47 (RealtimeRunner, lock)
   conditions: >-
-    a long request (a slowed checkpoint save) holds the graph while the
-    runner runs (passes); a POST /sim/start is waiting for the graph when
-    the stop arrives (fails), timeout patched to 1 s.
-  oracle: the stop answered within 1 s of the 1.5 s holder (passes), and within 0.5 s behind the waiting start (fails).
+    at once: the long holder is a request that is not a runner route (a
+    checkpoint save slowed to 1.5 s) while the runner runs.  Within one
+    timeout: a POST /sim/start is waiting for the graph when the stop
+    arrives (it holds the runner lock until it gives up), timeout patched
+    to 0.25 s.
+  oracle: the stop answered within 1 s of the 1.5 s holder; behind the waiting start, within 1.6 timeouts of its arrival, a 409 once the start has given up.
   tests:
     - tests/api/test_concurrent_requests_are_serialised.py::test_stop_is_answered_while_another_request_holds_the_graph
-    - tests/api/test_graph_lock_refusals_cover_every_route.py::test_stop_is_answered_at_once_while_a_start_waits_for_the_graph
-  status: failing
-  finding: >-
-    POST /sim/stop takes the runner lock, which a /sim/start waiting for the
-    graph holds for up to the lock timeout: measured, the stop (a 409 "Runner
-    is not started") answered after 0.98 s at a 1 s timeout, i.e. after the
-    start gave up -- up to 30 s at the shipped timeout.  Reproducer: hold
-    server._graph_lock, POST /sim/start in a thread, POST /sim/stop.  Guess:
-    src/maddening/api/server.py:3449 (sim_start holds self._runner_lock
-    across _graph_access).
-  notes: fix/p4-13-rest bounds this by one timeout; "at once" would still need the start not to hold the runner lock while it waits.
+    - tests/api/test_graph_lock_refusals_cover_every_route.py::test_stop_behind_a_start_waiting_for_the_graph_answers_within_one_lock_timeout
+  status: verified
+  notes: >-
+    Behind a /sim/start that is waiting for the graph the stop is not
+    answered at once: it waits for the start to give up (one timeout, 30 s
+    shipped), as the round-6 sentence of the release notes and the REST
+    guide state.  The round-5 sentence's "at once" holds for a long holder
+    that is not a runner route.  Until fix/p4-13-rest (#205) the wait was
+    unbounded by any deadline of the stop's own.
 
 - id: REST-046
   area: lock
   claim: >-
-    The 503 from a lock timeout says "Nothing was changed; retry shortly",
-    and POST /sim/reset "A 503, with nothing reset, when the runner's thread
-    will not stop in time".
+    POST /sim/reset: "The runner is stopped first and the graph lock taken
+    after, within about one graph-lock timeout of the request in all; when
+    the graph cannot be had in time the 503 (or a 409) says that the runner
+    it stopped stays stopped, with was_running"; a 503 with nothing reset
+    when the runner's thread will not stop in time.
   sources:
-    - src/maddening/api/server.py:2265 (SimulationServer._graph_access)
     - src/maddening/api/server.py:3757 (sim_reset)
-  conditions: a running runner, the graph held by another request when POST /sim/reset arrives, timeout patched to 0.25 s.
-  oracle: a 503 that says nothing was changed must leave the runner running.
+    - src/maddening/api/server.py:2301 (SimulationServer._after_stopping_the_runner)
+    - src/maddening/api/README.md:160 (Simulation Control)
+    - docs/release_notes/v0.4.0.md:4680 (The REST round-6 audit, Smaller fixes)
+  conditions: >-
+    a running runner (and none), the graph held by another request when
+    POST /sim/reset arrives, timeout patched to 0.25 s; a runner whose stop
+    times out.
+  oracle: the 503 does not say "Nothing was changed", says the runner stays stopped, and carries was_running; the runner is no longer alive.
   tests:
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_a_reset_that_stopped_the_runner_does_not_say_nothing_was_changed
+    - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_a_reset_that_cannot_have_the_graph_says_it_stopped_the_runner
+    - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_a_reset_without_a_runner_says_only_that_nothing_was_reset
     - tests/api/test_runner_stop_and_stride.py::test_a_reset_whose_stop_times_out_resets_nothing
-  status: failing
-  finding: >-
-    sim_reset stops the runner (successfully) before it waits for the graph,
-    and when that wait times out the 503 says "Nothing was changed" -- the
-    runner it stopped stays stopped.  Reproducer: POST /sim/start, hold
-    server._graph_lock, POST /sim/reset -> 503 "... Nothing was changed",
-    runner no longer alive.  Guess: src/maddening/api/server.py:3772 (a
-    detail of its own for a reset that stopped the runner, with
-    was_running).
-  notes: fix/p4-13-rest addresses this.
+  status: verified
+  notes: failing until fix/p4-13-rest (#205), whose reply said "Nothing was changed" of a runner it had just stopped.
 
 - id: REST-047
   area: lock
@@ -1194,42 +1198,36 @@ claims:
 - id: REST-058
   area: sim
   claim: >-
-    "A graph that cannot step is a 400 naming why (nothing is stepped)";
-    POST /sim/step and POST /sim/run "answer these 400 with the message
-    (nothing is stepped)".
+    A graph that cannot step is a 400 naming why, and nothing is stepped
+    (POST /sim/step); "A step that raises (a run-time check in the step,
+    strict_convergence) answers 400 {detail, steps_run, n_steps}: the steps
+    before it were taken" (POST /sim/run).
   sources:
+    - src/maddening/api/README.md:155 (Simulation Control)
     - src/maddening/api/server.py:3567 (sim_step)
+    - src/maddening/api/server.py:3580 (_run_failed)
     - src/maddening/api/server.py:668 (_GRAPH_CONFIGURATION_ERRORS)
-    - src/maddening/api/server.py:686 (_cannot_step_detail)
     - docs/release_notes/v0.4.0.md:4543 (PUT /graph/params refuses what the step cannot run with)
+    - docs/release_notes/v0.4.0.md:4680 (The REST round-6 audit, Smaller fixes)
   conditions: >-
     a configuration error found when the step is traced (an edge of
-    mismatched shapes, constraints the step cannot use) and a run-time
-    check in the step (equinox.error_if) raising at the first step (passes)
-    or after earlier slices of a run were stored (fails).
-  oracle: 400 naming the error; the graph's state against what the detail says.
+    mismatched shapes, constraints the step cannot use), and a run-time
+    check in the step (equinox.error_if) raising at the first step, or in
+    the sixth doubling slice of a run after 32 steps were stored.
+  oracle: 400 naming the error; steps_run against the graph's state and the relay's count.
   tests:
     - tests/api/test_params_writes_the_step_cannot_run_with.py::test_a_graph_configured_so_it_cannot_step_is_a_400_naming_why
     - tests/api/test_runner_pacing_and_status.py::test_an_edge_the_graph_cannot_validate_is_a_400_on_every_route_that_steps
     - tests/api/test_routes_answer_what_they_did.py::test_a_single_step_that_raises_is_a_400_and_stores_nothing
     - tests/api/test_routes_answer_what_they_did.py::test_a_run_that_raises_at_its_first_step_is_a_400_and_moves_nothing
-    - tests/api/test_routes_answer_what_they_did.py::test_a_run_that_raises_part_way_does_not_say_nothing_was_stepped
-  status: failing
-  finding: >-
-    POST /sim/run steps in slices and stores each; a step that raises inside
-    a later slice is answered 400 "...; nothing was stepped" with no count,
-    while the graph has moved by every step of the earlier slices: a counter
-    that raises past 0.5 at dt 1/64 is left at 0.5 (32 steps) under a 400
-    that says nothing was stepped.  Reproducer: a BallNode whose update
-    wraps position in equinox.error_if(position > 0.5); with
-    _RUN_SLICE_SECONDS large, POST /sim/run?n_steps=100.  Guess:
-    src/maddening/api/server.py:3643 (report the steps done before the
-    failing slice, and those the failing slice stored).
+    - tests/api/test_routes_answer_what_they_did.py::test_a_run_that_raises_part_way_says_how_many_steps_it_took
+    - tests/api/test_sim_run_reports_the_steps_a_failing_run_took.py::test_a_run_that_fails_part_way_reports_the_steps_it_took
+  status: verified
   notes: >-
-    fix/p4-13-rest addresses this (a 400 carrying steps_run).  The detail
-    of a step that raises as an XlaRuntimeError is that error's text, which
-    carries a Python traceback with server file paths; no document says it
-    does not.
+    failing until fix/p4-13-rest (#205), whose 400 said "nothing was
+    stepped" after storing earlier slices.  The detail of a step that
+    raises as an XlaRuntimeError is that error's text, which carries a
+    Python traceback with server file paths; no document says it does not.
 
 - id: REST-059
   area: runner
@@ -1317,7 +1315,7 @@ claims:
     - tests/api/test_profile_endpoints.py::TestSimProfile::test_runner_running_returns_409
     - tests/api/test_graph_lock_refusals_cover_every_route.py::test_every_write_is_a_409_while_a_run_is_in_progress
   status: verified
-  notes: fix/p4-13-rest adds a claim that the profile leaves the live state where it was; it gets a row when it merges.
+  notes: That the profile leaves the live state where it was is REST-100.
 
 - id: REST-064
   area: sim
@@ -1855,7 +1853,7 @@ claims:
     - tests/api/test_streams_after_a_checkpoint_load.py::test_the_manifest_records_the_hash_and_the_streams_clock
     - tests/api/test_api.py::TestCheckpointEndpoints::test_save_and_load
   status: verified
-  notes: fix/p4-13-rest adds "written under a temporary name ... a save refused on the way leaves any earlier file of that name as it was"; it gets a row when it merges.
+  notes: A save refused on the way is REST-101 and REST-102.
 
 - id: REST-092
   area: checkpoint
@@ -2031,6 +2029,147 @@ claims:
     Each call sets both values: one left out of the query is set to its
     default, 1 -- send both to change one and keep the other.
   notes: The bundled app sends both; a script that sends one resets the other without a word.
+
+- id: REST-100
+  area: sim
+  claim: >-
+    POST /sim/profile: "The live simulation is left as it was: its state and
+    params are restored after the profile, and the streams neither show nor
+    count the profiler's steps"; "the next step is bit-identical to an
+    unprofiled graph's, a coupling group's warm start included".
+  sources:
+    - src/maddening/api/server.py:4223 (sim_profile)
+    - src/maddening/api/README.md:162 (Simulation Control)
+    - docs/release_notes/v0.4.0.md:4658 (POST /sim/profile leaves the live simulation where it was)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-132)
+  conditions: >-
+    a single node after 640 steps, a params write before the profile, and a
+    coupling group with a predictor's history in _meta.  What the streams
+    send is out of scope; the relay's step count and clock are read
+    directly.
+  oracle: the state, the params leaves and _meta before and after; the next step against a never-profiled twin, bit for bit.
+  tests:
+    - tests/api/test_profile_leaves_the_live_simulation.py::test_a_profile_leaves_the_state_and_the_streams_clock_as_they_were
+    - tests/api/test_profile_leaves_the_live_simulation.py::test_the_params_a_profile_runs_with_are_put_back
+    - tests/api/test_profile_leaves_the_live_simulation.py::test_the_next_step_after_a_profile_is_the_unprofiled_graphs_next_step
+    - tests/api/test_profile_leaves_the_live_simulation.py::test_a_coupling_groups_state_and_warm_start_survive_a_profile
+  status: verified
+
+- id: REST-101
+  area: checkpoint
+  claim: >-
+    "The checkpoint is written under a temporary name, the manifest next,
+    and the file moved into place last: a save refused on the way ...
+    leaves any earlier file of that name as it was."
+  sources:
+    - src/maddening/api/README.md:147 (Checkpoints)
+    - src/maddening/api/server.py:3464 (checkpoint_save)
+    - docs/release_notes/v0.4.0.md:4686 (The REST round-6 audit, Smaller fixes)
+  conditions: a save refused at its manifest (a directory made through the API where the manifest goes), over an earlier checkpoint of that name and with none; an ordinary save.
+  oracle: the earlier file's SHA-256 unchanged and it still loads; no new file, no partial left; an ordinary save writes the file and a manifest that hashes to it.
+  tests:
+    - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_refused_at_its_manifest_leaves_the_earlier_checkpoint
+    - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_refused_at_its_manifest_writes_no_new_checkpoint
+    - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_still_writes_the_checkpoint_and_its_manifest
+  status: verified
+
+- id: REST-102
+  area: checkpoint
+  claim: >-
+    A save refused on the way is a 400 "could not save checkpoint, nothing
+    was written".
+  sources:
+    - src/maddening/api/README.md:147 (Checkpoints)
+    - src/maddening/api/server.py:3464 (checkpoint_save)
+  conditions: >-
+    a save refused at its manifest (passes); a save refused at the final
+    move, its name a directory a save of d.npz/inner.npz made through the
+    API (fails).
+  oracle: the checkpoint root's listing before and after.
+  tests:
+    - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_refused_at_its_manifest_writes_no_new_checkpoint
+    - tests/api/test_routes_answer_what_they_did.py::test_a_save_refused_at_its_final_move_writes_nothing
+  status: failing
+  finding: >-
+    checkpoint_save writes the manifest beside the target before
+    os.replace(partial, target); when the move fails (the target name is a
+    directory) the 400 says "nothing was written" and d.npz.manifest.json
+    has been written -- over an earlier manifest of that name, if there was
+    one.  Reproducer: POST /checkpoint/save?path=d.npz/inner.npz, then
+    POST /checkpoint/save?path=d.npz -> 400 and a new d.npz.manifest.json
+    in the root.  The detail also names the server's absolute paths.  Guess:
+    src/maddening/api/server.py:3492 (refuse a target that is not a file
+    before writing anything, or write the manifest under a temporary name
+    and move both).
+
+- id: REST-103
+  area: sim
+  claim: >-
+    A JAX trace records the steps after POST /sim/profile/jax/start "for at
+    most MAX_JAX_TRACE_STEPS (10 000) steps ...: past [it] it stops itself
+    and writes its files", and GET /sim/profile/jax/status says how many
+    steps it recorded and why it stopped; a stop by request is reported as
+    before.
+  sources:
+    - src/maddening/api/README.md:163 (Simulation Control)
+    - src/maddening/api/server.py:354 (MAX_JAX_TRACE_STEPS)
+    - src/maddening/api/server.py:2429 (SimulationServer._count_traced_step)
+    - docs/release_notes/v0.4.0.md:4675 (A JAX trace stops itself)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-134)
+  conditions: >-
+    the budget patched to 4 and 5 steps: three steps leave it running, the
+    fourth stops it and later steps are not counted; a run of 12 past a
+    budget of 5; a stop by request after 3 steps.
+  oracle: the status route's active, steps and stopped_by; the trace directory holds files; the stop route's 409 names the directory.
+  tests:
+    - tests/api/test_routes_answer_what_they_did.py::test_a_trace_records_exactly_its_step_budget
+    - tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_step_budget
+    - tests/api/test_jax_trace_stops_itself.py::test_a_trace_stopped_by_request_is_reported_as_before
+    - tests/api/test_jax_trace_stops_itself.py::test_the_budgets_are_published_and_bounded
+  status: verified
+
+- id: REST-104
+  area: sim
+  claim: >-
+    A JAX trace runs "for at most ... MAX_JAX_TRACE_SECONDS (600 s): past
+    [it] it stops itself and writes its files"; "It now stops after 10 000
+    steps or 600 s, writing its files".
+  sources:
+    - src/maddening/api/README.md:163 (Simulation Control)
+    - src/maddening/api/server.py:358 (MAX_JAX_TRACE_SECONDS)
+    - docs/release_notes/v0.4.0.md:4677 (A JAX trace stops itself)
+  conditions: >-
+    the budget patched to 0 s: a step recorded after it (passes); no step
+    after the start, the status read 50 ms later (fails).
+  oracle: the status route's active.
+  tests:
+    - tests/api/test_jax_trace_stops_itself.py::test_a_trace_stops_itself_at_its_time_budget
+    - tests/api/test_routes_answer_what_they_did.py::test_a_trace_past_its_time_budget_is_stopped_without_waiting_for_a_step
+  status: failing
+  finding: >-
+    The elapsed time is compared with MAX_JAX_TRACE_SECONDS only in
+    _count_traced_step, i.e. when a step is recorded, so a trace started on
+    an idle simulation runs on past its time budget until the next step (or
+    for ever).  Reproducer: patch MAX_JAX_TRACE_SECONDS to 0,
+    POST /sim/profile/jax/start, GET /sim/profile/jax/status -> active
+    true.  Guess: src/maddening/api/server.py:2439 (also check the time on
+    the status and stop routes and on a timer, or document the budget as
+    counted at each recorded step).
+
+- id: REST-105
+  area: sim
+  claim: >-
+    "PUT /sim/stride ...: The runner's steps per frame and the relay's
+    stride; answered at once, whatever the other runner routes wait for."
+  sources:
+    - src/maddening/api/README.md:161 (Simulation Control)
+    - src/maddening/api/server.py:3783 (sim_set_stride)
+    - docs/release_notes/v0.4.0.md:4686 (The REST round-6 audit, Smaller fixes)
+  conditions: a long holder of the graph lock and a /sim/start and three resets waiting behind it, timeout patched to 0.25 s.
+  oracle: 200 within half a timeout, and the value applied.
+  tests:
+    - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_each_request_behind_a_long_holder_answers_within_about_one_timeout
+  status: verified
 
 # ---------------------------------------------------------------------------
 # run_pod.py: what it runs and never runs
@@ -2212,53 +2351,44 @@ claims:
   claim: >-
     "If the runner itself changed between the session and the summary (a
     new check, a new case), the session's files no longer match it and read
-    INVALID: summarise with the commit the session ran."
+    INVALID"; "A file this runner cannot read in full (an older runner's)
+    reads INVALID and is left out of the tables, which say so; it used to
+    stop the summary on a traceback."
   sources:
     - benchmarks/multigpu/README.md:429 (5. Read the result)
-  conditions: a schema-5 indivisible.json without stencil_axis1, a key the tables read (fails); a schema-5 file with every key the tables read (passes).
-  oracle: exit 3 and the file's run-table line ending INVALID.
+    - benchmarks/multigpu/README.md:386 (5. Read the result)
+    - benchmarks/multigpu/run_pod.py:3462 (_readable_for_tables)
+  conditions: a schema-5 indivisible.json without stencil_axis1, a key the tables read; a schema-5 file with every key the tables read.
+  oracle: exit 3, the file's run-table line ending INVALID, the other files' tables still printed.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_an_older_runners_file_reads_invalid_instead_of_stopping_the_summary
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_file_the_runner_can_read_but_would_not_write_exits_3_with_its_tables
-  status: failing
-  finding: >-
-    _print_checklist_goal_tables indexes r['stencil_axis1'] (and the other
-    goals' tables index their keys) with no guard, so an older runner's file
-    stops the summary with a KeyError traceback, exit 1, after its verdict
-    line was printed INVALID.  Reproducer: in a copy of run_pod_record set
-    indivisible.json's schema_version to 5 and drop each result's
-    stencil_axis1; --summarise.  Guess: benchmarks/multigpu/run_pod.py:3334
-    (leave out of the tables a file they cannot read).
-  notes: fix/p4-13-rest addresses this (_readable_for_tables).
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_summarise_reads_an_older_runners_file_invalid_instead_of_stopping
+  status: verified
+  notes: failing until fix/p4-13-rest (#205), which stopped on a KeyError in the tables, exit 1.
 
 - id: RPD-011
   area: run_pod-summary
   claim: >-
-    "Each file records the commit git rev-parse HEAD names"; the files that
-    decide one item "must all record the same git_commit (and must record
-    one)", and a file that records none keeps every item open (exit 4).
+    "Each file records the commit git rev-parse HEAD names -- when git exits
+    0 with a full SHA; otherwise none, which keeps every item open"; the
+    files that decide one item "must all record the same git_commit (and
+    must record one)"; "a recorded commit that is not a full SHA counts as
+    none" (exit 4).
   sources:
     - benchmarks/multigpu/README.md:202 (2a. Sanity)
     - benchmarks/multigpu/README.md:418 (5. Read the result)
     - benchmarks/multigpu/run_pod.py:367 (_git_commit)
     - benchmarks/multigpu/run_pod.py:2990 (_commit_of)
-  conditions: a repository with no commit yet (git init in a tree synced without .git), where git rev-parse HEAD prints HEAD and exits 128; a record whose git_commit is "HEAD".
-  oracle: _git_commit() is None; _commit_of reads "HEAD" as no commit; a 40-hex SHA once committed.
+  conditions: a repository with no commit yet (git init in a tree synced without .git), where git rev-parse HEAD prints HEAD and exits 128, then one commit; a record whose git_commit is "HEAD".
+  oracle: _git_commit() is None, then a 40-hex SHA; _commit_of reads "HEAD" as no commit; every item open and exit 4.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_repository_with_no_commit_records_no_commit
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_recorded_commit_that_is_not_a_sha_counts_as_none
+    - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_recorded_commit_that_is_not_a_sha_is_no_commit
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_summarise_exits_4_when_no_file_records_a_commit
-  status: failing
-  finding: >-
-    _git_commit ignores git's exit status and returns stdout, so a
-    repository with no commit records the commit "HEAD" in every file, and
-    _commit_of accepts any non-empty string: every file then "records one
-    commit", the items can close and the summary exits 0.  Reproducer:
-    git init a directory, copy run_pod.py there, import it and call
-    _git_commit() -> "HEAD".  Guess: benchmarks/multigpu/run_pod.py:376
-    (require returncode 0 and a full SHA) and 2978 (the same test in
-    _commit_of).
-  notes: fix/p4-13-rest addresses this.
+  status: verified
+  notes: failing until fix/p4-13-rest (#205), which recorded "HEAD" as the commit of every file.
 
 - id: RPD-012
   area: run_pod-records

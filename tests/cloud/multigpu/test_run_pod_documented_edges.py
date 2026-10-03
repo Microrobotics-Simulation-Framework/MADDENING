@@ -7,12 +7,12 @@ not already pin.  Everything here runs in-process on CPU, and every
 goal for real.
 
 * the summary's exit codes at their edge: a goal file a killed run left
-  truncated, or one that is not a JSON object, and an older runner's file
-  whose tables this runner cannot read, must read ``INVALID`` and exit 3
-  (strict xfails: each stops the summary on a traceback, exit 1, which
-  means "no goal JSON");
+  truncated, or one that is not a JSON object, must read ``INVALID`` and
+  exit 3 (strict xfails: each stops the summary on a traceback, exit 1,
+  which means "no goal JSON"); an older runner's file whose tables this
+  runner cannot read reads ``INVALID`` and exits 3;
 * the commit a file records: a repository with no commit records none,
-  and a recorded commit that is not a SHA counts as none (strict xfails);
+  and a recorded commit that is not a SHA counts as none;
 * the checklist's goals and the seeded faults the runbook names (the
   tests that read the runbook itself are in
   ``tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py``,
@@ -90,9 +90,6 @@ def test_a_goal_file_that_is_not_an_object_reads_invalid_and_the_summary_exits_3
     assert rp.summarise(directory) == 3
 
 
-@pytest.mark.xfail(strict=True, raises=KeyError,
-                   reason="RPD-010: an older runner's file stops the summary's tables on a "
-                          "KeyError; pending fix")
 def test_an_older_runners_file_reads_invalid_instead_of_stopping_the_summary(rp, tmp_path,
                                                                             capsys):
     """The runbook: "If the runner itself changed between the session and
@@ -134,9 +131,6 @@ def _git(*args, cwd: Path) -> None:
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, timeout=60)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="RPD-011: a repository with no commit records the commit 'HEAD'; "
-                          "pending fix")
 def test_a_repository_with_no_commit_records_no_commit(tmp_path):
     """``git rev-parse HEAD`` in a repository with no commit prints
     ``HEAD`` and exits 128 -- a tree synced without its ``.git`` and then
@@ -154,9 +148,6 @@ def test_a_repository_with_no_commit_records_no_commit(tmp_path):
     assert isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", sha), sha
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="RPD-011: a recorded commit that is not a SHA is taken as one "
-                          "session's commit; pending fix")
 def test_a_recorded_commit_that_is_not_a_sha_counts_as_none(rp):
     assert rp._commit_of({"environment": {"git_commit": "0" * 40}}) == "0" * 40
     assert rp._commit_of({"environment": {"git_commit": ""}}) is None

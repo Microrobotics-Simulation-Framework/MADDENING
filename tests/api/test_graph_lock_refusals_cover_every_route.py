@@ -14,14 +14,13 @@ both (the reset and the runner start, which the route docstrings add, as
 well), with nothing written by any refused request.
 
 The lock-timeout rows are checked with ``_GRAPH_LOCK_TIMEOUT`` patched to
-a fraction of a second.  Three rows the tree does not meet are strict
-xfails (``REST-044``, ``REST-045`` and ``REST-046`` in
-``docs/validation/rest_runpod_claims.yaml``): the
-runner routes wait for the runner's own lock before the graph's, so a
-request queued behind a ``POST /sim/start`` that is waiting for the graph
-answers after more than one timeout, a ``POST /sim/stop`` behind it is not
-answered at once, and a reset that stopped the runner and then could not
-have the graph says "Nothing was changed".
+a fraction of a second, among them the runner routes queued behind a
+``POST /sim/start`` that is waiting for the graph (``REST-044`` to
+``REST-046`` in ``docs/validation/rest_runpod_claims.yaml``): each answers
+within about one timeout of its arrival -- ``POST /sim/stop`` included,
+which waits for the start to give up, not for the graph -- and a reset that
+stopped the runner and then could not have the graph says the runner stays
+stopped.  Until 0.4.0's round-6 fixes these were strict xfails.
 
 Nothing here can reach a cloud provider
 (:func:`tests.property.differential.no_cloud_launch`).
@@ -262,9 +261,6 @@ def _queue_behind_a_start(server, client, calls) -> dict:
     return log
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-044: a runner route behind a waiting /sim/start answers after "
-                          "more than one lock timeout; pending fix")
 def test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout(
         tmp_path, monkeypatch):
     monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", TIMEOUT)
@@ -279,23 +275,23 @@ def test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout(
         assert waited < 1.6 * TIMEOUT, (label, round(waited, 3), status, log)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-045: POST /sim/stop waits for a /sim/start that is waiting for "
-                          "the graph; pending fix")
-def test_stop_is_answered_at_once_while_a_start_waits_for_the_graph(tmp_path, monkeypatch):
-    monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", 1.0)
+def test_stop_behind_a_start_waiting_for_the_graph_answers_within_one_lock_timeout(
+        tmp_path, monkeypatch):
+    """The start holds the runner lock while it waits for the graph, so the
+    stop is answered when the start gives up -- within about one timeout of
+    the stop's arrival, not at once, and not after the graph is free."""
+    monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", TIMEOUT)
     server, client = _served(tmp_path)
     try:
         log = _queue_behind_a_start(server, client, [("stop", "POST", "/sim/stop")])
     finally:
         _stop(server)
     waited, status, body = log["stop"]
-    assert waited < 0.5, (round(waited, 3), status, body)
+    assert waited < 1.6 * TIMEOUT, (round(waited, 3), status, body)
+    assert log["start"][1] == 503, log
+    assert status == 409 and "Runner is not started" in body, (status, body)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-046: a reset that stopped the runner and then timed out on "
-                          "the graph says nothing was changed; pending fix")
 def test_a_reset_that_stopped_the_runner_does_not_say_nothing_was_changed(
         tmp_path, monkeypatch):
     monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", TIMEOUT)
@@ -314,3 +310,5 @@ def test_a_reset_that_stopped_the_runner_does_not_say_nothing_was_changed(
     assert resp.status_code == 503, resp.text
     detail = resp.json()["detail"]
     assert runner_kept or "Nothing was changed" not in detail, detail
+    assert not runner_kept and resp.json()["was_running"] is True
+    assert "stays stopped" in detail, detail

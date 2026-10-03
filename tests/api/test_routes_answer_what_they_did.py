@@ -6,8 +6,8 @@ Rows of ``docs/validation/rest_runpod_claims.yaml`` this module pins:
 * ``POST /sim/step`` and ``POST /sim/run`` answer a graph that cannot step
   with a 400 naming why; a single step that raises stores nothing, and a
   run that raises at its first step moves nothing.  A run that raises
-  part-way has moved the graph by every step before, and still says
-  "nothing was stepped" (a strict xfail);
+  part-way has moved the graph by every step before, and its 400 says how
+  many (``steps_run``);
 * the runner routes are a 409 when there is no runner to act on;
 * ``POST /sim/reset`` without a runner resets and says it was not running;
 * ``DELETE /graph/nodes/{name}`` removes every edge that touches the node;
@@ -17,7 +17,13 @@ Rows of ``docs/validation/rest_runpod_claims.yaml`` this module pins:
   first compile and after;
 * ``POST /checkpoint/load`` of a file it cannot read, or of another
   graph's checkpoint, is a 400 that names no parser internals and loads
-  nothing.
+  nothing (a file NumPy refuses as a pickle has its message echoed: a
+  strict xfail);
+* ``POST /checkpoint/save`` refused on the way leaves the earlier file of
+  that name as it was, and says "nothing was written" -- a save whose final
+  move fails has already written the manifest (a strict xfail);
+* a JAX trace stops itself at its step budget; past its time budget it is
+  stopped only by the next step it records (a strict xfail).
 
 Nothing here can reach a cloud provider
 (:func:`tests.property.differential.no_cloud_launch`).
@@ -26,6 +32,7 @@ Nothing here can reach a cloud provider
 from __future__ import annotations
 
 import os
+import time
 import warnings
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -105,19 +112,20 @@ def test_a_run_that_raises_at_its_first_step_is_a_400_and_moves_nothing():
     assert server.relay.step_count == 0
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="REST-058: a run that raises part-way says nothing was stepped "
-                          "after stepping; pending fix")
-def test_a_run_that_raises_part_way_does_not_say_nothing_was_stepped(monkeypatch):
-    """Slices that always double (1, 2, 4, ... steps): the 33rd step is
-    inside the sixth slice, after 31 steps were stored."""
+def test_a_run_that_raises_part_way_says_how_many_steps_it_took(monkeypatch):
+    """Slices that always double (1, 2, 4, ... steps): the 33rd step is the
+    second of the sixth slice.  The 400 carries the 32 steps taken, the
+    stored ones of the failing slice included, and the graph is after them."""
     monkeypatch.setattr(server_module, "_RUN_SLICE_SECONDS", 1e9)
     server, client = _guarded(start=0.0)
     resp = client.post("/sim/run", params={"n_steps": 100})
     assert resp.status_code == 400, resp.text
+    body = resp.json()
     moved = client.get("/graph/state/c").json()["position"]
-    assert moved > 0.0
-    assert "nothing was stepped" not in resp.json()["detail"], (moved, resp.json())
+    assert "nothing was stepped" not in body["detail"], (moved, body)
+    assert body["steps_run"] == 32 and body["n_steps"] == 100, body
+    assert moved == 32 * DT == 0.5
+    assert server.relay.step_count == 32
 
 
 # ---------------------------------------------------------------------------
@@ -342,3 +350,69 @@ def test_a_stride_call_that_names_one_value_sets_the_other_to_one():
     assert resp.status_code == 200, resp.text
     assert resp.json() == {"steps_per_frame": 7, "relay_stride": 1}
     assert server.relay.stride == 1
+
+
+# ---------------------------------------------------------------------------
+# A save refused on the way, and a JAX trace's budgets
+# ---------------------------------------------------------------------------
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="REST-102: a save refused at its final move has already written "
+                          "the manifest; pending fix")
+def test_a_save_refused_at_its_final_move_writes_nothing(tmp_path):
+    """The REST guide: the checkpoint "is written under a temporary name,
+    the manifest next, and the file moved into place last: a save refused
+    on the way (400, 'nothing was written') leaves any earlier file of that
+    name as it was".  A name that is a directory -- one a save of
+    ``d.npz/inner.npz`` made through the API -- refuses the final move,
+    after the manifest beside it was written."""
+    server, client = _ball_server(tmp_path)
+    assert client.post("/checkpoint/save", params={"path": "d.npz/inner.npz"}).status_code == 200
+    before = sorted(p.name for p in tmp_path.iterdir())
+    resp = client.post("/checkpoint/save", params={"path": "d.npz"})
+    assert resp.status_code == 400, resp.text
+    assert "nothing was written" in resp.json()["detail"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+
+
+@pytest.fixture
+def traced_client():
+    from maddening.core.simulation import profiler
+
+    server, client = _ball_server()
+    assert client.post("/sim/step").status_code == 200          # compiled before tracing
+    yield server, client
+    if profiler.jax_trace_active():
+        profiler.stop_jax_trace()
+
+
+def test_a_trace_records_exactly_its_step_budget(monkeypatch, traced_client):
+    """At a budget of 4 steps: the 4th step stops the trace, and a run that
+    goes on is not recorded past it."""
+    monkeypatch.setattr(server_module, "MAX_JAX_TRACE_STEPS", 4)
+    server, client = traced_client
+    assert client.post("/sim/profile/jax/start").status_code == 200
+    assert client.post("/sim/run", params={"n_steps": 3}).status_code == 200
+    assert client.get("/sim/profile/jax/status").json()["active"] is True
+    assert client.post("/sim/step").status_code == 200
+    status = client.get("/sim/profile/jax/status").json()
+    assert status["active"] is False and status["steps"] == 4, status
+    assert client.post("/sim/run", params={"n_steps": 5}).status_code == 200
+    assert client.get("/sim/profile/jax/status").json()["steps"] == 4
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="REST-104: past its time budget a trace runs on until it records "
+                          "another step; pending fix")
+def test_a_trace_past_its_time_budget_is_stopped_without_waiting_for_a_step(
+        monkeypatch, traced_client):
+    """The REST guide: a trace runs "for at most MAX_JAX_TRACE_STEPS (10 000)
+    steps or MAX_JAX_TRACE_SECONDS (600 s): past either it stops itself and
+    writes its files".  The time is read only when a step is recorded, so a
+    trace left with the simulation idle runs on.  At a budget of 0 s."""
+    monkeypatch.setattr(server_module, "MAX_JAX_TRACE_SECONDS", 0.0)
+    server, client = traced_client
+    assert client.post("/sim/profile/jax/start").status_code == 200
+    time.sleep(0.05)
+    status = client.get("/sim/profile/jax/status").json()
+    assert status["active"] is False, status

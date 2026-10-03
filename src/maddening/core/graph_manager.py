@@ -1377,7 +1377,9 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # (eta ||t_i|| root)``, the largest over the responding probes added
     # to the largest leading-order term.  Exactly zero where the Jacobian
     # does not move (``h = 0``, ``miss = 0``), so an affine group's bound
-    # is untouched.  Without it the bound read 0.986x the true gradient
+    # is the one it was, to its last bit or so (the extra operations can
+    # move how XLA fuses the rest: one ulp on one of 125 configurations
+    # measured).  Without it the bound read 0.986x the true gradient
     # error, usable, on a bilinear pair stopped two passes in (``h =
     # 0.19``): the leading-order term, its distance already stretched to
     # ``t*`` and its resolvent to ``x*``, still took the change of ``G``

@@ -11239,7 +11239,7 @@ anomalies:
       - "tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py::test_a_non_finite_cotangent_on_a_mesh_gives_a_nan_gradient"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-156"
+  - anomaly_id: "MADD-ANO-160"
     title: "A checkpoint load -- POST /checkpoint/load and GraphManager.load_state -- restored parameter values the write paths refuse (past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string), answered 200, and left a graph whose save did not reload and whose steps diverged"
     description: >
       A checkpoint carries the graph's live parameter leaves, and the
@@ -11318,7 +11318,7 @@ anomalies:
       - "tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_graph_built_outside_its_bounds_reloads_its_own_checkpoint"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-157"
+  - anomaly_id: "MADD-ANO-161"
     title: "A parameter write to a HybridNode was answered and then lost: the hybrid held a copy of its physics node's params, so PUT /graph/params echoed the new value and the step kept the old one"
     description: >
       `HybridNode.__init__` passed its physics node's params to
@@ -11363,7 +11363,7 @@ anomalies:
       - "tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_to_a_hybrid_over_a_sharded_node_changes_the_trajectory"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-158"
+  - anomaly_id: "MADD-ANO-162"
     title: "POST /sim/run that could not have the graph part-way through answered 503 'Nothing was changed; retry shortly' after it had stepped, so a client that retried stepped the graph twice; its final read waited with no timeout"
     description: >
       A run steps in slices and takes the graph lock for each.  When a slice
@@ -11407,7 +11407,7 @@ anomalies:
       - "tests/api/test_a_run_that_cannot_have_the_graph_says_how_far_it_got.py::test_a_zero_step_run_behind_a_long_holder_is_a_503_that_took_nothing"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-159"
+  - anomaly_id: "MADD-ANO-163"
     title: "POST /sim/profile answered 500 for a graph that could not compile with any error but a RuntimeError"
     description: >
       The profile route caught `RuntimeError` alone around the profiler,

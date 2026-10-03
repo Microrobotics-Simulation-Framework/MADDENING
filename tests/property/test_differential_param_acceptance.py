@@ -69,9 +69,9 @@ Fixed, and run as tests: **N1** -- the REST route stored a numeric string
 (``"1.5"``) in a float leaf as the number; **B2-H1** -- a checkpoint load
 (``load_state``, ``POST /checkpoint/load``) restored what PUT refuses: out
 of bounds, non-finite, a boolean, a numeric string, a value the constructor
-refuses (``MADD-ANO-156``); **B2-L10** -- ``POST /graph/nodes`` applied no
+refuses (``MADD-ANO-160``); **B2-L10** -- ``POST /graph/nodes`` applied no
 ``ParamSpec`` bounds, and **N3** -- took a boolean for a float constant;
-**B2-H2** -- a write to a ``HybridNode`` was lost (``MADD-ANO-157``).  The
+**B2-H2** -- a write to a ``HybridNode`` was lost (``MADD-ANO-161``).  The
 sharded wrappers agree.
 
 Tolerance: none.  Acceptance is a yes or no, and a stored value is compared
@@ -748,7 +748,7 @@ def test_a_restore_door_refuses_what_no_door_takes_with_nothing_changed(doors, v
 @pytest.mark.parametrize("value", [-1.0, -5.0, math.nan, math.inf, True, "1.5"],
                          ids=["below-bound", "damping-like", "nan", "inf", "bool", "string"])
 def test_a_restore_door_refuses_what_the_write_doors_refuse(doors, value):
-    """B2-H1, fixed (``MADD-ANO-156``)."""
+    """B2-H1, fixed (``MADD-ANO-160``)."""
     assert check_acceptance(doors, ParamSpec(bounds=(0.0, None)), value,
                             restore=True) == "refused"
 
@@ -969,7 +969,7 @@ def test_a_wrapper_node_refuses_a_value_outside_its_bounds_with_nothing_changed(
 
 
 def test_a_hybrid_node_holds_a_write_every_door_takes(wrapper_root):
-    """B2-H2, fixed (``MADD-ANO-157``)."""
+    """B2-H2, fixed (``MADD-ANO-161``)."""
     assert check_acceptance(wrapped("hybrid", wrapper_root), None, 45.0,
                             restore=True) == "accepted"
 

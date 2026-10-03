@@ -11031,4 +11031,6 @@ anomalies:
       - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_ift_linear_solve_answers_a_non_finite_rhs_with_nan"
       - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_no_krylov_backend_is_handed_a_non_finite_rhs"
       - "tests/core/test_krylov_solves_propagate_a_non_finite_rhs.py::test_a_loop_cg_handed_a_non_finite_rhs_does_not_iterate_from_its_start"
+      - "tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py::test_a_non_finite_entry_in_one_shard_gives_nan_in_every_shard"
+      - "tests/cloud/multigpu/test_a_sharded_solve_of_a_non_finite_rhs_is_nan_on_a_mesh.py::test_a_non_finite_cotangent_on_a_mesh_gives_a_nan_gradient"
     github_issue: null

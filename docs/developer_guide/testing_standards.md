@@ -921,7 +921,15 @@ domains but `hostile_input`. Within a REST row `n/a` is kept for these:
   slice, the runner stops at the lifespan's end (REST-052, REST-053);
 - `runner_active` and `sim_run_active` for a route REST-041 refuses beside
   a stepper (the state and structure writes, a load, a step or run): the
-  409 is that domain's claim, and REST-041's and REST-096's cells test it.
+  409 is that domain's claim, and REST-041's and REST-096's cells test it;
+  and `sim_run_active` where the claim needs the runner's thread alive, as
+  no `/sim/run` can be in flight then;
+- `wrapper_nodes` and `checkpoint_restore` for a claim about the runner,
+  its routes, the stride or the lock, which read no node and no state;
+- `large_payload` and `hostile_input` for a claim about what a valid
+  request does (a write takes effect, a read returns the state): an
+  oversized or hostile request is refused, and the refusal is a row of its
+  own (REST-029 to REST-037, REST-080, REST-081, REST-092, REST-095).
 
 Most REST cells cite one of two batteries. `tests/api/rest_claims_support.py`
 states each route row's claim once, as a check keyed by its row id (the

@@ -1835,7 +1835,10 @@ claims:
   sources:
     - src/maddening/api/server.py:740 (_GraphLock)
     - src/maddening/api/README.md:211 (Concurrency, limits and shutdown)
-  conditions: threads asking in a known order; the runner behind its schedule; a stop arriving as the runner is granted the lock.
+  conditions: >-
+    threads asking in a known order; the runner behind its schedule; a stop
+    arriving as the runner is granted the lock. Not claimed for a server
+    shutting down.
   oracle: grant order; elapsed wait against the step time; RuntimeError on a foreign release.
   tests:
     - tests/api/test_concurrent_requests_are_serialised.py::test_the_graph_lock_is_granted_in_the_order_it_was_asked_for
@@ -1853,7 +1856,7 @@ claims:
     sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-047]'
     large_payload: n/a
     hostile_input: n/a
-    shutdown: n/a
+    shutdown: narrowed
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: n/a
@@ -2073,7 +2076,9 @@ claims:
   sources:
     - src/maddening/api/README.md:156 (Simulation Control)
     - src/maddening/api/server.py:3675 (sim_start)
-  conditions: a running runner; a runner whose thread died on a step.
+  conditions: >-
+    a running runner; a runner whose thread died on a step. Not claimed for a
+    server shutting down.
   oracle: 409 "already started"; a new runner started after a dead one.
   tests:
     - tests/api/test_api.py::TestSimEndpoints::test_start_twice_fails
@@ -2089,7 +2094,7 @@ claims:
     sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-054]'
     large_payload: n/a
     hostile_input: n/a
-    shutdown: n/a
+    shutdown: narrowed
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: n/a
@@ -3224,6 +3229,7 @@ claims:
     wrapper_nodes:
       - tests/cloud/multigpu/test_sharded_params.py::test_a_rest_param_write_outside_a_sharded_nodes_bounds_is_refused_by_name
       - 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_wrapper_node[REST-085]'
+      - tests/property/test_differential_param_acceptance.py::test_a_wrapper_node_refuses_a_value_outside_its_bounds_with_nothing_changed
     checkpoint_restore: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_on_a_graph_restored_from_a_checkpoint[REST-085]'
     dry_run_cpu: n/a
     relabelled_records: n/a

@@ -11174,6 +11174,61 @@ class GraphManager:
         return inspection.to_dot(self, rankdir=rankdir)
 
     @stability(StabilityLevel.EXPERIMENTAL)
+    def print_graph_diagram(self, *, theme: Optional[str] = None, direction: str = "LR",
+                            use_ascii: bool = False, file: Optional[TextIO] = None) -> None:
+        """Draw the graph in the terminal as boxes and arrows.
+
+        The content of :meth:`to_mermaid`, drawn by the optional
+        ``termaid`` package (``pip install "maddening[terminal]"``): each
+        node a box reading ``name :: Type``, each coupling group a frame
+        titled ``coupling group a+b``, each edge an arrow labelled
+        ``field→input`` (dotted for a flux edge), each external input a
+        parallelogram feeding its node.  Raises ``ImportError`` naming
+        the extra when ``termaid`` is missing.
+
+        With ``rich`` installed (the same extra) the drawing is coloured
+        by ``theme`` when ``file`` is a terminal; any other file gets the
+        same drawing as plain text.  Without ``rich``, ``theme=None``
+        draws it uncoloured and a named theme raises ``ImportError``.
+
+        For reading, not parsing: the layout is termaid's, and the few
+        characters termaid's parser cannot carry in a label (``"``,
+        a backtick, ``%%``, ``:::``, a literal ``\\n``, a line break) are
+        shown as look-alikes.  :meth:`to_mermaid` and :meth:`format_graph`
+        carry every name exactly.  Read-only, as :meth:`format_graph`:
+        nothing is compiled, and the state, ``params`` and flags are
+        untouched.
+
+        Parameters
+        ----------
+        theme : str, optional
+            One of termaid's themes: ``"default"``, ``"terra"``,
+            ``"neon"``, ``"mono"``, ``"amber"``, ``"phosphor"``,
+            ``"gruvbox"``, ``"monokai"``, ``"dracula"``, ``"nord"``,
+            ``"solarized"``; any other name raises ``ValueError``.
+            ``None`` (the default) colours with ``"default"`` when
+            ``rich`` is installed.
+        direction : {"LR", "RL", "TB", "BT"}
+            Flowchart direction; ``"TB"`` stacks a wide graph vertically.
+        use_ascii : bool
+            Draw the boxes and arrows in ASCII instead of Unicode box
+            drawing, and write the edge labels' ``→`` as ``->``.  Names
+            are drawn as they are.
+        file : text stream, optional
+            Where to write (default ``sys.stdout``).
+
+        Notes
+        -----
+        Usage (the user guide's inspection page shows a drawing)::
+
+            gm.print_graph_diagram()                       # coloured on a terminal
+            gm.print_graph_diagram(theme="amber", direction="TB")
+        """
+        from maddening.core import inspection  # noqa: PLC0415
+        inspection.print_graph_diagram(self, theme=theme, direction=direction,
+                                       use_ascii=use_ascii, file=file)
+
+    @stability(StabilityLevel.EXPERIMENTAL)
     def state_summary(self, *, include_meta: bool = False) -> InspectionTable:
         """Per-field statistics of the state the graph holds now.
 

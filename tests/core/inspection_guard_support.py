@@ -136,6 +136,26 @@ try:
 except ImportError:      # pragma: no cover - CI installs rich through the ci extra
     HAS_RICH = False
 
+HAS_TERMAID = True
+try:
+    import termaid  # noqa: F401
+except ImportError:      # pragma: no cover - CI installs termaid through the ci extra
+    HAS_TERMAID = False
+
+
+def unavailable(method: str) -> str | None:
+    """Why ``INSPECTION_CALLS[method]`` cannot run here, or ``None``.
+
+    The ``*_rich`` entries need ``rich`` and the ``*_diagram*`` entries
+    ``termaid``, both from the optional ``terminal`` extra; CI installs
+    both through the ``ci`` extra, so there every entry runs.
+    """
+    if method.endswith("_rich") and not HAS_RICH:
+        return "rich is not installed; the rich renderer is an optional extra"
+    if "_diagram" in method and not HAS_TERMAID:
+        return "termaid is not installed; the diagram renderer is an optional extra"
+    return None
+
 
 def _sink() -> io.StringIO:
     return io.StringIO()
@@ -150,6 +170,9 @@ INSPECTION_CALLS: dict[str, Callable[[Any], Any]] = {
     "print_graph_rich": lambda gm: gm.print_graph(file=_sink(), rich=True),
     "to_mermaid": lambda gm: gm.to_mermaid(),
     "to_dot": lambda gm: gm.to_dot(),
+    "print_graph_diagram": lambda gm: gm.print_graph_diagram(file=_sink()),
+    "print_graph_diagram_ascii_themed_rich": lambda gm: gm.print_graph_diagram(
+        file=_sink(), theme="amber", direction="TB", use_ascii=True),
     "state_summary": lambda gm: gm.state_summary(include_meta=True),
     "print_state_summary": lambda gm: gm.print_state_summary(file=_sink(), include_meta=True),
     "print_state_summary_rich": lambda gm: gm.print_state_summary(file=_sink(), rich=True),

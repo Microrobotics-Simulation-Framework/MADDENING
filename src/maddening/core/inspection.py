@@ -1086,8 +1086,8 @@ def _bound_violation(spec: Any, leaf: Any) -> Optional[str]:
     (:func:`~maddening.core.params._bound_operands`): the value and the
     bound rounded to the dtype JAX compares them in, then compared exactly,
     and under a ``log`` / ``logit`` transform a distance from the bound
-    below the smallest normal number counts as on it."""
-    from maddening.core.params import _bound_operands  # noqa: PLC0415
+    that the step's arithmetic flushes to zero counts as on it."""
+    from maddening.core.params import _bound_operands, _step_gap  # noqa: PLC0415
 
     arr = np.asarray(leaf)
     if arr.dtype.kind not in "biufc" and not jnp.issubdtype(arr.dtype, jnp.floating):
@@ -1102,15 +1102,15 @@ def _bound_violation(spec: Any, leaf: Any) -> Optional[str]:
     strict = spec.transform in ("log", "logit")
     if lo is None and spec.transform == "log":
         a, b, tiny = _bound_operands(arr, 0.0)
-        if np.any(a - b < tiny):
+        if np.any(_step_gap(a, b, tiny) <= 0.0):
             return "at or below 0 (transform='log' without a lower bound is measured from 0)"
     if lo is not None:
         a, b, tiny = _bound_operands(arr, lo)
-        if np.any(a - b < tiny) if strict else np.any(a < b):
+        if np.any(_step_gap(a, b, tiny) <= 0.0) if strict else np.any(a < b):
             return f"below the lower bound {_cell(float(lo))}"
     if hi is not None:
         a, b, tiny = _bound_operands(arr, hi)
-        if np.any(b - a < tiny) if strict else np.any(a > b):
+        if np.any(_step_gap(b, a, tiny) <= 0.0) if strict else np.any(a > b):
             return f"above the upper bound {_cell(float(hi))}"
     return None
 

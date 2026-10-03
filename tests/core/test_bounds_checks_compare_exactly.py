@@ -8,8 +8,8 @@ every positive identity-transform parameter.  ``check_params``, the FMU's
 it, so each accepted a value below the range the spec declares and reported
 it back as stored.  The check now compares on the host, exactly, with the
 value and the bound rounded to the dtype JAX would compare them in; under a
-``log`` / ``logit`` transform, whose own arithmetic flushes, a value within
-the smallest normal number of its bound is refused as on it.
+``log`` / ``logit`` transform, whose own arithmetic flushes, a value whose
+distance from its bound that arithmetic flushes to zero is refused as on it.
 """
 
 from __future__ import annotations
@@ -117,3 +117,21 @@ def test_the_params_table_flags_what_check_refuses(param, value, flagged):
     except ValueError:
         refused = True
     assert refused is flagged
+
+
+def test_a_strict_bound_is_met_as_the_steps_arithmetic_meets_it():
+    """Under ``log`` the question is whether the value has a coordinate in
+    the step's arithmetic, which flushes subnormals: with a bound that is
+    itself a subnormal (read as 0 there) the smallest normal number is
+    strictly inside -- it is what ``constrain`` returns for a coordinate of
+    -88, and ``unconstrain`` takes it back finitely -- while one subnormal
+    ulp above a normal bound is not (the difference flushes to 0)."""
+    lo = float(np.float32(1.884746434516879e-41))
+    spec = ParamSpec(bounds=(lo, None), transform="log")
+    p = spec.to_constrained(jnp.float32(-88.0))
+    spec.check(p, name="k")
+    assert np.isfinite(float(spec.to_unconstrained(p)))
+    normal = float(np.float32(2.0 * TINY32))
+    above = np.nextafter(np.float32(normal), np.float32(1.0))
+    with pytest.raises(ValueError, match="below bound"):
+        ParamSpec(bounds=(normal, None), transform="log").check(above, name="k")

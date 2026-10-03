@@ -1516,8 +1516,9 @@ claims:
     because check compared through jnp and XLA on CPU flushes subnormal
     inputs to zero.  check now compares on the host, exactly, with the
     value and the bound rounded to the dtype JAX compares them in; under
-    log / logit a value within the smallest normal of its bound is refused
-    as on it (MADD-ANO-132; tests/core/test_bounds_checks_compare_exactly.py).
+    log / logit a value whose distance from its bound the step's arithmetic
+    flushes to zero is refused as on it (MADD-ANO-132;
+    tests/core/test_bounds_checks_compare_exactly.py).
 
 # ---------------------------------------------------------------------------
 # node.params and gm.params as fitting and export see them

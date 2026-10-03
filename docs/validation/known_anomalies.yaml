@@ -10015,10 +10015,12 @@ anomalies:
       Resolved in 0.4.0 (7a7c49a, 2026-10-03): `check` compares on the host,
       in NumPy, exactly, with the value and the bound each rounded to the
       dtype JAX compares them in; under a `log` / `logit` transform, whose
-      step arithmetic flushes, a value within the smallest normal number
-      of its bound is refused as on it (`jnp.log` of a float32 `1e-40` is
-      `-inf`), which keeps the refusals the flush used to make by
-      accident.  `params_table` applies the same rule.
+      step arithmetic flushes, the distance from a bound is computed as
+      that arithmetic computes it (subnormal operands and results read as
+      zero) and a distance that is not positive is refused as on the bound
+      (`jnp.log` of a float32 `1e-40` is `-inf`), which keeps the refusals
+      the flush used to make by accident.  `params_table` applies the same
+      rule.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >

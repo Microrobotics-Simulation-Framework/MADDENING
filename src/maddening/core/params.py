@@ -401,10 +401,12 @@ class ParamSpec:
         ``(0, None)`` bound -- every ``check_params``, FMU ``set`` and
         ``set_state`` behind it then accepted a value below the range the
         spec declares, and reported it back as stored.  Under a ``log`` or
-        ``logit`` transform the step's own arithmetic is what flushes, so
-        there a value whose distance from a bound is below the dtype's
-        smallest normal number is refused as on it: ``log`` of a float32
-        ``1e-40`` is ``-inf`` on that backend.
+        ``logit`` transform the step's own arithmetic decides whether the
+        value has a coordinate, so there its distance from a bound is
+        computed as that arithmetic computes it (:func:`_step_gap`:
+        subnormal operands and results flushed to zero) and a distance
+        that is not positive is refused as on the bound: ``log`` of a
+        float32 ``1e-40`` is ``-inf`` on that backend.
         """
         lo, hi = self.bounds
         v = np.asarray(p)
@@ -421,7 +423,7 @@ class ParamSpec:
             # ``unconstrain`` returned -inf for 0 and NaN below it, and this
             # check used to pass both.
             a, b, tiny = _bound_operands(v, 0.0)
-            if bool(np.any(a - b < tiny)):
+            if bool(np.any(_step_gap(a, b, tiny) <= 0.0)):
                 raise ValueError(
                     f"{name}={v} below bound 0.0 (transform='log' without a "
                     "lower bound is measured from 0, so the value must be > 0, "
@@ -429,11 +431,11 @@ class ParamSpec:
                     "below which the arithmetic flushes it to 0)")
         if lo is not None:
             a, b, tiny = _bound_operands(v, lo)
-            if bool(np.any(a - b < tiny) if strict else np.any(a < b)):
+            if bool(np.any(_step_gap(a, b, tiny) <= 0.0) if strict else np.any(a < b)):
                 raise ValueError(f"{name}={v} below bound {lo}")
         if hi is not None:
             a, b, tiny = _bound_operands(v, hi)
-            if bool(np.any(b - a < tiny) if strict else np.any(a > b)):
+            if bool(np.any(_step_gap(b, a, tiny) <= 0.0) if strict else np.any(a > b)):
                 raise ValueError(f"{name}={v} above bound {hi}")
 
     def _check_through_jnp(self, v, name: str, strict: bool) -> None:
@@ -465,6 +467,20 @@ def _bound_operands(v: np.ndarray, bound) -> tuple[np.ndarray, float, float]:
     b = float(np.asarray(bound, dtype=dt).astype(np.float64))
     tiny = float(jnp.finfo(dt).tiny) if jnp.issubdtype(dt, jnp.floating) else 0.0
     return a, b, tiny
+
+
+def _step_gap(a, b, tiny: float):
+    """``a - b`` as XLA's CPU backend computes it in a dtype whose smallest
+    normal number is ``tiny``: a subnormal operand is read as zero, and a
+    subnormal result is stored as zero.  ``a`` and ``b`` are exact float64
+    copies of values of that dtype (:func:`_bound_operands`), so the
+    difference of the flushed operands is exact and only its flush is
+    left to apply.  A strict bound is met when this is positive: it is the
+    distance ``log`` and the logistic's inverse take."""
+    def flush(x):
+        return np.where(np.abs(x) < tiny, 0.0, x)
+    gap = flush(np.asarray(a, dtype=np.float64)) - flush(np.asarray(b, dtype=np.float64))
+    return flush(gap)
 
 
 DEFAULT_SPEC = ParamSpec()

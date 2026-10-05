@@ -338,9 +338,10 @@ def test_a_replaced_mapping_counts_the_writes_made_into_it_afterwards():
 
 
 def test_a_replaced_mapping_with_no_later_write_reaches_the_graph():
-    """The replacement alone is a write of every key, including one never
-    written before -- the replaced mapping's write counts start again at
-    zero, so only the identity test can see it."""
+    """The replacement alone is a write of the keys it changes, including
+    one never written before -- the replaced mapping's own write counts
+    start again at zero, so the replacement itself counts them
+    (``_ParamsDict._succeed``)."""
     gm = _spring()
     node = gm.get_node("s")
     node.params = {**node.params, "damping": 7.0}
@@ -448,3 +449,204 @@ def test_an_in_place_write_is_taken_in_once_and_a_later_calibration_wins():
     assert gm.params["nodes"]["v"]["rates"].tolist() == [7.0, 2.0]
     gm.step()
     assert gm.params["nodes"]["v"]["rates"].tolist() == [7.0, 2.0]
+
+
+# ---------------------------------------------------------------------------
+# A replaced mapping writes the keys it changes, and no others (MADD-ANO-179)
+# ---------------------------------------------------------------------------
+
+
+def _c(gm):
+    return float(gm.params["nodes"]["s"]["damping"])
+
+
+def test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone():
+    """``node.params = {**node.params, "damping": 5.0}`` names one key.  Read
+    as a write of every key, it put the node's own stiffness (30) back over
+    the 45 a fit had calibrated in ``gm.params``, with no word
+    (audit_040_p4_12/fmu-sysid/repro_F6_low_wording_items.py); the keyed
+    write ``node.params["damping"] = 5.0`` never did."""
+    for write in (lambda node: node.params.__setitem__("damping", 5.0),
+                  lambda node: setattr(node, "params", {**node.params, "damping": 5.0})):
+        gm = _spring()
+        gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(45.0, jnp.float32)   # the calibration
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            write(gm.get_node("s"))
+            assert (_k(gm), _c(gm)) == (45.0, 5.0)
+            assert _k_stepped(gm) == pytest.approx(45.0, rel=1e-3)
+            gm.compile()
+        assert (_k(gm), _c(gm)) == (45.0, 5.0)
+        assert _saved_value(gm, "s", "stiffness") == 45.0
+
+
+def test_a_replacement_that_hands_a_key_back_unchanged_is_not_a_write_of_it():
+    """The rule, both ways: handed the value the node already held, a key is
+    not written and its calibration stays; the keyed write of that same
+    value is a write and reverts it (``test_writing_the_nodes_own_value_back_
+    reverts_a_calibration``)."""
+    gm = _spring()
+    gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(42.0, jnp.float32)
+    node = gm.get_node("s")
+    node.params = {**node.params, "stiffness": 30.0}      # the node's own value, handed back
+    assert _k(gm) == 42.0
+    node.params = dict(node.params)                       # a copy changes nothing
+    assert _k(gm) == 42.0 and node.params._write_counts() == {}
+    node.params["stiffness"] = 30.0                       # the keyed write is a write
+    assert _k(gm) == 30.0
+
+
+def test_a_replacement_carries_the_writes_the_old_mapping_had_pending():
+    """A keyed write the graph has not yet taken, then the mapping replaced:
+    the write is not lost with the mapping that counted it -- including a
+    write of the value the node already held, which no comparison of the two
+    mappings can see."""
+    gm = _spring()
+    gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(42.0, jnp.float32)
+    gm.params["nodes"]["s"]["damping"] = jnp.asarray(9.0, jnp.float32)
+    node = gm.get_node("s")
+    node.params["stiffness"] = 30.0                       # pending: reverts the calibration
+    node.params = {**node.params, "mass": 2.5}            # ... and the mapping goes
+    node.params = {**node.params, "rest_length": 1.25}    # ... twice
+    assert node.params._writes == 0                       # its own counts start at zero
+    assert node.params._write_counts() == {"stiffness": 1, "mass": 1, "rest_length": 1}
+    leaves = gm.params["nodes"]["s"]
+    assert (float(leaves["stiffness"]), float(leaves["mass"]), float(leaves["rest_length"])) \
+        == (30.0, 2.5, 1.25)
+    assert float(leaves["damping"]) == 9.0                # handed back twice: still calibrated
+
+
+@pytest.mark.parametrize("spelling", ["list", "ndarray"])
+def test_a_replacement_and_an_in_place_write_do_not_hide_each_other(spelling):
+    """A list value is shared by ``{**node.params}``: an element written in
+    place before or after the replacement is a write of its key; a new list
+    of the same numbers is not, and one of other numbers is."""
+    import numpy as np
+
+    def rates(*values):
+        return list(values) if spelling == "list" else np.asarray(values, np.float32)
+
+    gm = _vec(rates(1.0, 2.0))
+    node = gm.get_node("v")
+    node.params["rates"][0] = 5.0                         # in place, pending
+    node.params = {**node.params}                         # replaced: same list object
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [5.0, 2.0]
+    gm.params["nodes"]["v"]["rates"] = jnp.asarray([7.0, 2.0], jnp.float32)   # a calibration
+    node.params = {**node.params, "rates": rates(5.0, 2.0)}                  # equal: no write
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [7.0, 2.0]
+    node.params = {**node.params, "rates": rates(5.0, 3.0)}                  # changed: a write
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [5.0, 3.0]
+    node.params = {**node.params}
+    node.params["rates"][1] = 4.0                         # in place, after the replacement
+    assert gm.params["nodes"]["v"]["rates"].tolist() == [5.0, 4.0]
+
+
+def test_a_counting_mapping_from_elsewhere_writes_the_keys_it_changes():
+    """A ``_ParamsDict`` assigned as it is (another node's, a sharded
+    wrapper's) has counts that say nothing about this graph: its values do."""
+    gm = _spring()
+    gm.params["nodes"]["s"]["stiffness"] = jnp.asarray(42.0, jnp.float32)
+    node = gm.get_node("s")
+    node.params["mass"] = 1.75                            # pending on the old mapping
+    foreign = _ParamsDict({**node.params, "damping": 6.0})
+    foreign["damping"] = 6.0                              # counted before it arrives
+    node.params = foreign
+    assert node.params is foreign
+    leaves = gm.params["nodes"]["s"]
+    assert (float(leaves["stiffness"]), float(leaves["damping"]), float(leaves["mass"])) \
+        == (42.0, 6.0, 1.75)
+    foreign["stiffness"] = 30.0                           # and it counts from here on
+    assert _k(gm) == 30.0
+
+
+_ORACLE_KEYS = ("stiffness", "damping", "mass")
+#: Three values a key, so that a write of the value already held is common.
+_ORACLE_VALUES = {"stiffness": (30.0, 40.0, 50.0), "damping": (2.0, 3.0, 4.0),
+                  "mass": (1.5, 2.5, 3.5)}
+
+
+class _LaterWriteWins:
+    """The reference model of "the later of a node.params write and a
+    gm.params write wins": what the node holds, what the graph holds, and
+    the keys the node has written since the graph last looked."""
+
+    def __init__(self):
+        self.node = {"stiffness": 30.0, "damping": 2.0, "mass": 1.5}
+        self.live = dict(self.node)
+        self.pending: set = set()
+
+    def sync(self):
+        for key in self.pending:
+            self.live[key] = self.node[key]
+        self.pending.clear()
+
+    def gm_write(self, key, value):          # reads gm.params first
+        self.sync()
+        self.live[key] = value
+
+    def node_write(self, key, value):        # a write, whatever the value
+        self.node[key] = value
+        self.pending.add(key)
+
+    def replace(self, mapping):              # writes the keys it changes
+        self.pending |= {k for k in mapping if mapping[k] != self.node[k]}
+        self.node = dict(mapping)
+
+
+def test_the_later_write_wins_over_generated_sequences_of_writes():
+    """400 generated sequences of keyed node writes, mapping replacements
+    (one key changed, several, none), ``gm.params`` leaf writes, whole-tree
+    assignments and reads, held to the reference model after every read:
+    whichever of a ``node.params`` write and a ``gm.params`` write came
+    later is the value the graph holds, a replacement being a write of the
+    keys it changed and of no others."""
+    import numpy as np
+
+    rng = np.random.default_rng(2026)
+    gm = _spring()
+    node = gm.get_node("s")
+    replacements = 0
+    for sequence in range(400):
+        model = _LaterWriteWins()
+        # Every sequence starts from the same state, by writes the graph takes.
+        for key, value in model.node.items():
+            node.params[key] = value
+        for key in _ORACLE_KEYS:
+            gm.params["nodes"]["s"][key] = jnp.asarray(model.node[key], jnp.float32)
+        trace = []
+        for _ in range(int(rng.integers(3, 10))):
+            op = rng.choice(["node", "replace", "replace-many", "gm", "gm-all", "read"])
+            key = str(rng.choice(_ORACLE_KEYS))
+            value = float(rng.choice(_ORACLE_VALUES[key]))
+            trace.append((str(op), key, value))
+            if op == "node":
+                node.params[key] = value
+                model.node_write(key, value)
+            elif op == "replace":
+                node.params = {**node.params, key: value}
+                model.replace({**model.node, key: value})
+                replacements += 1
+            elif op == "replace-many":
+                new = {k: float(rng.choice(_ORACLE_VALUES[k])) for k in _ORACLE_KEYS}
+                trace[-1] = ("replace-many", new)
+                node.params = {**node.params, **new}
+                model.replace({**model.node, **new})
+                replacements += 1
+            elif op == "gm":
+                gm.params["nodes"]["s"][key] = jnp.asarray(value, jnp.float32)
+                model.gm_write(key, value)
+            elif op == "gm-all":
+                gm.params = jax.tree.map(lambda x: x, gm.params)
+                model.sync()
+            else:
+                model.sync()
+                got = {k: float(gm.params["nodes"]["s"][k]) for k in _ORACLE_KEYS}
+                assert got == model.live, (sequence, trace)
+        model.sync()
+        got = {k: float(gm.params["nodes"]["s"][k]) for k in _ORACLE_KEYS}
+        assert got == model.live, (sequence, trace)
+        assert {k: node.params[k] for k in _ORACLE_KEYS} == model.node, (sequence, trace)
+    assert replacements > 300                             # the oracle saw what it is about
+    # And the graph runs what it holds, after all of it.
+    node.params = {**node.params, "stiffness": 40.0, "damping": 2.0, "mass": 1.5}
+    assert _k_stepped(gm) == pytest.approx(40.0, rel=1e-3)

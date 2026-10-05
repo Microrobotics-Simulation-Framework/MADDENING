@@ -510,8 +510,10 @@ def test_a_shrunken_step_never_reads_as_stationary(monkeypatch, shrunk):
     proposed, undamped = [], []
 
     def moved(th, cand) -> float:
-        """The largest move of a coordinate, relative to itself."""
-        return float(jnp.max(jnp.abs(cand - th) / jnp.abs(th)))
+        """The largest move of a coordinate, relative to itself.  The solves
+        are asked in the tangent frame, where a ``log`` coordinate's origin
+        is 0 and its answer the tangent step -- a relative move already."""
+        return float(jnp.max(jnp.abs(cand - th) / jnp.where(th == 0, 1.0, jnp.abs(th))))
 
     def shrunken(th, r, J, lam, lo, hi, held):
         cand, ok = marquardt(th, r, J, lam, lo, hi, held)

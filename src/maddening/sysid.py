@@ -1338,6 +1338,62 @@ class _FittedLeaf:
         return slice(self.start, self.stop)
 
 
+#: How many compiled maps :func:`_compiled_physical_map` keeps: one per
+#: distinct set of fitted leaves' specs, shapes and dtypes.
+_PHYSICAL_MAP_CACHE_SIZE = 64
+
+
+@functools.lru_cache(maxsize=_PHYSICAL_MAP_CACHE_SIZE)
+def _compiled_physical_map(signature: tuple, theta_dtype):
+    """``(values, slopes, bends)``: the compiled ``theta -> physical`` map of
+    :class:`_PhysicalMap` for fitted leaves of ``signature`` -- a tuple of
+    ``(spec, shape, dtype)`` in ``theta`` order -- and its first and second
+    derivatives.
+
+    The start (``theta0``) and the values that went in (``given``) are
+    arguments, not constants, so the programs depend on the leaves' specs,
+    shapes and dtypes alone and a second fit of the same parameters reuses
+    them: there is one compiled map per such signature in the process, not
+    one per fit.
+
+    ``values(theta, theta0, given)``: per fitted leaf, entry by entry, the
+    value that went in where the coordinate is where it started -- ``==`` at
+    the leaf's dtype: the claim is bitwise identity, and an entry an
+    optimiser moved by one ulp *was* fitted -- and the leaf's transform of
+    the coordinate anywhere else.  ``slopes(theta)`` and ``bends(theta)``
+    are the transform's own first and second derivative there, entry by
+    entry (every transform is elementwise), whatever ``values`` selected.
+    """
+    spans, offset = [], 0
+    for _, shape, _ in signature:
+        n = int(math.prod(shape))
+        spans.append(slice(offset, offset + n))
+        offset += n
+
+    def values(theta, theta0, given):
+        out = []
+        for (spec, shape, dtype), span, leaf in zip(signature, spans, given):
+            u = theta[span].reshape(shape).astype(dtype)
+            u0 = theta0[span].reshape(shape).astype(dtype)
+            out.append(jnp.where(u == u0, leaf, spec.to_constrained(u)))
+        return tuple(out)
+
+    def derivative(theta, order: int):
+        parts = []
+        for (spec, _, dtype), span in zip(signature, spans):
+            u = theta[span].astype(dtype)
+
+            def first(x, spec=spec):
+                return jax.jvp(spec.to_constrained, (x,), (jnp.ones_like(x),))[1]
+
+            value = first(u) if order == 1 else jax.jvp(first, (u,), (jnp.ones_like(u),))[1]
+            parts.append(value.astype(theta.dtype))
+        return jnp.concatenate(parts) if parts else jnp.zeros((0,), theta.dtype)
+
+    return (jax.jit(values), jax.jit(functools.partial(derivative, order=1)),
+            jax.jit(functools.partial(derivative, order=2)))
+
+
 class _PhysicalMap:
     """``theta -> physical params``: the one evaluation of that map a fit makes.
 
@@ -1346,7 +1402,7 @@ class _PhysicalMap:
     value a fit uses comes from :meth:`params`: the tree its objective is
     evaluated on, the tree its ``callback`` and observers receive, and the
     tree it returns are that method's output, the arrays of one compiled
-    function (:meth:`_values`).  The model-side programs
+    function (:func:`_compiled_physical_map`).  The model-side programs
     (:func:`_compile_model`) take that tree as an argument and never see
     ``theta``.
 
@@ -1416,41 +1472,19 @@ class _PhysicalMap:
         self._fitted_index = [f.leaf for f in fitted]
         taken = set(self._fitted_index)
         self._other_index = [i for i in range(len(leaves)) if i not in taken]
-        self._values = jax.jit(self._traced_values)
-        self._slopes = jax.jit(functools.partial(self._traced_derivative, order=1))
-        self._bends = jax.jit(functools.partial(self._traced_derivative, order=2))
+        # The values that went in, at the leaves' own dtypes: what the map
+        # selects for an entry whose coordinate has not moved.
+        self._given = tuple(jnp.asarray(leaves[f.leaf], f.dtype) for f in fitted)
+        self._values, self._slopes, self._bends = _compiled_physical_map(
+            tuple((f.spec, f.shape, f.dtype) for f in fitted), np.dtype(self.dtype))
 
     # -- the one map -------------------------------------------------------
-
-    def _traced_values(self, theta):
-        out = []
-        for f in self.fitted:
-            u = theta[f.coordinates].reshape(f.shape).astype(f.dtype)
-            u0 = self._theta0[f.coordinates].reshape(f.shape).astype(f.dtype)
-            given = jnp.asarray(self._start_leaves[f.leaf], f.dtype)
-            # ``==`` at the leaf's dtype, entry by entry: the claim is
-            # bitwise identity, and an entry an optimiser moved by one ulp
-            # *was* fitted.
-            out.append(jnp.where(u == u0, given, f.spec.to_constrained(u)))
-        return tuple(out)
-
-    def _traced_derivative(self, theta, *, order: int):
-        parts = []
-        for f in self.fitted:
-            u = theta[f.coordinates].astype(f.dtype)
-
-            def first(x, spec=f.spec):
-                return jax.jvp(spec.to_constrained, (x,), (jnp.ones_like(x),))[1]
-
-            value = first(u) if order == 1 else jax.jvp(first, (u,), (jnp.ones_like(u),))[1]
-            parts.append(value.astype(theta.dtype))
-        return jnp.concatenate(parts) if parts else jnp.zeros((0,), theta.dtype)
 
     def params(self, theta) -> dict:
         """The physical ``params`` pytree at ``theta``: what the model is
         evaluated on."""
         leaves = list(self._start_leaves)
-        for f, value in zip(self.fitted, self._values(theta)):
+        for f, value in zip(self.fitted, self._values(theta, self._theta0, self._given)):
             leaves[f.leaf] = value
         return jax.tree.unflatten(self.treedef, leaves)
 
@@ -1458,7 +1492,7 @@ class _PhysicalMap:
         """``params`` (:meth:`params` of ``theta``) as a fit hands it out:
         fresh containers, and every fitted leaf no coordinate of which moved
         as the object that went in.  Its entries are already that object's
-        values, selected by :meth:`_values`; this gives back the object
+        values, selected by the map; this gives back the object
         itself, as :class:`FitResult` documents for a leaf no step moved."""
         leaves = jax.tree.leaves(params)
         here, base = np.asarray(theta), np.asarray(self._theta0)
@@ -1644,10 +1678,19 @@ class _CoordinateBounds:
                 # distance to the bound: a logit-bounded damping driven
                 # there sat at 1.999998 of (0.5, 2) with ``converged=True``.
                 # Same projection, onto the range the transform resolves.
-                lo, hi = spec._optimiser_interval(jnp.result_type(leaf))  # noqa: SLF001
-                p_lo, p_hi = _physical_edges(spec, jnp.result_type(leaf), (lo, hi))
+                leaf_dtype = np.dtype(jnp.result_type(leaf))
+                lo, hi = spec._optimiser_interval(leaf_dtype)  # noqa: SLF001
                 if spec.transform is not None:
+                    # On the leaf's own grid, so that a coordinate projected
+                    # onto an end *is* that end: the tangent box there is then
+                    # exactly 0 wide on that side, which is what holds an
+                    # active edge out of the coupled step (an end half an ulp
+                    # away left the coordinate free, the solve moved the
+                    # others for a step it could not take, and a float32 fit
+                    # crawled along the edge for its whole budget).
+                    lo, hi = (float(np.asarray(x, leaf_dtype)) for x in (lo, hi))
                     curved.append((offset, offset + n, spec, (lo, hi)))
+                p_lo, p_hi = _physical_edges(spec, leaf_dtype, (lo, hi))
             los.append(np.full(n, lo))
             his.append(np.full(n, hi))
             p_los.append(np.full(n, p_lo))
@@ -1858,12 +1901,14 @@ def _warn_on_an_edge(method: str, pmap: _PhysicalMap, bounds: _CoordinateBounds,
         f"{method}: {int(on.sum())} parameter(s) ended on the edge of their "
         f"transform's usable range:\n{listed}"
         + (f"\n  (+{more} more)" if more > 0 else "") +
-        "\nA 'log' / 'logit' parameter cannot reach its bound: within sqrt(eps) of "
-        "the bounds' size of it the transform has too few digits left for a fit "
-        "to step on, so the fit stops there and this is not an interior optimum. "
-        "If the parameter belongs on (or beyond) its bound, declare it with "
+        "\nThe fitters keep a 'log' / 'logit' parameter where its transform can "
+        "be stepped on -- at least sqrt(eps) of the bounds' own size inside each "
+        "bound, and below the dtype's largest number -- so it cannot reach its "
+        "bound, and a fit that ends there has not found an interior optimum. If "
+        "the parameter belongs on (or beyond) its bound, declare it with "
         "transform=None, which clips and can sit on the bound; if it does not, "
-        "the fit could not bring it back -- restart it from inside the range.",
+        "the fit could not bring it back within its budget -- restart it from "
+        "inside the range.",
         RuntimeWarning, stacklevel=3)
 
 
@@ -4680,12 +4725,19 @@ class FitResult:
         guard's tolerance of this one (a relative ``2**10 * eps``, 1.2e-4 in
         float32, plus the loss cost of rounding the moved point; see
         ``hold_declined``).  Where the guard holds nothing it is the loss of
-        exactly ``params``, bit for bit: the fitters evaluate a leaf no step
-        moved at the value that went in -- the value ``params`` returns --
-        and not at its ``constrain(unconstrain(p))`` round trip, which for a
-        ``log`` leaf is ``exp(log(p))`` and can land an ulp away (until
-        0.4.0's SYS-071 fix ``best_loss`` was the round trip's loss, off in
-        the last bits).  ``None`` when nothing was evaluated (``n_iter=0``).
+        exactly ``params``, bit for bit, because there is one evaluation:
+        the fitters map their coordinates to physical parameters once, by
+        one compiled function, run the model on the arrays it returns, and
+        hand those arrays back.  A leaf no step moved is in them as the
+        value that went in, never as its ``constrain(unconstrain(p))`` round
+        trip.  (Until 0.4.0's fix the map was evaluated twice -- inside the
+        jitted objective and again, eagerly, for the result -- and the two
+        landed on different floats: an ulp apart for a ``log`` leaf, and
+        under a ``logit`` whose bounds are wide beside the value, far enough
+        that ``best_loss`` read 1.3e-8 for parameters whose loss was 4.5e-10,
+        MADD-ANO-178.)  The value is the fitter's own program's: a loss you
+        compute yourself from ``params`` agrees with it to rounding, not to
+        the bit.  ``None`` when nothing was evaluated (``n_iter=0``).
 
     Every leaf no step moved is the value that went in, bit for bit --
     not merely close -- so comparing a fit's input and output leaf by
@@ -4693,7 +4745,21 @@ class FitResult:
     covers the leaves outside the resolved mask and the masked ones a
     run that stopped before its first update never stepped: neither is
     round-tripped through ``constrain(unconstrain(p))``, which for a
-    ``log`` leaf is ``exp(log(p))`` and lands one ulp away.
+    ``log`` leaf is ``exp(log(p))`` and lands one ulp away.  **And it is
+    the value the model was run at**: a leaf the fit does not move is
+    never passed through its transform, whatever that is, in the result
+    or in any evaluation of the objective.
+
+    A fitted ``log`` / ``logit`` leaf is returned at the resolution of its
+    transform, which is set by its bounds and not by its value
+    (:meth:`~maddening.core.params.ParamSpec` rebuilds it as ``lo + ...``:
+    ``eps * max(|lo|, |hi|, hi - lo)`` for ``logit``, ``eps * |lo|`` for
+    ``log``).  Where that leaves fewer than half the working precision's
+    digits of a value -- more than ``sqrt(eps)`` of it: a float32 ``3.0``
+    under ``logit`` bounds 1e4 wide -- the fitters say so in a
+    :class:`~maddening.warnings.PrecisionLimitWarning` naming the leaf, at
+    their start (and again for a leaf that only ends up so); tighten the
+    bounds or declare the leaf with ``transform=None``.
 
     ``excited_rank``, ``undetermined_drift`` and ``hold_declined`` report
     the identifiability guard (``hold_undetermined``), which all three
@@ -4848,6 +4914,17 @@ def fit(
     ``gm.set_param_spec(node, key, ParamSpec(trainable=False))`` after
     :func:`fim` has named it keeps a fit out of a parameter the data
     cannot see at all.
+
+    A ``log`` / ``logit`` coordinate is kept where its transform can be
+    stepped on: at least ``sqrt(eps)`` of the bounds' own size inside each
+    bound (3.5e-4 of the range in float32, 1.5e-8 in float64;
+    :meth:`ParamSpec._usable_margin`).  Nearer a bound than that the
+    transform is flat to the working precision.  So such a parameter cannot
+    be fitted *onto* its bound: a fit that ends on that margin -- its data
+    pull the parameter to the bound, or it started out there and could not
+    come back within its budget -- says so in a :class:`RuntimeWarning`
+    naming the parameter.  Declare a parameter that belongs on its bound
+    with ``transform=None``, which clips.
 
     A degeneracy is rarely one parameter, though — the spring's data
     determines ``k/m`` and ``c/m`` but not the scale of ``(k, c, m)``,
@@ -5380,6 +5457,32 @@ def fit_lm(
     and the run goes on, so the verdict there does not depend on which way
     the damped candidates' rounding fell.
 
+    **A step of a ``log`` / ``logit`` coordinate is read along the
+    transform's curve or along its tangent, whichever moves the value
+    less.**  The step is solved on the residual's linearisation, which for
+    such a coordinate is the transform's tangent, and the two readings of a
+    step ``v`` -- ``p(u + v)`` and ``p(u) + p'(u) v`` -- agree to first
+    order.  Where the transform is flat (a ``logit`` value near a bound, a
+    ``log`` value far below its optimum) the tangent's is the shorter: the
+    step the same parameter would take under ``transform=None``, instead of
+    one ``1 / p'(u)`` long in ``u`` that lands on the opposite edge of the
+    range.  Where a step heads for a bound the curve's is the shorter: it
+    closes the distance by a factor of ``e`` at most and never lands on the
+    bound.  And every step is confined to the range the transform resolves,
+    ``sqrt(eps)`` of the bounds' size inside each bound
+    (:class:`_CoordinateBounds`).  So wherever the same fit with the
+    parameter under ``transform=None`` and the same bounds recovers its
+    optimum, this one does too, from any start; and a fit that ends on the
+    edge of that range -- the data pull the parameter onto its bound, which
+    this transform cannot reach -- says so in a :class:`RuntimeWarning`
+    naming the parameter.  Until 0.4.0's fix a ``logit`` coordinate that an
+    early step carried to the edge of its range (where ``p'(u)`` was a few
+    ``eps``) stayed there: every candidate landed on the opposite edge, the
+    damped retries with it, and the run ended on the bound with
+    ``converged=False`` and no warning -- a damping bounded to ``(0.5, 2)``
+    came back 2.0 for a truth of 1.9 from 20 of 60 starts under x64
+    (MADD-ANO-104).
+
     A trainable leaf with ``bounds`` and ``transform=None`` is optimised in
     its own coordinate and clipped by ``constrain``.  Every step is projected
     back onto the bounds, so a coordinate one step carried past its bound
@@ -5434,7 +5537,11 @@ def fit_lm(
     and here that is always the last one: a step is accepted only when it
     strictly lowers the loss, so every accepted iterate is below every
     earlier one, and a rejected step changes nothing.  No extra
-    evaluation is needed to know it, and none is made.
+    evaluation is needed to know it, and none is made.  Every loss the run
+    reads -- ``losses``, the acceptance test, ``best_loss`` -- is one
+    compiled residual's value at the parameters :class:`FitResult` returns
+    for that iterate (the Jacobian is a program of its own and gives no
+    loss).
     :attr:`FitResult.best_iteration` is ``len(losses)`` when the run ended
     on an accepted step (the loss of that iterate, ``best_loss``, is the
     one the acceptance test computed) and ``len(losses) - 1`` when it

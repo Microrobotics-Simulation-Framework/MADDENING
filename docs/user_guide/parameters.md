@@ -263,6 +263,18 @@ place into a list, a NumPy array or a nested dict
 with a copy taken at the last sync, which costs a copy and a comparison
 of those values per sync.  Until 0.4.0's fix both were lost to
 `gm.params`, every run, `compile()` and `to_dict()`.
+**The assignment is a write of the keys whose values it changes** -- a key
+added, dropped, or given another value, bit for bit -- **and of no
+other**: the keys it hands back unchanged are the node's own values, not
+writes, so a constant of that node you calibrated in `gm.params` stays
+calibrated.  It is the rule the in-place write follows, and the one way
+the two spellings of a write differ: `node.params = {**node.params, "k":
+v}` with the `v` the node already held writes nothing, while
+`node.params["k"] = v` is a write whatever the value.  Write the key to
+put a node's own value back over a calibration.  (For a time during 0.4.0
+development the assignment was read as a write of every key, and the
+one-key idiom put the node's own value over every other calibrated
+constant of the node, without a word.)
 A `gm.params` write reads `gm.params` first, which takes in any pending
 node write, so the two are always ordered and the later wins; the one
 exception is a `gm.params` leaf written through a reference held across

@@ -168,6 +168,16 @@ class _ParamsDict(dict):
     made, although this docstring said one was, and such a write was lost
     to ``gm.params`` and to every run (MADD-ANO-175).
 
+    A mapping *assigned* over this one -- ``node.params = {**node.params,
+    "k": v}`` -- takes over from it (:meth:`_succeed`): the node stores the
+    assigned items in a fresh mapping whose own counts start at zero, which
+    carries what this one had counted and counts each key the assignment
+    changed.  The assignment names one key, and the others are the node's
+    own values handed back, so they are not writes.  Until 0.4.0 shipped
+    the graph read a replaced mapping as a write of *every* key, which put
+    the node's own value over every other constant of that node a fit had
+    calibrated in ``gm.params`` (MADD-ANO-179).
+
     Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON, a
     JAX pytree with the dict's own flattening, and a copy (``dict(p)``,
     pickle, ``copy.deepcopy``) that starts its counts at zero.
@@ -177,10 +187,37 @@ class _ParamsDict(dict):
         super().__init__(*args, **kwargs)
         self._writes = 0
         self._key_writes: dict = {}
+        # The counts of the mappings this one replaced as a node's params,
+        # and one write for each key each replacement changed (``_succeed``).
+        self._carried: dict = {}
+        # Shared by a mapping and everything that succeeds it, so a graph
+        # can tell "the node's params, replaced" from an unrelated mapping.
+        self._lineage: object = object()
 
     def _wrote(self, key) -> None:
         self._writes += 1
         self._key_writes[key] = self._key_writes.get(key, 0) + 1
+
+    def _succeed(self, old: "_ParamsDict") -> None:
+        """Take over from ``old`` as a node's params: carry what it counted,
+        and count a write of each key whose value this mapping changes
+        (:func:`_replaced_keys`: a key added, dropped, or holding another
+        value, bit for bit).  Decided here, when the node is assigned, from
+        what ``old`` holds at that moment."""
+        self._lineage = old._lineage
+        carried = old._write_counts()
+        for key in _replaced_keys(old, self):
+            carried[key] = carried.get(key, 0) + 1
+        self._carried = carried
+
+    def _write_counts(self) -> dict:
+        """``{key: writes}`` since this mapping's lineage began: its own
+        counted writes and what it carries (:meth:`_succeed`).  What a graph
+        compares with the counts it last saw."""
+        counts = dict(self._carried)
+        for key, n in self._key_writes.items():
+            counts[key] = counts.get(key, 0) + n
+        return counts
 
     def __setitem__(self, key, value) -> None:
         super().__setitem__(key, value)
@@ -293,24 +330,17 @@ def _mutated_keys(params, snapshot: dict) -> set:
 
 
 def _replaced_keys(old, new) -> set:
-    """The keys a mapping assigned over ``old`` changed: a key ``new`` adds
+    """The keys a mapping assigned over ``old`` changes: a key ``new`` adds
     or drops, and one whose value is not ``old``'s, bit for bit
     (:func:`_same_value`).
 
-    What ``node.params = {**node.params, "k": v}`` writes.  The assignment
-    names one key, and the others are the node's own values handed back, so
-    they are not writes: read as writes of every key (as the replacement was
-    until 0.4.0 shipped) they overwrote, with the node's value, every other
-    constant of that node a fit had calibrated in ``gm.params``
-    (MADD-ANO-179).  It is the rule an in-place element write follows, the
-    other write no method of the mapping sees: a value is written when it is
-    no longer the value held before.  So a replacement that hands a key the
-    value it already had is not a write of it; ``node.params[key] = value``
-    is, whatever the value.
+    What ``node.params = {**node.params, "k": v}`` writes
+    (:meth:`_ParamsDict._succeed`).  It is the rule an in-place element
+    write follows, the other write no method of the mapping sees: a value
+    is written when it is no longer the value held before.  So a
+    replacement that hands a key the value it already had is not a write of
+    it; ``node.params[key] = value`` is, whatever the value.
     """
-    if not isinstance(old, Mapping) or not isinstance(new, Mapping):
-        out: set = set(new) if isinstance(new, Mapping) else set()
-        return out | (set(old) if isinstance(old, Mapping) else set())
     return {key for key in set(old) | set(new)
             if key not in old or key not in new or not _same_value(new[key], old[key])}
 
@@ -661,6 +691,16 @@ class SimulationNode(ABC):
         lost to the graph (MADD-ANO-175).  A reference to the assigned
         object is therefore not ``node.params``: write through
         ``node.params``.
+
+        The assignment is a write of the keys whose values it changes -- a
+        key added, dropped, or given another value -- and of no other: a
+        constant of this node calibrated in ``gm.params`` stays calibrated
+        when the assignment hands its key back unchanged.  (For a time
+        during 0.4.0 development it was a write of every key, and the
+        one-key idiom silently reverted every other calibrated constant of
+        the node, MADD-ANO-179.)  To write a value the node already holds --
+        to revert a calibration -- write the key: ``node.params[key] =
+        value``.
         """
         try:
             return self.__dict__["params"]
@@ -674,6 +714,11 @@ class SimulationNode(ABC):
         # ``copy`` and every walk of ``vars(node)`` see what they always saw.
         if isinstance(value, Mapping) and not isinstance(value, _ParamsDict):
             value = _ParamsDict(value)
+            old = self.__dict__.get("params")
+            if isinstance(old, _ParamsDict):
+                # The replacement writes the keys it changes, not the ones
+                # it hands back (MADD-ANO-179).
+                value._succeed(old)
         cast(dict, self.__dict__)["params"] = value
 
     # ------------------------------------------------------------------

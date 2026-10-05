@@ -915,7 +915,9 @@ def test_fit_lm_holds_a_float32_residuals_degeneracy_in_an_x64_process():
                      notify_every=0, hold_undetermined=False)
     assert res.excited_rank == 2 and res.hold_declined is False, res
     assert abs(_scale(res.params) / s0 - 1.0) < _HELD["mixed"], _scale(res.params) / s0 - 1.0
-    assert abs(_scale(raw.params) / s0 - 1.0) > 1e-3, "no drift for the guard to remove"
+    # Unguarded it drifts 2.3e-4 (5.2e-3 before a ``log`` coordinate's step was
+    # read on its tangent): twenty times what the guard leaves.
+    assert abs(_scale(raw.params) / s0 - 1.0) > 1e-4, "no drift for the guard to remove"
 
 
 def _orthogonal_gradients(dtype, n_grad=20):

@@ -122,16 +122,19 @@ def test_fit_lm_without_a_noise_model_never_evaluates_the_residual_eagerly():
     ``None``.  A whole extra rollout per call, buying nothing.
 
     Every entry into ``residual_fn`` must now be a trace.  The count is
-    pinned too, at 3 (the ``jacfwd`` pair inside ``residual_and_jac`` plus
-    ``residual_only``), because "all entries are traces" is also true of a
-    ``fit_lm`` that stopped calling the residual altogether.
+    pinned too, at 2 -- the program every loss is taken from and the
+    Jacobian's, each a compiled function of the physical parameters
+    (``sysid._compile_model``) -- because "all entries are traces" is also
+    true of a ``fit_lm`` that stopped calling the residual altogether.  (It
+    was 3 while one program returned both the residual and its ``jacfwd``,
+    which entered the function twice.)
     """
     from maddening.sysid import fit_lm
     gm = _spring_gm()
     residual, log = _counting_residual(gm)
     fit_lm(gm, residual, n_iter=3, notify_every=0)
     assert all(log), f"{log.count(False)} of {len(log)} entries ran a rollout"
-    assert len(log) == 3, len(log)
+    assert len(log) == 2, len(log)
 
 
 def test_fit_lm_at_zero_iterations_does_not_touch_the_residual_at_all():
@@ -157,7 +160,7 @@ def test_a_noise_model_costs_fit_lm_a_trace_not_a_rollout():
     fit_lm(gm, residual, n_iter=3, noise_std={"pos": 0.1, "vel": 1.0},
            notify_every=0)
     assert all(log), f"{log.count(False)} of {len(log)} entries ran a rollout"
-    assert len(log) == 4, len(log)
+    assert len(log) == 3, len(log)
 
 
 def test_removing_the_probe_left_the_noise_weighting_alone():

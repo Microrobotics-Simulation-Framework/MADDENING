@@ -231,8 +231,8 @@ def test_a_padded_slot_contributes_an_exact_zero_whatever_the_field_holds_at_ind
     padded = ~valid_slots(m)
     assert padded.sum() == 6 and np.isfinite(grad[padded]).all() and not grad[padded].any()
     np.testing.assert_array_equal(grad[[0, 0, 1, 3, 3], [0, 1, 0, 0, 1]], [1, 2, 3, 4, 4])
-    # the dense operator is not finite anywhere a zero meets the infinity
-    assert not np.isfinite(densify(m) @ np.asarray(f)).any()
+    # the dense mapping is not finite anywhere: a zero entry meets the infinity
+    assert not np.isfinite(np.asarray(jnp.asarray(densify(m)) @ f)).any()
 
 
 @pytest.mark.parametrize("layout", ["gather", "scatter"])

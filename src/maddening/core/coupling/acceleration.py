@@ -454,6 +454,10 @@ def _reading_eps(source_dtype, value) -> float:
     delivered = jnp.asarray(value).dtype
     eps = float(jnp.finfo(delivered).eps)
     if jnp.issubdtype(source_dtype, jnp.floating):
+        # units: dimensionless -- each eps is relative to its own value's
+        # magnitude (the floor counts it per entry in the norm's units,
+        # where every field is divided by its own max|field|); the larger
+        # of the two is the resolution the delivered value really has.
         eps = max(eps, float(jnp.finfo(source_dtype).eps))
     return eps
 

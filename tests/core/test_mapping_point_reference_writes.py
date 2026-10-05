@@ -42,14 +42,18 @@ from maddening.core.coupling.mapping import rbf_mapping
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.heat import HeatNode
 from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS, SELECTION
+from tests.sparse_mapping_support import SPARSE_NEAREST_NEIGHBOR, SPARSE_POINT_KINDS
 
 EDGE = "a.temperature->b.heat_source"
 REGISTRY = {"HeatNode": HeatNode}
 
 #: ``make(source, target, source_ref=, target_ref=)`` for each mapping kind
-#: the module runs under.
+#: the module runs under: the built-in RBF, two registered the way another
+#: library registers one, and the library's sparse nearest neighbour (whose
+#: index, not only its weights, was built from the referenced points).
 _MAKERS = {"rbf": rbf_mapping, INVERSE_DISTANCE: KINDS[INVERSE_DISTANCE].build,
-           SELECTION: KINDS[SELECTION].build}
+           SELECTION: KINDS[SELECTION].build,
+           SPARSE_NEAREST_NEIGHBOR: SPARSE_POINT_KINDS[SPARSE_NEAREST_NEIGHBOR].build}
 _MAKE = {"mapping": rbf_mapping}
 
 

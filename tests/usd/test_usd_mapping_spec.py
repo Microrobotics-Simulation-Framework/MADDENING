@@ -20,7 +20,9 @@ from maddening.core.graph_manager import GraphManager
 from maddening.nodes.heat import HeatNode
 from maddening.usd.serialization import load_graph_from_usd, save_graph_to_usd
 from tests.core.builtin_mapping_pins import PINS
-from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+# The kinds registered the way another library registers one, and the
+# library's own sparse nearest neighbour, registered the same way.
+from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
 from tests.registered_mapping_kinds import assert_same_weights, temporary_kind
 from tests.usd.builtin_mapping_usd_pins import capture_usd
 

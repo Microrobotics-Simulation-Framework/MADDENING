@@ -26,7 +26,9 @@ from maddening.core.coupling.mapping import (
     rbf_mapping,
 )
 from maddening.nodes.heat import HeatNode
-from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+# The kinds registered the way another library registers one, and the
+# library's own sparse nearest neighbour, registered the same way.
+from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
 
 N_COARSE, N_FINE = 6, 12
 X_COARSE = np.linspace(0.0, 1.0, N_COARSE)

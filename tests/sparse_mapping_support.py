@@ -48,6 +48,7 @@ from maddening.core.coupling.sparse_mapping import (
     sparse_nearest_neighbor_mapping,
     sparse_projection_1d_mapping,
 )
+from tests.registered_mapping_kinds import KINDS as _REGISTERED_BY_THE_TESTS
 from tests.registered_mapping_kinds import RegisteredKind
 
 SPARSE_KIND_NAMES = ("sparse_matrix", "sparse_nearest_neighbor", "sparse_projection_1d")
@@ -187,14 +188,26 @@ SPARSE_NEAREST_NEIGHBOR = "sparse_nearest_neighbor"
 
 #: ``sparse_nearest_neighbor`` for the harnesses parametrised over
 #: ``tests.registered_mapping_kinds.KINDS``: same shape (two point sets,
-#: ``source_ref=`` / ``target_ref=``), one weight ``W``.  ``transpose`` is
-#: left out of the drawn hyper-parameters: ``"scatter"`` is refused with
-#: ``mode="consistent"``, and it has its own cases in :data:`CASES`.
+#: ``source_ref=`` / ``target_ref=``), one weight ``W``.  Only
+#: ``transpose="gather"`` is among the hyper-parameters a harness draws
+#: freely: ``"scatter"`` is refused with ``mode="consistent"``.  The
+#: scatter form is :data:`SCATTER`, and has its own cases in :data:`CASES`.
 SPARSE_POINT_KINDS: dict[str, RegisteredKind] = {
     SPARSE_NEAREST_NEIGHBOR: RegisteredKind(
         SPARSE_NEAREST_NEIGHBOR, sparse_nearest_neighbor_mapping, ("W",),
-        "source_ref", "target_ref", {"mode": ("consistent", "conservative")}),
+        "source_ref", "target_ref",
+        {"mode": ("consistent", "conservative"), "transpose": ("gather",)}),
 }
+
+#: The one valid hyper-parameter combination the table above cannot draw.
+SCATTER = {"mode": "conservative", "transpose": "scatter"}
+
+#: What a harness written for "a kind registered the way another library
+#: registers one" runs: the three kinds of
+#: ``tests/registered_mapping_kinds.py`` and the library's own sparse
+#: nearest neighbour, which goes through the same ``register_mapping``.
+REGISTERED_AND_SPARSE: dict[str, RegisteredKind] = {**_REGISTERED_BY_THE_TESTS,
+                                                    **SPARSE_POINT_KINDS}
 
 
 # ---------------------------------------------------------------------------

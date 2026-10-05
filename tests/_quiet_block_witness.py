@@ -181,7 +181,7 @@ def another_thread_hears_its_own_warning() -> bool:
         except Canary:
             heard.append(True)
 
-    thread = threading.Thread(target=warn)
+    thread = threading.Thread(target=warn, daemon=True)
     thread.start()
     thread.join(30)
     return bool(heard)

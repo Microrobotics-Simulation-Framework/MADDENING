@@ -188,7 +188,7 @@ def test_independent_graphs_written_and_stepped_in_two_threads_leave_the_filters
             rendezvous.left()
 
     rendezvous.armed = True
-    threads = [threading.Thread(target=work, args=(i,)) for i in range(2)]
+    threads = [threading.Thread(target=work, args=(i,), daemon=True) for i in range(2)]
     try:
         for t in threads:
             t.start()

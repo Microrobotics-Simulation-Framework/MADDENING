@@ -67,7 +67,7 @@ def _in_a_thread(fn):
         except BaseException as exc:  # noqa: BLE001 - re-raised below
             box.append(("raised", exc))
 
-    thread = threading.Thread(target=run)
+    thread = threading.Thread(target=run, daemon=True)
     thread.start()
     thread.join(WAIT)
     assert box, "the thread never finished"
@@ -225,7 +225,7 @@ def test_blocks_that_overlap_in_two_threads_leave_the_filters_alone(
         seen["b after"] = _raises_here()
         b_out.set()
 
-    threads = [threading.Thread(target=a), threading.Thread(target=b)]
+    threads = [threading.Thread(target=a, daemon=True), threading.Thread(target=b, daemon=True)]
     for t in threads:
         t.start()
     for t in threads:
@@ -265,7 +265,7 @@ def test_many_threads_opening_blocks_at_once_lose_no_warning_and_leave_no_filter
             if not _raises_here(f"{i}/{r} outside"):
                 wrong.append((i, r, "not raised outside every block"))
 
-    threads = [threading.Thread(target=work, args=(i,)) for i in range(n_threads)]
+    threads = [threading.Thread(target=work, args=(i,), daemon=True) for i in range(n_threads)]
     try:
         for t in threads:
             t.start()
@@ -395,7 +395,7 @@ def _foreign_block(opened: threading.Event, close: threading.Event) -> threading
             opened.set()
             assert close.wait(WAIT)
 
-    thread = threading.Thread(target=run)
+    thread = threading.Thread(target=run, daemon=True)
     thread.start()
     assert opened.wait(WAIT)
     return thread

@@ -11,6 +11,8 @@ optionally applying *transform* first."
 from dataclasses import dataclass, fields
 from typing import Any, Callable, Optional
 
+import jax
+
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
@@ -161,3 +163,45 @@ class EdgeSpec:
         if self.source_units or self.target_units:
             arrow += f"  [{self.source_units or '?'} -> {self.target_units or '?'}]"
         return f"EdgeSpec({arrow})"
+
+
+def _delivered(edge: EdgeSpec, value, mappings=None):
+    """The value *edge* hands its target for *value* read at its source.
+
+    The step's edge rule, in the one place it is written: the interface
+    mapping first (:attr:`EdgeSpec.mapping`, applied with this edge's
+    weights), then the scalar :attr:`EdgeSpec.transform`.  Everything
+    that reads what an edge carries goes through it -- the step's
+    boundary resolution, and the coupling group's interface norm, its
+    float floor and the spectral analysis taken on that norm's reading
+    -- so none of them can measure a value the consuming node never
+    sees.  While the norm applied the transform itself and left the
+    mapping out, a group with a mapped internal edge was judged on the
+    source field's scale: a 9% change of the delivered value read 0.0071
+    of the tolerance.
+
+    Parameters
+    ----------
+    edge : EdgeSpec
+    value
+        What was read at ``edge.source_node``'s ``edge.source_field``.
+    mappings : dict, optional
+        The ``"mappings"`` section of a graph parameter pytree,
+        ``{edge.key: weights}``: the weights the step runs with, which a
+        caller may override per step.  ``None``, or no entry for this
+        edge, uses the mapping's own (``Mapping.apply(value, None)``).
+
+    Returns
+    -------
+    The delivered value: what ``boundary_inputs[edge.target_field]``
+    receives (or is summed into, for an additive edge).
+    """
+    if edge.mapping is not None:
+        weights = None
+        if mappings is not None:
+            weights = mappings.get(edge.key)
+        with jax.named_scope("edge:mapping"):
+            value = edge.mapping.apply(value, weights)
+    if edge.transform is not None:
+        value = edge.transform(value)
+    return value

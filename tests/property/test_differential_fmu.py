@@ -2054,12 +2054,14 @@ def typed_paths(wire: str):
                 cw.inst = cw._instantiate()                             # noqa: SLF001
                 cw.time = 0.0
             cw._into_step_mode()                                        # noqa: SLF001
-            # the wire form asked for is the one in use: one get through the
-            # wrapper is answered in a binary frame, or is not
-            assert cw.bridge.binary_frames_served == 0
-            status, _ = paths.c_get(paths.var("time"), sentinel=0.0)
-            assert status == cw.OK, cw.w.logs[-2:]
-            assert cw.bridge.binary_frames_served == (1 if wire == "binary" else 0)
+            # the wire form asked for is the one in use: a get through the
+            # wrapper is answered in a binary frame, or is not.  (The bridge
+            # counts a frame once it has sent it, on its own thread, so the
+            # count is read after the next reply has come back.)
+            for _ in range(2):
+                status, _ = paths.c_get(paths.var("time"), sentinel=0.0)
+                assert status == cw.OK, cw.w.logs[-2:]
+            assert (cw.bridge.binary_frames_served >= 1) is (wire == "binary")
             yield paths
         finally:
             paths.close()

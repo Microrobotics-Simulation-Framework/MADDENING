@@ -267,7 +267,7 @@ reads as exactly zero in the group's norm.
 | float64 | 1.0e-292 | 2.2e-308 |
 
 A bfloat16 or float16 field is measured in float32 (the round-6 fix,
-MADD-ANO-174): its value, widened exactly, is a normal float32 number, so
+MADD-ANO-186): its value, widened exactly, is a normal float32 number, so
 the norm reads a float16 field below 6.1e-5, and its changes, like any
 other.  At the other end, the L2 norm's overflow rule (a scale whose
 reciprocal is not a normal number reads `inf`) applies in float32 too:

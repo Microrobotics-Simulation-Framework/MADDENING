@@ -139,7 +139,7 @@ def test_run_adaptive_scan_steps_a_sixteen_bit_state_to_its_end_time(dtype):
     the steps the host loop takes (they share one acceptance rule; the
     host loop reads the norm as a Python float).  Where the default float
     is float32: under ``jax_enable_x64`` the scan refuses every state
-    narrower than float64 for another reason (MADD-ANO-178, below).
+    narrower than float64 for another reason (MADD-ANO-190, below).
     """
     rtol = 1e-2 if dtype == jnp.float16 else 1e-1      # bfloat16 resolves 0.8%
     run = dict(_RUN, rtol=rtol)
@@ -164,7 +164,7 @@ def _x64():
 
 
 @pytest.mark.xfail(strict=True, raises=TypeError, reason=(
-    "MADD-ANO-178: under jax_enable_x64 run_adaptive_scan's clock carry is float64 and its "
+    "MADD-ANO-190: under jax_enable_x64 run_adaptive_scan's clock carry is float64 and its "
     "next timestep takes the error norm's dtype, so a float32 or 16-bit state raises a "
     "scan-carry TypeError; deferred to 0.5.0"))
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float16])

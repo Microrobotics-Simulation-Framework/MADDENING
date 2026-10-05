@@ -25,7 +25,7 @@ float32's.
   still measured, and the mixed and interface norms measure it far
   above.  So a field within a factor of four of overflow never converges
   under L2.  The edge is the dtype the norms measure in, at least float32
-  (a 16-bit field is widened exactly, MADD-ANO-174): bfloat16 shares
+  (a 16-bit field is widened exactly, MADD-ANO-186): bfloat16 shares
   float32's range and its edge, and no finite float16 value reaches it,
   so a float16 field is measured up to its largest value.
 * CPL-044: the group scaled by ``2**-shift`` to where a one-ulp change of
@@ -238,7 +238,7 @@ def _measured_overflow_edge(dtype):
     """The L2 norm's overflow edge for a field of *dtype*, in that dtype, or ``None``.
 
     The norms measure a field in at least float32 (a 16-bit field is
-    widened exactly first, MADD-ANO-174), so the edge is the measuring
+    widened exactly first, MADD-ANO-186), so the edge is the measuring
     dtype's ``1 / tiny``, with the next number of *dtype* above it.
     bfloat16 holds float32's edge; float16's largest finite value is far
     below it, so for float16 there is none.

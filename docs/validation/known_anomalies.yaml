@@ -12122,7 +12122,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null
-  - anomaly_id: "MADD-ANO-174"
+  - anomaly_id: "MADD-ANO-186"
     title: "A bfloat16 or float16 coupling group's norms and floor were computed in its own dtype: residual 0.0 above 65,504 active entries, inf on a finite state at the default rtol"
     description: >
       `coupling_residual_mixed` and `coupling_residual_interface` square
@@ -12187,7 +12187,7 @@ anomalies:
       - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_the_cap_on_a_finite_float16_state"
       - "tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges"
     github_issue: null
-  - anomaly_id: "MADD-ANO-175"
+  - anomaly_id: "MADD-ANO-187"
     title: "spectral_error_bound under convergence_norm='interface' with a transform on an internal edge read 0.0014-0.098x the true distance, spectral_usable=True"
     description: >
       The interface norm measures each internal edge's source value after
@@ -12248,7 +12248,7 @@ anomalies:
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_transformed_pair"
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_an_identity_transform_reads_the_bound_an_untransformed_edge_does"
     github_issue: null
-  - anomaly_id: "MADD-ANO-176"
+  - anomaly_id: "MADD-ANO-188"
     title: "gradient_relative_error_bound read 0.65-0.986x the true gradient error, gradient_bound_usable=True, on a group stopped far from its fixed point"
     description: >
       The gradient bound is leading-order in the distance and carries a
@@ -12300,7 +12300,7 @@ anomalies:
       - "tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_a_usable_gradient_bound_holds_on_the_audit_pair_at_every_cap"
       - "tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn"
     github_issue: null
-  - anomaly_id: "MADD-ANO-177"
+  - anomaly_id: "MADD-ANO-189"
     title: "The adaptive steppers' error norm was computed in a bfloat16 or float16 state's own dtype: run_adaptive did not return on a float16 state above 65,504 elements, run_adaptive_scan refused any 16-bit state"
     description: >
       `_tree_error_norm`, the step-doubling error norm that `run_adaptive`,
@@ -12325,7 +12325,7 @@ anomalies:
       `run_adaptive_scan` raises the `TypeError` at either size.  On
       0.4.0's development builds `run_adaptive` returned that state as NaN
       after one accepted step, with no error or warning.  The sibling of
-      MADD-ANO-174 at the other norm the library takes, found by sweeping
+      MADD-ANO-186 at the other norm the library takes, found by sweeping
       for that defect's pattern.  Resolved in 0.4.0: each leaf is widened to
       float32 before its difference is formed (the coupling norms'
       `_widened`) and the sum starts from a float32 zero, so both steppers
@@ -12333,7 +12333,7 @@ anomalies:
       runs a 16-bit state to its end time where the default float is
       float32; a float32 or float64 state takes no new operation.  Under
       `jax_enable_x64` the scan still refuses a 16-bit state, as it does a
-      float32 one (MADD-ANO-178, a different cause).
+      float32 one (MADD-ANO-190, a different cause).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -12368,7 +12368,7 @@ anomalies:
       - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_scan_steps_a_sixteen_bit_state_to_its_end_time"
       - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_build_adaptive_step_reports_a_sixteen_bit_states_error_in_float32"
     github_issue: null
-  - anomaly_id: "MADD-ANO-178"
+  - anomaly_id: "MADD-ANO-190"
     title: "run_adaptive_scan raises a scan-carry TypeError on a float32, bfloat16 or float16 state under jax_enable_x64"
     description: >
       `run_adaptive_scan` carries its clock -- the time and the timestep --
@@ -12384,7 +12384,7 @@ anomalies:
       0.1.0, 0.2.1 and 0.3.1 trees (CPU, empty HOME, jaxlib 0.11.0), where
       the same node in float64 takes 13 steps and `run_adaptive`, the host
       loop, steps all three.  Loud: nothing is returned.  Found while
-      verifying MADD-ANO-177, whose fix lets the scan step a 16-bit state
+      verifying MADD-ANO-189, whose fix lets the scan step a 16-bit state
       where the default float is float32 and leaves this one as it was.
     severity: "minor"
     safety_relevance: "not_safety_relevant"

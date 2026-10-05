@@ -580,19 +580,40 @@ def test_a_replaced_group_does_not_inherit_the_recorded_floor():
 
 def test_a_state_without_the_recorded_floor_is_read_with_the_graphs_own_weights():
     """A ``_meta`` whose slot was never written (a checkpoint from before the
-    slot existed) still reports: the floor is taken with ``gm.params``."""
-    gm = _mapped_pair(**STANDARD)
-    gm.step()
-    with_slot = dict(gm.coupling_diagnostics()[KEY])
-    saved = gm._state
-    meta = dict(saved["_meta"])
-    del meta[SLOT]
-    gm._state = {**saved, "_meta": meta}
+    slot existed) still reports: the floor is taken from the returned state
+    with ``gm.params``' weights, which is what a ``params=None`` step runs.
+
+    The graph's own weights are edited to deliver the mapped edge inside the
+    dead band (the mapping object still holds the matrix it was built
+    with).  The step records a floor of zero; with the slot removed the
+    report must still say so.  Read on the source field, or with the
+    mapping object's weights, the edge is outside the band and the floor is
+    not zero.
+    """
+    gm = _banded_pair()
+    key = "A.u->B.inp"
+    built_with = gm.params["mappings"][key]["H"]
     try:
+        gm.params["mappings"][key]["H"] = jnp.asarray(0.01 * SELECT)
+        gm.step()
+        saved = gm._state
+        assert float(saved["_meta"][SLOT]) == 0.0
+        with_slot = dict(gm.coupling_diagnostics()[KEY])
+        meta = dict(saved["_meta"])
+        del meta[SLOT]
+        gm._state = {**saved, "_meta": meta}
         without = dict(gm.coupling_diagnostics()[KEY])
-    finally:
         gm._state = saved
-    assert without == with_slot
+    finally:
+        gm.params["mappings"][key]["H"] = built_with
+    assert with_slot["precision_limited"] is False and with_slot["residual"] == 0.0, with_slot
+    assert set(without) == set(with_slot)
+    for name, value in with_slot.items():
+        other = without[name]
+        assert value == other or (isinstance(value, float) and math.isnan(value)
+                                  and math.isnan(other)), (name, value, other)
+    # The fixture premise: the mapping object's own weights keep the edge in the norm.
+    assert _floor_with(gm, None) > 0.0
 
 
 def _bits_after_two_steps(gm) -> list:

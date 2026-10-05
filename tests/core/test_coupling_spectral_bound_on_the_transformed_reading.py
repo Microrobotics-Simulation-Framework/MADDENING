@@ -29,6 +29,7 @@ before a transform, and are held to the same oracle.
 
 from __future__ import annotations
 
+import functools
 import math
 import os
 import warnings
@@ -110,6 +111,16 @@ def _audit_mapping(fixture, dtype=F32):
 
 
 def _audit_graph(fixture, acceleration, cap, norm="interface", mode="jacobi"):
+    """The fixture's pair, handed back at its initial state.  The last
+    sixteen are kept compiled: the per-push tests share theirs, and the slow
+    sweep's eighty do not pile up."""
+    gm = _build_audit_graph(fixture, acceleration, cap, norm, mode)
+    gm.reset_state()
+    return gm
+
+
+@functools.lru_cache(maxsize=16)
+def _build_audit_graph(fixture, acceleration, cap, norm, mode):
     tj, _tn, gA, cA, gB, cB, uA0, uB0 = AUDIT_FIXTURES[fixture]
     gm = GraphManager()
     gm.add_node(_LinVec("A", gA, cA, uA0))
@@ -157,9 +168,18 @@ def _assert_bound_holds(d, true, label):
             label, d["spectral_error_bound"] / true, d["spectral_error_bound"], true, dict(d))
 
 
-@pytest.mark.parametrize("cap", [2, 3])
-@pytest.mark.parametrize("acceleration", ["none", "aitken"])
-@pytest.mark.parametrize("fixture", sorted(AUDIT_FIXTURES))
+#: Each fixture under plain iteration and under Aitken at caps 2 and 3; a
+#: mapped fixture's Aitken cells are slow (one more compiled pair each).
+_AUDIT_CELLS = [
+    pytest.param(fixture, acceleration, cap, marks=(
+        [pytest.mark.slow] if fixture in AUDIT_MAPPINGS and acceleration == "aitken" else []))
+    for fixture in sorted(AUDIT_FIXTURES) for acceleration in ("none", "aitken")
+    for cap in (2, 3)]
+
+
+# Per push: tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures
+# (every fixture under plain iteration, and the transform fixtures under Aitken)
+@pytest.mark.parametrize("fixture, acceleration, cap", _AUDIT_CELLS)
 def test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures(fixture, acceleration,
                                                                          cap):
     """``spectral_error_bound >= ||x - x*||`` in the interface norm, wherever usable.
@@ -790,7 +810,9 @@ def test_a_usable_bound_holds_on_random_transformed_internal_edges(data):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("cap", [2, 3, 4])
+# Per push: tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_selection_written_as_a_mapping_is_bounded_as_the_same_selection_as_a_transform
+# (caps 2 and 3, on the pairs the fixtures' test compiled)
+@pytest.mark.parametrize("cap", [2, 3, pytest.param(4, marks=pytest.mark.slow)])
 def test_a_selection_written_as_a_mapping_is_bounded_as_the_same_selection_as_a_transform(cap):
     """The audit's ``extract_last`` pair, the selection as a ``matrix_mapping``.
 
@@ -818,12 +840,15 @@ def test_a_selection_written_as_a_mapping_is_bounded_as_the_same_selection_as_a_
         assert as_mapping[key] == pytest.approx(as_transform[key], rel=1e-4), (key, cap)
 
 
-@pytest.mark.parametrize("mode", ["jacobi", "gauss-seidel"])
+# Per push: tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_an_identity_mapping_reads_the_bound_an_unmapped_edge_does
+# (under Jacobi; Gauss-Seidel is the same check on another compiled pair)
+@pytest.mark.parametrize("mode", ["jacobi", pytest.param("gauss-seidel",
+                                                         marks=pytest.mark.slow)])
 def test_an_identity_mapping_reads_the_bound_an_unmapped_edge_does(mode):
     """A mapping that delivers its source unchanged takes the reading's path
     and must give the raw fields' bound, radius and flags, to float32 rounding."""
     values = _values(np.random.default_rng(4), "none", "none", 0.8)
-    plain = _run(_mat_graph("none", "none", mode=mode), values)
+    plain = _run(_cached_graph("none", "none", mode, "none", 3), values)
     eye = {"ab": np.eye(N), "ba": np.eye(N)}
     through = _run(_mat_graph("mapped", "mapped", mode=mode, own_weights=eye), values)
     assert plain["spectral_usable"] == through["spectral_usable"] is True
@@ -865,7 +890,7 @@ def test_weights_passed_for_one_step_are_read_as_the_mapping_objects_own_are():
     gradient bound and every flag.  Stepped with its own (decoy) weights it
     reports another solve.
     """
-    ab, ba = "mapped-then-offset", "mapped-tall"
+    ab, ba = "mapped-then-unit", "mapped-wide"       # the pair above: compiled once
     values = _values(np.random.default_rng(5), ab, ba, 0.85)
     gm = _cached_graph(ab, ba, "jacobi", "none", 3)
     passed = dict(_run(gm, values))

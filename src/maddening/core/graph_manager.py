@@ -3419,7 +3419,6 @@ def _raise_if_a_kept_solve_failed(messages: dict, verdicts: Sequence[dict]) -> N
 _PER_SOLVE_REPORT_SUFFIXES = (
     "residual", "amplification", "rho_spectral", "spectral_residual",
     "spectral_amplification", "gradient_relative_error_bound", "pass_evaluations",
-    "reading_floor",
 )
 
 
@@ -5378,7 +5377,9 @@ def _run_coupled_block_impl(
             # longer holds afterwards -- so the step measures it, once,
             # after the solve, by the function the report calls.  Only its
             # dead-band and finiteness tests read the values, so it carries
-            # no derivative.
+            # no derivative.  It is the floor of the state the step leaves,
+            # as every other group's is: ``run_adaptive*`` keeps the last
+            # half step's (``_fold_kept_half_step_reports`` does not fold it).
             floor_meta[f"coupling_{group_key}_reading_floor"] = jnp.asarray(
                 residual_precision_floor(
                     {nn: result[nn] for nn in group_node_names}, group_node_names,

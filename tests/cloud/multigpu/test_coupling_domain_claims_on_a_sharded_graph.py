@@ -52,6 +52,7 @@ CASES = {
     # is applied to a sharded field, and the norm reads what it delivers.
     "CPL-041": [mapped.test_the_interface_norm_measures_what_mapped_edges_deliver],
     "CPL-088": [mapped.test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver],
+    "CPL-188": [mapped.test_the_reports_floor_is_the_one_the_step_measured_with_its_weights],
 }
 
 

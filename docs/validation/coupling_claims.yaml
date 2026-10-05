@@ -1488,36 +1488,75 @@ claims:
   area: norms
   claim: >-
     coupling_residual_interface: "Computes the difference in interface values
-    (edge source fields) between two successive iterations.  Only the fields
-    that appear on intra-group edges are compared", scaled as the mixed norm,
-    with the edge's transform applied to both iterates.
+    between two successive iterations: for each intra-group edge, the value
+    the edge delivers -- its source field through the edge's interface
+    mapping and then its transform, exactly as the step hands it to the
+    target ...  Only the fields that appear on intra-group edges are
+    compared", scaled as the mixed norm.  The mapping weights are the ones
+    the step ran with (params["mappings"], a per-step override included).
   sources:
-    - src/maddening/core/coupling/acceleration.py:358 (coupling_residual_interface)
+    - src/maddening/core/coupling/acceleration.py:461 (coupling_residual_interface)
+    - src/maddening/core/coupling/acceleration.py:402 (_interface_readings)
+    - src/maddening/core/edge.py:168 (_delivered)
+    - src/maddening/core/coupling/group.py:95 (CouplingGroup, convergence_norm)
   conditions: >-
     convergence_norm="interface"; state edges (a flux edge is refused at
-    compile: CPL-075). Not claimed for mixed dtypes, 16-bit floats, vmap,
-    multi-rate graphs, run_adaptive, checkpoint restarts or sharded graphs.
-  oracle: closed form over the transformed edge values.
+    compile: CPL-075), with or without an interface mapping and a transform;
+    an edge whose source field is not floating, or that delivers no entries,
+    is not read.  The dead band and the unevaluable-field rule are applied
+    to the delivered value.  The domain cells run a pair with one mapped and
+    one plain internal edge, the mapping's weights passed for the step.
+  oracle: closed form over the delivered edge values, in float64.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
     - tests/core/test_phases_5_7_8.py::TestInterfaceResidual::test_interface_residual_detects_difference
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_norm_of_a_mapped_edge_is_the_norm_of_what_it_delivers
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_weights_read_are_the_ones_passed_not_the_mapping_objects_own
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_dead_band_is_the_delivered_values
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_that_is_not_finite_fails_the_criterion
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_an_integer_source_and_an_empty_delivery_carry_no_norm
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_one_pass_reports_the_change_of_what_its_edges_delivered
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_group_iterates_until_what_its_mapped_edge_delivers_has_stopped_moving
+    - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver
+    - tests/property/test_differential_coupling_topologies.py::test_the_interface_norm_on_a_mapped_ring_reproduces_the_monolithic_reference
   status: verified
+  notes: >-
+    Until 0.4.0's interface-reading fix the norm applied an edge's transform
+    and left its mapping out: a mapped edge was measured on its source
+    field (a 9% change of what a selecting mapping delivered read 0.0071 of
+    the tolerance), and the row excluded mapped edges and seven domains.
+    Every reading now goes through the step's edge rule, and the cells
+    below hold a mapped and a plain edge in every domain.
   domains:
-    f32: tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
-    f64: tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
-    mixed_dtype: narrowed
-    16bit: narrowed
-    jit: 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r06]'
+    f32:
+      - tests/core/test_coupling_claims_helpers.py::test_the_interface_norm_measures_the_transformed_edge_values
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[f32]'
+    f64:
+      - tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_interface_norm_on_a_mapped_ring_reproduces_its_reference_in_every_domain[f64]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[f64]'
+    mixed_dtype: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[bfloat16]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[float16]'
+    jit:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r06]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[f32]'
     grad: n/a
-    vmap: narrowed
-    multi_rate: narrowed
-    sub_cycled: 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r06]'
+    vmap: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[vmap]'
+    multi_rate: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[multi_rate]'
+    sub_cycled:
+      - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r06]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_interface_norm_on_a_mapped_ring_reproduces_its_reference_in_every_domain[sub_cycled]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[sub_cycled]'
     predictors_warm_starts:
       - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r26]'
       - 'tests/property/test_differential_coupling_interactions.py::test_every_row_reproduces_the_monolithic_reference[r48]'
-    adaptive: narrowed
-    checkpoint_restart: narrowed
-    sharded: narrowed
+      - 'tests/property/test_differential_coupling_topologies.py::test_the_interface_norm_on_a_mapped_ring_reproduces_its_reference_in_every_domain[predictors_warm_starts]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[adaptive]'
+    checkpoint_restart: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_interface_norm_measures_what_mapped_edges_deliver[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-041]'
 
 - id: CPL-042
   area: norms
@@ -3247,21 +3286,29 @@ claims:
     accelerator did -- so this is a bound on ||x - x*||" where
     spectral_usable is True.
   sources:
-    - src/maddening/core/graph_manager.py:7960 (coupling_diagnostics, spectral_error_bound)
-    - src/maddening/core/coupling/acceleration.py:1193 (spectral_error_bound)
+    - src/maddening/core/graph_manager.py:9499 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/coupling/acceleration.py:1435 (spectral_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
     - src/maddening/core/inspection.py:1397 (coupling_report, the error_estimate note)
+    - src/maddening/core/graph_manager.py:643 (_interface_spectral_rate_at)
   conditions: >-
     F linear; solver="ift", diagnostics=True; at most eight independent
     interface scalars (spectral_usable); the group's own norm at the
     returned state -- each field divided by its own max|field| at the
     returned state, the residual put in those weights (MADD-ANO-146), and
     under convergence_norm="interface" the fields are what that norm reads,
-    each internal edge's source value after the edge's transform, with the
-    transforms affine (offsets, scales, selections; a non-affine transform
-    makes the map non-linear in the reading) (MADD-ANO-187); every
-    acceleration and schedule; long Gauss-Seidel chains, sub-cycled and
-    multi-rate groups; float16 to float64.
+    the value each internal edge delivers: its source value through the
+    edge's interface mapping (the weights the step ran with) and then its
+    transform, with the mappings linear and the transforms affine (offsets,
+    scales, selections; a non-affine transform makes the map non-linear in
+    the reading) (MADD-ANO-187, and the mapped-edge anomaly registered with
+    the interface-mapping fixes); every acceleration and schedule; long
+    Gauss-Seidel chains, sub-cycled and multi-rate groups; float16 to
+    float64, a delivered value wider than its source field resolved at the
+    source's eps (MADD-ANO-191).  Where the residual is at its float floor
+    the bound rests on the counted floor (CPL-092, CPL-102), which does not
+    see a same-pass read that differences entries of one field
+    (MADD-ANO-192, open).
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
@@ -3286,6 +3333,13 @@ claims:
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_dead_banded_transformed_edge_is_folded_into_the_bound
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_arnoldi_through_an_identity_reading_is_the_plain_arnoldi
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_in_every_float_dtype_and_sweep
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_selection_written_as_a_mapping_is_bounded_as_the_same_selection_as_a_transform
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_an_identity_mapping_reads_the_bound_an_unmapped_edge_does
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_mapped_pair
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_weights_passed_for_one_step_are_read_as_the_mapping_objects_own_are
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_random_mapped_internal_edges
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_stalled_float32_pair_behind_edges_that_widen_is_bounded_at_float32_resolution
+    - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver
   status: verified
   notes: >-
     The round-6 audit found the interface norm's transformed reading
@@ -3293,34 +3347,56 @@ claims:
     edge the bound read 0.0014-0.098x the true distance, usable
     (MADD-ANO-187). The spectrum is now taken on the reading. The
     transformed reading itself is exercised in single, double and both
-    half precisions under both sweeps (the tests named after it above);
-    the cells below run untransformed edges, where the reading is the raw
-    fields.  On an internal edge with an interface mapping that norm, and
-    so this bound, reads the source field and not the value the mapping
-    delivers (an open anomaly, registered with the interface-mapping
-    fixes): the bound is in the reading the residual is in.
+    half precisions under both sweeps (the tests named after it above).
+    On an internal edge with an interface mapping that norm, and so this
+    bound, read the source field and not the value the mapping delivers:
+    with the audit's selection written as a matrix_mapping the bound read
+    0.064x, 0.318x and 0.074x the true distance in the delivered values at
+    caps 2 to 4, usable.  Every reading of an interface edge now goes
+    through the step's edge rule (1.001x, 66.5x and 1.003x on the same
+    pair), and each cell below runs, beside its untransformed pair, a pair
+    with one mapped and one plain internal edge in that domain.
   domains:
-    f32: tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
+    f32:
+      - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[f32]'
     f64:
       - tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
       - tests/property/test_differential_precision.py::test_the_coupling_report_agrees_across_precisions
-    mixed_dtype: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_float32_member_under_x64[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[f64]'
+    mixed_dtype:
+      - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_float32_member_under_x64[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[mixed_dtype]'
     16bit:
       - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[bfloat16]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[float16]'
     jit: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_is_never_below_the_true_distance
     grad: n/a
-    vmap: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_for_each_member_of_a_vmapped_step[CPL-088]'
+    vmap:
+      - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_for_each_member_of_a_vmapped_step[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[vmap]'
     multi_rate:
       - tests/core/test_coupling_claims_graphs.py::test_a_usable_bound_holds_on_a_stalled_subcycled_or_multirate_group
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_multirate_graph[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[multi_rate]'
     sub_cycled:
       - tests/core/test_coupling_claims_graphs.py::test_a_usable_bound_holds_on_a_stalled_subcycled_or_multirate_group
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_subcycled_group[CPL-088]'
-    predictors_warm_starts: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_predictor_and_a_warm_start[CPL-088]'
-    adaptive: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-088]'
-    checkpoint_restart: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_a_checkpoint_restart[CPL-088]'
-    sharded: 'tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[sub_cycled]'
+    predictors_warm_starts:
+      - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_predictor_and_a_warm_start[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[predictors_warm_starts]'
+    adaptive:
+      - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[adaptive]'
+    checkpoint_restart:
+      - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_a_checkpoint_restart[CPL-088]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[checkpoint_restart]'
+    sharded:
+      - 'tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-088]'
+      - 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-088]'
 
 - id: CPL-089
   area: report
@@ -3462,7 +3538,11 @@ claims:
     neither of which anything outside the node can check.  Measured on 154
     configurations of the 0.4.0 floor study (float32 and float64, CPU): a
     2000-sub-step node declaring one evaluation read 0.26-0.60x the true
-    distance with the flag set, and internal cancellation 0.02-0.65x.  In
+    distance with the flag set, and internal cancellation 0.02-0.65x.  Nor
+    does the count see a same-pass read that differences entries of one
+    source field (a mapping row [1, -1] on a field at 1000 with a
+    difference of order one): a Gauss-Seidel group stalled behind it read
+    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-192, open).  In
     the other direction mixed-sign chains read up to 1e7x and sub-cycled
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
@@ -3742,9 +3822,15 @@ claims:
     - src/maddening/core/coupling/acceleration.py:1033 (residual_precision_floor)
   conditions: >-
     every norm; mixed dtypes; computed in at least float32 whatever the
-    fields' dtypes, each field at its own dtype's eps (MADD-ANO-186).
+    fields' dtypes, each field at its own dtype's eps (MADD-ANO-186).  Under
+    "interface" the entries are what each internal edge delivers (its
+    mapping, with the weights passed as `mappings`, then its transform),
+    each at the coarser of its own dtype's eps and its source field's
+    (MADD-ANO-191).
   oracle: closed form.
   tests:
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_floor_of_a_mapped_edge_counts_what_it_delivers
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_delivered_value_is_no_finer_than_the_field_it_was_computed_from
     - tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve
     - tests/core/test_coupling_precision_floor.py::test_a_float16_field_beside_a_float32_one_is_floored_at_float16
     - tests/core/test_coupling_claims_helpers.py::test_the_floor_traces_under_jit_and_reads_nothing_inside_the_dead_band
@@ -3819,7 +3905,12 @@ claims:
     0.26-0.60x the true distance, and internal cancellation at 0.02-0.65x,
     both with spectral_usable=True (0.4.0 floor study, 154 configurations);
     mixed-sign chains and sub-cycled groups read up to 1e7x and 1e3-1e5x
-    over.  diagnostics="rounding", which measures instead of counting, is
+    over.  A read's gain is measured along its source's own state, which a
+    difference of two entries of that field cancels: a same-pass read
+    through a mapping row [1, -1] is counted as a gain of about one, and a
+    Gauss-Seidel group stalled behind it read its bound at 0.054x to
+    2.6e-4x the true distance, usable (MADD-ANO-192, open).
+    diagnostics="rounding", which measures instead of counting, is
     planned for 0.5.0.
   oracle: the count against hand-derived chains; the step and the report count the same.
   tests:
@@ -5419,3 +5510,56 @@ claims:
     adaptive: narrowed
     checkpoint_restart: n/a
     sharded: narrowed
+
+- id: CPL-188
+  area: precision floor
+  claim: >-
+    Under convergence_norm="interface" with an interface mapping on an
+    internal edge "the entries are what the edges deliver, which depends on
+    the mapping weights the step ran with (params["mappings"], which a
+    caller may override for one step): the step measures that group's floor
+    itself and the report reads it, so a params override, or an edit of the
+    weights since, does not move it either."
+  sources:
+    - src/maddening/core/graph_manager.py:9499 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/graph_manager.py:352 (_reads_mapping_weights)
+    - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
+  conditions: >-
+    convergence_norm="interface" and an internal edge with a mapping whose
+    source field is floating: only that group owns the `_meta` slot
+    coupling_<key>_reading_floor (the floor per evaluation, NaN until a
+    step has written it, restarted with the group's other report slots);
+    every other group's floor is taken from the returned state alone, as it
+    was.  A state whose slot was never written (a checkpoint from before
+    the slot existed) is read with the graph's own weights.
+  oracle: >-
+    residual_precision_floor of the returned state under the step's
+    weights; the documented bound formula on the reported slots.
+  tests:
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_recorded_floor_times_the_count_is_the_floor_the_report_adds
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_only_a_group_whose_norm_reads_a_mapped_edge_records_its_floor
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_replaced_group_does_not_inherit_the_recorded_floor
+    - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_a_state_without_the_recorded_floor_is_read_with_the_graphs_own_weights
+    - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights
+  status: verified
+  domains:
+    f32:
+      - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f32]'
+    f64: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f64]'
+    mixed_dtype: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[mixed_dtype]'
+    16bit:
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[bfloat16]'
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[float16]'
+    jit:
+      - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_reports_floor_is_taken_with_the_weights_the_step_ran_with
+      - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[f32]'
+    grad: n/a
+    vmap: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[vmap]'
+    multi_rate: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[multi_rate]'
+    sub_cycled: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[sub_cycled]'
+    predictors_warm_starts: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[predictors_warm_starts]'
+    adaptive: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[adaptive]'
+    checkpoint_restart: 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_the_reports_floor_is_the_one_the_step_measured_with_its_weights[checkpoint_restart]'
+    sharded: 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-188]'

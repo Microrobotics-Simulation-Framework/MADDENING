@@ -140,3 +140,53 @@ def test_create_app_holds_the_build_lock_while_it_builds(tmp_path, monkeypatch):
     assert seen == [False], "another thread could take the lock mid-build"
     assert server_module._CREATE_APP_LOCK.acquire(blocking=False)
     server_module._CREATE_APP_LOCK.release()
+
+
+def test_an_app_is_built_while_another_thread_holds_the_graph(tmp_path, monkeypatch):
+    """The build lock is the only lock a build waits for: an app is built
+    while another thread holds its server's graph lock, as a long request
+    does, so the two locks are never taken in opposite orders."""
+    monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", 1.0)
+    server = SimulationServer({}, checkpoint_root=str(tmp_path))
+    built: list = []
+    builder = threading.Thread(target=lambda: built.append(server.create_app()), daemon=True)
+    assert server._graph_lock.acquire(timeout=10)
+    try:
+        builder.start()
+        builder.join(20)
+        waited = builder.is_alive() or not built
+    finally:
+        server._graph_lock.release()
+        builder.join(20)
+    assert not waited, "create_app waited for the graph lock"
+
+
+def test_a_build_that_builds_another_app_does_not_wait_for_itself(tmp_path, monkeypatch):
+    """The build lock is re-entrant: the thread that holds it takes it
+    again, so a build that builds a second server's app on its own thread
+    (a server composed of another) finishes."""
+    lock = server_module._CREATE_APP_LOCK
+    assert lock.acquire(blocking=False)
+    try:
+        again = lock.acquire(blocking=False)
+        if again:
+            lock.release()
+    finally:
+        lock.release()
+    # Asked first, without blocking: the nested build below would wait for
+    # ever on a lock that is not re-entrant, and hold it against every
+    # later build in the process.
+    assert again, "the thread holding the build lock could not take it again"
+
+    outer = SimulationServer({}, checkpoint_root=str(tmp_path / "outer"))
+    inner = SimulationServer({}, checkpoint_root=str(tmp_path / "inner"))
+    real_build = SimulationServer._build_app
+    nested: list = []
+
+    def build(self):
+        if self is outer:
+            nested.append(inner.create_app())
+        return real_build(self)
+
+    monkeypatch.setattr(SimulationServer, "_build_app", build)
+    assert outer.create_app() is not None and len(nested) == 1

@@ -32,6 +32,7 @@ and the module runs under :func:`tests.property.differential.no_cloud_launch`.
 from __future__ import annotations
 
 import contextlib
+import gc
 import hashlib
 import json
 import os
@@ -145,6 +146,35 @@ def reading(base: str, headers: dict):
         stop.set()
         t.join(30)
     assert not bad, bad[:3]
+
+
+@contextlib.contextmanager
+def collector_off():
+    """Python's cyclic garbage collector switched off for the block.
+
+    A test here that times a request shares its process with the server it
+    asks, and a full (oldest-generation) collection stops every thread of
+    that process -- the client, the server's event loop and its workers --
+    for as long as it takes: 0.1 to 0.4 s in these tests on an idle core,
+    longer on a busy one.  The collector runs once enough objects have been
+    allocated, so a test that has just built and sent a hundred requests is
+    where one falls, and one that falls inside a timed request is counted
+    as the route's own time.  The two misses reproduced here (jax 0.10.2,
+    one busy core: a stop at 0.54 s and at 0.60 s against 0.5 s) each had
+    a collection of 0.46 s and of 0.42 s inside the request; CI's three,
+    0.70 to 0.76 s, are read the same way.  What the routes are asked for
+    -- not to wait for a worker thread, or for the graph -- has nothing to
+    do with it.
+
+    A collection another thread has already begun is not stopped, so a
+    test enters this before it starts its server or any thread."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 # ---------------------------------------------------------------------------
@@ -562,8 +592,9 @@ def test_simultaneous_saves_of_one_name_leave_a_manifest_that_hashes_to_the_file
 def test_healthz_answers_while_every_worker_waits_for_the_graph(tmp_path):
     """REST-018: the graph held, more reads queued than anyio has worker
     threads (40), each waiting for the graph in a worker; /healthz, answered
-    on the event loop, still answers within two seconds."""
-    with S.loopback_server(_ANY, tmp_path) as (server, base):
+    on the event loop, still answers within two seconds.  No collection
+    runs meanwhile (:func:`collector_off`)."""
+    with collector_off(), S.loopback_server(_ANY, tmp_path) as (server, base):
         lock = server._graph_lock
         assert lock.acquire(timeout=20)
         queued = []
@@ -590,7 +621,14 @@ def test_healthz_answers_while_every_worker_waits_for_the_graph(tmp_path):
 #: The graph-lock timeout of the saturated-pool test, and how many reads it
 #: queues behind a held graph: three times anyio's 40 workers, so a route
 #: that needs a worker waits two waves of timed-out reads for one.
-LOCK_TIMEOUT = 1.0
+#:
+#: The timeout is also how long the test has to arrange that: every read
+#: must have arrived before the first of them gives up.  The 120 take 0.07
+#: to 0.14 s to arrive on three idle cores and up to 0.54 s on three busy
+#: ones (0.89 s with a collection among them, before ``collector_off``):
+#: too near a 1 s timeout.  The route's bounds are counted in timeouts, so
+#: a longer one leaves the claim as it was.
+LOCK_TIMEOUT = 2.0
 QUEUED = 120
 #: Runner routes behind a saturated worker pool: (route, the row, the
 #: runner running?, what it must answer, within how many lock timeouts).
@@ -653,15 +691,18 @@ def test_a_runner_route_answers_in_time_while_every_worker_waits_for_the_graph(
     of their arrival, not after a worker freed up.
 
     Timed on the server, from the route's arrival to its answer
-    (:class:`_ServerClock`), and asked only once every read has arrived and
-    none has been answered.  The reads used to be sent from threads that
+    (:class:`_ServerClock`), asked only once every read has arrived and
+    none has been answered, and with the garbage collector off
+    (:func:`collector_off`).  The reads used to be sent from threads that
     each built their own client first -- an SSL context each, up to 1.6 s
     for the 120 on three cores -- so the first reads timed out before the
-    last were sent, and the route, timed by the client, waited for the CPU
-    behind clients still being built and 503s being sent: 0.72 s for the
-    stride on a CI runner, which answers in about a millisecond.  A route
-    that needed a worker would wait about two lock timeouts here: for the
-    two waves of reads queued ahead of it to time out."""
+    last were sent, and the route was timed by the client in the middle of
+    it: behind clients still being built, 503s being sent and -- in both
+    misses reproduced with the collector watched -- a full collection of
+    what had just been allocated.  That was 0.70 to 0.76 s on a CI runner
+    for a stride or a stop that answers in milliseconds.  A route that
+    needed a worker would wait about two lock timeouts here: for the two
+    waves of reads queued ahead of it to time out."""
     chk = S.Check(fn=None, rows=(), bind="any", contexts=frozenset(), server_kw={},
                   patch={"_GRAPH_LOCK_TIMEOUT": LOCK_TIMEOUT}, xfail={})
     clock = _ServerClock()
@@ -669,7 +710,7 @@ def test_a_runner_route_answers_in_time_while_every_worker_waits_for_the_graph(
     monkeypatch.setattr(server_module.SimulationServer, "create_app",
                         lambda self: clock.wrap(build(self)))
     path = url.split("?")[0]
-    with S.loopback_server(chk, tmp_path) as (server, base):
+    with collector_off(), S.loopback_server(chk, tmp_path) as (server, base):
         if running:
             with _client(base, server) as c:
                 assert c.post("/sim/start").status_code == 200

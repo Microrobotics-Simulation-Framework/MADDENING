@@ -24,7 +24,7 @@ import time
 import warnings
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api import server as server_module
 from maddening.api.server import SimulationServer

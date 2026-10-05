@@ -18,13 +18,31 @@ has to be right:
 
 1. the bind address given to :class:`APIAuth` is not loopback, which is
    the configured, whole-server answer; and
-2. the peer address of the individual request is a routable IP, which
+2. the individual request is not a direct connection from a loopback
+   address -- its peer is not a loopback IP literal, or it carries a
+   forwarding header (``X-Forwarded-For``, ``Forwarded``) -- which
    catches a caller who binds ``0.0.0.0`` through
    ``uvicorn.run(app, host="0.0.0.0")`` without telling the app.
 
 (2) exists because the app cannot see the socket uvicorn binds.  Without
 it, the security of the whole server would rest on a string the caller
 remembered to pass.
+
+The peer is ``scope["client"]`` as the ASGI server reports it, and that
+is not always the socket's: under uvicorn's ``proxy_headers`` (on by
+default, trusting ``127.0.0.1``) it is whatever a trusted proxy's
+``X-Forwarded-For`` says, so any request arriving over loopback names
+its own peer.  A peer that is not an IP literal -- Starlette's
+``TestClient`` reports ``"testclient"``, a Unix socket none, and a
+forged header anything at all -- is therefore unknown, and the token is
+demanded of it; so is any request that carries a forwarding header.
+**Never configure loopback as a trusted proxy for a loopback-bound
+server** (uvicorn's ``forwarded_allow_ips``): this module no longer
+depends on it, but nothing gains from it either.  The library's own
+launch paths pass ``proxy_headers=False``.  An in-process client
+(``TestClient``) presents :attr:`APIAuth.token`, or is constructed as a
+loopback client: ``TestClient(app, base_url="http://127.0.0.1",
+client=("127.0.0.1", 50000))``.
 
 Where the token comes from
 --------------------------
@@ -37,7 +55,10 @@ or blank string is a configuration error and raises**: it is what
 exists to remove.  Unset the variable if you want a generated token.
 A token with whitespace before or after it raises too: a client's
 ``Authorization`` header is read with that whitespace stripped, so such
-a token could never be presented.
+a token could never be presented.  So does one holding a character that
+is not printable ASCII: a header carries latin-1 bytes, which clients
+either refuse to send or send in another encoding than the one the
+server compares.
 
 A generated token is only useful to somebody who can read the log.
 When nothing can — a detached container, a job whose stdout goes
@@ -162,12 +183,15 @@ def is_loopback(host: Optional[str]) -> bool:
 def is_routable_peer(host: Optional[str]) -> bool:
     """Whether *host* is an IP address that is not loopback.
 
-    The peer backstop (rule 2 in the module docstring) uses this rather
-    than ``not is_loopback(...)`` because ASGI transports that are not
-    TCP put a non-address in ``scope["client"]`` -- Starlette's
-    ``TestClient`` uses the string ``"testclient"``, and a Unix socket
-    leaves the field empty.  Those are in-process or same-host by
-    construction, so they are not treated as remote.
+    A classification of an address, and no longer the peer backstop's
+    rule (rule 2 in the module docstring), which demands the token of
+    every peer that is not a loopback IP literal.  A value that is not
+    an IP address -- Starlette's ``TestClient`` reports ``"testclient"``,
+    a Unix socket leaves the field empty -- is not routable, but it is
+    not known to be local either: the peer is ``scope["client"]`` as the
+    ASGI server reports it, which under uvicorn's ``proxy_headers`` is a
+    trusted proxy's ``X-Forwarded-For`` value, so any string at all can
+    be put there by a request.
 
     Parameters
     ----------
@@ -188,6 +212,36 @@ def is_routable_peer(host: Optional[str]) -> bool:
     except ValueError:
         return False
     return not is_loopback(normalised)
+
+
+def _is_loopback_peer(host: Optional[str]) -> bool:
+    """Whether *host* -- ``scope["client"][0]`` -- is a loopback IP
+    literal (``127.0.0.0/8``, ``::1``, their IPv4-mapped form).  A name
+    (``"localhost"``, ``"testclient"``), an empty peer and anything else
+    that does not parse as an address are not: the peer backstop treats
+    them as unknown and demands the token."""
+    normalised = (host or "").strip()
+    if not normalised:
+        return False
+    try:
+        ipaddress.ip_address(normalised.split("%", 1)[0])
+    except ValueError:
+        return False
+    return is_loopback(normalised)
+
+
+#: Request headers that say a proxy forwarded the request, and that an ASGI
+#: server's proxy support (uvicorn's ``proxy_headers``, hypercorn's
+#: ``ProxyFixMiddleware``) reads ``scope["client"]`` from.
+_FORWARDING_HEADERS = ("x-forwarded-for", "forwarded")
+
+
+def _carries_forwarding_header(headers: Optional[Mapping[str, str]]) -> bool:
+    """Whether *headers* (a case-insensitive mapping, or one keyed by
+    lowercase names) carry ``X-Forwarded-For`` or ``Forwarded``."""
+    if not headers:
+        return False
+    return any(headers.get(name) is not None for name in _FORWARDING_HEADERS)
 
 
 def encode_ws_bearer(token: str) -> str:
@@ -293,11 +347,20 @@ def bearer_from_subprotocols(offered: Iterable[str]) -> str:
     -------
     str
         The first decodable ``maddening.bearer.*`` value, else ``""``.
+
+    Notes
+    -----
+    ASGI specifies ``scope["subprotocols"]`` as a list of names, but some
+    servers pass the ``Sec-WebSocket-Protocol`` header as one
+    comma-joined entry (uvicorn 0.50.0 does); each entry is split on
+    commas, so the browser carrier is read either way.  A subprotocol
+    name is an HTTP token and holds no comma.
     """
-    for name in offered:
-        token = decode_ws_bearer(name.strip())
-        if token:
-            return token
+    for entry in offered:
+        for name in str(entry).split(","):
+            token = decode_ws_bearer(name.strip())
+            if token:
+                return token
     return ""
 
 
@@ -314,7 +377,8 @@ class APIAuth:
         A non-loopback value turns authentication on for every request.
     token : str, optional
         An explicit token, overriding the environment.  Must be a
-        non-blank string without whitespace before or after it.
+        non-blank string of printable ASCII characters without whitespace
+        before or after it.
     environ : mapping, optional
         Environment to read (``MADDENING_HOST``, ``MADDENING_API_TOKEN``,
         ``MADDENING_API_TOKEN_FILE``); defaults to :data:`os.environ`.
@@ -340,7 +404,8 @@ class APIAuth:
         the module docstring: an empty token is a configuration mistake,
         and silently reading it as "no authentication" is the defect
         this class exists to fix.  Also if it has whitespace before or
-        after it, which no ``Authorization`` header can present.
+        after it, or a character that is not printable ASCII, neither of
+        which an ``Authorization`` header can present.
 
     Examples
     --------
@@ -349,6 +414,8 @@ class APIAuth:
     False
     >>> auth.required_for_peer("10.0.0.4")
     True
+    >>> auth.required_for_peer("127.0.0.1"), auth.required_for_peer("testclient")
+    (False, True)
     >>> auth.verify("s3cret"), auth.verify("wrong")
     (True, False)
     """
@@ -387,6 +454,24 @@ class APIAuth:
                 "client could ever present this token. Set it without the "
                 "surrounding whitespace (a trailing newline from a file, say)."
             )
+        unpresentable = next((ch for ch in source if not " " <= ch <= "~"), None) \
+            if source is not None else None
+        if unpresentable is not None:
+            # An HTTP header carries latin-1 bytes, which Starlette decodes as
+            # such, and verify() compares UTF-8: a token outside printable
+            # ASCII was accepted here and then refused to every client --
+            # curl's UTF-8 bytes arrive as other characters, httpx and
+            # requests will not encode the header at all, and a latin-1
+            # token matched only a client sending latin-1 bytes.
+            raise ValueError(
+                f"{origin} holds the character {unpresentable!r} "
+                f"(U+{ord(unpresentable):04X}), which is not printable ASCII. An "
+                "'Authorization: Bearer' header cannot carry it as this server "
+                "reads one -- clients send header bytes the server decodes as "
+                "latin-1, or refuse to send them -- so no client could ever present "
+                "this token. Set it to printable ASCII characters only (a generated "
+                "token is URL-safe base64)."
+            )
         self.generated = source is None
         self._environ = env
         self.token = secrets.token_urlsafe(TOKEN_BYTES) if source is None else source
@@ -403,15 +488,36 @@ class APIAuth:
         Parameters
         ----------
         peer_host : str or None
-            ``scope["client"][0]``: the address the request came from.
+            ``scope["client"][0]`` as the ASGI server reports it.  That is
+            the socket's peer address, except under a proxy-header
+            middleware (uvicorn's ``proxy_headers``, on by default and
+            trusting ``127.0.0.1``), where it is a trusted proxy's
+            ``X-Forwarded-For`` value -- which any request arriving over
+            loopback can set.
 
         Returns
         -------
         bool
             ``True`` when the bind is non-loopback (rule 1) **or** the
-            peer is a routable IP (rule 2, the backstop).
+            peer is not a loopback IP literal (rule 2, the backstop).  A
+            peer that is not an IP address at all (Starlette's
+            ``TestClient`` reports ``"testclient"``, a Unix socket none, a
+            forged ``X-Forwarded-For`` anything) is unknown, so the
+            backstop fails closed.  Until 0.4.0's release it treated such
+            a peer as local, and ``X-Forwarded-For: x`` on a request to a
+            loopback-bound uvicorn made every route answer without a token.
         """
-        return self.enforced or is_routable_peer(peer_host)
+        return self.enforced or not _is_loopback_peer(peer_host)
+
+    def _required_for_request(self, peer_host: Optional[str],
+                              headers: Optional[Mapping[str, str]]) -> bool:
+        """:meth:`required_for_peer`, and also for a request that carries a
+        forwarding header (``X-Forwarded-For``, ``Forwarded``): a proxy
+        stands between the client and this server, or the request claims
+        one does, and either way the peer it reports is not a direct
+        loopback connection.  The one rule the HTTP middleware, the
+        WebSocket middleware and every WebSocket handler ask."""
+        return self.required_for_peer(peer_host) or _carries_forwarding_header(headers)
 
     def verify(self, presented: Optional[str]) -> bool:
         """Whether *presented* is the expected token.
@@ -489,7 +595,6 @@ class APIAuth:
                 self.bind_host, port, TOKEN_ENV,
             )
             return False
-        self._write_token_file()
         logger.warning(
             "\n"
             "============================================================\n"
@@ -514,6 +619,10 @@ class APIAuth:
             self.bind_host, port, self.token,
             TOKEN_ENV,
         )
+        # After the token is logged: a file that cannot be written says the
+        # token "is in the log line above", which it was not when the file
+        # was written first.
+        self._write_token_file()
         return True
 
     def _write_token_file(self) -> None:

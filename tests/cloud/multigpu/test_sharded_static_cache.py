@@ -305,7 +305,7 @@ def test_param_write_through_the_rest_layer_reaches_a_derived_static():
     pytest.importorskip(
         "fastapi", reason="the REST layer is the optional [api] extra",
     )
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
 
     from maddening.api.server import SimulationServer
 

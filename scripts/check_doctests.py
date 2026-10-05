@@ -109,7 +109,10 @@ EXCLUDED = (PACKAGE / "examples",)
 #: Hence ``EXAMPLES_PER_FILE``.  ``TestDoctestGate`` now holds this number
 #: *equal* to the examples in the source, not merely below them, so the
 #: slack cannot reopen silently.
-MIN_EXAMPLES = 111
+#:
+#: 111 -> 112 with the example in ``api/auth.py`` that a non-IP peer
+#: (``"testclient"``) needs the token on a loopback bind.
+MIN_EXAMPLES = 112
 
 #: The examples each file holds, pinned.  A total floor guards only the
 #: total: one example deleted where another was added passes it, and so
@@ -126,7 +129,7 @@ MIN_EXAMPLES = 111
 #: test module, so raising or lowering one is a two-file edit.  Keys are
 #: repository-relative POSIX paths, as pytest spells a doctest's node id.
 EXAMPLES_PER_FILE: dict[str, int] = {
-    "src/maddening/api/auth.py": 7,
+    "src/maddening/api/auth.py": 8,
     "src/maddening/api/server.py": 3,
     "src/maddening/core/compliance/metadata.py": 1,
     "src/maddening/core/coupling/acceleration.py": 37,

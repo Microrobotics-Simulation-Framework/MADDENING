@@ -24,7 +24,7 @@ import warnings
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api import server as server_module
 from maddening.api.server import SimulationServer
@@ -146,3 +146,26 @@ def test_each_request_behind_a_long_holder_answers_within_about_one_timeout(serv
         assert waited < 1.5 * QUEUE_TIMEOUT, (label, waited, status, log)
     assert log["stride"][1] == 200 and log["stride"][0] < QUEUE_TIMEOUT / 2, log
     assert server._steps_per_frame == 2
+
+
+def test_a_runner_route_waits_for_the_runner_lock_only_until_its_deadline(served):
+    """Another request holds the runner lock (it is starting, stopping or
+    resetting the runner): ``POST /sim/start`` answers 503 within about one
+    timeout of its arrival, while the lock is still held, instead of
+    waiting for it."""
+    server, client = served
+    assert server._runner_lock.acquire()
+    answered: dict = {}
+    thread = threading.Thread(target=lambda: answered.update(resp=client.post("/sim/start")))
+    try:
+        thread.start()
+        thread.join(TIMEOUT * 40)
+        held_reply = dict(answered)
+    finally:
+        server._runner_lock.release()
+        thread.join(60)
+    assert "resp" in held_reply, "the route waited for the runner lock past its deadline"
+    resp = held_reply["resp"]
+    assert resp.status_code == 503, resp.text
+    assert "starting, stopping or resetting the runner" in resp.json()["detail"]
+    assert server.runner is None or not server.runner.is_alive

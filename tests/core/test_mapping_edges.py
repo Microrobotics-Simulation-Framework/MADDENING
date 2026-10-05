@@ -138,7 +138,7 @@ def test_changed_weights_take_effect_without_recompile(kind, weight):
 
 
 @pytest.mark.parametrize("coupled", [False, True])
-@pytest.mark.parametrize("kind", ["rbf", "inverse_distance"])
+@pytest.mark.parametrize("kind", ["rbf", "inverse_distance", "sparse_nearest_neighbor"])
 def test_gradient_wrt_mapping_weights(coupled, kind):
     """A gradient reaches every weight of the edge, staggered and through
     the IFT rule of a coupling group, whatever class holds the weights."""

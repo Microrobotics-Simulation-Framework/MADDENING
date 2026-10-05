@@ -33,6 +33,15 @@ domain by building that graph differently:
 ``vmap`` and ``run_adaptive`` have their own tests below; the 16-bit
 dtypes and sharded graphs are not exercised for a registered kind and the
 rows narrow them.
+
+**The sparse kinds** (``maddening.core.coupling.sparse_mapping``) are
+registered kinds too, and run through the same statement in the same
+domains: nearest neighbour in both modes and both conservative forms, the
+1-D projection, and ``sparse_matrix`` from two asset files
+(``tests/sparse_mapping_support.py``).  For them "the reload rebuilds every
+weight" has a second half, which is asserted with it: the reload rebuilds
+the *index* bit for bit -- the same pattern, so the same digest, so the
+checkpoint's weights are accepted.
 """
 
 from __future__ import annotations
@@ -42,6 +51,7 @@ import dataclasses
 import json
 import os
 import warnings
+from typing import Any, Callable
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
@@ -53,6 +63,8 @@ import pytest
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.static_data import StaticArray
+from maddening.core.coupling.sparse_mapping import StaticSparseMapping
+from tests import sparse_mapping_support as sparse
 from tests.registered_mapping_kinds import (
     INVERSE_DISTANCE,
     KINDS,
@@ -159,13 +171,54 @@ def build(domain: Domain) -> GraphManager:
     return gm
 
 
-def _reload(gm: GraphManager) -> GraphManager:
+@dataclasses.dataclass(frozen=True)
+class Subject:
+    """The mapping kind a graph's two edges are built from, as the shared
+    statement sees it."""
+
+    name: str
+    #: ``build(domain, base_dir)``: the compiled two-member graph.
+    build: Callable[..., GraphManager]
+    registry: dict
+    mapping_class: type
+    weights: tuple[str, ...]
+    #: The dtype every weight has in *domain*.
+    weight_dtype: Callable[["Domain"], str]
+
+    def __repr__(self) -> str:      # the pytest id
+        return self.name
+
+
+def _sparse_subject(case: sparse.SparseCase) -> Subject:
+    def build_sparse(domain: Domain, base_dir) -> GraphManager:
+        return sparse.mapped_pair(
+            case, n_a=4, n_b=6, dtype_a=domain.dtype_a, dtype_b=domain.dtype_b,
+            dt_a=DT, dt_b=domain.dt_b, group=domain.group, base_dir=base_dir)
+
+    # The nearest-neighbour and projection weights are float32 whatever the
+    # setting, as the dense kinds' are; sparse_matrix keeps its values'.
+    def weight_dtype(domain: Domain) -> str:
+        return domain.weight_dtype if case.kind == "sparse_matrix" else "float32"
+
+    return Subject(case.name, build_sparse, sparse.REGISTRY, StaticSparseMapping, ("W",),
+                   weight_dtype)
+
+
+#: The registered kind the harness was written for.
+INVERSE = Subject(INVERSE_DISTANCE, lambda domain, base_dir: build(domain), REGISTRY,
+                  InverseDistanceMapping, ("W", "gain"), lambda domain: domain.weight_dtype)
+#: Every sparse case: nearest neighbour (consistent, conservative as a
+#: padded gather, conservative as a scatter-add), projection, your own rows.
+SPARSE = {name: _sparse_subject(case) for name, case in sparse.CASES.items()}
+
+
+def _reload(gm: GraphManager, registry: dict = REGISTRY, base_dir=None) -> GraphManager:
     with warnings.catch_warnings():
         # The recipe is what is being reloaded; that the live weights
         # differ from it is asserted where it matters.
         warnings.filterwarnings("ignore", message=r".*live mapping weights.*")
         config = json.loads(json.dumps(gm.to_dict()))
-    reloaded = GraphManager.from_dict(config, REGISTRY)
+    reloaded = GraphManager.from_dict(config, registry, base_dir=base_dir)
     reloaded.compile()
     return reloaded
 
@@ -187,29 +240,45 @@ def _assert_same_state(got: dict, expected: dict, what: str) -> None:
 
 
 def _move_weights(gm: GraphManager) -> None:
-    """Both weights of both edges, away from what the factory builds, as a
+    """Every weight of both edges, away from what the factory builds, as a
     fit would leave them."""
     for slot in gm.params["mappings"].values():
-        slot["gain"] = (slot["gain"] * 0.75).astype(slot["gain"].dtype)
-        slot["W"] = (slot["W"] * 1.25).astype(slot["W"].dtype)
+        for name in slot:
+            factor = 0.75 if name == "gain" else 1.25
+            slot[name] = (slot[name] * factor).astype(slot[name].dtype)
 
 
-def check_round_trip_and_checkpoint(domain: Domain, tmp_path) -> None:
-    gm = build(domain)
-    for key in (A2B, B2A):
-        assert isinstance(gm.edges[0].mapping, InverseDistanceMapping)
-        assert sorted(gm.params["mappings"][key]) == ["W", "gain"]
+def _structure(mapping: Any):
+    """What of a sparse mapping is not a weight: its layout, sizes, index
+    and row counts, as bytes (``None`` for a mapping without one)."""
+    if not isinstance(mapping, StaticSparseMapping):
+        return None
+    counts = None if mapping.counts is None else np.asarray(mapping.counts).tobytes()
+    return (mapping.layout, mapping.n_source, mapping.n_target, mapping.indices.dtype,
+            mapping.indices.shape, mapping.indices.tobytes(), counts,
+            mapping.structure_digest())
+
+
+def check_round_trip_and_checkpoint(domain: Domain, tmp_path,
+                                    subject: Subject = INVERSE) -> None:
+    gm = subject.build(domain, tmp_path)
+    names = sorted(subject.weights)
+    for key, edge in zip((A2B, B2A), gm.edges):
+        assert type(edge.mapping) is subject.mapping_class
+        assert sorted(gm.params["mappings"][key]) == names
         for leaf in gm.params["mappings"][key].values():
-            assert str(leaf.dtype) == domain.weight_dtype
+            assert str(leaf.dtype) == subject.weight_dtype(domain)
     assert str(gm.get_node_state("a")["x"].dtype) == domain.dtype_a
     assert str(gm.get_node_state("b")["x"].dtype) == domain.dtype_b
 
-    # 1. The recipe round-trips: same weights bit for bit, same steps.
-    reloaded = _reload(gm)
-    for key in (A2B, B2A):
+    # 1. The recipe round-trips: same weights bit for bit, same steps --
+    #    and, for a sparse kind, the same index.
+    reloaded = _reload(gm, subject.registry, tmp_path)
+    for key, edge, again in zip((A2B, B2A), gm.edges, reloaded.edges):
         assert_same_weights(reloaded.params["mappings"][key], gm.params["mappings"][key],
                             what=f"rebuilt {key}")
-        assert reloaded.edges[0].mapping.spec == gm.edges[0].mapping.spec
+        assert again.mapping.spec == edge.mapping.spec
+        assert _structure(again.mapping) == _structure(edge.mapping), f"rebuilt {key}"
     gm.run(4)
     reloaded.run(4)
     _assert_same_state(_state(reloaded), _state(gm), "the reload after four steps")
@@ -225,10 +294,12 @@ def check_round_trip_and_checkpoint(domain: Domain, tmp_path) -> None:
 
     # ... a checkpoint carries each under its own name; the config does not.
     path = gm.save_state(tmp_path / f"{domain.name}.npz")
-    with pytest.warns(UserWarning, match=r"live mapping weights \['W', 'gain'\]"):
+    listed = ", ".join(repr(name) for name in names)
+    with pytest.warns(UserWarning, match=rf"live mapping weights \[{listed}\]"):
         gm.to_dict()
-    fresh = _reload(gm)
-    assert fresh.params["mappings"][A2B]["gain"].tobytes() != moved[A2B]["gain"].tobytes()
+    fresh = _reload(gm, subject.registry, tmp_path)
+    first = names[-1]
+    assert fresh.params["mappings"][A2B][first].tobytes() != moved[A2B][first].tobytes()
     if domain.ahead:
         fresh.run(domain.ahead)
     fresh.load_state(path)
@@ -325,6 +396,108 @@ def test_run_adaptive_reads_a_registered_kinds_restored_weights(tmp_path):
     restored = _reload(gm)
     restored.load_state(path)
     recipe = _reload(gm)
+
+    _, info = gm.run_adaptive(0.5, **kwargs)
+    _, info_restored = restored.run_adaptive(0.5, **kwargs)
+    recipe.run_adaptive(0.5, **kwargs)
+    assert info["dt_history"] == info_restored["dt_history"] and info["dt_history"]
+    _assert_same_state(_state(restored), _state(gm), "after run_adaptive")
+    assert _state(recipe)["b"]["x"].tobytes() != _state(gm)["b"]["x"].tobytes()
+
+
+# ---------------------------------------------------------------------------
+# The sparse kinds, through the same statement in the same domains
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", sorted(DOMAINS))
+@pytest.mark.parametrize("case", sorted(SPARSE))
+def test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint(case, name, tmp_path):
+    """Every sparse case in each domain: the config carries the recipe, a
+    reload rebuilds the index and every weight bit for bit and steps
+    exactly as the graph it was saved from; the weights are live
+    parameters a checkpoint restores into a reload -- which holds the same
+    pattern, so accepts them -- and the run continues as the one that
+    never stopped."""
+    domain = DOMAINS[name]
+    with x64(domain.x64):
+        check_round_trip_and_checkpoint(domain, tmp_path, SPARSE[case])
+
+
+def test_the_sparse_fixtures_have_several_entries_in_a_row_padding_and_both_layouts(tmp_path):
+    """The fixture can express the defects: across the cases there is a
+    row of more than one entry, a padded slot, an index that is not the
+    row's own number, and both layouts."""
+    mappings = [SPARSE[case].build(DOMAINS["f32"], tmp_path).edges[i].mapping
+                for case in sorted(SPARSE) for i in (0, 1)]
+    assert {m.layout for m in mappings} == {"gather", "scatter"}
+    assert any(m.k > 1 for m in mappings)
+    assert any(m.counts is not None for m in mappings)
+    assert any(m.counts is None and m.k == 1 for m in mappings)
+    assert all((np.asarray(m.indices) != np.arange(m.indices.shape[0])[:, None]).any()
+               for m in mappings), "an index that is not its row's own number"
+    assert {m.kind for m in mappings} == set(sparse.SPARSE_KIND_NAMES)
+
+
+@pytest.mark.parametrize("name", ["f32", "f64", "mixed_dtype"])
+@pytest.mark.parametrize("case", sorted(SPARSE))
+def test_a_gradient_reaches_the_weights_of_a_sparse_kind_at_their_dtype(case, name, tmp_path):
+    """A derivative with respect to ``W`` of both edges, at the weights'
+    own dtype: one number per slot, zero in a padded slot."""
+    domain, subject = DOMAINS[name], SPARSE[case]
+    with x64(domain.x64):
+        gm = subject.build(domain, tmp_path)
+        step, ext, state0 = gm._build_step_fn(), gm._default_external_inputs(), gm._state
+
+        def loss(params):
+            state = step(step(state0, ext, params), ext, params)
+            return jnp.sum(state["b"]["x"].astype(jnp.result_type(float)) ** 2)
+
+        grads = jax.jit(jax.grad(loss))(gm.params)["mappings"]
+        for key, edge in zip((A2B, B2A), gm.edges):
+            g = grads[key]["W"]
+            assert str(g.dtype) == subject.weight_dtype(domain)
+            assert g.shape == edge.mapping.indices.shape
+            assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0
+            if edge.mapping.counts is not None:
+                padded = ~sparse.valid_slots(edge.mapping)
+                assert not np.asarray(g)[padded].any()
+
+
+@pytest.mark.parametrize("case", sorted(SPARSE))
+def test_a_sparse_kinds_weights_batch_under_vmap_as_each_member_alone(case, tmp_path):
+    """``jax.vmap`` over a batch of ``W``: each member of the batch is the
+    step taken with that member's weights alone."""
+    gm = SPARSE[case].build(DOMAINS["f32"], tmp_path)
+    step, ext, state0 = gm._build_step_fn(), gm._default_external_inputs(), gm._state
+
+    def after(scale):
+        params = jax.tree.map(lambda x: x, gm.params)
+        params["mappings"][A2B] = {"W": scale * params["mappings"][A2B]["W"]}
+        state = step(step(state0, ext, params), ext, params)
+        return state["b"]["x"]
+
+    scales = jnp.asarray([1.0, 0.25, 2.0, -1.5], jnp.float32)
+    batched = np.asarray(jax.jit(jax.vmap(after))(scales))
+    assert batched.shape == (4, 6)
+    alone = np.stack([np.asarray(jax.jit(after)(s)) for s in scales])
+    # The same arithmetic in another order of evaluation: equal to a few ulp.
+    np.testing.assert_allclose(batched, alone, rtol=4 * np.finfo(np.float32).eps)
+    assert len({row.tobytes() for row in batched}) == 4       # the weights were read
+
+
+@pytest.mark.parametrize("case", sorted(SPARSE))
+def test_run_adaptive_reads_a_sparse_kinds_restored_weights(case, tmp_path):
+    """``run_adaptive`` on a reload that restored trained weights from a
+    checkpoint takes the steps, and reaches the state, of the graph the
+    weights were trained in -- and not those of the rebuilt recipe."""
+    kwargs = dict(dt_initial=0.05, dt_max=0.1, atol=1e-6, rtol=1e-4)
+    subject = SPARSE[case]
+    gm = subject.build(DOMAINS["f32"], tmp_path)
+    _move_weights(gm)
+    path = gm.save_state(tmp_path / "trained.npz")
+    restored = _reload(gm, subject.registry, tmp_path)
+    restored.load_state(path)
+    recipe = _reload(gm, subject.registry, tmp_path)
 
     _, info = gm.run_adaptive(0.5, **kwargs)
     _, info_restored = restored.run_adaptive(0.5, **kwargs)

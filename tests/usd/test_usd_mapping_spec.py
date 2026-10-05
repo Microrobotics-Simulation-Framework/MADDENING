@@ -5,7 +5,9 @@ references resolve relative to the stage file.
 The round trips run over the built-in RBF kind and over each kind
 registered the way another library registers one
 (``tests/registered_mapping_kinds.py``); a stage, like a config, can only
-*name* a kind."""
+*name* a kind.  The three sparse kinds run too
+(``tests/sparse_mapping_support.py``): a stage carries their recipe and
+the reader rebuilds the index and the weights bit for bit."""
 
 import json
 import sys
@@ -19,11 +21,12 @@ from maddening.core.coupling.mapping_spec import MappingRebuildError, point_arra
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.heat import HeatNode
 from maddening.usd.serialization import load_graph_from_usd, save_graph_to_usd
+from tests import sparse_mapping_support as sparse
 from tests.core.builtin_mapping_pins import PINS
+from tests.registered_mapping_kinds import assert_same_weights, temporary_kind
 # The kinds registered the way another library registers one, and the
 # library's own sparse nearest neighbour, registered the same way.
 from tests.sparse_mapping_support import REGISTERED_AND_SPARSE as REGISTERED_KINDS
-from tests.registered_mapping_kinds import assert_same_weights, temporary_kind
 from tests.usd.builtin_mapping_usd_pins import capture_usd
 
 C2F = "coarse.temperature->fine.heat_source"
@@ -119,6 +122,43 @@ def test_an_asset_referenced_registered_kind_resolves_relative_to_the_stage_file
     with pytest.raises(MappingRebuildError, match="differs from the points") as changed:
         load_graph_from_usd(Usd.Stage.Open(str(tmp_path / "graph.usda")))
     assert changed.value.kind == kind
+
+
+@pytest.mark.parametrize("name", sorted(sparse.CASES))
+def test_a_sparse_mapping_round_trips_through_a_stage_file(name, tmp_path):
+    """Every sparse case through a stage on disk: the attribute holds the
+    recipe the config holds (references and hyper-parameters, no index and
+    no weight), the reader rebuilds the same index and the same weights,
+    and the reloaded graph steps exactly as the one that was saved.  The
+    two arrays of ``sparse_matrix`` are members of an ``.npz`` beside the
+    stage file."""
+    case = sparse.CASES[name]
+    gm = sparse.mapped_pair(case, base_dir=tmp_path)
+    stage = Usd.Stage.CreateNew(str(tmp_path / "graph.usda"))
+    save_graph_to_usd(gm, stage)
+    stage.GetRootLayer().Save()
+    text = (tmp_path / "graph.usda").read_text(encoding="utf-8")
+    assert case.kind in text and "inline" not in text
+
+    opened = Usd.Stage.Open(str(tmp_path / "graph.usda"))
+    stored = [json.loads(opened.GetPrimAtPath(f"/Simulation/edges/e{i}").GetAttribute(
+        "maddening:mappingSpecJson").Get()) for i in (0, 1)]
+    config = json.loads(json.dumps(gm.to_dict()))
+    assert stored == [edge["mapping"] for edge in config["edges"]]
+    for spec in stored:
+        assert spec["kind"] == case.kind
+        assert not {"W", "counts", "layout", "k"} & set(spec)
+
+    gm2 = load_graph_from_usd(opened, node_registry=sparse.REGISTRY)
+    gm2.compile()
+    for key, edge, again in zip((sparse.A2B, sparse.B2A), gm.edges, gm2.edges):
+        assert again.mapping.spec == edge.mapping.spec
+        assert again.mapping.layout == edge.mapping.layout
+        assert again.mapping.indices.tobytes() == edge.mapping.indices.tobytes()
+        assert again.mapping.structure_digest() == edge.mapping.structure_digest()
+        assert_same_weights(gm2.params["mappings"][key], gm.params["mappings"][key])
+    np.testing.assert_array_equal(np.asarray(gm2.run_scan(5)["b"]["x"]),
+                                  np.asarray(gm.run_scan(5)["b"]["x"]))
 
 
 def test_asset_referenced_matrix_resolves_relative_to_the_stage_file(tmp_path):

@@ -45,9 +45,10 @@ that see one particular fault each, and so run per push:
 * ``flux reads the mapped input``: the target's flux hook receives its
   post-update state, so a target-anchored geometry must be read again for
   it;
-* ``interface norm, three passes``: the interface norm and the
-  quasi-Newton interface set must read a source-anchored geometry as they
-  read the value, and three passes from convergence the residual says so.
+* ``interface norm, three passes`` and ``group IQN-ILS, three passes``:
+  the interface norm and the quasi-Newton interface set must read a
+  source-anchored geometry as they read the value, and three passes from
+  convergence the residual and the iterate say so.
 
 The second half of the module is the frozen case: a geometry that never
 moves gives the static mapping built from the same points.
@@ -68,11 +69,10 @@ from tests.property.geometry_graphs import DT, case
 #: Ulps of a field's scale two different programs of the same arithmetic
 #: may differ by.
 ROUNDING_ULPS = 8
-#: A solve that stops on its criterion returns a state within its
-#: tolerance of the fixed point by its own *estimate*; this many times the
-#: tolerance is allowed for the estimate's error and for entries of a
-#: root-mean-square norm.
-TOLERANCE_SLACK = 32
+#: The mixed and interface criteria are a root mean square over the entries
+#: they read, so one entry may hold this many times its share of the
+#: tolerance (the square root of the number of entries, generously).
+RMS_ENTRY_SLACK = 8
 
 _TIGHT64 = dict(max_iterations=400, tolerance=1e-13)
 _TIGHT32 = dict(max_iterations=200, tolerance=1e-5)
@@ -97,10 +97,18 @@ PER_PUSH = [
     case("back and forward edge, target anchors", order=("P", "F"), adv=0.3, **TARGETS),
     case("flux reads the mapped input", flux="reader", adv=0.3, **TARGETS),
     case("group, the geometry follows the iterate", group=_TIGHT32, adv=0.3, **P_HOLDS),
+    case("group Jacobi, two passes", adv=0.3, **TARGETS,
+         group=dict(max_iterations=2, iteration_mode="jacobi")),
     case("sub-cycled target, one pass", dt_p=DT / 4, adv=0.3, **SOURCES,
          group=dict(_SUB, max_iterations=1, boundary_interpolation="linear")),
+    case("sub-cycled target, one pass, constant, target anchors", dt_p=DT / 4, adv=0.3,
+         **TARGETS, group=dict(_SUB, max_iterations=1, boundary_interpolation="constant")),
     case("interface norm, three passes", adv=0.6, dtype="float64", **P_HOLDS,
          group=dict(max_iterations=3, convergence_norm="interface", rtol=1e-6)),
+    case("group IQN-ILS, three passes", adv=0.6, dtype="float64", **P_HOLDS,
+         group=dict(max_iterations=3, tolerance=1e-13, acceleration="iqn-ils")),
+    case("group, a member's flux read in the same pass, two passes", flux="internal",
+         order=("P", "F"), adv=0.3, **TARGETS, group=dict(max_iterations=2)),
     case("multilinear, forward and back edge", kind="multilinear", adv=0.3, **P_HOLDS),
 ]
 
@@ -136,8 +144,6 @@ SLOW = [
          group=dict(_TIGHT64, acceleration="fixed", relaxation=0.7, iteration_mode="jacobi")),
     case("group IQN-ILS, Jacobi", adv=0.3, dtype="float64", **F_HOLDS,
          group=dict(_TIGHT64, acceleration="iqn-ils", iteration_mode="jacobi")),
-    case("group IQN-ILS, three passes", adv=0.6, dtype="float64", **P_HOLDS,
-         group=dict(max_iterations=3, tolerance=1e-13, acceleration="iqn-ils")),
     case("group IQN-IMVJ, interface norm", adv=0.3, dtype="float64", **SOURCES,
          group=dict(max_iterations=400, acceleration="iqn-imvj", jacobian_reuse=2,
                     convergence_norm="interface", rtol=1e-11)),
@@ -158,6 +164,10 @@ SLOW = [
                     boundary_interpolation="linear")),
     case("group, a member's flux scattered inside it", group=_TIGHT32, flux="internal",
          adv=0.3, **P_HOLDS),
+    case("group, a member's flux read in the same pass", group=_TIGHT32, flux="internal",
+         order=("P", "F"), adv=0.3, **TARGETS),
+    case("group Jacobi, a member's flux scattered inside it, float64", flux="internal",
+         adv=0.3, dtype="float64", **TARGETS, group=dict(_TIGHT64, iteration_mode="jacobi")),
     case("group with an additive port and a transform", group=_TIGHT32, extra=True, adv=0.3,
          **F_HOLDS),
     case("multilinear group", kind="multilinear", group=_TIGHT32, adv=0.3, **P_HOLDS),
@@ -190,7 +200,8 @@ SLOW = [
 ]
 
 #: The cases whose gradients are compared per push, and in the slow lane.
-GRADIENTS_PER_PUSH = [PER_PUSH[0], PER_PUSH[2]]
+GRADIENTS_PER_PUSH = [c for c in PER_PUSH if c.label in (
+    "forward and back edge, source anchors", "flux reads the mapped input")]
 GRADIENTS_SLOW = [
     case("float64, forward and back edge", adv=0.3, dtype="float64", **SOURCES),
     case("float64, F holds", order=("P", "F"), adv=0.3, dtype="float64", **F_HOLDS),
@@ -222,7 +233,7 @@ def _solve_tolerance(c: gg.Case, scale: float) -> float:
         return 0.0          # a fixed few passes: the same arithmetic in both graphs
     if knobs.get("convergence_norm", "l2") == "l2":
         return float(knobs.get("tolerance", 1e-6))
-    return float(knobs.get("rtol", 1e-6)) * scale
+    return float(knobs.get("rtol", 1e-6)) * scale * RMS_ENTRY_SLACK
 
 
 def assert_same_states(c: gg.Case, a: dict, b: dict, *, step: int) -> float:
@@ -233,8 +244,10 @@ def assert_same_states(c: gg.Case, a: dict, b: dict, *, step: int) -> float:
             x, y = np.asarray(a[name][field]), np.asarray(b[name][field])
             assert x.dtype == y.dtype and x.shape == y.shape, (name, field, x.dtype, y.dtype)
             scale = float(max(np.max(np.abs(x)), np.max(np.abs(y))))
+            # Each of the two solves is within its tolerance of the fixed
+            # point: twice the tolerance apart, per step taken.
             allowed = (ROUNDING_ULPS * float(np.finfo(x.dtype).eps) * scale
-                       + 2 * TOLERANCE_SLACK * step * _solve_tolerance(c, scale))
+                       + 2 * step * _solve_tolerance(c, scale))
             gap = float(np.max(np.abs(x.astype(np.float64) - y.astype(np.float64))))
             assert gap <= allowed, (
                 f"{c.label} step {step}: {name}.{field} of the edge-mapped graph is "
@@ -370,6 +383,13 @@ def test_the_cases_cover_what_the_module_claims():
     assert any(c.knobs.get("convergence_norm") == "interface" and c.adv
                for c in PER_PUSH if c.group is not None)
     assert any(c.flux == "reader" and c.group is None and c.down == "target" for c in PER_PUSH)
+    assert any(c.knobs.get("acceleration") == "iqn-ils" and c.adv
+               for c in PER_PUSH if c.group is not None)
+    # A member's flux that reads its mapped input, read by a member swept
+    # before the producer (seeded from the iterate) and by one swept after
+    # it (computed in the pass).
+    internal = {c.order for c in cases if c.flux == "internal" and c.group is not None}
+    assert internal == {("F", "P"), ("P", "F")}
     assert {g.get("predictor", "none") for g in groups} >= {"none", "linear", "quadratic"}
     # A forward and a back edge, each with a source-anchored and a
     # target-anchored geometry, per push and outside any group.
@@ -422,11 +442,42 @@ def test_the_gradients_of_every_drawn_edge_mapped_graph_are_its_twin_s(c):
     assert_same_gradients(c)
 
 
+# Slow: two graphs with diagnostics compiled.
+# Per push: tests/property/test_differential_geometry_edges.py::test_an_edge_mapped_graph_steps_as_its_node_inlined_twin
+@pytest.mark.slow
+def test_a_report_s_float_floor_counts_a_source_anchored_geometry():
+    """The float floor a report is judged against reads what the group's
+    norm reads, a source-anchored geometry included.  It shows where the
+    geometry's dtype is not the value's: under the interface norm the floor
+    is a root mean square of ``eps / rtol`` over the entries read, so a
+    float64 geometry among float32 values lowers it.  A group run to its
+    floor then reports the same ``spectral_error_bound`` from both graphs
+    (leaving the geometry out of the floor's inputs moves it by 30%)."""
+    c = case("floor", kind="multilinear", geom_dtype="float64", adv=0.3, **SOURCES,
+             group=dict(max_iterations=80, convergence_norm="interface", rtol=1e-6,
+                        diagnostics=True))
+    with gg.x64(True):
+        edge, inline = gg.graphs(c)
+        for step in range(1, 4):
+            edge.step()
+            inline.step()
+            re, ri = edge.coupling_diagnostics()["F+P"], inline.coupling_diagnostics()["F+P"]
+            assert int(re["iterations"]) == int(ri["iterations"]), (step, re, ri)
+            assert bool(re["precision_limited"]) and bool(ri["precision_limited"]), (
+                "premise: a residual at its float floor", step, re, ri)
+            a, b = float(re["spectral_error_bound"]), float(ri["spectral_error_bound"])
+            assert np.isfinite(a) and np.isfinite(b) and b > 0, (step, a, b)
+            assert abs(a - b) <= 0.05 * b, (
+                f"step {step}: the edge-mapped graph reports spectral_error_bound {a:.6g} and "
+                f"the node-inlined graph {b:.6g}")
+
+
 # ---------------------------------------------------------------------------
 # Batches and restarts
 # ---------------------------------------------------------------------------
 
-BATCHED_PER_PUSH = [PER_PUSH[0], PER_PUSH[6]]
+BATCHED_PER_PUSH = [c for c in PER_PUSH if c.label in (
+    "forward and back edge, source anchors", "multilinear, forward and back edge")]
 BATCHED_SLOW = [
     case("batched group", group=_TIGHT32, adv=0.3, **P_HOLDS),
     case("batched group, float64, Jacobi", adv=0.3, dtype="float64", **F_HOLDS,
@@ -772,11 +823,12 @@ def _assert_close_runs(domain: str, knobs, a, b, what: str) -> None:
     eps = float(jnp.finfo(dtype).eps)
     ulps = 16 if dtype.itemsize == 2 else ROUNDING_ULPS
     tolerance = max((float(g.get("tolerance", 1e-6)) if g.get("convergence_norm", "l2") == "l2"
-                     else float(g.get("rtol", 1e-6)) for g in knobs), default=0.0)
+                     else float(g.get("rtol", 1e-6)) * RMS_ENTRY_SLACK for g in knobs),
+                    default=0.0)
     for k, (sa, sb) in enumerate(zip(a, b), start=1):
         scale = max(float(np.max(np.abs(np.asarray(f["x"], np.float64))))
                     for f in list(sa.state.values()) + list(sb.state.values()))
-        allowed = k * (ulps * eps * scale + 2 * TOLERANCE_SLACK * tolerance * max(scale, 1.0))
+        allowed = k * (ulps * eps * scale + 2 * tolerance * max(scale, 1.0))
         for node in sb.state:
             gap = float(np.max(np.abs(np.asarray(sa.state[node]["x"], np.float64)
                                       - np.asarray(sb.state[node]["x"], np.float64))))

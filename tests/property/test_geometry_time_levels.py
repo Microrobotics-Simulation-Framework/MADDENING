@@ -305,8 +305,12 @@ SINGLE_PASS = {
     "target sub-cycled, Jacobi, mixed anchors": (2, "g1", "jacobi", "linear", "st"),
     "first member sub-cycled, linear, mixed anchors": (4, "g0", "gauss-seidel", "linear", "ts"),
 }
-_SINGLE_PARAMS = [name if k < 2 else pytest.param(name, marks=pytest.mark.slow)
-                  for k, name in enumerate(SINGLE_PASS)]
+_SINGLE_PARAMS = [pytest.param(name, dtype, marks=[] if k < 2 else [pytest.mark.slow])
+                  for k, name in enumerate(SINGLE_PASS) for dtype in ("float32", "float64")]
+#: A single pass needs no contraction, so its matrices move this many times
+#: further per update than a converging group's: what a sub-step reads is
+#: then far above a float32 pass's rounding.
+_SINGLE_PASS_MOVE = 32
 
 
 @functools.lru_cache(maxsize=4)
@@ -322,10 +326,9 @@ def _built_single(name: str, dtype: str):
 
 
 # Per push: tests/property/test_geometry_time_levels.py::test_a_single_pass_reads_the_interpolated_geometry_at_every_sub_step
-# (the two linear Gauss-Seidel cases, in float32; the slow parameters are the
-# same check under the other schedule and interpolation, and in float64)
-@pytest.mark.parametrize("dtype", _DTYPES)
-@pytest.mark.parametrize("name", _SINGLE_PARAMS)
+# (the two linear Gauss-Seidel cases, in float32 and float64; the slow
+# parameters are the same check under the other schedule and interpolation)
+@pytest.mark.parametrize("name, dtype", _SINGLE_PARAMS)
 def test_a_single_pass_reads_the_interpolated_geometry_at_every_sub_step(name, dtype):
     """``max_iterations=1``: the returned state is one pass from the pre-step
     state, which :func:`~tests.property.coupled_topologies.single_pass`
@@ -337,6 +340,8 @@ def test_a_single_pass_reads_the_interpolated_geometry_at_every_sub_step(name, d
     topo = built.topo
     eps = float(np.finfo(np.dtype(dtype)).eps)
     for draw, values in enumerate(_values(built, knobs, geometry, dtype)):
+        for g in values["geometry"].values():
+            g["move"] = np.asarray(g["move"] * _SINGLE_PASS_MOVE, g["move"].dtype)
         with x64(dtype == "float64"):
             traj = ct.run(built, values, _STEPS)
             model = ct.LinearModel(topo, values, node_order=built.node_order, dtype=dtype,

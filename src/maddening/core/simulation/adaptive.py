@@ -121,14 +121,35 @@ def _tree_error_norm(state_fine, state_coarse, atol, rtol):
     measured exactly as before.  A floating field that is the same in
     both estimates still counts as an element: that is the RMS convention
     adaptive ODE solvers use.
+
+    **A 16-bit leaf is measured in float32, and the norm accumulates
+    there** -- the rule the coupling norms follow
+    (``coupling.acceleration._widened``).  The running sum was a weakly
+    typed ``jnp.array(0.0)``, which took a bfloat16 or float16 leaf's
+    dtype, so the int32 element count it is divided by became float16
+    ``inf`` above 65 504 elements and the norm of a finite sum read
+    ``0.0`` (or ``inf / inf``, NaN, once the sum overflowed too):
+    ``run_adaptive`` on a 70 000-entry float16 field returned a NaN state
+    after one accepted step.  Below that size a squared ratio past 65 504
+    read ``inf`` on an ordinary rejected attempt, so the controller shrank
+    by ``min_factor`` instead of its own factor.  And the 16-bit norm made
+    the next timestep 16-bit, which ``run_adaptive_scan``'s carry refuses:
+    a scan-carry ``TypeError`` on any 16-bit state.  Widening is exact, so
+    what is measured is the leaves' own difference; a float32 or float64
+    state is measured, to the bit, as it was.
     """
-    sum_sq = jnp.array(0.0)
+    from maddening.core.coupling.acceleration import _widened  # noqa: PLC0415
+
+    # Strongly typed: the sum, and its quotient by the element count, are
+    # at least float32 whatever the leaves' dtypes.
+    sum_sq = jnp.zeros((), jnp.float32)
     count = jnp.array(0, dtype=jnp.int32)
 
     def _accumulate(fine, coarse):
         nonlocal sum_sq, count
         if not _is_inexact_leaf(fine):
             return
+        fine, coarse = _widened(fine), _widened(coarse)
         diff = jnp.abs(fine - coarse)
         scale = atol + rtol * jnp.maximum(jnp.abs(fine), jnp.abs(coarse))
         # A zero scale (``atol=0`` on an entry at zero in both estimates)

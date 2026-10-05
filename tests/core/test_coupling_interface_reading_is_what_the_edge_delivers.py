@@ -616,6 +616,46 @@ def test_a_state_without_the_recorded_floor_is_read_with_the_graphs_own_weights(
     assert _floor_with(gm, None) > 0.0
 
 
+def _fresh_mapped_pair() -> GraphManager:
+    """An uncached mapped pair without the report's analysis (cheap to trace)."""
+    gm = GraphManager()
+    gm.add_node(_Lin("A", G_A, C_A, U_A0))
+    gm.add_node(_Lin("B", G_B, C_B, U_B0))
+    gm.add_edge("A", "B", "u", "inp", mapping=matrix_mapping(H_AB))
+    gm.add_edge("B", "A", "u", "inp", mapping=matrix_mapping(H_BA), transform=_negate_twice)
+    gm.add_coupling_group(["A", "B"], max_iterations=4, convergence_norm="interface",
+                          rtol=1e-4)
+    gm.compile()
+    return gm
+
+
+def test_a_mapped_group_steps_on_one_trace_and_scans_as_it_steps():
+    """The recorded floor is one more scalar in the scan carry, in the
+    residual slot's dtype: the step is traced once whether or not the
+    weights are passed for it, and ``run_scan`` of three steps leaves the
+    state and every report slot ``step()`` three times leaves, to the bit."""
+    stepped = _fresh_mapped_pair()
+    stepped.step()
+    stepped.step(params=_with_weights(stepped, H_AB_STEP * 0.1, H_BA_STEP * 0.1))
+    stepped.step()
+    assert stepped.trace_count == 1
+    scanned = _fresh_mapped_pair()
+    for gm in (stepped, scanned):
+        gm.reset_state()
+    for _ in range(3):
+        stepped.step()
+    scanned.run_scan(3)
+    for name in ("A", "B"):
+        a, b = (np.asarray(g._state[name]["u"]) for g in (stepped, scanned))
+        assert a.tobytes() == b.tobytes(), (name, a, b)
+    meta_a, meta_b = stepped._state["_meta"], scanned._state["_meta"]
+    assert set(meta_a) == set(meta_b) and SLOT in meta_a
+    for key in meta_a:
+        a, b = np.asarray(meta_a[key]), np.asarray(meta_b[key])
+        assert a.dtype == b.dtype and a.tobytes() == b.tobytes(), (key, a, b)
+    assert math.isfinite(float(meta_b[SLOT]))
+
+
 def _bits_after_two_steps(gm) -> list:
     gm.step(params=_with_weights(gm, H_AB_STEP * 0.1, H_BA_STEP * 0.1))
     gm.step()

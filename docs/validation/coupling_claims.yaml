@@ -1497,7 +1497,7 @@ claims:
   sources:
     - src/maddening/core/coupling/acceleration.py:461 (coupling_residual_interface)
     - src/maddening/core/coupling/acceleration.py:402 (_interface_readings)
-    - src/maddening/core/edge.py:168 (_delivered)
+    - src/maddening/core/edge.py:170 (_delivered)
     - src/maddening/core/coupling/group.py:95 (CouplingGroup, convergence_norm)
   conditions: >-
     convergence_norm="interface"; state edges (a flux edge is refused at
@@ -3286,7 +3286,7 @@ claims:
     accelerator did -- so this is a bound on ||x - x*||" where
     spectral_usable is True.
   sources:
-    - src/maddening/core/graph_manager.py:9499 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/graph_manager.py:9558 (coupling_diagnostics, spectral_error_bound)
     - src/maddening/core/coupling/acceleration.py:1435 (spectral_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
     - src/maddening/core/inspection.py:1397 (coupling_report, the error_estimate note)
@@ -5521,7 +5521,7 @@ claims:
     itself and the report reads it, so a params override, or an edit of the
     weights since, does not move it either."
   sources:
-    - src/maddening/core/graph_manager.py:9499 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/graph_manager.py:9558 (coupling_diagnostics, spectral_error_bound)
     - src/maddening/core/graph_manager.py:352 (_reads_mapping_weights)
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-

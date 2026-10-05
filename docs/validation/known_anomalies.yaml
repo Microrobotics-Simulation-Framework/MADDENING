@@ -12122,3 +12122,248 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null
+  - anomaly_id: "MADD-ANO-174"
+    title: "Interface-mapping factories returned an operator for coordinates their formula does not cover"
+    description: >
+      The factories that build an interface operator from coordinates
+      computed something from coordinates they cannot map, with no error
+      and no warning.  `conservative_projection_1d` and (new in 0.4.0)
+      `projection_1d_mapping` evaluate `|target_i ∩ source_j| / |target_i|`
+      as `min(upper) - max(lower)`, which assumes increasing boundaries:
+      descending boundaries on either grid gave a matrix of zeros,
+      boundaries out of order (`[0, 2, 1, 3]`) rows summing to 4/3, and a
+      repeated or infinite target boundary a zero row.
+      `nearest_neighbor_1d`, `nearest_neighbor_2d`
+      and (new) `nearest_neighbor_mapping` take `argmin` of the distances,
+      and `argmin` returns a NaN: one NaN source coordinate was selected for
+      every target, a NaN target read source 0, and an `(n, 1)` target set
+      against `(m, 2)` sources was broadcast.  `linear_interpolation_1d`
+      documents "sorted ascending" and checked nothing: on a descending
+      grid the field `x` mapped to `[3, 0]` where the answer is
+      `[0.5, 2.5]`.  `rbf_interpolation` (and the new `rbf_mapping` /
+      `rbf_matrix`) solved to a matrix of NaN for a NaN point and, without
+      the polynomial, to a row of zeros for an infinite target;
+      `matrix_mapping` (new) took a non-finite matrix.  Measured on the
+      tree and, for the closure factories, on the extracted 0.1.0, 0.2.0,
+      0.2.1, 0.3.0 and 0.3.1 trees (CPU, jax 0.11.0, empty HOME); the
+      `*_mapping` factories are new in 0.4.0.  Found by reading during a
+      design review of the mapping kinds.
+      Resolved in 0.4.0: each of these inputs is a `ValueError` naming the
+      argument and the first offending index; nothing is sorted or
+      repaired, because the field keeps the caller's order; a mapping
+      rebuilt from a config or a USD stage raises `MappingRebuildError`
+      naming the edge; and an accepted input gives the operator it gave
+      before, bit for bit.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A wrong interface operator couples two nodes with wrong values, or
+      with none (the zero matrix), and the run looks healthy.
+      `context_dependent` because what the coupled result is used for is
+      the caller's.
+    affected_components:
+      - "maddening.core.coupling.interface_mapping.conservative_projection_1d"
+      - "maddening.core.coupling.interface_mapping.linear_interpolation_1d"
+      - "maddening.core.coupling.interface_mapping.nearest_neighbor_1d"
+      - "maddening.core.coupling.interface_mapping.nearest_neighbor_2d"
+      - "maddening.core.coupling.interface_mapping.rbf_interpolation"
+      - "maddening.core.coupling.mapping.projection_1d_mapping"
+      - "maddening.core.coupling.mapping.nearest_neighbor_mapping"
+      - "maddening.core.coupling.mapping.rbf_mapping"
+      - "maddening.core.coupling.mapping.rbf_matrix"
+      - "maddening.core.coupling.mapping.matrix_mapping"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, check the coordinates yourself before building a
+      transform: cell boundaries strictly increasing and finite on both
+      grids, source coordinates of `linear_interpolation_1d` ascending,
+      every point finite, and both point sets of one dimension.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Coordinates handed to a closure factory as JAX tracers (a factory
+      called inside `jit`) have no values to check and are taken as given,
+      and so is a traced matrix.  Two grids that do not cover the same
+      interval are accepted: the projection treats a cell outside the
+      other grid as empty, so it preserves the integral only when the
+      target grid covers the source grid, reproduces a constant only on
+      target cells the source covers, and is a matrix of zeros for grids
+      that share no interval (stated on the factory; nothing warns of a
+      unit or frame mismatch between the grids).  A `StaticLinearMapping`
+      constructed directly is not checked.
+    verification:
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_boundaries_that_are_not_strictly_increasing_are_refused_by_name"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_non_finite_point_is_refused_by_name_and_index"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_point_sets_of_different_dimension_are_refused"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_linear_interpolation_refuses_source_coordinates_out_of_order"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_non_finite_matrix_is_refused_by_index"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_config_with_boundaries_out_of_order_does_not_rebuild"
+      - "tests/usd/test_usd_refuses_a_mapping_its_factory_refuses.py::test_a_stage_whose_mapping_spec_the_factory_refuses_does_not_load"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_an_accepted_input_gives_the_operator_it_gave_before_the_checks"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-175"
+    title: "The conservation diagnostic and the surrogate dataset generator rebuilt boundary inputs by a rule of their own, not the step's"
+    description: >
+      The compiled step turns an edge into a boundary input by one rule:
+      the edge's interface mapping, then its transform, additive edges
+      summed, and an external input in place of whatever edges delivered
+      to its field.  Two readers of the edges re-implemented it and
+      differed.  `check_conservation` fed each node's
+      `compute_boundary_fluxes` the source field through the transform
+      only: an additive edge overwrote the edges before it (two edges
+      delivering `x` and `100 x`: the hook was fed `100 x`, the step feeds
+      `101 x`), an edge that reads a flux output was dropped, external
+      inputs were absent, and a flux name the node does not report read as
+      `0.0`, so two misspelt names compared as conserved.  With 0.4.0's
+      interface mappings it fed the unmapped field (three entries where
+      the input has two), and it read the node constants of the
+      constructor rather than `gm.params`.  `DatasetGenerator.from_graph`
+      and `from_sweep` built `boundary_inputs` the same way and applied a
+      transform to the whole history at once, so a transform that indexes
+      its field (`v[::-1][:2]`) indexed time and returned a `(2, 3)` array
+      where the step fed three samples of two.  `resolve_boundary_inputs`
+      (new in 0.4.0) kept an edge's value in a field an external input
+      replaces.  The additive and transform cases were measured on the
+      tree and on the extracted 0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.3.1 trees
+      (CPU, jax 0.11.0, empty HOME, a node that stores the input it is
+      fed); the mapping and `gm.params` cases are new in 0.4.0.  Found by
+      reading during a design review of the mapping kinds.
+      Resolved in 0.4.0: all three resolve through one method,
+      `GraphManager._boundary_inputs_from`, which applies the step's
+      `_apply_edge`; the dataset maps it over the history's sample axes;
+      the diagnostic takes a flux-reading edge from its source's flux at
+      the same state, with the constants of `gm.params`, raises `KeyError`
+      for a flux the node does not report or a node missing from the
+      state, and refuses two nodes that read each other's flux outputs.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A conservation check that compares fluxes computed from the wrong
+      inputs can read zero imbalance on an interface that leaks, and a
+      surrogate trained on inputs the node never received is wrong where
+      it replaces the node.  `context_dependent` because the use of either
+      is the caller's.
+    affected_components:
+      - "maddening.core.coupling.helpers.check_conservation"
+      - "maddening.surrogates.dataset.DatasetGenerator"
+      - "maddening.core.graph_manager.GraphManager.resolve_boundary_inputs"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, do not use `check_conservation` or `DatasetGenerator`
+      on a node with additive incoming edges, an incoming edge that reads
+      a flux output, or (for the dataset) a transform that is not
+      elementwise; compare the fluxes, or record the inputs, in the node.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The diagnostic takes every input from the one state it is given,
+      where the step mixes time levels, so on a transient it is the
+      imbalance of that state and not a replay of the last step (stated
+      on the function).  The dataset is rebuilt from a state history and
+      still pairs a forward edge's input with the wrong step
+      (MADD-ANO-176); a node fed by a flux-reading edge has no dataset
+      (`KeyError`, as before).  The interface convergence norm reads a
+      mapped edge before its mapping (MADD-ANO-177).
+    verification:
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_check_conservation_feeds_the_flux_hook_what_the_step_feeds"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_dataset_pairs_each_state_with_the_boundary_input_the_step_fed"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_sweep_dataset_pairs_each_state_with_the_boundary_input_the_step_fed"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_resolve_boundary_inputs_is_what_the_step_then_feeds"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_an_edge_that_reads_a_flux_output_is_resolved_not_dropped"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_two_nodes_that_read_each_others_flux_are_refused_not_guessed"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_flux_the_node_does_not_report_is_a_key_error_not_zero"
+      - "tests/api/test_the_surrogate_estimate_counts_what_a_mapped_edge_delivers.py::test_a_mapped_edge_is_counted_at_the_size_it_delivers"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-176"
+    title: "DatasetGenerator pairs a forward edge's boundary input with the source's state before the step"
+    description: >
+      `DatasetGenerator.from_graph` and `from_sweep` rebuild a sample's
+      boundary inputs from the state history: the sample that takes the
+      target from its state after step `t` to its state after step `t+1`
+      is given the sources' states after step `t`.  That is what the step
+      read on a back edge.  On a forward edge -- the source runs earlier in
+      the schedule, the common case -- the step read the source's state
+      after step `t+1`.  A source `x <- x + 1` started at `[10, 20]`
+      feeding a node that stores its input: the dataset's first sample
+      holds `[11, 21]` where the step fed `[12, 22]`, and every sample is
+      one step behind (the tree and the extracted 0.1.0, 0.2.0, 0.2.1,
+      0.3.0 and 0.3.1 trees; CPU, jax 0.11.0, empty HOME).  The same holds
+      for an edge inside a coupling group, whose member is fed the
+      converged iterate, and a multi-rate or sub-cycled target is fed
+      values no state history holds.  A surrogate trained on the dataset
+      and put in the node's place receives, when it runs, inputs one step
+      later than it was trained on: exact for a constant input, an error
+      of one step of the input's change otherwise.  Found while comparing
+      the dataset with what the step feeds (MADD-ANO-175).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silently misaligned training set: the surrogate learns a map from
+      the previous step's input.  `DatasetGenerator` is experimental, and
+      `context_dependent` because what the surrogate replaces is the
+      caller's.
+    affected_components:
+      - "maddening.surrogates.dataset.DatasetGenerator"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      For a target fed by forward edges, shift `boundary_inputs` one
+      sample later against `states` yourself (drop the first input and the
+      last state pair), or have the node record the inputs it receives.
+      Inputs that do not change between steps are unaffected.  Deferred to
+      0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to record the boundary
+      inputs the step delivers instead of rebuilding them from the state
+      history.  Until then a dataset of a node with time-varying forward
+      inputs is one step out of phase, with no warning.
+    verification:
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_forward_edges_input_is_paired_with_the_step_that_read_it"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_back_edges_input_is_paired_with_the_step_that_read_it"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-177"
+    title: "The interface convergence norm reads a mapped edge's source field, not what the edge delivers"
+    description: >
+      `convergence_norm="interface"` measures, for each edge inside a
+      coupling group, the change of the edge's source field through the
+      edge's transform (`coupling_residual_interface`), and
+      `residual_precision_floor` reads the same values.  Neither applies
+      the edge's interface mapping, which the step applies before the
+      transform.  On a mapped edge the norm is therefore taken on the
+      source field's scale, not on the delivered value's: with a mapping
+      that delivers the second entry of `[1000, x1]`, a change of `x1` from
+      1.0 to 1.1 reads 0.0071 in units of `rtol = 1e-2` where the
+      delivered value moved by 9.09 of them, so the group is reported
+      converged on that edge.  A transform written for the mapped shape is
+      applied to the unmapped field: a shape error when the group is
+      traced, or another entry of the field with no error.  No release
+      carried it: mapped edges are new in 0.4.0.  Found by the sweep of
+      every reader of an edge's source field that followed MADD-ANO-175
+      (CPU, jax 0.11.0).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A convergence verdict taken on another quantity than the one the
+      edge delivers: `converged=True` at a looser tolerance than the one
+      asked for.  `context_dependent` because the accuracy the coupled
+      result needs is the caller's.
+    affected_components:
+      - "maddening.core.coupling.acceleration.coupling_residual_interface"
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      For a coupling group with a mapped internal edge use
+      `convergence_norm="mixed"` (or `"l2"`), which hold every member
+      field to the criterion, or tighten `rtol` by the ratio of the source
+      field's scale to the delivered value's.
+    resolution_status: "open"
+    residual_risk: >
+      Open.  The fix is to read each interface edge through the step's
+      own edge rule (mapping, then transform) in the norm and in the
+      precision floor; it changes the criterion of mapped groups only.
+      Until then the interface norm of a mapped edge is the norm of its
+      source field.
+    verification:
+      - "tests/core/test_the_interface_norm_measures_what_a_mapped_edge_delivers.py::test_the_norm_of_a_mapped_edge_is_the_scaled_change_of_what_it_delivers"
+      - "tests/core/test_the_interface_norm_measures_what_a_mapped_edge_delivers.py::test_the_norm_of_an_unmapped_edge_is_the_scaled_change_of_what_it_delivers"
+    github_issue: null

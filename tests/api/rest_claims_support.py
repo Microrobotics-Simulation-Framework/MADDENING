@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import json
 import math
@@ -38,12 +39,13 @@ import socket
 import threading
 import time
 import warnings
+import weakref
 from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api import server as server_module
 from maddening.api.server import SimulationServer
@@ -64,6 +66,8 @@ FOREIGN_ORIGIN = "http://evil.example"
 REMOTE_PEER = ("203.0.113.5", 44321)
 #: A loopback TCP peer: an IP address, so the Host rule is asked of it.
 LOOPBACK_PEER = ("127.0.0.1", 50123)
+#: A peer that is not an IP address (Starlette's in-process client's own).
+NON_IP_PEER = ("testclient", 50000)
 
 REGISTRY = {"BallNode": BallNode, "SpringDamperNode": SpringDamperNode,
             "HeatNode": HeatNode}
@@ -98,6 +102,27 @@ def _sharded(node):
     return ShardedStencilNode(node, create_device_mesh(shape=(1,)), {"devices": 0})
 
 
+#: Held while a graph is built here and while REST-006 builds its second
+#: server.  Both run under ``warnings.catch_warnings()`` -- ``build_graph``
+#: compiles inside one, FastAPI builds an app's routes inside others --
+#: and those blocks save and put back the process's warnings filters, so
+#: they are not thread-safe.  The copies of a check the concurrent domain
+#: runs at once built them together, put back each other's filters, and a
+#: warning one copy had silenced was raised in another: an error under this
+#: suite's filter.  (The server's own blocks run under its graph lock, one
+#: at a time.)
+_BUILD_LOCK = threading.RLock()
+
+
+def _one_at_a_time(fn):
+    @functools.wraps(fn)
+    def locked(*args, **kwargs):
+        with _BUILD_LOCK:
+            return fn(*args, **kwargs)
+    return locked
+
+
+@_one_at_a_time
 def build_graph(*, wrapped: bool = False) -> GraphManager:
     """Every node a check writes to, compiled:
 
@@ -238,8 +263,8 @@ class Ctx:
         return self.make_client(headers=dict(BEARER) if token else {}, peer=REMOTE_PEER)
 
     def ip_peer(self, headers=None):
-        """A client whose peer is a loopback IP address, so the Host rule is
-        asked (TestClient's own peer, ``testclient``, is not an IP)."""
+        """A client whose peer is a loopback IP address: served without a
+        token on a loopback bind, so the Host rule decides."""
         base = dict(BEARER) if self.enforced else {}
         base.update(headers or {})
         return self.make_client(headers=base, peer=LOOPBACK_PEER)
@@ -287,8 +312,7 @@ def _in_process_client(app):
         kw = {}
         if peer is not None:
             kw["client"] = peer
-            # TestClient's own Host, ``testserver``, is no name of this
-            # machine: an IP peer that sent it would be refused for its Host.
+            # A Host that names this machine, as a local client sends.
             headers = {"Host": "localhost", **headers}
         return TestClient(app, raise_server_exceptions=False, headers=headers, **kw)
     return make
@@ -655,10 +679,35 @@ def _only_the_exact_exempt_paths_are_served_anonymously(ctx):
 
 @check("REST-005", bind="loopback", skip=("restored", "wrapper", "shutdown"))
 def _a_routable_peer_is_challenged_on_a_loopback_bind(ctx):
+    """A routable peer, a peer that is not an IP address, and a request
+    that carries a forwarding header are each asked the token on a
+    loopback bind; a direct loopback connection is not."""
     assert not ctx.enforced
     _anonymous_is_refused_everywhere(ctx, peer=REMOTE_PEER)
+    _anonymous_is_refused_everywhere(ctx, peer=NON_IP_PEER)
+    for forwarded in ({"X-Forwarded-For": "x"}, {"X-Forwarded-For": "127.0.0.1"},
+                      {"Forwarded": "for=127.0.0.1"}):
+        refused(ctx.make_client(headers=forwarded, peer=LOOPBACK_PEER).get("/graph"), 401)
+        resp = ctx.make_client(headers={**forwarded, **BEARER}, peer=LOOPBACK_PEER).get("/graph")
+        assert resp.status_code == 200, (forwarded, resp.text)
     assert ctx.routable_peer(token=True).get("/graph").status_code == 200
     assert ctx.make_client(headers={}, peer=LOOPBACK_PEER).get("/graph").status_code == 200
+
+
+_LOOPBACK_TWINS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _loopback_twin(ctx):
+    """The app of a second server built as *ctx*'s is but told it is bound
+    to 127.0.0.1: built once per served server, under :data:`_BUILD_LOCK`,
+    and shared by the copies of a check running at once."""
+    with _BUILD_LOCK:
+        app = _LOOPBACK_TWINS.get(ctx.server)
+        if app is None:
+            loop = SimulationServer(REGISTRY, graph_manager=build_graph(),
+                                    bind_host="127.0.0.1", checkpoint_root=str(ctx.root))
+            app = _LOOPBACK_TWINS[ctx.server] = loop.create_app()
+        return app
 
 
 @check("REST-006", bind="public", skip=("restored", "wrapper", "shutdown"))
@@ -669,9 +718,7 @@ def _the_401_says_why_and_where_the_token_is(ctx):
     # The backstop names the misconfiguration (a routable peer of a
     # server bound, as far as it was told, to loopback) -- asked of a second
     # server built the same way but told it is bound to 127.0.0.1.
-    loop = SimulationServer(REGISTRY, graph_manager=build_graph(), bind_host="127.0.0.1",
-                            checkpoint_root=str(ctx.root))
-    resp = TestClient(loop.create_app(), client=REMOTE_PEER,
+    resp = TestClient(_loopback_twin(ctx), client=REMOTE_PEER,
                       raise_server_exceptions=False).get("/graph")
     refused(resp, 401)
     assert "bind_host" in resp.json()["detail"] or "MADDENING_HOST" in resp.json()["detail"]
@@ -827,6 +874,13 @@ def _a_loopback_bind_answers_only_to_the_names_this_machine_is_reached_by(ctx):
     for host in ("localhost", "localhost:8000", "127.0.0.1:9", "[::1]:8000", "LOCALHOST.",
                  "127.3.4.5"):
         assert ctx.ip_peer({"Host": host}).get("/graph").status_code == 200, host
+    # The rule keys on the Host, not the peer: a forwarding header naming a
+    # loopback peer does not skip it (the header asks the token, which a
+    # rebound page does not hold), and a valid token is what does.
+    refused(ctx.ip_peer({"Host": "attacker.example", "X-Forwarded-For": "127.0.0.1"})
+            .get("/graph"), 401)
+    resp = ctx.ip_peer({"Host": "attacker.example", **BEARER}).get("/graph")
+    assert resp.status_code == 200, resp.text
 
 
 @check("REST-026", bind="loopback", skip=("restored", "wrapper", "shutdown"),
@@ -1870,7 +1924,12 @@ def _a_file_that_is_not_an_archive_is_a_400_naming_no_internals(ctx):
 
 @check("REST-101", "REST-102")
 def _a_save_refused_on_the_way_leaves_the_earlier_checkpoint(ctx):
-    name = f"keep{ctx.index}.npz"
+    # Copies running at once save in a directory each.  A save writes its
+    # temporary files beside its target, so another copy's first save, in
+    # flight, had its ``.partial`` file beside this copy's -- and the scan
+    # below saw it.  The scan covers every directory but the other copies'.
+    others = [ctx.root / f"copy{j}" for j in range(ctx.copies) if j != ctx.index]
+    name = (f"copy{ctx.index}/" if ctx.copies > 1 else "") + f"keep{ctx.index}.npz"
     assert ctx.client.post("/checkpoint/save", params={"path": name}).status_code == 200
     digest = hashlib.sha256((ctx.root / name).read_bytes()).hexdigest()
     manifest = ctx.root / f"{name}.manifest.json"
@@ -1881,7 +1940,9 @@ def _a_save_refused_on_the_way_leaves_the_earlier_checkpoint(ctx):
         refused(resp, 400, "nothing was written")
         assert str(ctx.root) not in resp.json()["detail"]
         assert hashlib.sha256((ctx.root / name).read_bytes()).hexdigest() == digest
-        assert not [p for p in ctx.root.rglob("*partial*")]
+        left = [p for p in ctx.root.rglob("*partial*")
+                if not any(other in p.parents for other in others)]
+        assert not left, left
     finally:
         manifest.rmdir()
 

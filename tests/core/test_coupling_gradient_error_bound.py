@@ -201,6 +201,12 @@ def _curved_reference(kind):
 #:   the other parameter reads its gap to that one as well: log's ``g``
 #:   has a ninth of ``a``'s relative error (6.9-11.4), square's ``a``
 #:   2.7x less than ``g``'s (3.46-3.55).
+#:
+#: Since 0.4.0's round-6 fix the Kantorovich terms (the affine-covariant
+#: ``h``, the Newton step's second-order miss) raise the earliest cap most:
+#: log's ``a`` reads 3.05 at a cap of three and 1.10-1.41 from four, log's
+#: ``g`` 9.1-12.6, square's ``a`` 3.08-3.58 and ``g`` 1.17-1.22 -- inside
+#: every band below.
 _RECORDED_RATIO = {
     ("log", "a"): 1.3,
     ("log", "g"): 9.0,

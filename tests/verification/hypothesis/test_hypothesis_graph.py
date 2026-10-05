@@ -13,7 +13,7 @@ import pytest
 from hypothesis import given, settings, note
 from hypothesis import strategies as st
 
-from maddening.core.graph_manager import GraphManager
+from maddening.core.graph_manager import _RESERVED_STATE_KEYS, GraphManager
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.heat import HeatNode
@@ -45,11 +45,17 @@ from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY
 #: exercises the exact-match rule rather than hiding it.  The refusal
 #: itself, and the lookalikes, are pinned in
 #: ``tests/core/test_non_finite_json_tokens.py``.
+#: The keys the graph reserves for its own state and checkpoints
+#: (``_meta``, ``_params``, ``_params_mappings``) are mapped the same way,
+#: to the name without its leading underscore -- a lookalike ``add_node``
+#: takes; the refusal is pinned in
+#: ``tests/api/test_new_nodes_need_a_usable_name_and_timestep.py``.
 node_name_st = st.text(
     alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="_-"),
     min_size=1,
     max_size=12,
-).map(lambda n: n.lower() if n in NON_FINITE_TOKENS else n)
+).map(lambda n: n.lower() if n in NON_FINITE_TOKENS
+      else n.lstrip("_") or "x" if n in _RESERVED_STATE_KEYS else n)
 
 # Strategy for generating a random valid node
 def _make_ball(name, dt=0.01):

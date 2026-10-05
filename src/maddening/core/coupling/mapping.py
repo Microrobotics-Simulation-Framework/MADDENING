@@ -22,7 +22,10 @@ Factories:
 Every factory attaches a :class:`~maddening.core.coupling.mapping_spec.MappingSpec`
 (kind, hyper-parameters, *references* to the point sets — never the
 weights) so a graph config or USD stage can rebuild the mapping; see
-:mod:`maddening.core.coupling.mapping_spec`.
+:mod:`maddening.core.coupling.mapping_spec`.  Each is registered under its
+kind in :mod:`maddening.core.coupling.mapping_registry`, and
+:func:`register_mapping` (experimental) adds a kind of your own to the
+same table.
 
 Modes follow preCICE.  ``"consistent"`` transfers a *value* field
 (temperature, displacement): ``H @ v`` interpolates.  ``"conservative"``
@@ -41,11 +44,16 @@ from typing import Any, Optional, Protocol, runtime_checkable
 import math
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.coupling.mapping_registry import (
+    _register_builtin,
+    register_mapping,
+)
 from maddening.core.coupling.mapping_spec import (
     MappingSpec,
     normalise_point_reference,
@@ -67,6 +75,15 @@ class Mapping(Protocol):
     :meth:`params_pytree`); ``geom`` is reserved for mappings that
     depend on a moving interface (resolved like a state field) and is
     ignored by static mappings.
+
+    ``params_pytree()`` is snapshotted into ``gm.params["mappings"]``,
+    which checkpoints, ``POST /checkpoint/load``, system identification,
+    the FMU's state archive and ``to_dict`` all walk as a flat table of
+    arrays.  For any class other than :class:`StaticLinearMapping`,
+    ``GraphManager.add_edge`` therefore refuses one that is not a plain
+    ``dict`` (empty for a mapping without weights) from Python identifiers
+    to concrete, finite, floating-point JAX arrays, the same on every call
+    (see :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
     """
 
     kind: str
@@ -159,6 +176,90 @@ class StaticLinearMapping:
 
 
 # ---------------------------------------------------------------------------
+# What params_pytree() may contain
+# ---------------------------------------------------------------------------
+
+
+def _params_pytree_problem(tree: Any) -> Optional[str]:
+    """Why *tree* cannot be an entry of ``gm.params["mappings"]``, or
+    ``None``.  Structure, key names and leaves; one call's worth."""
+    if type(tree) is not dict:
+        return (f"returned {type(tree).__name__}, not a plain dict of weight name -> "
+                f"array")
+    for key, leaf in tree.items():
+        if not isinstance(key, str) or not key.isidentifier():
+            return (f"has the key {key!r}; a weight name must be a Python identifier "
+                    f"(it is a member name in a checkpoint archive and a key of a "
+                    f"config's param_specs)")
+        where = f"entry {key!r}"
+        if isinstance(leaf, jax.core.Tracer):
+            return (f"{where} is a traced value; the graph snapshots concrete weights, "
+                    f"so build the mapping outside jit / grad / vmap")
+        if not isinstance(leaf, jax.Array):
+            what = ("a nested container" if isinstance(leaf, (dict, list, tuple))
+                    else type(leaf).__name__)
+            return (f"{where} is {what}, not a JAX array; the entry is a flat table of "
+                    f"arrays, and a NumPy array or a Python number would take its "
+                    f"dtype from jax_enable_x64 at the moment it was read (use "
+                    f"jnp.asarray(value))")
+        if not jnp.issubdtype(leaf.dtype, jnp.floating):
+            return (f"{where} has dtype {leaf.dtype}; a weight is a real "
+                    f"floating-point array (keep indices and other integer structure "
+                    f"as attributes of the mapping, outside the parameter tree)")
+        if not bool(np.all(np.isfinite(np.asarray(leaf)))):
+            return f"{where} holds a non-finite value (NaN or infinity)"
+    return None
+
+
+def _params_contract_problem(mapping: Any) -> Optional[str]:
+    """Why ``mapping.params_pytree()`` cannot back an edge, or ``None``.
+
+    The answer starts with ``params_pytree()`` so that a caller can put
+    its own subject in front.  A :class:`StaticLinearMapping` is not
+    asked: its entry is ``{"H": <2-D array>}`` by construction, and what
+    its matrix may hold (an integer selection matrix, say) is unchanged.
+
+    Every other class is held to what each reader of
+    ``gm.params["mappings"]`` assumes, none of which checks it for itself:
+
+    * checkpoints and the FMU state archive store each leaf as the member
+      ``<edge key>/<name>`` -- a nested dict would be pickled as an object
+      array, which the loader refuses, and a ``/`` in a name is read back
+      as part of the edge key and the weight silently not restored;
+    * ``param_specs`` / ``set_param_spec``, the trainable mask and
+      ``sysid`` address a weight as ``mappings -> edge -> name``, three
+      keys deep, and fit only floating-point leaves;
+    * ``POST /checkpoint/load`` judges each leaf it would install as one
+      numeric array, against its bounds (``PUT /graph/params`` is per node
+      and has no door to a mapping's weights);
+    * ``to_dict`` warns when the live weights differ from
+      ``params_pytree()``, and ``reset_params()`` restores it, so two
+      calls must agree, and a NaN (unequal to itself) would warn forever.
+    """
+    if type(mapping) is StaticLinearMapping:
+        return None
+    first = mapping.params_pytree()
+    problem = _params_pytree_problem(first)
+    if problem is not None:
+        return f"params_pytree() {problem}"
+    second = mapping.params_pytree()
+    if type(second) is not dict or list(second) != list(first):
+        return ("params_pytree() is not the same on every call: a second call "
+                f"returned the keys {list(second) if isinstance(second, dict) else second!r}"
+                f" after {list(first)}")
+    for key, leaf in first.items():
+        again = second[key]
+        if not isinstance(again, jax.Array) or isinstance(again, jax.core.Tracer) \
+                or again.shape != leaf.shape or again.dtype != leaf.dtype \
+                or not np.array_equal(np.asarray(again), np.asarray(leaf)):
+            return (f"params_pytree() is not the same on every call: entry {key!r} "
+                    f"changed between two calls.  It is what reset_params() restores "
+                    f"and what to_dict() compares the live weights with, so compute "
+                    f"the weights once, when the mapping is built")
+    return None
+
+
+# ---------------------------------------------------------------------------
 # RBF
 # ---------------------------------------------------------------------------
 
@@ -194,7 +295,14 @@ def _finite_real(name: str, value) -> float:
     ``Infinity`` / ``NaN``)."""
     if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
         raise ValueError(f"{name} must be a real number, got {value!r}")
-    if not math.isfinite(value):
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        # An integer no float64 holds: ``math.isfinite`` raises for it.
+        raise ValueError(f"{name} must be finite, got an integer of "
+                         f"{len(str(abs(int(value))))} digits, which no float64 holds"
+                         ) from None
+    if not finite:
         raise ValueError(f"{name} must be finite, got {value!r}")
     return float(value)
 
@@ -238,19 +346,26 @@ def rbf_matrix(
     float64 under ``jax_enable_x64``.  Point coordinates are therefore
     static; a mapping that must follow a moving interface is the
     matrix-free ``OnTheFlyMapping`` planned for 0.5.0.
+
+    Both point sets must be finite ``(n,)`` or ``(n, d)`` arrays of the
+    same ``d``, and ``source_points`` must hold at least one point;
+    anything else is a ``ValueError`` naming the argument and the first
+    offending point (a NaN coordinate used to give a matrix of NaN, and
+    an infinite target a row of zeros or of infinities, without a word).
+    Coincident source points are accepted: the ridge shares the weight
+    between them, and with ``ridge=0`` the solve raises
+    ``numpy.linalg.LinAlgError`` (a ``ValueError``).
     """
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
     if kernel not in _KERNELS:
         raise ValueError(f"Unknown kernel {kernel!r}; choose from {_KERNELS}")
     epsilon = _finite_real("epsilon", epsilon)
     ridge = _finite_real("ridge", ridge)
     dtype = _out_dtype(source_points, target_points)
-    src = _as_points(source_points)
-    tgt = _as_points(target_points)
-    if src.shape[1] != tgt.shape[1]:
-        raise ValueError(
-            f"source and target points must share a dimension, got "
-            f"{src.shape[1]} and {tgt.shape[1]}"
-        )
+    src = _checks.checked_points("source_points", source_points)
+    tgt = _checks.checked_points("target_points", target_points, allow_empty=True)
+    _checks.check_same_dimension(src, tgt)
     n, d = src.shape
     phi_ss = _kernel(_pairwise_r(src, src), epsilon, kernel)
     phi_ts = _kernel(_pairwise_r(tgt, src), epsilon, kernel)
@@ -271,6 +386,13 @@ def rbf_matrix(
     return jnp.asarray(H, dtype=dtype)
 
 
+@_register_builtin(
+    "rbf",
+    arrays=("source_points", "target_points"),
+    hyperparameters={"kernel": str, "epsilon": float, "polynomial": bool,
+                     "ridge": float, "mode": str},
+    references={"source_points": "source_ref", "target_points": "target_ref"},
+)
 @stability(StabilityLevel.EVOLVING)
 def rbf_mapping(
     source_points,
@@ -299,11 +421,27 @@ def rbf_mapping(
     :mod:`~maddening.core.coupling.mapping_spec`); without them a set of
     at most ``INLINE_POINT_LIMIT`` points is inlined into the spec and a
     larger one leaves the mapping unserialisable.
+
+    The point sets are checked as in :func:`rbf_matrix`, under the names
+    given here: the set the interpolant is built on (``source_points`` in
+    consistent mode, ``target_points`` in conservative mode) must hold at
+    least one point.
     """
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
     if mode not in _MODES:
         raise ValueError(f"mode={mode!r} not in {_MODES}")
     epsilon = _finite_real("epsilon", epsilon)
     ridge = _finite_real("ridge", ridge)
+    # Checked here as well as in ``rbf_matrix`` so that the refusal names
+    # this function's argument: conservative mode hands the two sets to
+    # ``rbf_matrix`` the other way round.
+    _checks.check_same_dimension(
+        _checks.checked_points("source_points", source_points,
+                               allow_empty=mode != "consistent"),
+        _checks.checked_points("target_points", target_points,
+                               allow_empty=mode == "consistent"),
+    )
     # Annotated: the literal mixes `str` and `float`, so without this the
     # `**kw` expansion offers `str | float` to every keyword parameter.
     kw: dict[str, Any] = dict(kernel=kernel, epsilon=epsilon,
@@ -336,6 +474,12 @@ def _nn_matrix(source_points, target_points) -> jnp.ndarray:
     return jnp.asarray(H)
 
 
+@_register_builtin(
+    "nearest_neighbor",
+    arrays=("source_points", "target_points"),
+    hyperparameters={"mode": str},
+    references={"source_points": "source_ref", "target_points": "target_ref"},
+)
 @stability(StabilityLevel.EVOLVING)
 def nearest_neighbor_mapping(
     source_points, target_points, *, mode: str = "consistent",
@@ -347,9 +491,26 @@ def nearest_neighbor_mapping(
     source value is *added* to the target point nearest to it, so the
     total is preserved exactly.  ``source_ref`` / ``target_ref`` as in
     :func:`rbf_mapping`.
+
+    Both point sets must be finite ``(n,)`` or ``(n, d)`` arrays of the
+    same ``d``, and the set the nearest point is searched in
+    (``source_points`` in consistent mode, ``target_points`` in
+    conservative mode) must hold at least one point; anything else is a
+    ``ValueError`` naming the argument and the first offending point.  A
+    NaN coordinate used to be *selected*: ``argmin`` returns a NaN
+    distance, so every target read the one source that had no position.
+    Among equidistant points the lowest index is taken.
     """
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
     if mode not in _MODES:
         raise ValueError(f"mode={mode!r} not in {_MODES}")
+    _checks.check_same_dimension(
+        _checks.checked_points("source_points", source_points,
+                               allow_empty=mode != "consistent"),
+        _checks.checked_points("target_points", target_points,
+                               allow_empty=mode == "consistent"),
+    )
     if mode == "consistent":
         H = _nn_matrix(source_points, target_points)
     else:
@@ -361,6 +522,12 @@ def nearest_neighbor_mapping(
     return StaticLinearMapping(H, kind="nearest_neighbor", mode=mode, spec=spec)
 
 
+@_register_builtin(
+    "projection_1d",
+    arrays=("source_boundaries", "target_boundaries"),
+    hyperparameters={},
+    references={"source_boundaries": "source_ref", "target_boundaries": "target_ref"},
+)
 @stability(StabilityLevel.EVOLVING)
 def projection_1d_mapping(
     source_boundaries, target_boundaries, *, source_ref=None, target_ref=None,
@@ -370,9 +537,31 @@ def projection_1d_mapping(
     ``P[i, j] = |target_i ∩ source_j| / |target_i|``.  ``source_ref`` /
     ``target_ref`` reference the boundary arrays for serialisation, as
     in :func:`rbf_mapping`.
+
+    Each boundary array must be one-dimensional, hold at least two
+    values, be finite and be **strictly increasing**; anything else is a
+    ``ValueError`` naming the argument and the first offending index.
+    The arrays are not sorted or reversed for you, because the field
+    keeps its cell order.  (The overlap formula assumes increasing
+    boundaries: a descending array used to give a matrix of zeros and a
+    non-monotone one rows that sum to more than one, without a word.)
+
+    The two grids need not cover the same interval.  Outside the other
+    grid a cell is treated as empty, so:
+
+    * the integral is preserved, ``sum_i |target_i| (P f)_i = sum_j
+      |source_j| f_j``, when the target grid covers the source grid; a
+      part of the source outside the target is dropped;
+    * a constant is reproduced (a row sums to one) on every target cell
+      the source grid covers; a target cell partly outside it averages
+      in zeros, and one wholly outside it is zero.  Two grids that share
+      no interval therefore give a matrix of zeros: check that they are
+      in the same units and frame.
     """
-    sb = np.asarray(source_boundaries, dtype=np.float64)
-    tb = np.asarray(target_boundaries, dtype=np.float64)
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
+    sb = _checks.checked_boundaries("source_boundaries", source_boundaries)
+    tb = _checks.checked_boundaries("target_boundaries", target_boundaries)
     n_src, n_tgt = sb.size - 1, tb.size - 1
     P = np.zeros((n_tgt, n_src), np.float64)
     for i in range(n_tgt):
@@ -408,9 +597,18 @@ def matrix_mapping(
     own kind stays ``"matrix"`` so the rebuild finds this factory.  The
     asset reference records the content hash of ``H``, so the file read
     back must hold exactly this matrix.
+
+    ``H`` must be finite: a NaN or an infinity is a ``ValueError`` naming
+    its index (``PUT /graph/params`` and ``POST /checkpoint/load`` refuse
+    a non-finite mapping weight too).  A traced ``H`` has no values to
+    check and is taken as given.
     """
+    from maddening.core.coupling import _mapping_checks as _checks  # noqa: PLC0415
+
     if not isinstance(kind, str) or not kind:
         raise ValueError(f"matrix_mapping: kind must be a non-empty string label, got {kind!r}")
+    if not _checks.is_traced(H):
+        _checks.check_finite("H", H)
     hyper = {"mode": mode} if kind == "matrix" else {"mode": mode, "label": kind}
     ref = None if asset is None else normalise_point_reference(asset, name="H")
     if ref is not None and "asset" not in ref:
@@ -419,6 +617,21 @@ def matrix_mapping(
         ref = reference_for_array(H, ref, name="H", inline_ok=False)
     spec = MappingSpec("matrix", hyper, {"H": ref})
     return StaticLinearMapping(jnp.asarray(H), kind=kind, mode=mode, spec=spec)
+
+
+@_register_builtin(
+    "matrix",
+    arrays=("H",),
+    hyperparameters={"mode": str, "label": str},
+    references={"H": "asset"},
+)
+def _matrix_from_spec(H, *, mode: str = "consistent", label: str = "matrix",
+                      asset=None) -> StaticLinearMapping:
+    """:func:`matrix_mapping` as a ``MappingSpec`` of kind ``"matrix"``
+    calls it: the spec's ``label`` hyper-parameter is the factory's
+    ``kind`` argument (the user-facing label), because ``kind`` in a spec
+    names the factory."""
+    return matrix_mapping(H, mode=mode, kind=label, asset=asset)
 
 
 __all__ = [
@@ -430,4 +643,5 @@ __all__ = [
     "projection_1d_mapping",
     "rbf_mapping",
     "rbf_matrix",
+    "register_mapping",
 ]

@@ -15,6 +15,13 @@ referenced field differently? -- and refuses the value when it would.
 What stays open is MADD-ANO-022: a traced or explicit ``params=`` pytree
 (``sysid.fit``, ``run_scan(params=...)``) still computes with the
 constructor's geometry, because no write is made for anything to refuse.
+
+The question is asked of the mapping's ``MappingSpec``, whatever its kind,
+so every test here runs three times: with the built-in RBF mapping it was
+written for, with a mapping of a kind registered the way another library
+registers one (``tests/registered_mapping_kinds.py``; a class of its own
+with two weights), and with a registered kind that has no weights at all
+(its entry of ``params["mappings"]`` is ``{}``).
 """
 
 from __future__ import annotations
@@ -28,15 +35,30 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api.server import SimulationServer
 from maddening.core.coupling.mapping import rbf_mapping
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.heat import HeatNode
+from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS, SELECTION
 
 EDGE = "a.temperature->b.heat_source"
 REGISTRY = {"HeatNode": HeatNode}
+
+#: ``make(source, target, source_ref=, target_ref=)`` for each mapping kind
+#: the module runs under.
+_MAKERS = {"rbf": rbf_mapping, INVERSE_DISTANCE: KINDS[INVERSE_DISTANCE].build,
+           SELECTION: KINDS[SELECTION].build}
+_MAKE = {"mapping": rbf_mapping}
+
+
+@pytest.fixture(autouse=True, params=sorted(_MAKERS))
+def mapping_kind(request):
+    """Every test in the module, under each mapping kind."""
+    _MAKE["mapping"] = _MAKERS[request.param]
+    yield request.param
+    _MAKE["mapping"] = rbf_mapping
 
 
 def _rods(*, source_ref=None, source_points=None, target_ref=None, wrap=None,
@@ -52,7 +74,7 @@ def _rods(*, source_ref=None, source_points=None, target_ref=None, wrap=None,
     gm.add_node(wrap(a) if wrap is not None else a)
     gm.add_node(b)
     if mapped:
-        gm.add_edge("a", "b", "temperature", "heat_source", mapping=rbf_mapping(
+        gm.add_edge("a", "b", "temperature", "heat_source", mapping=_MAKE["mapping"](
             np.asarray(a.static_data["grid_x"].value) if source_points is None
             else source_points(a),
             np.asarray(b.static_data["grid_x"].value),

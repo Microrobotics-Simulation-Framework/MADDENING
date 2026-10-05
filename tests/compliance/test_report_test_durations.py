@@ -443,6 +443,19 @@ def test_a_partial_lane_lists_no_allowlist_entry_as_removable(gate, tmp_path, ca
     assert "may be removable" not in Path(str(report) + ".md").read_text()
 
 
+def test_no_shipped_allowlist_entry_names_a_test_that_needs_usd_core(gate):
+    """The budget reads the sharded lanes' results, and those lanes skip
+    ``tests/usd/`` (they install no ``usd-core``), so an entry there
+    exempts nothing.  The collection below would also fail on it wherever
+    ``pxr`` cannot be imported: pytest handed a file of that directory
+    exits with its conftest's skip as an error.  This refuses the entry in
+    every lane, with the reason."""
+    named = sorted(n for n in gate.read_allowlist(ALLOWLIST) if n.startswith("tests/usd/"))
+    assert not named, (
+        f"{named}: tests/usd runs in the test-usd job, whose durations the budget does not "
+        "read; an allowlist entry for it exempts nothing")
+
+
 def test_every_shipped_allowlist_entry_is_a_node_id_pytest_collects(gate):
     """An entry is matched exactly, so a typo in it exempts nothing, silently.
 

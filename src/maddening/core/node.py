@@ -176,7 +176,7 @@ class _ParamsDict(dict):
     own values handed back, so they are not writes.  Until 0.4.0 shipped
     the graph read a replaced mapping as a write of *every* key, which put
     the node's own value over every other constant of that node a fit had
-    calibrated in ``gm.params`` (MADD-ANO-192).
+    calibrated in ``gm.params`` (MADD-ANO-198).
 
     Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON, a
     JAX pytree with the dict's own flattening, and a copy (``dict(p)``,
@@ -391,6 +391,35 @@ def _signature_takes_keyword(fn: Any, keyword: str) -> bool:
     return keyword in sig.parameters or any(
         p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
     )
+
+
+def _signature_required_arguments(fn: Any) -> Optional[dict[str, bool]]:
+    """The arguments a call of ``fn`` must supply, each with whether a
+    keyword can supply it.
+
+    ``{name: True}`` for a parameter without a default that may be passed
+    by name, ``{name: False}`` for a positional-only one; ``*args`` and
+    ``**kwargs`` require nothing.  ``None`` for a signature that cannot be
+    inspected, so the caller decides what that means (the keyword rule
+    above answers ``False`` there).
+
+    This is not a second keyword rule.  Whether ``fn`` *takes* a keyword
+    is :func:`_signature_takes_keyword`'s to say, and a caller that needs
+    both answers -- the mapping registry, which checks a declaration
+    against its factory before any config names the kind -- asks both
+    here, the one module that reads a signature
+    (``tests/core/test_params_probe_agreement.py`` scans for any other).
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return None
+    return {
+        name: p.kind is not inspect.Parameter.POSITIONAL_ONLY
+        for name, p in sig.parameters.items()
+        if p.default is inspect.Parameter.empty
+        and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    }
 
 
 def _signature_takes_params(fn: Any) -> bool:
@@ -698,7 +727,7 @@ class SimulationNode(ABC):
         when the assignment hands its key back unchanged.  (For a time
         during 0.4.0 development it was a write of every key, and the
         one-key idiom silently reverted every other calibrated constant of
-        the node, MADD-ANO-192.)  To write a value the node already holds --
+        the node, MADD-ANO-198.)  To write a value the node already holds --
         to revert a calibration -- write the key: ``node.params[key] =
         value``.
         """
@@ -717,7 +746,7 @@ class SimulationNode(ABC):
             old = self.__dict__.get("params")
             if isinstance(old, _ParamsDict):
                 # The replacement writes the keys it changes, not the ones
-                # it hands back (MADD-ANO-192).
+                # it hands back (MADD-ANO-198).
                 value._succeed(old)
         cast(dict, self.__dict__)["params"] = value
 

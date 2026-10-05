@@ -23,12 +23,17 @@ Usage
 
 Security
 --------
-A **loopback bind is unauthenticated**, exactly as it always was: bind
-``127.0.0.1`` and nothing changes for local development.  It answers only
-to the names this machine is reached by (``localhost``, ``127.0.0.1``,
-``[::1]``, and any ``allowed_hosts``) and refuses a state change from a
-foreign ``Origin``, so a web page in the developer's browser -- DNS
-rebinding included -- cannot drive it.  **Any other
+A **loopback bind is unauthenticated** for a direct connection from a
+loopback address, exactly as it always was: bind ``127.0.0.1`` and nothing
+changes for local development.  It answers only to the names this machine
+is reached by (``localhost``, ``127.0.0.1``, ``[::1]``, and any
+``allowed_hosts``) and refuses a state change from a foreign ``Origin``,
+so a web page in the developer's browser -- DNS rebinding included --
+cannot drive it.  A peer that is not a loopback IP literal, or a request
+that carries ``X-Forwarded-For`` / ``Forwarded``, must present the token
+(:mod:`maddening.api.auth`: under uvicorn's default ``proxy_headers`` the
+peer is whatever a request arriving over loopback says it is; never
+configure loopback as a trusted proxy).  **Any other
 bind requires a bearer token on every route** except ``/healthz`` and
 the static ``/viz/*`` pages -- see :mod:`maddening.api.auth` for where
 the token comes from and how a client presents it.  Tell the server
@@ -67,7 +72,7 @@ import uuid
 import warnings
 import weakref
 from pathlib import Path
-from typing import Annotated, Any, Iterable, Optional
+from typing import Annotated, Any, Iterable, Mapping, Optional
 from urllib.parse import urlsplit
 
 import jax
@@ -76,6 +81,8 @@ import numpy as np
 
 try:
     from fastapi import FastAPI, HTTPException, Query, WebSocket
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.exceptions import RequestValidationError
     from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     from pydantic import BaseModel, Field, field_validator
     from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -93,6 +100,7 @@ from maddening.api.auth import (
     UNAUTHENTICATED_PATHS,
     WS_SUBPROTOCOL,
     APIAuth,
+    _carries_forwarding_header,
     bearer_from_headers,
     bearer_from_subprotocols,
     is_loopback,
@@ -195,6 +203,52 @@ def _unrepresentable(value: Any, dtype: Any) -> Optional[str]:
     if bool(np.any(np.isfinite(wide) & ~np.isfinite(narrow))) \
             or bool(np.any((wide != 0) & (narrow == 0))):
         return f"value does not fit its type {dt}"
+    return None
+
+
+def _state_value_refusal(value: Any, dtype: Any) -> Optional[str]:
+    """Why a JSON *value* (a number, or nested lists of them) cannot be
+    written into a state field of *dtype*, or ``None``; asked of every
+    element before anything is cast.
+
+    The rule every other write surface applies (``PUT /graph/params``,
+    ``POST /checkpoint/load`` through ``checkpoint._checked_cast``, the
+    FMU): text, a boolean for a numeric field, ``null`` and anything that
+    is not a number are refused; an integer field takes only integral
+    values inside its dtype's range; a boolean field takes booleans, or 0
+    and 1.  ``PUT /graph/state`` cast with ``jnp.asarray`` alone: ``"1.5"``,
+    ``" 2 "`` and ``true`` were parsed as numbers, 0.5 and 1.7 were
+    truncated to 0 and 1 in LBMNode's ``uint8`` wall mask, and 256, -1 or
+    1e10 there were a 500 (``OverflowError``).  A float field's range is
+    :func:`_unrepresentable`'s to say, and its finiteness the route's.
+    """
+    dt = np.dtype(dtype)
+    stack = [value]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, (list, tuple)):
+            stack.extend(v)
+            continue
+        if isinstance(v, bool):
+            if dt.kind == "b":
+                continue
+            return "expected a number, got a boolean"
+        if v is None:
+            return "expected a number, got null"
+        if isinstance(v, str):
+            return "expected a number, got a string"
+        if not isinstance(v, (int, float)):
+            return f"expected a number, got {type(v).__name__}"
+        if dt.kind == "b":
+            if v not in (0, 1):
+                return f"value {v!r} is not a boolean (true, false, 0 or 1)"
+        elif dt.kind in "iu":
+            if isinstance(v, float) and not v.is_integer():
+                return f"value {v!r} is not an integer, and the field holds {dt}"
+            info = np.iinfo(dt)
+            if not info.min <= v <= info.max:
+                return (f"value {v!r} is outside the range of {dt} "
+                        f"[{info.min}, {info.max}]")
     return None
 
 
@@ -545,7 +599,10 @@ def _oversized_new_node_param(cls: Any, params: dict[str, Any]) -> Optional[str]
 class AddNodeRequest(BaseModel):
     type: str
     name: str
-    timestep: float
+    # A finite number > 0: NaN or Infinity added the node and then answered
+    # 500 (its reply could not be encoded), every step a 400 until it was
+    # deleted; 0 or a negative value stepped it not at all, or backwards.
+    timestep: float = Field(gt=0, allow_inf_nan=False)
     params: dict[str, Any] = {}
 
     @field_validator("params")
@@ -961,7 +1018,9 @@ def _surrogate_training_bytes(gm: GraphManager, node_name: str,
 
     * **the sweep's history**: ``C * S * E_graph`` values;
     * **the dataset** (states, next states and boundary inputs of the
-      target node): ``D = C * (S - 1) * (2 * E_node + E_inputs)`` values,
+      target node, each input at the size its edge delivers -- a mapped
+      edge's ``n_target``, not its source field's):
+      ``D = C * (S - 1) * (2 * E_node + E_inputs)`` values,
       held three times at the peak -- the dataset, the training/validation
       split and each epoch's shuffle (measured: a 25 000-cell rod at the
       defaults took 2.18 GiB, this says 2.08 GiB);
@@ -996,7 +1055,13 @@ def _surrogate_training_bytes(gm: GraphManager, node_name: str,
         if edge.target_node != node_name:
             continue
         source = gm._state.get(edge.source_node, {})
-        e_inputs += size(source[edge.source_field]) if edge.source_field in source else 1
+        delivered = size(source[edge.source_field]) if edge.source_field in source else 1
+        if edge.mapping is not None and edge.source_field in source:
+            # The dataset holds what the edge delivers: a mapping turns the
+            # source field's first axis into its ``n_target`` entries.
+            trailing = tuple(getattr(source[edge.source_field], "shape", ()))[1:]
+            delivered = int(edge.mapping.n_target) * math.prod(int(d) for d in trailing)
+        e_inputs += delivered
     for ext in gm._external_inputs:
         if ext.target_node == node_name:
             e_inputs += max(1, math.prod(int(d) for d in (ext.shape or ())))
@@ -1602,9 +1667,14 @@ def _params_write_refusal(gm: GraphManager, owner: str, changes: dict[str, Any],
     (:meth:`~maddening.core.graph_manager.GraphManager._unused_node_write_reason`).
 
     The keys in *at_own_value* hold the node's own value (the one it was
-    built with) and are asked only in the combined checks: a load that
-    puts a calibrated leaf back to it writes no new value.  (``PUT`` drops
-    such a key before it asks.)
+    built with) and are asked only in the combined checks -- the size of
+    what the checks build, and the graph a save would reload, with every
+    other key's live value: the node was built with the value, so the
+    per-key checks have nothing to ask of it, but the graph's other live
+    leaves (a fit, a load) may not take it.  A load that puts a calibrated
+    leaf back to it and a ``PUT`` that writes it back both pass such a
+    key here; each counts a key as changed when it differs from the live
+    leaf, never from the node's own value.
     """
     leaf_keys = set(leaf_keys)
     spec = gm._nodes[owner]
@@ -1935,6 +2005,15 @@ _CROSS_ORIGIN_DETAIL = (
 )
 
 
+def _is_port(text: str) -> bool:
+    """Whether *text* is a port as a ``Host`` header spells one: ASCII
+    digits only.  ``str.isdigit`` is true of ``"\u00b2"`` (superscript two,
+    a latin-1 byte a client can send) and ``int`` refuses it, so a Host
+    ``localhost:\u00b2`` was a 500 on every route and on the WebSocket
+    handshake."""
+    return text.isascii() and text.isdigit()
+
+
 def _host_and_port(host_header: Optional[str]) -> Optional[tuple[str, Optional[int]]]:
     """``(host, port)`` of a ``Host`` header as :func:`urllib.parse.urlsplit`
     reads an origin's authority -- lowercased, an IPv6 literal without its
@@ -1952,15 +2031,25 @@ def _host_and_port(host_header: Optional[str]) -> Optional[tuple[str, Optional[i
         name, rest = value[1:end], value[end + 1:]
         if not rest:
             return name, None
-        if not (rest.startswith(":") and rest[1:].isdigit()):
+        if not (rest.startswith(":") and _is_port(rest[1:])):
             return None
         return name, int(rest[1:])
     if value.count(":") > 1:           # a bare IPv6 address is not a valid Host
         return None
     name, colon, port = value.partition(":")
-    if not name or (colon and not port.isdigit()):
+    if not name or (colon and not _is_port(port)):
         return None
     return name, (int(port) if colon else None)
+
+
+def _offered_subprotocols(scope: Mapping[str, Any]) -> list[str]:
+    """The subprotocol names a WebSocket handshake offered.  ASGI specifies
+    ``scope["subprotocols"]`` as a list of names; uvicorn 0.50.0 passes the
+    ``Sec-WebSocket-Protocol`` header as one comma-joined entry, which left
+    the browser's bearer carrier unread and ``maddening.v1`` unselected.
+    Each entry is split on commas (a subprotocol name holds none)."""
+    return [name.strip() for entry in (scope.get("subprotocols") or ())
+            for name in str(entry).split(",") if name.strip()]
 
 
 def _host_name(host_header: str) -> Optional[str]:
@@ -1973,13 +2062,13 @@ def _host_name(host_header: str) -> Optional[str]:
     if value.startswith("["):
         end = value.find("]")
         rest = value[end + 1:] if end > 0 else None
-        if rest is None or (rest and not (rest.startswith(":") and rest[1:].isdigit())):
+        if rest is None or (rest and not (rest.startswith(":") and _is_port(rest[1:]))):
             return None
         return value[1:end]
     if value.count(":") > 1:           # a bare IPv6 address is not a valid Host
         return None
     name, colon, port = value.partition(":")
-    if colon and not port.isdigit():
+    if colon and not _is_port(port):
         return None
     return name.rstrip(".") or None
 
@@ -1992,10 +2081,10 @@ def _is_ip_address(peer: Optional[str]) -> bool:
     return True
 
 
-def _rebinding_refusal(auth: APIAuth, peer: Optional[str], host_header: Optional[str],
-                       allowed_hosts: frozenset) -> Optional[str]:
-    """Why a request that reached a loopback-bound API without a token is
-    refused for its ``Host``, or ``None``.
+def _rebinding_refusal(auth: APIAuth, host_header: Optional[str],
+                       allowed_hosts: frozenset, *, authenticated: bool) -> Optional[str]:
+    """Why a request that reached a loopback-bound API without a valid
+    token is refused for its ``Host``, or ``None``.
 
     The ``Origin`` check compares the ``Origin`` with the ``Host``, and a
     DNS-rebinding page sends both naming its own domain: served from
@@ -2007,16 +2096,22 @@ def _rebinding_refusal(auth: APIAuth, peer: Optional[str], host_header: Optional
     the names this machine is reached by: ``localhost``, a ``127.0.0.0/8``
     or ``::1`` literal (any port), and the names in *allowed_hosts*.
 
-    Asked only where nothing else authenticates the caller: a request that
-    must present the bearer token (a non-loopback bind, or a routable peer)
-    is not, since the token is what a rebound page does not hold.  And
-    only of a peer that is an IP address, because a browser reaches the API
-    over TCP: an in-process client (Starlette's ``TestClient`` reports the
-    peer ``"testclient"``) or a Unix-socket connection (no peer address) is
-    not a browser's.  A request with no ``Host`` at all is not a browser's
-    either and is served.
+    Asked of every request to a loopback bind that did not present a
+    valid token (*authenticated*), whatever its peer: the token is what a
+    rebound page does not hold.  It keys on the bind and the ``Host``
+    header, never on the peer.  It used to be asked only of a peer that
+    was an IP address, on the grounds that a browser reaches the API over
+    TCP; but the peer is ``scope["client"]`` as the ASGI server reports
+    it, which uvicorn's default ``proxy_headers`` rewrites from
+    ``X-Forwarded-For`` for every request arriving over loopback, and a
+    rebound page's ``fetch()`` may set that header.  ``X-Forwarded-For: x``
+    made the peer the string ``"x"``, which skipped this check and the
+    peer backstop both, and the page could step, read, add nodes and save
+    checkpoints.  A non-loopback bind demands the token of every request
+    and is not asked.  A request with no ``Host`` at all is not a
+    browser's and is served.
     """
-    if auth.required_for_peer(peer) or not _is_ip_address(peer) or host_header is None:
+    if authenticated or auth.enforced or host_header is None:
         return None
     name = _host_name(host_header)
     if name is not None and (is_loopback(name) or name in allowed_hosts):
@@ -2109,11 +2204,15 @@ class _WebSocketAuthMiddleware:
             key.decode("latin-1").lower(): value.decode("latin-1")
             for key, value in (scope.get("headers") or ())
         }
+        offered = _offered_subprotocols(scope)
+        presented = bearer_from_headers(headers) or bearer_from_subprotocols(offered)
+        authenticated = self._auth.verify(presented)
         # A DNS-rebinding page passes the origin check below (its Origin
         # and Host both name its own domain); its Host is what gives it
-        # away.  See _rebinding_refusal.
-        if _rebinding_refusal(self._auth, peer, headers.get("host"),
-                              self._allowed_hosts) is not None:
+        # away.  Asked of every handshake without a valid token, whatever
+        # its peer.  See _rebinding_refusal.
+        if _rebinding_refusal(self._auth, headers.get("host"), self._allowed_hosts,
+                              authenticated=authenticated) is not None:
             logger.warning(
                 "Refused WebSocket %s for host %r: not a name of this "
                 "loopback-bound server", scope.get("path", "?"), headers.get("host"),
@@ -2134,20 +2233,14 @@ class _WebSocketAuthMiddleware:
             )
             await self._refuse(receive, send)
             return
-        if self._auth.required_for_peer(peer):
-            offered = list(scope.get("subprotocols") or [])
-            presented = (
-                bearer_from_headers(headers)
-                or bearer_from_subprotocols(offered)
+        if not authenticated and self._auth._required_for_request(peer, headers):  # noqa: SLF001
+            logger.warning(
+                "Refused WebSocket %s from %s: %s bearer token",
+                scope.get("path", "?"), peer or "?",
+                "invalid" if presented else "missing",
             )
-            if not self._auth.verify(presented):
-                logger.warning(
-                    "Refused WebSocket %s from %s: %s bearer token",
-                    scope.get("path", "?"), peer or "?",
-                    "invalid" if presented else "missing",
-                )
-                await self._refuse(receive, send)
-                return
+            await self._refuse(receive, send)
+            return
         await self.app(scope, receive, send)
 
     @staticmethod
@@ -2328,6 +2421,18 @@ def _restore_graph_structure(gm, snapshot: dict) -> None:
     gm._dirty = snapshot["dirty"]
 
 
+#: Held while :meth:`SimulationServer.create_app` builds an application, so
+#: apps are built one at a time.  FastAPI builds each route's fields inside
+#: ``warnings.catch_warnings()``, which saves the process's warnings
+#: filters and puts them back on the way out and is not thread-safe: two
+#: apps built at once in two threads put back each other's filters.  A
+#: warning FastAPI silences was shown -- raised, where warnings are errors
+#: -- and ``ignore::UserWarning`` could be left in the filters for good,
+#: silencing every MADDENING warning in the process from then on
+#: (MADD-ANO-191).
+_CREATE_APP_LOCK = threading.RLock()
+
+
 class SimulationServer:
     """Wraps a ``GraphManager`` with a FastAPI HTTP + WebSocket interface.
 
@@ -2361,8 +2466,12 @@ class SimulationServer:
         ``/etc/hosts`` alias); ports are ignored.  On a loopback bind the
         API is unauthenticated, and a request whose ``Host`` names
         anything else is refused with 403: that is how a DNS-rebinding web
-        page reaches it.  Not consulted where the bearer token is demanded
-        (a non-loopback bind, or a routable peer).  Each entry must be a
+        page reaches it.  Asked of every request without a valid token,
+        whatever its peer; not consulted on a non-loopback bind (the token
+        decides there) nor for a request that presents the token.  A
+        reverse proxy in front of a loopback bind needs its name here, and
+        its forwarded requests (``X-Forwarded-For`` / ``Forwarded``) need
+        the token.  Each entry must be a
         host name -- an IP literal (an IPv6 one in brackets) or DNS labels
         of letters, digits, hyphens and underscores, optionally with a
         port, nothing around it -- or the constructor raises
@@ -2500,7 +2609,8 @@ class SimulationServer:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _unauthorized_detail(self, peer: Optional[str]) -> str:
+    def _unauthorized_detail(self, peer: Optional[str],
+                             headers: Optional[Any] = None) -> str:
         """The 401 body: why a token is needed and where to find it."""
         if self.auth.enforced:
             return (
@@ -2508,10 +2618,18 @@ class SimulationServer:
                 "route requires 'Authorization: Bearer <token>'. The token "
                 "is $MADDENING_API_TOKEN, or was logged once at start-up."
             )
+        if _carries_forwarding_header(headers):
+            why = ("the request carried a forwarding header (X-Forwarded-For or "
+                   "Forwarded), so it did not come straight from this machine")
+        else:
+            why = (f"the request arrived from {peer!r}, which is not a loopback "
+                   "address (an in-process client such as Starlette's TestClient "
+                   "reports a name: present server.auth.token, or construct it with "
+                   "base_url='http://127.0.0.1' and client=('127.0.0.1', <port>))")
         return (
             f"This server was configured for a loopback bind "
-            f"({self.auth.bind_host!r}) but the request arrived from "
-            f"{peer!r}. A request from off-host needs "
+            f"({self.auth.bind_host!r}), and a token is needed without a direct "
+            f"connection from a loopback address: {why}. Present "
             f"'Authorization: Bearer <token>'. If the bind really is "
             f"public, pass bind_host to SimulationServer (or set "
             f"MADDENING_HOST) so the token is logged at start-up."
@@ -2541,10 +2659,10 @@ class SimulationServer:
             select one of the offered names, and a browser aborts the
             connection when it selects none.
         """
-        offered = list(websocket.scope.get("subprotocols") or [])
+        offered = _offered_subprotocols(websocket.scope)
         selected = WS_SUBPROTOCOL if WS_SUBPROTOCOL in offered else None
         peer = websocket.client.host if websocket.client else None
-        if not self.auth.required_for_peer(peer):
+        if not self.auth._required_for_request(peer, websocket.headers):  # noqa: SLF001
             return True, selected
         presented = (
             bearer_from_headers(websocket.headers)
@@ -3050,7 +3168,17 @@ class SimulationServer:
             :data:`maddening.api.auth.UNAUTHENTICATED_PATHS` requires
             ``Authorization: Bearer <token>``, and ``/docs``, ``/redoc``
             and ``/openapi.json`` are not served at all.
+
+        Notes
+        -----
+        Safe to call from several threads at once: the apps are built one
+        at a time (see :data:`_CREATE_APP_LOCK`).
         """
+        with _CREATE_APP_LOCK:
+            return self._build_app()
+
+    def _build_app(self) -> FastAPI:
+        """:meth:`create_app`'s application, built under :data:`_CREATE_APP_LOCK`."""
         # Swagger UI is a browser page that fetches /openapi.json with no
         # Authorization header, so it cannot work behind a bearer token.
         # A half-working docs page that 401s on its own schema is worse
@@ -3105,6 +3233,17 @@ class SimulationServer:
         # ExceptionGroup that FastAPI answers as "There was an error
         # parsing the body" (400).  No middleware or route reads a body
         # before it either way.
+        # A 422 echoes the value it refused, and FastAPI's own handler hands
+        # that to a JSON encoder that refuses NaN and the infinities: a
+        # request whose refused field held one (``"timestep": NaN``) was a
+        # 500.  The same body, encoded as every reply is (_json_reply).
+        @app.exception_handler(RequestValidationError)
+        async def _request_validation_error(_request, exc):
+            return JSONResponse(
+                status_code=422,
+                content=_json_reply({"detail": jsonable_encoder(exc.errors())}),
+            )
+
         app.add_middleware(_RequestBodyLimitMiddleware)
         app.add_middleware(
             _WebSocketAuthMiddleware,
@@ -3120,24 +3259,27 @@ class SimulationServer:
             # the Host header, and a malformed one (``[::1]x``) raised
             # inside this middleware -- a 500 where the refusal is a 403.
             path = request.scope.get("path", "")
-            if (self.auth.required_for_peer(peer)
-                    and path not in UNAUTHENTICATED_PATHS):
-                if not self.auth.verify(bearer_from_headers(request.headers)):
-                    logger.warning(
-                        "Refused %s %s from %s: %s bearer token",
-                        request.method, path, peer or "?",
-                        "invalid" if request.headers.get("authorization")
-                        else "missing",
-                    )
-                    return JSONResponse(
-                        status_code=401,
-                        content={"detail": self._unauthorized_detail(peer)},
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
+            authenticated = self.auth.verify(bearer_from_headers(request.headers))
+            if (not authenticated
+                    and path not in UNAUTHENTICATED_PATHS
+                    and self.auth._required_for_request(peer, request.headers)):  # noqa: SLF001
+                logger.warning(
+                    "Refused %s %s from %s: %s bearer token",
+                    request.method, path, peer or "?",
+                    "invalid" if request.headers.get("authorization")
+                    else "missing",
+                )
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": self._unauthorized_detail(peer, request.headers)},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
             # Every method, GET included: a rebound page is same-origin to
-            # its browser, so it can read the replies it gets.
-            rebinding = _rebinding_refusal(self.auth, peer, request.headers.get("host"),
-                                           self.allowed_hosts)
+            # its browser, so it can read the replies it gets.  Asked of
+            # every request without a valid token, whatever its peer (which
+            # a proxy header can rewrite): see _rebinding_refusal.
+            rebinding = _rebinding_refusal(self.auth, request.headers.get("host"),
+                                           self.allowed_hosts, authenticated=authenticated)
             if rebinding is not None:
                 logger.warning(
                     "Refused %s %s for host %r: not a name of this "
@@ -3351,7 +3493,10 @@ class SimulationServer:
                 except ValueError as exc:
                     raise HTTPException(status_code=400, detail=str(exc))
                 self._publish_state()
-                return {"status": "ok", "node": node.to_dict()}
+                # Through the reply encoder every other route uses: a
+                # non-finite value in the node's dict is written as its
+                # quoted token, never a 500 after the node was added.
+                return _json_reply({"status": "ok", "node": node.to_dict()})
 
         @app.delete("/graph/nodes/{name}", tags=["graph"], response_model=None)
         def remove_node(name: str) -> dict[str, str]:
@@ -3463,7 +3608,10 @@ class SimulationServer:
         def set_node_state(node_name: str, req: SetNodeStateRequest) -> dict[str, str]:
             """Replace a node's state.  Every field is required, coerced to
             the live leaf's dtype, and must match its shape and be finite;
-            a 400 names the field and writes nothing.  Each field's value
+            a 400 names the field and writes nothing.  Text, a boolean for
+            a numeric field and ``null`` are refused, and an integer field
+            takes only integral values inside its dtype's range
+            (:func:`_state_value_refusal`).  Each field's value
             count is checked against the live field before anything is
             converted to an array."""
             with self._graph_access("write a node's state", write=True):
@@ -3490,12 +3638,22 @@ class SimulationServer:
                 staged = {}
                 for field, value in req.state.items():
                     want = jnp.asarray(live[field])
+                    # Text, booleans, non-integral or out-of-range integers:
+                    # refused as every other write surface refuses them.
+                    problem = _state_value_refusal(value, want.dtype)
+                    if problem is not None:
+                        raise HTTPException(status_code=400, detail=f"{field}: {problem}")
                     # As for PUT /graph/params: refused before the cast warns.
                     problem = _unrepresentable(value, want.dtype)
                     if problem is not None:
                         raise HTTPException(status_code=400, detail=f"{field}: {problem}")
                     try:
                         arr = jnp.asarray(value, dtype=want.dtype)
+                    except OverflowError:
+                        # An integer past float64 for a float field (10**400).
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"{field}: value does not fit its type {want.dtype}")
                     except (TypeError, ValueError) as exc:
                         raise HTTPException(status_code=400, detail=f"{field}: {exc}")
                     if arr.shape != want.shape:
@@ -3717,15 +3875,30 @@ class SimulationServer:
                         raise HTTPException(status_code=400, detail=str(exc))
                 staged[key] = new
             # What the write would store in node.params, for every key that
-            # changes; an unchanged key has nothing to refuse.
+            # changes; an unchanged key has nothing to refuse.  A leaf
+            # changes when it differs from the value the graph runs with now
+            # -- the live leaf -- not from the node's own: after a fit, or a
+            # POST /checkpoint/load (which moves gm.params, not
+            # node.params), the two differ, and a leaf written back to the
+            # node's own value used to be dropped here.  The combined checks
+            # below were then asked with its old live value: a HeatNode
+            # rod's ``length`` and ``thermal_diffusivity`` went past its
+            # Fourier limit together with a 200, ran to NaN, and saved a
+            # graph that did not reload.  Such a key is asked as
+            # ``at_own_value``, as a load asks it: the node was built with
+            # it, so the per-key checks have nothing to ask, and the
+            # combined ones take it with every other key's live value.
             ctor = node.params_pytree() if staged else {}
             changes: dict[str, Any] = {}
+            at_own_value: list[str] = []
             for key, value in req.params.items():
                 if key in staged:
-                    ref = ctor.get(key, live.get(key))
-                    if ref is not None and _leaf_values_equal(staged[key], ref):
+                    if _leaf_values_equal(staged[key], live[key]):
                         continue
                     changes[key] = np.asarray(staged[key]).tolist()
+                    own_leaf = ctor.get(key)
+                    if own_leaf is not None and _leaf_values_equal(staged[key], own_leaf):
+                        at_own_value.append(key)
                 else:
                     value = structural[key]
                     if key in node.params and _same_param_value(node.params[key], value):
@@ -3759,7 +3932,8 @@ class SimulationServer:
             found = _params_write_refusal(
                 self.gm, node_name, changes, staged,
                 dict(live) if accepts else None,
-                {**live, **staged} if accepts else None)
+                {**live, **staged} if accepts else None,
+                at_own_value=at_own_value)
             if found is not None:
                 keys, reason, reported = found
                 raise refused(keys, reason, reported=reported)
@@ -4266,7 +4440,8 @@ class SimulationServer:
             """Start the runner.  Answered within about one graph-lock
             timeout of its arrival, a 503 past it: run on the runner routes'
             own threads, so it does not wait for a worker behind requests
-            waiting for the graph."""
+            waiting for the graph.  A graph with no nodes is a 409: there is
+            nothing to run."""
             return await on_runner_pool(sim_start_blocking)
 
         def sim_start_blocking(deadline: float) -> dict[str, str]:
@@ -4284,6 +4459,16 @@ class SimulationServer:
                 if self._runner_started:
                     raise HTTPException(status_code=409, detail="Runner is already started.")
                 with self._graph_access("start the runner", write=True, deadline=deadline):
+                    if not self.gm._nodes:
+                        # The runner's thread read gm.timestep on its first
+                        # frame and died ("No nodes registered.") after the
+                        # route had answered "started".
+                        raise HTTPException(
+                            status_code=409,
+                            detail=("The graph has no nodes, so there is nothing to "
+                                    "run. Add a node (POST /graph/nodes), then start "
+                                    "the runner."),
+                        )
                     runner = self._ensure_runner()
                     try:
                         runner.start()

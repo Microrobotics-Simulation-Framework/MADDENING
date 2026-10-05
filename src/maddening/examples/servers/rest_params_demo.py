@@ -89,7 +89,11 @@ def main(argv=None) -> int:
     with tempfile.TemporaryDirectory(prefix="maddening_rest_demo_") as tmp:
         server = SimulationServer(node_registry=REGISTRY, graph_manager=gm,
                                   checkpoint_root=tmp)
-        client = TestClient(server.create_app())
+        # An in-process client is not a loopback connection (its peer is
+        # the name "testclient"), so it presents the server's token, as any
+        # caller that is not a direct loopback connection must.
+        client = TestClient(server.create_app(),
+                            headers={"Authorization": f"Bearer {server.auth.token}"})
         run(client, gm, args.steps)
     print()
     print("All checks passed.")

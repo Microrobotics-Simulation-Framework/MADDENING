@@ -70,6 +70,7 @@ STABILITY_MODULES: tuple[str, ...] = (
     "maddening.api.server",
     "maddening.core.compliance.stability",
     "maddening.core.compliance.uq",
+    "maddening.core.coupling.mapping_registry",
     "maddening.core.coupling.mapping_spec",
     "maddening.fmi.directional_derivatives",
     "maddening.fmi.fmu_state",

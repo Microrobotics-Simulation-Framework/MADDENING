@@ -21,7 +21,10 @@ to the same rules:
 * **every cited test exists and runs on every push**: pytest collects it,
   it is not skip-marked, and if it is slow-marked it names a ``# Per
   push: <node id>`` witness at its mark (the slow-only rule's convention,
-  ``tests/compliance/test_slow_only_rule.py``);
+  ``tests/compliance/test_slow_only_rule.py``).  A test under
+  ``tests/usd/`` needs ``usd-core``, which only the ``test-usd`` job
+  installs to run tests with, so it must also be in that job's selection
+  ("Tests that need an optional extra", below);
 * **a failing row cites a strict xfail** whose reason starts with the
   row's id, so the row and the test move together when the fix lands;
 * **a verified row cites no xfail**, strict or not: a claim the tree does
@@ -47,14 +50,41 @@ Which tests are slow, skipped or xfail comes from pytest itself, in one
 rules are pure functions over the files, their rows and that collection,
 so the self-tests at the end feed them broken files and rows and check
 each rule fires.
+
+Tests that need an optional extra
+---------------------------------
+``tests/usd/conftest.py`` skips its directory when ``pxr`` (``usd-core``)
+cannot be imported.  This module runs in two kinds of job: the sharded
+lanes install ``.[ci]``, without it, and the ``compliance`` job installs
+``.[ci,usd]``.  Where ``pxr`` is importable nothing differs: pytest
+collects the cited USD tests like any other.  Where it is not, pytest
+cannot import those modules at all, so their items are read from their
+source instead (:func:`items_from_source`): one item per test function,
+with the ``slow``, ``skip`` and ``xfail`` marks its decorators, its
+class's and the module's ``pytestmark`` spell.  Every rule then runs
+over them unchanged, so a row citing a USD test that does not exist, is
+skip-marked, is slow with no witness or disagrees with its status fails
+in both kinds of job.
+
+The source reader is not pytest: it expands no parameters (a cited
+``test_x[id]`` is taken to exist when ``test_x`` does) and reads no mark
+attached to one parameter or reached through an import.  Two tests keep
+it honest.  One collects a module of every spelling it reads with pytest
+and compares, in every job.  The other compares it with pytest's own
+answer for the cited USD files, in the job that can collect them, on
+every push -- so a spelling the reader does not know fails there rather
+than passing here unread.
 """
 
 from __future__ import annotations
 
 import ast
+import dataclasses
+import importlib.util
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -64,6 +94,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.compliance.test_ci_workflows import _logical_lines, _usd_job_targets, _workflow
 from tests.compliance.test_slow_only_rule import _NODE_ID, _comments_at, _covers, witness_ids
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -87,6 +118,10 @@ _ID = re.compile(r"^([A-Z]{2,6})-\d{3}$")
 _SOURCE_PATH = re.compile(r"^([\w./\-]+?\.(?:py|md|yaml|toml|json|txt|c|h|xml))(?=$|[:#\s(])")
 #: An xfail reason that names a row.
 _REASON_ROW = re.compile(r"^(([A-Z]{2,6})-\d{3}):")
+#: Tests here need ``usd-core`` (imported as ``pxr``): the directory's
+#: conftest skips them without it.  The sharded lanes do not install it, so
+#: on a push these run in the ``test-usd`` job and nowhere else.
+USD_TESTS = "tests/usd/"
 
 # --------------------------------------------------------------------------
 # The domain matrix: the fixed vocabularies, and how conditions name them
@@ -257,11 +292,32 @@ DOMAIN_WITNESS: dict[str, re.Pattern] = {
         ("relabelled_records", r"relabel"),
         ("mixed_commits", r"commit"),
     )}
-#: A real server's marks, for ``concurrent``: the requests must meet on one
+#: A real server's mark, for ``concurrent``: the requests must meet on one
 #: server's socket, event loop and worker pool, not each on its own
-#: in-process client.
-_REAL_SERVER = re.compile(r"uvicorn|socket|http://127\.0\.0\.1", re.IGNORECASE)
-_SIMULTANEOUS = re.compile(r"concurren|thread|simultaneous|barrier|gather", re.IGNORECASE)
+#: in-process client.  The mark is the call that starts one --
+#: ``uvicorn.run(...)`` (a server script's too) or ``uvicorn.Server(...)``,
+#: which ``rest_claims_support.loopback_server`` makes -- because an
+#: in-process client has no reason to make it.  A URL, a ``127.0.0.1``, the
+#: word "socket" (every WebSocket test says it) or "uvicorn" in passing are
+#: no evidence: a client that names a loopback Host says all of them.  Nor
+#: is the call quoted in backticks, as a docstring quotes it.  (Prose that
+#: spells the call unquoted still reads as one: a floor, as every witness is.)
+_REAL_SERVER = re.compile(r"(?<!`)\b\w*uvicorn(?:\(\))?\.(?:run|Server)\(")
+#: ... and the requests must be simultaneous: the word, a barrier or a
+#: gather, or a thread the test starts.  Two things the helper that starts
+#: the server says are no evidence, or every test that starts one would be
+#: simultaneous by that alone: the thread the server itself runs in
+#: (``Thread(target=userver.run)``), and the domain's own name, which the
+#: helper passes as a tag (``make_server("concurrent", ...)``).
+_SIMULTANEOUS = re.compile(r"simultaneous|barrier|gather|Thread\(\s*target=(?!\w+\.run\b)",
+                           re.IGNORECASE)
+#: Test modules whose definitions are not read as a test's own words.  The
+#: shared in-process client names a loopback Host and peer for every REST
+#: test that constructs it (and annotates a ``str``), so read as evidence it
+#: would witness ``loopback_bind``, ``no_token`` and ``hostile_input`` for a
+#: test of none of them, and its URL once read as a real server.  What a
+#: test says of its domain it says itself, or in a helper written for it.
+TRANSPORT_MODULES = frozenset({"tests/_loopback_client.py"})
 
 
 def witnesses(domain: str, text: str) -> bool:
@@ -583,11 +639,13 @@ def cited_files(rows: list) -> list[str]:
                    for t in cited_targets(row)})
 
 
-@pytest.fixture(scope="module")
-def collection(tmp_path_factory) -> list[Item]:
-    """Every item of every cited file, collected once with ``-m "slow or not slow"``."""
-    files = [f for f in cited_files(every_row(load_all())) if (REPO_ROOT / f).is_file()]
-    dump = tmp_path_factory.mktemp("claims") / "items.json"
+def usd_core_installed() -> bool:
+    """Whether pytest can collect ``tests/usd/`` here: ``pxr`` can be found."""
+    return importlib.util.find_spec("pxr") is not None
+
+
+def _collect(files: list[str], dump: Path, cwd: Path = REPO_ROOT) -> list[Item]:
+    """What pytest collects from *files*, with ``-m "slow or not slow"``."""
     env = {k: v for k, v in os.environ.items()
            if k not in ("MADDENING_TEST_SHARD", "MADDENING_TEST_JAX_TIMING", "PYTEST_ADDOPTS")}
     env.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", JAX_PLATFORMS="cpu",
@@ -595,9 +653,29 @@ def collection(tmp_path_factory) -> list[Item]:
     proc = subprocess.run(
         [sys.executable, "-c", _COLLECT, "--collect-only", "-q", "-p", "no:cacheprovider",
          "-m", "slow or not slow", *files],
-        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=900)
+        cwd=cwd, env=env, capture_output=True, text=True, timeout=900)
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
     return [Item(*row) for row in json.loads(dump.read_text())]
+
+
+def split_by_lane(files: list[str], usd_core: bool) -> tuple[list[str], list[str]]:
+    """``(the files pytest can collect here, the ones to read from source)``:
+    without ``usd-core`` the cited files under :data:`USD_TESTS` are the second."""
+    unread = [] if usd_core else [f for f in files if f.startswith(USD_TESTS)]
+    return [f for f in files if f not in unread], unread
+
+
+@pytest.fixture(scope="module")
+def collection(tmp_path_factory) -> list[Item]:
+    """Every item of every cited file, collected once with ``-m "slow or not
+    slow"``; where ``usd-core`` is not installed, the items of the cited
+    files under ``tests/usd/`` are read from their source instead."""
+    rows = every_row(load_all())
+    files, unread = split_by_lane(
+        [f for f in cited_files(rows) if (REPO_ROOT / f).is_file()], usd_core_installed())
+    items = _collect(files, tmp_path_factory.mktemp("claims") / "items.json")
+    cited = [t for row in rows for t in cited_targets(row)]
+    return items + [it for f in unread for it in items_from_source(f, cited)]
 
 
 # --------------------------------------------------------------------------
@@ -629,6 +707,116 @@ def collection_problems(rows: list, items: list[Item], witness=_per_push_witness
                 problems.append(f"{row.get('id')}: {target} -- slow-marked with no "
                                 "'# Per push: <node id>' witness at its mark")
     return problems
+
+
+def lane_problems(rows: list, usd_job: list[str]) -> list[str]:
+    """Cited tests under ``tests/usd/`` that the ``test-usd`` job does not run.
+
+    *usd_job* is what that job hands pytest (``_usd_job_targets``).  The
+    sharded lanes skip the directory for want of ``usd-core``, so a USD
+    test outside that selection runs in no per-push job, however it is
+    marked."""
+    problems = []
+    for row in rows:
+        for target in cited_targets(row):
+            rel = target.split("::", 1)[0]
+            if rel.startswith(USD_TESTS) and not any(
+                    rel == s or rel.startswith(s.rstrip("/") + "/") or _covers(s, target)
+                    for s in usd_job):
+                problems.append(f"{row.get('id')}: {target} -- needs usd-core, and the test-usd "
+                                "job (the one per-push job that runs tests with it) does not "
+                                "select it")
+    return problems
+
+
+# --------------------------------------------------------------------------
+# Reading a module's items from its source, where pytest cannot import it
+# --------------------------------------------------------------------------
+#: The marks the rules read.
+_MARKS = ("slow", "skip", "xfail")
+
+
+def _mark(expr, defs: dict):
+    """``(name, the call or None)`` when *expr* spells ``<x>.mark.<name>``,
+    called or bare, or is a module-level name bound to one; else None."""
+    if isinstance(expr, ast.Name):
+        bound = defs.get(expr.id, (None, None))[1]
+        expr = bound.value if isinstance(bound, (ast.Assign, ast.AnnAssign)) else None
+    call = expr if isinstance(expr, ast.Call) else None
+    attr = call.func if call is not None else expr
+    if isinstance(attr, ast.Attribute) and attr.attr in _MARKS \
+            and isinstance(attr.value, ast.Attribute) and attr.value.attr == "mark":
+        return attr.attr, call
+    return None
+
+
+def _literal(node, default):
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return default
+
+
+def items_from_source(rel: str, cited=(), repo_root: Path = REPO_ROOT) -> list[Item]:
+    """The items of test module *rel*, read from its source rather than collected.
+
+    One item per ``test*`` function at module level and per ``test*``
+    method of a ``Test*`` class, with the closest ``slow``, ``skip`` and
+    ``xfail`` mark among the function's decorators, its class's and the
+    module's ``pytestmark`` (a module-level name bound to a mark is
+    followed).  An xfail's ``strict`` and ``reason`` are its literal
+    keywords; ``strict`` defaults to False, as the project's
+    ``xfail_strict`` does.
+
+    Parameters are not expanded.  A node id in *cited* that names one
+    parameter of a function found here gets an item of its own with the
+    function's marks, so the citation is covered; whether that parameter
+    exists is pytest's to say, where it can collect the module.  See the
+    module docstring for what else this does not read and what holds it
+    to pytest's answer.
+    """
+    mod = _module(rel, repo_root)
+    if mod is None:
+        return []
+    _text, tree, defs = mod
+
+    def marks(exprs, inherited: dict) -> dict:
+        found = dict(inherited)
+        for expr in exprs:
+            got = _mark(expr, defs)
+            if got is not None:
+                found[got[0]] = got[1]
+        return found
+
+    def item(nodeid: str, found: dict) -> Item:
+        call = found.get("xfail")
+        keywords = {k.arg: k.value for k in call.keywords} if call is not None else {}
+        return Item(nodeid, "slow" in found, "skip" in found, "xfail" in found,
+                    "strict" in keywords and bool(_literal(keywords["strict"], False)),
+                    str(_literal(keywords["reason"], "")) if "reason" in keywords else "")
+
+    def is_test(stmt) -> bool:
+        return isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+            and stmt.name.startswith("test")
+
+    whole = defs.get("pytestmark", (None, None))[1]
+    value = whole.value if isinstance(whole, (ast.Assign, ast.AnnAssign)) else None
+    module_marks = marks(value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value], {})
+    items = []
+    for stmt in tree.body:
+        if is_test(stmt):
+            items.append(item(f"{rel}::{stmt.name}", marks(stmt.decorator_list, module_marks)))
+        elif isinstance(stmt, ast.ClassDef) and stmt.name.startswith("Test"):
+            class_marks = marks(stmt.decorator_list, module_marks)
+            items += [item(f"{rel}::{stmt.name}::{sub.name}",
+                           marks(sub.decorator_list, class_marks))
+                      for sub in stmt.body if is_test(sub)]
+    by_function = {it.nodeid: it for it in items}
+    for target in sorted(set(cited)):
+        function = target.split("[", 1)[0]
+        if target != function and function in by_function:
+            items.append(dataclasses.replace(by_function[function], nodeid=target))
+    return items
 
 
 # --------------------------------------------------------------------------
@@ -718,16 +906,34 @@ def _module(rel: str, repo_root: Path = REPO_ROOT):
     return text, tree, defs
 
 
+def _imports_transport(node) -> bool:
+    """Whether *node* is an import of (or from) one of :data:`TRANSPORT_MODULES`."""
+    def path(dotted: str) -> str:
+        return dotted.replace(".", "/") + ".py"
+    if isinstance(node, ast.ImportFrom) and node.module:
+        return path(node.module) in TRANSPORT_MODULES or any(
+            path(f"{node.module}.{a.name}") in TRANSPORT_MODULES for a in node.names)
+    return isinstance(node, ast.Import) and any(path(a.name) in TRANSPORT_MODULES
+                                                for a in node.names)
+
+
 def _segment(text: str, node) -> str:
+    """*node*'s source lines, decorators included, less any import of a
+    transport module inside it: the import names the client, not a domain."""
     lines = text.splitlines()
     first = min([d.lineno for d in getattr(node, "decorator_list", [])] + [node.lineno])
-    return "\n".join(lines[first - 1:node.end_lineno])
+    dropped = {n for imp in ast.walk(node) if _imports_transport(imp)
+               for n in range(imp.lineno, imp.end_lineno + 1)}
+    return "\n".join(ln for n, ln in enumerate(lines[first - 1:node.end_lineno], first)
+                     if n not in dropped)
 
 
 def _resolve(entry, repo_root: Path):
     """A definition entry ``(file, node)`` or an import ``(file, name)`` -> ``(text, node)``."""
     rel, node = entry
     if node is None:                    # a module alias: nothing to read by itself
+        return None
+    if rel in TRANSPORT_MODULES:        # the shared client: no test's own words
         return None
     if isinstance(node, str):           # imported from another test module
         mod = _module(rel, repo_root)
@@ -844,7 +1050,8 @@ def test_every_tested_domain_cites_a_test_that_names_its_domain(path):
 @pytest.mark.parametrize("path", INVENTORIES, ids=_NAMES)
 def test_every_cited_test_exists_and_runs_on_every_push(path, collection):
     inv = load(path)
-    problems = collection_problems(inv.rows, collection)
+    problems = collection_problems(inv.rows, collection) \
+        + lane_problems(inv.rows, _usd_job_targets())
     assert not problems, f"{inv.name} cites tests that cannot fail on a push:\n  " \
         + "\n  ".join(problems)
 
@@ -1250,11 +1457,29 @@ def test_the_domain_rule_passes_a_filled_server_matrix():
 
 
 def test_the_witness_rule_reads_the_server_vocabulary():
-    real = ("def test_c():\n    with S.loopback_server(chk, root) as s:  # uvicorn\n"
-            "        simultaneously([job] * 4)  # threads")
+    # concurrent: a call that starts a server, and requests that meet on it
+    helper = ("def loopback_server(chk, root):\n    server = make_server('concurrent', chk, root)\n"
+              "    userver = _uvicorn().Server(config)\n"
+              "    thread = threading.Thread(target=userver.run)  # uvicorn, in a thread\n")
+    served = "def test_c():\n    with S.loopback_server(chk, root) as s:\n        %s\n" + helper
+    real = served % "simultaneously([job] * 4)"
     in_process = "def test_c():\n    threads = [threading.Thread(target=TestClient(app).get)]"
     assert witnesses("concurrent", real)
+    assert witnesses("concurrent", served % "threading.Thread(target=lambda: get(s)).start()")
+    assert witnesses("concurrent", "def test_c():\n    Popen([_SERVER]); threading.Thread(target=run)"
+                                   "\n_SERVER = 'uvicorn.run(app, port=8000)'")
     assert not witnesses("concurrent", in_process), "TestClient threads are no real server"
+    # ... which a URL, a WebSocket, a client named for loopback and the word
+    # "uvicorn" do not make them
+    assert not witnesses("concurrent", in_process + "\n    TestClient(app, 'http://127.0.0.1')"
+                         ".websocket_connect('/ws')  # as uvicorn's proxy_headers would\n"
+                         "LOOPBACK_BASE_URL = 'http://127.0.0.1'\nsocket.socket()")
+    # ... nor a docstring that quotes the call
+    assert not witnesses("concurrent", in_process.replace(
+        "\n", '\n    """``uvicorn.run(app, host="0.0.0.0")`` and ``_uvicorn().Server(config)``'
+        ' never tell the app."""\n', 1))
+    # ... and a server's own thread and domain tag are no simultaneous requests
+    assert not witnesses("concurrent", served % "httpx.get(s)  # one request at a time")
     assert not witnesses("concurrent", "def test_c():\n    uvicorn.run(app)  # one request")
     # loopback and no token are the defaults: anything but a test that only
     # runs on another bind / always presents the token
@@ -1290,3 +1515,298 @@ def test_the_witness_rule_reads_the_server_vocabulary():
     sources["tests/api/test_x.py::test_c"] = real
     sources["tests/api/test_x.py::test_s"] = "def test_s(): signal.raise_signal(SIGTERM)"
     assert domain_witness_problems([row], source=sources.get) == []
+
+
+def test_the_shared_in_process_client_is_no_tests_own_words(tmp_path, monkeypatch):
+    """The client every REST test constructs names a loopback Host and peer.
+    Read as a test's own words it witnesses a loopback bind, a tokenless
+    request and hostile input for a test of none of them (and its URL once
+    read as a real server), so neither its source nor the line that imports
+    it is read -- here a test of a non-loopback bind that always presents
+    the token, from threads, through the real client."""
+    client = "tests/_loopback_client.py"
+    assert client in TRANSPORT_MODULES and (REPO_ROOT / client).is_file()
+    (tmp_path / "tests" / "api").mkdir(parents=True)
+    (tmp_path / client).write_text((REPO_ROOT / client).read_text(encoding="utf-8"),
+                                   encoding="utf-8")
+    (tmp_path / "tests" / "api" / "test_z.py").write_text(
+        "import threading\n"
+        "from tests._loopback_client import LoopbackTestClient as TestClient\n\n\n"
+        "def test_public():\n"
+        "    from tests._loopback_client import (\n        LoopbackTestClient as Client,\n    )\n"
+        "    app = SimulationServer({}, bind_host='0.0.0.0').create_app()\n"
+        "    Client(app, headers={'Authorization': 'Bearer t'}).get('/graph')\n"
+        "    jobs = [threading.Thread(target=TestClient(app).get) for _ in range(8)]\n",
+        encoding="utf-8")
+    nodeid = "tests/api/test_z.py::test_public"
+    text = source_of_test(nodeid, repo_root=tmp_path)
+    assert "bind_host='0.0.0.0'" in text and "Loopback" not in text and "127.0.0.1" not in text
+    for domain in ("loopback_bind", "no_token", "hostile_input", "concurrent"):
+        assert not witnesses(domain, text), domain
+    assert witnesses("non_loopback_bind", text) and witnesses("token_enforced", text)
+    # What that keeps out: the same test, the client read as its own words.
+    monkeypatch.setattr(sys.modules[__name__], "TRANSPORT_MODULES", frozenset())
+    read = source_of_test(nodeid, repo_root=tmp_path)
+    assert "LOOPBACK_BASE_URL" in read
+    for domain in ("loopback_bind", "no_token", "hostile_input"):
+        assert witnesses(domain, read), domain
+
+
+# --------------------------------------------------------------------------
+# Self-tests: tests that need an optional extra
+# --------------------------------------------------------------------------
+_U = "tests/usd/test_x.py::test_a"
+
+
+def test_only_the_usd_files_are_read_from_source_and_only_without_usd_core():
+    files = ["tests/core/test_x.py", "tests/usd/test_x.py", "tests/usd_like/test_x.py"]
+    assert split_by_lane(files, usd_core=True) == (files, [])
+    assert split_by_lane(files, usd_core=False) == (
+        ["tests/core/test_x.py", "tests/usd_like/test_x.py"], ["tests/usd/test_x.py"])
+
+
+def test_the_lane_rule_wants_a_usd_test_in_the_usd_jobs_selection():
+    row = _row(tests=[_T, _U])
+    for selection in (["tests/usd/", "tests/property/test_round_trips.py"], ["tests/usd"],
+                      ["tests/usd/test_x.py"], [_U], ["tests/usd/test_x.py::test_b", _U]):
+        assert lane_problems([row], selection) == [], selection
+    for selection in ([], ["tests/property/test_round_trips.py"], ["tests/usd/test_y.py"],
+                      ["tests/usd/test_x.py::test_b"], ["tests/usd_like/"], ["tests/core/"]):
+        problems = lane_problems([row], selection)
+        assert len(problems) == 1 and f"{_U} -- needs usd-core" in problems[0], selection
+    # a class the job selects runs its methods; a domain cell's test is read too
+    in_class = _row(tests=["tests/usd/test_x.py::TestK::test_a"])
+    assert lane_problems([in_class], ["tests/usd/test_x.py::TestK"]) == []
+    assert lane_problems([in_class], ["tests/usd/test_x.py::TestJ"])
+    assert lane_problems([_drow(f32=_T, jit=_U)], [])
+    # a test that needs no extra is not this rule's
+    assert lane_problems([_GOOD], []) == []
+    # ... and the shipped job runs the directory
+    assert lane_problems([row], _usd_job_targets()) == []
+
+
+_MARK_SPELLINGS = '''
+import pytest
+
+slow = pytest.mark.slow
+quiet = pytest.mark.filterwarnings("ignore")
+
+
+def helper():
+    pass
+
+
+@pytest.fixture
+def thing():
+    return 1
+
+
+def test_plain(thing):
+    pass
+
+
+@pytest.mark.slow
+def test_slow():
+    pass
+
+
+@slow
+def test_slow_by_name():
+    pass
+
+
+@quiet
+def test_a_mark_the_rules_do_not_read():
+    pass
+
+
+@pytest.mark.skip(reason="never")
+def test_skipped():
+    pass
+
+
+@pytest.mark.skipif(False, reason="conditional")
+def test_a_skipif_is_not_a_skip_mark():
+    pass
+
+
+@pytest.mark.xfail(strict=True, reason="SYS-900: broken; pending fix")
+def test_strict_xfail():
+    assert False
+
+
+@pytest.mark.xfail(reason="loose")
+def test_loose_xfail():
+    assert False
+
+
+@pytest.mark.xfail
+def test_bare_xfail():
+    assert False
+
+
+@pytest.mark.parametrize("n", [1, 2])
+@pytest.mark.slow
+def test_slow_parametrised(n):
+    pass
+
+
+@pytest.mark.parametrize("n", [1, 2])
+def test_parametrised(n):
+    pass
+
+
+@pytest.mark.slow
+class TestMarked:
+    def test_inherits(self):
+        pass
+
+    @pytest.mark.xfail(strict=True, reason="CPL-900: x")
+    def test_adds(self):
+        assert False
+
+    def helper(self):
+        pass
+
+
+class TestPlain:
+    def test_method(self):
+        pass
+
+    @pytest.mark.skip
+    def test_bare_skip(self):
+        pass
+
+
+class NotCollected:
+    def test_method(self):
+        pass
+'''
+_MODULE_MARKS = '''
+import pytest
+
+pytestmark = [pytest.mark.filterwarnings("ignore"),
+              pytest.mark.xfail(strict=True, reason="REST-900: y")]
+
+
+def test_under_the_module_mark():
+    assert False
+
+
+@pytest.mark.xfail(reason="its own")
+def test_with_a_closer_mark():
+    assert False
+'''
+_ONE_MODULE_MARK = "import pytest\n\npytestmark = pytest.mark.slow\n\n\ndef test_a():\n    pass\n"
+
+
+def _marks_by_function(items: list[Item]) -> dict[str, set[tuple]]:
+    """``{function node id: the (slow, skip, xfail, strict, reason) of its items}``."""
+    out: dict[str, set[tuple]] = {}
+    for it in items:
+        out.setdefault(it.nodeid.split("[", 1)[0], set()).add(
+            (it.slow, it.skip, it.xfail, it.strict, it.reason))
+    return out
+
+
+def test_the_source_reader_agrees_with_pytest_on_every_mark_it_reads(tmp_path):
+    """One module of every spelling, collected by pytest and read from its
+    source: the same test functions, each with the same marks.  This is
+    what lets the reader stand in for pytest where a module cannot be
+    imported."""
+    sample = tmp_path / "tests" / "sample"
+    sample.mkdir(parents=True)
+    texts = {"test_spellings.py": _MARK_SPELLINGS, "test_module_marks.py": _MODULE_MARKS,
+             "test_one_module_mark.py": _ONE_MODULE_MARK}
+    for name, text in texts.items():
+        (sample / name).write_text(text, encoding="utf-8")
+    files = sorted(f"tests/sample/{name}" for name in texts)
+    collected = _collect(files, tmp_path / "items.json", cwd=tmp_path)
+    read = [it for f in files for it in items_from_source(f, repo_root=tmp_path)]
+    assert _marks_by_function(read) == _marks_by_function(collected)
+    # ... and the sample holds every case: each mark, and a test with none
+    flags = {flag for marks in _marks_by_function(read).values() for flag in marks}
+    assert {f[:4] for f in flags} == {
+        (False, False, False, False), (True, False, False, False), (False, True, False, False),
+        (False, False, True, True), (False, False, True, False), (True, False, True, True)}
+    assert len(read) == 18 and len(collected) == 20   # two tests of two parameters
+
+
+def test_a_cited_parameter_is_covered_when_its_function_is_found(tmp_path):
+    (tmp_path / "tests" / "usd").mkdir(parents=True)
+    (tmp_path / "tests" / "usd" / "test_x.py").write_text(
+        "import pytest\n\n@pytest.mark.slow\n@pytest.mark.parametrize('n', [1])\n"
+        "def test_a(n):\n    pass\n", encoding="utf-8")
+    cited = [f"{_U}[1]", "tests/usd/test_x.py::test_gone[1]", "tests/core/test_x.py::test_a[1]"]
+    items = items_from_source("tests/usd/test_x.py", cited, repo_root=tmp_path)
+    assert items == [Item(_U, True, False, False, False, ""),
+                     Item(f"{_U}[1]", True, False, False, False, "")]
+    assert items_from_source("tests/usd/test_gone.py", cited, repo_root=tmp_path) == []
+
+
+def test_every_rule_fires_on_items_read_from_source(tmp_path):
+    """What a lane without usd-core is left with: a row citing a USD test
+    that does not exist, never runs, is slow with no witness or disagrees
+    with its status still fails there."""
+    (tmp_path / "tests" / "usd").mkdir(parents=True)
+    (tmp_path / "tests" / "usd" / "test_x.py").write_text(
+        "import pytest\n\n\ndef test_a():\n    pass\n\n\n"
+        "@pytest.mark.skip(reason='x')\ndef test_never():\n    pass\n\n\n"
+        "@pytest.mark.slow\ndef test_slow():\n    pass\n\n\n"
+        "@pytest.mark.xfail(strict=True, reason='CPL-900: broken; pending fix')\n"
+        "def test_broken():\n    assert False\n", encoding="utf-8")
+    items = items_from_source("tests/usd/test_x.py", repo_root=tmp_path)
+
+    def cites(name, **changes):
+        return [_row(tests=[f"tests/usd/test_x.py::{name}"], **changes)]
+
+    assert collection_problems(cites("test_a"), items) == []
+    assert any("collects no such test" in p for p in collection_problems(cites("test_b"), items))
+    assert any("skip-marked" in p for p in collection_problems(cites("test_never"), items))
+    assert any("no '# Per push" in p for p in collection_problems(
+        cites("test_slow"), items, witness=lambda f: False))
+    assert any("verified, but cites the xfail" in p
+               for p in xfail_problems(cites("test_broken"), items))
+    failing = dict(status="failing", finding="f")
+    assert xfail_problems(cites("test_broken", **failing), items) == []
+    assert any("cites no strict xfail" in p for p in xfail_problems(cites("test_a", **failing), items))
+    assert any("which does not cite it" in p for p in xfail_problems(cites("test_a"), items))
+    ghost = [dataclasses.replace(it, reason="CPL-777: x") for it in items if it.xfail]
+    assert any("no inventory holds" in p for p in unowned_xfail_problems([_inv()], ghost))
+
+
+def test_one_ungated_job_runs_this_module_with_usd_core():
+    """What holds the source reader to pytest's answer on every push: the
+    ``compliance`` job installs the ``usd`` extra, runs all of
+    ``tests/compliance/`` and is gated on nothing a push changed.  Without
+    it the comparison below would be skipped in every job."""
+    job = _workflow("ci.yml")["jobs"]["compliance"]
+    assert "if" not in job and "needs" not in job, "the compliance job is gated"
+    scripts = [s.get("run", "") for s in job["steps"]]
+    assert any('pip install -e ".[ci,usd]"' in _logical_lines(script) for script in scripts), \
+        "the compliance job no longer installs the usd extra"
+    runs = [shlex.split(line) for script in scripts for line in _logical_lines(script)
+            if "-m pytest" in line]
+    assert len(runs) == 1, runs
+    args = runs[0][runs[0].index("pytest") + 1:]
+    assert not any(a in ("-m", "-k") or a.startswith(("-m=", "-k=", "--deselect", "--ignore"))
+                   for a in args), f"the compliance job narrows its selection: {args}"
+    assert [a for a in args if not a.startswith("-")] == ["tests/compliance/"], args
+
+
+def test_the_source_reader_agrees_with_pytest_on_the_cited_usd_tests(collection):
+    """Where usd-core is installed, ``collection`` holds pytest's own items
+    for the cited files under ``tests/usd/``.  The source reader, which
+    stands in for pytest in the lanes without it, must give each of those
+    test functions the same marks -- so a mark spelled in a way the reader
+    does not know fails here, on every push, rather than passing unread
+    there."""
+    if not usd_core_installed():
+        pytest.skip("usd-core is not installed, so pytest cannot collect tests/usd here and "
+                    "there is nothing to compare the source reader with; the compliance job "
+                    "installs the usd extra and runs this comparison on every push")
+    files = [f for f in cited_files(every_row(load_all())) if f.startswith(USD_TESTS)]
+    for rel in files:
+        collected = [it for it in collection if it.nodeid.startswith(rel + "::")]
+        assert collected, f"{rel}: cited, but pytest collected nothing from it"
+        assert _marks_by_function(items_from_source(rel)) == _marks_by_function(collected), rel

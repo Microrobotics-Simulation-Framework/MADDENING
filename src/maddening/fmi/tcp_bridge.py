@@ -475,7 +475,14 @@ def _json_object(body: bytes, what: str) -> Any:
         # well as the quoted ones this module writes, so a peer of either
         # vintage is understood; ``decode_non_finite`` turns the quoted
         # form into the float the bare form already produced.
-        return decode_non_finite(json.loads(body.decode("utf-8"), parse_int=_json_int))
+        # The hook that keeps the literal -0 apart is a Python call per
+        # integer (measured: 1.9x on the parse of a 16 MiB list of value
+        # references), so it is used only for a body that holds "-0" at all;
+        # every other request is parsed exactly as before.
+        text = body.decode("utf-8")
+        if b"-0" in body:
+            return decode_non_finite(json.loads(text, parse_int=_json_int))
+        return decode_non_finite(json.loads(text))
     except RecursionError as exc:
         raise ValueError(f"{what} is nested too deeply") from exc
     except ValueError as exc:                  # JSONDecodeError, UnicodeDecodeError

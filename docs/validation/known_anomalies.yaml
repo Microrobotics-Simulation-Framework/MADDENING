@@ -13366,11 +13366,13 @@ anomalies:
     resolution_version: "0.4.0"
     residual_risk: >
       `StaticLinearMapping` is not asked, so what its matrix may hold is
-      unchanged: an integer or boolean matrix is accepted (a fit refuses to
-      train one), and a NaN in a matrix still makes the FMU refuse its own
-      snapshot.  The contract is checked where an edge is added; a mapping
-      that changes its table afterwards is not seen.  A sharded graph and
-      16-bit weights of a registered kind are not exercised.
+      unchanged by this check: an integer or boolean matrix is accepted (a
+      fit refuses to train one), and a NaN in the matrix of one built
+      directly still makes the FMU refuse its own snapshot (the
+      `matrix_mapping` factory refuses a non-finite `H` of its own accord,
+      MADD-ANO-192).  The contract is checked where an edge is added; a
+      mapping that changes its table afterwards is not seen.  A sharded
+      graph and 16-bit weights of a registered kind are not exercised.
     verification:
       - "tests/core/test_mapping_registry.py::test_an_edit_of_the_live_weights_does_not_reach_the_table_a_mapping_keeps"
       - "tests/core/test_mapping_registry.py::test_add_edge_refuses_a_mapping_whose_params_pytree_a_reader_could_not_walk"

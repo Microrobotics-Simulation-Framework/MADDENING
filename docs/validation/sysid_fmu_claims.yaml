@@ -4178,9 +4178,10 @@ claims:
     accepted; an integer, a boolean, a complex and a NumPy weight and a NaN
     refused with x64 on as with it off; a weight traced by jit; a subclass
     of StaticLinearMapping is asked and the class itself is not, whatever
-    its matrix holds.  Asked where the edge is added, before the graph has
-    a step.
-  oracle: the ValueError's text, naming the edge and the entry; the graph is left without the edge; a StaticLinearMapping of an integer, boolean, complex or NaN matrix is still added.
+    its matrix holds (the class built directly: the matrix_mapping factory
+    refuses a non-finite H itself, before there is a mapping to ask).
+    Asked where the edge is added, before the graph has a step.
+  oracle: the ValueError's text, naming the edge and the entry; the graph is left without the edge; a StaticLinearMapping of an integer, boolean, complex or NaN matrix, built directly, is still added.
   tests:
     - tests/core/test_mapping_registry.py::test_add_edge_refuses_a_mapping_whose_params_pytree_a_reader_could_not_walk
     - tests/core/test_mapping_registry.py::test_a_traced_weight_is_refused_as_traced
@@ -4289,8 +4290,10 @@ claims:
     (the others' solves are not exact across machines), as float32 arrays
     in the default lane; seventeen malformed specs; the unknown-kind refusal in a
     process that registered nothing.  Against a capture taken on
-    release/0.4.0 at a7e69509.  Not claimed for float64 (x64), mixed dtypes
-    or 16-bit floats.
+    release/0.4.0 at a7e69509, of geometry the factories accept (increasing
+    boundaries, finite points, a finite matrix): the coordinates they
+    refuse since MADD-ANO-192 are outside it.  Not claimed for float64
+    (x64), mixed dtypes or 16-bit floats.
   oracle: tests/core/data/builtin_mapping_pins.json, the capture module's output on the tree before the change, compared text for text and value for value.
   tests:
     - tests/core/test_mapping_registry.py::test_the_capture_can_express_a_change_to_any_built_in_kind

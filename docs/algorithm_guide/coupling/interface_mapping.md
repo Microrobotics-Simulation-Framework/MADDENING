@@ -522,7 +522,12 @@ The limits on [point references](#point-references) -- the asset size
 cap, the inline limits, the accepted dtypes, the containment of asset
 paths in the config directory, the content hash -- are enforced by the
 reference resolver before a factory runs, so they hold for a registered
-kind exactly as for a built-in one.  Whatever a registered factory
+kind exactly as for a built-in one.  The coordinate checks of
+[Shapes and validation](#shapes-and-validation) do not: each built-in
+factory makes them itself, so your factory is handed whatever its
+references resolve to, and geometry its formula does not cover -- an
+unsorted grid, a NaN coordinate -- is its own to refuse, with a
+`ValueError`.  Whatever a registered factory
 raises, `from_dict` and `load_graph_from_usd` report as a
 `MappingRebuildError` naming the edge and the kind, with the factory's
 exception chained as `__cause__` -- an `ImportError` included, for a

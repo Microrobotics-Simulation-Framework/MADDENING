@@ -129,8 +129,11 @@ def test_the_claim_holds_with_a_sharded_member(row, tmp_path_factory):
 
 
 #: strict_convergence at a capped solve, on the group with ``b`` sharded, in a
-#: process of its own: today the raise inside one device's thread leaves the
-#: others waiting at an all-reduce until XLA aborts the process.
+#: process of its own: the raise used to come from one device's thread and
+#: leave the others waiting at an all-reduce until XLA aborted the process
+#: (MADD-ANO-162), and a regression to that must not take the test run with
+#: it.  It now raises on every device (``_strict_error_if``), and the process
+#: exits cleanly after the error (``_drain_mesh``).
 _STRICT = textwrap.dedent("""
     import jax
     from tests.cloud.multigpu.test_coupling_claims_on_a_sharded_graph import CFG, build
@@ -148,18 +151,16 @@ _STRICT = textwrap.dedent("""
 """)
 
 
-# Slow: a subprocess with its own JAX start and two compiles, ~10 s once fixed;
-# today it is killed at the timeout, after XLA's collective has hung.
+# Slow: a subprocess with its own JAX start and two compiles, ~10 s.
 # Per push: tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_for_each_member_of_a_vmapped_step
 # (strict_convergence on a batched step, every member checked)
+# tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_a_converged_strict_step_with_a_sharded_member_is_the_unchecked_step
+# (the per-device check on a sharded step that converges)
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "CPL-033: strict_convergence on a coupling group with a sharded member aborts the "
-    "process: the error_if callback raises on one device's thread and the others wait at "
-    "an all-reduce until XLA aborts (SIGABRT after ~60 s); pending fix"))
 def test_strict_convergence_raises_with_a_sharded_member():
     """CPL-033 with ``b`` sharded: a capped, unconverged solve raises a Python
-    exception naming ``strict_convergence``, and the process lives."""
+    exception naming ``strict_convergence``, and the process lives and exits
+    cleanly (it aborted in about a minute: MADD-ANO-162)."""
     repo = Path(__file__).resolve().parents[3]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(
         [str(repo / "src"), str(repo), os.environ.get("PYTHONPATH", "")]),

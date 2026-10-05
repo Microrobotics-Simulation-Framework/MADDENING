@@ -102,7 +102,15 @@ def assert_reproduces_the_reference(topo, knobs, built, values, steps=_STEPS, tr
     return traj
 
 
+#: The text of ``compile()``'s warning for an edge a group's block staggers
+#: between two strongly connected components (MADD-ANO-159).
+CROSSING = "is read from the previous step although no cycle runs through it"
+
+
 def assert_warns_exactly_for_groups_inside_larger_loops(topo, built):
+    # Every named topology reproduces the reference, which reads an edge
+    # between two components forward: none is staggered across components.
+    assert not any(CROSSING in w for w in built.warnings), built.warnings
     for gi, members in enumerate(topo.groups):
         said = any(f"coupling group {sorted(members)} is part of a larger feedback loop" in w
                    for w in built.warnings)
@@ -501,20 +509,17 @@ def test_a_flux_edge_read_late_in_an_ungrouped_cycle_steps():
 
 
 @pytest.mark.parametrize("acceleration", ["aitken", "fixed"])
-@pytest.mark.xfail(strict=True, raises=ValueError, reason=(
-    "CPL-003: a typed PRNG key in a coupling group member fails to trace under "
-    "solver='ift' with acceleration='aitken' or 'fixed'; pending fix"))
 def test_a_typed_prng_key_in_a_member_steps_under_aitken_and_fixed_relaxation(acceleration):
     """CPL-003: a PRNG-key field is computed by every pass and never relaxed.
 
     Under ``solver="ift"`` with ``"aitken"`` or ``"fixed"`` the step
-    builder sizes the accelerator from ``_flatten(state_after_first)`` with
+    builder sized the accelerator from ``_flatten(state_after_first)`` with
     ``accel_fields=None`` (``_run_coupled_block_impl``: "the IFT path
     relaxes on its own floating vector and reads this only for IQN's index
-    map"), which concatenates *every* field of every member, the typed key
+    map"), which concatenated *every* field of every member, the typed key
     included: ``ValueError: dtype=key<fry> is not a valid dtype for JAX
-    type promotion``.  ``"none"``, the IQN pair and ``solver="fori"``
-    (which flattens the floating fields only) all step.
+    type promotion`` (MADD-ANO-158).  It now flattens the floating fields
+    only there, as ``"none"``, the IQN pair and ``solver="fori"`` do.
     """
     b = ct.TopologyBuilder()
     b.node("a", 2, alpha=0.5, leaves=("key",))
@@ -555,9 +560,6 @@ def _joined_through_an_outside_node():
     return b.build("joined-off-cycle")
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "CPL-187: a group whose members are joined only through an outside node, on no "
-    "cycle, reads that node a step late with no warning; pending fix"))
 def test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_late():
     """The group runs as one block, so ``c -> b`` is read from the previous step -- silently.
 
@@ -569,15 +571,45 @@ def test_a_group_joined_through_an_outside_node_off_any_cycle_says_it_reads_it_l
     -- an edge between two strongly connected components, which CPL-025
     says always points forward.  ``compile()``'s warning for a group inside
     a larger loop (``_loop_through_outside_nodes``) looks for strongly
-    connected components only and stays silent.  Either a refusal or a
-    warning naming the staggered edge would say so.
+    connected components only and stayed silent (MADD-ANO-159); a second
+    warning (``_staggered_across_components``) now names every staggered
+    edge between two components and the group whose block forced it.
     """
     topo = _joined_through_an_outside_node()
     try:
         built = ct.build(topo, [dict(tolerance=1e-6, max_iterations=50)])
     except (ValueError, RuntimeError):
         return
-    assert any("c.x -> b.u" in w for w in built.warnings), built.warnings
+    assert any("c.x -> b.u" in w and CROSSING in w for w in built.warnings), built.warnings
+    named = [w for w in built.warnings if CROSSING in w]
+    assert len(named) == 1 and "['a', 'b']" in named[0], named
+
+
+def test_an_edge_staggered_inside_a_component_is_not_named_as_crossing_components():
+    """The control for the warning above: an ungrouped cycle's back edge, and a
+    group inside a larger loop, stagger an edge *inside* one component --
+    the documented schedule (CPL-025, CPL-181) -- and the crossing warning
+    says nothing about them."""
+    ring = ct.TopologyBuilder()
+    ring.node("a", 1, alpha=0.5, beta=1.0)
+    ring.node("p", 1, alpha=0.25)
+    ring.edge("a", "p")
+    ring.edge("p", "a")
+    for order in (("a", "p"), ("p", "a")):
+        built = ct.build(ring.build("ungrouped-ring"), [], node_order=order)
+        assert not any(CROSSING in w for w in built.warnings), built.warnings
+    loop = ct.TopologyBuilder()
+    loop.node("a", 1, alpha=0.5, beta=1.0)
+    loop.node("b", 1, alpha=0.25)
+    loop.node("c", 1, alpha=0.0)
+    loop.edge("a", "b")
+    loop.edge("b", "a")
+    loop.edge("b", "c")
+    loop.edge("c", "a")
+    loop.group("a", "b")
+    built = ct.build(loop.build("group-in-a-loop"), [dict(tolerance=1e-6, max_iterations=50)])
+    assert any("is part of a larger feedback loop" in w for w in built.warnings), built.warnings
+    assert not any(CROSSING in w for w in built.warnings), built.warnings
 
 
 def test_the_build_order_of_an_ungrouped_cycle_picks_the_edge_read_late():

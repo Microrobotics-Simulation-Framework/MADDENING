@@ -26,7 +26,10 @@ The node-dependence MADD-ANO-017 records is pinned here too, and it is not
 what it looks like.  The discriminator is *whether a parameter reaches an
 output field at all*, not how the node computes: ``TableNode.update`` returns
 its state unchanged and reads no parameter, so it scans under x64; every node
-that consumes a parameter promotes its carry and raises, the spring included.
+that consumes a parameter promotes its carry and raises -- except
+``SpringDamperNode``, which since 0.4.0 seeds its state in the dtype its
+constants make (:class:`TestTheSpringSeedsItsStateInItsConstantsDtype`, the
+entry's resolved part).
 
 ``jax.config.update`` is process-global, so every test here runs inside
 :func:`_x64`, which restores the previous setting the way the ``_float64``
@@ -134,12 +137,6 @@ class TestTheDtypeAsymmetryThatCausesIt:
                                  initial_position=5.0),
                 id="ball",
             ),
-            pytest.param(
-                lambda: SpringDamperNode(name="spring", timestep=0.01,
-                                         rest_length=0.3,
-                                         initial_position=0.5),
-                id="spring",
-            ),
         ],
     )
     def test_the_params_pytree_is_float64_and_the_seed_state_is_float32(
@@ -182,12 +179,10 @@ class TestTheDtypeAsymmetryThatCausesIt:
 class TestAFreshlyCompiledGraphRefusesToScanUnderX64:
     """The loud half, on both scan entry points and on both sample nodes.
 
-    The spring is here rather than in the "still works" class on purpose.
-    MADD-ANO-017 was first written up with the spring as the node that
-    narrows; it does not.  That reading came from a harness that passed
-    explicitly float32 params (``_with_params`` in
-    ``tests/property/test_sysid_contract.py`` does exactly this), which is the
-    entry's workaround (b) and not a property of the node.
+    The spring used to be here too: it promoted its float32 seed and raised
+    like the ball.  Since 0.4.0 it seeds its state in its constants' dtype
+    and scans (:class:`TestTheSpringSeedsItsStateInItsConstantsDtype`), so
+    the loud half is pinned on the ball, which still raises.
     """
 
     _NODES = [
@@ -195,12 +190,6 @@ class TestAFreshlyCompiledGraphRefusesToScanUnderX64:
             lambda: BallNode(name="ball", timestep=0.01, initial_position=5.0),
             "ball",
             id="ball",
-        ),
-        pytest.param(
-            lambda: SpringDamperNode(name="spring", timestep=0.01,
-                                     rest_length=0.3, initial_position=0.5),
-            "spring",
-            id="spring",
         ),
     ]
 
@@ -298,6 +287,61 @@ class TestAFreshlyCompiledGraphRefusesToScanUnderX64:
             gm = _compiled(make_node())
             out = gm.run_scan(4)
             assert _dtypes(out) == {"float32"}
+
+
+class TestTheSpringSeedsItsStateInItsConstantsDtype:
+    """The resolved part of MADD-ANO-017: ``SpringDamperNode.initial_state``
+    seeds position and velocity in the dtype ``update`` produces from the
+    node's constants, so a freshly compiled spring graph scans under x64.
+
+    It used to seed float32 outright, and the parameter guide's system-
+    identification recipe on this node -- ``run_scan_with_history``, then
+    ``observations_from_history`` and ``windowed_loss``, or the sysid demo's
+    ``run_sweep`` -- raised the carry ``TypeError`` under x64
+    (audit_040_p4_10/fmu-sysid/repro_x64_spring_sysid_recipe.py).
+    """
+
+    @staticmethod
+    def _spring(**constants):
+        return SpringDamperNode(name="spring", timestep=0.01,
+                                **{"rest_length": 0.3, "initial_position": 0.5,
+                                   **constants})
+
+    def test_python_float_constants_scan_in_float64_under_x64(self):
+        with _x64():
+            gm = _compiled(self._spring())
+            assert _dtypes(gm.params) == {"float64"}
+            assert _dtypes(gm.get_node_state("spring")) == {"float64"}
+            out = gm.run_scan(4)
+            assert _dtypes(out) == {"float64"}
+            gm = _compiled(self._spring())
+            _, history = gm.run_scan_with_history(4)
+            assert _dtypes(history) == {"float64"}
+            gm = _compiled(self._spring())
+            seeds = {"spring": {k: v[None] for k, v in gm.get_node_state("spring").items()}}
+            swept = gm.run_sweep(4, seeds, return_history=True, params=gm.params)
+            assert _dtypes(swept) == {"float64"}
+
+    def test_float32_constants_keep_a_float32_scan_under_x64(self):
+        """The seed follows the constants, not ``jax_enable_x64``: a spring
+        whose constants are float32 still runs in float32 (the inventory's
+        mixed-dtype domain relies on it)."""
+        with _x64():
+            gm = _compiled(self._spring(**{k: np.float32(v) for k, v in dict(
+                stiffness=30.0, damping=2.0, mass=1.0, rest_length=0.3,
+                initial_position=0.5, initial_velocity=0.0).items()}))
+            assert _dtypes(gm.params) == {"float32"}
+            assert _dtypes(gm.get_node_state("spring")) == {"float32"}
+            assert _dtypes(gm.run_scan(4)) == {"float32"}
+
+    def test_without_x64_the_seed_is_float32_as_before(self):
+        assert jax.config.jax_enable_x64 is _X64_AT_IMPORT
+        if jax.config.jax_enable_x64:
+            pytest.skip("this session was started with x64 enabled (JAX_ENABLE_X64=1), "
+                        "so there is no float32 default to compare with")
+        gm = _compiled(self._spring())
+        assert _dtypes(gm.get_node_state("spring")) == {"float32"}
+        assert _dtypes(gm.run_scan(4)) == {"float32"}
 
 
 class TestANodeThatReachesNoParameterStillScans:

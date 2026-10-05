@@ -312,6 +312,12 @@
           "parameters": [],
           "returns": "dict"
         },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
+        },
         "params_pytree": {
           "kind": "method",
           "parameters": [],
@@ -602,6 +608,12 @@
           "kind": "method",
           "parameters": [],
           "returns": "dict"
+        },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
         },
         "params_pytree": {
           "kind": "method",
@@ -919,6 +931,12 @@
           "kind": "method",
           "parameters": [],
           "returns": "dict"
+        },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
         },
         "params_pytree": {
           "kind": "method",
@@ -2322,6 +2340,12 @@
           "parameters": [],
           "returns": "dict[str, maddening.core.params.ParamSpec]"
         },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
+        },
         "params_pytree": {
           "kind": "method",
           "parameters": [],
@@ -2662,6 +2686,12 @@
           "parameters": [],
           "returns": "dict[str, maddening.core.params.ParamSpec]"
         },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
+        },
         "params_pytree": {
           "kind": "method",
           "parameters": [],
@@ -2955,6 +2985,12 @@
           "kind": "method",
           "parameters": [],
           "returns": "dict[str, maddening.core.params.ParamSpec]"
+        },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
         },
         "params_pytree": {
           "kind": "method",
@@ -3266,6 +3302,12 @@
           "kind": "method",
           "parameters": [],
           "returns": "dict[str, maddening.core.params.ParamSpec]"
+        },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
         },
         "params_pytree": {
           "kind": "method",
@@ -3581,6 +3623,12 @@
           "kind": "method",
           "parameters": [],
           "returns": "dict[str, maddening.core.params.ParamSpec]"
+        },
+        "params": {
+          "kind": "property",
+          "parameters": [],
+          "returns": "dict",
+          "settable": true
         },
         "params_pytree": {
           "kind": "method",

@@ -207,6 +207,10 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **Assigning `node.params` stores a counting mapping; `SpringDamperNode` seeds its state in its constants' dtype** (MADD-ANO-175, MADD-ANO-017): writes made through `node.params` after `node.params = {...}` now reach `gm.params` (they were lost), so a reference to the assigned dict is no longer `node.params`; under x64 a spring with Python-float constants seeds float64, so its graph scans (it raised; 0.3.x ran it in float32).
+  Action: write through `node.params` after assigning it; give a spring float32 constants to keep a float32 state under x64.
+- **Two released behaviours corrected** (MADD-ANO-160, 159, since 0.1.0): `jax.grad` through `run_adaptive_scan` read NaN or exactly 0.0 wherever an attempt's step-doubling estimates agreed exactly (a coupled group at its fixed point, a memoryless or resting node) and now reads the derivative; `compile()` warns, naming the edge, when a coupling group whose members are joined only through outside nodes reads one of them a step late.
+  Action: re-run a calibration or sensitivity study that differentiated `run_adaptive_scan`; a group the new warning names should take the joining nodes in, or be split.
 - **`GraphManager.add_node` refuses a timestep that is not a finite number > 0 and the names `_meta`, `_params`, `_params_mappings`; a loopback-bound API asks the token of a non-loopback peer and of a forwarded request** (MADD-ANO-179, 181, 182): each was accepted, then ran silently wrong or broke later.
   `run_pod.py` exits 2 when it refuses a run and 5 when a goal raises (both were 1, "a check failed"); `--summarise`'s statuses are unchanged.
   Action: give every node a finite timestep > 0; in-process REST clients present `server.auth.token`; read a goal's exit status by the runbook's table.
@@ -373,6 +377,12 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **sysid round-8 fixes** (MADD-ANO-174 to 177, never released): `fit_lm`'s loss and solves are framed by powers of two, so a float32 residual or parameter from `1e-30` to `1e30` no longer reports `converged=True` at a wrong point or its start, and `fit` lifts a flushed gradient; `fim`/`fim_core` flag an `F` flushed to zero; in-place and replaced-mapping `node.params` writes reach `gm.params`;
+  a `log`/`logit` spec the leaf's dtype cannot hold is refused; float32 leaves in an x64 graph no longer creep; `fit_lm`'s floor verdict no longer follows units or an on-bound gradient's rounding; counts read integers in every spelling.
+  Action: none; an ordinary `fit_lm` run moves in its last bits (the equilibrated solve's pivots).  SYS-131 and SYS-132 are new.
+- **The known coupling, sysid and FMU findings** (MADD-ANO-158 to 162, CPL-087, SYS-024, SYS-071): `jax.grad` / `jax.jvp` through a bfloat16 or float16 group under `solver="ift"` works (the adjoint solve runs in float32); a 16-bit group's spectral slots are float32; `strict_convergence` on a step spanning several devices raises instead of aborting the process; a typed PRNG key steps under `"ift"` with Aitken or fixed relaxation;
+  the precision warning names float64 leaves when x64 is already on; `best_loss` and `losses` are the loss of exactly the parameters a fit returns (an untouched `log` leaf was evaluated at its round trip, an ulp away).
+  Action: none; a 16-bit group's gradient is to its dtype's resolution.  MADD-ANO-156 and 157 (flux edges across a group's boundary or staggered by an ungrouped cycle) stay open for 0.5.0.
 - **REST round-8 audit fixes** (MADD-ANO-178, 180 to 185): a params write back to a node's own value is asked the combined checks (178); `PUT /graph/state` refuses text, booleans and integers its field cannot hold (180, since 0.1.0); zero, negative or non-finite timesteps (181), a node named `_meta` (182), `/sim/start` of an empty graph (183) are refused; a 422 holding NaN is no 500 (184); a checkpoint load checks member headers before reading (185).
   Also: a non-ASCII `Host` port is a 403, not a 500; a token outside printable ASCII is refused at start-up; a comma-joined `Sec-WebSocket-Protocol` carries the token; `run_pod.py --summarise` reads any goal file's shape as INVALID and counts a file with no checks.
   Action: write state in its field's dtype; choose a printable ASCII token; re-run a summary that a mistyped file used to stop.

@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
@@ -51,7 +52,7 @@ from maddening.core.coupling.acceleration import (
     convergence_criterion,
     estimated_error,
 )
-from maddening.core._pow2_frame import pow2_frame
+from maddening.core._pow2_frame import pow2_exponent, pow2_frame, pow2_rescale
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 # ``_resolve_specs`` is the one walk that decides which ParamSpec governs
@@ -159,6 +160,13 @@ _CONTINUITY_WEIGHT_WHY = (
 #: spot; ``TestPrecisionLimitedRank`` holds the separation from both
 #: sides so that a later edit cannot quietly give it up.
 _PRECISION_WARN_FACTOR = 2.0
+
+
+def _x64_enabled() -> bool:
+    """Whether ``jax_enable_x64`` is on: a float32 decomposition then comes
+    from float32 leaves, and its precision remedy is float64 leaves rather
+    than the x64 re-run (SYS-024)."""
+    return bool(jax.config.read("jax_enable_x64"))
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -482,7 +490,7 @@ def windowed_loss(
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
                  why=_CONTINUITY_WEIGHT_WHY)
     if start_step is not None:
-        _check_count("start_step", start_step)
+        start_step = _check_count("start_step", start_step)
     # As every run method does first: a ``node.params`` write or a changed
     # static since the last compile makes the graph recompile, so this loss
     # traces the same model ``gm.step`` runs.  A caller that passed the live
@@ -778,6 +786,11 @@ class FIMReport:
     ``1e-3`` divided by ``noise_std=1e15`` -- and :func:`fim` says so with
     a :class:`~maddening.warnings.PrecisionLimitWarning` (and
     :class:`FIMCore` with ``precision_limited``) rather than reporting it.
+    The same is said when every product flushed and ``F`` came out exactly
+    zero although ``J`` has a nonzero entry (``|J|`` below about
+    ``sqrt(tiny)``, ``1e-19`` in float32): the cutoff is then ``0`` and
+    ``rank`` reads ``0``, which earlier 0.4.0 development builds reported
+    as a fact, with every ``crb`` ``inf`` and no warning (MADD-ANO-176).
 
     The verdict is a comparison of two numbers, and at float32 it can be
     a comparison of two numbers that differ by less than the
@@ -1338,6 +1351,69 @@ def _physical_params(gm, start: dict, flat_u, unravel, idx):
     return to_params
 
 
+@jax.custom_jvp
+def _with_tangent_of(value, carrier):
+    """``value``, differentiated as ``carrier`` (see :func:`_exact_physical_params`)."""
+    return value
+
+
+@_with_tangent_of.defjvp
+def _with_tangent_of_jvp(primals, tangents):
+    value, _carrier = primals
+    _value_dot, carrier_dot = tangents
+    return value, carrier_dot
+
+
+def _exact_physical_params(gm, start: dict, flat_u, unravel, idx):
+    """``theta -> physical params`` for the fitters' objectives: traceable, and
+    equal bit for bit to what ``to_params`` (:func:`_physical_params`) returns.
+
+    The objectives used to evaluate ``gm.constrain(unravel(...))`` -- every
+    leaf through its ``constrain(unconstrain(p))`` round trip -- while the
+    fitters return a leaf no step moved as the value that went in.  For a
+    ``log`` leaf whose ``exp(log(p))`` lands an ulp away (``30.03`` in
+    float64, ``30.0`` in float32) the run therefore evaluated a point it did
+    not return: ``best_loss`` read 5.364755728149608e-06 for a returned
+    start whose loss is 5.364755728152416e-06 (SYS-071).  Here a leaf whose
+    coordinates are bit for bit where they started -- every leaf with no
+    optimiser coordinate among them -- is the value that went in, its
+    derivative still the round trip's (:func:`_with_tangent_of`), so the
+    gradient the optimiser steps on is unchanged and every loss the run
+    records -- ``losses``, ``best_loss`` -- is the loss of exactly the
+    parameters that iterate returns.  A leaf whose round trip is exact is
+    passed through as before: selecting it as well changed nothing it
+    computes but let XLA fuse the rest of the objective differently, and a
+    replay at the truth that read exactly 0.0 read 1.3e-12 on jaxlib 0.11.2.
+    """
+    leaves_start, treedef = jax.tree.flatten(start)
+    edges = np.cumsum([0] + [int(np.asarray(leaf).size) for leaf in leaves_start])
+    # Which leaves the round trip moves at all, decided once on the host.  A
+    # leaf it returns bit for bit (every identity leaf; a ``log`` value whose
+    # ``exp(log(p))`` is exact) goes through the objective exactly as it
+    # always did -- the program, and so XLA's fusion of everything
+    # downstream, is unchanged for it -- and only a leaf the round trip moves
+    # takes the selection below.
+    round_trip = jax.tree.leaves(gm.constrain(unravel(flat_u)))
+    moves = [np.asarray(c).tobytes() != np.asarray(jnp.asarray(u, jnp.result_type(c))).tobytes()
+             for u, c in zip(leaves_start, round_trip)]
+
+    def physical(theta):
+        flat_new = flat_u.at[idx].set(theta)
+        full = jax.tree.leaves(gm.constrain(unravel(flat_new)))
+        out = []
+        for untouched, fitted, lo, hi, moved_by_round_trip in zip(
+                leaves_start, full, edges[:-1], edges[1:], moves):
+            if not moved_by_round_trip:
+                out.append(fitted)
+                continue
+            unmoved = jnp.all(flat_new[lo:hi] == flat_u[lo:hi])
+            value = jnp.where(unmoved, jnp.asarray(untouched, jnp.result_type(fitted)), fitted)
+            out.append(_with_tangent_of(value, fitted))
+        return jax.tree.unflatten(treedef, out)
+
+    return physical
+
+
 class _CoordinateBounds:
     """The bounds of each optimiser coordinate ``theta``, and the projection
     onto them.
@@ -1855,8 +1931,10 @@ class FIMCore:
     precision_limited : jnp.ndarray
         0-d bool: the rank verdict rests on a difference this precision
         cannot resolve, or was decided below the range ``F`` can be
-        formed in (:func:`_range_limited`) -- the conditions :func:`fim`
-        turns into a :class:`~maddening.warnings.PrecisionLimitWarning`.
+        formed in (:func:`_range_limited`), which includes an ``F`` that
+        flushed to exactly zero from a ``J`` that is not -- the
+        conditions :func:`fim` turns into a
+        :class:`~maddening.warnings.PrecisionLimitWarning`.
         A live gate should read it as a third outcome, "verdict
         unavailable", rather than as a refusal.
     deciding_ratio : jnp.ndarray
@@ -2001,7 +2079,8 @@ def _device_precision_limited(eigvals, rank_rtol: float, eps_floor: float,
 
 
 def _range_limited(top: float, rank_rtol: float, n_residual: int, dtype,
-                   factor: float = _PRECISION_WARN_FACTOR) -> bool:
+                   factor: float = _PRECISION_WARN_FACTOR, *,
+                   j_nonzero: bool = False) -> bool:
     """Whether the rank cutoff sits where ``F = JᵀJ`` cannot be formed.
 
     ``F``'s entries are sums of ``m`` products ``J_ij * J_ik``, and XLA's
@@ -2014,26 +2093,45 @@ def _range_limited(top: float, rank_rtol: float, n_residual: int, dtype,
     ``1e-18``) dropped a determined direction, rank 2 to 1, with every
     ``crb`` ``inf``, while the same residual at any smaller ``noise_std``
     reported rank 2.  The test is ``rank_rtol * top < factor * m * tiny``
-    (``factor`` is :data:`_PRECISION_WARN_FACTOR`, the band's own margin);
-    a largest eigenvalue that is not positive and finite has no scale to
-    judge, and is not flagged.
+    (``factor`` is :data:`_PRECISION_WARN_FACTOR`, the band's own margin).
+
+    A largest eigenvalue that is not positive is flagged when ``j_nonzero``
+    (``J`` has an entry that is not zero): ``F`` of a nonzero ``J`` is not
+    zero, so a zero ``F`` is the same flush taken to the end -- every
+    product below ``tiny`` (``|J|`` under about ``1e-19`` in float32) --
+    and the cutoff, ``rank_rtol * 0``, decides ``rank = 0`` for any data.
+    Earlier 0.4.0 development builds exempted it and reported rank 0 of 3
+    silently for a residual of exact rank 2 (MADD-ANO-176).  Whatever
+    ``rank_rtol`` is, even ``0``: no verdict can be read from such an
+    ``F``.  A zero ``J`` -- a residual that reads no parameter -- is a
+    real rank 0 and is not flagged; a non-finite ``top`` is :func:`fim`'s
+    ``FloatingPointError``.
     """
-    if not (math.isfinite(top) and top > 0.0) or rank_rtol <= 0.0:
+    if not math.isfinite(top):
+        return False
+    if top <= 0.0:
+        return bool(j_nonzero)
+    if rank_rtol <= 0.0:
         return False
     tiny = float(np.finfo(dtype).tiny)
     return rank_rtol * top < factor * max(int(n_residual), 1) * tiny
 
 
 def _device_range_limited(eigvals, rank_rtol: float, n_residual: int,
-                          factor: float = _PRECISION_WARN_FACTOR):
+                          factor: float = _PRECISION_WARN_FACTOR, *,
+                          j_nonzero: Any = False):
     """:func:`_range_limited` on the device, as a 0-d bool; the threshold
-    is computed on the host (every operand but ``eigvals`` is static)."""
+    is computed on the host (every operand but ``eigvals`` and
+    ``j_nonzero``, a traced 0-d bool, is static)."""
     hi = eigvals[-1]
+    # ``hi <= 0`` is False for a ``NaN`` ``hi``: a non-finite ``F`` is
+    # ``finite``'s to report, not this flag's.
+    flushed = (hi <= 0.0) & j_nonzero
     if rank_rtol <= 0.0:
-        return jnp.zeros((), dtype=bool)
+        return jnp.asarray(flushed, dtype=bool)
     tiny = float(np.finfo(eigvals.dtype).tiny)
     threshold = factor * max(int(n_residual), 1) * tiny / rank_rtol
-    return jnp.isfinite(hi) & (hi > 0.0) & (hi < threshold)
+    return (jnp.isfinite(hi) & (hi > 0.0) & (hi < threshold)) | flushed
 
 
 _SCALES = ("relative", "nominal", None)
@@ -2347,8 +2445,10 @@ def _fim_core_traced(residual_fn, params, *, scale, idx, inv_sigma,
     rank, crb = _device_rank_crb(eigvals, eigvecs, rtol, n_params)
     limited, ratio = _device_precision_limited(eigvals, rtol, floor)
     # A cutoff below the range ``F`` can be formed in (:func:`_range_limited`)
-    # leaves the verdict as unavailable as one at the noise floor.
-    out_of_range = _device_range_limited(eigvals, rtol, n_residual)
+    # leaves the verdict as unavailable as one at the noise floor -- and so
+    # does an ``F`` flushed to exactly zero from a ``J`` that is not.
+    out_of_range = _device_range_limited(eigvals, rtol, n_residual,
+                                         j_nonzero=jnp.any(J != 0.0))
     ratio = jnp.where(limited | ~out_of_range, ratio,
                       _device_precision_limited(eigvals, rtol, floor,
                                                 factor=math.inf)[1])
@@ -2746,7 +2846,9 @@ def fim(
         ``_PRECISION_WARN_FACTOR`` of the cutoff, i.e. the verdict rests
         on a difference the matrix's own precision cannot resolve.  The
         message names the ratio, the cutoff and the remedy: re-run under
-        ``jax_enable_x64``.  x64 is not the default and is not going to
+        ``jax_enable_x64`` -- or, when x64 is already on and the
+        decomposition is float32 because the parameters are, hold the
+        parameters and the state in float64.  x64 is not the default and is not going to
         be -- it is process-global, set before the first JAX import, and
         fp64 measures 91x slower than fp32 on the reference RTX A2000
         (155 vs 14,135 GFLOP/s, the fp32 figure being TF32 tensor
@@ -2882,7 +2984,18 @@ def fim(
         # would send a user round a loop they have finished.  There is
         # no third precision to escalate to, so say what is left: the
         # comparison is at the floor of the best precision available.
+        # A float32 decomposition *in an x64 process* comes from float32
+        # leaves (the residual they make is float32 too), so turning x64
+        # on -- the float32 remedy -- is already done and changes nothing:
+        # what settles it there is float64 leaves (SYS-024).
         remedy = (
+            "x64 is already on, but the decomposition is float32 because "
+            "the parameters (and the residual they produce) are float32: "
+            "settle it by holding them in float64 -- cast the parameters "
+            "and the state, e.g. jax.tree.map(lambda v: jnp.asarray(v, "
+            "jnp.float64), params) -- which moves the cutoff to "
+            "max(n, sqrt(m)) * 2.22e-16 and computes the ratio to match."
+            if dtype == np.float32 and _x64_enabled() else
             "Settle it by re-running under x64 -- "
             "jax.config.update('jax_enable_x64', True) before the first "
             "array is made, or JAX_ENABLE_X64=1 -- which moves the "
@@ -2920,7 +3033,26 @@ def fim(
         )
     rtol_in_force = _resolve_rank_rtol(eigvals_h.dtype, n_params, rank_rtol,
                                        n_residual=n_residual)
-    if _range_limited(hi, rtol_in_force, n_residual, eigvals_h.dtype):
+    # Read back only when ``F`` has no positive eigenvalue -- the one case
+    # it decides -- so an ordinary report keeps its four transfers.
+    j_nonzero = (math.isfinite(hi) and hi <= 0.0) and bool(jnp.any(J != 0.0))
+    if j_nonzero and _range_limited(hi, rtol_in_force, n_residual, eigvals_h.dtype,
+                                    j_nonzero=True):
+        dtype = eigvals_h.dtype
+        warnings.warn(
+            f"rank={rank} of {len(names)} was read from a Fisher matrix that "
+            f"came out exactly zero although J has nonzero entries: every "
+            f"product J_ij * J_ik is below {dtype}'s smallest normal number "
+            f"({float(np.finfo(dtype).tiny):.4g}) and the arithmetic flushes "
+            f"it to zero, so F = J^T J carries nothing of what J does, the "
+            f"cutoff is 0 and rank, crb and cond say nothing about the data. "
+            f"Rescale the residual -- a smaller noise_std, or residual units "
+            f"nearer one -- so that F's entries are normal numbers"
+            + (", or re-run under x64." if dtype == np.float32 else "."),
+            PrecisionLimitWarning,
+            stacklevel=2,
+        )
+    elif _range_limited(hi, rtol_in_force, n_residual, eigvals_h.dtype):
         dtype = eigvals_h.dtype
         warnings.warn(
             f"rank={rank} of {len(names)} was decided below {dtype}'s normal "
@@ -2935,7 +3067,10 @@ def fim(
             f"together. Rescale the residual -- a smaller noise_std, or "
             f"residual units nearer one -- so that F's entries are normal "
             f"numbers"
-            + (", or re-run under x64." if dtype == np.float32 else "."),
+            + ((", or hold the parameters and the state in float64 (x64 is "
+                "already on; the decomposition is float32 because they are)."
+                if _x64_enabled() else ", or re-run under x64.")
+               if dtype == np.float32 else "."),
             PrecisionLimitWarning,
             stacklevel=2,
         )
@@ -3015,8 +3150,25 @@ def _is_real_number(value) -> bool:
 
 
 def _check_count(name: str, value, *, minimum: int = 0) -> int:
-    """Reject a non-integer or too-small iteration/interval count."""
-    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+    """Reject a non-integer or too-small iteration/interval count.
+
+    An integer in every spelling reads, as a real number does for
+    :func:`_check_hyper`: a Python or NumPy integer, a JAX integer scalar,
+    or a 0-d integer array of either library.  Earlier 0.4.0 development
+    builds accepted only a :class:`numbers.Integral`, so ``n_iter=
+    jnp.int32(5)`` and ``np.asarray(5)`` were refused while
+    ``lr=jnp.asarray(0.05)`` read.  A ``bool`` in any spelling, a float
+    (even ``5.0``) and anything else are still refused.
+    """
+    if isinstance(value, (bool, np.bool_, jax.core.Tracer)):
+        # A tracer has no value to count with (``windowed_loss`` under
+        # ``jax.jit`` with a traced ``start_step``): refused as before.
+        raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+    if isinstance(value, (np.ndarray, jax.Array)):
+        if value.ndim != 0 or not jnp.issubdtype(value.dtype, jnp.integer):
+            raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
+        value = int(value)
+    elif not isinstance(value, numbers.Integral):
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
     if int(value) < minimum:
         raise ValueError(f"{name} must be an integer >= {minimum}, got {value!r}")
@@ -3044,10 +3196,108 @@ def _adam_frame(g0):
     return pow2_frame(g0)
 
 
-def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
+def _scaled_value_and_grad(objective, argnums: Any = 0):
+    """``jit((*args, cot) -> (loss, cot * gradient))``: the loss and its
+    gradient with ``cot`` as the cotangent of the backward pass.
+
+    A power-of-two ``cot`` scales every intermediate of the backward pass
+    exactly, so the result is ``cot`` times the gradient bit for bit
+    wherever those intermediates were normal numbers -- and where they were
+    not, it lifts them out of the flush (:func:`_gradient_lift`).
+    """
+    def run(*args):
+        *values, cot = args
+        loss, pullback = jax.vjp(objective, *values)
+        grads = pullback(cot)
+        if isinstance(argnums, int):
+            return loss, grads[argnums]
+        return loss, tuple(grads[a] for a in argnums)
+
+    return jax.jit(run)
+
+
+#: How many evaluations :func:`_gradient_lift` may spend looking for a
+#: cotangent at which the backward pass neither flushes nor overflows: one
+#: probe at the widest lift, halvings of its exponent while that overflows,
+#: and one evaluation at the lift that frames the gradient.
+_LIFT_PROBES = 12
+
+
+def _gradient_lift(scaled, grads, loss):
+    """The power of two to take an Adam fit's gradients with (as the
+    cotangent of the backward pass, :func:`_scaled_value_and_grad`), or
+    ``None`` when the gradient as evaluated is already clear of the flush.
+
+    ``scaled(cot)`` returns ``(loss, gradients)`` at the run's start; ``grads``
+    are the gradients evaluated plainly there, and ``loss`` the loss.  Their
+    products flush to zero below ``tiny`` on XLA's CPU backend, so a loss
+    written in small units -- ``0.5 * ||s * r||²`` with ``s = 1e-19``, a
+    nanoparticle's mass in kilograms -- had a gradient of exactly zero, and
+    :func:`fit` returned its start (at ``s = 1e-18`` a gradient that had
+    lost some of its products, and a point 1% off).  The loss's *value*
+    cannot be helped (it is the caller's function, and ``r * r`` has
+    already flushed inside it by the time it returns), but its gradient
+    can: the backward pass is linear in its cotangent, so evaluating it
+    with ``cot = 2**k`` instead of 1 lifts every product out of the flush
+    and scales the result by exactly ``2**k``.  Adam is invariant to that
+    scale beyond its ``eps``, which is relative to the run's first gradient
+    already (:func:`_adam_frame`).
+
+    A gradient whose largest entry is at least ``tiny / eps`` of its dtype
+    (``2**-103`` in float32) is clear: a product that flushed there was
+    ``2**23`` times smaller than it and moved it by less than an ulp, so no
+    lift is taken and the run is the one it always was, bit for bit.  Below
+    that the widest lift whose backward pass stays finite is probed, and
+    the lift is then set to frame the gradient's largest entry near one.
+    ``None`` also when even the widest lift finds no gradient: then it is
+    zero (a loss that does not read the parameters, or a start at an exact
+    optimum), and the plain evaluation already says so.
+    """
+    leaves = [np.asarray(g) for g in grads]
+    floor = min(float(np.finfo(g.dtype).tiny) / float(np.finfo(g.dtype).eps)
+                for g in leaves if np.issubdtype(g.dtype, np.floating)) \
+        if any(np.issubdtype(g.dtype, np.floating) for g in leaves) else 0.0
+
+    def top(gs):
+        values = [np.abs(np.asarray(g, dtype=np.float64)).max() if np.size(g) else 0.0
+                  for g in gs]
+        return max(values) if values else 0.0
+
+    first = top(leaves)
+    if not math.isfinite(first) or first >= floor:
+        return None
+    cot_dtype = jnp.result_type(loss)
+    if not jnp.issubdtype(cot_dtype, jnp.floating):
+        return None
+    widest = int(jnp.finfo(cot_dtype).maxexp) - 2
+
+    def probe(exponent):
+        _, gs = scaled(jnp.asarray(2.0 ** exponent, cot_dtype))
+        t = top(gs if isinstance(gs, (tuple, list)) else (gs,))
+        return t if math.isfinite(t) else None
+
+    exponent, budget = widest, _LIFT_PROBES
+    t = probe(exponent)
+    budget -= 1
+    while t is None and exponent > 1 and budget > 1:
+        exponent //= 2
+        t = probe(exponent)
+        budget -= 1
+    if t is None or t == 0.0:
+        return None
+    framed = min(exponent - pow2_exponent(t), widest)
+    if framed <= 0:
+        return None
+    t2 = probe(framed)
+    if t2 is None or t2 < floor:
+        framed = exponent
+    return jnp.asarray(2.0 ** framed, cot_dtype)
+
+
+def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> tuple[int, int]:
     """The hyper-parameters :func:`fit` and :func:`fit_multiple_shooting`
-    share."""
-    _check_count("n_iter", n_iter)
+    share; returns ``(n_iter, notify_every)`` as Python ints."""
+    n_iter = _check_count("n_iter", n_iter)
     _check_hyper("lr", lr, gt=0.0,
                  why=" A non-positive learning rate descends nothing: at 0 the "
                      "step vanishes, below it the step climbs the loss.")
@@ -3065,7 +3315,7 @@ def _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every) -> None:
     _check_hyper("eps", eps, gt=0.0,
                  why=" eps is the floor of Adam's denominator; at 0 the first "
                      "step is 0/0 and the NaN is reported against the loss.")
-    _check_count("notify_every", notify_every)
+    return n_iter, _check_count("notify_every", notify_every)
 
 
 #: Largest trainable-parameter count for which :func:`fit` accumulates the
@@ -3171,6 +3421,52 @@ def _float_resolution(tree) -> np.ndarray:
                              else np.float32).eps)
         parts.append(np.full(_leaf_size(leaf), eps))
     return np.concatenate(parts) if parts else np.zeros(0)
+
+
+def _leaf_grid(tree, idx, dtype):
+    """``(narrow, to_leaf_grid)`` for an optimiser over the trainable entries
+    ``idx`` (in ``ravel_pytree(tree)`` order) held in ``dtype``.
+
+    ``narrow`` flags the coordinates whose leaf is a narrower float than
+    ``dtype`` -- a float32 constant in an x64 graph, which ``ravel_pytree``
+    promotes to float64 beside a float64 one -- and ``to_leaf_grid(theta)``
+    rounds exactly those to their leaf's dtype, as ``unravel`` does before
+    the model sees them.  :func:`fit_lm` keeps its iterate there, so the
+    coordinate it carries is the value the model computes with.  Earlier
+    0.4.0 development builds did not: a step that moved such a coordinate by
+    less than one float32 ulp left the leaf where it was, the joint step's
+    compensation in the other parameters (computed for a move that never
+    happened) raised the loss and was rejected, and the float64 coordinate
+    crept by ~1e-11 an iteration until it crossed a rounding boundary --
+    five times the iterations of the all-float64 fit, and some runs
+    unconverged.  ``narrow`` is all False, and ``to_leaf_grid`` the
+    identity, when no leaf is narrower than ``dtype``.
+    """
+    groups: list = []
+    offset = 0
+    selected = np.zeros(sum(_leaf_size(leaf) for leaf in jax.tree.leaves(tree)), dtype=bool)
+    selected[np.asarray(idx, dtype=np.intp)] = True
+    position = np.full(selected.size, -1, dtype=np.intp)
+    position[np.asarray(idx, dtype=np.intp)] = np.arange(len(idx))
+    wide_eps = float(np.finfo(dtype).eps) if jnp.issubdtype(dtype, jnp.floating) else 0.0
+    narrow = np.zeros(len(idx), dtype=bool)
+    for leaf in jax.tree.leaves(tree):
+        n = _leaf_size(leaf)
+        leaf_dtype = jnp.result_type(leaf)
+        if (jnp.issubdtype(leaf_dtype, jnp.floating)
+                and float(jnp.finfo(leaf_dtype).eps) > wide_eps):
+            pos = position[offset:offset + n][selected[offset:offset + n]]
+            if pos.size:
+                narrow[pos] = True
+                groups.append((jnp.asarray(pos), leaf_dtype))
+        offset += n
+
+    def to_leaf_grid(theta):
+        for pos, leaf_dtype in groups:
+            theta = theta.at[pos].set(theta[pos].astype(leaf_dtype).astype(theta.dtype))
+        return theta
+
+    return narrow, to_leaf_grid
 
 
 def _coarsest_dtype(tree, idx) -> np.dtype:
@@ -3991,8 +4287,9 @@ class FitResult:
 
         Neither :func:`fit_lm` test fires while a parameter held on its
         bound (``transform=None`` with ``bounds``) could lower the loss by
-        moving into its range: that point is not a constrained stationary
-        point, however small the step proposed there.
+        moving into its range by more than ``step_tol`` (its own Newton
+        step; a smaller pull is rounding): that point is not a constrained
+        stationary point, however small the step proposed there.
 
         It says the iteration stopped moving, not that the data determined
         the parameters: a residual that reads none of the trainable
@@ -4035,11 +4332,13 @@ class FitResult:
         be flat in, and only when the moved point's loss is within the
         guard's tolerance of this one (a relative ``2**10 * eps``, 1.2e-4 in
         float32, plus the loss cost of rounding the moved point; see
-        ``hold_declined``).  It was computed from the optimiser's
-        unconstrained coordinates, so ``loss_fn(params)`` can differ from it
-        in the last bits: a ``log`` leaf round-trips as ``exp(log(p))``,
-        which ``params`` does not when it returns the start bit for bit.
-        ``None`` when nothing was evaluated (``n_iter=0``).
+        ``hold_declined``).  Where the guard holds nothing it is the loss of
+        exactly ``params``, bit for bit: the fitters evaluate a leaf no step
+        moved at the value that went in -- the value ``params`` returns --
+        and not at its ``constrain(unconstrain(p))`` round trip, which for a
+        ``log`` leaf is ``exp(log(p))`` and can land an ulp away (until
+        0.4.0's SYS-071 fix ``best_loss`` was the round trip's loss, off in
+        the last bits).  ``None`` when nothing was evaluated (``n_iter=0``).
 
     Every leaf no step moved is the value that went in, bit for bit --
     not merely close -- so comparing a fit's input and output leaf by
@@ -4242,7 +4541,14 @@ def fit(
         units the loss is written in.  Earlier 0.4.0 development builds
         applied it in the loss's own units, and a loss near ``1e-12`` (a
         position residual in metres at micrometre scale, squared) did not
-        move its parameters at all.
+        move its parameters at all.  Smaller still -- a gradient whose
+        products flush below ``tiny``, ``0.5 * ||s * r||²`` at ``s = 1e-19`` --
+        the gradients are taken with a power-of-two cotangent that lifts the
+        backward pass out of the flush, exactly (:func:`_gradient_lift`);
+        until 0.4.0's fix the gradient read zero there and the fit returned
+        its start (MADD-ANO-174).  ``loss_fn``'s own value is the caller's
+        and can still flush to ``0.0``: a ``RuntimeWarning`` says so once,
+        and such a ``0.0`` with a nonzero gradient does not meet ``tol``.
     callback : callable, optional
         ``callback(i, loss, params)`` after each evaluation.
     notify_every : int
@@ -4338,7 +4644,7 @@ def fit(
         stopped by ``tol`` returns the iterate that met it, which is the
         lowest by construction.
     """
-    _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
+    n_iter, notify_every = _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
     _check_hold_undetermined(hold_undetermined)
     _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
@@ -4353,13 +4659,29 @@ def fit(
     if idx is None:
         idx = np.arange(flat_u.size)
     to_params = _physical_params(gm, start, flat_u, unravel, idx)
+    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
     theta0 = flat_u[idx]
 
     def objective(theta):
-        u = unravel(flat_u.at[idx].set(theta))
-        return loss_fn(gm.constrain(u))
+        # At exactly the parameters ``to_params`` returns (SYS-071).
+        return loss_fn(physical(theta))
 
     value_and_grad = jax.jit(jax.value_and_grad(objective))
+    scaled_value_and_grad = _scaled_value_and_grad(objective)
+    # The cotangent the run takes its gradients with once a flushed first
+    # gradient made it lift them (:func:`_gradient_lift`); ``None`` -- the
+    # plain gradient, bit for bit as before -- otherwise.
+    lift = None
+
+    def evaluate(th):
+        """``(loss, gradient)`` at ``th``, the gradient times ``lift``."""
+        return value_and_grad(th) if lift is None else scaled_value_and_grad(th, lift)
+
+    def unlifted(g) -> np.ndarray:
+        """A gradient from :func:`evaluate`, in float64 and the loss's units."""
+        g64 = np.asarray(g, dtype=np.float64)
+        return g64 if lift is None else g64 / float(lift)
+
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
@@ -4384,9 +4706,17 @@ def fit(
     best = _BestIterate(theta0)
     losses: list[float] = []
     converged = False
+    vanished_warned = False
     i = 0
     for i in range(1, n_iter + 1):
-        loss, g = value_and_grad(theta)
+        loss, g = evaluate(theta)
+        if i == 1:
+            # A first gradient in the flush is evaluated again, lifted, and
+            # the run takes every gradient that way (``_gradient_lift``).
+            lift = _gradient_lift(lambda cot: scaled_value_and_grad(theta, cot),
+                                  (g,), loss)
+            if lift is not None:
+                loss, g = evaluate(theta)
         loss_f = float(loss)
         losses.append(loss_f)
         if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g))):
@@ -4399,14 +4729,29 @@ def fit(
             # Before the ``tol`` break, not after the step: this gradient is
             # information about the loss surface whether or not it moved
             # anything, and a run that stops on ``tol`` has still seen it.
-            tracker.observe(g)
+            tracker.observe(unlifted(g))
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
                 callback(i, loss_f, current)
             if progress is not None:
                 progress(i, loss_f, current)
-        if tol > 0.0 and loss_f <= tol:
+        # A loss of exactly 0.0 with a gradient that is not zero: ``loss_fn``
+        # flushed its own value (``r * r`` below ``tiny``).  It is not a loss
+        # that reached ``tol``, and the run says so once.
+        vanished = loss_f == 0.0 and bool(jnp.any(g != 0.0))
+        if vanished and not vanished_warned:
+            vanished_warned = True
+            warnings.warn(
+                f"fit: loss_fn returned exactly 0.0 at iteration {i} with a "
+                f"gradient that is not zero -- the loss underflows its "
+                f"precision (a squared residual below the smallest normal "
+                f"number flushes to 0).  The iterates follow the gradient, "
+                f"which is taken clear of the flush, but losses, best_loss and "
+                f"the tol test read 0.0 there, and tol does not count it. Write "
+                f"the loss in units nearer one.",
+                RuntimeWarning, stacklevel=2)
+        if tol > 0.0 and loss_f <= tol and not vanished:
             converged = True
             break
         if frame is None:
@@ -4415,28 +4760,32 @@ def fit(
 
     if i > 0 and not converged:
         # The budget ran out, so the last thing the loop did was an update
-        # whose result it never evaluated.  ``value_and_grad`` rather than a
+        # whose result it never evaluated.  ``evaluate`` rather than a
         # value-only function: the same compiled arithmetic as every entry
         # of ``losses``, so the comparison is like for like and costs no
         # compile.  The gradient is discarded -- in particular it is not
         # folded into the tracker, which would change ``excited_rank`` for
         # runs whose result is otherwise untouched.
-        _offer_final_iterate(best, theta, i, float(value_and_grad(theta)[0]), "fit")
+        _offer_final_iterate(best, theta, i, float(evaluate(theta)[0]), "fit")
 
     selected = best.state
 
     def _reference():
-        loss_sel, g_sel = value_and_grad(selected)
-        return float(loss_sel), np.asarray(g_sel, dtype=np.float64)
+        loss_sel, g_sel = evaluate(selected)
+        return float(loss_sel), unlifted(g_sel)
 
     def _flatness(candidates, spanned, scale):
+        # Hessian-vector products of the lifted gradient are lifted by the
+        # same power of two; the test is relative, the curvature it returns
+        # (for the hold's tolerance) is not, so it is unlifted.
+        lifted = 1.0 if lift is None else float(lift)
         return _hessian_flatness(
-            lambda V: _hvp_columns(lambda t: value_and_grad(t)[1], selected, (), V),
+            lambda V: _hvp_columns(lambda t: evaluate(t)[1], selected, (), V) / lifted,
             candidates, spanned, coarse, "fit", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,
-        _SelectedObjective(loss=lambda th: float(value_and_grad(th)[0]),
+        _SelectedObjective(loss=lambda th: float(evaluate(th)[0]),
                            reference=_reference, flatness=_flatness,
                            transformed=bounds.transformed,
                            columns=None if tracker is None else tracker.gradient_scale),
@@ -4451,21 +4800,105 @@ def fit(
     )
 
 
+def _column_frame(J):
+    """One power of two per column of ``J`` bringing its largest entry into
+    ``[0.5, 1)`` (:func:`~maddening.core._pow2_frame.pow2_frame`,
+    ``"entrywise"``); ``1`` for a column of zeros."""
+    return pow2_frame(jnp.max(jnp.abs(J), axis=0), mode="entrywise")
+
+
+def _half_squared_norm(r) -> float:
+    """``0.5 * ||r||²`` as a Python float, computed on ``r`` framed by a
+    power of two (its largest entry into ``[0.5, 1)``) and unframed in
+    float64.
+
+    :func:`fit_lm`'s loss.  ``r * r`` in the residual's own dtype flushes to
+    zero below ``sqrt(tiny)`` -- ``1.1e-19`` in float32 -- and overflows
+    above ``sqrt(max)``, ``1.8e19``: a residual written in small units (a
+    particle volume in cubic metres) had every loss ``0.0``, so no step
+    could lower it, and a large one had an infinite loss.  Framed, the sum
+    is of normal numbers at any scale, and the power of two makes it the
+    same number, bit for bit, wherever the bare sum was normal.  The
+    unframing is in float64, which holds it for any float32 residual; a
+    float64 residual below about ``1e-162`` still underflows there, and
+    :func:`fit_lm` refuses to call that converged (``r`` is not zero).
+    """
+    if r.size == 0:
+        return 0.0
+    f = pow2_frame(r)
+    framed = r * f
+    scale = float(f)
+    return 0.5 * float(jnp.sum(framed * framed)) / scale / scale
+
+
+def _framed_gradient(J, r) -> np.ndarray:
+    """``Jᵀr`` in float64, from ``J`` and ``r`` framed by powers of two
+    (every column's largest entry, and the residual's, into ``[0.5, 1)``)
+    and unframed in float64.
+
+    The gradient :func:`fit_lm` hands its identifiability guard and its
+    on-bound test.  Formed bare in the working precision its products
+    ``J_ij r_i`` flush below ``tiny`` -- a residual of ``1e-19`` with a
+    Jacobian of ``1e-19`` read a gradient of exactly zero -- and the
+    frames make it the same number, bit for bit, wherever the bare
+    products were normal.
+    """
+    c = _column_frame(J)
+    f = pow2_frame(r)
+    g = (J * c[None, :]).T @ (r * f)
+    # One frame at a time: their product can leave float64's range (a
+    # float64 residual near 1e-170) where each frame, and the result, is in it.
+    return np.asarray(g, dtype=np.float64) / np.asarray(c, dtype=np.float64) / float(f)
+
+
 @jax.jit
-def _marquardt_step(th, r, J, lam, lo, hi):
+def _marquardt_step(th, r, J, lam, lo, hi, held):
     """One Levenberg-Marquardt candidate from ``th``, projected onto
-    ``[lo, hi]`` (:class:`_CoordinateBounds`).
+    ``[lo, hi]`` (:class:`_CoordinateBounds`), and whether every column it
+    solved for was representable.
 
     Module-level, so its compiled form is shared by every :func:`fit_lm`
     call of the same shapes rather than compiled again per call.
+
+    **The solve is equilibrated and framed.**  ``J``'s columns are each
+    multiplied by the power of two that brings their largest entry into
+    ``[0.5, 1)`` and ``r`` by the one that brings its own there, and the
+    step is unframed by the same powers
+    (:func:`~maddening.core._pow2_frame.pow2_rescale`, exact).
+    Forming ``A = JᵀJ`` and ``g = Jᵀr`` bare in the working precision
+    flushed to zero or overflowed for a residual or a parameter far from
+    unit scale -- XLA's CPU backend flushes a subnormal product -- and in
+    float32 that is any ``|J|`` below about ``1e-19`` or above ``1e19``: a
+    residual of ``1e-19`` (a nanoparticle's mass in kilograms) solved for
+    nothing, and a parameter whose natural scale is ``1e-23`` (a 10 nm
+    particle's volume in cubic metres) had ``diag(A)`` overflow to ``inf``
+    and its step vanish.  Framed, every column of ``A`` that ``J`` does
+    not leave at zero has a diagonal entry in ``[0.25, m]``.  The
+    Marquardt step is invariant to a column scaling, so in exact
+    arithmetic nothing moves; in floating point the equilibrated system
+    is solved with different pivots, so ordinary problems move in the
+    last bits.  ``representable`` (a 0-d bool) is False when a column with
+    a nonzero entry of ``J``, not held, still has a ``diag(A)`` that is
+    zero or not finite: :func:`fit_lm` never reports such a step as
+    converged.
+
+    ``held`` (a boolean mask) holds coordinates at ``th`` -- the
+    mixed-precision coordinates whose step rounds away at their leaf's
+    dtype -- as a coordinate on its bound whose gradient points out of the
+    range is held: its row and column replaced by the identity and its
+    gradient by 0, so the step for the rest is solved without it rather
+    than compensating for a move it cannot make.
     """
-    A = J.T @ J
-    g = J.T @ r
+    c = _column_frame(J)
+    f = pow2_frame(r)
+    Jh = J * c[None, :]
+    A = Jh.T @ Jh
+    g = Jh.T @ (r * f)
     # A coordinate on its bound whose gradient points out of the range is
     # held (its row and column replaced by the identity, its gradient by 0):
     # that is the constraint active, and solving for it as if free would
     # couple a step it cannot take into the others.
-    hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+    hold = held | ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
     free = jnp.where(hold, 0.0, 1.0).astype(A.dtype)
     A = A * free[:, None] * free[None, :]
     g = g * free
@@ -4483,14 +4916,18 @@ def _marquardt_step(th, r, J, lam, lo, hi):
     # A column of exact zeros gets 1.0 (its gradient entry is 0 as well).
     floor = jnp.where(d > 0, jnp.finfo(A.dtype).eps * d, 1.0)
     A_damped = A + jnp.diag(lam * d + floor + (1.0 - free))
-    delta = jnp.linalg.solve(A_damped, g)
-    return jnp.clip(th - delta, lo, hi)
+    dh = jnp.linalg.solve(A_damped, g)
+    delta = pow2_rescale(dh, c, f)
+    live = jnp.any(J != 0.0, axis=0) & ~hold
+    representable = ~jnp.any(live & ~(jnp.isfinite(d) & (d > 0.0)))
+    return jnp.clip(th - delta, lo, hi), representable
 
 
 @jax.jit
-def _gauss_newton_step(th, r, J, lo, hi):
+def _gauss_newton_step(th, r, J, lo, hi, held):
     """The undamped Gauss-Newton candidate from ``th``, projected onto
-    ``[lo, hi]``: least squares on the column-equilibrated Jacobian.
+    ``[lo, hi]``: least squares on the column-equilibrated Jacobian; and
+    whether every column it solved for was representable.
 
     The stationarity test :func:`fit_lm`'s ``converged`` also requires.  It
     shares nothing with the Marquardt solve -- no ``lambda``, no floor, a
@@ -4499,15 +4936,31 @@ def _gauss_newton_step(th, r, J, lo, hi):
     from the iterate would still move a parameter by more than
     ``step_tol``, the iterate is not stationary.  Equilibrating the columns
     (each scaled to unit norm) makes it invariant to the units of every
-    parameter and of the residual.  A coordinate held on its bound (its
-    gradient pointing out of the range) is left out, as in the step.
+    parameter and of the residual.  The norms are taken of columns first
+    framed by a power of two (largest entry into ``[0.5, 1)``), and ``r``
+    is framed the same way: bare, a column of ``1e-23`` had a norm that
+    flushed to zero (``1e23``: overflowed to ``inf``), the column was left
+    out as if ``J`` did not read the parameter, and the iterate read as
+    stationary with the parameter unmoved.  The frames are powers of two,
+    so wherever the bare norms were normal the candidate is the same, bit
+    for bit.  ``representable`` is False when a column with a nonzero entry
+    of ``J``, not held, still has a norm that is zero or not finite.  A
+    coordinate held on its bound (its gradient pointing out of the range)
+    is left out, as in the step, and so is one ``held`` holds.
     """
-    g = J.T @ r
-    hold = ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
-    norms = jnp.sqrt(jnp.sum(J * J, axis=0))
-    scale = jnp.where((norms > 0) & ~hold, 1.0 / jnp.where(norms > 0, norms, 1.0), 0.0)
-    y = jnp.linalg.lstsq(J * scale[None, :], -r)[0]
-    return jnp.clip(th + scale * y, lo, hi)
+    c = _column_frame(J)
+    f = pow2_frame(r)
+    Jc = J * c[None, :]
+    g = Jc.T @ (r * f)
+    hold = held | ((th <= lo) & (g >= 0)) | ((th >= hi) & (g <= 0))
+    norms = jnp.sqrt(jnp.sum(Jc * Jc, axis=0))
+    usable = (norms > 0) & jnp.isfinite(norms)
+    scale = jnp.where(usable & ~hold, 1.0 / jnp.where(usable, norms, 1.0), 0.0)
+    y = jnp.linalg.lstsq(Jc * scale[None, :], -(r * f))[0]
+    step = pow2_rescale(scale * y, c, f)
+    live = jnp.any(J != 0.0, axis=0) & ~hold
+    representable = ~jnp.any(live & ~usable)
+    return jnp.clip(th + step, lo, hi), representable
 
 
 @stability(StabilityLevel.EVOLVING)
@@ -4550,7 +5003,11 @@ def fit_lm(
     when every candidate of an iteration was rejected down to one damped
     within ``step_tol`` (the rounding floor; see ``step_tol``).  A run that
     never lowered the loss and rejected every candidate is not converged,
-    and neither is one that ran out of ``n_iter``.
+    and neither is one that ran out of ``n_iter``.  At that floor the
+    undamped Gauss-Newton step is asked last: if it moves a parameter by
+    more than ``step_tol`` and lowers the loss it is taken as the iterate
+    and the run goes on, so the verdict there does not depend on which way
+    the damped candidates' rounding fell.
 
     A trainable leaf with ``bounds`` and ``transform=None`` is optimised in
     its own coordinate and clipped by ``constrain``.  Every step is projected
@@ -4562,7 +5019,10 @@ def fit_lm(
     points out of the range is held there: the constraint is active, and
     the step for the rest is solved without it.  No ``converged`` test fires
     while a coordinate on its bound could lower the loss by moving into the
-    range.
+    range -- by more than ``step_tol``, measured by its own Newton step: a
+    pull smaller than that is the residual's rounding (at a truth exactly on
+    the bound its sign is a coin flip, and decided the verdict until 0.4.0's
+    fix) and counts as zero.
 
     The Marquardt solve's floor, which keeps it regular, is ``eps`` times
     each column's own ``diag(JᵀJ)``: so the step is the same for every
@@ -4570,6 +5030,34 @@ def fit_lm(
     made a residual of 1e-7 in its own units fail to converge in 50
     iterations, and a floor of ``eps`` times the *mean* crushed the step of
     a parameter measured in small units, MADD-ANO-121).
+
+    That holds across the working precision's whole range -- any residual,
+    and any parameter, whose residual entries (its own rounding at the
+    optimum included) and Jacobian entries are normal numbers: in
+    float32 a residual of ``1e-30`` or ``1e30``, a parameter whose natural
+    scale is ``1e-23`` (a 10 nm particle's volume in cubic metres) or
+    ``1e23``.  The loss is ``0.5 * ||r||²`` of ``r`` framed by a power of two
+    and unframed in float64, and the solves are formed on columns of ``J``
+    and on ``r`` framed the same way (:func:`_marquardt_step`,
+    :func:`_gauss_newton_step`), which is exact and leaves every ordinary
+    problem's arithmetic as it was but for the Marquardt solve's pivots.
+    Earlier 0.4.0 development builds formed ``r * r``, ``JᵀJ`` and ``Jᵀr``
+    bare, which XLA's CPU backend flushes below ``tiny`` and which overflow
+    above ``sqrt(max)``: a residual of ``1e-19`` returned a point 7% off, or
+    its start, with ``converged=True`` and a loss of ``0.0``, and a
+    parameter at ``1e-23`` came back unmoved, "converged" (MADD-ANO-174).
+    ``converged`` is never reported on a solve whose live columns were not
+    representable even framed, or on a loss of ``0.0`` from a residual that
+    is not zero (a float64 residual below about ``1e-162``): the run stops
+    there unconverged, with a :class:`RuntimeWarning`.
+
+    A float32 leaf in an x64 graph is a float64 coordinate here
+    (``ravel_pytree`` promotes it), but its leaf is rounded to float32
+    before the model sees it; the coordinate is kept on that grid, and one
+    whose move rounds away is held while the others are solved again, so a
+    joint step never compensates for a move the model does not make
+    (:func:`_leaf_grid`; earlier development builds crept, five times the
+    iterations of an all-float64 fit).
 
     Like :func:`fit`, it returns the **lowest-loss iterate** it evaluated,
     and here that is always the last one: a step is accepted only when it
@@ -4690,7 +5178,7 @@ def fit_lm(
         held all three and returned parameters at a loss of 0.22 from a
         fit that had reached 0.0.
     """
-    _check_count("n_iter", n_iter)
+    n_iter = _check_count("n_iter", n_iter)
     _check_hyper("lam0", lam0, gt=0.0,
                  why=" lambda multiplies diag(J^T J): at 0 or below the solve is "
                      "the undamped Gauss-Newton one and there is nothing for a "
@@ -4711,7 +5199,7 @@ def fit_lm(
                          "negative one can never be met and 'converged' could only "
                          "ever mean the loss reached tol; None is the parameters' "
                          "own float resolution.")
-    _check_count("notify_every", notify_every)
+    notify_every = _check_count("notify_every", notify_every)
     _check_hold_undetermined(hold_undetermined)
     _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
@@ -4723,6 +5211,7 @@ def fit_lm(
     if idx is None:
         idx = np.arange(flat_u.size)
     to_params = _physical_params(gm, start, flat_u, unravel, idx)
+    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
     theta0 = flat_u[idx]
     theta = theta0
     progress = _progress_notifier(gm, "lm", n_iter, notify_every)
@@ -4737,7 +5226,8 @@ def fit_lm(
     inv_sigma = _resolved_noise(residual_fn, gm.constrain(u0), noise_std)
 
     def _residual(th):
-        p = gm.constrain(unravel(flat_u.at[idx].set(th)))
+        # At exactly the parameters ``to_params`` returns (SYS-071).
+        p = physical(th)
         r = ravel_pytree(residual_fn(p))[0]
         return r if inv_sigma is None else r * inv_sigma
 
@@ -4754,6 +5244,34 @@ def fit_lm(
     rel_tol = (_STEP_TOL_ULPS * _float_resolution(start)[idx] if step_tol is None
                else float(step_tol))
 
+    # Mixed precision: a float32 leaf beside a float64 one is a float64
+    # coordinate here (``ravel_pytree`` promotes), but ``unravel`` rounds it
+    # back to float32 before the model sees it (:func:`_leaf_grid`).
+    narrow, to_leaf_grid = _leaf_grid(start, idx, theta0.dtype)
+    no_hold = jnp.zeros(theta0.shape, dtype=bool)
+
+    def _quantised(th, solve):
+        """``(candidate, representable)`` from ``solve(held)`` -- a step from
+        ``th`` -- with every
+        narrow coordinate on its leaf's grid.  A narrow coordinate whose
+        proposed move rounds away there is held and the step solved again
+        without it, so the others do not compensate for a move the model
+        never sees (:func:`_leaf_grid`).  The identity, bit for bit, when no
+        leaf is narrower than the coordinates."""
+        cand, ok = solve(no_hold)
+        if not narrow.any():
+            return cand, bool(ok)
+        held = np.zeros(narrow.shape, dtype=bool)
+        here = np.asarray(th)
+        for _ in range(int(narrow.sum())):
+            c = np.asarray(cand)
+            lost = narrow & ~held & (np.asarray(to_leaf_grid(cand)) == here) & (c != here)
+            if not lost.any():
+                break
+            held |= lost
+            cand, ok = solve(jnp.asarray(held))
+        return to_leaf_grid(cand), bool(ok)
+
     def _physical(th) -> np.ndarray:
         p = gm.constrain(unravel(flat_u.at[idx].set(th)))
         return np.asarray(ravel_pytree(p)[0][idx], dtype=np.float64)
@@ -4761,6 +5279,44 @@ def fit_lm(
     def _within_step_tol(th, cand) -> bool:
         before, after = _physical(th), _physical(cand)
         return bool(np.all(np.abs(after - before) <= rel_tol * np.abs(before)))
+
+    # Whether every solve a convergence verdict of this iteration rests on
+    # was representable (``_marquardt_step``, ``_gauss_newton_step``).
+    verdict = {"representable": True}
+
+    def _resolvable(th, g, J) -> np.ndarray:
+        """``g`` with every entry zeroed whose coordinate's own Newton step,
+        ``g_i / ||J[:, i]||²`` (the others held), moves its parameter by no
+        more than ``step_tol`` -- for the on-bound test only.
+
+        On its bound a coordinate whose gradient points into the range
+        could lower the loss by moving there, and no converged test fires
+        while it can (:meth:`_CoordinateBounds.inward_descent`).  At a fit
+        whose truth is *on* the bound, that gradient is the residual's
+        rounding, and its sign is a coin flip: a noiseless fit to a truth
+        on ``(0.5, 2.0)`` converged on one bound and not on the other (and
+        the other way round under x64).  A pull whose own step is within
+        the tolerance moves nothing the tolerance resolves, so it is that
+        noise and counts as zero.  The step is measured physically, so a
+        ``logit`` coordinate at the flat edge of its sigmoid -- a large step
+        in ``u`` for a small one in the value -- is judged by the value's
+        move, as :func:`_within_step_tol` judges every step.
+        """
+        if not bounds.active:
+            return g
+        # ``g_i / ||J_i||²`` from framed columns (each largest entry in
+        # ``[0.5, 1)``): ``(g_i c_i) c_i / ||c_i J_i||²``, which neither
+        # flushes nor overflows where the step itself does not.
+        c = np.asarray(_column_frame(J), dtype=np.float64)
+        curvature = np.sum(np.square(np.asarray(J, dtype=np.float64) * c), axis=0)
+        step = np.where(curvature > 0.0,
+                        (g * c) * c / np.where(curvature > 0.0, curvature, 1.0), 0.0)
+        moved = np.clip(np.asarray(th, dtype=np.float64) - step,
+                        np.asarray(bounds.lo, dtype=np.float64),
+                        np.asarray(bounds.hi, dtype=np.float64))
+        before = _physical(th)
+        after = _physical(to_leaf_grid(jnp.asarray(moved, dtype=th.dtype)))
+        return np.where(np.abs(after - before) <= rel_tol * np.abs(before), 0.0, g)
 
     def _gauss_newton_stationary(th, r, J, loss_at_th=None) -> bool:
         """Whether ``th`` is stationary by the undamped, equilibrated
@@ -4778,13 +5334,14 @@ def fit_lm(
         structured rounding, whose cosines with the columns measured 0.5-0.9
         on a spring -- so the second test evaluates the step.
         """
-        candidate = _gauss_newton_step(th, r, J, bounds.lo, bounds.hi)
+        candidate, ok = _quantised(
+            th, lambda held: _gauss_newton_step(th, r, J, bounds.lo, bounds.hi, held))
+        verdict["representable"] &= ok
         if _within_step_tol(th, candidate):
             return True
         if loss_at_th is None:
             return False
-        r_gn = residual_only(candidate)
-        loss_gn = 0.5 * float(jnp.sum(r_gn * r_gn))
+        loss_gn = _half_squared_norm(residual_only(candidate))
         return not (np.isfinite(loss_gn) and loss_gn < loss_at_th)
 
     lam = float(lam0)
@@ -4809,23 +5366,25 @@ def fit_lm(
     i = 0
     for i in range(1, n_iter + 1):
         r, J = residual_and_jac(theta)
-        loss = 0.5 * float(jnp.sum(r * r))
+        # On the framed residual (``_half_squared_norm``): ``r * r`` in the
+        # working precision flushed a residual of 1e-19 to a loss of 0.0.
+        loss = _half_squared_norm(r)
         if not np.isfinite(loss) or not bool(jnp.all(jnp.isfinite(J))):
             raise FloatingPointError(f"non-finite residual or Jacobian at iteration {i}")
         losses.append(loss)
         theta_iteration, theta_loss = i - 1, loss
         rJ, rJ_iteration = (r, J), i - 1
+        # ``Jᵀr`` framed (``_framed_gradient``), in float64, for the tracker
+        # and the on-bound test: bare, it flushed to zero with the residual.
+        grad = _framed_gradient(J, r)
         if tracker is not None:
-            # ``J.T @ r`` is the same ``g`` ``_lm_step`` forms, recomputed
-            # here rather than returned from it: the tracker must not
-            # change the step, and ``_lm_step``'s own ``g`` lives inside a
-            # ``jax.jit`` whose fusion decides ``A``'s last bits (PR 101).
-            # Contracted on the device so only the ``n``-vector is read
-            # back, not the whole ``m x n`` Jacobian.  Folded in before
-            # the ``tol`` break, as in ``fit``: this gradient is
-            # information about the loss surface whether or not a step
-            # was taken on it.
-            tracker.observe(J.T @ r)
+            # The same ``g`` ``_lm_step`` forms, recomputed here rather than
+            # returned from it: the tracker must not change the step, and
+            # ``_lm_step``'s own ``g`` lives inside a ``jax.jit`` whose
+            # fusion decides ``A``'s last bits (PR 101).  Folded in before
+            # the ``tol`` break, as in ``fit``: this gradient is information
+            # about the loss surface whether or not a step was taken on it.
+            tracker.observe(grad)
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
@@ -4843,12 +5402,19 @@ def fit_lm(
         # shorter only because it is damped more, so it is not tested.
         accepted = False
         stationary = False
+        verdict["representable"] = True
+        # A loss of exactly 0.0 from a residual that is not: the framed
+        # sum's unframing underflowed float64 (a float64 residual below
+        # ~1e-162).  No step can lower it, so nothing about the iterate can
+        # be read from the step tests.
+        vanished = loss == 0.0 and bool(jnp.any(r != 0.0))
         # A coordinate on its bound that could lower the loss by moving into
         # the range makes this no constrained stationary point, so its
         # proposal cannot converge the run even if it moves nothing (the
         # coupled solve can point such a coordinate outward); the retries,
         # damped towards the gradient, move it inward.
-        stuck_inward = bounds.inward_descent(theta, J.T @ r, _physical(theta), rel_tol)
+        stuck_inward = bounds.inward_descent(theta, _resolvable(theta, grad, J),
+                                             _physical(theta), rel_tol)
         attempt, cand = -1, theta
         while True:
             attempt += 1
@@ -4861,9 +5427,13 @@ def fit_lm(
                 # (:data:`_LM_LADDER`), so the rule can see the shortest
                 # candidate it needs.
                 break
-            cand = _lm_step(theta, r, J, jnp.asarray(lam, theta.dtype), bounds.lo, bounds.hi)
-            r_new = residual_only(cand)
-            loss_new = 0.5 * float(jnp.sum(r_new * r_new))
+            lam_t = jnp.asarray(lam, theta.dtype)
+            cand, cand_ok = _quantised(
+                theta, lambda held, lam_t=lam_t: _lm_step(theta, r, J, lam_t, bounds.lo,
+                                                          bounds.hi, held))
+            if attempt == 0:
+                verdict["representable"] &= cand_ok
+            loss_new = _half_squared_norm(residual_only(cand))
             proposal_within = (attempt == 0 and not stuck_inward
                                and _within_step_tol(theta, cand)
                                and _gauss_newton_stationary(theta, r, J))
@@ -4897,8 +5467,51 @@ def fit_lm(
             # fit unconverged at loss 1e-13.  A run that never lowered the
             # loss gets no such reading: a residual whose Jacobian is wrong
             # rejects every candidate from its start.
-            stationary = (_within_step_tol(theta, cand)
-                          and _gauss_newton_stationary(theta, r, J, loss))
+            #
+            # The rule asks the undamped Gauss-Newton step last, and when it
+            # moves a parameter by more than ``step_tol`` *and* lowers the
+            # loss, it is taken as the iterate rather than ending the run:
+            # it is a candidate like the damped ones (``lam -> 0``), and
+            # the strict decrease is the acceptance test every candidate
+            # meets.  Near the floor of the loss's own evaluation -- a
+            # noisy residual whose rounding moves the loss by more than a
+            # few ulps of a parameter do -- the damped candidates' verdicts
+            # are rounding, while the Gauss-Newton step, built from ``r``
+            # and ``J`` linearly, still points at the optimum.  Earlier 0.4.0
+            # development builds ended such a run unconverged there, 40 ulps
+            # short, or converged a few ulps away, by which of the two the
+            # parameters' units happened to round to (MADD-ANO-174).
+            if _within_step_tol(theta, cand):
+                gn_cand, gn_ok = _quantised(
+                    theta, lambda held: _gauss_newton_step(theta, r, J, bounds.lo,
+                                                           bounds.hi, held))
+                verdict["representable"] &= gn_ok
+                if _within_step_tol(theta, gn_cand):
+                    stationary = True
+                else:
+                    loss_gn = _half_squared_norm(residual_only(gn_cand))
+                    if np.isfinite(loss_gn) and loss_gn < loss:
+                        theta = gn_cand
+                        theta_iteration, theta_loss = i, loss_gn
+                        lam = max(lam * lam_down, 1e-12)
+                        accepted = True
+                    else:
+                        stationary = True
+        if stationary and (vanished or not verdict["representable"]):
+            # Never a converged verdict the arithmetic could not form: with
+            # the frames neither can happen to a float32 problem, but the
+            # verdict must not rest on them if one does.
+            warnings.warn(
+                "fit_lm: stopped at an iterate whose stationarity could not be "
+                "read -- "
+                + ("the loss 0.5 * ||r||^2 underflows float64 although r is not "
+                   "zero" if vanished else
+                   "a column of the Jacobian that is not zero has a curvature "
+                   "diag(J^T J) that is zero or not finite even after framing")
+                + "; converged=False. Rescale the residual or the parameter "
+                  "towards unit size.",
+                RuntimeWarning, stacklevel=2)
+            break
         if stationary and accepted and tracker is not None:
             # Stopping on an accepted proposal leaves the run at an iterate
             # whose gradient no iteration formed.  A run that kept going
@@ -4909,7 +5522,7 @@ def fit_lm(
             # the same ``J`` (``_rj_selected``), so it is formed once.
             r_end, J_end = residual_and_jac(theta)
             if bool(jnp.all(jnp.isfinite(r_end))) and bool(jnp.all(jnp.isfinite(J_end))):
-                tracker.observe(J_end.T @ r_end)
+                tracker.observe(_framed_gradient(J_end, r_end))
                 rJ, rJ_iteration = (r_end, J_end), theta_iteration
         if stationary or not accepted:
             converged = stationary
@@ -4930,12 +5543,11 @@ def fit_lm(
         return at_selected["rJ"]
 
     def _loss(th):
-        r_th = residual_only(th)
-        return 0.5 * float(jnp.sum(r_th * r_th))
+        return _half_squared_norm(residual_only(th))
 
     def _reference():
         r_sel, J_sel = _rj_selected()
-        return _loss(selected), np.asarray(J_sel.T @ r_sel, dtype=np.float64)
+        return _loss(selected), _framed_gradient(J_sel, r_sel)
 
     def _flatness(candidates, spanned, scale):
         return _gauss_newton_flatness(_rj_selected()[1], candidates, coarse,
@@ -5000,7 +5612,9 @@ def fit_multiple_shooting(
     window states are one point of the joint objective, so they are
     selected together: :attr:`FitResult.best_loss` is the loss of that
     selected pair, as the run evaluated it, before the
-    ``hold_undetermined`` guard.  The window states are returned exactly
+    ``hold_undetermined`` guard -- which, the run evaluating every leaf no
+    step moved at the value that went in, is the loss of exactly the pair
+    returned when the guard holds nothing.  The window states are returned exactly
     as selected; the parameters are too unless the guard held a direction
     (``excited_rank`` below the count, ``hold_declined`` False), in which
     case the returned pair's loss is within the guard's tolerance of
@@ -5058,16 +5672,16 @@ def fit_multiple_shooting(
         such a direction is left unheld (fail-open) rather than held at a
         loss the fixed window states would make it pay.
     """
-    _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
+    n_iter, notify_every = _check_adam_hyper(n_iter, lr, tol, betas, eps, notify_every)
     if lr_states is not None:
         _check_hyper("lr_states", lr_states, gt=0.0,
                      why=" The window starts are decision variables like the "
                          "parameters; a non-positive rate moves them the wrong way.")
     _check_hyper("continuity_weight", continuity_weight, ge=0.0,
                  why=_CONTINUITY_WEIGHT_WHY)
-    _check_count("sample_every", sample_every, minimum=1)
+    sample_every = _check_count("sample_every", sample_every, minimum=1)
     if start_step is not None:
-        _check_count("start_step", start_step)
+        start_step = _check_count("start_step", start_step)
     _check_hold_undetermined(hold_undetermined)
     _sync_compiled(gm)
     start = gm._params_or_default(params)  # noqa: SLF001
@@ -5084,11 +5698,13 @@ def fit_multiple_shooting(
     if idx is None:
         idx = np.arange(flat_u.size)
     to_params = _physical_params(gm, start, flat_u, unravel, idx)
+    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
     theta0 = flat_u[idx]
     ws_flat0, unravel_ws = ravel_pytree(ws0)
 
     def objective(theta, ws_flat):
-        p = gm.constrain(unravel(flat_u.at[idx].set(theta)))
+        # At exactly the parameters ``to_params`` returns (SYS-071).
+        p = physical(theta)
         return windowed_loss(
             gm, p, observations, obs_fn=obs_fn, window=window,
             sample_every=sample_every, external_inputs=external_inputs,
@@ -5097,6 +5713,19 @@ def fit_multiple_shooting(
         )
 
     value_and_grad = jax.jit(jax.value_and_grad(objective, argnums=(0, 1)))
+    scaled_value_and_grad = _scaled_value_and_grad(objective, argnums=(0, 1))
+    # As in ``fit``: the cotangent every gradient is taken with once a
+    # flushed first gradient made the run lift them (``_gradient_lift``).
+    lift = None
+
+    def evaluate(th, w):
+        return (value_and_grad(th, w) if lift is None
+                else scaled_value_and_grad(th, w, lift))
+
+    def unlifted(g) -> np.ndarray:
+        g64 = np.asarray(g, dtype=np.float64)
+        return g64 if lift is None else g64 / float(lift)
+
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
 
     @jax.jit
@@ -5115,9 +5744,15 @@ def fit_multiple_shooting(
     best = _BestIterate((theta0, ws_flat0))
     losses: list[float] = []
     converged = False
+    vanished_warned = False
     i = 0
     for i in range(1, n_iter + 1):
-        loss, (g_t, g_s) = value_and_grad(theta, ws)
+        loss, (g_t, g_s) = evaluate(theta, ws)
+        if i == 1:
+            lift = _gradient_lift(lambda cot: scaled_value_and_grad(theta, ws, cot),
+                                  (g_t, g_s), loss)
+            if lift is not None:
+                loss, (g_t, g_s) = evaluate(theta, ws)
         loss_f = float(loss)
         losses.append(loss_f)
         if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g_t))) \
@@ -5128,14 +5763,25 @@ def fit_multiple_shooting(
             # The parameter block's gradient only: the window states are
             # decision variables of this fit and are returned as the
             # optimiser left them.  Before the ``tol`` break, as in ``fit``.
-            tracker.observe(g_t)
+            tracker.observe(unlifted(g_t))
         if callback is not None or progress is not None:
             current = to_params(theta)
             if callback is not None:
                 callback(i, loss_f, current)
             if progress is not None:
                 progress(i, loss_f, current)
-        if tol > 0.0 and loss_f <= tol:
+        vanished = loss_f == 0.0 and (bool(jnp.any(g_t != 0.0)) or bool(jnp.any(g_s != 0.0)))
+        if vanished and not vanished_warned:
+            vanished_warned = True
+            warnings.warn(
+                f"fit_multiple_shooting: the windowed loss is exactly 0.0 at "
+                f"iteration {i} with a gradient that is not zero -- it underflows "
+                f"its precision.  The iterates follow the gradient, which is "
+                f"taken clear of the flush, but losses, best_loss and the tol "
+                f"test read 0.0 there, and tol does not count it. Write the "
+                f"observations in units nearer one.",
+                RuntimeWarning, stacklevel=2)
+        if tol > 0.0 and loss_f <= tol and not vanished:
             converged = True
             break
         it = jnp.asarray(i, theta.dtype)
@@ -5151,27 +5797,28 @@ def fit_multiple_shooting(
     if i > 0 and not converged:
         # As in ``fit``: the last update's result was never evaluated.
         _offer_final_iterate(best, (theta, ws), i,
-                             float(value_and_grad(theta, ws)[0]),
+                             float(evaluate(theta, ws)[0]),
                              "fit_multiple_shooting")
     theta, ws = best.state
     selected = theta
 
     def _reference():
-        loss_sel, (g_sel, _) = value_and_grad(selected, ws)
-        return float(loss_sel), np.asarray(g_sel, dtype=np.float64)
+        loss_sel, (g_sel, _) = evaluate(selected, ws)
+        return float(loss_sel), unlifted(g_sel)
 
     def _flatness(candidates, spanned, scale):
         # The parameter block's Hessian at the selected window states, held
         # fixed: the guard moves only ``theta``, and does so with ``ws``
-        # where the optimiser left them.
+        # where the optimiser left them.  Unlifted, as in ``fit``.
+        lifted = 1.0 if lift is None else float(lift)
         return _hessian_flatness(
-            lambda V: _hvp_columns(lambda t, w: value_and_grad(t, w)[1][0],
-                                   selected, (ws,), V),
+            lambda V: _hvp_columns(lambda t, w: evaluate(t, w)[1][0],
+                                   selected, (ws,), V) / lifted,
             candidates, spanned, coarse, "fit_multiple_shooting", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
         tracker, selected, theta0,
-        _SelectedObjective(loss=lambda th: float(value_and_grad(th, ws)[0]),
+        _SelectedObjective(loss=lambda th: float(evaluate(th, ws)[0]),
                            reference=_reference, flatness=_flatness,
                            transformed=bounds.transformed,
                            columns=None if tracker is None else tracker.gradient_scale),

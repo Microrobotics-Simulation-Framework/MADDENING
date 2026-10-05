@@ -73,8 +73,10 @@ Fixed, and run as tests: **N2** -- a ``log`` / ``logit`` bound in the band
 where a float32's spacing is subnormal (``TINY <= |b| < 2**-102``) was
 advertised one float inside it, a distance XLA flushes to zero, where
 ``ParamSpec.check`` refuses, and a bridge whose sidecar had no specs took
-it; an open bound is now advertised as the outermost value inside it that
-``check`` accepts.  **N1** -- the REST route stored a numeric string
+it; so did a ``logit`` edge whose neighbour's coordinate rounds onto the
+bound (``max = -TINY`` under ``(-1, 0)``).  An open bound is now advertised
+as the outermost value inside it that ``check`` accepts.  **N1** -- the REST
+route stored a numeric string
 (``"1.5"``) in a float leaf as the number; **B2-H1** -- ``POST
 /checkpoint/load`` restored what PUT refuses: out of bounds, non-finite, a
 boolean, a numeric string, a value the constructor refuses
@@ -670,6 +672,9 @@ def test_every_door_agrees_on_a_log_spec_without_a_lower_bound(doors, data):
      float(np.nextafter(np.float32(-1e-35), np.float32(-1)))),
 ], ids=["log-at-TINY", "log-at-1e-35", "logit-lower", "logit-upper"])
 def test_an_open_bound_in_the_flushed_band_is_held_by_every_door(doors, spec, value):
+    """N2's cases: the float one subnormal step inside the bound, which the
+    description used to advertise and the spec refuses, is refused by every
+    door; so is every other value the spec refuses near the bound."""
     check_acceptance(doors, spec, value)
 
 
@@ -679,6 +684,36 @@ def test_every_door_agrees_on_an_open_bound_in_the_flushed_band(doors, data):
     spec = data.draw(specs(domain="N2"), label="spec")
     # The disagreement is at the bounds, so the values are drawn there.
     check_acceptance(doors, spec, data.draw(values(spec, kinds=("near_bound",)), label="value"))
+
+
+#: ``logit`` ranges whose edge's neighbour has no finite coordinate: next to a
+#: bound of zero the neighbour is ``-TINY`` (or ``TINY``), and ``(p - lo) /
+#: (hi - lo)`` rounds onto 1 (or 0).  The spec refuses it; the description
+#: advertised it, and a bridge whose sidecar had no specs took it.
+_LOGIT_EDGE_CASES = [
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), -TINY),
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), -2.0 ** -25),
+    (ParamSpec(bounds=(-1.0, 0.0), transform="logit"), -2.0 ** -24),
+    (ParamSpec(bounds=(0.0, 1.0), transform="logit"), 1.0 - 2.0 ** -24),
+    (ParamSpec(bounds=(-1.0, 1.0), transform="logit"), 1.0 - 2.0 ** -24),
+    (ParamSpec(bounds=(-1.0, 1.0), transform="logit"), -1.0 + 2.0 ** -23),
+]
+
+
+@pytest.mark.parametrize("spec, value", _LOGIT_EDGE_CASES,
+                         ids=["upper-0-at-minus-TINY", "upper-0-at-minus-2**-25",
+                              "upper-0-at-minus-2**-24", "upper-1-at-its-neighbour",
+                              "symmetric-upper", "symmetric-lower"])
+def test_a_logit_edge_whose_neighbour_has_no_coordinate_is_held_by_every_door(doors, spec,
+                                                                             value):
+    """The advertised ``min`` and ``max`` are the bounds ``ParamSpec.check``
+    accepts, at both ends: ``(-1, 0)`` advertised ``max = -TINY``, whose
+    coordinate rounds onto the bound, so the spec refused it and a bridge
+    over a sidecar with no specs -- which holds only the advertised
+    envelope -- accepted it.  Drawn by
+    ``test_every_door_accepts_or_refuses_a_parameter_value_together_broadly``
+    when Hypothesis injects the constant."""
+    check_acceptance(doors, spec, value)
 
 
 @pytest.mark.parametrize("value", [0.0, TINY, -TINY, 1e-40, 0.5])

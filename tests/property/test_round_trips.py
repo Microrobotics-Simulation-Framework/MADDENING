@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import importlib.util
 import tempfile
+import warnings
 from dataclasses import fields
 from pathlib import Path
 from typing import get_type_hints
@@ -68,10 +69,22 @@ N_STEPS = 3
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _compile_drawn(gm: GraphManager) -> None:
+    """``compile()`` a reloaded drawn graph, ignoring the warning the recipe's
+    own build ignores (``strategies.GraphRecipe.build``): a drawn group can be
+    part of a larger feedback loop, a structure the round trip carries, not a
+    mistake.  The reload compiled unfiltered, so a draw with such a group
+    failed here and only here."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*part of a larger feedback loop.*",
+                                category=UserWarning)
+        gm.compile()
+
+
 def _reload_config(gm: GraphManager, registry: dict) -> tuple[dict, GraphManager]:
     config = gm.to_dict()
     reloaded = GraphManager.from_dict(config, registry)
-    reloaded.compile()
+    _compile_drawn(reloaded)
     return config, reloaded
 
 
@@ -114,7 +127,7 @@ def _reload_usd(gm: GraphManager) -> GraphManager:
     stage = Usd.Stage.CreateInMemory()
     save_graph_to_usd(gm, stage)
     reloaded = load_graph_from_usd(stage)
-    reloaded.compile()
+    _compile_drawn(reloaded)
     return reloaded
 
 

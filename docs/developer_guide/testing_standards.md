@@ -1168,9 +1168,10 @@ is not exactly one group, and three or more additive edges into one port.
 | strict == report | the row with `strict_convergence` against without | It raises on exactly the steps reported unconverged. With `waveform_iterations > 1` it also raises where an earlier sweep hit the cap (CPL-052). Where it does not raise, bitwise | A raise that happens to fall on a step that is also unconverged |
 | usable bounds | `spectral_error_bound` against the distance in the returned state's weights; `gradient_relative_error_bound` against central differences of the exact fixed point in every member's gains and biases (slow) | None: the bound must be at least the truth | Constants outside the group |
 
-The harness found MADD-ANO-156 to 159, which are strict xfails naming
-CPL-003, CPL-186 and CPL-187.  Each oracle was mutation-tested against a
-scratch copy of `src/` with a seeded fault, and the PR that added the
+The harness found MADD-ANO-156 to 159, pinned as strict xfails naming
+CPL-003, CPL-186 and CPL-187.  158 and 159 are fixed in 0.4.0 and their
+cases run as tests; 156 and 157 (CPL-186) are still strict xfails.  Each
+oracle was mutation-tested against a scratch copy of `src/` with a seeded fault, and the PR that added the
 harness lists them:
 
 - back edges decided over the node order rather than the block order;
@@ -1304,12 +1305,14 @@ what PUT refuses: out of bounds, non-finite, a boolean, a numeric string,
 a value the constructor refuses; `load_state` a boolean and a numeric
 string), B2-L10 (`POST /graph/nodes` applied no
 `ParamSpec` bounds), B2-H2 (a write to a `HybridNode` was lost), N1 (the
-REST route stored a numeric string as the number) and N3 (`POST
-/graph/nodes` took a boolean for a float constant), all fixed in 0.4.0.
-Known failing: N2 (an open bound in the band where a float32's spacing
-flushes is advertised one float inside it, where `ParamSpec.check`
-refuses).  Each pinned case compares only the doors its finding is about,
-so a fix shows even while another finding on the same value is pending.
+REST route stored a numeric string as the number), N3 (`POST
+/graph/nodes` took a boolean for a float constant) and N2 (an open bound
+in the band where a float32's spacing flushes, or a `logit` edge whose
+neighbour's coordinate rounds onto the bound, was advertised one float
+inside it, where `ParamSpec.check`
+refuses), all fixed in 0.4.0.  Each pinned case compares only the doors its
+finding is about, so a fix shows even while another finding on the same
+value is pending.
 Cannot see: a rule every door shares, and arrays.
 
 #### The FMU with `node.params` writes, four ways

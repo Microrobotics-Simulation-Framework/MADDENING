@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import jax
 import jax.numpy as jnp
 
 from maddening.core.compliance.metadata import StabilityLevel
@@ -34,7 +35,20 @@ class SurrogateDataset:
 
 @stability(StabilityLevel.EXPERIMENTAL)
 class DatasetGenerator:
-    """Generate training datasets from physics graph simulations."""
+    """Generate training datasets from physics graph simulations.
+
+    A sample pairs the target node's state with the boundary inputs its
+    edges deliver and with its next state.  The inputs are rebuilt from
+    the run's state history by the graph's own edge rule (interface
+    mapping, transform, additive edges, external inputs as zeros).
+
+    **Known limit (MADD-ANO-176).**  The inputs of a sample are rebuilt
+    from the *sources' states at the sample's own step*.  That is what
+    the step read on a back edge; on a forward edge (the source runs
+    earlier in the schedule) the step read the source's state one step
+    later, so for an input that changes in time the dataset is one step
+    behind what the node was fed.  Inputs that do not change are exact.
+    """
 
     @staticmethod
     def from_graph(
@@ -197,31 +211,7 @@ class DatasetGenerator:
         Returns (boundary_spec, boundary_arrays) where boundary_arrays
         has shape (n_steps, *field_shape) for each field.
         """
-        boundary_spec = {}
-        boundary_arrays = {}
-
-        # From edges
-        for edge in gm._edges:
-            if edge.target_node != target_node:
-                continue
-            source_data = history[edge.source_node][edge.source_field]
-            if edge.transform is not None:
-                source_data = jnp.vectorize(
-                    edge.transform, signature="()->()"
-                )(source_data) if source_data.ndim <= 1 else edge.transform(source_data)
-            boundary_arrays[edge.target_field] = source_data
-            # Infer shape (strip time axis)
-            boundary_spec[edge.target_field] = source_data.shape[1:]
-
-        # From external inputs (use zeros)
-        for ei in gm._external_inputs:
-            if ei.target_node != target_node:
-                continue
-            shape = (n_steps,) + ei.shape
-            boundary_arrays[ei.target_field] = jnp.zeros(shape, dtype=ei.dtype)
-            boundary_spec[ei.target_field] = ei.shape
-
-        return boundary_spec, boundary_arrays
+        return DatasetGenerator._boundary_from_history(gm, target_node, history, lead=1)
 
     @staticmethod
     def _reconstruct_boundary_batched(gm, target_node, histories, n_steps):
@@ -230,34 +220,42 @@ class DatasetGenerator:
         histories fields have shape (batch, n_steps, *field_shape).
         Returns boundary_arrays with the same leading (batch, n_steps, ...) shape.
         """
-        boundary_spec = {}
-        boundary_arrays = {}
+        return DatasetGenerator._boundary_from_history(gm, target_node, histories, lead=2)
 
-        for edge in gm._edges:
-            if edge.target_node != target_node:
-                continue
-            source_data = histories[edge.source_node][edge.source_field]
-            if edge.transform is not None:
-                source_data = edge.transform(source_data)
-            boundary_arrays[edge.target_field] = source_data
-            # shape: strip batch and time axes
-            boundary_spec[edge.target_field] = source_data.shape[2:]
+    @staticmethod
+    def _boundary_from_history(gm, target_node, history, *, lead):
+        """The target's boundary inputs at every sample of *history*, whose
+        fields carry *lead* leading sample axes (time, or batch and time).
 
-        for ei in gm._external_inputs:
-            if ei.target_node != target_node:
-                continue
-            # Need to figure out batch size from any existing field
-            batch_size = None
-            for v in histories.values():
-                for arr in v.values():
-                    batch_size = arr.shape[0]
-                    break
-                if batch_size is not None:
-                    break
-            if batch_size is None:
-                batch_size = 1
-            shape = (batch_size, n_steps) + ei.shape
-            boundary_arrays[ei.target_field] = jnp.zeros(shape, dtype=ei.dtype)
-            boundary_spec[ei.target_field] = ei.shape
+        Each sample is resolved by the graph's own edge rule
+        (``GraphManager._boundary_inputs_from``, which the step's edge
+        application and ``resolve_boundary_inputs`` share): the edge's
+        interface mapping, then its transform, additive edges summed,
+        external inputs as zeros.  The rule is applied to one state at a
+        time and mapped over the sample axes, so a mapping or a transform
+        sees the field it sees in the step, never the history's time axis.
 
+        An edge that reads a flux output is a ``KeyError``: fluxes are not
+        part of a state history.
+        """
+        sources = sorted({e.source_node for e in gm._edges if e.target_node == target_node})
+
+        def resolve(state):
+            return gm._boundary_inputs_from(state, target_node)
+
+        if sources:
+            per_sample = resolve
+            for _ in range(lead):
+                per_sample = jax.vmap(per_sample)
+            boundary_arrays = per_sample({name: history[name] for name in sources})
+        else:
+            # External inputs only: nothing to map over, so give the zero
+            # defaults the history's sample axes.
+            sample_shape = next(
+                leaf.shape[:lead] for fields in history.values() for leaf in fields.values())
+            boundary_arrays = {
+                k: jnp.broadcast_to(v, sample_shape + v.shape)
+                for k, v in resolve({}).items()
+            }
+        boundary_spec = {k: v.shape[lead:] for k, v in boundary_arrays.items()}
         return boundary_spec, boundary_arrays

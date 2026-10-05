@@ -8,7 +8,7 @@ between nodes, plus conservation monitoring.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import jax.numpy as jnp
 
@@ -272,12 +272,29 @@ def check_conservation(
     computed on each side is the same.  The imbalance is the
     difference ``flux_a - flux_b``, which should be near zero.
 
+    Each node's flux is its ``compute_boundary_fluxes`` at *state*, given
+    the boundary inputs the graph's edges deliver from *state*.  Those are
+    resolved by the rule the compiled step uses
+    (``GraphManager._boundary_inputs_from``, which
+    ``resolve_boundary_inputs`` shares): the edge's interface mapping,
+    then its transform, additive edges summed, with the mapping weights
+    and the node constants of ``gm.params``.  An edge that reads another
+    node's *flux output* takes that node's flux at *state*, computed the
+    same way.
+
+    Every value is taken from the one *state* passed in.  The step itself
+    mixes time levels (a forward edge reads this step's value, a back
+    edge the previous one), so on a transient the diagnostic is the
+    imbalance *of that state*, not a replay of the last step; at a
+    converged or steady state the two agree.
+
     Parameters
     ----------
     gm : GraphManager
         The graph manager (used for node lookup).
     state : dict
-        Current graph state.
+        Current graph state.  It must hold every node an edge into the
+        compared nodes reads from.
     flux_pairs : list of (node_a, flux_a, node_b, flux_b)
         Each tuple identifies an interface where ``flux_a`` and
         ``flux_b`` measure the same physical quantity from each side.
@@ -288,42 +305,82 @@ def check_conservation(
     dict[str, float]
         ``{interface_name: imbalance}`` where imbalance is close
         to zero for conservative coupling.
+
+    Raises
+    ------
+    KeyError
+        A node of a pair, or the source of an edge into one, is not in
+        the graph or not in *state*; a node does not report the flux
+        named for it (a misspelt flux used to read as ``0.0``); an edge
+        reads a field that is neither a state field nor a flux output of
+        its source.
+    ValueError
+        Two nodes read each other's flux outputs (Robin-Robin coupling,
+        say).  Such inputs are what the coupling iteration converged to
+        and cannot be rebuilt from a state alone; the diagnostic used to
+        drop them and compare fluxes computed without them.
     """
+    from maddening.core.graph_manager import _node_fluxes  # noqa: PLC0415
+
+    node_params = gm._params_or_default(None).get("nodes", {})
+    computed: dict[str, dict] = {}
+
+    def fluxes_of(name: str, pending: tuple = ()) -> dict:
+        """``name``'s flux outputs at *state*, with the inputs the edges give it."""
+        if name in computed:
+            return computed[name]
+        if name not in gm._nodes:
+            raise KeyError(f"check_conservation: the graph has no node {name!r}")
+        if name not in state:
+            raise KeyError(f"check_conservation: state has no entry for node {name!r}")
+        if name in pending:
+            loop = " -> ".join(pending[pending.index(name):] + (name,))
+            raise ValueError(
+                f"check_conservation: the boundary inputs of {name!r} read flux outputs "
+                f"that depend on its own ({loop}).  Inside a coupling group those are "
+                f"the values the iteration converged to, which cannot be rebuilt from a "
+                f"state alone, so the fluxes at this interface cannot be compared here"
+            )
+        upstream: dict[str, dict] = {}
+        for edge in gm._edges:
+            if edge.target_node != name:
+                continue
+            src = edge.source_node
+            if src not in state:
+                raise KeyError(
+                    f"check_conservation: state has no entry for node {src!r}, the "
+                    f"source of edge {edge.key}"
+                )
+            if edge.source_field in state[src]:
+                continue
+            # Not a state field: a flux output of the source, as in the step.
+            upstream[src] = fluxes_of(src, pending + (name,))
+            if edge.source_field not in upstream[src]:
+                raise KeyError(
+                    f"check_conservation: edge {edge.key} reads {edge.source_field!r}, "
+                    f"which is neither a state field of {src!r} "
+                    f"({sorted(state[src])}) nor one of its flux outputs "
+                    f"({sorted(upstream[src])})"
+                )
+        inputs = gm._boundary_inputs_from(state, name, fluxes=upstream)
+        spec = gm._nodes[name]
+        computed[name] = _node_fluxes(
+            spec, state[name], inputs, spec.timestep, node_params.get(name))
+        return computed[name]
+
+    def flux(name: str, field: str):
+        fluxes = fluxes_of(name)
+        if field not in fluxes:
+            raise KeyError(
+                f"check_conservation: node {name!r} reports no flux {field!r}; its "
+                f"compute_boundary_fluxes returns {sorted(fluxes)}"
+            )
+        return fluxes[field]
+
     result: dict[str, float] = {}
     for node_a, flux_a, node_b, flux_b in flux_pairs:
-        # Compute fluxes
-        spec_a = gm._nodes[node_a]
-        spec_b = gm._nodes[node_b]
-        bi_a: dict[str, Any] = {}
-        bi_b: dict[str, Any] = {}
-        # Resolve boundary inputs for flux computation
-        for edge in gm._edges:
-            if edge.target_node == node_a:
-                src_dict = state.get(edge.source_node, {})
-                if edge.source_field in src_dict:
-                    val = src_dict[edge.source_field]
-                else:
-                    continue
-                if edge.transform is not None:
-                    val = edge.transform(val)
-                bi_a[edge.target_field] = val
-            if edge.target_node == node_b:
-                src_dict = state.get(edge.source_node, {})
-                if edge.source_field in src_dict:
-                    val = src_dict[edge.source_field]
-                else:
-                    continue
-                if edge.transform is not None:
-                    val = edge.transform(val)
-                bi_b[edge.target_field] = val
-        fluxes_a = spec_a.node.compute_boundary_fluxes(
-            state[node_a], bi_a, spec_a.timestep
-        )
-        fluxes_b = spec_b.node.compute_boundary_fluxes(
-            state[node_b], bi_b, spec_b.timestep
-        )
-        fa = fluxes_a.get(flux_a, jnp.array(0.0))
-        fb = fluxes_b.get(flux_b, jnp.array(0.0))
+        fa = flux(node_a, flux_a)
+        fb = flux(node_b, flux_b)
         imbalance = float(jnp.sum(fa - fb))
         interface_name = f"{node_a}.{flux_a}-{node_b}.{flux_b}"
         result[interface_name] = imbalance

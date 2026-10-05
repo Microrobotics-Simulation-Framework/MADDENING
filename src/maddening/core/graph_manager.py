@@ -6960,9 +6960,34 @@ class GraphManager:
     def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
         """Boundary inputs ``node_name`` would receive from the *current*
         state: every incoming edge (mapping, transform, additive) plus the
-        zero defaults of its external inputs.  A debugging / inspection
+        zero defaults of its external inputs, which replace an edge into
+        the same field as they do in the step.  A debugging / inspection
         helper; the compiled step resolves edges itself."""
         self._recover_from_escaped_tracers()
+        return self._boundary_inputs_from(self._state, node_name, params)
+
+    def _boundary_inputs_from(self, state, node_name: str, params: Optional[dict] = None,
+                              *, fluxes: Optional[dict] = None) -> dict:
+        """:meth:`resolve_boundary_inputs` of ``node_name`` from *state*
+        rather than from the graph's own.
+
+        The one place outside the compiled step that turns edges into a
+        node's boundary inputs: each incoming edge through
+        :func:`_apply_edge` (the mapping, then the transform, with the
+        weights in ``params["mappings"]``), additive edges summed, and
+        then the zero default of each external input -- which, as in the
+        step, *replaces* whatever edges delivered to the same field.
+        Every reader of the edges that is not the step --
+        :meth:`resolve_boundary_inputs`, the conservation diagnostic, the
+        surrogate dataset generator -- goes through it, so none of them
+        can apply an edge differently from the others.  It is traceable
+        in *state* (``jax.vmap`` over a state history gives the inputs at
+        every sample).
+
+        An edge whose source field is not in *state* reads a flux output:
+        it is looked up in ``fluxes[source_node]`` when *fluxes* is given,
+        and is a ``KeyError`` otherwise.
+        """
         if node_name not in self._nodes:
             raise KeyError(f"unknown node {node_name!r}")
         p = self._params_or_default(params)
@@ -6971,14 +6996,22 @@ class GraphManager:
         for edge in self._edges:
             if edge.target_node != node_name:
                 continue
-            value = self._state[edge.source_node][edge.source_field]
+            src_fields = state[edge.source_node]
+            if edge.source_field not in src_fields and fluxes is not None \
+                    and edge.source_field in fluxes.get(edge.source_node, {}):
+                value = fluxes[edge.source_node][edge.source_field]
+            else:
+                value = src_fields[edge.source_field]
             value = _apply_edge(edge, value, resolved)
             if edge.additive and edge.target_field in out:
                 out[edge.target_field] = out[edge.target_field] + value
             else:
                 out[edge.target_field] = value
         for ei in self._external_inputs:
-            if ei.target_node == node_name and ei.target_field not in out:
+            # No ``not in out`` guard: the step writes an external input
+            # over the edges into its field (``_resolve_and_update_node``),
+            # and an omitted external input is zeros.
+            if ei.target_node == node_name:
                 out[ei.target_field] = jnp.zeros(ei.shape, dtype=ei.dtype)
         return out
 

@@ -2314,6 +2314,7 @@ claims:
   tests:
     - tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
     - tests/core/test_sysid_claims_edges.py::test_best_loss_is_the_loss_of_exactly_the_params_returned
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_gauss_newton_iterate_is_evaluated_as_it_is_returned
   status: verified
   notes: >-
     f64 domain failing on d2429a6: a log leaf no step moved was returned as
@@ -2323,6 +2324,10 @@ claims:
     fit, fit_lm and fit_multiple_shooting evaluate exactly the parameters
     to_params returns (_exact_physical_params), so without the guard the
     pair is exact in float32 and float64.
+    fit_lm's other way to an iterate, the Gauss-Newton step its floor rule
+    takes (SYS-080), is evaluated through the same objective: best_loss is
+    that candidate's loss as the run's last act, and the next iteration's
+    once it converges on it.
     Ambiguous in the first edition: fit_multiple_shooting said "the loss of
     exactly the pair returned" and FitResult "the value before the guard",
     and round 7 (B1, on 04bc3e5) measured a held pair 1.9e-9 off best_loss.
@@ -2403,7 +2408,9 @@ claims:
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     a noiseless fit at its optimum in float32 and under x64; a run of
-    rejected candidates; a residual reading nothing trainable; a noisy fit
+    rejected candidates; a Marquardt step shrunk to within step_tol,
+    rejected from the start (float32) and accepted to the end of the budget
+    (x64); a residual reading nothing trainable; a noisy fit
     at the float32 floor, an identity parameter in units 1e-8 to 1e8 (the
     verdict and the answer the same in every unit); an unrepresentable
     solve and a float64 loss that underflows (never converged).  Not a
@@ -2420,6 +2427,7 @@ claims:
     - tests/core/test_sysid_noise_model.py::test_fit_lm_never_accepting_a_step_returns_cleanly
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_shrunken_step_never_reads_as_stationary
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_run_of_stalled_candidates_is_not_the_rounding_floor
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_gauss_newton_iterate_is_evaluated_as_it_is_returned
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_run_that_never_lowered_the_loss_is_not_converged_by_the_floor_rule
     - tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_rule_never_fires_while_a_bound_coordinate_could_descend
     - tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_verdict_does_not_depend_on_a_parameters_units
@@ -2436,7 +2444,12 @@ claims:
     unconverged in units 1e-6, 1e3 and 1e8; converged in the others): the
     damped candidates' verdicts were the loss's rounding while the
     Gauss-Newton step still pointed at the optimum.  The floor rule now
-    takes that step (MADD-ANO-174).
+    takes that step (MADD-ANO-174).  With that rule and SYS-071's fix
+    together, the shrunken-step test's one float32 run (a millionth of the
+    step) stopped being stuck: its first candidate had only tied with the
+    start, and once it lowered the loss the floor rule's Gauss-Newton step
+    carried the run to the truth, converged there, as claimed.  The test now
+    holds the step within step_tol in the two runs that leave a fit stuck.
   domains:
     f32: tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
     f64: tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float64_fit_at_its_floor_is_converged

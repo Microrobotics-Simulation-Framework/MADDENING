@@ -112,6 +112,29 @@ and, when the target declares a `boundary_input_spec` shape,
 `mapping.n_target` against it — a mismatch is a `ValueError` at graph
 construction, not a broadcast surprise inside the jit.
 
+The factories check the coordinates they are given, and refuse what their
+formula does not cover with a `ValueError` naming the argument and the first
+offending index (a `MappingRebuildError` when the mapping is rebuilt from a
+config or a USD stage):
+
+* cell boundaries (`projection_1d_mapping`) must be one-dimensional, hold at
+  least two values, be finite and be **strictly increasing**.  They are never
+  sorted or reversed for you: the field keeps its cell order.  The two grids
+  need not cover the same interval — a cell outside the other grid is
+  treated as empty, so the integral is preserved when the target grid covers
+  the source grid, a constant is reproduced on target cells the source grid
+  covers, and two grids that share no interval give a matrix of zeros;
+* point sets (`rbf_mapping`, `nearest_neighbor_mapping`) must be finite
+  `(n,)` or `(n, d)` arrays of one `d`, and the set the operator
+  interpolates from (the source in consistent mode, the target in
+  conservative mode) must hold a point.  Coincident points are accepted:
+  nearest neighbour takes the lowest index, and the RBF ridge shares the
+  weight between them;
+* a matrix (`matrix_mapping`) must be finite.
+
+An accepted input gives the same operator as before the checks, bit for bit
+(MADD-ANO-192 has the inputs that used to give a wrong one).
+
 ## Serialisation
 
 A mapping is written to a config (`gm.to_dict()`, JSON / YAML) or a USD

@@ -12372,7 +12372,6 @@ anomalies:
       - "tests/core/test_param_spec_edge_cases.py::test_a_logit_width_its_dtype_cannot_hold_is_refused"
       - "tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64"
       - "tests/core/test_param_spec_edge_cases.py::test_a_log_bound_its_dtype_cannot_hold_is_refused"
-    github_issue: null
   - anomaly_id: "MADD-ANO-178"
     title: "A PUT /graph/params that wrote a leaf back to the node's own value skipped the combined checks: after a fit or a checkpoint load, a 200 left a rod past its Fourier limit and a save that did not reload"
     description: >
@@ -12701,6 +12700,598 @@ anomalies:
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_an_extra_node_is_refused_before_any_member_is_read"
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_members_the_load_ignores_are_never_read"
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-186"
+    title: "A bfloat16 or float16 coupling group's norms and floor were computed in its own dtype: residual 0.0 above 65,504 active entries, inf on a finite state at the default rtol"
+    description: >
+      `coupling_residual_mixed` and `coupling_residual_interface` square
+      `|dx| / (rtol * scale)` per entry and sum the squares from a weakly
+      typed `jnp.array(0.0)`, which takes a float16 field's dtype, then
+      divide by an int32 entry count, which the division promotes to
+      float16 -- `inf` above 65,504.  The RMS of a finite sum then reads
+      exactly 0.0: two 40,000-entry float16 fields each moving by one ulp
+      read 0.0 where the closed form is 0.0976 (`rtol=1e-2`).  At a small
+      `rtol` the squares overflow instead: a change of one float16 ulp at
+      `rtol=1e-6` is a ratio of about 977, its square past 65,504, so the
+      residual read `inf` on a finite state, and `residual_precision_floor`
+      read `inf` for every `rtol` below about 3.8e-6 and above 65,504
+      entries under every norm.  Measured at v0.1.0, v0.2.1 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0): the norm reads 0.0
+      and `inf` exactly so.  Under those releases' raw-residual criterion
+      the overflowed sum stayed non-finite until the true RMS fell below
+      `sqrt(65504 / n)`, so a group stopped where the float32 group's test
+      would (4.1% from its fixed point against 5.1%) while reporting a
+      residual of 0.0.  Under 0.4.0's error-estimate criterion the same
+      group stopped 4.1% from its fixed point with `converged=True` where
+      the float32 group runs to 0.94%, and `strict_convergence` read the
+      overflowed `inf` as divergence ("no larger max_iterations would
+      help").  Found by the round-6 coupling audit (CPL-040, CPL-051,
+      CPL-072, CPL-100).  Resolved in 0.4.0: every norm and the floor widen
+      a 16-bit field to float32 before forming anything from it (through an
+      `optimization_barrier`, so the value measured is the rounded one the
+      state holds), the sums start from a float32 zero, a 16-bit group's
+      residual, loop carries and `_meta` slots are float32, and
+      `strict_convergence` decides "non-finite state" from the state.  The
+      L2 norm's overflow rule (CPL-043) applies in float32 too, so a float16
+      field is measured up to 65,504 where it read `inf` from `2**14` up.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A reported residual of 0.0 for a group still moving, and on 0.4.0's
+      development builds `converged=True` 4% from the fixed point, are
+      silent wrong results, never `minor`.  Not `critical`: it needs a
+      16-bit group under "mixed" or "interface" with more than 65,504
+      active entries (the 0.0) or a small `rtol` (the `inf`, which reads as
+      unconverged).  `context_dependent` because whether the verdict gates
+      anything is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.coupling_residual_mixed"
+      - "maddening.core.coupling.acceleration.coupling_residual_interface"
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Hold a coupling group's fields in float32, or keep a float16 group's
+      active entries at or below 65,504 and its `rtol` at or above 1e-2.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A node's own 16-bit arithmetic still rounds as its dtype does; the
+      norm now measures that rounded state exactly.
+    verification:
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_norm_over_more_than_65504_entries_reads_its_rms"
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_float16_group_above_65504_entries_does_not_stop_on_a_zero_residual"
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_norm_at_the_default_rtol_is_finite_on_a_finite_change"
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_is_four_eps_over_rtol"
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_the_cap_on_a_finite_float16_state"
+      - "tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-187"
+    title: "spectral_error_bound under convergence_norm='interface' with a transform on an internal edge read 0.0014-0.098x the true distance, spectral_usable=True"
+    description: >
+      The interface norm measures each internal edge's source value after
+      the edge's transform, each over its own magnitude
+      (`coupling_residual_interface`).  The spectral analysis behind
+      `spectral_error_bound` took its weights from the raw source fields
+      (`_read_fields`, `_norm_weights`, `_field_magnitudes`), so the bound
+      multiplied a residual measured in one set of coordinates by a
+      resolvent norm measured in another.  An offset changes the magnitude a
+      change is divided by (a unit conversion's 273.15, or 1000 in the
+      reproducer) and a selection changes which magnitude an entry is
+      divided by: on a linear Jacobi pair with `x[0] + 1000` on one edge the
+      bound read 0.0014x the true distance in the interface norm, and with
+      the registered `"extract_last"` 0.078x, both with
+      `spectral_usable=True`, at `max_iterations=2`.  Found by the round-6
+      coupling audit (CPL-088).  Resolved in 0.4.0: the report's spectral
+      triple is taken on the reading itself
+      (`_interface_spectral_rate_at`), whose iteration matrix `Phi' G'`
+      has the Jacobian's non-zero spectrum, through an Arnoldi that carries
+      each Krylov vector's state-space preimage (`_arnoldi_through`), so no
+      transform is inverted; on the same fixtures the bound reads
+      1.001-1.1x the true distance at the caps where the Jacobi residual is
+      small and more at the others.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it
+      (the spectral bound is new in 0.4.0's development), because it is
+      major.  Not `critical`: only the interface norm with a transform on
+      an internal edge reads it, and the iteration and `converged` were
+      unaffected.  `context_dependent` because whether the bound gates
+      anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager._spectral_rate_at"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: read the bound under convergence_norm="mixed", or put the
+      transform's offset and selection into the node instead of the edge.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A transform that is not affine makes the map non-linear in the
+      reading, and the bound is then asymptotic, as for any non-linear map.
+      An internal edge with an interface mapping is read by the interface
+      norm, its float floor and this analysis at its source field (through
+      the transform alone where it has one), not at the value the mapping
+      delivers: the bound is in the reading the residual is in, but that
+      reading is not what the consumer sees.  With the audit's selection
+      written as a mapping the bound reads 1.02-5.2x the distance in the
+      source fields and 0.064-0.32x the distance in the delivered values.
+      That is the mapped-edge anomaly registered with the interface-mapping
+      fixes (open), not this one.
+    verification:
+      - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures"
+      - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_transformed_pair"
+      - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_an_identity_transform_reads_the_bound_an_untransformed_edge_does"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-188"
+    title: "gradient_relative_error_bound read 0.65-0.986x the true gradient error, gradient_bound_usable=True, on a group stopped far from its fixed point"
+    description: >
+      The gradient bound is leading-order in the distance and carries a
+      Newton-Kantorovich check for the rest, with `h = beta L ||delta||`.
+      `L`, the Jacobian's Lipschitz constant, was its change along the
+      Newton step `delta` alone, and the part of `x* - x_k` the Newton step
+      misses was not carried.  On a pair bilinear in its state stopped at
+      `max_iterations=2` the check passed at `h = 0.19` and the bound read
+      0.986x the true gradient error with `gradient_bound_usable=True`; on a
+      pair 57% from its fixed point `h` read 0.37 along `delta` where the
+      affine-covariant form of the same change gives 0.65 -- past
+      Kantorovich's 1/2; the fixed point lay 0.568 away against the
+      certified radius 0.552 -- and the bound read 0.65x, flag set.  Found
+      by the round-6 coupling audit (CPL-093).  Resolved in 0.4.0: `h` is
+      the larger of the directional value and Deuflhard's affine-covariant
+      `||(I - J)^{-1} (J(x_k + delta) - J(x_k))||` as an operator on the
+      Jacobian's row space (`3 k` more Jacobian-vector products), each
+      probe adds the Newton step's second-order miss
+      (`beta ||secant|| (t* - ||delta||) / (||delta|| ||t|| sqrt(1 - 2h))`),
+      and Kantorovich's radius is formed without cancellation.  Over 240
+      random bilinear pairs at caps 2-4 every usable bound holds; the first
+      pair reads 1.21x and the second fails the check (unusable).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it
+      (the gradient bound is new in 0.4.0's development), because it is
+      major.  Not `critical`: it needs a group stopped far enough from its
+      fixed point that its Jacobian moves appreciably across one Newton
+      step, and the forward state is unaffected.  `context_dependent`
+      because whether the bound gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager._gradient_error_bound_at"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: raise max_iterations until the forward is near its fixed point
+      before reading the gradient bound.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Both rates the check uses are measured across the Newton step, so the
+      flag rests on the map changing no faster between `x_k` and `x*` than
+      across that step -- exact for an affine map, and the condition a group
+      far from its fixed point is likeliest to break.
+    verification:
+      - "tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_a_usable_gradient_bound_holds_on_the_audit_pair_at_every_cap"
+      - "tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-189"
+    title: "The adaptive steppers' error norm was computed in a bfloat16 or float16 state's own dtype: run_adaptive did not return on a float16 state above 65,504 elements, run_adaptive_scan refused any 16-bit state"
+    description: >
+      `_tree_error_norm`, the step-doubling error norm that `run_adaptive`,
+      `run_adaptive_scan` and `build_adaptive_step` share, squares
+      `|fine - coarse| / (atol + rtol * max|.|)` per element and sums the
+      squares from a weakly typed `jnp.array(0.0)`, which takes a float16
+      leaf's dtype, then divides by an int32 element count, which the
+      division promotes to float16 -- `inf` above 65,504.  The norm of a
+      finite sum then reads exactly 0.0, and NaN (`inf / inf`) once the sum
+      overflows too: 80,000 float16 elements eight ulps apart read 0.0
+      where the closed form is 0.775 (`rtol=1e-2`), and NaN where it is 7.74
+      (`atol=1e-6`, `rtol=1e-3`).  Below that size a ratio above 256
+      squares past 65,504, so the norm read `inf` on an ordinary rejected
+      attempt and the controller shrank by `min_factor` instead of its own
+      factor.  And the 16-bit norm made the next timestep 16-bit, which the
+      carry of `run_adaptive_scan` refuses: a scan-carry `TypeError` on any
+      bfloat16 or float16 state.  Measured at v0.1.0, v0.2.1 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0): the norm reads 0.0
+      and NaN exactly so, `run_adaptive` on a 70,000-entry float16 decay
+      does not return within 150 s (its NaN error norm, MADD-ANO-173) where
+      a 1,000-entry one takes the float32 state's 13 steps, and
+      `run_adaptive_scan` raises the `TypeError` at either size.  On
+      0.4.0's development builds `run_adaptive` returned that state as NaN
+      after one accepted step, with no error or warning.  The sibling of
+      MADD-ANO-186 at the other norm the library takes, found by sweeping
+      for that defect's pattern.  Resolved in 0.4.0: each leaf is widened to
+      float32 before its difference is formed (the coupling norms'
+      `_widened`) and the sum starts from a float32 zero, so both steppers
+      take the float32 state's steps on the 70,000-entry field and the scan
+      runs a 16-bit state to its end time where the default float is
+      float32; a float32 or float64 state takes no new operation.  Under
+      `jax_enable_x64` the scan still refuses a 16-bit state, as it does a
+      float32 one (MADD-ANO-190, a different cause).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A NaN state returned as the result of an integration, with no error
+      or warning, is a silent wrong result, never `minor`; on the tagged
+      releases the same state did not return at all.  Not `critical`: it
+      needs a 16-bit state with more than 65,504 floating elements, and a
+      NaN result is conspicuous; the scan's refusal is loud.
+      `context_dependent` because whether an adaptively stepped state is
+      held in 16 bits is the program's choice.
+    affected_components:
+      - "maddening.core.simulation.adaptive._tree_error_norm"
+      - "maddening.core.simulation.adaptive.build_adaptive_step"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Hold an adaptively stepped state in float32, or keep a float16
+      state's floating elements at or below 65,504 and use `run_adaptive`
+      rather than `run_adaptive_scan`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A node's own 16-bit arithmetic still rounds as its dtype does, so a
+      16-bit state's error estimates sit near its resolution at tolerances
+      below about one eps (9.8e-4 for float16, 7.8e-3 for bfloat16) and the
+      controller rejects more attempts than for the float32 state.
+    verification:
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_a_sixteen_bit_error_norm_over_more_than_65504_elements_reads_its_rms"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_a_float16_error_norm_is_finite_where_a_squared_ratio_passes_65504"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_on_a_float16_state_above_65504_elements_steps_as_the_float32_state_does"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_scan_steps_a_sixteen_bit_state_to_its_end_time"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_build_adaptive_step_reports_a_sixteen_bit_states_error_in_float32"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-190"
+    title: "run_adaptive_scan raises a scan-carry TypeError on a float32, bfloat16 or float16 state under jax_enable_x64"
+    description: >
+      `run_adaptive_scan` carries its clock -- the time and the timestep --
+      through `lax.scan` from weakly typed seeds (`jnp.array(0.0)` and the
+      Python `dt_initial`), which are float64 under `jax_enable_x64`.  The
+      next timestep is the old one times the controller's factor, whose
+      dtype is the error norm's, and a weakly typed float64 times a float32
+      factor is float32: the carry goes in float64 and comes out float32,
+      and `lax.scan` refuses it -- `TypeError: scan body function carry
+      input and carry output must have equal types`.  So under x64 the scan
+      steps only an all-float64 state.  One explicit-Euler decay node with a
+      float32 (or float16) field raises on the tree and on the extracted
+      0.1.0, 0.2.1 and 0.3.1 trees (CPU, empty HOME, jaxlib 0.11.0), where
+      the same node in float64 takes 13 steps and `run_adaptive`, the host
+      loop, steps all three.  Loud: nothing is returned.  Found while
+      verifying MADD-ANO-189, whose fix lets the scan step a 16-bit state
+      where the default float is float32 and leaves this one as it was.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An exception when the scan is traced: no state is returned, so none
+      can be wrong.  The cost is that a float32 graph cannot be stepped by
+      the differentiable adaptive stepper in an x64 process.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Use `run_adaptive` (the host loop), hold the adaptively stepped state
+      in float64 in an x64 process, or run the float32 graph without
+      `jax_enable_x64`.  Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to hold the scan's clock
+      in one strongly typed dtype without handing the nodes a strongly typed
+      timestep (a 16-bit node's own arithmetic would be promoted by it).
+    verification:
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_scan_steps_a_state_narrower_than_float64_under_x64"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-191"
+    title: "Apps built at once in several threads left the process's warnings filters changed: a silenced warning was raised, or every UserWarning was ignored from then on"
+    description: >
+      `SimulationServer.create_app()` builds its routes through FastAPI,
+      which builds each route's fields inside `warnings.catch_warnings()`
+      and sets an `ignore` there (for pydantic's
+      `UnsupportedFieldAttributeWarning`, and for `UserWarning` while it
+      looks for `pydantic.v1`).  `catch_warnings` saves the process's
+      filter list on the way in and puts it back on the way out, and is
+      not thread-safe: when two threads each ran `create_app()` at once,
+      each put back the list it had saved, which could be the other's,
+      taken mid-block.  Two things followed.  A warning FastAPI silences
+      was shown -- raised out of `create_app()` where warnings are errors
+      (`-W error`, a test suite's filter).  And an `ignore` could be left
+      at the front of the filters for good: `ignore::UserWarning` there
+      drops every warning class of `maddening.warnings` (each derives from
+      `UserWarning`) and every bare `warnings.warn(...)` for the rest of
+      the process, with no sign.  Four servers, each built in its own
+      thread and released together, 300 rounds, nothing widened and no
+      request sent (Python 3.12.3, FastAPI 0.136.1, pydantic 2.13.4, CPU,
+      three cores shared with another job, empty HOME): on the extracted
+      0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.3.1 trees and on the 0.4.0
+      development tree at a7e6950, a thread raised in 66 to 87 rounds, the
+      filters were left changed in 115 to 138, and `ignore::UserWarning`
+      was left behind in 1 to 5.  Found as an intermittent CI failure: the
+      REST inventory's concurrent domain ran four copies of a check that
+      each built a second server (REST-006).  Resolved in 0.4.0:
+      `create_app()` builds one app at a time, under a module lock; the
+      same 300 rounds raise nothing and leave the filters as they were.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      No value is computed wrongly, but the warnings are how the library
+      says a result is provisional (a unit mismatch, a rank decided at the
+      precision floor, a performance hazard), and the silent form removes
+      them for the rest of the process.  Graded `major` for that.
+      `context_dependent`: it takes apps built at once in several threads
+      of one process, which one server started the documented way
+      (`uvicorn.run(server.create_app())`) never does.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, build the apps one after another (or under one lock of
+      your own) before starting the threads that serve them.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The lock serialises `create_app()` against `create_app()` and nothing
+      else.  `warnings.catch_warnings` is not thread-safe (before Python
+      3.14's context-aware warnings), so an app built while another thread
+      is inside any other such block -- the caller's, a dependency's, or
+      one of the library's own parameter-write and compile probes, which
+      are new in 0.4.0 -- can still trade filters with it.  The probes one
+      server's routes reach run under its graph lock, one at a time.
+    verification:
+      - "tests/api/test_create_app_from_several_threads.py::test_apps_built_in_several_threads_at_once_leave_the_warnings_filters_as_they_were"
+      - "tests/api/test_create_app_from_several_threads.py::test_a_maddening_warning_still_reaches_the_caller_after_apps_built_at_once"
+      - "tests/api/test_create_app_from_several_threads.py::test_create_app_holds_the_build_lock_while_it_builds"
+      - "tests/api/test_create_app_from_several_threads.py::test_an_app_is_built_while_another_thread_holds_the_graph"
+      - "tests/api/test_create_app_from_several_threads.py::test_a_build_that_builds_another_app_does_not_wait_for_itself"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-192"
+    title: "Interface-mapping factories returned an operator for coordinates their formula does not cover"
+    description: >
+      The factories that build an interface operator from coordinates
+      computed something from coordinates they cannot map, with no error
+      and no warning.  `conservative_projection_1d` and (new in 0.4.0)
+      `projection_1d_mapping` evaluate `|target_i ∩ source_j| / |target_i|`
+      as `min(upper) - max(lower)`, which assumes increasing boundaries:
+      descending boundaries on either grid gave a matrix of zeros,
+      boundaries out of order (`[0, 2, 1, 3]`) rows summing to 4/3, and a
+      repeated or infinite target boundary a zero row.
+      `nearest_neighbor_1d`, `nearest_neighbor_2d`
+      and (new) `nearest_neighbor_mapping` take `argmin` of the distances,
+      and `argmin` returns a NaN: one NaN source coordinate was selected for
+      every target, a NaN target read source 0, and an `(n, 1)` target set
+      against `(m, 2)` sources was broadcast.  `linear_interpolation_1d`
+      documents "sorted ascending" and checked nothing: on a descending
+      grid the field `x` mapped to `[3, 0]` where the answer is
+      `[0.5, 2.5]`.  `rbf_interpolation` (and the new `rbf_mapping` /
+      `rbf_matrix`) solved to a matrix of NaN for a NaN point and, without
+      the polynomial, to a row of zeros for an infinite target;
+      `matrix_mapping` (new) took a non-finite matrix.  Measured on the
+      tree and, for the closure factories, on the extracted 0.1.0, 0.2.0,
+      0.2.1, 0.3.0 and 0.3.1 trees (CPU, jax 0.11.0, empty HOME); the
+      `*_mapping` factories are new in 0.4.0.  Found by reading during a
+      design review of the mapping kinds.
+      Resolved in 0.4.0: each of these inputs is a `ValueError` naming the
+      argument and the first offending index; nothing is sorted or
+      repaired, because the field keeps the caller's order; a mapping
+      rebuilt from a config or a USD stage raises `MappingRebuildError`
+      naming the edge; and an accepted input gives the operator it gave
+      before, bit for bit.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A wrong interface operator couples two nodes with wrong values, or
+      with none (the zero matrix), and the run looks healthy.
+      `context_dependent` because what the coupled result is used for is
+      the caller's.
+    affected_components:
+      - "maddening.core.coupling.interface_mapping.conservative_projection_1d"
+      - "maddening.core.coupling.interface_mapping.linear_interpolation_1d"
+      - "maddening.core.coupling.interface_mapping.nearest_neighbor_1d"
+      - "maddening.core.coupling.interface_mapping.nearest_neighbor_2d"
+      - "maddening.core.coupling.interface_mapping.rbf_interpolation"
+      - "maddening.core.coupling.mapping.projection_1d_mapping"
+      - "maddening.core.coupling.mapping.nearest_neighbor_mapping"
+      - "maddening.core.coupling.mapping.rbf_mapping"
+      - "maddening.core.coupling.mapping.rbf_matrix"
+      - "maddening.core.coupling.mapping.matrix_mapping"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, check the coordinates yourself before building a
+      transform: cell boundaries strictly increasing and finite on both
+      grids, source coordinates of `linear_interpolation_1d` ascending,
+      every point finite, and both point sets of one dimension.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Coordinates handed to a closure factory as JAX tracers (a factory
+      called inside `jit`) have no values to check and are taken as given,
+      and so is a traced matrix.  Two grids that do not cover the same
+      interval are accepted: the projection treats a cell outside the
+      other grid as empty, so it preserves the integral only when the
+      target grid covers the source grid, reproduces a constant only on
+      target cells the source covers, and is a matrix of zeros for grids
+      that share no interval (stated on the factory; nothing warns of a
+      unit or frame mismatch between the grids).  A `StaticLinearMapping`
+      constructed directly is not checked.
+    verification:
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_boundaries_that_are_not_strictly_increasing_are_refused_by_name"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_non_finite_point_is_refused_by_name_and_index"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_point_sets_of_different_dimension_are_refused"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_linear_interpolation_refuses_source_coordinates_out_of_order"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_non_finite_matrix_is_refused_by_index"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_config_with_boundaries_out_of_order_does_not_rebuild"
+      - "tests/usd/test_usd_refuses_a_mapping_its_factory_refuses.py::test_a_stage_whose_mapping_spec_the_factory_refuses_does_not_load"
+      - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_an_accepted_input_gives_the_operator_it_gave_before_the_checks"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-193"
+    title: "The conservation diagnostic and the surrogate dataset generator rebuilt boundary inputs by a rule of their own, not the step's"
+    description: >
+      The compiled step turns an edge into a boundary input by one rule:
+      the edge's interface mapping, then its transform, additive edges
+      summed, and an external input in place of whatever edges delivered
+      to its field.  Two readers of the edges re-implemented it and
+      differed.  `check_conservation` fed each node's
+      `compute_boundary_fluxes` the source field through the transform
+      only: an additive edge overwrote the edges before it (two edges
+      delivering `x` and `100 x`: the hook was fed `100 x`, the step feeds
+      `101 x`), an edge that reads a flux output was dropped, external
+      inputs were absent, and a flux name the node does not report read as
+      `0.0`, so two misspelt names compared as conserved.  With 0.4.0's
+      interface mappings it fed the unmapped field (three entries where
+      the input has two), and it read the node constants of the
+      constructor rather than `gm.params`.  `DatasetGenerator.from_graph`
+      and `from_sweep` built `boundary_inputs` the same way and applied a
+      transform to the whole history at once, so a transform that indexes
+      its field (`v[::-1][:2]`) indexed time and returned a `(2, 3)` array
+      where the step fed three samples of two.  `resolve_boundary_inputs`
+      (new in 0.4.0) kept an edge's value in a field an external input
+      replaces.  The additive and transform cases were measured on the
+      tree and on the extracted 0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.3.1 trees
+      (CPU, jax 0.11.0, empty HOME, a node that stores the input it is
+      fed); the mapping and `gm.params` cases are new in 0.4.0.  Found by
+      reading during a design review of the mapping kinds.
+      Resolved in 0.4.0: all three resolve through one method,
+      `GraphManager._boundary_inputs_from`, which applies the step's
+      `_apply_edge`; the dataset maps it over the history's sample axes;
+      the diagnostic takes a flux-reading edge from its source's flux at
+      the same state, with the constants of `gm.params`, raises `KeyError`
+      for a flux the node does not report or a node missing from the
+      state, and refuses two nodes that read each other's flux outputs.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A conservation check that compares fluxes computed from the wrong
+      inputs can read zero imbalance on an interface that leaks, and a
+      surrogate trained on inputs the node never received is wrong where
+      it replaces the node.  `context_dependent` because the use of either
+      is the caller's.
+    affected_components:
+      - "maddening.core.coupling.helpers.check_conservation"
+      - "maddening.surrogates.dataset.DatasetGenerator"
+      - "maddening.core.graph_manager.GraphManager.resolve_boundary_inputs"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, do not use `check_conservation` or `DatasetGenerator`
+      on a node with additive incoming edges, an incoming edge that reads
+      a flux output, or (for the dataset) a transform that is not
+      elementwise; compare the fluxes, or record the inputs, in the node.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The diagnostic takes every input from the one state it is given,
+      where the step mixes time levels, so on a transient it is the
+      imbalance of that state and not a replay of the last step (stated
+      on the function).  The dataset is rebuilt from a state history and
+      still pairs a forward edge's input with the wrong step
+      (MADD-ANO-194); a node fed by a flux-reading edge has no dataset
+      (`KeyError`, as before).  The interface convergence norm reads a
+      mapped edge before its mapping (MADD-ANO-195).
+    verification:
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_check_conservation_feeds_the_flux_hook_what_the_step_feeds"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_dataset_pairs_each_state_with_the_boundary_input_the_step_fed"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_sweep_dataset_pairs_each_state_with_the_boundary_input_the_step_fed"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_resolve_boundary_inputs_is_what_the_step_then_feeds"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_an_edge_that_reads_a_flux_output_is_resolved_not_dropped"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_two_nodes_that_read_each_others_flux_are_refused_not_guessed"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_flux_the_node_does_not_report_is_a_key_error_not_zero"
+      - "tests/api/test_the_surrogate_estimate_counts_what_a_mapped_edge_delivers.py::test_a_mapped_edge_is_counted_at_the_size_it_delivers"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-194"
+    title: "DatasetGenerator pairs a forward edge's boundary input with the source's state before the step"
+    description: >
+      `DatasetGenerator.from_graph` and `from_sweep` rebuild a sample's
+      boundary inputs from the state history: the sample that takes the
+      target from its state after step `t` to its state after step `t+1`
+      is given the sources' states after step `t`.  That is what the step
+      read on a back edge.  On a forward edge -- the source runs earlier in
+      the schedule, the common case -- the step read the source's state
+      after step `t+1`.  A source `x <- x + 1` started at `[10, 20]`
+      feeding a node that stores its input: the dataset's first sample
+      holds `[11, 21]` where the step fed `[12, 22]`, and every sample is
+      one step behind (the tree and the extracted 0.1.0, 0.2.0, 0.2.1,
+      0.3.0 and 0.3.1 trees; CPU, jax 0.11.0, empty HOME).  The same holds
+      for an edge inside a coupling group, whose member is fed the
+      converged iterate, and a multi-rate or sub-cycled target is fed
+      values no state history holds.  A surrogate trained on the dataset
+      and put in the node's place receives, when it runs, inputs one step
+      later than it was trained on: exact for a constant input, an error
+      of one step of the input's change otherwise.  Found while comparing
+      the dataset with what the step feeds (MADD-ANO-193).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A silently misaligned training set: the surrogate learns a map from
+      the previous step's input.  `DatasetGenerator` is experimental, and
+      `context_dependent` because what the surrogate replaces is the
+      caller's.
+    affected_components:
+      - "maddening.surrogates.dataset.DatasetGenerator"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      For a target fed by forward edges, shift `boundary_inputs` one
+      sample later against `states` yourself (drop the first input and the
+      last state pair), or have the node record the inputs it receives.
+      Inputs that do not change between steps are unaffected.  Deferred to
+      0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to record the boundary
+      inputs the step delivers instead of rebuilding them from the state
+      history.  Until then a dataset of a node with time-varying forward
+      inputs is one step out of phase, with no warning.
+    verification:
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_forward_edges_input_is_paired_with_the_step_that_read_it"
+      - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_back_edges_input_is_paired_with_the_step_that_read_it"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-195"
+    title: "The interface convergence norm reads a mapped edge's source field, not what the edge delivers"
+    description: >
+      `convergence_norm="interface"` measures, for each edge inside a
+      coupling group, the change of the edge's source field through the
+      edge's transform (`coupling_residual_interface`), and
+      `residual_precision_floor` reads the same values.  Neither applies
+      the edge's interface mapping, which the step applies before the
+      transform.  On a mapped edge the norm is therefore taken on the
+      source field's scale, not on the delivered value's: with a mapping
+      that delivers the second entry of `[1000, x1]`, a change of `x1` from
+      1.0 to 1.1 reads 0.0071 in units of `rtol = 1e-2` where the
+      delivered value moved by 9.09 of them, so the group is reported
+      converged on that edge.  A transform written for the mapped shape is
+      applied to the unmapped field: a shape error when the group is
+      traced, or another entry of the field with no error.  No release
+      carried it: mapped edges are new in 0.4.0.  Found by the sweep of
+      every reader of an edge's source field that followed MADD-ANO-193
+      (CPU, jax 0.11.0).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A convergence verdict taken on another quantity than the one the
+      edge delivers: `converged=True` at a looser tolerance than the one
+      asked for.  `context_dependent` because the accuracy the coupled
+      result needs is the caller's.
+    affected_components:
+      - "maddening.core.coupling.acceleration.coupling_residual_interface"
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+    affected_versions: ">=0.4.0.dev0"
+    workaround: >
+      For a coupling group with a mapped internal edge use
+      `convergence_norm="mixed"` (or `"l2"`), which hold every member
+      field to the criterion, or tighten `rtol` by the ratio of the source
+      field's scale to the delivered value's.
+    resolution_status: "open"
+    residual_risk: >
+      Open.  The fix is to read each interface edge through the step's
+      own edge rule (mapping, then transform) in the norm and in the
+      precision floor; it changes the criterion of mapped groups only.
+      Until then the interface norm of a mapped edge is the norm of its
+      source field.
+    verification:
+      - "tests/core/test_the_interface_norm_measures_what_a_mapped_edge_delivers.py::test_the_norm_of_a_mapped_edge_is_the_scaled_change_of_what_it_delivers"
+      - "tests/core/test_the_interface_norm_measures_what_a_mapped_edge_delivers.py::test_the_norm_of_an_unmapped_edge_is_the_scaled_change_of_what_it_delivers"
     github_issue: null
 
   - anomaly_id: "MADD-ANO-196"

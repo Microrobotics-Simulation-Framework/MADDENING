@@ -614,6 +614,109 @@ def _spectral_rate_at(step_pure, x_star, consts, weights, spectral_weights=None,
     )
 
 
+def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
+                                weights, spectral_weights, resolution, reference):
+    """``(rho, arnoldi_residual, amplification, ratio)`` in the interface norm's own coordinates.
+
+    :func:`_spectral_rate_at` with ``field_reference``, for a group under
+    ``convergence_norm="interface"`` with a transform on an internal edge.
+    That norm measures each internal edge's source value *after* the
+    edge's transform (``coupling_residual_interface``), each over its own
+    magnitude; the spectral analysis took its weights from the raw source
+    fields, and the bound multiplied a residual in one set of coordinates
+    by a resolvent norm in the other.  An offset (a unit conversion's
+    273.15) shrinks the reading's relative change, a selection
+    (``"extract_last"``) changes which magnitude an entry is divided by,
+    and the bound read 0.0014-0.098x the true distance with
+    ``spectral_usable=True``.
+
+    So here every quantity is taken on the reading ``y = Phi(x)`` itself
+    (``reading``: the flat vector of the transformed edge values, in the
+    order the norm sums them).  The pass reads the iterate only through
+    those edges, ``F = G o Phi``, so the reading iterates by its own map
+    ``Phi o G``, whose Jacobian ``A = Phi' G'`` has ``dF/dx``'s non-zero
+    spectrum, and for an affine reading of an affine map ``Phi(x) -
+    Phi(x*) = (I - A)^{-1} (Phi(x) - Phi(F(x)))`` exactly: the resolvent of
+    ``A`` in the reading's weights carries the residual the loop measured
+    to the distance in the norm the loop measured it in.  ``A`` is applied
+    through preimages (:func:`~maddening.core.coupling.acceleration._arnoldi_through`):
+    the Krylov vectors are readings of state tangents, so no transform is
+    ever inverted.
+
+    ``x_weights`` are the state's spectral weights, which only condition
+    the preimages; ``weights``, ``spectral_weights`` and ``resolution``
+    are the reading's, entry by entry, with the meanings
+    :func:`_spectral_rate_at` gives them for the state's (dead band,
+    spectrum, float floor); ``reference(x)`` is, at each entry of the
+    reading, its edge's ``max|Phi_e(x)|``, which gives the pair-to-returned
+    ratio (MADD-ANO-146).  The share of a dead-banded edge's residual is
+    folded into the factor as there.  NaN on a non-finite state.
+    """
+    from maddening.core.coupling.acceleration import (  # noqa: PLC0415
+        SPECTRAL_MARGIN,
+        _arnoldi_through,
+    )
+
+    x_sg = jax.lax.stop_gradient(x_star)
+    consts_sg = tuple(jax.lax.stop_gradient(c) for c in consts)
+    work = _analysis_dtype(x_sg.dtype)
+    wx = jax.lax.stop_gradient(jnp.asarray(x_weights, work))
+    dd0 = jax.lax.stop_gradient(jnp.asarray(weights, work))
+    ww0 = jax.lax.stop_gradient(jnp.asarray(spectral_weights, work))
+    rr0 = jax.lax.stop_gradient(jnp.asarray(resolution, work))
+
+    def spectrum(operands):
+        xx, cc, wxx, dd, ww, rr = operands
+        live = wxx > 0
+        w_inv = jnp.where(live, 1.0 / jnp.where(live, wxx, 1.0), 0.0)
+        lift = pow2_frame(w_inv, mode="lift")
+
+        def matvec(v):
+            _, Jv = jax.jvp(
+                lambda x_: _F_dispatch(step_pure, x_, cc), (xx,),
+                ((v * (w_inv * lift)).astype(xx.dtype),)
+            )
+            return (wxx / lift) * Jv.astype(work)
+
+        def measure(v):
+            # Only the fields the reading reads have a weight, so a
+            # preimage's other entries carry nothing into it.
+            _, Lv = jax.jvp(reading, (xx,), ((v * (w_inv * lift)).astype(xx.dtype),))
+            return (ww / lift) * Lv.astype(work)
+
+        fx = _F_dispatch(step_pure, xx, cc)
+        r_y = _framed_difference(reading(fx).astype(work), reading(xx).astype(work), ww)
+        r_x = _framed_difference(fx.astype(work), xx.astype(work), wxx)
+        u0 = jax.random.normal(jax.random.PRNGKey(0), xx.shape, work) * live.astype(work)
+        rho, resid, amp = _arnoldi_through(matvec, measure, u0, extra=(r_x, r_y))
+        kept = dd > 0
+        r_kept = jnp.linalg.norm(jnp.where(kept, r_y, 0.0))
+        r_unread = jnp.linalg.norm(jnp.where(kept, 0.0, r_y))
+        floor = _floor_of(rr, kept)
+        denom = jnp.maximum(r_kept, floor)
+        unread = r_unread > 0
+        share = jnp.where(unread, r_unread / jnp.where(denom > 0, denom, 1.0), 0.0)
+        share = jnp.where(jnp.logical_and(unread, denom <= 0), jnp.inf, share)
+        rho_safe = rho + SPECTRAL_MARGIN * resid
+        contracting = rho_safe < 1
+        radius = jnp.where(contracting, 1.0 / jnp.where(contracting, 1.0 - rho_safe, 1.0),
+                           jnp.inf)
+        folded = jnp.maximum(amp, radius) * jnp.sqrt(1.0 + share * share)
+        amp_out = jnp.where(unread, folded, amp)
+        ref_x = reference(xx).astype(work)
+        ref_pair = jnp.maximum(reference(fx).astype(work), ref_x)
+        shrink = jnp.where(ref_pair > 0, ref_x / jnp.where(ref_pair > 0, ref_pair, 1.0), 1.0)
+        r_pair = jnp.linalg.norm(jnp.where(kept, r_y * shrink, 0.0))
+        ratio = jnp.where(r_pair > 0, r_kept / jnp.where(r_pair > 0, r_pair, 1.0), 1.0)
+        return rho, resid, amp_out, jnp.maximum(ratio, 1.0)
+
+    nan = jnp.full((), jnp.nan, work)
+    return jax.lax.cond(
+        jnp.all(jnp.isfinite(x_sg)), spectrum, lambda _operands: (nan, nan, nan, nan),
+        (x_sg, consts_sg, wx, dd0, ww0, rr0),
+    )
+
+
 def _analysis_dtype(dtype):
     """The dtype the coupling diagnostics' linear algebra runs in: at least float32.
 
@@ -840,9 +943,14 @@ def _gradient_error_bound_at(step_pure, x_star, consts, weights, rho,
        largest over the probes the fixed point responds to
        (``||t_i|| > 0``, or non-finite).
     6. **Newton-Kantorovich** with the full-operator resolvent norm
-       (:func:`_full_resolvent_norm`, exact from the range basis).
+       (:func:`_full_resolvent_norm`, exact from the range basis), ``h``
+       the larger of ``beta`` times the Jacobian's change along ``delta``
+       and the affine-covariant constant
+       ``||(I - J(x_k))^{-1} (J(x_k + delta) - J(x_k))||`` as an operator on
+       the Jacobian's row space (``3 k`` JVPs); and the Newton step's
+       second-order miss, ``t* - eta``, carried into each probe's bound.
 
-    ``11 + k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``19 + 5 n_p`` forward), ``n_p``
+    ``11 + 4 k + 5 n_p`` Jacobian-vector products (plus one linearisation and ``k`` reverse-mode products where the state has more than ``k`` entries) in all (at most ``43 + 5 n_p`` forward), ``n_p``
     the number of probes, which is
     why it is gated behind ``diagnostics=True``; the per-probe products
     are ``vmap``-ed, so the primal is evaluated once.  Every input is
@@ -931,17 +1039,48 @@ def _full_resolvent_norm(U, M, make_transpose):
     and needs no product.  ``None`` where the map has no transpose and
     ``U`` is not square.
     """
+    return _full_resolvent_norm_and_rows(U, M, make_transpose)[0]
+
+
+def _full_resolvent_norm_and_rows(U, M, make_transpose):
+    """``(norm, R)``: :func:`_full_resolvent_norm` and a basis of ``J``'s row space.
+
+    ``R`` is an orthonormal basis (``n x min(n, k)``) of ``span(B^T)``,
+    which ``B`` already computed -- ``J``'s row space, since ``J^T`` maps
+    ``range(J)`` onto it -- or the whole space where ``U`` is square, so
+    the Kantorovich check can take the Jacobian's change as an operator on
+    the directions ``J`` reads at no further reverse-mode cost.  ``(None,
+    None)`` without a transpose.
+    """
     n, k = U.shape
     eye_k = jnp.eye(k, dtype=M.dtype)
     if n <= k:
-        return jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2)
+        return jnp.linalg.norm(jnp.linalg.inv(eye_k - M), ord=2), jnp.eye(n, dtype=M.dtype)
     matvec_t = make_transpose()
     if matvec_t is None:
-        return None
+        return None, None
     B = jax.vmap(matvec_t)(U.T)                     # row i: u_i^T J
     P, _ = jnp.linalg.qr(jnp.concatenate([U, B.T], axis=1))
     T = jnp.eye(P.shape[1], dtype=M.dtype) + (P.T @ U) @ jnp.linalg.solve(eye_k - M, B @ P)
-    return jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype))
+    R, _ = jnp.linalg.qr(B.T)
+    return jnp.maximum(jnp.linalg.norm(T, ord=2), jnp.ones((), M.dtype)), R
+
+
+def _kantorovich_root_and_miss(step, h):
+    """``(sqrt(1 - 2h), t* - eta)``: Kantorovich's root and the Newton step's miss.
+
+    ``t* = eta (1 - sqrt(1 - 2h)) / h`` bounds the distance from the
+    Newton step's start to the fixed point, so ``t* - eta`` is the most the
+    step of length ``eta`` (*step*) can miss it by.  It is formed as ``eta
+    2h / (1 + root)^2`` (``1 - root = 2h / (1 + root)``), which does not
+    cancel: in float32 the quotient form read ``t* = 0`` for ``h`` below
+    about 1.5e-8 (``1 - 2h`` rounds to 1), 2-4 ``eta`` up to 3e-8 and
+    1.19 ``eta`` up to about 3e-7, where ``t*`` is ``eta`` to within ``h``.
+    The root is clipped at 0 (``h >= 1/2``, where the check fails) and the
+    miss is 0 at ``h = 0``.
+    """
+    root = jnp.sqrt(jnp.maximum(1.0 - 2.0 * h, 0.0))
+    return root, jnp.where(h > 0, step * (2.0 * h) / ((1.0 + root) * (1.0 + root)), 0.0)
 
 
 def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
@@ -1163,9 +1302,10 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # the *full-operator* norm (``_full_resolvent_norm``), not the
     # Krylov-restricted ``amp``, which can be several times smaller
     # (MADD-ANO-142) -- ``eta = ||delta||`` (the Newton correction) and
-    # ``L`` the Jacobian's Lipschitz constant -- estimated along ``delta``
-    # from the extra row, ``||(J(x_k + delta) - J(x_k)) delta|| /
-    # ||delta||**2`` -- the check is ``h = beta L eta < 1/2``.  (The
+    # ``L`` the Jacobian's Lipschitz constant -- estimated across the step,
+    # the larger of the extra row's ``||(J(x_k + delta) - J(x_k)) delta|| /
+    # ||delta||**2`` and the operator norm of ``J(x_k + delta) - J(x_k)``
+    # over ``||delta||`` (below) -- the check is ``h = beta L eta < 1/2``.  (The
     # affine-covariant form, the exact resolvent applied to that change
     # of the Jacobian along ``delta`` alone, was measured too and is not
     # enough: on the stiff ``x <- a + g u**2`` pair at three passes it
@@ -1184,10 +1324,10 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
     # point, the uncorrected bound read 0.20-0.96x the true relative
     # error with the flag True; ``h`` there is 0.48-0.58.
     step = norm(delta_s)
-    beta = _full_resolvent_norm(
+    beta, rows = _full_resolvent_norm_and_rows(
         U, M, lambda: _scaled_transpose(step_pure, x_sg, consts_sg, s, s_inv, lift, dtype))
     jac_change = norm(jac_secant_s)
-    if beta is None:
+    if beta is None or rows is None:
         # No transpose to take the full norm with (a node the map cannot be
         # reverse-differentiated through, in a group larger than the range
         # basis): a map whose Jacobian does not move (``jac_change == 0``,
@@ -1195,18 +1335,87 @@ def _gradient_error_bound_body(step_pure, probed, x_sg, consts_sg, d, rho,
         # certified bound.
         numerator = jnp.where(jac_change > 0, jnp.inf, jnp.zeros_like(jac_change))
     else:
-        numerator = beta * jac_change
+        # **The affine-covariant constant, as an operator.**  ``h`` was
+        # ``beta * ||(J(x_k + delta) - J(x_k)) delta|| / ||delta||``: the
+        # Jacobian's change along ``delta`` alone, which can be much smaller
+        # than its change in the directions ``delta`` hardly moves.  Then
+        # ``h`` passed where the fixed point lay outside the radius it
+        # certified: on a bilinear pair stopped two passes in, ``h = 0.37``
+        # with the fixed point 0.568 away against ``t* = 0.552``, and the
+        # bound read 0.81x the true gradient error, usable.  So the check
+        # also takes Deuflhard's affine-covariant Kantorovich constant,
+        # ``omega = ||(I - J(x_k))^{-1} (J(x_k + delta) - J(x_k))|| /
+        # ||delta||`` -- an operator norm, on the directions the Jacobian
+        # reads (its row space, which the full resolvent norm's reverse-mode
+        # products already span, ``k`` of them), with the resolvent applied
+        # exactly through the range basis -- and ``h`` is the larger of the
+        # two: 0.65 on that pair, no certified bound.  ``beta`` times the
+        # Jacobian's operator change would also have caught it, but reads
+        # 3.5-16x the directional value on a ring whose Jacobian depends on
+        # one field the Newton step barely moves, withdrawing bounds that
+        # hold; the resolvent in front measures the change where it lands.
+        # ``3 k`` more JVPs, both points through one batched evaluation and
+        # differenced after a barrier, so an affine map's change is exactly
+        # zero, as the extra row's is.
+        def jac_at(xx, z):
+            _, Jz = jax.jvp(lambda x_: _F_dispatch(step_pure, x_, consts_sg), (xx,),
+                            ((z * (s_inv * lift)).astype(x_dtype),))
+            return Jz
+
+        JR = jax.vmap(lambda xx: jax.vmap(lambda z: jac_at(xx, z))(rows.T))(points)
+        JR = jax.lax.optimization_barrier(JR).astype(dtype)
+        change = live * _framed_difference(JR[1], JR[0], s / lift)
+        op_change = jnp.linalg.norm(live * jax.vmap(resolve)(change), ord=2)
+        numerator = jnp.maximum(beta * jac_change, op_change * step)
     h = jnp.where(
         step > 0, numerator / jnp.where(step > 0, step, 1.0), 0.0,
     )
     certified = h < 0.5
-    root = jnp.sqrt(jnp.maximum(1.0 - 2.0 * h, 0.0))
-    t_star = jnp.where(h > 0, step * (1.0 - root) / jnp.where(h > 0, h, 1.0), step)
+    # ``t* - eta``, the most the Newton step can miss the fixed point by,
+    # in the form that does not cancel (see the helper).
+    root, miss = _kantorovich_root_and_miss(step, h)
+    t_star = step + miss
     stretch = jnp.where(distance > 0,
                         jnp.maximum(distance, t_star) / jnp.where(distance > 0, distance, 1.0),
                         1.0)
-    factor = stretch / jnp.where(certified, jnp.where(root > 0, root, 1.0), 1.0)
-    worst = jnp.where(certified, worst * factor, jnp.full_like(worst, jnp.inf))
+    safe_root = jnp.where(certified, jnp.where(root > 0, root, 1.0), 1.0)
+    factor = stretch / safe_root
+    # **The second-order term: the Newton step's miss.**  The secant is
+    # ``G`` across ``delta``, and ``x* - x_k = delta + e`` with ``||e|| <=
+    # t* - eta`` (Kantorovich), so the error's ``G(x*) - G(x_k)`` differs
+    # from the secant by ``G(x_k + delta + e) - G(x_k + delta)``, of size at
+    # most ``Lip(G) ||e||``.  Stretching the secant to ``t*`` covers only
+    # the part of ``e`` along ``delta``; the rest can point where ``G``
+    # changes faster.  So each probe adds that term, with ``Lip(G)`` read
+    # off its own secant (``||G(x_k + delta) - G(x_k)|| / eta``, along
+    # ``delta`` as ``L`` is) and the full resolvent norm at ``x*``
+    # (``beta / root``) applied to it: ``beta ||secant_i|| (t* - eta) /
+    # (eta ||t_i|| root)``, the largest over the responding probes added
+    # to the largest leading-order term.  Exactly zero where the Jacobian
+    # does not move (``h = 0``, ``miss = 0``), so an affine group's bound
+    # is the one it was, to its last bit or so (the extra operations can
+    # move how XLA fuses the rest: one ulp on one of 125 configurations
+    # measured).  With ``h`` along ``delta`` alone and without it, the
+    # bound read 0.986x the true gradient error, usable, on a bilinear
+    # pair stopped two passes in (``h = 0.19``): the leading-order term
+    # took the change of ``G`` along the Newton direction for its change
+    # along ``x* - x_k``.  With the affine-covariant ``h`` (0.22 there)
+    # the leading-order term alone reads 1.07x, and on 294 usable drawn
+    # bilinear pairs it never fell below the true error; this term adds up
+    # to 42% of it.  It stays because it is the part of Kantorovich's
+    # argument the stretch to ``t*`` does not cover, not because a
+    # measured case needed it.
+    if beta is None:
+        # ``h`` is 0 here or the bound is not certified: no miss to carry.
+        extra = jnp.zeros_like(worst)
+    else:
+        tangent_norm = norm(t_s)
+        took = jnp.logical_and(responds, miss > 0)
+        den = jnp.where(jnp.logical_and(took, tangent_norm > 0), step * tangent_norm, 1.0)
+        extra_i = jnp.where(took, beta * norm(secant_s) * miss / den, 0.0)
+        extra = jnp.max(extra_i)
+    worst = jnp.where(certified, worst * factor + extra / safe_root,
+                      jnp.full_like(worst, jnp.inf))
     return jnp.where(captured, worst, nan)
 
 
@@ -1695,6 +1904,15 @@ def _group_residual_dtype(state, node_names):
     ``PYTHONHASHSEED``, and ``run_scan`` raised a scan-carry dtype
     ``TypeError`` in some processes and not in others.  ``float32`` for
     a group with no floating field.
+
+    **At least float32.**  Every norm measures and accumulates in at
+    least float32 (``acceleration._widened``), so a bfloat16 or float16
+    group's residual is a float32 number, and it is held in one: kept in
+    the group's 16-bit dtype, a residual the norm computed finitely
+    overflowed again on the way into the loop's carry or the report slot
+    (float16 holds nothing above 65 504, and a mixed-norm ratio at
+    ``rtol=1e-6`` is about 977 per ulp), and the verdict compared a
+    float16 rounding of it.  A float32 or float64 group is unchanged.
     """
     dtypes = [
         jnp.asarray(leaf).dtype
@@ -1702,7 +1920,25 @@ def _group_residual_dtype(state, node_names):
         for leaf in state.get(nn, {}).values()
         if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
     ]
-    return jnp.result_type(*dtypes) if dtypes else jnp.dtype(jnp.float32)
+    if not dtypes:
+        return jnp.dtype(jnp.float32)
+    return jnp.promote_types(jnp.result_type(*dtypes), jnp.float32)
+
+
+def _state_measurable(state, node_names, norm):
+    """Whether *state* is one a coupling group's norm can measure a change at.
+
+    Every floating field of every member finite (:func:`_group_state_finite`),
+    and every field the norm reads within the range its dtype can measure
+    a change at: the group's norm of *state* against itself (``norm(s_new,
+    s_old)``, the group's ``_compute_residual``) is ``0.0`` there and ``inf``
+    on a field it cannot evaluate (``acceleration._scaled_change``).  A
+    verdict on the *state*, not on the residual: ``strict_convergence``
+    reads it to tell a diverged iteration from one whose estimate was
+    non-finite on a perfectly finite state.
+    """
+    return jnp.logical_and(_group_state_finite(state, node_names),
+                           jnp.isfinite(norm(state, state)))
 
 
 def _group_state_finite(state, node_names):
@@ -2105,6 +2341,12 @@ def _fixed_point_while(
     def body(carry):
         x, _x_meas, res_prev, res_prev2, _res_prev3, i, acc = carry
         x_raw, res = step_pure(x, *consts)
+        # The residual carry is at least float32 (the seed below); a step
+        # that hands back a narrower residual -- a 16-bit iterate's own
+        # dtype -- is widened, exactly.  The graph's own step already
+        # returns it at least float32 (``_group_residual_dtype``), so this
+        # is the identity there.
+        res = jnp.asarray(res).astype(acc_dt)
         if idx is None:
             x_new, acc = accelerate(x, x_raw, acc, i)
         else:
@@ -2123,8 +2365,10 @@ def _fixed_point_while(
     # guard is provable at every cap instead of being switched off at
     # the smallest one.  ``cond`` forces the first body regardless, so
     # this value only ever reaches the criterion as the ``r_{k-1}``
-    # of the first ratio.
-    seed = jnp.asarray(first_res, dtype)
+    # of the first ratio.  In the residual's dtype, at least float32
+    # (``_group_residual_dtype``), which ``step_pure`` returns it in:
+    # the iterate's own for a float32 or wider group.
+    seed = jnp.asarray(first_res, acc_dt)
     init = (x0, x0, seed, seed, seed, jnp.int32(0), acc0)
     (x_next, x_meas, final_res, res_prev, res_prev2, n_iters,
      acc) = jax.lax.while_loop(cond, body, init)
@@ -2151,7 +2395,7 @@ def _fixed_point_while(
     loop_res = final_res
 
     def _measure_at_cap(_x):
-        r = step_pure(_x, *consts)[1]
+        r = jnp.asarray(step_pure(_x, *consts)[1]).astype(acc_dt)   # as the body's
         return r, amplification(r, loop_res, res_prev)
 
     # ``final_amp`` has to describe the pair that ends on the state
@@ -2981,11 +3225,18 @@ def _strict_convergence_messages(group) -> tuple[str, str]:
     """``(non-finite, unconverged)``: what ``strict_convergence`` raises for *group*.
 
     Two checks with exclusive predicates, so the message names the cause.
-    A non-finite estimate is a non-finite *state*: since 0.4.0 the norm
-    reports ``inf`` for a field it cannot evaluate rather than dropping it
-    (MADD-ANO-019), and that is the one case where no amount of iteration
-    would help.  Shared by the in-graph checks and by ``run_adaptive*``,
-    which raise them only about a solve the step keeps.
+    The first fires on a non-finite *state*, decided from the state itself
+    (:func:`_state_measurable`): a field that is NaN or inf, or whose
+    magnitude is beyond the range its dtype can measure a change at --
+    since 0.4.0 the norm reports ``inf`` for such a field rather than
+    dropping it (MADD-ANO-019), and it is the one case where no amount of
+    iteration would help.  The second fires on every other unconverged
+    exit, a non-finite *estimate* on a finite state included: it was once
+    taken for the first, and a float16 group whose norm overflowed at the
+    default ``rtol`` on a finite state was told it had diverged and that no
+    larger cap would help, when the cap was the whole story.  Shared by
+    the in-graph checks and by ``run_adaptive*``, which raise them only
+    about a solve the step keeps.
     """
     head = (f"coupling group {sorted(group.nodes)} exited at "
             f"max_iterations={group.max_iterations} without converging")
@@ -3423,19 +3674,23 @@ def _run_coupled_block_impl(
 
     _strict_nonfinite_msg, _strict_unconverged_msg = _strict_convergence_messages(group)
 
-    def _strict_check(value, est):
+    def _strict_check(value, est, state_ok):
         """``strict_convergence`` on a solve whose error estimate is ``est``.
 
+        ``state_ok`` is the verdict on the returned state itself
+        (:func:`_state_measurable`), which decides which message an
+        unconverged exit raises (``_strict_convergence_messages``): the
+        estimate cannot, since a norm can overflow on a finite state.
         Raises in-graph about a solve the step keeps (``_gate_on_firing``),
         or, with ``strict_sink``, hands the two predicates to the caller.
         """
-        nonfinite = jnp.logical_not(jnp.isfinite(est))
+        # ``not (r <= t)``, not ``r > t``: see below.
+        unmet = jnp.logical_not(est <= conv_threshold_value)
+        nonfinite = jnp.logical_and(jnp.logical_not(state_ok), unmet)
         if strict_sink is not None:
             strict_sink.append((
                 nonfinite,
-                # ``not (r <= t)``, not ``r > t``: see below.
-                jnp.logical_and(jnp.isfinite(est),
-                                jnp.logical_not(est <= conv_threshold_value)),
+                jnp.logical_and(state_ok, unmet),
             ))
             return value
         # Two checks with exclusive predicates, so the message names the
@@ -3450,16 +3705,13 @@ def _run_coupled_block_impl(
             # ``not (r <= t)`` rather than ``r > t``: the two differ
             # exactly on NaN, which answers False to both, and a NaN
             # residual is the one case where the IFT gradient is certainly
-            # invalid.  That case is named by the check above; this
+            # invalid.  A non-finite state is named by the check above; this
             # predicate stays in the closed form and is made exclusive of
             # it so exactly one message fires.  ``coupling_diagnostics()``
             # already reads a non-finite residual as ``converged=False``;
             # the guard has to agree.
             value,
-            _gate_on_firing(jnp.logical_and(
-                jnp.isfinite(est),
-                jnp.logical_not(est <= conv_threshold_value),
-            )),
+            _gate_on_firing(jnp.logical_and(state_ok, unmet)),
             _strict_unconverged_msg,
             strict_mesh,
         )
@@ -3746,20 +3998,26 @@ def _run_coupled_block_impl(
     one_pass = one_pass_jacobi if use_jacobi else one_pass_gs
 
     def _compute_residual(s_new, s_old):
+        # In the group's residual dtype (``_group_residual_dtype``: the
+        # promotion of its floating fields, at least float32), which every
+        # loop carry and report slot holds it in.  The norms already return
+        # it wherever the fields they read carry the group's widest dtype;
+        # the cast is for the interface norm reading only narrower fields.
+        res_dtype = _group_residual_dtype(s_new, group_node_names)
         with jax.named_scope("coupling:residual"):
             if use_interface_norm:
                 return coupling_residual_interface(
                     s_new, s_old, interface_edges_in_order,
                     group.atol, group.rtol,
-                )
+                ).astype(res_dtype)
             if use_mixed_norm:
                 return coupling_residual_mixed(
                     s_new, s_old, group_node_names,
                     group.atol, group.rtol,
-                )
+                ).astype(res_dtype)
             return coupling_residual_l2(
                 s_new, s_old, group_node_names, group.atol,
-            )
+            ).astype(res_dtype)
 
     def _estimate(residual, prev_residual, prev2_residual, first=False):
         """``(estimated distance to the fixed point, amplification)``.
@@ -3917,10 +4175,11 @@ def _run_coupled_block_impl(
             )
             sub = {nn: state_after_first[nn] for nn in group_node_names}
             if group.strict_convergence and group.solver == "ift":
-                # A non-finite estimate is a non-finite state; see
+                # Which message, decided from the state; see
                 # ``_strict_check`` and the ift branch below.
                 single_est = estimated_error(single_r, single_amp, step_scale)
-                sub = _strict_check(sub, single_est)
+                sub = _strict_check(sub, single_est, _state_measurable(
+                    state_after_first, group_node_names, _compute_residual))
             r = {k: v for k, v in new_state_inner.items()}
             for nn in group_node_names:
                 r[nn] = sub[nn]
@@ -4270,6 +4529,88 @@ def _run_coupled_block_impl(
                     w[nn][fld] = jnp.broadcast_to(inv, val.shape).astype(val.dtype)
                 return _flatten_full({**s_star, **w})
 
+            # Under ``convergence_norm="interface"`` with a transform on an
+            # internal edge the norm reads each edge's *transformed* source
+            # value, so the report's spectral analysis is taken on that
+            # reading (``_interface_spectral_rate_at``); the raw source
+            # fields' weights above measured a different norm.  Static: a
+            # group without such an edge keeps the analysis it had.
+            transformed_reading = use_interface_norm and any(
+                e.transform is not None
+                and e.source_field in float_fields.get(e.source_node, ())
+                for e in interface_edges_in_order
+            )
+
+            def _reading_values(s_star):
+                """The interface norm's reading at ``s_star``: each internal
+                edge's source value after its transform, in the order and by
+                the rules ``coupling_residual_interface`` sums them."""
+                out = []
+                for e in interface_edges_in_order:
+                    v = s_star[e.source_node][e.source_field]
+                    if not jnp.issubdtype(jnp.asarray(v).dtype, jnp.floating):
+                        continue
+                    if e.transform is not None:
+                        v = e.transform(v)
+                    v = jnp.asarray(v)
+                    if v.size == 0:
+                        continue
+                    out.append(v)
+                return out
+
+            def _reading(x_full):
+                """``Phi(x)``: the reading as one flat vector."""
+                vals = _reading_values(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                return jnp.concatenate([jnp.ravel(v).astype(work) for v in vals])
+
+            def _reading_reference(x_full):
+                """At each entry of the reading, its edge's ``max|Phi_e(x)|``."""
+                vals = _reading_values(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                return jnp.concatenate([
+                    jnp.broadcast_to(_field_reference(v, v), (v.size,)).astype(work)
+                    for v in vals])
+
+            def _reading_weights(x_full, zero_field_weight=None):
+                """``(weights, scale)`` of the reading at ``x_full``, entry by entry.
+
+                ``_norm_weights`` and ``_weight_scale`` on the reading: each
+                edge's value over its own magnitude, read only above the dead
+                band (or, with ``zero_field_weight``, the spectrum's weights,
+                a dead-banded edge keeping its own magnitude's), times a
+                common power of two that keeps every reciprocal normal.
+                """
+                vals = _reading_values(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                top = jnp.array(False)
+                for v in vals:
+                    top = jnp.logical_or(
+                        top, _field_reference(v, v) * jnp.finfo(v.dtype).tiny > 1.0)
+                parts = []
+                for v in vals:
+                    ref = _field_reference(v, v)
+                    k = jnp.where(top, 16.0, 1.0).astype(v.dtype)
+                    if zero_field_weight is None:
+                        active = jnp.logical_and(ref > group.atol, ref > 0)
+                        inv = jnp.where(active, k / jnp.where(active, ref, 1.0), 0.0)
+                    else:
+                        scaled = ref >= jnp.finfo(v.dtype).tiny
+                        inv = jnp.where(scaled, k / jnp.where(scaled, ref, 1.0),
+                                        zero_field_weight * k)
+                    parts.append(jnp.broadcast_to(inv, (v.size,)).astype(v.dtype).astype(work))
+                return jnp.concatenate(parts), jnp.where(top, 16.0, 1.0).astype(work)
+
+            def _reading_resolution(x_full, scale, evaluations):
+                """The reading's float resolution per entry, each edge's value at
+                its own dtype's eps (``_residual_resolution``), in the reading's
+                weights' units, for a pass that rounds like ``evaluations``."""
+                vals = _reading_values(_embed(x_full))
+                work = _analysis_dtype(jnp.result_type(*[v.dtype for v in vals]))
+                eps = jnp.concatenate([
+                    jnp.full((v.size,), jnp.finfo(v.dtype).eps, work) for v in vals])
+                return (scale * evaluations.astype(work)) * _residual_resolution(eps)
+
             if accel_fields is not None:
                 # Positions of the accelerated (interface) fields in
                 # the full flat vector: flatten an index-valued state
@@ -4299,7 +4640,7 @@ def _run_coupled_block_impl(
 
             x_star_full, (n_iters, final_res, final_amp, vw) = _ift_solve(
                 step_pure, x0_full, consts, accel_init,
-                jnp.asarray(first_r, x0_full.dtype),
+                first_r,
                 conv_threshold_value,
                 int(max_iters),
                 group.acceleration,
@@ -4357,19 +4698,49 @@ def _run_coupled_block_impl(
                         for fld in float_fields[nn]}
                     for nn in group_node_names
                 }))
-                rho_spec, spec_resid, spec_amp, pair_ratio = _spectral_rate_at(
-                    step_pure, x_star_full, consts, weights, spec_weights,
-                    resolution=resolution, field_reference=_field_magnitudes,
-                )
+                if transformed_reading:
+                    # The gradient bound's triple, in the state's weights,
+                    # which its own norms are taken in.
+                    rho_spec, spec_resid, spec_amp = _spectral_rate_at(
+                        step_pure, x_star_full, consts, weights, spec_weights,
+                        resolution=resolution,
+                    )
+                else:
+                    rho_spec, spec_resid, spec_amp, pair_ratio = _spectral_rate_at(
+                        step_pure, x_star_full, consts, weights, spec_weights,
+                        resolution=resolution, field_reference=_field_magnitudes,
+                    )
                 # Its distance is the spectral bound (never below the Newton
                 # step); the resolvent is applied exactly to each probe's
                 # secant, a second difference of the adjoint's own matvec.
-                # ``11 + k + 5 n_p`` more JVPs, ``n_p`` the probes (see
+                # ``11 + 4 k + 5 n_p`` more JVPs, ``n_p`` the probes (see
                 # ``_gradient_error_bound_at``).
                 grad_bound = _gradient_error_bound_at(
                     step_pure, x_star_full, consts, weights,
                     rho_spec, spec_resid, spec_amp, resolution=resolution,
                 )
+                if transformed_reading:
+                    # The report reads ``gradient_bound_usable`` off the
+                    # reading's spectrum below; the gradient bound rests on
+                    # the state's, so it stands only where that one settled.
+                    grad_bound = jnp.where(
+                        spectral_rate_settled(rho_spec, spec_resid), grad_bound,
+                        jnp.full_like(grad_bound, jnp.nan))
+                    # The report's triple, on the interface norm's own
+                    # reading: each internal edge's transformed value over its
+                    # own magnitude -- the coordinates ``residual`` and the
+                    # floor are measured in (``_interface_spectral_rate_at``).
+                    x_sg = jax.lax.stop_gradient(x_star_full)
+                    read_w, read_scale = _reading_weights(x_sg)
+                    read_spec_w, _ = _reading_weights(
+                        x_sg,
+                        zero_field_weight=(1.0 / float(group.atol)) if group.atol > 0 else 1.0)
+                    rho_spec, spec_resid, spec_amp, pair_ratio = _interface_spectral_rate_at(
+                        step_pure, x_star_full, consts, spec_weights, _reading,
+                        read_w, read_spec_w,
+                        _reading_resolution(x_sg, read_scale, pass_evals),
+                        _reading_reference,
+                    )
                 # The factor the report's bound applies, in the returned
                 # state's weights: the gradient bound above takes its own
                 # residual in those weights already, so only the stored
@@ -4379,15 +4750,17 @@ def _run_coupled_block_impl(
                 rho_spec = jnp.full((), jnp.nan, x0_full.dtype)
                 spec_resid = spec_amp = rho_spec
             if group.strict_convergence:
-                # A non-finite estimate is a non-finite *state*.  Since
+                # A non-finite *state* is the diverged iteration: since
                 # 0.4.0 every norm reports ``inf`` for a field it cannot
                 # evaluate -- a NaN or inf entry, or a magnitude beyond
                 # what its dtype can measure a change at -- instead of
-                # dropping it from the dead band (MADD-ANO-019), so that
-                # is exactly the diverged iteration, and no larger cap
-                # would help: ``_strict_check`` names it first.
+                # dropping it from the dead band (MADD-ANO-019), and no
+                # larger cap would help: ``_strict_check`` names it first.
+                # Decided from the state (``_state_measurable``), not the
+                # estimate, which a norm can also overflow on a finite one.
                 final_est = estimated_error(final_res, final_amp, step_scale)
-                x_star_full = _strict_check(x_star_full, final_est)
+                x_star_full = _strict_check(x_star_full, final_est, _state_measurable(
+                    _embed(x_star_full), group_node_names, _compute_residual))
             # ``_embed`` restores the non-floating fields from the first
             # pass; they are recomputed at the returned floating state
             # (``_with_nonfloat_fields_at``, the rule both solvers share).
@@ -7029,9 +7402,34 @@ class GraphManager:
     def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
         """Boundary inputs ``node_name`` would receive from the *current*
         state: every incoming edge (mapping, transform, additive) plus the
-        zero defaults of its external inputs.  A debugging / inspection
+        zero defaults of its external inputs, which replace an edge into
+        the same field as they do in the step.  A debugging / inspection
         helper; the compiled step resolves edges itself."""
         self._recover_from_escaped_tracers()
+        return self._boundary_inputs_from(self._state, node_name, params)
+
+    def _boundary_inputs_from(self, state, node_name: str, params: Optional[dict] = None,
+                              *, fluxes: Optional[dict] = None) -> dict:
+        """:meth:`resolve_boundary_inputs` of ``node_name`` from *state*
+        rather than from the graph's own.
+
+        The one place outside the compiled step that turns edges into a
+        node's boundary inputs: each incoming edge through
+        :func:`_apply_edge` (the mapping, then the transform, with the
+        weights in ``params["mappings"]``), additive edges summed, and
+        then the zero default of each external input -- which, as in the
+        step, *replaces* whatever edges delivered to the same field.
+        Every reader of the edges that is not the step --
+        :meth:`resolve_boundary_inputs`, the conservation diagnostic, the
+        surrogate dataset generator -- goes through it, so none of them
+        can apply an edge differently from the others.  It is traceable
+        in *state* (``jax.vmap`` over a state history gives the inputs at
+        every sample).
+
+        An edge whose source field is not in *state* reads a flux output:
+        it is looked up in ``fluxes[source_node]`` when *fluxes* is given,
+        and is a ``KeyError`` otherwise.
+        """
         if node_name not in self._nodes:
             raise KeyError(f"unknown node {node_name!r}")
         p = self._params_or_default(params)
@@ -7040,14 +7438,22 @@ class GraphManager:
         for edge in self._edges:
             if edge.target_node != node_name:
                 continue
-            value = self._state[edge.source_node][edge.source_field]
+            src_fields = state[edge.source_node]
+            if edge.source_field not in src_fields and fluxes is not None \
+                    and edge.source_field in fluxes.get(edge.source_node, {}):
+                value = fluxes[edge.source_node][edge.source_field]
+            else:
+                value = src_fields[edge.source_field]
             value = _apply_edge(edge, value, resolved)
             if edge.additive and edge.target_field in out:
                 out[edge.target_field] = out[edge.target_field] + value
             else:
                 out[edge.target_field] = value
         for ei in self._external_inputs:
-            if ei.target_node == node_name and ei.target_field not in out:
+            # No ``not in out`` guard: the step writes an external input
+            # over the edges into its field (``_resolve_and_update_node``),
+            # and an omitted external input is zeros.
+            if ei.target_node == node_name:
                 out[ei.target_field] = jnp.zeros(ei.shape, dtype=ei.dtype)
         return out
 
@@ -9052,8 +9458,12 @@ class GraphManager:
               0.2 it reads 0.999.  Exact (non-zero eigenvalues, to
               float32) for a group whose Jacobian has rank at most
               eight -- rank is at most the number of boundary scalars
-              crossing the group's edges -- and an estimate from below
-              otherwise, which ``"spectral_usable"`` reports.  For a
+              crossing the group's edges -- and an estimate otherwise,
+              which ``"spectral_usable"`` reports: from below for a
+              normal ``dF/dx`` (in the norm's weights), from either side
+              for a non-normal one, whose Ritz values can lie outside
+              the spectrum's convex hull (1.17 on a Jacobi ring of nine
+              relays whose every eigenvalue has modulus 0.95).  For a
               bfloat16 or float16 group the analysis and the value
               reported are float32, but the Jacobian-vector products are
               the map's own, rounded to the group's dtype, so the radius
@@ -9145,7 +9555,20 @@ class GraphManager:
               (MADD-ANO-146) -- so the dead band's excluded
               fields are outside what it bounds and the norm's scale
               drifts with the iterate exactly as it does for
-              ``"residual"``; and its float floor is a model of the
+              ``"residual"``.  Under ``convergence_norm="interface"``
+              the "fields" are what that norm reads: each internal
+              edge's source value *after* the edge's transform, over
+              its own magnitude, and the spectrum is taken on that
+              reading (the Jacobian of the reading's own iteration,
+              ``Phi' G'`` for ``F = G o Phi``, applied through state
+              tangents, so no transform is inverted) -- taken on the
+              raw source fields instead, the bound multiplied a residual
+              in one set of coordinates by a resolvent in another and
+              read 0.0014-0.098x the true distance, usable, with an
+              offset (a unit conversion) or ``"extract_last"`` on an
+              edge.  A transform that is not affine makes the map
+              non-linear in the reading, with the asymptotic reading
+              above.  And its float floor is a model of the
               map's rounding (see
               :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`),
               which a node that cancels catastrophically inside its own
@@ -9164,7 +9587,8 @@ class GraphManager:
               ``"rho_spectral"``), where the bound is ``inf``, for
               a group with more independent interface scalars than the
               eight Krylov steps resolve -- there ``"rho_spectral"``
-              is from below and the bound carries only the margin --
+              is an estimate (from below only for a normal ``dF/dx``)
+              and the bound carries only the margin --
               where the residual never entered the Krylov space
               (its outside fraction is reported as unresolved), and
               where the residual is at its float floor
@@ -9218,16 +9642,22 @@ class GraphManager:
               of the tangent the adjoint returns for that probe, and
               reported for the worst probe.  Read it as
               ``|g_k - g*| <= bound * |g_k|`` for the gradient with
-              respect to one scalar constant.  Measured (jaxlib 0.11.0,
+              respect to one scalar constant, its norms the group's over
+              the state's own fields -- under
+              ``convergence_norm="interface"`` with a transform on an
+              internal edge, the source fields the edges read, before the
+              transform, not the reading ``"spectral_error_bound"`` is
+              taken in.  Measured (jaxlib 0.11.0,
               float32) at every cap of a ``max_iterations`` sweep that
               stops the forward early by construction (caps 3-8): never
               below the true error on a concave and a convex map,
-              1.1-2.1x it for the parameter whose error is the larger
-              and up to 10.5x for the other, which reads its gap to the
-              worst probe; 1.35x for a parameter multiplying the state
-              of an affine map; 1.19-1.70x for a spring pair's
+              1.1-3.1x it for the parameter whose error is the larger
+              and up to 12.6x for the other, which reads its gap to the
+              worst probe (1.1-2.1x and 10.5x before 0.4.0's round-6
+              Kantorovich terms); 1.35x for a parameter multiplying the
+              state of an affine map; 1.19-1.70x for a spring pair's
               stiffnesses and masses (``k = 6000``, ``c = 60``, ``dt =
-              0.01``, caps 2-6); 25x on a hidden slow mode.  The distance carries the
+              0.01``, caps 2-6); 26x on a hidden slow mode.  The distance carries the
               residual's float resolution, as ``"spectral_error_bound"``
               does, so a stalled iterate no longer reads ``0.0`` (it did,
               against true errors of 1.5-3% at ``F'(x*) = 0.999``); where
@@ -9235,19 +9665,33 @@ class GraphManager:
               direction, the curvature is taken along a floor-sized
               vector's resolvent image instead of the Newton correction.
               And it carries a Newton-Kantorovich check on how far the
-              linearisation at ``x_k`` can be trusted at ``x*``: with
-              ``h = amp * L * ||delta||``, ``L`` the Jacobian's change
-              along the Newton correction ``delta`` per unit length
-              squared (one more pair of Jacobian-vector products), the
-              bound is multiplied by ``1 / sqrt(1 - 2h)`` (the resolvent
-              at the fixed point) with its distance at least
-              Kantorovich's radius, and is ``inf`` -- unusable -- at
+              linearisation at ``x_k`` can be trusted at ``x*``: ``h`` is
+              the larger of ``beta * ||(J(x_k + delta) - J(x_k)) delta||
+              / ||delta||`` (``beta`` the full resolvent norm at ``x_k``,
+              the Jacobian's change along the Newton correction
+              ``delta``) and Deuflhard's affine-covariant ``||(I -
+              J(x_k))^{-1} (J(x_k + delta) - J(x_k))||``, an operator
+              norm on the directions the Jacobian reads (``3 k`` more
+              Jacobian-vector products); the bound is multiplied by
+              ``1 / sqrt(1 - 2h)`` (the resolvent at the fixed point),
+              its distance is at least Kantorovich's radius ``t*``, each
+              probe adds the Newton step's second-order miss (``beta *
+              ||secant|| * (t* - ||delta||) / (||delta|| * ||t_k|| *
+              sqrt(1 - 2h))``: the change of its linearisation over the
+              part of ``x* - x_k`` the Newton step misses, at the rate
+              its own secant shows), and it is ``inf`` -- unusable -- at
               ``h >= 1/2``, where nothing measured at ``x_k`` bounds the
               resolvent at ``x*``.  Uncorrected it read 0.20-0.96x the
               true error, flag ``True``, at ``F'(x*) = 0.99`` with the
               forward 0.65-4.5% short; ``h`` there is 0.48-0.58, so two
-              of those four now read ``inf`` and two hold at 3.0-3.5x.
-              ``h`` is exactly zero on an affine map.  **Only
+              of those four now read ``inf`` and two hold at 3.3-4.0x.
+              With ``h`` along ``delta`` alone and no second-order term
+              it read 0.986x the true error at ``max_iterations=2``
+              (``h = 0.19``) and 0.81x on a pair whose ``h`` read 0.37
+              along ``delta`` and is 0.65 in the affine-covariant form,
+              both on bilinear pairs far from their fixed points, flag
+              ``True``.  ``h`` is exactly zero on an affine map, and so
+              is every correction here.  **Only
               under ``solver="ift"`` with ``diagnostics=True``**; NaN
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1``; ``inf``
@@ -9256,7 +9700,7 @@ class GraphManager:
               tangent through the group is not finite (that constant
               has no gradient to bound) and where the returned state is
               not finite.  Costs
-              ``11 + k + 5 n_p`` Jacobian-vector products per group per
+              ``11 + 4 k + 5 n_p`` Jacobian-vector products per group per
               step beside the spectral bound's eight (plus one
               linearisation and ``k`` reverse-mode products where the
               state has more than ``k`` entries), ``k <= 8`` and ``n_p``
@@ -9345,9 +9789,18 @@ class GraphManager:
               nothing was computed, where the bound is ``inf`` or NaN
               (including a group whose Jacobian range the eight-vector
               basis did not capture, and one that fails the
-              Kantorovich check, ``h >= 1/2``).  Like the other flags
-              it reports what the code checked, and not the linearity
-              or probe conditions above.
+              Kantorovich check, ``h >= 1/2``).  What it certifies is
+              that check and the bound built on it: the Kantorovich
+              radius and resolvent with the Jacobian's change across the
+              Newton step taken as an operator (affine-covariantly), and
+              the Newton step's miss carried at the rate the probes' own
+              secants show.  Both rates are measured across the step, so the
+              flag rests on the map changing no faster between ``x_k``
+              and ``x*`` than across that step -- exact for an affine
+              map, and the condition a group far from its fixed point
+              (a large ``h``, a large distance) is likeliest to break.
+              Like the other flags it reports what the code checked, and
+              not the linearity or probe conditions above.
             - ``"precision_limited"`` : bool — the residual is at or
               below its own float resolution (the floor
               ``"spectral_error_bound"`` adds): the last pass moved no

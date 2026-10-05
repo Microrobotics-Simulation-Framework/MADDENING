@@ -12022,7 +12022,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null
-  - anomaly_id: "MADD-ANO-174"
+  - anomaly_id: "MADD-ANO-178"
     title: "A PUT /graph/params that wrote a leaf back to the node's own value skipped the combined checks: after a fit or a checkpoint load, a 200 left a rod past its Fourier limit and a save that did not reload"
     description: >
       The params route counted a leaf as changed when it differed from the
@@ -12076,7 +12076,7 @@ anomalies:
       - "tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_two_key_write_back_after_a_load_is_asked_with_the_loaded_values"
       - "tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_write_back_the_live_values_take_is_still_a_200_whose_save_reloads"
     github_issue: null
-  - anomaly_id: "MADD-ANO-175"
+  - anomaly_id: "MADD-ANO-179"
     title: "X-Forwarded-For let a web page past a loopback-bound API's DNS-rebinding defence and its peer backstop: uvicorn's default proxy headers made the peer any string a request named"
     description: >
       The loopback bind's Host allowlist (MADD-ANO-076's fix) was asked only
@@ -12136,7 +12136,7 @@ anomalies:
       - "tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_starlettes_own_in_process_client_must_present_the_token"
       - "tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_every_launch_path_the_library_ships_passes_proxy_headers"
     github_issue: null
-  - anomaly_id: "MADD-ANO-176"
+  - anomaly_id: "MADD-ANO-180"
     title: "PUT /graph/state wrote every field as float32 whatever its dtype, and parsed text and booleans as numbers"
     description: >
       From v0.1.0 to v0.3.1 the state route converted every value with
@@ -12179,7 +12179,7 @@ anomalies:
       - "tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_takes_integral_values_in_its_range"
       - "tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_a_float_field_refuses_text_booleans_and_what_float_cannot_hold"
     github_issue: null
-  - anomaly_id: "MADD-ANO-177"
+  - anomaly_id: "MADD-ANO-181"
     title: "A node whose timestep was zero, negative or non-finite was added: it stepped not at all or backwards with every reply a 200, and NaN broke every later step"
     description: >
       Neither `POST /graph/nodes` nor `GraphManager.add_node` checked a
@@ -12216,7 +12216,7 @@ anomalies:
       - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused"
       - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_add_node_refuses_a_timestep_that_is_not_a_finite_positive_number"
     github_issue: null
-  - anomaly_id: "MADD-ANO-178"
+  - anomaly_id: "MADD-ANO-182"
     title: "A node named _meta (or _params, _params_mappings) was added and broke every later step and save"
     description: >
       `GraphManager.add_node` refused the names that delimit checkpoint keys,
@@ -12250,7 +12250,7 @@ anomalies:
       - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_reserved_state_key_is_refused_as_a_node_name"
       - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_lookalike_of_a_reserved_key_is_taken"
     github_issue: null
-  - anomaly_id: "MADD-ANO-179"
+  - anomaly_id: "MADD-ANO-183"
     title: "POST /sim/start on a graph with no nodes answered 'started' and its runner thread died on its first frame"
     description: >
       The route started a runner on any graph; on one with no nodes (a
@@ -12279,7 +12279,7 @@ anomalies:
     verification:
       - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_starting_the_runner_on_a_graph_with_no_nodes_is_refused"
     github_issue: null
-  - anomaly_id: "MADD-ANO-180"
+  - anomaly_id: "MADD-ANO-184"
     title: "A request refused by its model for a NaN or infinite value answered 500"
     description: >
       FastAPI answers a request its model refuses with a 422 that echoes the
@@ -12309,7 +12309,7 @@ anomalies:
     verification:
       - "tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused"
     github_issue: null
-  - anomaly_id: "MADD-ANO-181"
+  - anomaly_id: "MADD-ANO-185"
     title: "A checkpoint load decompressed every archive member before it checked any name or shape: a small archive cost as much memory as its members declared"
     description: >
       `GraphManager.load_state` (and so `POST /checkpoint/load` and the cloud

@@ -254,6 +254,15 @@ hands out, so the FMU export refuses a graph left dirty this way, asking
 for `compile()` first; until 0.4.0's fix it ran the old model.
 `node.params` counts its writes, so
 writing a constructor value back is a write (it reverts a calibration).
+Assigning it -- `node.params = {**node.params, "k": v}` -- stores the
+items in a fresh counting mapping, so writes made through `node.params`
+afterwards count as well (a reference to the dict you assigned is not
+`node.params`: write through `node.params`); and an element written in
+place into a list, a NumPy array or a nested dict
+(`node.params["rates"][0] = 5.0`) is found by comparing each such value
+with a copy taken at the last sync, which costs a copy and a comparison
+of those values per sync.  Until 0.4.0's fix both were lost to
+`gm.params`, every run, `compile()` and `to_dict()`.
 A `gm.params` write reads `gm.params` first, which takes in any pending
 node write, so the two are always ordered and the later wins; the one
 exception is a `gm.params` leaf written through a reference held across
@@ -382,8 +391,10 @@ than `cond` for that verdict: `cond` is `eigvals[-1] / eigvals[0]` and in
 float32 rescaling the residual (by `noise_std`, say) can round the
 smallest eigenvalue to zero and turn a large `cond` into `inf`, whereas
 `rank`'s threshold scales with the matrix (until the matrix itself leaves
-float32's normal range, which `fim` reports with a
-`PrecisionLimitWarning`).  Freeze one of them, then fit:
+float32's normal range -- or flushes to exactly zero from a Jacobian that
+is not, at `|J|` below about `1e-19` -- which `fim` reports with a
+`PrecisionLimitWarning`, and `fim_core` with `precision_limited`).
+Freeze one of them, then fit:
 
 `scale="relative"` — the default, and the coordinates the eigenvectors
 above are in — multiplies each Jacobian column by the parameter's value,
@@ -544,11 +555,29 @@ units nor on any parameter's (a floor shared across columns once crushed
 the step of a parameter measured in small units, which then read as
 converged), and with the identifiability guard below making its tests in
 coordinates no change of units moves, neither does the answer `fit_lm`
-returns with its defaults.  And neither test fires unless the undamped Gauss-Newton step
+returns with its defaults.  That holds across the whole float range, for
+any residual and any parameter whose residual entries (its own rounding at
+the optimum included) and Jacobian entries are normal numbers of the
+working precision -- in float32 a residual of `1e-30` or `1e30`, a
+parameter whose natural scale is `1e-23` (a 10 nm particle's volume in
+cubic metres) or `1e23` -- because the loss is computed on the residual
+framed by a power of two and the solve on Jacobian columns framed the
+same way, exactly; until 0.4.0's fix `r * r`, `JᵀJ` and `Jᵀr` flushed or
+overflowed there and `fit_lm` reported `converged=True` at a wrong point or
+at its start.  It never reports `converged` on a solve whose columns it
+could not represent, or on a loss of `0.0` from a residual that is not
+zero; it warns instead.  And neither test fires unless the undamped Gauss-Newton step
 from the iterate -- least squares on the equilibrated Jacobian, with no
 damping and no floor -- would also move every parameter by no more than
 `step_tol`, or, at the floor, would not lower the loss: a shrunken step
-cannot read as stationary.
+cannot read as stationary.  When that step would still lower the loss
+there it is taken as the next iterate, so the verdict at the floor does
+not depend on which units the damped candidates' rounding happened to
+favour.  An on-bound gradient whose own Newton step is within `step_tol`
+is the residual's rounding and counts as zero, so a truth exactly on a
+bound converges on either bound.  A float32 constant in an x64 graph is
+optimised on float32's grid, as the model sees it, so it converges in as
+few iterations as a float64 one.
 
 Every fitter keeps each optimiser coordinate where `constrain` is its
 transform and not a clamp: a `transform=None` leaf inside its bounds,
@@ -571,7 +600,13 @@ mask — frozen, or trainable but not selected — comes back bit-identical
 to the value passed in, so comparing a fit's input and output leaf by
 leaf says exactly which constants it touched.  Gradients through the
 whole graph come from a single `jax.value_and_grad`; a non-finite
-gradient raises rather than continuing.
+gradient raises rather than continuing.  A loss written in units so small
+that its gradient's products flush (`0.5 * ||s * r||²` with `s = 1e-19`)
+has its gradients taken with a power-of-two cotangent that lifts them out
+of the flush, exactly, so `fit` and `fit_multiple_shooting` move as they
+would at scale one; the loss's own value is yours and can still read
+`0.0` there, which they say once with a `RuntimeWarning` and which then
+does not meet `tol`.
 
 `fit` also keeps out of the directions the data cannot determine.  Every
 gradient of a least-squares loss is `Jᵀr`, so a direction `v` with `Jv = 0`

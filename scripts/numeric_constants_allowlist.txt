@@ -60,5 +60,5 @@ src/maddening/core/solver_utils.py ift_linear_solve 1e-6  # dimensionless: rtol,
 
 # --- system identification -----------------------------------------------------
 src/maddening/sysid.py fit 1e-8  # dimensionless: Adam's eps, relative to the run's first gradient (_adam_frame)
-src/maddening/sysid.py fit_lm 1e-12  # dimensionless: a floor on the Marquardt damping lambda, which multiplies diag(J^T J)
+src/maddening/sysid.py fit_lm 1e-12*2  # dimensionless: a floor on the Marquardt damping lambda, which multiplies diag(J^T J) -- after an accepted damped step and after an accepted Gauss-Newton step at the floor
 src/maddening/sysid.py fit_multiple_shooting 1e-8  # dimensionless: Adam's eps, relative to each block's first gradient (_adam_frame)

@@ -541,9 +541,10 @@ def test_every_frozen_geometry_steps_as_its_static_mapping(c):
     assert_frozen_equals_static(c)
 
 
-#: ``(anchor, mode)`` of a topology's mapped edges, in rotation.
-_COMBINATIONS = (("source", "consistent"), ("target", "conservative"),
-                 ("target", "consistent"), ("source", "conservative"))
+#: ``(anchor, mode)`` of a topology's mapped edges, in rotation.  Two places
+#: on, both the anchor and the mode are the other one.
+_COMBINATIONS = (("source", "consistent"), ("target", "consistent"),
+                 ("target", "conservative"), ("source", "conservative"))
 
 
 def frozen_geometry(topo, variant: int = 0):
@@ -576,25 +577,37 @@ def _frozen_values(topo, knobs, geometry, domain) -> list:
                 for seed, rho in topo_tests._DRAWS]                         # noqa: SLF001
 
 
-def _assert_points_never_moved(starts: list, traj, where: str) -> None:
-    """Every geometry field holds, after every step, the bits one of the
-    drawn *starts* gave it.  (One of them, not a particular one: the
-    harness's batched runs start every member of the batch from the last
-    draw's state.)"""
-    for node, field in starts[0]["geometry"]:
-        first = np.asarray(traj[0].state[node][field])
-        candidates = [v["geometry"][(node, field)]["start"] for v in starts]
-        assert any(first.dtype == c.dtype and first.tobytes() == c.tobytes()
-                   for c in candidates), f"{where}: {node}.{field} is not where it started"
-        for step in traj:
-            assert np.asarray(step.state[node][field]).tobytes() == first.tobytes(), (
+def _assert_points_never_moved(values, traj, where: str) -> None:
+    """Every geometry field holds, after every step, the bits it started with."""
+    for step in traj:
+        for (node, field), g in values["geometry"].items():
+            got = np.asarray(step.state[node][field])
+            assert got.dtype == g["start"].dtype and got.tobytes() == g["start"].tobytes(), (
                 f"{where}: {node}.{field} moved")
 
 
 def _assert_frozen_premises(topo, geometry, name: str) -> None:
-    assert len(geometry.anchor) == sum(e.mapped for e in topo.edges) >= 2, name
-    assert {geometry.mode(i) for i in geometry.anchor} == {"consistent", "conservative"}
-    assert set(geometry.anchor.values()) == {"source", "target"}
+    assert len(geometry.anchor) == sum(e.mapped for e in topo.edges) >= 1, name
+
+
+def test_the_two_rotations_give_every_mapped_edge_both_anchors_and_both_modes():
+    """The premise of the frozen sweeps: over rotations 0 and 2 each mapped
+    edge of each named structure is anchored at its source and at its
+    target, and is a gather once and a scatter once; and the per-push
+    structure alone already has all four combinations."""
+    for name, topo in NAMED.items():
+        seen: dict = {}
+        for variant in (0, 2):
+            geometry = frozen_geometry(topo, variant)
+            for i, anchor in geometry.anchor.items():
+                seen.setdefault(i, set()).add((anchor, geometry.mode(i)))
+        assert seen, name
+        for i, combos in seen.items():
+            assert {a for a, _m in combos} == {"source", "target"}, (name, i, combos)
+            assert {m for _a, m in combos} == {"consistent", "conservative"}, (name, i, combos)
+    ring = NAMED["chain-into-ring"]
+    assert {(a, frozen_geometry(ring, v).mode(i)) for v in (0, 2)
+            for i, a in frozen_geometry(ring, v).anchor.items()} == set(_COMBINATIONS)
 
 
 _NAMED_PARAMS = [n if n == "chain-into-ring" else pytest.param(n, marks=pytest.mark.slow)
@@ -623,7 +636,7 @@ def test_a_named_topology_with_frozen_geometry_edges_reproduces_the_monolithic_r
             model.check_step(step.pre, step.state, step.reports,
                              thresholds=ct.thresholds_of(knobs), where=where)
             ct.check_leaves(built.topo, step.state, k, dividers=model.divider, where=where)
-        _assert_points_never_moved([values], traj, f"{name} variant {variant}")
+        _assert_points_never_moved(values, traj, f"{name} variant {variant}")
 
 
 def _assert_close_runs(domain: str, knobs, a, b, what: str) -> None:
@@ -645,10 +658,63 @@ def _assert_close_runs(domain: str, knobs, a, b, what: str) -> None:
             assert gap <= allowed, (
                 f"{what} step {k}: {node}.x through the frozen geometry is {gap:.3e} from "
                 f"the static mapping's ({allowed:.3e} allowed)")
+        # (The verdicts are not compared: these groups stop at a tolerance
+        # near their dtype's floor, where one program reaches exact
+        # stationarity and the other a two-state cycle an ulp wide.)
         assert set(sa.reports) == set(sb.reports)
-        for gi in sa.reports:
-            assert bool(sa.reports[gi]["converged"]) == bool(sb.reports[gi]["converged"]) or (
-                dtype.itemsize == 2), (what, k, gi, sa.reports[gi], sb.reports[gi])
+
+
+_VMAPPED: dict = {}
+
+
+def _batched_runs(built, values_list, steps: int) -> list:
+    """One trajectory per draw, all through one ``jax.vmap`` of the step, each
+    member from its own draw's state and parameters.
+
+    (``set_initial`` rewrites the graph's state dictionary in place, so each
+    draw's state is copied out before the next is written: a frozen
+    geometry and the static matrix it is compared with must come from the
+    same draw.)
+    """
+    gm = built.gm
+    if id(gm) not in _VMAPPED:
+        _VMAPPED[id(gm)] = (gm, jax.jit(jax.vmap(gm._raw_step_fn,          # noqa: SLF001
+                                                 in_axes=(0, None, 0))))
+    step = _VMAPPED[id(gm)][1]
+    states, params = [], []
+    for v in values_list:
+        ct.set_initial(built, v)
+        states.append({name: dict(fields) for name, fields in gm._state.items()})  # noqa: SLF001
+        params.append(ct.params_for(built, v))
+    state = jax.tree.map(lambda *xs: jnp.stack(xs), *states)
+    batched_params = jax.tree.map(lambda *xs: jnp.stack(xs), *params)
+    ext = gm._default_external_inputs()                                     # noqa: SLF001
+    out = [[] for _ in values_list]
+    pres = [None] * len(values_list)
+    saved = gm._state                                                       # noqa: SLF001
+    try:
+        for _ in range(steps):
+            state = step(state, ext, batched_params)
+            for i in range(len(values_list)):
+                gm._state = jax.tree.map(lambda x, i=i: x[i], state)        # noqa: SLF001
+                snap = ct._snapshot(gm, {})                                 # noqa: SLF001
+                diag = gm.coupling_diagnostics()
+                reports = {gi: dict(diag[built.topo.group_key(gi)])
+                           for gi in range(len(built.topo.groups))
+                           if built.topo.group_key(gi) in diag}
+                out[i].append(ct.Step(pres[i], snap, reports, {}))
+                pres[i] = snap
+    finally:
+        gm._state = saved                                                   # noqa: SLF001
+    return out
+
+
+def _domain_runs(domain: str, built, values: list) -> list:
+    if domain != "vmap":
+        return topo_tests._runs_in(domain, built, values)                   # noqa: SLF001
+    runs = _batched_runs(built, values, topo_tests._domain_steps(domain))   # noqa: SLF001
+    topo_tests._assert_in_domain(domain, built, runs)                       # noqa: SLF001
+    return runs
 
 
 _DOMAIN_PARAMS = [(d, "chain-into-ring", 0) for d in topo_tests.DOMAINS] + [
@@ -670,12 +736,18 @@ def test_a_frozen_geometry_equals_the_static_mapping_in_every_domain(domain, nam
     _t, static_knobs, static = topo_tests._built_in(domain, name, 0)        # noqa: SLF001
     assert static_knobs == knobs
     values = _frozen_values(topo, knobs, geometry, domain)
-    runs = topo_tests._runs_in(domain, built, values)                       # noqa: SLF001
-    twins = topo_tests._runs_in(domain, static, values)                     # noqa: SLF001
+    if len(geometry.anchor) >= 2:
+        # (A structure's one mapped edge may gather from, or scatter onto, a
+        # grid of a single point, whose matrix is all ones wherever the
+        # points are; with two edges or more some matrix depends on them.)
+        assert any(np.any((v["H"][i] > 0) & (v["H"][i] < 1)) for v in values
+                   for i in geometry.anchor), "premise: a matrix that depends on its points"
+    runs = _domain_runs(domain, built, values)
+    twins = _domain_runs(domain, static, values)
     for draw, (v, a, b) in enumerate(zip(values, runs, twins)):
         what = f"{domain}/{name} variant {variant} draw {draw}"
         _assert_close_runs(domain, knobs, a, b, what)
-        _assert_points_never_moved(values, a, what)
+        _assert_points_never_moved(v, a, what)
         want = ct.geometry_dtype(topo_tests._domain_dtype(domain))          # noqa: SLF001
         assert all(np.asarray(a[-1].state[n][f]).dtype == want for n, f in v["geometry"])
         if domain in topo_tests._REFERENCE_DOMAINS:                         # noqa: SLF001

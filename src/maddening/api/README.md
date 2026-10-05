@@ -18,7 +18,7 @@ app = server.create_app()
 Run with uvicorn:
 
 ```bash
-uvicorn module:app --host 127.0.0.1 --port 8000
+uvicorn module:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 # Interactive docs at http://localhost:8000/docs
 ```
 
@@ -42,7 +42,26 @@ uvicorn.run(server.create_app(), host=host, port=port)
 
 A request that arrives from a routable IP is challenged even when the
 server was told the bind is loopback.  That backstop is why forgetting
-`bind_host` costs you a 401, not an open API.
+`bind_host` costs you a 401, not an open API.  On a loopback bind only a
+**direct connection from a loopback address** is served without the
+token: a peer that is not a loopback IP literal (Starlette's in-process
+`TestClient` reports `"testclient"`, a Unix socket reports none) and any
+request carrying `X-Forwarded-For` or `Forwarded` must present it.  The
+peer is `scope["client"]` as the ASGI server reports it, and under
+uvicorn's `proxy_headers` (on by default, trusting `127.0.0.1`) that is a
+trusted proxy's `X-Forwarded-For` value -- which any request arriving over
+loopback, a DNS-rebinding page's included, can set.  **Never configure
+loopback as a trusted proxy for a loopback-bound server**; the library's
+own launch paths pass `proxy_headers=False`.  A reverse proxy in front of a
+loopback bind needs its name in `allowed_hosts` and its clients need the
+token.  In-process, present `server.auth.token`, or build the client as a
+loopback one: `TestClient(app, base_url="http://127.0.0.1",
+client=("127.0.0.1", 50000))`.
+
+On a loopback bind a request without a valid token is also asked its
+`Host`: only `localhost`, a `127.0.0.0/8` or `::1` literal and the names
+in `allowed_hosts` are served (403 otherwise), whatever its peer.  A valid
+token is served under any `Host`.
 
 ### The token
 
@@ -139,7 +158,7 @@ not loopback; `/healthz` and `/viz/*` never do.
 |--------|------|-------------|
 | GET | `/graph/state` | Get state of all nodes, `_meta` included |
 | GET | `/graph/state/{node_name}` | Get state of one node |
-| PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`). A value the field's dtype cannot hold (`1e39` into float32) or a non-finite one is a 400, and nothing is written. The streams are sent the written state, at their clock |
+| PUT | `/graph/state/{node_name}` | Overwrite node state (`{state: {field: value}}`). A value the field's dtype cannot hold (`1e39` into float32; for an integer field, a non-integral value or one outside its range: `0.5` or `256` into uint8), a non-finite one, text, `null` or a boolean for a numeric field is a 400 naming the field, and nothing is written. The streams are sent the written state, at their clock |
 
 A non-finite number in any reply -- a diverged state, a coupling
 diagnostic not yet filled (`diagnostics=True` seeds its spectral `_meta`
@@ -160,7 +179,7 @@ already been applied.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root, and beside the file a manifest (`<path>.manifest.json`: its SHA-256 and the streams' clock, `sim_time` and step count). Both are written under temporary names and moved into place after both exist, the checkpoint first and its manifest last: a save refused before that (400, "nothing was written") leaves any earlier file of either name as it was, and a name that is not a file is refused before anything is written. If only the manifest's move fails, the 400 says the checkpoint was written without it (it loads, with `sim_time` counted from zero). No 4xx detail names the server's absolute paths. Replies `{status, path, sim_time}` |
+| POST | `/checkpoint/save?path=` | Save state and parameters under the checkpoint root, and beside the file a manifest (`<path>.manifest.json`: its SHA-256 and the streams' clock, `sim_time` and step count). Both are written under temporary names and moved into place after both exist, the checkpoint first and its manifest last: a save refused before that (400, "nothing was written") leaves any earlier file of either name as it was, and a name that is not a file is refused before anything is written. If only the manifest's move fails, the 400 says the checkpoint was written without it (it loads, with `sim_time` counted from zero). No 4xx detail names the server's absolute paths; the 200 reply's `path` is the file's absolute path on the server (as the JAX trace routes' `log_dir` is). Replies `{status, path, sim_time}` |
 | POST | `/checkpoint/load?path=` | Restore them. A checkpoint that does not fit this graph is a 400, and nothing is loaded: other node or field names, a field or parameter of another shape, a value its dtype cannot hold, or a parameter value `PUT /graph/params` would refuse on the node as it stands -- non-finite, outside its `ParamSpec` bounds, refused by the node's constructor with the graph's other values (a save after the load would not reload), one a node consumed at construction, one that moves a mapped edge's points, text or a boolean; each asked of what the load changes only, and finiteness and the bounds only of a value that is neither the leaf's now nor the node's own, so a graph built outside its bounds reloads its own checkpoint.  `GraphManager.load_state` refuses text and booleans and asks none of the rest (Python may hold a value outside a `ParamSpec`'s bounds on purpose). The streams then serve the loaded state at the checkpoint's `sim_time` -- the one its manifest records, or zero, counted from the load, for a file without one or whose manifest does not hash to it (`sim_time_from_checkpoint` says which). 409 while the runner runs or a `/sim/run` is in progress |
 
 ### Simulation Control

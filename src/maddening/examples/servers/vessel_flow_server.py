@@ -476,7 +476,7 @@ def main():
     print(f"  Serving on http://{host_for_url}:{sock.getsockname()[1]}", flush=True)
 
     try:
-        uvicorn.Server(uvicorn.Config(app, log_level="warning")).run(sockets=[sock])
+        uvicorn.Server(uvicorn.Config(app, log_level="warning", proxy_headers=False)).run(sockets=[sock])
     except (KeyboardInterrupt, SystemExit):   # Ctrl-C, after shutdown
         pass
     finally:

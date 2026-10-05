@@ -83,6 +83,10 @@ CC = (_COMPILE_CACHE,)
 SLOW_RULE = (_SLOW_RULE,)
 _CLAIMS = "tests/compliance/test_claims_inventories.py"
 CLAIMS = (_CLAIMS,)
+#: The witness rule alone (no collection of the tree), and its self-tests.
+WITNESS = (f"{_CLAIMS}::test_every_tested_domain_cites_a_test_that_names_its_domain",)
+SERVER_WORDS = (f"{_CLAIMS}::test_the_witness_rule_reads_the_server_vocabulary",)
+TRANSPORT = (f"{_CLAIMS}::test_the_shared_in_process_client_is_no_tests_own_words",)
 CPL = "docs/validation/coupling_claims.yaml"
 RST = "docs/validation/rest_runpod_claims.yaml"
 #: The shipped allowlist: the reason check (fast) first, then collection.
@@ -131,6 +135,30 @@ _AL_LAST = ("tests/core/test_compile_counts.py::"
 _KEPT = ("tests/core/test_coupling_diagnostics_leave_the_state_alone.py::"
          "test_diagnostics_leave_the_returned_state_bit_identical")
 _ZMQ = "tests/security/test_zmq_transport_auth.py"
+_API = "tests/api/"
+_BEARER = f"{_API}test_bearer_auth.py::"
+_MG = "tests/cloud/multigpu/"
+_EDGES = f"{_MG}test_run_pod_documented_edges.py::"
+_VERDICT = f"{_MG}test_run_pod_verdict_integrity.py::"
+#: A real uvicorn server on loopback, spoken to one connection at a time.
+_CLEARTEXT = (f"{_API}test_rest_claims_at_their_domain_edges.py::"
+              "test_the_server_speaks_plain_http_and_the_token_crosses_in_cleartext[127.0.0.1]")
+#: REST-040's tokenless and concurrent cells (the tokenless one makes the anchor unique).
+_STEPS_CELLS = ("    no_token: tests/api/test_concurrent_requests_are_serialised.py::"
+                "test_concurrent_steps_are_all_taken_bit_identical_to_serial\n"
+                "    concurrent: %s\n")
+_STEPS_SERVED = ("tests/api/test_rest_claims_under_concurrent_requests.py::"
+                 "test_simultaneous_steps_are_all_taken_bit_identical_to_serial")
+
+
+def _cell(domain: str, test: str) -> str:
+    """One domain cell of a claims row, as the inventories write it."""
+    return f"    {domain}: {test!r}\n" if "[" in test else f"    {domain}: {test}\n"
+
+
+def _wrong_cell(id: str, domain: str, cited: str, wrong: str, lets_through: str) -> Mutant:
+    """A REST or run_pod row's *domain* cell made to cite *wrong*, a test of another domain."""
+    return _M(id, RST, _cell(domain, cited), _cell(domain, wrong), WITNESS, lets_through)
 
 MUTANTS: tuple[Mutant, ...] = (
     # --- R: the time budget, scripts/report_test_durations.py --------------
@@ -456,14 +484,9 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("K5", RST, "    runs. Not claimed for a server shutting down.\n", "    runs.\n", CLAIMS,
        "a narrowed server domain whose conditions no longer exclude it: REST-051 reads as "
        "claimed while the server shuts down"),
-    _M("K6", RST, "    no_token: tests/api/test_concurrent_requests_are_serialised.py::"
-       "test_concurrent_steps_are_all_taken_bit_identical_to_serial\n"
-       "    concurrent: tests/api/test_rest_claims_under_concurrent_requests.py::"
-       "test_simultaneous_steps_are_all_taken_bit_identical_to_serial\n",
-       "    no_token: tests/api/test_concurrent_requests_are_serialised.py::"
-       "test_concurrent_steps_are_all_taken_bit_identical_to_serial\n"
-       "    concurrent: tests/api/test_concurrent_requests_are_serialised.py::"
-       "test_concurrent_steps_are_all_taken_bit_identical_to_serial\n", CLAIMS,
+    _M("K6", RST, _STEPS_CELLS % _STEPS_SERVED,
+       _STEPS_CELLS % "tests/api/test_concurrent_requests_are_serialised.py::"
+       "test_concurrent_steps_are_all_taken_bit_identical_to_serial", CLAIMS,
        "a concurrent cell citing in-process TestClient threads, not a real server"),
     _M("K7", _CLAIMS, "        return bool(_REAL_SERVER.search(text) and _SIMULTANEOUS.search(text))\n",
        "        return bool(_SIMULTANEOUS.search(text))\n", CLAIMS,
@@ -476,6 +499,69 @@ MUTANTS: tuple[Mutant, ...] = (
        '("token_enforced",)),\n', "", CLAIMS,
        "a non-loopback bind no longer covers token_enforced: the token cell of a row about "
        "such a bind could hide as n/a"),
+    # A server cell citing a test of another domain, one per domain a shared helper's words
+    # could witness (K10-K13: the ones the in-process client's did) or a bind or record names.
+    _M("K10", RST, _STEPS_CELLS % _STEPS_SERVED, _STEPS_CELLS % repr(_CLEARTEXT), WITNESS,
+       "a concurrent cell citing a real server spoken to one connection at a time: the server's "
+       "own thread read as simultaneous requests"),
+    _wrong_cell("K11", "loopback_bind", f"{_BEARER}test_loopback_bind_serves_every_route_without_a_token",
+                f"{_BEARER}test_interactive_docs_are_not_served_when_the_token_is_enforced",
+                "a loopback cell citing a test that only binds 0.0.0.0"),
+    _wrong_cell("K12", "no_token", f"{_BEARER}test_a_loopback_websocket_still_gets_its_subprotocol_echoed",
+                f"{_BEARER}test_a_websocket_authenticates_with_the_authorization_header",
+                "a tokenless cell citing a test that always presents the token"),
+    _wrong_cell("K13", "hostile_input",
+                f"{_API}test_rest_claims_in_every_domain.py::"
+                "test_the_claim_holds_on_a_non_loopback_bind_with_the_token[REST-006]",
+                f"{_BEARER}test_the_backstop_explains_the_misconfiguration",
+                "a hostile-input cell citing a test that sends one well-formed GET"),
+    _wrong_cell("K14", "non_loopback_bind",
+                f"{_API}test_auth_and_host_rules_hold_at_their_edges.py::"
+                "test_an_anonymous_oversized_body_is_refused_for_its_credential_first",
+                f"{_API}test_request_memory_is_bounded.py::test_a_body_over_the_limit_is_a_413_before_it_is_parsed",
+                "a non-loopback cell citing a test on the default loopback bind"),
+    _wrong_cell("K15", "token_enforced",
+                f"{_API}test_auth_and_host_rules_hold_at_their_edges.py::"
+                "test_every_state_changing_route_refuses_a_foreign_origin",
+                f"{_API}test_cross_origin_requests.py::test_a_cross_origin_state_change_is_refused",
+                "a token cell citing a test that presents no token to a loopback bind"),
+    _wrong_cell("K16", "shutdown",
+                f"{_API}test_rest_claims_in_every_domain.py::"
+                "test_the_claim_holds_when_sigterm_arrives_mid_request[REST-029]",
+                f"{_API}test_request_bounds_hold_at_their_boundaries.py::"
+                "test_a_body_of_exactly_the_limit_is_read_and_one_byte_more_is_a_413",
+                "a shutdown cell citing a test that raises no signal"),
+    _wrong_cell("K17", "dry_run_cpu",
+                f"{_MG}test_run_pod_claims_across_records.py::"
+                "test_a_dry_run_record_whose_commit_is_not_a_sha_counts_as_none",
+                f"{_EDGES}test_a_repository_with_no_commit_records_no_commit",
+                "a dry-run cell citing a test that reads no dry run's record"),
+    _wrong_cell("K18", "relabelled_records",
+                f"{_VERDICT}test_summarise_lists_a_record_that_cannot_decide_and_exits_3",
+                f"{_EDGES}test_a_truncated_goal_file_reads_invalid_and_the_summary_exits_3",
+                "a relabelled-record cell citing a test that relabels nothing"),
+    _wrong_cell("K19", "mixed_commits",
+                f"{_MG}test_run_pod_claims_across_records.py::"
+                "test_a_goal_that_raised_among_files_of_two_commits_fails_its_item_and_exits_3",
+                f"{_VERDICT}test_a_tampered_record_of_a_goal_that_raised_cannot_decide",
+                "a mixed-commit cell citing a test whose files record one commit"),
+    # ... and the witness rule's own repairs undone
+    _M("K20", _CLAIMS, "    if rel in TRANSPORT_MODULES:        # the shared client: no test's own words\n"
+       "        return None\n", "", TRANSPORT,
+       "the in-process client's source read as every REST test's own words: its loopback Host and "
+       "peer witness a loopback bind and a tokenless request, its annotations hostile input"),
+    _M("K21", _CLAIMS, "    dropped = {n for imp in ast.walk(node) if _imports_transport(imp)\n",
+       "    dropped = {n for imp in ast.walk(node) if False\n", TRANSPORT,
+       "the line that imports the in-process client inside a test read as the test naming loopback"),
+    _M("K22", _CLAIMS, '_REAL_SERVER = re.compile(r"(?<!`)\\b\\w*uvicorn(?:\\(\\))?\\.(?:run|Server)\\(")\n',
+       '_REAL_SERVER = re.compile(r"uvicorn|socket|http://127\\.0\\.0\\.1", re.IGNORECASE)\n', SERVER_WORDS,
+       "a real server read from a loopback URL, a WebSocket or the word uvicorn: in-process "
+       "threads through a client that names a loopback Host witness concurrent"),
+    _M("K23", _CLAIMS, '_SIMULTANEOUS = re.compile(r"simultaneous|barrier|gather|Thread\\(\\s*target=(?!\\w+\\.run\\b)",\n'
+       "                           re.IGNORECASE)\n",
+       '_SIMULTANEOUS = re.compile(r"concurren|thread|simultaneous|barrier|gather", re.IGNORECASE)\n',
+       SERVER_WORDS, "the server's own thread and domain tag read as simultaneous requests: every test "
+       "that starts a real server witnesses concurrent"),
 )
 
 
@@ -536,6 +622,51 @@ def test_the_mutant_table_is_well_formed():
             if arg == "--deselect" and (i + 1 == len(m.guards) or m.guards[i + 1].startswith("-")):
                 problems.append(f"{m.id}: --deselect without a node id")
     assert not problems, "\n".join(problems)
+
+
+def test_every_seeded_inventory_fault_fails_a_rule_that_reads_only_the_tree():
+    """The mutants that edit a claims inventory, caught on every push.
+
+    The row rule and the witness rule are pure functions of an inventory's
+    rows and the cited tests' sources, so such a mutant needs no copy of the
+    tree: it is applied in memory and the two rules are asked of the rows it
+    changed.  The slow lane runs on a schedule, on the default branch; a
+    change that blinds a rule -- a helper every test shares starting to say
+    a domain's words -- would otherwise pass every push of its own PR."""
+    import yaml
+
+    from tests.compliance import test_claims_inventories as claims
+
+    row_start = "\n- id: "     # a row starts at the left margin, in every inventory
+
+    @cache
+    def head(file: str):
+        """The file's top level (its prefixes and domain set), without its rows."""
+        return claims.Inventory(Path(file).name, yaml.safe_load(_tree_text(file).split(row_start)[0]))
+
+    def problems(row_text: str, file: str) -> list[str]:
+        rows = yaml.safe_load(row_text)
+        assert isinstance(rows, list) and len(rows) == 1, row_text[:200]
+        return (claims.row_problems(rows, head(file).prefixes, domains=head(file).domains)
+                + claims.domain_witness_problems(rows))
+
+    checked, survivors = [], []
+    for m in MUTANTS:
+        if m.file not in (CPL, RST) or m.equivalent or m.gap:
+            continue
+        text = _tree_text(m.file)
+        at = text.index(m.anchor)
+        end = text.find(row_start, at + len(m.anchor))
+        row = text[text.rindex(row_start, 0, at) + 1:len(text) if end < 0 else end + 1]
+        # The row as it stands passes both rules, or a catch below means nothing.
+        assert problems(row, m.file) == [], f"{m.id}: its row fails unmutated"
+        checked.append(m.id)
+        if not problems(row.replace(m.anchor, m.replacement), m.file):
+            survivors.append(f"{m.id}: {m.lets_through}")
+    assert len(checked) >= 14, f"inventory mutants checked: {checked}"
+    assert not survivors, (
+        "seeded inventory faults that neither the row rule nor the witness rule of "
+        f"{_CLAIMS} catches on this tree:\n  " + "\n  ".join(survivors))
 
 
 # --------------------------------------------------------------------------

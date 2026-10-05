@@ -71,9 +71,12 @@ block the consequences for MADDENING are bounded:
   (no thread is inside a block) and is removed the next time the last
   block closes.
 
-Neither leaves anything that silences a warning.  See "Warnings and
-threads" in ``docs/user_guide/troubleshooting.md`` for the libraries on
-MADDENING's own paths that use ``catch_warnings``.
+Neither leaves anything that silences a warning.  "Warnings when several
+threads run graphs" in ``docs/user_guide/parameters.md`` lists the
+libraries on MADDENING's own paths that use ``catch_warnings`` (lineax,
+when a gradient through a coupling group is traced; FastAPI, when an app
+or its OpenAPI schema is built), which can still trade filters with each
+other.
 
 Only the default build of CPython is covered: with the global interpreter
 lock a ``list.insert`` is atomic.  A free-threaded build, and an

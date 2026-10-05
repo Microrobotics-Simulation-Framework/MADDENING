@@ -299,6 +299,72 @@ key keeps its calibrated value, not its constructor constant).  The raw
 compiled step (`gm._compiled_step`, what the FMI sidecar calls) refuses
 an incomplete pytree instead of guessing.
 
+### Warnings when several threads run graphs
+
+Much of what this page promises is said as a Python warning: a
+compile-time advisory, a leaf dropped at a recompile, a rank decided at
+the precision floor.  Python keeps one list of warning filters for the
+whole process, so what one thread does to that list, every thread lives
+with.
+
+To check a write, MADDENING runs the node's own code a second time -- a
+trace of the step to see which leaves it reads, the constructor with the
+new value, `initial_state()` for the state's layout -- and silences what
+that code warns, because the real run says it.  The same is done when a
+sharded wrapper checks its inner node's state and when the profiler
+compiles its one-iteration variant.  That silence covers **the thread
+that is probing and no other**, and nothing is saved or put back: graphs,
+servers and profilers running in other threads keep every warning of
+their own, and the process's filters afterwards are the ones before.
+(During 0.4.0's development the probes used `warnings.catch_warnings()`,
+which does neither; no release carried it.  MADD-ANO-197.)
+
+**What MADDENING cannot do** is make `warnings.catch_warnings()` safe for
+*other* code that uses it while your threads run.  That block saves the
+process's filter list on the way in and puts it back on the way out.  Two
+of them that overlap in two threads can put back each other's list, and a
+filter one of them set inside -- often `ignore` -- then stays for good,
+with no sign.  (Python 3.14 changes this only when started with
+`-X context_aware_warnings`, the default of its free-threaded build;
+MADDENING is tested on neither.)  Where such a block overlaps one of
+MADDENING's probes the damage to MADDENING is bounded: at worst that
+probe is not silenced for the rest of its run, so what the node's code
+warns there is shown -- or, where warnings are errors, raised, which the
+probe reads as "cannot tell".  Nothing of MADDENING's that ignores a
+warning is left in the filters.  Two foreign blocks can still trade
+filters with each other.
+
+Libraries on MADDENING's own paths that use the block, found by recording
+every `catch_warnings` entered (JAX 0.11.0, NumPy 2.4.6, lineax 0.0.7,
+FastAPI 0.136.1, pydantic 2.13.4):
+
+| path | who opens a block | what it sets inside |
+|---|---|---|
+| `compile()`, `step()`, `run()`, `run_scan()`, a `gm.params` write, `save_state()` / `load_state()` | nobody (JAX and NumPy use the block only in their test utilities and at import) | -- |
+| tracing a gradient through a coupling group (the implicit solve's backward pass: `jax.grad` of a run, a `sysid` fit) | lineax, twice per trace | `ignore`, for every warning |
+| `SimulationServer.create_app()` | FastAPI, 48 times for a server with the built-in routes | `ignore` for `UserWarning`, and for one pydantic category |
+| the first `GET /openapi.json` of each app | FastAPI, 44 times | `ignore` for one pydantic category |
+
+`create_app()` builds one app at a time since 0.4.0 (MADD-ANO-191).  The
+lineax blocks are a few microseconds long: four threads each tracing such
+a gradient at once changed the filters in 0 rounds of 30, and left an
+`ignore` for every warning in 1 round of 10 once every block was held
+open a millisecond longer.  So it is rare, and it is not excluded.
+
+What to do in a process with more than one thread:
+
+- **Set your filters once, at start-up**, before any thread starts:
+  `warnings.simplefilter(...)`, `-W`, or `PYTHONWARNINGS`.  A filter set
+  that way is never saved or put back.
+- **Do not open `warnings.catch_warnings()` -- or `pytest.warns`, which
+  is one -- in a thread while other threads run graphs.**  Record
+  warnings in the main thread, with the others idle.
+- **Take a gradient through a coupling group in one thread at a time**,
+  unless it is compiled with `jax.jit` and was traced before the threads
+  started: only the trace opens lineax's blocks.
+- To see whether a process has lost its warnings, look for
+  `('ignore', None, Warning, None, 0)` at the front of `warnings.filters`.
+
 ## `ParamSpec`: what an optimiser may do
 
 Each leaf carries a `ParamSpec` (`maddening.core.params`):

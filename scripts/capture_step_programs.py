@@ -29,9 +29,9 @@ of its message.
 
 The graphs: the four named coupled topologies at two configurations each;
 the same four with sparse mappings where the tree has them; a multi-rate
-graph and a sub-cycled group; a flux edge outside any group; an uncoupled
-pair joined by an ``rbf`` mapping; and a graph with a sharded node on two
-virtual CPU devices (which is why this script sets
+graph, a sub-cycled group and a group with a predictor; a flux edge
+outside any group; an uncoupled pair joined by an ``rbf`` mapping; and a
+graph with a sharded node on two virtual CPU devices (which is why this script sets
 ``--xla_force_host_platform_device_count`` before it imports jax).
 
 The gate is strict on purpose.  The text changes with any change to what
@@ -136,6 +136,13 @@ def _sub_cycled():
     return _built(topo, knobs)
 
 
+def _predictor():
+    """``chain-into-ring`` with a quadratic predictor on its group."""
+    ct = _ct()
+    topo = ct.named_topologies()["chain-into-ring"]
+    return _built(topo, [dict(g, predictor="quadratic") for g in ct.topology_knobs(topo, 0)])
+
+
 def _flux_outside_a_group():
     """An ungrouped ring whose forward edge carries a boundary flux."""
     ct = _ct()
@@ -215,6 +222,7 @@ def gate_graphs() -> dict:
                     _named, name, choice, mapping_kind="sparse-banded")
     graphs["multi-rate/chain-into-ring"] = _multi_rate
     graphs["sub-cycled/chain-into-ring"] = _sub_cycled
+    graphs["predictor/chain-into-ring"] = _predictor
     graphs["flux-outside-a-group"] = _flux_outside_a_group
     graphs["rbf-edge"] = _rbf_edge
     graphs[SHARDED] = _sharded

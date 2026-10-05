@@ -129,14 +129,16 @@ def test_the_capture_holds_exactly_the_gate_graphs_of_this_tree():
 def test_the_gate_graphs_are_the_documented_set():
     """Four named structures at two configurations, the same with sparse
     mappings where the tree has them, a multi-rate graph, a sub-cycled
-    group, a flux edge outside a group, an ``rbf`` edge and a sharded node."""
+    group, a group with a predictor, a flux edge outside a group, an
+    ``rbf`` edge and a sharded node."""
     names = set(GRAPHS)
     named = {n for n in names if n.startswith("named/")}
     assert len(named) == 8 and {n.rsplit("/", 1)[1] for n in named} == {"choice-0", "choice-1"}
     sparse = {n for n in names if n.startswith("sparse-banded/")}
     assert len(sparse) == (8 if capture.has_sparse_mappings() else 0)
     assert names - named - sparse == {"multi-rate/chain-into-ring",
-                                      "sub-cycled/chain-into-ring", "flux-outside-a-group",
+                                      "sub-cycled/chain-into-ring",
+                                      "predictor/chain-into-ring", "flux-outside-a-group",
                                       "rbf-edge", capture.SHARDED}
 
 

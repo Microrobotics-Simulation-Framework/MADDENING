@@ -320,6 +320,36 @@ def test_the_lock_is_free_while_a_block_runs():
             assert _in_a_thread(take)
 
 
+def test_the_lock_guards_two_list_operations_and_nothing_else():
+    """Read off the source: the lock is taken in the two functions that
+    open and close a block, and all that is called while it is held is
+    ``list.insert`` and ``list.remove`` on the filters.  No call out --
+    to a node, to JAX, to anything that takes another lock -- so the lock
+    cannot be one half of a deadlock.  Nothing else in ``src/`` names it."""
+    tree = ast.parse((SRC_ROOT / HELPER).read_text())
+    holders = {}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef):
+            continue
+        for node in ast.walk(fn):
+            if isinstance(node, ast.With) and any(
+                    isinstance(item.context_expr, ast.Name)
+                    and item.context_expr.id == "_FILTER_LOCK" for item in node.items):
+                calls = sorted(
+                    ast.unparse(call.func) for stmt in node.body for call in ast.walk(stmt)
+                    if isinstance(call, ast.Call))
+                holders[fn.name] = calls
+    assert holders == {"_block_opened": ["filters.insert"],
+                       "_block_closed": ["filters.remove"]}, holders
+    named = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Name) and node.id == "_FILTER_LOCK"]
+    assert len(named) == 3, "the lock is named somewhere other than its definition and two holders"
+    elsewhere = [path.relative_to(SRC_ROOT).as_posix() for path in sorted(SRC_ROOT.rglob("*.py"))
+                 if path.relative_to(SRC_ROOT).as_posix() != HELPER
+                 and "_FILTER_LOCK" in path.read_text()]
+    assert not elsewhere, elsewhere
+
+
 def test_a_block_opens_and_closes_while_the_same_thread_holds_the_lock(
         every_warning_is_an_error):
     """Re-entrant: code that runs inside the guarded region on the thread
@@ -497,6 +527,10 @@ def _filter_uses(source: str, rel: str) -> list[tuple[str, int, str]]:
         elif isinstance(node, ast.Name) and node.id in _FILTER_CALLS:
             found.append((rel, node.lineno, node.id))
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value in _FILTER_CALLS:
+                # getattr(warnings, "simplefilter"): the name alone, as data.
+                found.append((rel, node.lineno, f"the name {node.value!r} as a string"))
+                continue
             if not _CALL_IN_TEXT.search(node.value):
                 continue
             first, last = node.lineno, node.end_lineno or node.lineno
@@ -545,39 +579,93 @@ def test_the_helper_is_where_the_scan_says_it_is():
     assert _filter_uses(source, HELPER)
 
 
+def _helper_uses(source: str, rel: str) -> tuple[int, list[tuple[str, int, str]]]:
+    """``(calls, odd)``: how many times *source* calls ``quiet_warnings``,
+    and every use that is not ``with quiet_warnings():`` under that name
+    -- an import under another name, a call that is not a ``with`` item,
+    the function handed on as a value."""
+    tree = ast.parse(source, filename=rel)
+    with_items = {id(item.context_expr) for node in ast.walk(tree)
+                  if isinstance(node, (ast.With, ast.AsyncWith)) for item in node.items}
+    callees = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    calls, odd = 0, []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                if "quiet_warnings" in a.name and a.asname not in (None, a.name):
+                    odd.append((rel, node.lineno, f"{a.name} imported as {a.asname}"))
+        elif isinstance(node, ast.Call):
+            f = node.func
+            name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+            if name == "quiet_warnings":
+                calls += 1
+                if id(node) not in with_items:
+                    odd.append((rel, node.lineno, "called outside a with statement"))
+        elif (isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in callees
+              and (node.id if isinstance(node, ast.Name) else node.attr) == "quiet_warnings"):
+            odd.append((rel, node.lineno, "used as a value, not called"))
+    return calls, odd
+
+
 def test_every_use_of_the_helper_is_a_with_block_under_its_own_name():
     """``tests/_quiet_block_witness.py`` finds the silencing blocks of
     ``src/`` as ``with quiet_warnings():`` statements, and
     ``test_warning_probes_across_threads.py`` drives a node through every
     one it finds.  A use it could not find -- the helper imported under
-    another name, or entered by hand -- would be a block no test looks
-    inside."""
-    odd = []
-    uses = 0
+    another name, entered by hand, or handed on as a value -- would be a
+    block no test looks inside."""
+    odd, calls = [], 0
     for path in sorted(SRC_ROOT.rglob("*.py")):
         rel = path.relative_to(SRC_ROOT).as_posix()
         text = path.read_text()
         if rel == HELPER or "quiet_warnings" not in text:
             continue
-        tree = ast.parse(text, filename=rel)
-        in_with = {id(item.context_expr) for node in ast.walk(tree)
-                   if isinstance(node, (ast.With, ast.AsyncWith)) for item in node.items}
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                for a in node.names:
-                    if "quiet_warnings" in a.name and a.asname not in (None, a.name):
-                        odd.append((rel, node.lineno, f"imported as {a.asname}"))
-            elif isinstance(node, ast.Call):
-                f = node.func
-                name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
-                if name == "quiet_warnings":
-                    uses += 1
-                    if id(node) not in in_with:
-                        odd.append((rel, node.lineno, "called outside a with statement"))
-            elif isinstance(node, ast.Name) and node.id == "quiet_warnings":
-                pass
+        n, found = _helper_uses(text, rel)
+        calls += n
+        odd += found
     assert not odd, odd
-    assert uses >= 16, f"{uses} uses of quiet_warnings() found under {SRC_ROOT}"
+    assert calls >= 16, f"{calls} uses of quiet_warnings() found under {SRC_ROOT}"
+
+
+_IMPORT = "from maddening.core._quiet_warnings import quiet_warnings\n"
+
+
+@pytest.mark.parametrize("source", [
+    "from maddening.core._quiet_warnings import quiet_warnings as _quiet\nwith _quiet():\n    pass\n",
+    "import maddening.core._quiet_warnings as quiet_warnings_module\n",
+    _IMPORT + "import contextlib\nwith contextlib.ExitStack() as stack:\n"
+              "    stack.enter_context(quiet_warnings())\n",
+    _IMPORT + "block = quiet_warnings()\nblock.__enter__()\n",
+    _IMPORT + "silence = quiet_warnings\nwith silence():\n    pass\n",
+    _IMPORT + "def probe(cm=quiet_warnings):\n    with cm():\n        pass\n",
+    "from maddening.core import _quiet_warnings\nhow = _quiet_warnings.quiet_warnings\n",
+])
+def test_the_scan_sees_each_use_of_the_helper_a_witness_would_not_find(source):
+    assert _helper_uses(source, "scanned.py")[1], source
+
+
+@pytest.mark.parametrize("source, calls", [
+    (_IMPORT + "with quiet_warnings():\n    pass\n", 1),
+    (_IMPORT + "with quiet_warnings(), open('f') as f:\n    pass\n", 1),
+    (_IMPORT + "def a():\n    with quiet_warnings():\n        pass\n"
+               "def b():\n    with quiet_warnings():\n        pass\n", 2),
+    ("from maddening.core import _quiet_warnings\nwith _quiet_warnings.quiet_warnings():\n    pass\n", 1),
+    ("x = 1\n", 0),
+])
+def test_the_scan_counts_a_with_block_and_finds_nothing_odd_in_it(source, calls):
+    assert _helper_uses(source, "scanned.py") == (calls, []), source
+
+
+def test_the_scans_allowance_is_for_one_line_of_one_file():
+    """The advice the scan lets through is let through where it stands,
+    and nowhere else: not another line of the same file, not the same
+    line in another file."""
+    rel, line = sorted(_ADVICE_TO_THE_USER)[1]
+    assert rel == "warnings.py"
+    advice = f'"""Advice.\n\n    {line}\n"""\n'
+    assert _filter_uses(advice, rel) == []
+    assert _filter_uses(advice, "other.py")
+    assert _filter_uses('"""Run under ``warnings.simplefilter("always")``."""\n', rel)
 
 
 @pytest.mark.parametrize("source", [
@@ -596,6 +684,10 @@ def test_every_use_of_the_helper_is_a_with_block_under_its_own_name():
     'SCRIPT = r"""\nimport warnings\nwith warnings.catch_warnings():\n    gm.compile()\n"""\n',
     'def f():\n    """Run under ``warnings.simplefilter("ignore")``."""\n',
     "msg = f\"call warnings.filterwarnings('ignore') {1}\"\n",
+    "from somewhere import *\nwith catch_warnings():\n    simplefilter('ignore')\n",
+    "def run(catch_warnings):\n    with catch_warnings():\n        pass\n",
+    "import warnings\ngetattr(warnings, 'simplefilter')('ignore')\n",
+    "import warnings\nblock = getattr(warnings, 'catch_warnings')\n",
 ])
 def test_the_scan_sees_each_way_of_touching_the_filters(source):
     assert _filter_uses(source, "scanned.py"), source

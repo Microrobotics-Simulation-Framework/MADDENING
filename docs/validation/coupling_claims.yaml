@@ -365,8 +365,13 @@ claims:
     tolerance: "Since 0.4.0 the L2 norm divides each field's change by that
     field's largest magnitude (the larger of its two iterates' max|v|), so
     this is a relative tolerance: it equals the pre-0.4.0 absolute
-    threshold exactly when every field's largest magnitude is 1, and is an
-    absolute threshold of tolerance * max|v| per field otherwise."
+    threshold exactly when every field's largest magnitude is 1.  It is one
+    threshold for the whole group, not one per field: the norm is the
+    root-sum-square, over every entry of every floating field of every
+    member, of that entry's change divided by its field's largest
+    magnitude.  A field of n entries each moving by tolerance * max|v|
+    therefore reads tolerance * sqrt(n), and so do n one-entry fields each
+    moving by that much of their own magnitude."
   sources:
     - src/maddening/core/coupling/group.py:69 (CouplingGroup, tolerance)
     - src/maddening/core/coupling/acceleration.py:237 (coupling_residual_l2)
@@ -375,10 +380,14 @@ claims:
   tests:
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_known_value
     - tests/core/test_coupling_claims_helpers.py::test_the_l2_tolerance_is_absolute_only_at_unit_magnitude
+    - tests/core/test_coupling_claims_helpers.py::test_the_l2_tolerance_is_one_threshold_for_the_whole_group
   status: verified
   notes: >-
     Ambiguous until 0.4.0's claims fix ("for fields of order one it is the
-    absolute threshold it used to be").  Reworded.
+    absolute threshold it used to be").  Reworded.  The round-6 audit found
+    "an absolute threshold of tolerance * max|v| per field" wrong: two
+    fields each inside it fail the group's test, and a 100-entry field
+    moving 0.5 tolerance per entry reads 5x over.  Reworded again.
   domains:
     f32: tests/core/test_coupling_claims_helpers.py::test_the_l2_tolerance_is_absolute_only_at_unit_magnitude
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-008]'
@@ -568,8 +577,9 @@ claims:
 - id: CPL-013
   area: configuration
   claim: >-
-    The diagnostics cost "8 Jacobian-vector products for the spectrum and
-    11 + k + 5 n_p more for the bound per group per step (plus one
+    The diagnostics cost "8 Jacobian-vector products for the spectrum (16
+    under convergence_norm="interface" with a transform on an internal edge
+    ...) and 11 + 4 k + 5 n_p more for the bound per group per step (plus one
     linearisation and k reverse-mode products where the state has more than
     k entries; k <= 8, n_p the probes: every entry of a floating constant of
     at most 64 entries, one per larger constant)"; arnoldi_spectral_radius's n_steps "is the
@@ -583,7 +593,8 @@ claims:
   oracle: Jacobian-vector products counted by evaluating the analysis eagerly with vmap unrolled.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_jacobian_vector_products
-    - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_k_plus_five_n_p_products
+    - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_four_k_plus_five_n_p_products
+    - tests/core/test_coupling_claims_helpers.py::test_the_spectrum_on_a_transformed_reading_costs_eight_more_products
   status: verified
   domains:
     f32: n/a
@@ -1194,6 +1205,9 @@ claims:
     - tests/core/test_coupling_convergence_reporting.py::test_a_group_that_reached_its_fixed_point_reports_it_converged
     - tests/core/test_coupling_while_default.py::test_unconverged_is_reported_not_raised_by_default
     - tests/property/test_differential_coupling_interactions.py::test_strict_convergence_raises_exactly_where_the_report_says_unconverged
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_the_cap_on_a_finite_float16_state
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_the_cap_where_the_estimate_alone_overflows
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_single_pass_names_its_cause_from_the_state_too
     - tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_a_converged_strict_step_with_a_sharded_member_is_the_unchecked_step
   status: verified
   notes: >-
@@ -1442,13 +1456,18 @@ claims:
     - src/maddening/core/coupling/acceleration.py:237 (coupling_residual_l2)
     - src/maddening/core/coupling/acceleration.py:289 (coupling_residual_mixed)
     - src/maddening/core/coupling/acceleration.py:41 (_field_reference)
-  conditions: float fields; integer, boolean and key leaves are skipped.
+  conditions: >-
+    float fields; integer, boolean and key leaves are skipped; a bfloat16 or
+    float16 field is measured, squared and summed in float32 and the entry
+    count divided in float32 (MADD-ANO-186).
   oracle: closed form.
   tests:
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_l2_known_value
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_mixed_norm_known_value
     - tests/core/test_coupling_convergence.py::TestResidualNorms::test_mixed_with_arrays
     - tests/core/test_coupling_norms_skip_non_floating_fields.py::test_an_old_iterate_without_its_non_floating_fields_measures_the_same
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_norm_over_more_than_65504_entries_reads_its_rms
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_norm_at_the_default_rtol_is_finite_on_a_finite_change
   status: verified
   domains:
     f32: tests/core/test_coupling_convergence.py::TestResidualNorms::test_mixed_norm_known_value
@@ -1551,7 +1570,11 @@ claims:
   conditions: >-
     the non-finite rule under every norm; the overflow rule is "only
     reachable under the L2 norm's rtol=1.0" -- the mixed and interface
-    scales rtol * max|v| stay normal far above it.
+    scales rtol * max|v| stay normal far above it.  The dtype is the one
+    the norms measure in, at least float32: a bfloat16 or float16 field is
+    widened exactly first (MADD-ANO-186), so bfloat16 keeps float32's edge
+    and no finite float16 value reaches it -- a float16 field is measured
+    up to 65,504.
   oracle: closed form; a constant field (an exact fixed point) near overflow.
   tests:
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_is_active_and_contributes_inf
@@ -1559,6 +1582,11 @@ claims:
     - tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf
     - tests/core/test_coupling_claims_helpers.py::test_only_the_l2_norm_fails_a_field_near_overflow
   status: verified
+  notes: >-
+    The round-6 coupling fix widens a 16-bit field to float32 before any
+    norm forms from it (MADD-ANO-186); the float16 cells, which read inf
+    from float16's own 2**14 up, now pin it measured at that edge, one ulp
+    above and at 65,504.
   domains:
     f32: tests/core/test_coupling_non_finite_state.py::test_every_norm_reads_a_non_finite_field_as_inf
     f64:
@@ -1848,6 +1876,8 @@ claims:
     - tests/core/test_coupling_converged_one_precision.py::test_the_sysid_mask_agrees_with_the_report
     - tests/core/test_coupling_converged_one_precision.py::test_the_host_verdict_is_the_in_graph_verdict_on_float32_slots
     - tests/core/test_profiler.py::test_the_profiler_reads_converged_as_the_report_does_on_every_step
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_float16_group_above_65504_entries_does_not_stop_on_a_zero_residual
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_every_reader_gives_a_sixteen_bit_groups_verdict
   status: verified
   domains:
     f32: tests/core/test_coupling_converged_one_precision.py::test_every_reader_gives_the_loops_verdict
@@ -1918,6 +1948,7 @@ claims:
   tests:
     - tests/core/test_coupling_claims_graphs.py::test_unconverged_means_at_the_cap_or_not_finite
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_residual_at_the_default_rtol_is_finite_and_held_in_float32
   status: verified
   domains:
     f32: tests/core/test_coupling_claims_graphs.py::test_unconverged_means_at_the_cap_or_not_finite
@@ -2558,15 +2589,20 @@ claims:
     - src/maddening/core/graph_manager.py:560 (_analysis_dtype)
     - src/maddening/core/coupling/group.py:236 (CouplingGroup, solver)
   conditions: >-
-    every acceleration, both solvers, bfloat16 and float16. Not claimed for
-    mixed dtypes, vmap, multi-rate graphs, sub-cycled groups, predictors or
-    warm starts, run_adaptive, checkpoint restarts or sharded graphs.
+    every acceleration, both solvers, bfloat16 and float16, the norms, the
+    floor and the residual measured and held in 32-bit precision or wider
+    (MADD-ANO-186). Not
+    claimed for mixed dtypes, vmap, multi-rate graphs, sub-cycled groups,
+    predictors or warm starts, run_adaptive, checkpoint restarts or sharded
+    graphs.
   oracle: step and run_scan succeed and keep the group's dtype.
   tests:
     - tests/core/test_coupling_sixteen_bit_groups.py::test_diagnostics_run_on_a_sixteen_bit_group
     - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
     - tests/core/test_coupling_claims_graphs.py::test_a_sixteen_bit_group_steps_under_every_accelerator
     - tests/core/test_coupling_sixteen_bit_groups.py::test_fori_and_ift_take_the_same_passes_on_an_accelerated_sixteen_bit_group
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_float16_group_above_65504_entries_does_not_stop_on_a_zero_residual
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_residual_at_the_default_rtol_is_finite_and_held_in_float32
   status: verified
   notes: >-
     Ambiguous until 0.4.0's round-4 fix (MADD-ANO-116): under the
@@ -3054,6 +3090,8 @@ claims:
     - tests/core/test_coupling_non_finite_state.py::test_strict_convergence_raises_on_a_non_finite_field_no_edge_reads
     - tests/core/test_coupling_non_finite_state.py::test_a_single_pass_reads_a_non_finite_field_no_edge_reads
     - tests/core/test_coupling_non_finite_state.py::test_strict_convergence_names_the_non_finite_state
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_residual_at_the_default_rtol_is_finite_and_held_in_float32
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_a_state_beyond_its_dtypes_range
   status: verified
   domains:
     f32: tests/core/test_coupling_non_finite_state.py::test_a_non_finite_state_never_reads_as_converged
@@ -3155,10 +3193,12 @@ claims:
   claim: >-
     rho_spectral is "the spectral radius of dF/dx at the returned state, from
     eight Arnoldi steps ...  Exact (non-zero eigenvalues, to float32) for a
-    group whose Jacobian has rank at most eight ... and an estimate from
-    below otherwise, which spectral_usable reports.  For a bfloat16 or
-    float16 group the analysis and the value reported are float32, but the
-    Jacobian-vector products are the map's own, rounded to the group's
+    group whose Jacobian has rank at most eight ... and an estimate
+    otherwise, which spectral_usable reports: from below for a normal dF/dx
+    (in the norm's weights), from either side for a non-normal one, whose
+    Ritz values can lie outside the spectrum's convex hull.  For a bfloat16
+    or float16 group the analysis and the value reported are float32, but
+    the Jacobian-vector products are the map's own, rounded to the group's
     dtype, so the radius is exact to about one eps of that dtype times the
     Jacobian's norm ... rather than to float32.  Only under solver="ift"
     with diagnostics=True; NaN for "fori", for diagnostics=False, at
@@ -3172,6 +3212,7 @@ claims:
   tests:
     - tests/core/test_coupling_error_bound.py::test_arnoldi_recovers_the_spectral_radius_of_a_resolved_spectrum
     - tests/core/test_coupling_error_bound.py::test_arnoldi_leaves_a_residual_where_the_space_is_too_small
+    - tests/core/test_coupling_error_bound.py::test_a_non_normal_spectrum_larger_than_the_space_can_read_above_its_radius
     - tests/core/test_coupling_error_bound.py::test_the_spectral_keys_read_nan_and_false_where_nothing_was_computed
     - tests/core/test_coupling_error_bound.py::test_on_a_nonlinear_map_the_spectrum_is_taken_at_the_returned_iterate
     - tests/core/test_coupling_non_finite_state.py::test_a_non_finite_field_no_edge_reads_is_still_a_non_finite_state
@@ -3212,11 +3253,16 @@ claims:
     - src/maddening/core/graph_manager.py:7960 (coupling_diagnostics, spectral_error_bound)
     - src/maddening/core/coupling/acceleration.py:1193 (spectral_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
+    - src/maddening/core/inspection.py:1397 (coupling_report, the error_estimate note)
   conditions: >-
     F linear; solver="ift", diagnostics=True; at most eight independent
     interface scalars (spectral_usable); the group's own norm at the
     returned state -- each field divided by its own max|field| at the
-    returned state, the residual put in those weights (MADD-ANO-146); every
+    returned state, the residual put in those weights (MADD-ANO-146), and
+    under convergence_norm="interface" the fields are what that norm reads,
+    each internal edge's source value after the edge's transform, with the
+    transforms affine (offsets, scales, selections; a non-affine transform
+    makes the map non-linear in the reading) (MADD-ANO-187); every
     acceleration and schedule; long Gauss-Seidel chains, sub-cycled and
     multi-rate groups; float16 to float64.
   oracle: exact float64 fixed point of the evaluated map.
@@ -3231,7 +3277,31 @@ claims:
     - tests/core/test_coupling_claims_graphs.py::test_a_usable_bound_holds_on_a_stalled_subcycled_or_multirate_group
     - tests/core/test_coupling_spectral_bound_in_returned_weights.py::test_the_bound_holds_in_the_returned_states_weights_on_a_growing_group
     - tests/property/test_differential_coupling_interactions.py::test_a_usable_spectral_bound_bounds_the_distance_in_every_row
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_at_every_cap
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_transformed_pair
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_random_transformed_internal_edges
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_an_identity_transform_reads_the_bound_an_untransformed_edge_does
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_mixed_norm_with_the_same_transforms_keeps_the_raw_fields
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_in_float64_and_in_float16
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_returned_readings_weights_on_a_growing_pair
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_stalled_transformed_pair_is_bounded_through_the_readings_float_floor
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_dead_banded_transformed_edge_is_folded_into_the_bound
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_arnoldi_through_an_identity_reading_is_the_plain_arnoldi
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_in_every_float_dtype_and_sweep
   status: verified
+  notes: >-
+    The round-6 audit found the interface norm's transformed reading
+    outside the analysis: with an offset or "extract_last" on an internal
+    edge the bound read 0.0014-0.098x the true distance, usable
+    (MADD-ANO-187). The spectrum is now taken on the reading. The
+    transformed reading itself is exercised in single, double and both
+    half precisions under both sweeps (the tests named after it above);
+    the cells below run untransformed edges, where the reading is the raw
+    fields.  On an internal edge with an interface mapping that norm, and
+    so this bound, reads the source field and not the value the mapping
+    delivers (an open anomaly, registered with the interface-mapping
+    fixes): the bound is in the reading the residual is in.
   domains:
     f32: tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
     f64:
@@ -3430,18 +3500,26 @@ claims:
     iterate ... Read it as |g_k - g*| <= bound * |g_k| for the gradient with
     respect to one scalar constant"; measured never below the true error at
     caps 3-8 on concave, convex and affine maps, 1.19-1.70x on a spring pair,
-    25x on a hidden slow mode.
+    26x on a hidden slow mode.
   sources:
     - src/maddening/core/graph_manager.py:8023 (coupling_diagnostics, gradient_relative_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#gradient_relative_error_bound-the-gradient-not-the-solve
   conditions: >-
-    solver="ift", diagnostics=True; gradient_bound_usable; leading-order in
+    solver="ift", diagnostics=True; gradient_bound_usable, which certifies
+    the Newton-Kantorovich check h < 1/2 with h the larger of beta L
+    ||delta|| and the affine-covariant ||(I - J)^{-1} (J(x_k + delta) -
+    J(x_k))|| on the Jacobian's row space, and the Newton step's
+    second-order miss carried at the rate each
+    probe's own secant shows -- so the map changing no faster between x_k
+    and x* than across that step (MADD-ANO-188); leading-order in
     the distance; one probe per scalar entry of every floating constant of
     at most 64 entries (GRADIENT_PROBE_ENTRY_LIMIT); a larger constant is
     probed along one |c|-weighted fixed-seed direction and named by
     coupling_report(), and for it the bound covers that directional
     derivative only.  The resolvent is applied exactly to each probe's
-    secant (MADD-ANO-142; per-entry probes MADD-ANO-143).
+    secant (MADD-ANO-142; per-entry probes MADD-ANO-143).  Its norms are
+    the state's fields: under convergence_norm="interface" with an edge
+    transform, the raw source fields, before the transform.
   oracle: the fixed point's gradient from the float64 solve or from tight ift and fori arms that agree.
   tests:
     - tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_holds_across_an_early_exit_sweep
@@ -3456,6 +3534,8 @@ claims:
     - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit
     - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_every_cap
     - tests/property/test_differential_coupling_interactions.py::test_a_usable_gradient_bound_bounds_the_error_in_every_row
+    - tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_a_usable_gradient_bound_holds_on_the_audit_pair_at_every_cap
+    - tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn
   status: verified
   notes: >-
     16bit domain failing on d2429a6: jax.grad and jax.jvp through a bfloat16
@@ -3528,9 +3608,12 @@ claims:
   claim: >-
     The gradient bound "carries a Newton-Kantorovich check ... the bound is
     multiplied by 1 / sqrt(1 - 2h) ... and is inf -- unusable -- at
-    h >= 1/2 ... h is exactly zero on an affine map", with h = beta L eta
-    and beta the full-operator resolvent norm (exact from the range basis;
-    not the Krylov-restricted factor, MADD-ANO-142); gradient_bound_usable
+    h >= 1/2 ... h is exactly zero on an affine map", with h the larger of
+    beta L eta -- beta the full-operator resolvent norm (exact from the range
+    basis; not the Krylov-restricted factor, MADD-ANO-142), L the Jacobian's
+    change along the Newton step -- and the affine-covariant
+    ||(I - J(x_k))^{-1} (J(x_k + delta) - J(x_k))|| on the Jacobian's row
+    space (MADD-ANO-188); gradient_bound_usable
     is "finite and spectral_usable is True"; NaN "for "fori", for
     diagnostics=False, at max_iterations=1 ... where the fixed point responds
     to no constant, where a constant's tangent through the group is not
@@ -3553,7 +3636,13 @@ claims:
     - tests/core/test_coupling_report_flags_read_their_conditions.py::test_a_range_larger_than_the_basis_reports_no_gradient_bound
     - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_helper_never_reports_a_number_where_none_was_computed
     - tests/property/test_differential_gradient_bound.py::test_a_usable_gradient_bound_covers_every_scalar_constant_at_an_early_exit
+    - tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn
   status: verified
+  notes: >-
+    The round-6 audit found the check passing along delta at h = 0.19
+    and 0.37 with the bound 0.986x and 0.65x the true error, usable; h
+    now also takes the affine-covariant constant, and the bound the
+    Newton step's second-order miss (MADD-ANO-188).
   domains:
     f32: tests/core/test_coupling_gradient_error_bound.py::test_the_gradient_bound_is_unusable_where_kantorovich_fails_and_holds_where_it_passes
     f64: 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_in_float64[CPL-095]'
@@ -3654,12 +3743,16 @@ claims:
   sources:
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
     - src/maddening/core/coupling/acceleration.py:1033 (residual_precision_floor)
-  conditions: every norm; mixed dtypes.
+  conditions: >-
+    every norm; mixed dtypes; computed in at least float32 whatever the
+    fields' dtypes, each field at its own dtype's eps (MADD-ANO-186).
   oracle: closed form.
   tests:
     - tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve
     - tests/core/test_coupling_precision_floor.py::test_a_float16_field_beside_a_float32_one_is_floored_at_float16
     - tests/core/test_coupling_claims_helpers.py::test_the_floor_traces_under_jit_and_reads_nothing_inside_the_dead_band
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_is_four_eps_over_rtol
+    - tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_counts_more_than_65504_entries
   status: verified
   domains:
     f32: tests/core/test_coupling_precision_floor.py::test_the_precision_floor_is_what_each_norm_can_resolve

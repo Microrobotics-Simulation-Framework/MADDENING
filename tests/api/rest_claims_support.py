@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import json
 import math
@@ -38,6 +39,7 @@ import socket
 import threading
 import time
 import warnings
+import weakref
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -100,6 +102,27 @@ def _sharded(node):
     return ShardedStencilNode(node, create_device_mesh(shape=(1,)), {"devices": 0})
 
 
+#: Held while a graph is built here and while REST-006 builds its second
+#: server.  Both run under ``warnings.catch_warnings()`` -- ``build_graph``
+#: compiles inside one, FastAPI builds an app's routes inside others --
+#: and those blocks save and put back the process's warnings filters, so
+#: they are not thread-safe.  The copies of a check the concurrent domain
+#: runs at once built them together, put back each other's filters, and a
+#: warning one copy had silenced was raised in another: an error under this
+#: suite's filter.  (The server's own blocks run under its graph lock, one
+#: at a time.)
+_BUILD_LOCK = threading.RLock()
+
+
+def _one_at_a_time(fn):
+    @functools.wraps(fn)
+    def locked(*args, **kwargs):
+        with _BUILD_LOCK:
+            return fn(*args, **kwargs)
+    return locked
+
+
+@_one_at_a_time
 def build_graph(*, wrapped: bool = False) -> GraphManager:
     """Every node a check writes to, compiled:
 
@@ -671,6 +694,22 @@ def _a_routable_peer_is_challenged_on_a_loopback_bind(ctx):
     assert ctx.make_client(headers={}, peer=LOOPBACK_PEER).get("/graph").status_code == 200
 
 
+_LOOPBACK_TWINS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _loopback_twin(ctx):
+    """The app of a second server built as *ctx*'s is but told it is bound
+    to 127.0.0.1: built once per served server, under :data:`_BUILD_LOCK`,
+    and shared by the copies of a check running at once."""
+    with _BUILD_LOCK:
+        app = _LOOPBACK_TWINS.get(ctx.server)
+        if app is None:
+            loop = SimulationServer(REGISTRY, graph_manager=build_graph(),
+                                    bind_host="127.0.0.1", checkpoint_root=str(ctx.root))
+            app = _LOOPBACK_TWINS[ctx.server] = loop.create_app()
+        return app
+
+
 @check("REST-006", bind="public", skip=("restored", "wrapper", "shutdown"))
 def _the_401_says_why_and_where_the_token_is(ctx):
     for headers in ({}, {"Authorization": "Bearer"}, {"Authorization": "Token x"}):
@@ -679,9 +718,7 @@ def _the_401_says_why_and_where_the_token_is(ctx):
     # The backstop names the misconfiguration (a routable peer of a
     # server bound, as far as it was told, to loopback) -- asked of a second
     # server built the same way but told it is bound to 127.0.0.1.
-    loop = SimulationServer(REGISTRY, graph_manager=build_graph(), bind_host="127.0.0.1",
-                            checkpoint_root=str(ctx.root))
-    resp = TestClient(loop.create_app(), client=REMOTE_PEER,
+    resp = TestClient(_loopback_twin(ctx), client=REMOTE_PEER,
                       raise_server_exceptions=False).get("/graph")
     refused(resp, 401)
     assert "bind_host" in resp.json()["detail"] or "MADDENING_HOST" in resp.json()["detail"]
@@ -1887,7 +1924,12 @@ def _a_file_that_is_not_an_archive_is_a_400_naming_no_internals(ctx):
 
 @check("REST-101", "REST-102")
 def _a_save_refused_on_the_way_leaves_the_earlier_checkpoint(ctx):
-    name = f"keep{ctx.index}.npz"
+    # Copies running at once save in a directory each.  A save writes its
+    # temporary files beside its target, so another copy's first save, in
+    # flight, had its ``.partial`` file beside this copy's -- and the scan
+    # below saw it.  The scan covers every directory but the other copies'.
+    others = [ctx.root / f"copy{j}" for j in range(ctx.copies) if j != ctx.index]
+    name = (f"copy{ctx.index}/" if ctx.copies > 1 else "") + f"keep{ctx.index}.npz"
     assert ctx.client.post("/checkpoint/save", params={"path": name}).status_code == 200
     digest = hashlib.sha256((ctx.root / name).read_bytes()).hexdigest()
     manifest = ctx.root / f"{name}.manifest.json"
@@ -1898,7 +1940,9 @@ def _a_save_refused_on_the_way_leaves_the_earlier_checkpoint(ctx):
         refused(resp, 400, "nothing was written")
         assert str(ctx.root) not in resp.json()["detail"]
         assert hashlib.sha256((ctx.root / name).read_bytes()).hexdigest() == digest
-        assert not [p for p in ctx.root.rglob("*partial*")]
+        left = [p for p in ctx.root.rglob("*partial*")
+                if not any(other in p.parents for other in others)]
+        assert not left, left
     finally:
         manifest.rmdir()
 

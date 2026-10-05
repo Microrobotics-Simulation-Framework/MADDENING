@@ -713,14 +713,6 @@ def group_in_larger_loop(topo: Topology, gi: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _norm_rows(topo: Topology, gi: int, norm: str) -> list:
-    """The norm's entries, as ``(node, index)``: every member's ``x``, or each internal edge's source."""
-    if norm == "interface":
-        return [(topo.edges[i].src, k) for i in topo.internal_edges(gi)
-                for k in range(topo.node(topo.edges[i].src).n)]
-    return [(m, k) for m in topo.groups[gi] for k in range(topo.node(m).n)]
-
-
 class LinearModel:
     """One step of a :class:`Topology` of linear relays, in float64.
 
@@ -1000,28 +992,90 @@ class LinearModel:
                    self.group_constant(gi, pre, state))
         return {m: x[off[m]:off[m] + self.topo.node(m).n] for m in members}
 
-    def norm_parts(self, gi: int, state: dict, F: Optional[np.ndarray] = None):
+    def norm_fields(self, gi: int, *, raw: bool = False) -> list:
+        """The fields group *gi*'s norm reads: ``[(B, gamma), ...]``.
+
+        Each ``B`` maps the members' stacked ``x`` to one field, and the
+        norm divides every entry of a field by ``rtol`` times that
+        field's own largest magnitude.  Under ``"l2"`` and ``"mixed"`` a
+        field is a member's ``x``.  Under ``"interface"`` it is **what one
+        internal edge delivers**: the source's ``x`` through the edge's
+        mapping matrix ``H``, then its transform's factor -- the value the
+        step hands the target, with the weights the step ran with.  (An
+        internal flux edge under that norm is refused at compile,
+        CPL-075.)  While the library read the source's ``x`` there and
+        left ``H`` out, this model restated that rule and agreed with it.
+
+        ``gamma`` bounds the float evaluation of the reading itself,
+        relative to ``|B| |x|``: a mapped edge's delivered value is an
+        inner product the norm computes again from the stored field
+        (``(n + 1) eps``); every other field is read as stored, a
+        power-of-two factor being exact.
+
+        ``raw=True`` gives the fields the *gradient* bound's norm is
+        documented in under ``"interface"``: the source fields the edges
+        read, before any mapping or transform.
+        """
+        norm = self.cfgs[gi].get("convergence_norm", "l2")
+        members, off, k = self._group_layout(gi)
+        fields = []
+        if norm != "interface":
+            for m in members:
+                n = self.topo.node(m).n
+                B = np.zeros((n, k))
+                B[:, off[m]:off[m] + n] = np.eye(n)
+                fields.append((B, 0.0))
+            return fields
+        for i in self.topo.internal_edges(gi):
+            e = self.topo.edges[i]
+            assert e.field == "x", f"the interface norm cannot read a flux edge: {e}"
+            n_src = self.topo.node(e.src).n
+            if raw or not e.mapped:
+                block = np.eye(n_src)
+                gamma = 0.0
+            else:
+                block = np.asarray(self._rnd(self.values["H"][i]), np.float64)
+                gamma = (n_src + 1) * self.eps
+            if not raw:
+                block = TRANSFORM_FACTORS[e.transform] * block
+            B = np.zeros((block.shape[0], k))
+            B[:, off[e.src]:off[e.src] + n_src] = block
+            fields.append((B, gamma))
+        return fields
+
+    def norm_parts(self, gi: int, state: dict, F: Optional[np.ndarray] = None, *,
+                   raw: bool = False):
         """``(S, w, rtol_eff, rms)`` of the group's norm at the returned state.
 
-        ``S`` selects the norm's entries from the members' stacked ``x``
-        (each member once for ``"l2"`` / ``"mixed"``, each internal edge's
-        source for ``"interface"``); ``w`` weights each entry by
-        ``1 / (rtol max|field|)`` at *state* (``rtol`` 1 under ``"l2"``);
-        a field with no magnitude leaves the norm, as ``atol = 0`` makes
-        it.  ``rms`` divides the sum of squares by the count.
+        ``S`` maps the members' stacked ``x`` to the norm's entries (the
+        rows of :meth:`norm_fields`: each member once for ``"l2"`` /
+        ``"mixed"``, what each internal edge delivers for
+        ``"interface"``); ``w`` weights each entry by ``1 / (rtol
+        max|field|)`` at *state* (``rtol`` 1 under ``"l2"``); a field
+        with no magnitude leaves the norm, as ``atol = 0`` makes it.
+        ``rms`` divides the sum of squares by the count.
         """
         cfg = self.cfgs[gi]
         norm = cfg.get("convergence_norm", "l2")
         rtol_eff = 1.0 if norm == "l2" else float(cfg.get("rtol", 1e-6))
-        members, off, k = self._group_layout(gi)
-        rows = _norm_rows(self.topo, gi, norm)
-        S = np.zeros((len(rows), k))
-        w = np.zeros(len(rows))
-        for r, (node, idx) in enumerate(rows):
-            S[r, off[node] + idx] = 1.0
-            ref = float(np.max(np.abs(np.asarray(state[node]["x"], np.float64))))
-            w[r] = 1.0 / (rtol_eff * ref) if ref > 0 else 0.0
+        members, _off, _k = self._group_layout(gi)
+        x = np.concatenate([np.asarray(state[m]["x"], np.float64) for m in members])
+        blocks, weights = [], []
+        for B, _gamma in self.norm_fields(gi, raw=raw):
+            ref = float(np.max(np.abs(B @ x))) if B.shape[0] else 0.0
+            blocks.append(B)
+            weights.append(np.full(B.shape[0], 1.0 / (rtol_eff * ref) if ref > 0 else 0.0))
+        S = np.vstack(blocks) if blocks else np.zeros((0, len(x)))
+        w = np.concatenate(weights) if weights else np.zeros(0)
         return S, w, rtol_eff, norm != "l2"
+
+    def _field_slices(self, gi: int) -> list:
+        """``[(rows of S, B, gamma), ...]``, one per field of :meth:`norm_fields`."""
+        out, at = [], 0
+        for B, gamma in self.norm_fields(gi):
+            out.append((slice(at, at + B.shape[0]), B, gamma))
+            at += B.shape[0]
+        return out
 
     def group_report_consistency(self, gi: int, pre: dict, state: dict, residual: float):
         """``(defect_norm, bound, detail)``: is the reported residual that of the returned state?
@@ -1039,6 +1093,15 @@ class LinearModel:
         (``rtol max(|x|, |F(x)| + |eta|)``), ``epsilon`` the members'
         rounding (:meth:`rounding`).  Holds whatever the acceleration, the
         predictor and the solver did to reach the state, converged or not.
+
+        ``S`` is the norm's own reading (:meth:`norm_fields`), which under
+        ``"interface"`` is what each internal edge delivers.  Every member
+        reads the others only through those edges, so ``L = B S`` for some
+        ``B`` and ``S (I - L) S^+`` applied to ``S r`` is ``(I - S B) S r``
+        exactly, whether or not ``S`` has an inverse.  A mapped edge's
+        delivered value is computed again by the norm, in float: both
+        readings the residual compared carry that rounding (``gamma |S|
+        |x|``, :meth:`norm_fields`), which is allowed for beside ``eta``.
         """
         members, off, k = self._group_layout(gi)
         L, U = self.group_pass(gi)
@@ -1064,38 +1127,55 @@ class LinearModel:
         eps_vec = np.concatenate([self.rounding(m, pre, read) for m in members])
         eta = np.abs(np.linalg.inv(np.eye(k) - L)) @ eps_vec
         S, w, rtol_eff, rms = self.norm_parts(gi, state)
+        absS = np.abs(S)
+        fields = self._field_slices(gi)
+        # Per entry of the reading: how far the float pass's reading can be
+        # from the exact pass's (``|S| eta``), and how far a reading the
+        # norm computed can be from the exact reading of the same state
+        # (``read_x`` at the returned state, ``read_F`` after the pass).
+        s_eta = absS @ eta
+        read_x = np.zeros(len(w))
+        read_F = np.zeros(len(w))
         rho_up = np.zeros(len(w))
-        rows = _norm_rows(self.topo, gi, self.cfgs[gi].get("convergence_norm", "l2"))
-        for r, (node, idx) in enumerate(rows):
-            sl = slice(off[node], off[node] + self.topo.node(node).n)
-            rho_up[r] = rtol_eff * max(float(np.max(np.abs(x[sl]))),
-                                       float(np.max(np.abs(F[sl]) + eta[sl])))
+        for rows, B, gamma in fields:
+            read_x[rows] = gamma * (np.abs(B) @ np.abs(x))
+            read_F[rows] = gamma * (np.abs(B) @ (np.abs(F) + eta))
+            if B.shape[0]:
+                rho_up[rows] = rtol_eff * max(
+                    float(np.max(np.abs(B @ x) + read_x[rows])),
+                    float(np.max(np.abs(B @ F) + s_eta[rows] + read_F[rows])))
+        read = read_x + read_F
         Splus = np.linalg.pinv(S)
         A = (w[:, None] * S) @ (np.eye(k) - L) @ Splus @ np.diag(rho_up)
         K_up = float(np.linalg.norm(A, 2))
         N = len(w)
         R2 = float(residual) * (np.sqrt(N) if rms else 1.0) * (1.0 + (N + 4) * self.eps)
-        bound = K_up * R2 + float(np.linalg.norm(w * (S @ eps_vec)))
+        A_read = np.abs((w[:, None] * S) @ (np.eye(k) - L) @ Splus)
+        bound = (K_up * R2 + float(np.linalg.norm(w * (absS @ eps_vec)))
+                 + float(np.linalg.norm(A_read @ read)))
         dnorm = float(np.linalg.norm(w * (S @ d)))
         scale = np.sqrt(N) if rms else 1.0
         # The other direction: the reported residual *is* ``||F(x) - x||`` of
         # the returned state (``coupling_diagnostics``: "for the state x this
         # step returned").  The float pass is within ``eta`` of ``F`` per
-        # entry, which moves the norm by at most ``||D S eta||`` (``D`` the
-        # returned-state weights, never below the residual's own); the
-        # residual's weights move by at most ``max eta / ref`` per field; the
-        # norm's own evaluation by ``(N + 4) eps``.
+        # entry, which moves the norm by at most ``||D |S| eta||`` (``D`` the
+        # returned-state weights, never below the residual's own), and the
+        # two readings it compared by their own rounding; the residual's
+        # weights move by at most ``(max |S| eta + reading) / ref`` per
+        # field; the norm's own evaluation by ``(N + 4) eps``.
         r_true = F - x
         w_true = np.zeros(N)
         delta = 0.0
-        for row, (node, idx) in enumerate(rows):
-            sl = slice(off[node], off[node] + self.topo.node(node).n)
-            ref = max(float(np.max(np.abs(x[sl]))), float(np.max(np.abs(F[sl]))))
-            w_true[row] = 1.0 / (rtol_eff * ref) if ref > 0 else 0.0
+        for rows, B, _gamma in fields:
+            if not B.shape[0]:
+                continue
+            ref = max(float(np.max(np.abs(B @ x))), float(np.max(np.abs(B @ F))))
+            w_true[rows] = 1.0 / (rtol_eff * ref) if ref > 0 else 0.0
             if ref > 0:
-                delta = max(delta, float(np.max(eta[sl])) / ref)
+                delta = max(delta, float(np.max(s_eta[rows] + np.maximum(
+                    read_x[rows], read_F[rows]))) / ref)
         R_true = float(np.linalg.norm(w_true * (S @ r_true))) / scale
-        R_tol = (float(np.linalg.norm(w * (S @ eta))) / scale
+        R_tol = (float(np.linalg.norm(w * (s_eta + read))) / scale
                  + 2.0 * delta * R_true
                  + (N + 4) * self.eps * max(float(residual), R_true))
         return dnorm / scale, bound / scale, dict(K_up=K_up, eps=float(np.max(eps_vec)),
@@ -1202,10 +1282,20 @@ class LinearModel:
             scale = np.sqrt(len(w)) if rms else 1.0
             _m, off, _k = self._group_layout(gi)
             for m in members:
+                # ``||w (S d)|| <= bound scale``, so each entry the norm
+                # reads of this member's defect is within ``bound scale /
+                # w``; the defect itself is those entries through the
+                # pseudo-inverse of the member's rows -- where they
+                # determine it.  A member the norm reads through a mapping
+                # that loses a direction (or does not read at all) has no
+                # allowance, and the monolithic comparison is skipped.
                 sl = slice(off[m], off[m] + topo.node(m).n)
-                wm = np.max(w[(S[:, sl] != 0).any(axis=1)]) if np.any(S[:, sl]) else 0.0
-                allowance[m] = (np.full(topo.node(m).n, bound * scale / wm)
-                                if wm > 0 else None)
+                rows = (S[:, sl] != 0).any(axis=1) & (w > 0)
+                C = S[rows][:, sl]
+                if C.size and np.linalg.matrix_rank(C) == topo.node(m).n:
+                    allowance[m] = np.abs(np.linalg.pinv(C)) @ (bound * scale / w[rows])
+                else:
+                    allowance[m] = None
             entry = {"defect": dnorm, "bound": bound}
             if rep.get("converged") and thresholds is not None:
                 dist, tol = self.converged_distance(gi, pre, state, thresholds[gi])
@@ -1331,7 +1421,10 @@ def named_topologies() -> dict:
       reader;
     * ``chain-into-ring``: a chain of outside nodes into a two-member ring,
       a node beside the group reading the chain and the group additively,
-      and a reader added first.
+      and a reader added first.  The ring's forward edge carries an
+      interface mapping and then a transform, its return edge a transform
+      alone, so configuration 2 -- the interface norm -- reads one edge of
+      each kind as the step delivers it.
     """
     out = {}
 
@@ -1401,7 +1494,7 @@ def named_topologies() -> dict:
     b.edge("c0", "c1", field="q")
     b.edge("c1", "c2", transform="negate")
     b.edge("c2", "g0")
-    b.edge("g0", "g1")
+    b.edge("g0", "g1", transform="negate", mapped=True)
     b.edge("g1", "g0", transform="scale_0.5")
     p = b.edge("c1", "w")
     b.edge("g0", "w", port=p)

@@ -492,7 +492,9 @@ def assert_the_gradient_bound_bounds(index: int) -> None:
         return
     after = ct._snapshot(gm, {})                                # noqa: SLF001
     model = ct.LinearModel(built.topo, values, dtype=row["dtype"], group_cfgs=[_group_cfg(g)])
-    S, w, _rt, _rms = model.norm_parts(0, after)
+    # The gradient bound's norm: under "interface" the source fields the
+    # edges read, before any mapping or transform (``raw``).
+    S, w, _rt, _rms = model.norm_parts(0, after, raw=True)
     worst, where = 0.0, None
     for m in members:
         nd = built.topo.node(m)

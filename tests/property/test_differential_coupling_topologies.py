@@ -155,6 +155,48 @@ def test_a_named_topology_reproduces_the_monolithic_reference(name, choice, orde
     assert_reproduces_the_reference(topo, knobs, built, values)
 
 
+#: The structure whose ring carries an interface mapping (then a transform)
+#: on one internal edge and a transform alone on the other, and the
+#: configuration that puts the interface norm on it.
+_MAPPED_RING, _INTERFACE_CHOICE = "chain-into-ring", 2
+
+
+def _assert_the_interface_norm_reads_a_mapped_edge(topo, knobs):
+    """The premise of the mapped-ring tests."""
+    (gi,) = range(len(topo.groups))
+    assert knobs[gi]["convergence_norm"] == "interface", knobs
+    internal = [topo.edges[i] for i in topo.internal_edges(gi)]
+    assert any(e.mapped and e.transform for e in internal), internal
+    assert any(not e.mapped and e.transform for e in internal), internal
+
+
+@pytest.mark.parametrize("order", ["as-built", "interleaved"])
+# Costly tier: one compiled graph per order; the examples draw the gains,
+# biases, the mapping matrix, scale and start.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_the_interface_norm_on_a_mapped_ring_reproduces_the_monolithic_reference(order, data):
+    """Aitken, Gauss-Seidel and ``convergence_norm="interface"`` on a ring with a
+    mapped internal edge: the reported residual is ``||F(x) - x||`` of the
+    returned state *in what the edges deliver* -- the mapping matrix the step
+    ran with, then the transform -- the defect is within what that residual
+    allows, and a converged group is within its threshold of its exact fixed
+    point in that norm.
+
+    While the norm read the source field and left the mapping out, the
+    reference restated that rule and agreed with it; with the reference
+    reading what the step delivers, the same library fails this test (the
+    mapping object holds zeros: the matrix reaches the step as a parameter).
+    Slow sibling: :func:`test_a_drawn_topology_reproduces_the_monolithic_reference`,
+    which draws mapped and transformed internal edges under every norm.
+    """
+    node_order = None if order == "as-built" else ct.interleaved_order(NAMED[_MAPPED_RING])
+    topo, knobs, built = _built(_MAPPED_RING, _INTERFACE_CHOICE, node_order=node_order)
+    _assert_the_interface_norm_reads_a_mapped_edge(topo, knobs)
+    values = data.draw(_values(topo, knobs))
+    assert_reproduces_the_reference(topo, knobs, built, values)
+
+
 @pytest.mark.parametrize("name", sorted(NAMED))
 def test_compile_warns_exactly_for_a_group_inside_a_larger_loop(name):
     """``compile()`` names every group that is a strict subset of a component, and no other."""
@@ -1028,4 +1070,19 @@ def test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_doma
         traj, = _runs_in(domain, relayed, [rv])
         with _x64(domain == "f64"):
             assert_reproduces_the_reference(t1, knobs, relayed, rv, traj=traj,
+                                            dtype=_domain_dtype(domain))
+
+
+@pytest.mark.parametrize("domain", _REFERENCE_DOMAINS)
+def test_the_interface_norm_on_a_mapped_ring_reproduces_its_reference_in_every_domain(domain):
+    """The mapped ring under the interface norm in each domain the reference
+    models: float64, a sub-cycled member and a predictor's starting guess.
+    (The other domains hold the same structure and configuration to the
+    build-order invariance above.)"""
+    topo, knobs, built = _built_in(domain, _MAPPED_RING, _INTERFACE_CHOICE)
+    _assert_the_interface_norm_reads_a_mapped_edge(topo, knobs)
+    for values in _domain_values(topo, knobs, domain):
+        traj, = _runs_in(domain, built, [values])
+        with _x64(domain == "f64"):
+            assert_reproduces_the_reference(topo, knobs, built, values, traj=traj,
                                             dtype=_domain_dtype(domain))

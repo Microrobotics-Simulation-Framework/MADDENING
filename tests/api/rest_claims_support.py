@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import gc
 import hashlib
 import json
 import math
@@ -178,6 +179,9 @@ class Check:
     patch: dict
     #: (row, domain) -> reason: a cell that is a strict xfail
     xfail: dict
+    #: the check holds a request to a wall-clock bound: it is served with
+    #: the garbage collector off (:func:`collector_off`)
+    timed: bool = False
 
 
 CHECKS: dict[str, Check] = {}
@@ -186,9 +190,11 @@ ALL = frozenset(IN_PROCESS + ("concurrent",))
 
 
 def check(*rows: str, bind: str = "any", skip=(), only=None, server_kw=None, patch=None,
-          xfail=None):
+          xfail=None, timed: bool = False):
     """Register *fn* as the check of *rows*, in every domain but *skip* (or
-    only those in *only*); a check about one bind leaves out the other."""
+    only those in *only*); a check about one bind leaves out the other.
+    *timed*: the check times a request, and :func:`run_check` serves it with
+    the garbage collector off."""
     def register(fn):
         contexts = set(only) if only is not None else set(ALL)
         contexts -= set(skip)
@@ -197,7 +203,7 @@ def check(*rows: str, bind: str = "any", skip=(), only=None, server_kw=None, pat
         if bind == "public":
             contexts.discard("loopback")
         chk = Check(fn, rows, bind, frozenset(contexts), dict(server_kw or {}),
-                    dict(patch or {}), dict(xfail or {}))
+                    dict(patch or {}), dict(xfail or {}), timed)
         for row in rows:
             assert row not in CHECKS, f"{row} has two checks"
             CHECKS[row] = chk
@@ -327,6 +333,35 @@ def wait_for(predicate, timeout: float = 20.0) -> bool:
     return False
 
 
+@contextlib.contextmanager
+def collector_off():
+    """Python's cyclic garbage collector switched off for the block.
+
+    A test here that times a request shares its process with the server it
+    asks, and a full (oldest-generation) collection stops every thread of
+    that process -- the client, the server's event loop and its workers --
+    for as long as it takes: 0.1 to 0.4 s in these tests on an idle core,
+    longer on a busy one.  The collector runs once enough objects have been
+    allocated, so a test that has just built and sent a hundred requests is
+    where one falls, and one that falls inside a timed request is counted
+    as the route's own time.  The two misses reproduced here (jax 0.10.2,
+    one busy core: a stop at 0.54 s and at 0.60 s against 0.5 s) each had
+    a collection of 0.46 s and of 0.42 s inside the request; CI's three,
+    0.70 to 0.76 s, are read the same way.  What the routes are asked for
+    -- not to wait for a worker thread, or for the graph -- has nothing to
+    do with it.
+
+    A collection another thread has already begun is not stopped, so a
+    test enters this before it starts its server or any thread."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
 def stop_runner(server: SimulationServer) -> None:
     with server._runner_lock:
         server._stop_runner()
@@ -428,7 +463,9 @@ def run_check(row: str, domain: str, root: Path) -> None:
     """Run *row*'s check in an in-process *domain*."""
     chk = CHECKS[row]
     assert domain in chk.contexts, (row, domain)
-    with served(domain, chk, root) as ctx:
+    # Off from before the server is built, for a check that times a request.
+    quiet = collector_off() if chk.timed else contextlib.nullcontext()
+    with quiet, served(domain, chk, root) as ctx:
         if domain == "shutdown":
             mid_request_sigterm(chk, ctx)
         else:
@@ -1221,11 +1258,14 @@ def _a_runner_route_answers_within_one_timeout_of_its_arrival(ctx):
     stop_runner(ctx.server)
 
 
-@check("REST-105", only=("public", "sim_run"), patch={"_GRAPH_LOCK_TIMEOUT": 0.25})
+@check("REST-105", only=("public", "sim_run"), patch={"_GRAPH_LOCK_TIMEOUT": 0.25},
+       timed=True)
 def _the_stride_is_answered_at_once_whatever_the_runner_routes_wait_for(ctx):
     """PUT /sim/stride answers at once and applies its value: behind a long
     holder of the graph with a start and a reset waiting there, and beside
-    an in-flight /sim/run."""
+    an in-flight /sim/run.  Its bound leaves half a second for the request
+    itself, which a full garbage collection inside it can take: the check
+    is served with the collector off (``timed``, :func:`collector_off`)."""
     if ctx.domain == "sim_run":
         elapsed, status = _timed(ctx, "PUT", "/sim/stride", params={"steps_per_frame": 2})
     else:

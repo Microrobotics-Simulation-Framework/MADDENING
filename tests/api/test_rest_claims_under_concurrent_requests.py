@@ -33,7 +33,6 @@ and the module runs under :func:`tests.property.differential.no_cloud_launch`.
 from __future__ import annotations
 
 import contextlib
-import gc
 import hashlib
 import json
 import os
@@ -152,33 +151,9 @@ def reading(base: str, headers: dict):
     assert not bad, bad[:3]
 
 
-@contextlib.contextmanager
-def collector_off():
-    """Python's cyclic garbage collector switched off for the block.
-
-    A test here that times a request shares its process with the server it
-    asks, and a full (oldest-generation) collection stops every thread of
-    that process -- the client, the server's event loop and its workers --
-    for as long as it takes: 0.1 to 0.4 s in these tests on an idle core,
-    longer on a busy one.  The collector runs once enough objects have been
-    allocated, so a test that has just built and sent a hundred requests is
-    where one falls, and one that falls inside a timed request is counted
-    as the route's own time.  The two misses reproduced here (jax 0.10.2,
-    one busy core: a stop at 0.54 s and at 0.60 s against 0.5 s) each had
-    a collection of 0.46 s and of 0.42 s inside the request; CI's three,
-    0.70 to 0.76 s, are read the same way.  What the routes are asked for
-    -- not to wait for a worker thread, or for the graph -- has nothing to
-    do with it.
-
-    A collection another thread has already begun is not stopped, so a
-    test enters this before it starts its server or any thread."""
-    was_enabled = gc.isenabled()
-    gc.disable()
-    try:
-        yield
-    finally:
-        if was_enabled:
-            gc.enable()
+#: The garbage collector off for a timed request: shared with the other
+#: wall-clock tests of ``tests/api`` (``rest_claims_support.collector_off``).
+collector_off = S.collector_off
 
 
 # ---------------------------------------------------------------------------

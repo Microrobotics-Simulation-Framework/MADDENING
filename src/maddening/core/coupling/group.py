@@ -98,9 +98,11 @@ class CouplingGroup:
         not depend on the units its quantities are written in.  ``"l2"``
         uses a global L2 norm with ``tolerance`` as threshold;
         ``"mixed"`` a per-field RMS of ``|dx| / (rtol * |v|)`` over
-        every float field, and ``"interface"`` the same over the
-        coupling-edge fields only (both converged when the norm
-        <= 1.0).
+        every float field, and ``"interface"`` the same over what the
+        group's internal edges *deliver* only: each edge's source
+        field through the edge's interface mapping and then its
+        transform, the value the step hands the target (both
+        converged when the norm <= 1.0).
     atol : float
         Dead band, in each field's own units: a field whose magnitude
         does not exceed ``atol`` counts as being at zero, **leaves the
@@ -132,8 +134,8 @@ class CouplingGroup:
         gradient-error bound (``gradient_relative_error_bound``,
         ``gradient_bound_usable``), which cost ``8`` Jacobian-vector
         products for the spectrum (``16`` under the interface norm with
-        a transform on an internal edge, whose report takes a second
-        spectrum on the transformed reading) and ``11 + 4 k + 5 n_p``
+        a mapping or a transform on an internal edge, whose report takes
+        a second spectrum on the reading the edges deliver) and ``11 + 4 k + 5 n_p``
         more for the bound per group per step (plus one linearisation and ``k``
         reverse-mode products where the state has more than ``k``
         entries; ``k <= 8``, ``n_p`` the probes: every entry of a

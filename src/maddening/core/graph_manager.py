@@ -645,19 +645,20 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
     """``(rho, arnoldi_residual, amplification, ratio)`` in the interface norm's own coordinates.
 
     :func:`_spectral_rate_at` with ``field_reference``, for a group under
-    ``convergence_norm="interface"`` with a transform on an internal edge.
-    That norm measures each internal edge's source value *after* the
-    edge's transform (``coupling_residual_interface``), each over its own
+    ``convergence_norm="interface"`` with a mapping or a transform on an
+    internal edge.  That norm measures what each internal edge *delivers*
+    -- its source value through the edge's interface mapping and then its
+    transform (``coupling_residual_interface``) -- each over its own
     magnitude; the spectral analysis took its weights from the raw source
     fields, and the bound multiplied a residual in one set of coordinates
     by a resolvent norm in the other.  An offset (a unit conversion's
     273.15) shrinks the reading's relative change, a selection
-    (``"extract_last"``) changes which magnitude an entry is divided by,
-    and the bound read 0.0014-0.098x the true distance with
-    ``spectral_usable=True``.
+    (``"extract_last"``, or a mapping that delivers one entry) changes
+    which magnitude an entry is divided by, and the bound read
+    0.0014-0.098x the true distance with ``spectral_usable=True``.
 
     So here every quantity is taken on the reading ``y = Phi(x)`` itself
-    (``reading``: the flat vector of the transformed edge values, in the
+    (``reading``: the flat vector of the delivered edge values, in the
     order the norm sums them).  The pass reads the iterate only through
     those edges, ``F = G o Phi``, so the reading iterates by its own map
     ``Phi o G``, whose Jacobian ``A = Phi' G'`` has ``dF/dx``'s non-zero
@@ -666,8 +667,8 @@ def _interface_spectral_rate_at(step_pure, x_star, consts, x_weights, reading,
     ``A`` in the reading's weights carries the residual the loop measured
     to the distance in the norm the loop measured it in.  ``A`` is applied
     through preimages (:func:`~maddening.core.coupling.acceleration._arnoldi_through`):
-    the Krylov vectors are readings of state tangents, so no transform is
-    ever inverted.
+    the Krylov vectors are readings of state tangents, so no mapping or
+    transform is ever inverted.
 
     ``x_weights`` are the state's spectral weights, which only condition
     the preimages; ``weights``, ``spectral_weights`` and ``resolution``
@@ -1563,8 +1564,9 @@ def _flux_edge_coupling_errors(group, nodes, edges, state) -> list[str]:
     serve one, and both used to fail inside the trace with a bare
     ``KeyError`` naming the flux:
 
-    * ``convergence_norm="interface"`` measures the change of each
-      internal edge's source field between iterates;
+    * ``convergence_norm="interface"`` measures the change, between
+      iterates, of what each internal edge delivers from its source
+      field;
     * a sub-cycled member under ``boundary_interpolation="linear"`` (or
       ``"quadratic"``, which is linear) interpolates each internal input
       between the pass's incoming iterate and the in-pass state.
@@ -4774,7 +4776,7 @@ def _run_coupled_block_impl(
                         spectral_rate_settled(rho_spec, spec_resid), grad_bound,
                         jnp.full_like(grad_bound, jnp.nan))
                     # The report's triple, on the interface norm's own
-                    # reading: each internal edge's transformed value over its
+                    # reading: each internal edge's delivered value over its
                     # own magnitude -- the coordinates ``residual`` and the
                     # floor are measured in (``_interface_spectral_rate_at``).
                     x_sg = jax.lax.stop_gradient(x_star_full)
@@ -9514,7 +9516,14 @@ class GraphManager:
               not re-derived from the graph at report time: an edit made
               since -- a node rebuilt with another declared count -- does
               not move the report of a step that already ran, and a group
-              a member of which was removed since has no entry -- measured
+              a member of which was removed since has no entry.  Under
+              ``convergence_norm="interface"`` with an interface mapping
+              on an internal edge the entries are what the edges deliver,
+              which depends on the mapping weights the step ran with
+              (``params["mappings"]``, which a caller may override for one
+              step): the step measures that group's floor itself and the
+              report reads it, so a ``params`` override, or an edit of the
+              weights since, does not move it either -- measured
               in that norm), times the larger of
               ``||(I - H)^{-1}||_2`` (the resolvent norm of the
               Krylov-compressed Jacobian, in the group's own norm) and
@@ -9574,19 +9583,25 @@ class GraphManager:
               fields are outside what it bounds and the norm's scale
               drifts with the iterate exactly as it does for
               ``"residual"``.  Under ``convergence_norm="interface"``
-              the "fields" are what that norm reads: each internal
-              edge's source value *after* the edge's transform, over
-              its own magnitude, and the spectrum is taken on that
-              reading (the Jacobian of the reading's own iteration,
-              ``Phi' G'`` for ``F = G o Phi``, applied through state
-              tangents, so no transform is inverted) -- taken on the
-              raw source fields instead, the bound multiplied a residual
-              in one set of coordinates by a resolvent in another and
-              read 0.0014-0.098x the true distance, usable, with an
-              offset (a unit conversion) or ``"extract_last"`` on an
-              edge.  A transform that is not affine makes the map
-              non-linear in the reading, with the asymptotic reading
-              above.  And its float floor is a model of the
+              the "fields" are what that norm reads: the value each
+              internal edge *delivers* -- its source value through the
+              edge's interface mapping, with the weights the step ran
+              with, and then its transform -- over its own magnitude,
+              and the spectrum is taken on that reading (the Jacobian
+              of the reading's own iteration, ``Phi' G'`` for ``F = G o
+              Phi``, applied through state tangents, so no mapping or
+              transform is inverted) -- taken on the raw source fields
+              instead, the bound multiplied a residual in one set of
+              coordinates by a resolvent in another and read
+              0.0014-0.098x the true distance, usable, with an offset
+              (a unit conversion) or ``"extract_last"`` on an edge; and
+              while the norm and the analysis left an edge's mapping
+              out, residual and bound alike described the source field
+              and not what the target is handed (0.064-0.318x the true
+              distance in the delivered values, usable, with the
+              selection written as a mapping).  A transform that is
+              not affine makes the map non-linear in the reading, with
+              the asymptotic reading above.  And its float floor is a model of the
               map's rounding (see
               :data:`~maddening.core.coupling.acceleration.PRECISION_FLOOR_ULPS`),
               which a node that cancels catastrophically inside its own
@@ -9662,10 +9677,10 @@ class GraphManager:
               ``|g_k - g*| <= bound * |g_k|`` for the gradient with
               respect to one scalar constant, its norms the group's over
               the state's own fields -- under
-              ``convergence_norm="interface"`` with a transform on an
-              internal edge, the source fields the edges read, before the
-              transform, not the reading ``"spectral_error_bound"`` is
-              taken in.  Measured (jaxlib 0.11.0,
+              ``convergence_norm="interface"`` with a mapping or a
+              transform on an internal edge, the source fields the edges
+              read, before the mapping and the transform, not the reading
+              ``"spectral_error_bound"`` is taken in.  Measured (jaxlib 0.11.0,
               float32) at every cap of a ``max_iterations`` sweep that
               stops the forward early by construction (caps 3-8): never
               below the true error on a concave and a convex map,

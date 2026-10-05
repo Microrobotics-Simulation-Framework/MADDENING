@@ -441,12 +441,15 @@ def _interface_readings(interface_edges, *states, mappings=None):
 def _reading_eps(source_dtype, value) -> float:
     """The float resolution of one delivered value: the coarser of its own dtype's and its source's.
 
-    A delivered value is no finer than the field it was computed from: a
-    float64 mapping matrix applied to a float32 field (a float32 member
-    of an x64 graph) delivers float64 numbers that carry float32
-    rounding, and at float64's eps the floor read 5e-10 of what the
-    source resolves.  An edge that delivers its source's dtype, or a
-    narrower one, keeps the eps it had.
+    A delivered value is no finer than the field it was computed from.
+    Under ``jax_enable_x64`` a float64 mapping matrix applied to a
+    float32 field, or a transform that returns float64, delivers float64
+    numbers that carry float32 rounding; taken at the delivered dtype's
+    eps the floor was ``2**-29`` of what the source resolves, and a
+    float32 pair stalled at ``residual=0.0`` behind edges that widen
+    read its bound at 6.7e-7 of the true distance with
+    ``spectral_usable=True`` (jaxlib 0.11.0, CPU).  An edge that delivers
+    its source's dtype, or a narrower one, keeps the eps it had.
     """
     delivered = jnp.asarray(value).dtype
     eps = float(jnp.finfo(delivered).eps)
@@ -1095,8 +1098,9 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 
     ``measure`` is a linear map from the iterate's coordinates to the
     coordinates a norm is taken in -- under ``convergence_norm="interface"``
-    the JVP of the interface reading, each internal edge's *transformed*
-    source value -- and the operator analysed is ``A`` with
+    the JVP of the interface reading, what each internal edge *delivers*
+    (its source value through the edge's mapping, then its transform)
+    -- and the operator analysed is ``A`` with
     ``A measure(u) = measure(matvec(u))``.  It is well defined wherever
     ``matvec`` sends the kernel of ``measure`` to zero, which a coupling
     pass does when every member reads the iterate only through the edges

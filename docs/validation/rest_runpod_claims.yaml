@@ -3425,7 +3425,7 @@ claims:
     and cross-parameter writes; costly nodes and generated graphs in the slow
     lane; generated sequences of writes among saves, checkpoint loads, node
     rebuilds and in-process gm.params writes, with a rod at its Fourier limit
-    (ten requests a sequence per push, fifty in the slow lane); every
+    (ten requests a sequence per push, a hundred in the slow lane); every
     malformed value of every member of the request body. Not claimed for
     simultaneous requests, the runner running, an in-flight /sim/run or a
     server shutting down.

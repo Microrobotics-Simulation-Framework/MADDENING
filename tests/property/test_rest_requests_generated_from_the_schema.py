@@ -104,9 +104,12 @@ def _no_cloud():
 #: and the streams (EXPERIMENTAL in 0.4.0, hardened in 0.5.0), and
 #: ``/cloud/*`` (which could reach a provider).
 OUT_OF_SCOPE = ("/surrogate/", "/ws/", "/cloud/")
-#: Routes FastAPI adds on a loopback bind: the schema and its two viewers.
-#: They take no input; the header battery is asked of them.
-FRAMEWORK_ROUTES = ("/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc")
+def framework_routes(app) -> tuple:
+    """The routes FastAPI itself adds on a loopback bind -- the schema, its
+    two viewers and the first one's redirect page -- as *app* names them.
+    They take no input; the header battery is asked of them."""
+    return tuple(url for url in (app.openapi_url, app.docs_url,
+                                 app.swagger_ui_oauth2_redirect_url, app.redoc_url) if url)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -165,10 +168,11 @@ def _in_scope(path: str) -> bool:
 
 #: The documented routes of a loopback-bound server, read once at import to
 #: parametrise the tests (the fail-closed test builds its own app).
-OPERATIONS = documented_operations(SimulationServer({}).create_app())
+_APP = SimulationServer({}).create_app()
+OPERATIONS = documented_operations(_APP)
 IN_SCOPE = {key: op for key, op in OPERATIONS.items() if _in_scope(op.path)}
-FRAMEWORK = {f"GET {path}": Operation("GET", path, (), (), None, path == "/openapi.json")
-             for path in FRAMEWORK_ROUTES}
+FRAMEWORK = {f"GET {path}": Operation("GET", path, (), (), None, path == _APP.openapi_url)
+             for path in framework_routes(_APP)}
 
 
 # ---------------------------------------------------------------------------
@@ -795,7 +799,7 @@ def test_every_documented_route_has_a_request_generator():
                     f"{method} {path} is routed but not in the OpenAPI document "
                     "(include_in_schema=False?): it has no generator here")
         else:
-            assert path in FRAMEWORK_ROUTES, (
+            assert path in framework_routes(app), (
                 f"{type(route).__name__} {path} is neither a documented operation, an "
                 f"out-of-scope prefix {OUT_OF_SCOPE} nor one of FastAPI's own routes")
     in_scope = {key for key, op in documented.items() if _in_scope(op.path)}

@@ -1108,7 +1108,7 @@ names no directory of the deployment; a 2xx is strict JSON.
   returns to values the graph has already held as often as it proposes new
   ones, and reuses four node names and four checkpoint names, which is what
   makes a sequence like MADD-ANO-178's reachable. Ten requests a sequence
-  per push, drawn the same on every run; fifty in the slow lane at the
+  per push, drawn the same on every run; a hundred in the slow lane at the
   profile's depth. Each historical sequence is also pinned, replayed
   through the machine's own `do_*` requests.
   **To add a rule:** write a `do_<request>` method that sends one request

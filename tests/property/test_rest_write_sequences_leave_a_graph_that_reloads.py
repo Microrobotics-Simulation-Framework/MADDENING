@@ -773,10 +773,13 @@ class RestWriteSequences(RuleBasedStateMachine):
 #: other state machines' are (``testing_standards.md``): it sets how long
 #: one example is.  A request costs 10 to 80 ms here (the reload of a graph
 #: whose config changed is compiled to be stepped), so ten keep an example
-#: well under a second; fifty are long enough for a sequence of six
-#: particular requests among others.
+#: well under a second.  The slow lane's are long on purpose: a defect
+#: that takes three particular requests in order is found in proportion to
+#: the cube of the sequence's length, at a cost that grows with its length
+#: (measured on the tree that had MADD-ANO-178, the PR that added this
+#: module lists the examples it took at 50 and at 100).
 STEPS_PER_PUSH = 10
-STEPS_SLOW = 50
+STEPS_SLOW = 100
 
 
 def test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload():
@@ -808,9 +811,9 @@ def test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload():
 
 
 # Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
-@pytest.mark.slow  # a state machine over the REST server: fifty requests an example, about 1.5 s each
+@pytest.mark.slow  # a state machine over the REST server: a hundred requests an example, about 3 s each
 def test_any_sequence_of_rest_writes_leaves_a_graph_that_runs_as_its_reload():
-    """Any sequence of the write routes, fifty requests long: no 5xx, a
+    """Any sequence of the write routes, a hundred requests long: no 5xx, a
     refusal changes nothing, and what is accepted reloads, runs as its
     reload and is within its stability limits.  ``max_examples`` is the
     profile's."""

@@ -109,6 +109,8 @@ PER_PUSH = [
          group=dict(max_iterations=3, tolerance=1e-13, acceleration="iqn-ils")),
     case("group, a member's flux read in the same pass, two passes", flux="internal",
          order=("P", "F"), adv=0.3, **TARGETS, group=dict(max_iterations=2)),
+    case("group, a member's flux seeded from the iterate, two passes", flux="internal",
+         adv=0.3, **TARGETS, group=dict(max_iterations=2)),
     case("multilinear, forward and back edge", kind="multilinear", adv=0.3, **P_HOLDS),
 ]
 

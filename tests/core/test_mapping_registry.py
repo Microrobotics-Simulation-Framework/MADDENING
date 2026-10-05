@@ -1472,6 +1472,43 @@ def test_a_value_the_factory_itself_refuses_names_the_edge(kind, hyper, points, 
     assert type(refused.value.__cause__) is ValueError
 
 
+def test_a_registered_kind_is_not_asked_what_a_built_in_factory_asks_of_its_geometry():
+    """The built-in kinds check their coordinates *inside* their factories
+    (MADD-ANO-192); neither the registry nor the reference resolver does.
+    So a built-in kind's refusal reaches the loader through the registry
+    as any factory's ``ValueError`` does, and a registered kind given the
+    same references is called with the same arrays: what its formula does
+    not cover is its own factory's to refuse."""
+    descending = {"inline": [1.0, 0.5, 0.0], "dtype": "float64"}
+    points = {"source_boundaries": descending, "target_boundaries": INLINE3}
+
+    with pytest.raises(MappingRebuildError, match="must be strictly increasing") as refused:
+        _load({"kind": "projection_1d", "points": points}, n_source=2, n_target=2)
+    assert refused.value.edge == EDGE and refused.value.kind == "projection_1d"
+    assert type(refused.value.__cause__) is ValueError
+
+    handed = []
+
+    def unchecked(source_boundaries, target_boundaries, *, source_boundaries_ref=None,
+                  target_boundaries_ref=None):
+        handed.append((np.asarray(source_boundaries).tolist(),
+                       np.asarray(target_boundaries).tolist()))
+        spec = MappingSpec("unchecked", {}, {
+            "source_boundaries": reference_for_array(
+                source_boundaries, source_boundaries_ref, name="source_boundaries"),
+            "target_boundaries": reference_for_array(
+                target_boundaries, target_boundaries_ref, name="target_boundaries")})
+        return StaticLinearMapping(jnp.full((2, 2), 0.5, jnp.float32), kind="unchecked",
+                                   spec=spec)
+
+    with temporary_kind("unchecked", unchecked,
+                        arrays=("source_boundaries", "target_boundaries"),
+                        hyperparameters={}):
+        gm = _load({"kind": "unchecked", "points": points}, n_source=2, n_target=2)
+    assert handed == [([1.0, 0.5, 0.0], [0.0, 0.5, 1.0])]
+    assert gm.edges[0].mapping.kind == "unchecked"
+
+
 def test_a_registered_factory_with_a_required_hyper_parameter_names_it_when_a_spec_omits_it():
     def needs_radius(source_points, target_points, *, radius, source_points_ref=None,
                      target_points_ref=None):
@@ -1766,12 +1803,22 @@ def test_a_traced_weight_is_refused_as_traced():
 ], ids=["int32", "bool", "float64", "complex64", "nan"])
 def test_a_static_linear_mapping_is_not_asked_and_takes_what_it_always_took(matrix):
     """The built-in class is exempt: what its matrix may hold did not
-    change with the registry."""
+    change with the registry.
+
+    What the ``matrix_mapping`` *factory* takes is the factory's own rule,
+    not this check's: it refuses a non-finite ``H`` (MADD-ANO-192), under
+    its own message, before there is a mapping to ask.  The class built
+    directly is still added whatever its matrix holds."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")           # complex -> real casts
-        gm = _vectors(matrix_mapping(matrix))
         gm = _vectors(StaticLinearMapping(jnp.asarray(matrix)))
-    assert len(gm.edges) == 1
+        assert len(gm.edges) == 1
+        if np.all(np.isfinite(matrix)):
+            assert len(_vectors(matrix_mapping(matrix)).edges) == 1
+        else:
+            with pytest.raises(ValueError, match="H holds a non-finite value") as refused:
+                matrix_mapping(matrix)
+            assert "params_pytree()" not in str(refused.value)
 
 
 def test_a_subclass_of_the_built_in_class_is_asked():

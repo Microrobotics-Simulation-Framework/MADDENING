@@ -31,6 +31,9 @@ import os
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+import contextlib
+
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -134,7 +137,9 @@ def test_run_adaptive_scan_steps_a_sixteen_bit_state_to_its_end_time(dtype):
 
     The scan reaches ``t_end`` with the state in its own dtype, in about
     the steps the host loop takes (they share one acceptance rule; the
-    host loop reads the norm as a Python float).
+    host loop reads the norm as a Python float).  Where the default float
+    is float32: under ``jax_enable_x64`` the scan refuses every state
+    narrower than float64 for another reason (MADD-ANO-178, below).
     """
     rtol = 1e-2 if dtype == jnp.float16 else 1e-1      # bfloat16 resolves 0.8%
     run = dict(_RUN, rtol=rtol)
@@ -146,6 +151,35 @@ def test_run_adaptive_scan_steps_a_sixteen_bit_state_to_its_end_time(dtype):
     host_final, host_info = _decay(dtype, 8).run_adaptive(T_END, **run)
     assert abs(int(info["n_steps"]) - int(host_info["n_steps"])) <= 2
     assert u[0] == pytest.approx(float(np.asarray(host_final["d"]["u"], np.float64)[0]), rel=5e-2)
+
+
+@contextlib.contextmanager
+def _x64():
+    prior = jax.config.read("jax_enable_x64")
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", prior)
+
+
+@pytest.mark.xfail(strict=True, raises=TypeError, reason=(
+    "MADD-ANO-178: under jax_enable_x64 run_adaptive_scan's clock carry is float64 and its "
+    "next timestep takes the error norm's dtype, so a float32 or 16-bit state raises a "
+    "scan-carry TypeError; deferred to 0.5.0"))
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float16])
+def test_run_adaptive_scan_steps_a_state_narrower_than_float64_under_x64(dtype):
+    """Under x64 the scan must step a float32 or 16-bit state as the host loop does.
+
+    It steps only an all-float64 one: the weakly typed float64 clock times
+    the controller's float32 factor comes out float32, and ``lax.scan``
+    refuses the carry.  ``run_adaptive`` steps all three.
+    """
+    with _x64():
+        _final, host_info = _decay(dtype, 8).run_adaptive(T_END, **_RUN)
+        assert host_info["t_history"][-1] == pytest.approx(T_END, rel=1e-6)     # the control
+        _final, _history, info = _decay(dtype, 8).run_adaptive_scan(T_END, max_steps=400, **_RUN)
+        assert float(info["final_t"]) == pytest.approx(T_END, rel=1e-6)
 
 
 @pytest.mark.parametrize("dtype", SIXTEEN)

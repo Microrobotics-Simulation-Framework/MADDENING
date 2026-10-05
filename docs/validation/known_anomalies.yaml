@@ -12324,8 +12324,10 @@ anomalies:
       float32 before its difference is formed (the coupling norms'
       `_widened`) and the sum starts from a float32 zero, so both steppers
       take the float32 state's steps on the 70,000-entry field and the scan
-      runs a 16-bit state to its end time; a float32 or float64 state takes
-      no new operation.
+      runs a 16-bit state to its end time where the default float is
+      float32; a float32 or float64 state takes no new operation.  Under
+      `jax_enable_x64` the scan still refuses a 16-bit state, as it does a
+      float32 one (MADD-ANO-178, a different cause).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -12359,4 +12361,43 @@ anomalies:
       - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_on_a_float16_state_above_65504_elements_steps_as_the_float32_state_does"
       - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_scan_steps_a_sixteen_bit_state_to_its_end_time"
       - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_build_adaptive_step_reports_a_sixteen_bit_states_error_in_float32"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-178"
+    title: "run_adaptive_scan raises a scan-carry TypeError on a float32, bfloat16 or float16 state under jax_enable_x64"
+    description: >
+      `run_adaptive_scan` carries its clock -- the time and the timestep --
+      through `lax.scan` from weakly typed seeds (`jnp.array(0.0)` and the
+      Python `dt_initial`), which are float64 under `jax_enable_x64`.  The
+      next timestep is the old one times the controller's factor, whose
+      dtype is the error norm's, and a weakly typed float64 times a float32
+      factor is float32: the carry goes in float64 and comes out float32,
+      and `lax.scan` refuses it -- `TypeError: scan body function carry
+      input and carry output must have equal types`.  So under x64 the scan
+      steps only an all-float64 state.  One explicit-Euler decay node with a
+      float32 (or float16) field raises on the tree and on the extracted
+      0.1.0, 0.2.1 and 0.3.1 trees (CPU, empty HOME, jaxlib 0.11.0), where
+      the same node in float64 takes 13 steps and `run_adaptive`, the host
+      loop, steps all three.  Loud: nothing is returned.  Found while
+      verifying MADD-ANO-177, whose fix lets the scan step a 16-bit state
+      where the default float is float32 and leaves this one as it was.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An exception when the scan is traced: no state is returned, so none
+      can be wrong.  The cost is that a float32 graph cannot be stepped by
+      the differentiable adaptive stepper in an x64 process.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Use `run_adaptive` (the host loop), hold the adaptively stepped state
+      in float64 in an x64 process, or run the float32 graph without
+      `jax_enable_x64`.  Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to hold the scan's clock
+      in one strongly typed dtype without handing the nodes a strongly typed
+      timestep (a 16-bit node's own arithmetic would be promoted by it).
+    verification:
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_scan_steps_a_state_narrower_than_float64_under_x64"
     github_issue: null

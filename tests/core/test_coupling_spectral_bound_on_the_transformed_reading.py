@@ -35,6 +35,7 @@ from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.transforms import resolve_transform
 from tests.conftest import EXAMPLES_COSTLY
+from tests.core import coupling_domains as cd
 
 F32 = np.float32
 RTOL = 1e-6
@@ -101,9 +102,9 @@ def _audit_exact(fixture):
     return uA, gB * tn(uA) + cB
 
 
-def _rms_over_own_magnitude(pairs):
+def _rms_over_own_magnitude(pairs, rtol=RTOL):
     """``sqrt(mean((|a - b| / (rtol * max|a|))**2))`` over every entry of every pair."""
-    terms = np.concatenate([np.abs(a - b) / (RTOL * np.max(np.abs(a))) for a, b in pairs])
+    terms = np.concatenate([np.abs(a - b) / (rtol * np.max(np.abs(a))) for a, b in pairs])
     return float(np.sqrt(np.mean(terms ** 2)))
 
 
@@ -152,6 +153,86 @@ def test_the_bound_holds_in_the_transformed_reading_at_every_cap(fixture, accele
         gm.step()
         d = gm.coupling_diagnostics()[KEY]
         _assert_bound_holds(d, _audit_distance(fixture, gm), (fixture, acceleration, cap))
+
+
+class _LinVecIn(SimulationNode):
+    """:class:`_LinVec` in a chosen dtype."""
+
+    def __init__(self, name, g, c, u0, dtype):
+        super().__init__(name, 1.0)
+        self._p = (np.asarray(g, np.float64), np.asarray(c, np.float64),
+                   np.asarray(u0, np.float64), dtype)
+
+    def initial_state(self):
+        return {"u": jnp.asarray(self._p[2], self._p[3])}
+
+    def update(self, state, boundary_inputs, dt):
+        g, c, _u0, dtype = self._p
+        inp = jnp.asarray(boundary_inputs.get("inp", 0.0), dtype)
+        return {"u": (jnp.asarray(g, dtype) * inp + jnp.asarray(c, dtype)).astype(dtype)}
+
+    def update_evaluations(self):
+        return 1.0
+
+
+#: ``domain -> (dtype, x64, rtol)``: the reading's analysis outside float32.
+#: A 16-bit group asks for what its fields resolve.
+READING_DOMAINS = {
+    "f64": (jnp.float64, True, RTOL),
+    "float16": (jnp.float16, False, 1e-2),
+    "bfloat16": (jnp.bfloat16, False, 1e-1),
+}
+
+
+def _assert_the_bound_holds_in(domain, mode):
+    """The audit's ``extract_last`` pair in *domain*'s dtype under *mode*, two passes.
+
+    The oracle is the float64 fixed point of the affine map with its
+    constants as the dtype rounds them, the distance the interface norm's.
+    """
+    dtype, x64, rtol = READING_DOMAINS[domain]
+    tj, tn, gA, cA, gB, cB, uA0, uB0 = AUDIT_FIXTURES["extract-last"]
+    with cd.x64(x64):
+        gm = GraphManager()
+        gm.add_node(_LinVecIn("A", gA, cA, uA0, dtype))
+        gm.add_node(_LinVecIn("B", gB, cB, uB0, dtype))
+        gm.add_edge("A", "B", "u", "inp", transform=tj)
+        gm.add_edge("B", "A", "u", "inp", transform="extract_first")
+        gm.add_coupling_group(["A", "B"], max_iterations=2, convergence_norm="interface",
+                              rtol=rtol, diagnostics=True, iteration_mode=mode)
+        gm.compile()
+        gm.step()
+        d = gm.coupling_diagnostics()[KEY]
+        uA = np.asarray(gm.get_node_state("A")["u"], np.float64)
+        uB = np.asarray(gm.get_node_state("B")["u"], np.float64)
+        gA, cA, gB, cB = (np.asarray(jnp.asarray(np.asarray(v, np.float64), dtype), np.float64)
+                          for v in (gA, cA, gB, cB))
+    t0 = tn(cA)
+    s_star = (gB[0] * t0 + cB[0]) / (1.0 - gB[0] * (tn(gA + cA) - t0))
+    uA_s = gA * s_star + cA
+    uB_s = gB * tn(uA_s) + cB
+    true = _rms_over_own_magnitude([
+        (np.atleast_1d(tn(uA)), np.atleast_1d(tn(uA_s))),
+        (np.atleast_1d(uB[0]), np.atleast_1d(uB_s[0])),
+    ], rtol)
+    assert d["spectral_usable"] and true > 0, (dict(d), true)     # the fixture premise
+    _assert_bound_holds(d, true, (domain, mode))
+
+
+@pytest.mark.parametrize("domain", ["f64", "float16"])
+def test_the_bound_holds_in_the_transformed_reading_in_float64_and_in_float16(domain):
+    """The reading's analysis outside float32: the bound read 0.078x (float64) and 0.85x (float16)."""
+    _assert_the_bound_holds_in(domain, "jacobi")
+
+
+# Per push: tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_in_float64_and_in_float16
+@pytest.mark.slow
+@pytest.mark.parametrize("domain, mode", [("bfloat16", "jacobi"), ("f64", "gauss-seidel"),
+                                          ("float16", "gauss-seidel"),
+                                          ("bfloat16", "gauss-seidel")])
+def test_the_bound_holds_in_the_transformed_reading_in_every_float_dtype_and_sweep(domain, mode):
+    """bfloat16, and Gauss-Seidel in each of the three dtypes."""
+    _assert_the_bound_holds_in(domain, mode)
 
 
 def test_the_mixed_norm_with_the_same_transforms_keeps_the_raw_fields():

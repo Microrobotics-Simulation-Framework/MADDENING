@@ -3279,6 +3279,8 @@ claims:
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_random_transformed_internal_edges
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_an_identity_transform_reads_the_bound_an_untransformed_edge_does
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_mixed_norm_with_the_same_transforms_keeps_the_raw_fields
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_in_float64_and_in_float16
+    - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_in_every_float_dtype_and_sweep
   status: verified
   notes: >-
     The round-6 audit found the interface norm's transformed reading

@@ -59,6 +59,7 @@ import time.  Levels:
 | `maddening.core.coupling.mapping.projection_1d_mapping` | evolving |
 | `maddening.core.coupling.mapping.rbf_mapping` | evolving |
 | `maddening.core.coupling.mapping.rbf_matrix` | evolving |
+| `maddening.core.coupling.mapping_registry.register_mapping` | experimental |
 | `maddening.core.coupling.mapping_spec.MappingSpec` | evolving |
 | `maddening.core.coupling.mapping_spec.build_mapping` | evolving |
 | `maddening.core.coupling.mapping_spec.make_point_resolver` | evolving |
@@ -216,4 +217,4 @@ import time.  Levels:
 | `maddening.usd.live_stage.LiveStage` | evolving |
 | `maddening.viz.relay.StateRelay` | experimental |
 
-*196 API surfaces registered.*
+*197 API surfaces registered.*

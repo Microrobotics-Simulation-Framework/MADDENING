@@ -133,12 +133,14 @@ class EdgeSpec:
         if self.mapping is not None:
             # A factory-built mapping describes itself as its MappingSpec
             # (kind, hyper-parameters, point references, shape -- never
-            # the weights), which from_dict rebuilds; anything else can
-            # only be named.  GraphManager.to_dict checks completeness.
-            describe = getattr(self.mapping, "describe", None)
-            d["mapping"] = describe() if callable(describe) else {
-                "kind": getattr(self.mapping, "kind", type(self.mapping).__name__),
-            }
+            # the weights), which from_dict rebuilds; a mapping class
+            # without a ``describe`` is written as the spec it carries;
+            # anything else can only be named.  GraphManager.to_dict
+            # checks completeness.
+            from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+                _mapping_config_dict,
+            )
+            d["mapping"] = _mapping_config_dict(self.mapping)
         if self.ordinal:
             d["ordinal"] = self.ordinal
         if self.transform is not None:

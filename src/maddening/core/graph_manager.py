@@ -6056,8 +6056,13 @@ class GraphManager:
                 for name, spec in self._nodes.items()
                 if spec.accepts_params
             },
+            # A copy of each table: ``gm.params`` is edited in place, and a
+            # mapping may hand out the dict it keeps.  Stored as it came,
+            # an edit of the live weights rewrote the mapping's own --
+            # ``reset_params()`` then restored the edit, and ``to_dict``
+            # compared the live weights with themselves and never warned.
             "mappings": {
-                edge.key: edge.mapping.params_pytree()
+                edge.key: dict(edge.mapping.params_pytree())
                 for edge in self._edges
                 if edge.mapping is not None
             },
@@ -7357,6 +7362,11 @@ class GraphManager:
         traced input on every step.  Its ``n_source`` must equal the
         source field's size; ``n_target`` must match the target's
         declared ``boundary_input_spec`` shape when that is an array.
+        A mapping of a class other than ``StaticLinearMapping`` is a
+        ``ValueError`` unless its ``params_pytree()`` is a plain dict
+        from identifiers to concrete, finite, floating-point JAX arrays,
+        the same on every call (the contract is spelled out in
+        :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
         A :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (or
         its dict form) is rebuilt first with :meth:`point_resolver`.
 
@@ -7419,6 +7429,21 @@ class GraphManager:
                 raise TypeError(
                     f"mapping must implement the Mapping protocol (missing {attr!r})"
                 )
+        # What the mapping puts into params["mappings"][edge.key].  Every
+        # reader of that entry -- checkpoints, POST /checkpoint/load, sysid,
+        # the FMU archive, to_dict's "live weights differ" warning -- takes
+        # it for a flat table of floating-point arrays and none of them
+        # checks, so a mapping class of the caller's own is asked here,
+        # where the edge is added, before anything can read it.
+        from maddening.core.coupling.mapping import (  # noqa: PLC0415
+            _params_contract_problem,
+        )
+        problem = _params_contract_problem(mapping)
+        if problem is not None:
+            raise ValueError(
+                f"mapping {mapping!r} on {source}.{source_field} -> "
+                f"{target}.{target_field}: {problem}"
+            )
         src_spec = self._nodes.get(source)
         if src_spec is not None:
             src_state = src_spec.node.initial_state()
@@ -7446,9 +7471,34 @@ class GraphManager:
     def resolve_boundary_inputs(self, node_name: str, params: Optional[dict] = None) -> dict:
         """Boundary inputs ``node_name`` would receive from the *current*
         state: every incoming edge (mapping, transform, additive) plus the
-        zero defaults of its external inputs.  A debugging / inspection
+        zero defaults of its external inputs, which replace an edge into
+        the same field as they do in the step.  A debugging / inspection
         helper; the compiled step resolves edges itself."""
         self._recover_from_escaped_tracers()
+        return self._boundary_inputs_from(self._state, node_name, params)
+
+    def _boundary_inputs_from(self, state, node_name: str, params: Optional[dict] = None,
+                              *, fluxes: Optional[dict] = None) -> dict:
+        """:meth:`resolve_boundary_inputs` of ``node_name`` from *state*
+        rather than from the graph's own.
+
+        The one place outside the compiled step that turns edges into a
+        node's boundary inputs: each incoming edge through
+        :func:`_apply_edge` (the mapping, then the transform, with the
+        weights in ``params["mappings"]``), additive edges summed, and
+        then the zero default of each external input -- which, as in the
+        step, *replaces* whatever edges delivered to the same field.
+        Every reader of the edges that is not the step --
+        :meth:`resolve_boundary_inputs`, the conservation diagnostic, the
+        surrogate dataset generator -- goes through it, so none of them
+        can apply an edge differently from the others.  It is traceable
+        in *state* (``jax.vmap`` over a state history gives the inputs at
+        every sample).
+
+        An edge whose source field is not in *state* reads a flux output:
+        it is looked up in ``fluxes[source_node]`` when *fluxes* is given,
+        and is a ``KeyError`` otherwise.
+        """
         if node_name not in self._nodes:
             raise KeyError(f"unknown node {node_name!r}")
         p = self._params_or_default(params)
@@ -7457,14 +7507,22 @@ class GraphManager:
         for edge in self._edges:
             if edge.target_node != node_name:
                 continue
-            value = self._state[edge.source_node][edge.source_field]
+            src_fields = state[edge.source_node]
+            if edge.source_field not in src_fields and fluxes is not None \
+                    and edge.source_field in fluxes.get(edge.source_node, {}):
+                value = fluxes[edge.source_node][edge.source_field]
+            else:
+                value = src_fields[edge.source_field]
             value = _apply_edge(edge, value, resolved)
             if edge.additive and edge.target_field in out:
                 out[edge.target_field] = out[edge.target_field] + value
             else:
                 out[edge.target_field] = value
         for ei in self._external_inputs:
-            if ei.target_node == node_name and ei.target_field not in out:
+            # No ``not in out`` guard: the step writes an external input
+            # over the edges into its field (``_resolve_and_update_node``),
+            # and an omitted external input is zeros.
+            if ei.target_node == node_name:
                 out[ei.target_field] = jnp.zeros(ei.shape, dtype=ei.dtype)
         return out
 
@@ -11758,9 +11816,20 @@ class GraphManager:
         :class:`~maddening.core.coupling.mapping_spec.MappingRebuildError`
         (a ``ValueError``) naming this edge, with the original exception
         chained: a config is untrusted input and the edge it broke on is
-        the only thing that makes the failure actionable.
+        the only thing that makes the failure actionable.  So does a
+        factory's ``ImportError`` (an optional package it needs is not
+        installed).
+
+        A kind added with
+        :func:`~maddening.core.coupling.mapping_registry.register_mapping`
+        runs a factory this library did not write, which may raise
+        anything; for such a kind *every* ``Exception`` is wrapped, not
+        only the types the built-in factories and the resolver raise.
         """
         import zipfile  # noqa: PLC0415
+        from maddening.core.coupling.mapping_registry import (  # noqa: PLC0415
+            _lookup,
+        )
         from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
             MappingRebuildError,
             MappingSpec,
@@ -11788,9 +11857,21 @@ class GraphManager:
                         f"{list(shape)}; the referenced point sets changed"
                     )
         except (ValueError, TypeError, KeyError, OSError, MemoryError,
-                zipfile.BadZipFile) as exc:
+                zipfile.BadZipFile, ImportError) as exc:
             # json.JSONDecodeError is a ValueError and numpy's
-            # UFuncTypeError a TypeError, so both land here too.
+            # UFuncTypeError a TypeError, so both land here too.  An
+            # ImportError is a factory that needs a package this
+            # environment lacks: the edge that needs it is what the user
+            # has to be told, whichever kind's factory it is.
+            raise MappingRebuildError(where, kind, exc) from exc
+        except Exception as exc:
+            # Any other type is the edge's to report only when the kind's
+            # factory is not one of ours: what the built-in kinds can raise
+            # is listed above, and anything else from them is a defect that
+            # should surface as itself.
+            entry = _lookup(kind)
+            if entry is None or entry.builtin:
+                raise
             raise MappingRebuildError(where, kind, exc) from exc
         return mapping
 

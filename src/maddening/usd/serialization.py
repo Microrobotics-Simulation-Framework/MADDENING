@@ -254,6 +254,7 @@ def save_graph_to_usd(
     """
     # Validate edge transforms / mappings before writing (fail early)
     from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
+        _mapping_config_dict,
         check_mapping_serialisable,
     )
     _resolve_points = gm.point_resolver()
@@ -386,11 +387,13 @@ def save_graph_to_usd(
             if edge.mapping is not None:
                 # The spec (kind, hyper-parameters, point references) plus
                 # the shape ``describe()`` adds, as one JSON string — the
-                # idiom used for ParamSpec overrides above.
+                # idiom used for ParamSpec overrides above.  What a config
+                # writes for the same edge (a mapping class without a
+                # ``describe`` is written as the spec it carries).
                 attr = prim.CreateAttribute(
                     "maddening:mappingSpecJson", Sdf.ValueTypeNames.String,
                 )
-                attr.Set(_json_dumps(edge.mapping.describe()))
+                attr.Set(_json_dumps(_mapping_config_dict(edge.mapping)))
                 # ParamSpec overrides keyed by the edge key (a mapping whose
                 # weights were made trainable for sysid) belong to the edge,
                 # not to any node prim, so they are written here.

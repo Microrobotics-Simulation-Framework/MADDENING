@@ -40,6 +40,7 @@ from maddening.core.coupling.mapping_spec import (
     MappingRebuildError,
     MappingSpec,
     PointReferenceError,
+    _mapping_config_dict,
     make_point_resolver,
     point_array_digest,
 )
@@ -48,8 +49,25 @@ from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.params import ParamSpec
 from maddening.nodes.heat import HeatNode
 from tests.conftest import EXAMPLES_COSTLY
+from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
+from tests.registered_mapping_kinds import assert_same_weights, weights_of
 
 C2F = "coarse.temperature->fine.heat_source"
+
+#: Every kind that maps one point set onto another, as
+#: ``make(source, target, source_ref=, target_ref=)``: the built-in RBF
+#: these tests were written for, and each kind registered the way another
+#: library registers one (``tests/registered_mapping_kinds.py``).  A test
+#: parametrised over these holds a registered kind to what it holds the
+#: built-in one to.
+POINT_KINDS = {
+    "rbf": lambda source, target, **refs: rbf_mapping(source, target, epsilon=2.0, **refs),
+    **{name: kind.build for name, kind in REGISTERED_KINDS.items()},
+}
+#: The weights each of those kinds puts into ``params["mappings"]``.
+WEIGHTS = {"rbf": ("H",), **{name: kind.weights for name, kind in REGISTERED_KINDS.items()}}
+#: ... and the kinds that have any.
+WEIGHTED = [name for name in POINT_KINDS if WEIGHTS[name]]
 
 
 class Vec(SimulationNode):
@@ -76,14 +94,15 @@ def _grid(gm, name):
     return np.asarray(gm.get_node(name).static_data["grid_x"].value)
 
 
-def _two_rods():
+def _two_rods(kind="rbf"):
     gm = GraphManager()
     gm.add_node(HeatNode("coarse", 1e-4, n_cells=6, thermal_diffusivity=0.1))
     gm.add_node(HeatNode("fine", 1e-4, n_cells=12, thermal_diffusivity=0.1))
     gm.add_edge("coarse", "fine", "temperature", "heat_source",
-                mapping=rbf_mapping(_grid(gm, "coarse"), _grid(gm, "fine"), epsilon=2.0,
-                                    source_ref={"node": "coarse", "field": "grid_x"},
-                                    target_ref={"node": "fine", "field": "grid_x"}))
+                mapping=POINT_KINDS[kind](
+                    _grid(gm, "coarse"), _grid(gm, "fine"),
+                    source_ref={"node": "coarse", "field": "grid_x"},
+                    target_ref={"node": "fine", "field": "grid_x"}))
     gm.compile()
     return gm
 
@@ -98,25 +117,27 @@ def _config(mapping):
 
 # --------------------------------------------------- F1: trainable mapping weights
 
-def test_trainable_mapping_param_spec_survives_config_round_trip():
+@pytest.mark.parametrize("kind", WEIGHTED)
+def test_trainable_mapping_param_spec_survives_config_round_trip(kind):
     """``set_param_spec(edge.key, "H", ParamSpec())`` — the documented way
     to calibrate an interface operator — is written to the config and read
-    back.  The loader must create the edges (and their
-    ``params["mappings"]`` slots) before it applies ``param_specs``,
-    which name those slots."""
-    gm = _two_rods()
-    gm.set_param_spec(C2F, "H", ParamSpec(trainable=True, description="learned"))
+    back, for every weight a kind exposes.  The loader must create the
+    edges (and their ``params["mappings"]`` slots) before it applies
+    ``param_specs``, which name those slots."""
+    gm = _two_rods(kind)
+    for weight in WEIGHTS[kind]:
+        gm.set_param_spec(C2F, weight, ParamSpec(trainable=True, description="learned"))
 
     config = json.loads(json.dumps(gm.to_dict()))
-    assert config["param_specs"][C2F]["H"]["trainable"] is True
-
     gm2 = GraphManager.from_dict(config, REGISTRY)
     gm2.compile()
-    assert gm2.param_spec_overrides()[C2F]["H"].trainable is True
-    # sysid-style access: the spec is in param_specs() and the trainable
-    # mask marks exactly this leaf.
-    assert gm2.param_specs()["mappings"][C2F]["H"].trainable is True
-    assert gm2.trainable_mask()["mappings"][C2F]["H"] is True
+    for weight in WEIGHTS[kind]:
+        assert config["param_specs"][C2F][weight]["trainable"] is True
+        assert gm2.param_spec_overrides()[C2F][weight].trainable is True
+        # sysid-style access: the spec is in param_specs() and the trainable
+        # mask marks exactly this leaf.
+        assert gm2.param_specs()["mappings"][C2F][weight].trainable is True
+        assert gm2.trainable_mask()["mappings"][C2F][weight] is True
 
 
 def test_param_specs_naming_neither_a_node_nor_a_mapped_edge_is_a_value_error():
@@ -130,10 +151,12 @@ def test_param_specs_naming_neither_a_node_nor_a_mapped_edge_is_a_value_error():
 
 # ------------------------------------------- F2 / F7: references must stay truthful
 
-def test_reference_that_does_not_match_the_points_used_is_refused():
+@pytest.mark.parametrize("kind", sorted(POINT_KINDS))
+def test_reference_that_does_not_match_the_points_used_is_refused(kind):
     """A ``source_ref`` naming the wrong node field has the same shape but
     different values: the recorded content hash catches it at write time
     instead of silently rebuilding a different operator."""
+    make = POINT_KINDS[kind]
     gm = GraphManager()
     gm.add_node(HeatNode("a", 1e-4, n_cells=6, length=1.0))
     gm.add_node(HeatNode("b", 1e-4, n_cells=6, length=2.0))
@@ -141,41 +164,41 @@ def test_reference_that_does_not_match_the_points_used_is_refused():
     assert xa.shape == xb.shape and not np.array_equal(xa, xb)
 
     gm.add_edge("a", "b", "temperature", "heat_source",
-                mapping=rbf_mapping(xa, xb, epsilon=2.0,
-                                    source_ref={"node": "b", "field": "grid_x"},
-                                    target_ref={"node": "b", "field": "grid_x"}))
+                mapping=make(xa, xb, source_ref={"node": "b", "field": "grid_x"},
+                             target_ref={"node": "b", "field": "grid_x"}))
     with pytest.raises(ValueError, match="no longer describes the points"):
         gm.to_dict()
 
     # ... and a hand-written hash that does not match the points is refused
     # by the factory itself.
     with pytest.raises(PointReferenceError, match="does not describe these points"):
-        rbf_mapping(xa, xb, source_ref={"node": "a", "field": "grid_x",
-                                        "sha256": point_array_digest(xb)})
+        make(xa, xb, source_ref={"node": "a", "field": "grid_x",
+                                 "sha256": point_array_digest(xb)})
 
 
-def test_strict_to_dict_refuses_a_reference_to_a_removed_node():
+@pytest.mark.parametrize("kind", ["nearest_neighbor", *sorted(REGISTERED_KINDS)])
+def test_strict_to_dict_refuses_a_reference_to_a_removed_node(kind):
+    make = {"nearest_neighbor": nearest_neighbor_mapping, **POINT_KINDS}[kind]
     gm = GraphManager()
     for name in ("a", "b", "c"):
         gm.add_node(Vec(name, 1.0, pts=[0.0, 0.5, 1.0]))
     pts = np.array([0.0, 0.5, 1.0])
     gm.add_edge("a", "b", "v", "inp",
-                mapping=nearest_neighbor_mapping(
-                    pts, pts, source_ref={"node": "c", "field": "pts"}))
+                mapping=make(pts, pts, source_ref={"node": "c", "field": "pts"}))
     gm.remove_node("c")
     with pytest.raises(ValueError, match="unknown node 'c'") as exc:
         gm.to_dict()
     assert "a.v->b.inp" in str(exc.value)
     # the display writer still describes it (GET /graph must not break)
-    assert gm.to_dict(strict_mappings=False)["edges"][0]["mapping"]["kind"] == \
-        "nearest_neighbor"
+    assert gm.to_dict(strict_mappings=False)["edges"][0]["mapping"]["kind"] == kind
 
 
-def test_rebuilt_reference_that_changed_since_the_save_is_refused_on_load():
+@pytest.mark.parametrize("kind", sorted(POINT_KINDS))
+def test_rebuilt_reference_that_changed_since_the_save_is_refused_on_load(kind):
     """The hash is checked on the way in as well: a node field that moved
     between save and load rebuilds a different operator, so it is an error
     naming the edge, not a silent difference."""
-    gm = _two_rods()
+    gm = _two_rods(kind)
     config = json.loads(json.dumps(gm.to_dict()))
     for node in config["nodes"]:
         if node["name"] == "fine":
@@ -399,6 +422,28 @@ def test_an_asset_that_is_not_a_regular_file_is_refused_without_blocking(tmp_pat
     ({"kind": "nearest_neighbor",
       "points": {"source_points": {"asset": "nul\x00.npy"}, "target_points": INLINE3}},
      "cannot rebuild interface mapping"),
+    # ... and the same failures of a registered kind
+    ({"kind": "inverse_distance", "power": None,
+      "points": {"source_points": INLINE3, "target_points": INLINE3}},
+     "must be a real number"),
+    ({"kind": "inverse_distance", "power": float("inf"),
+      "points": {"source_points": INLINE3, "target_points": INLINE3}},
+     "must be finite"),
+    ({"kind": "inverse_distance", "normalise": "yes",
+      "points": {"source_points": INLINE3, "target_points": INLINE3}},
+     "must be a bool"),
+    ({"kind": "linear_1d", "shape": 3,
+      "points": {"source_points": INLINE3, "target_points": INLINE3}},
+     "two-element list of ints"),
+    ({"kind": "selection", "points": [INLINE3, INLINE3]},
+     "'points' must be a dict"),
+    ({"kind": "selection",
+      "points": {"source_points": {"asset": "bad.npz", "key": "pts"},
+                 "target_points": INLINE3}},
+     "not a valid .npz"),
+    ({"kind": "linear_1d",
+      "points": {"source_points": {"asset": "nul\x00.npy"}, "target_points": INLINE3}},
+     "cannot rebuild interface mapping"),
 ])
 def test_from_dict_names_the_broken_edge_whatever_the_failure(tmp_path, mapping, message):
     (tmp_path / "bad.npz").write_bytes(b"not a zip archive at all")
@@ -418,6 +463,7 @@ def _numpy_ufunc_type_error() -> TypeError:
     raise AssertionError("numpy no longer refuses str * float")
 
 
+@pytest.mark.parametrize("kind", ["nearest_neighbor", *sorted(REGISTERED_KINDS)])
 @pytest.mark.parametrize("exc", [
     TypeError("bad operand"),
     KeyError("missing"),
@@ -426,22 +472,25 @@ def _numpy_ufunc_type_error() -> TypeError:
     zipfile.BadZipFile("not a zip"),
     json.JSONDecodeError("nope", "{", 0),
     _numpy_ufunc_type_error(),
+    ImportError("cannot import name 'cKDTree' from 'scipy.spatial'"),
+    ModuleNotFoundError("No module named 'scipy'"),
 ])
-def test_rebuild_reports_the_edge_for_every_failure_type(exc):
+def test_rebuild_reports_the_edge_for_every_failure_type(exc, kind):
     """``_rebuild_mapping`` is the only place that knows which edge a
-    config entry belongs to, so no failure may escape it unlabelled."""
+    config entry belongs to, so no failure may escape it unlabelled --
+    whichever kind's rebuild it is."""
     def boom(ref):
         raise exc
 
     edge = {"source_node": "a", "target_node": "b",
             "source_field": "v", "target_field": "inp",
-            "mapping": {"kind": "nearest_neighbor",
+            "mapping": {"kind": kind,
                         "points": {"source_points": INLINE3,
                                    "target_points": INLINE3}}}
     with pytest.raises(MappingRebuildError) as caught:
         GraphManager._rebuild_mapping(edge, boom)
     assert caught.value.edge == "a.v -> b.inp"
-    assert caught.value.kind == "nearest_neighbor"
+    assert caught.value.kind == kind
     assert caught.value.__cause__ is exc
     assert type(exc).__name__ in str(caught.value)
 
@@ -669,20 +718,29 @@ def _no_constants(name):
 
 # --------------------------------------------------- F11: trained weights are not lost
 
-def test_to_dict_warns_when_live_mapping_weights_differ_from_the_recipe():
-    gm = _two_rods()
+@pytest.mark.parametrize("kind", sorted(POINT_KINDS))
+def test_to_dict_warns_when_live_mapping_weights_differ_from_the_recipe(kind):
+    """Each weight a kind exposes, moved on its own, is named; a kind
+    without weights has nothing a config could lose and never warns."""
+    gm = _two_rods(kind)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         gm.to_dict()                       # untouched weights: no warning
 
-    gm.params["mappings"][C2F]["H"] = 1.5 * gm.params["mappings"][C2F]["H"]
-    with pytest.warns(UserWarning, match=r"live mapping weights \['H'\]"):
-        config = gm.to_dict()
-    assert "H" not in config["edges"][0]["mapping"]
-    # display-only writer stays silent: nothing is being persisted
+    for weight in WEIGHTS[kind]:
+        gm.reset_params()
+        gm.params["mappings"][C2F][weight] = 1.5 * gm.params["mappings"][C2F][weight]
+        with pytest.warns(UserWarning, match=rf"live mapping weights \['{weight}'\]"):
+            config = gm.to_dict()
+        assert weight not in config["edges"][0]["mapping"]
+        # display-only writer stays silent: nothing is being persisted
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            gm.to_dict(strict_mappings=False)
+    gm.reset_params()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        gm.to_dict(strict_mappings=False)
+        gm.to_dict()                       # put back: no warning again
 
 
 # ------------------------------------------------------------- F14: sharded wrappers
@@ -770,17 +828,19 @@ def _points(data, n, dim, dtype):
 
 @pytest.mark.parametrize("codec", ["json", "yaml"])
 @pytest.mark.parametrize("dtype", ["float32", "float64"])
-@pytest.mark.parametrize("kind", ["rbf", "nearest_neighbor", "projection_1d", "matrix"])
+@pytest.mark.parametrize("kind", ["rbf", "nearest_neighbor", "projection_1d", "matrix",
+                                  *sorted(REGISTERED_KINDS)])
 @settings(max_examples=EXAMPLES_COSTLY, deadline=None, database=None,
           suppress_health_check=[HealthCheck.too_slow, HealthCheck.data_too_large])
 @given(data=st.data())
 def test_every_factory_round_trips_bitwise_for_random_hyperparameters(
         kind, dtype, codec, data):
-    """For all four factories, both float widths, both text codecs and any
-    valid hyper-parameters: the spec survives the text round trip and the
-    factory rebuilds bitwise-identical weights with an equal
-    ``describe()``."""
-    dim = data.draw(st.integers(1, 3)) if kind in ("rbf", "nearest_neighbor") else 1
+    """For the four built-in factories and every registered one, both float
+    widths, both text codecs and any valid hyper-parameters: the spec
+    survives the text round trip and the factory rebuilds bitwise-identical
+    weights, writing the same description again."""
+    multi_dim = ("rbf", "nearest_neighbor", "inverse_distance", "selection")
+    dim = data.draw(st.integers(1, 3)) if kind in multi_dim else 1
     n_src = data.draw(st.integers(dim + 2, 8))
     n_tgt = data.draw(st.integers(dim + 2, 8))
     mode = data.draw(st.sampled_from(["consistent", "conservative"]))
@@ -803,6 +863,16 @@ def test_every_factory_round_trips_bitwise_for_random_hyperparameters(
         elif kind == "projection_1d":
             mapping = projection_1d_mapping(_points(data, n_src, 1, dtype).ravel(),
                                             _points(data, n_tgt, 1, dtype).ravel())
+        elif kind in REGISTERED_KINDS:
+            registered = REGISTERED_KINDS[kind]
+            src, tgt = _points(data, n_src, dim, dtype), _points(data, n_tgt, dim, dtype)
+            hyper = {name: data.draw(st.sampled_from(values), label=name)
+                     for name, values in registered.hyper.items()}
+            if "power" in hyper:
+                hyper["power"] = data.draw(st.floats(0.25, 6.0, allow_nan=False,
+                                                     allow_infinity=False))
+            mapping = registered.build(src if dim > 1 else src.ravel(),
+                                       tgt if dim > 1 else tgt.ravel(), **hyper)
         else:
             flat = data.draw(st.lists(st.integers(-8, 8), min_size=n_tgt * n_src,
                                       max_size=n_tgt * n_src))
@@ -811,13 +881,16 @@ def test_every_factory_round_trips_bitwise_for_random_hyperparameters(
             mapping = matrix_mapping(H, kind=data.draw(st.sampled_from(
                 ["matrix", "supermesh", "mortar"])), mode=mode, asset="H.npy")
 
-        described = mapping.describe()
+        # What an edge writes for the mapping: ``describe()`` for the
+        # built-in class, the spec itself for a class without one.
+        described = _mapping_config_dict(mapping)
         text = (json.dumps(described) if codec == "json"
                 else yaml.safe_dump(described, default_flow_style=False))
         back = json.loads(text) if codec == "json" else yaml.safe_load(text)
         rebuilt = MappingSpec.from_dict(back).build(resolve)
 
-    np.testing.assert_array_equal(np.asarray(rebuilt.H), np.asarray(mapping.H))
-    assert rebuilt.H.dtype == mapping.H.dtype
-    assert rebuilt.describe() == described
+    # Every weight, bit for bit and at its dtype (``H`` for the built-in
+    # class; none at all for a kind without weights).
+    assert_same_weights(weights_of(rebuilt), weights_of(mapping))
+    assert _mapping_config_dict(rebuilt) == described
     assert rebuilt.spec == mapping.spec

@@ -1018,7 +1018,9 @@ def _surrogate_training_bytes(gm: GraphManager, node_name: str,
 
     * **the sweep's history**: ``C * S * E_graph`` values;
     * **the dataset** (states, next states and boundary inputs of the
-      target node): ``D = C * (S - 1) * (2 * E_node + E_inputs)`` values,
+      target node, each input at the size its edge delivers -- a mapped
+      edge's ``n_target``, not its source field's):
+      ``D = C * (S - 1) * (2 * E_node + E_inputs)`` values,
       held three times at the peak -- the dataset, the training/validation
       split and each epoch's shuffle (measured: a 25 000-cell rod at the
       defaults took 2.18 GiB, this says 2.08 GiB);
@@ -1053,7 +1055,13 @@ def _surrogate_training_bytes(gm: GraphManager, node_name: str,
         if edge.target_node != node_name:
             continue
         source = gm._state.get(edge.source_node, {})
-        e_inputs += size(source[edge.source_field]) if edge.source_field in source else 1
+        delivered = size(source[edge.source_field]) if edge.source_field in source else 1
+        if edge.mapping is not None and edge.source_field in source:
+            # The dataset holds what the edge delivers: a mapping turns the
+            # source field's first axis into its ``n_target`` entries.
+            trailing = tuple(getattr(source[edge.source_field], "shape", ()))[1:]
+            delivered = int(edge.mapping.n_target) * math.prod(int(d) for d in trailing)
+        e_inputs += delivered
     for ext in gm._external_inputs:
         if ext.target_node == node_name:
             e_inputs += max(1, math.prod(int(d) for d in (ext.shape or ())))
@@ -2413,6 +2421,18 @@ def _restore_graph_structure(gm, snapshot: dict) -> None:
     gm._dirty = snapshot["dirty"]
 
 
+#: Held while :meth:`SimulationServer.create_app` builds an application, so
+#: apps are built one at a time.  FastAPI builds each route's fields inside
+#: ``warnings.catch_warnings()``, which saves the process's warnings
+#: filters and puts them back on the way out and is not thread-safe: two
+#: apps built at once in two threads put back each other's filters.  A
+#: warning FastAPI silences was shown -- raised, where warnings are errors
+#: -- and ``ignore::UserWarning`` could be left in the filters for good,
+#: silencing every MADDENING warning in the process from then on
+#: (MADD-ANO-191).
+_CREATE_APP_LOCK = threading.RLock()
+
+
 class SimulationServer:
     """Wraps a ``GraphManager`` with a FastAPI HTTP + WebSocket interface.
 
@@ -3148,7 +3168,17 @@ class SimulationServer:
             :data:`maddening.api.auth.UNAUTHENTICATED_PATHS` requires
             ``Authorization: Bearer <token>``, and ``/docs``, ``/redoc``
             and ``/openapi.json`` are not served at all.
+
+        Notes
+        -----
+        Safe to call from several threads at once: the apps are built one
+        at a time (see :data:`_CREATE_APP_LOCK`).
         """
+        with _CREATE_APP_LOCK:
+            return self._build_app()
+
+    def _build_app(self) -> FastAPI:
+        """:meth:`create_app`'s application, built under :data:`_CREATE_APP_LOCK`."""
         # Swagger UI is a browser page that fetches /openapi.json with no
         # Authorization header, so it cannot work behind a bearer token.
         # A half-working docs page that 401s on its own schema is worse

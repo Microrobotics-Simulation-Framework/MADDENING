@@ -268,6 +268,11 @@ def _same_value(a, b) -> bool:
         return a.keys() == b.keys() and all(_same_value(a[k], b[k]) for k in a)
     if isinstance(a, np.generic):
         return a.dtype == b.dtype and a.tobytes() == b.tobytes()
+    if isinstance(a, jax.Array) and not isinstance(a, jax.core.Tracer):
+        # A JAX array is immutable, but two of them can hold one value: a
+        # mapping rebuilt around a copy has not written it.
+        return (a.shape == b.shape and a.dtype == b.dtype
+                and np.asarray(a).tobytes() == np.asarray(b).tobytes())
     if isinstance(a, float):
         return (a == b and math.copysign(1.0, a) == math.copysign(1.0, b)) or (a != a and b != b)
     try:
@@ -285,6 +290,29 @@ def _mutated_keys(params, snapshot: dict) -> set:
         return set()
     return {key for key, copied in snapshot.items()
             if key in params and not _same_value(params[key], copied)}
+
+
+def _replaced_keys(old, new) -> set:
+    """The keys a mapping assigned over ``old`` changed: a key ``new`` adds
+    or drops, and one whose value is not ``old``'s, bit for bit
+    (:func:`_same_value`).
+
+    What ``node.params = {**node.params, "k": v}`` writes.  The assignment
+    names one key, and the others are the node's own values handed back, so
+    they are not writes: read as writes of every key (as the replacement was
+    until 0.4.0 shipped) they overwrote, with the node's value, every other
+    constant of that node a fit had calibrated in ``gm.params``
+    (MADD-ANO-179).  It is the rule an in-place element write follows, the
+    other write no method of the mapping sees: a value is written when it is
+    no longer the value held before.  So a replacement that hands a key the
+    value it already had is not a write of it; ``node.params[key] = value``
+    is, whatever the value.
+    """
+    if not isinstance(old, Mapping) or not isinstance(new, Mapping):
+        out: set = set(new) if isinstance(new, Mapping) else set()
+        return out | (set(old) if isinstance(old, Mapping) else set())
+    return {key for key in set(old) | set(new)
+            if key not in old or key not in new or not _same_value(new[key], old[key])}
 
 
 def _params_dict_flatten_with_keys(d: _ParamsDict):

@@ -1305,118 +1305,286 @@ def _resolve_mask(gm, params: dict, mask: Optional[dict]) -> dict:
     return mask
 
 
-def _physical_params(gm, start: dict, flat_u, unravel, idx):
-    """``theta -> physical params``, leaving the untouched leaves alone.
+def _compile_model(fn):
+    """``jax.jit(fn)`` for a function of the physical parameters.
 
-    The optimisers carry only ``theta`` -- the ``ravel_pytree`` entries
-    the resolved ``mask`` selects -- so mapping back means
-    :meth:`GraphManager.constrain` over the *whole* tree, and for a
-    ``log`` or ``logit`` leaf that round trip is ``exp(log(p))`` in
-    float32, exact only to about one ulp.  A leaf no step touched would
-    therefore come back perturbed (a ``HeatNode``'s
-    ``thermal_diffusivity`` moved by ~1e-7 relative while only
-    ``length`` was masked), and a bit comparison of a calibration's
-    input and output could not tell "not fitted" from "fitted and
-    barely moved".
-
-    So the test is on the coordinates rather than on the mask: a leaf
-    whose unconstrained entries are bit-for-bit what they were comes
-    back from ``start``, bit for bit.  That is the exact complement of
-    the entries ``idx`` selects *and* the leaves a selected-but-unmoved
-    step left alone -- ``fit(n_iter=0)`` and a ``tol`` that stops before
-    the first update both used to return ``30.000002`` for a
-    ``stiffness`` of ``30.0``, which is precisely the case
-    :class:`FitResult` promises will not happen.
-
-    Returned as a closure because every fitter needs it twice -- for the
-    ``callback`` / observer pytree as well as the final one -- and the
-    two must agree.
+    Every program a fitter runs the model through -- :func:`fit_lm`'s
+    residual and its Jacobian, the loss and gradient of :func:`fit` and
+    :func:`fit_multiple_shooting` -- is compiled here and takes the physical
+    ``params`` pytree as its first argument, as arrays: the tree
+    :class:`_PhysicalMap` produced.  Nothing of the optimiser's coordinates,
+    of a transform or of the mask is inside such a program, so what it
+    evaluates is what it was handed.  One name, so that a test can stand
+    between a fitter and its model and read which arrays each evaluation
+    received (``tests/property/test_sysid_one_evaluation.py``).
     """
-    leaves_start, treedef = jax.tree.flatten(start)
-    edges = np.cumsum([0] + [int(np.asarray(leaf).size) for leaf in leaves_start])
-    base = np.asarray(flat_u)
-
-    def to_params(theta):
-        flat_new = flat_u.at[idx].set(theta)
-        full = gm.constrain(unravel(flat_new))
-        # ``!=`` rather than a tolerance: the claim is bitwise identity,
-        # and a leaf an optimiser moved by one ulp *was* fitted.
-        moved = np.asarray(flat_new) != base
-        return jax.tree.unflatten(treedef, [
-            fitted if bool(moved[lo:hi].any()) else untouched
-            for untouched, fitted, lo, hi
-            in zip(leaves_start, jax.tree.leaves(full), edges[:-1], edges[1:])
-        ])
-
-    return to_params
+    return jax.jit(fn)
 
 
-@jax.custom_jvp
-def _with_tangent_of(value, carrier):
-    """``value``, differentiated as ``carrier`` (see :func:`_exact_physical_params`)."""
-    return value
+@dataclass(frozen=True)
+class _FittedLeaf:
+    """One leaf of ``params`` the fit moves: its position among the leaves,
+    the slice of ``theta`` that holds its coordinates, and what maps them."""
+
+    leaf: int
+    start: int
+    stop: int
+    shape: tuple
+    dtype: Any
+    spec: Any
+
+    @property
+    def coordinates(self) -> slice:
+        return slice(self.start, self.stop)
 
 
-@_with_tangent_of.defjvp
-def _with_tangent_of_jvp(primals, tangents):
-    value, _carrier = primals
-    _value_dot, carrier_dot = tangents
-    return value, carrier_dot
+class _PhysicalMap:
+    """``theta -> physical params``: the one evaluation of that map a fit makes.
 
+    The optimisers carry ``theta``, the ``ravel_pytree`` entries of the
+    unconstrained tree that the resolved ``mask`` selects.  Every physical
+    value a fit uses comes from :meth:`params`: the tree its objective is
+    evaluated on, the tree its ``callback`` and observers receive, and the
+    tree it returns are that method's output, the arrays of one compiled
+    function (:meth:`_values`).  The model-side programs
+    (:func:`_compile_model`) take that tree as an argument and never see
+    ``theta``.
 
-def _exact_physical_params(gm, start: dict, flat_u, unravel, idx):
-    """``theta -> physical params`` for the fitters' objectives: traceable, and
-    equal bit for bit to what ``to_params`` (:func:`_physical_params`) returns.
+    Until 0.4.0's fix the map was evaluated twice: inside each fitter's
+    jitted objective, and again eagerly (``GraphManager.constrain``) for the
+    tree returned.  XLA contracts ``lo + (hi - lo) * sigmoid(u)`` into a
+    fused multiply-add and eager JAX does not, so the two landed on
+    different floats -- an ulp apart at ordinary bounds, 1.3% apart for a
+    float32 ``2.0`` under ``logit`` bounds ``(-1e6, 1e6)`` -- and
+    ``best_loss`` was the loss of parameters other than the ones returned.
+    A leaf the fit did not move was returned as given while the objective
+    ran its ``constrain(unconstrain(p))`` round trip whenever the eager
+    round trip happened to be exact: left out by ``mask=`` at ``2.0`` under
+    those bounds it was run at 2.0266, and the stiffness fitted beside it
+    came back 30.06 for a truth of 30, ``converged=True`` (MADD-ANO-178).
+    Two evaluations cannot be made to agree in the last bit across
+    compilers; there is now one.
 
-    The objectives used to evaluate ``gm.constrain(unravel(...))`` -- every
-    leaf through its ``constrain(unconstrain(p))`` round trip -- while the
-    fitters return a leaf no step moved as the value that went in.  For a
-    ``log`` leaf whose ``exp(log(p))`` lands an ulp away (``30.03`` in
-    float64, ``30.0`` in float32) the run therefore evaluated a point it did
-    not return: ``best_loss`` read 5.364755728149608e-06 for a returned
-    start whose loss is 5.364755728152416e-06 (SYS-071).  Here a leaf whose
-    coordinates are bit for bit where they started -- every leaf with no
-    optimiser coordinate among them -- is the value that went in, its
-    derivative still the round trip's (:func:`_with_tangent_of`), so the
-    gradient the optimiser steps on is unchanged and every loss the run
-    records -- ``losses``, ``best_loss`` -- is the loss of exactly the
-    parameters that iterate returns.  A leaf whose round trip is exact is
-    passed through as before: selecting it as well changed nothing it
-    computes but let XLA fuse the rest of the objective differently, and a
-    replay at the truth that read exactly 0.0 read 1.3e-12 on jaxlib 0.11.2.
+    What the one map returns, entry by entry:
+
+    * a leaf the mask leaves out, or whose spec is not trainable, is **the
+      object that went in**: it is never raveled, transformed or cast;
+    * an entry of a fitted leaf whose coordinate is where it started, bit
+      for bit at the leaf's dtype, is the value that went in, selected, not
+      recomputed -- so a fit that takes no step evaluates exactly its
+      start, and ``constrain(unconstrain(p))`` (an ulp off for a ``log``
+      leaf) is never what a leaf nobody moved is run at;
+    * any other entry is the leaf's transform of its coordinate.
+
+    The derivative the optimisers need is the map's own, taken apart from
+    its value: :meth:`slope` is ``dp/dtheta`` entry by entry (every
+    transform is elementwise) and :meth:`bend` the second derivative.  The
+    model's derivatives are taken with respect to the physical values and
+    chained with them, so a derivative can never move the point it was
+    taken at.
     """
-    leaves_start, treedef = jax.tree.flatten(start)
-    edges = np.cumsum([0] + [int(np.asarray(leaf).size) for leaf in leaves_start])
-    # Which leaves the round trip moves at all, decided once on the host.  A
-    # leaf it returns bit for bit (every identity leaf; a ``log`` value whose
-    # ``exp(log(p))`` is exact) goes through the objective exactly as it
-    # always did -- the program, and so XLA's fusion of everything
-    # downstream, is unchanged for it -- and only a leaf the round trip moves
-    # takes the selection below.
-    round_trip = jax.tree.leaves(gm.constrain(unravel(flat_u)))
-    moves = [np.asarray(c).tobytes() != np.asarray(jnp.asarray(u, jnp.result_type(c))).tobytes()
-             for u, c in zip(leaves_start, round_trip)]
 
-    def physical(theta):
-        flat_new = flat_u.at[idx].set(theta)
-        full = jax.tree.leaves(gm.constrain(unravel(flat_new)))
+    def __init__(self, gm, start: dict, flat_u, idx) -> None:
+        specs = _resolve_specs(start, gm.param_specs())
+        leaves, self.treedef = jax.tree.flatten(start)
+        self._start_leaves = list(leaves)
+        #: The dtype of ``theta`` (``ravel_pytree`` promotes across leaves).
+        self.dtype = flat_u.dtype
+        index = np.asarray(idx, dtype=np.intp)
+        self._theta0 = flat_u[index]
+        chosen = np.zeros(int(flat_u.size), dtype=bool)
+        chosen[index] = True
+        fitted: list[_FittedLeaf] = []
+        offset = position = 0
+        for i, (leaf, spec) in enumerate(zip(leaves, specs)):
+            n = _leaf_size(leaf)
+            picked = chosen[offset:offset + n]
+            if n and picked.all():
+                fitted.append(_FittedLeaf(i, position, position + n, tuple(np.shape(leaf)),
+                                          np.dtype(jnp.result_type(leaf)), spec))
+                position += n
+            elif picked.any():
+                # A mask flags whole leaves (``_masked_indices``).
+                raise ValueError(
+                    f"the trainable entries select part of params leaf {i}; a fit "
+                    "moves whole leaves")
+            offset += n
+        #: The leaves the fit moves, in ``theta`` order.
+        self.fitted = tuple(fitted)
+        #: How many coordinates ``theta`` has.
+        self.n = position
+        self._fitted_index = [f.leaf for f in fitted]
+        taken = set(self._fitted_index)
+        self._other_index = [i for i in range(len(leaves)) if i not in taken]
+        self._values = jax.jit(self._traced_values)
+        self._slopes = jax.jit(functools.partial(self._traced_derivative, order=1))
+        self._bends = jax.jit(functools.partial(self._traced_derivative, order=2))
+
+    # -- the one map -------------------------------------------------------
+
+    def _traced_values(self, theta):
         out = []
-        for untouched, fitted, lo, hi, moved_by_round_trip in zip(
-                leaves_start, full, edges[:-1], edges[1:], moves):
-            if not moved_by_round_trip:
-                out.append(fitted)
-                continue
-            unmoved = jnp.all(flat_new[lo:hi] == flat_u[lo:hi])
-            value = jnp.where(unmoved, jnp.asarray(untouched, jnp.result_type(fitted)), fitted)
-            out.append(_with_tangent_of(value, fitted))
-        return jax.tree.unflatten(treedef, out)
+        for f in self.fitted:
+            u = theta[f.coordinates].reshape(f.shape).astype(f.dtype)
+            u0 = self._theta0[f.coordinates].reshape(f.shape).astype(f.dtype)
+            given = jnp.asarray(self._start_leaves[f.leaf], f.dtype)
+            # ``==`` at the leaf's dtype, entry by entry: the claim is
+            # bitwise identity, and an entry an optimiser moved by one ulp
+            # *was* fitted.
+            out.append(jnp.where(u == u0, given, f.spec.to_constrained(u)))
+        return tuple(out)
 
-    return physical
+    def _traced_derivative(self, theta, *, order: int):
+        parts = []
+        for f in self.fitted:
+            u = theta[f.coordinates].astype(f.dtype)
+
+            def first(x, spec=f.spec):
+                return jax.jvp(spec.to_constrained, (x,), (jnp.ones_like(x),))[1]
+
+            value = first(u) if order == 1 else jax.jvp(first, (u,), (jnp.ones_like(u),))[1]
+            parts.append(value.astype(theta.dtype))
+        return jnp.concatenate(parts) if parts else jnp.zeros((0,), theta.dtype)
+
+    def params(self, theta) -> dict:
+        """The physical ``params`` pytree at ``theta``: what the model is
+        evaluated on."""
+        leaves = list(self._start_leaves)
+        for f, value in zip(self.fitted, self._values(theta)):
+            leaves[f.leaf] = value
+        return jax.tree.unflatten(self.treedef, leaves)
+
+    def returned(self, theta, params: dict) -> dict:
+        """``params`` (:meth:`params` of ``theta``) as a fit hands it out:
+        fresh containers, and every fitted leaf no coordinate of which moved
+        as the object that went in.  Its entries are already that object's
+        values, selected by :meth:`_values`; this gives back the object
+        itself, as :class:`FitResult` documents for a leaf no step moved."""
+        leaves = jax.tree.leaves(params)
+        here, base = np.asarray(theta), np.asarray(self._theta0)
+        for f in self.fitted:
+            moved = here[f.coordinates].astype(f.dtype) != base[f.coordinates].astype(f.dtype)
+            if not bool(moved.any()):
+                leaves[f.leaf] = self._start_leaves[f.leaf]
+        return jax.tree.unflatten(self.treedef, leaves)
+
+    def physical(self, params: dict) -> np.ndarray:
+        """The trainable entries of ``params`` in ``theta`` order, float64."""
+        leaves = jax.tree.leaves(params)
+        parts = [np.asarray(leaves[f.leaf]).astype(f.dtype).astype(np.float64).reshape(-1)
+                 for f in self.fitted]
+        return np.concatenate(parts) if parts else np.zeros(0)
+
+    def slope(self, theta):
+        """``dp/dtheta`` of every trainable entry (``theta``'s dtype)."""
+        return self._slopes(theta)
+
+    def bend(self, theta):
+        """``d²p/dtheta²`` of every trainable entry (``theta``'s dtype)."""
+        return self._bends(theta)
+
+    # -- for the model-side programs (traceable) ---------------------------
+
+    def split(self, params: dict) -> tuple[tuple, tuple]:
+        """``(fitted, others)``: the leaves a fit differentiates, and the rest."""
+        leaves = jax.tree.leaves(params)
+        return (tuple(leaves[i] for i in self._fitted_index),
+                tuple(leaves[i] for i in self._other_index))
+
+    def join(self, fitted, others) -> dict:
+        """The inverse of :meth:`split`."""
+        leaves: list = [None] * (len(self._fitted_index) + len(self._other_index))
+        for i, leaf in zip(self._fitted_index, fitted):
+            leaves[i] = leaf
+        for i, leaf in zip(self._other_index, others):
+            leaves[i] = leaf
+        return jax.tree.unflatten(self.treedef, leaves)
+
+    def ravel(self, fitted):
+        """Fitted leaves (or cotangents shaped like them) as one vector in
+        ``theta`` order and dtype."""
+        parts = [jnp.ravel(x).astype(self.dtype) for x in fitted]
+        return jnp.concatenate(parts) if parts else jnp.zeros((0,), self.dtype)
+
+    def unravel(self, vector) -> tuple:
+        """A vector in ``theta`` order as tangents shaped like the fitted leaves."""
+        return tuple(vector[f.coordinates].reshape(f.shape).astype(f.dtype)
+                     for f in self.fitted)
+
+    def names(self) -> list[str]:
+        """One human name per coordinate of ``theta`` (:func:`_leaf_location`)."""
+        paths = [path for path, _ in jax.tree_util.tree_flatten_with_path(
+            jax.tree.unflatten(self.treedef, self._start_leaves))[0]]
+        out = []
+        for f in self.fitted:
+            where = _leaf_location(paths[f.leaf])
+            n = f.stop - f.start
+            if n == 1:
+                out.append(where)
+            else:
+                out.extend(f"{where}{list(ix)}" for ix in np.ndindex(*f.shape))
+        return out
+
+
+def _model_hvp(grad_p, pmap: _PhysicalMap, theta, params: dict, extra: tuple, V):
+    """``H V`` for ``H`` the Hessian in ``theta`` of a fitter's objective,
+    from the model's own derivatives in the physical parameters.
+
+    ``grad_p(params, *extra)`` is the gradient with respect to the trainable
+    entries of ``params`` (raveled, :meth:`_PhysicalMap.ravel`) by the
+    fitter's own compiled loss-and-gradient, so the products reuse its trace.
+    With ``s = dp/dtheta`` and ``b = d²p/dtheta²`` (the map is elementwise),
+
+        ``H_theta v = s * (H_p (s * v)) + b * g_p * v``
+
+    and ``H_p w`` is one forward-over-reverse product per column, evaluated
+    one after another (``lax.map``) so the memory is one product's.  Every
+    model evaluation is at exactly ``params``.
+    """
+    s = np.asarray(pmap.slope(theta), dtype=np.float64)
+    b = np.asarray(pmap.bend(theta), dtype=np.float64)
+    V = np.asarray(V, dtype=np.float64)
+    tangents = jnp.asarray((s[:, None] * V).T, dtype=pmap.dtype)
+
+    def products(p, ex, ws):
+        fitted, others = pmap.split(p)
+
+        def gradient(leaves):
+            return grad_p(pmap.join(leaves, others), *ex)
+
+        return gradient(fitted), jax.lax.map(
+            lambda w: jax.jvp(gradient, (fitted,), (pmap.unravel(w),))[1], ws)
+
+    g, HW = jax.jit(products)(params, extra, tangents)
+    return (s[:, None] * np.asarray(HW, dtype=np.float64).T
+            + (b * np.asarray(g, dtype=np.float64))[:, None] * V)
+
+
+def _along_the_shorter(spec, u, v, box, interval):
+    """The coordinates a step ``v`` solved on the linear model at ``u``
+    stands for, for a ``log`` / ``logit`` leaf: the step read along the
+    transform's curve (``u + v``) or along its tangent
+    (:meth:`ParamSpec._tangent_shift`), whichever moves the value less.
+
+    ``box`` is the tangent box the solver clipped ``v`` to
+    (:meth:`ParamSpec._tangent_box`) and ``interval`` the coordinate's
+    range.  A ``v`` on the box is a tangent step that reached the edge of
+    the range, so its tangent reading is that edge exactly.
+    """
+    (v_lo, v_hi), (u_lo, u_hi) = box, interval
+    v = np.clip(v, v_lo, v_hi)
+    tangent = np.asarray(spec._tangent_shift(u, v))  # noqa: SLF001
+    tangent = np.where(v >= v_hi, u_hi - u, np.where(v <= v_lo, u_lo - u, tangent))
+    shorter = np.abs(tangent) < np.abs(v)
+    moved = u + np.where(shorter, tangent, v)
+    # On an edge exactly: ``u + (u_hi - u)`` need not round to ``u_hi``.
+    moved = np.where((v >= v_hi) & (np.abs(u_hi - u) <= np.abs(v)), u_hi, moved)
+    return np.where((v <= v_lo) & (np.abs(u_lo - u) <= np.abs(v)), u_lo, moved)
 
 
 class _CoordinateBounds:
-    """The bounds of each optimiser coordinate ``theta``, and the projection
-    onto them.
+    """The bounds of each optimiser coordinate ``theta``, the projection
+    onto them, and the reading of a step solved on the linear model.
 
     A trainable leaf whose :class:`~maddening.core.params.ParamSpec` has
     bounds and ``transform=None`` is optimised in its own (physical)
@@ -1429,45 +1597,75 @@ class _CoordinateBounds:
     0.  So every fitter projects its coordinate back onto the bounds after
     each update; a coordinate on its bound has the one-sided derivative
     into the range, and a step that would leave the range again moves it by
-    nothing.  A ``log`` / ``logit`` coordinate is bounded the same way to the
-    range where ``constrain`` is its transform and not its clamp
-    (:meth:`ParamSpec._optimiser_interval`), since past that its derivative
-    is 0 too.  Inside the bounds the projection is the identity, bit for bit.
+    nothing.  A ``log`` / ``logit`` coordinate is bounded the same way, to
+    the range where its transform still resolves the distance to its bound
+    (:meth:`ParamSpec._optimiser_interval`: ``sqrt(eps)`` of the bounds'
+    size inside each): past that the transform is flat to the working
+    precision.  Inside the bounds the projection is the identity, bit for
+    bit.
+
+    **A ``log`` / ``logit`` coordinate is stepped on its tangent**
+    (:meth:`tangent_frame`, :meth:`from_tangent`).  A Marquardt or
+    Gauss-Newton step is solved on the residual's linearisation in
+    ``theta``, and for a transformed coordinate that linearisation is the
+    transform's tangent: where the transform is flat, the step that should
+    move the value by 0.1 is ``0.1 / (dp/du)`` long, and taken along the
+    curve it lands on the opposite edge of the range -- every damped retry
+    with it.  That is how a ``logit`` damping carried to the edge of
+    ``(0.5, 2)`` by an early overshoot stayed there, ``converged=False``,
+    for a truth of 1.9 (MADD-ANO-104).  So the solver is given, for such a
+    coordinate, the origin 0 and the box of steps over which the *tangent*
+    stays inside the range; its answer ``v`` is then read along the curve
+    (``u + v``) or along the tangent (the ``du`` whose value is the tangent
+    step's), whichever moves the value less.  The two agree to first order;
+    the tangent is the shorter when a step leaves a flat end (it is the
+    step the same parameter under ``transform=None`` would take), and the
+    curve when a step approaches one (it never reaches the bound).  No
+    tolerance is involved, and an identity coordinate is untouched, bit for
+    bit.
     """
 
     def __init__(self, gm, start: dict, idx, dtype) -> None:
         specs = _resolve_specs(start, gm.param_specs())
         los, his, p_los, p_his, transformed = [], [], [], [], []
+        curved = []
+        offset = 0
         for leaf, spec in zip(jax.tree.leaves(start), specs):
             n = _leaf_size(leaf)
             lo, hi = -np.inf, np.inf
             p_lo, p_hi = -np.inf, np.inf
             transformed.append(np.full(n, spec.transform is not None))
             if spec.trainable and _is_differentiable(leaf):
-                p_lo, p_hi = _physical_edges(spec, jnp.result_type(leaf))
                 # A ``log`` / ``logit`` coordinate is unbounded in principle,
                 # but past the point where ``constrain`` clamps it (``exp``
                 # at its floor or overflowing, the sigmoid at the edge of
-                # the representable interior) its derivative is 0 as well:
-                # a logit-bounded damping driven past it sat at 1.999998 of
-                # (0.5, 2) with ``converged=True``.  Same projection.
+                # the representable interior) its derivative is 0, and
+                # short of that the transform has stopped resolving the
+                # distance to the bound: a logit-bounded damping driven
+                # there sat at 1.999998 of (0.5, 2) with ``converged=True``.
+                # Same projection, onto the range the transform resolves.
                 lo, hi = spec._optimiser_interval(jnp.result_type(leaf))  # noqa: SLF001
+                p_lo, p_hi = _physical_edges(spec, jnp.result_type(leaf), (lo, hi))
+                if spec.transform is not None:
+                    curved.append((offset, offset + n, spec, (lo, hi)))
             los.append(np.full(n, lo))
             his.append(np.full(n, hi))
             p_los.append(np.full(n, p_lo))
             p_his.append(np.full(n, p_hi))
+            offset += n
         lo_all = np.concatenate(los) if los else np.zeros(0)
         hi_all = np.concatenate(his) if his else np.zeros(0)
-        lo_np, hi_np = lo_all[idx], hi_all[idx]
+        index = np.asarray(idx, dtype=np.intp)
+        lo_np, hi_np = lo_all[index], hi_all[index]
         #: The physical values the edges of each coordinate's range map to.
-        self.p_lo = (np.concatenate(p_los) if p_los else np.zeros(0))[idx]
-        self.p_hi = (np.concatenate(p_his) if p_his else np.zeros(0))[idx]
+        self.p_lo = (np.concatenate(p_los) if p_los else np.zeros(0))[index]
+        self.p_hi = (np.concatenate(p_his) if p_his else np.zeros(0))[index]
         #: Whether each coordinate is a ``log`` / ``logit`` one (dimensionless,
         #: a relative change of the parameter) rather than the parameter in
         #: its own units: the identifiability guard measures the latter
         #: relative to the parameter's value (:func:`_relative_scale`).
         self.transformed = (np.concatenate(transformed) if transformed
-                            else np.zeros(0, dtype=bool))[idx]
+                            else np.zeros(0, dtype=bool))[index]
         #: Whether any coordinate is bounded at all; when not, every method
         #: here is the identity and costs nothing.
         self.active = bool(np.isfinite(lo_np).any() or np.isfinite(hi_np).any())
@@ -1475,9 +1673,69 @@ class _CoordinateBounds:
         # rounds a Python-float bound, so the two agree on where the bound is.
         self.lo = jnp.asarray(lo_np, dtype)
         self.hi = jnp.asarray(hi_np, dtype)
+        # The ``log`` / ``logit`` leaves among the coordinates, as
+        # ``(positions in theta, spec, interval)``.
+        position = np.full(lo_all.size, -1, dtype=np.intp)
+        position[index] = np.arange(index.size)
+        self._curved = []
+        for a, b, spec, interval in curved:
+            where = position[a:b]
+            where = where[where >= 0]
+            if where.size:
+                self._curved.append((where, spec, interval))
 
     def project(self, theta):
         return jnp.clip(theta, self.lo, self.hi) if self.active else theta
+
+    def _tangent_boxes(self, u: np.ndarray, dtype):
+        """Per ``log`` / ``logit`` leaf, the tangent box at ``u`` rounded to
+        the solver's ``dtype`` (what the solver clips to)."""
+        boxes = []
+        for where, spec, (u_lo, u_hi) in self._curved:
+            v_lo, v_hi = spec._tangent_box(u[where], u_lo, u_hi)  # noqa: SLF001
+            boxes.append((np.asarray(v_lo, dtype).astype(np.float64),
+                          np.asarray(v_hi, dtype).astype(np.float64)))
+        return boxes
+
+    def tangent_frame(self, theta):
+        """``(origin, lo, hi)`` to solve a step from ``theta`` in: the
+        coordinates and their bounds as they are for an identity
+        coordinate, and for a ``log`` / ``logit`` one the origin 0 and the
+        box of steps over which the transform's tangent stays inside the
+        range.  A solver's answer in this frame is read back by
+        :meth:`from_tangent`."""
+        if not self._curved:
+            return theta, self.lo, self.hi
+        dtype = np.dtype(theta.dtype)
+        u = np.asarray(theta, dtype=np.float64)
+        origin = u.copy()
+        lo = np.asarray(self.lo, dtype=np.float64).copy()
+        hi = np.asarray(self.hi, dtype=np.float64).copy()
+        for (where, _, _), (v_lo, v_hi) in zip(self._curved, self._tangent_boxes(u, dtype)):
+            origin[where], lo[where], hi[where] = 0.0, v_lo, v_hi
+        return (jnp.asarray(origin, dtype), jnp.asarray(lo, dtype), jnp.asarray(hi, dtype))
+
+    def from_tangent(self, theta, answer):
+        """The coordinates a solver's ``answer`` in :meth:`tangent_frame` of
+        ``theta`` stands for: itself for an identity coordinate, and for a
+        ``log`` / ``logit`` one the shorter of the curve's and the tangent's
+        readings of that step (:func:`_along_the_shorter`), inside the
+        range."""
+        if not self._curved:
+            return answer
+        dtype = np.dtype(theta.dtype)
+        u = np.asarray(theta, dtype=np.float64)
+        out = np.asarray(answer, dtype=np.float64).copy()
+        for (where, spec, interval), box in zip(self._curved, self._tangent_boxes(u, dtype)):
+            out[where] = _along_the_shorter(spec, u[where], out[where], box, interval)
+        return self.project(jnp.asarray(out, dtype))
+
+    def on_an_edge(self, theta) -> np.ndarray:
+        """Per coordinate, whether a ``log`` / ``logit`` one sits on (or
+        beyond) an edge of the range its transform resolves."""
+        th = np.asarray(theta)
+        on = (th <= np.asarray(self.lo)) | (th >= np.asarray(self.hi))
+        return on & self.transformed
 
     def inward_descent(self, theta, g, physical=None, rel_tol: Any = 0.0) -> bool:
         """Whether a coordinate on its bound could lower the loss by moving
@@ -1506,17 +1764,107 @@ class _CoordinateBounds:
         return bool(((on_lo & (gg < 0)) | (on_hi & (gg > 0))).any())
 
 
-def _physical_edges(spec, dtype) -> tuple[float, float]:
+def _physical_edges(spec, dtype, interval) -> tuple[float, float]:
     """The physical values a trainable leaf's coordinate range ends at: its
-    bounds under ``transform=None``, the floor ``constrain`` keeps a ``log``
-    leaf above, the representable interior of a ``logit`` leaf."""
+    bounds under ``transform=None``, and for a ``log`` / ``logit`` leaf the
+    values of the ends of ``interval`` (:meth:`ParamSpec._optimiser_interval`),
+    which lie :meth:`ParamSpec._usable_margin` inside the bounds."""
     if spec.transform is None:
         lo, hi = spec.bounds
         return (-np.inf if lo is None else float(lo), np.inf if hi is None else float(hi))
-    fi = np.finfo(dtype)
-    if spec.transform == "log":
-        return spec._lo() + spec._log_floor(fi), np.inf  # noqa: SLF001
-    return spec._logit_interior(fi)  # noqa: SLF001
+    ends = []
+    for u, unbounded in zip(interval, (-np.inf, np.inf)):
+        ends.append(float(spec.to_constrained(jnp.asarray(u, dtype)))
+                    if np.isfinite(u) else unbounded)
+    return ends[0], ends[1]
+
+
+_UNRESOLVED_DIGITS_WHY = (
+    "under that the transform keeps fewer than half the working precision's digits "
+    "of the value")
+
+
+def _warn_unresolved_values(method: str, pmap: _PhysicalMap, params: dict, when: str,
+                            already: set) -> None:
+    """Warn, once per leaf, about a fitted ``log`` / ``logit`` leaf whose
+    value its transform cannot resolve to ``sqrt(eps)`` of the value's own
+    magnitude (:meth:`ParamSpec._resolution`).
+
+    The transform returns values spaced like the floats near its *bounds*,
+    so a small value under wide bounds has few of its digits left: a float32
+    ``2.0`` under ``logit`` bounds ``(-1e6, 1e6)`` can be placed only to
+    0.12.  The fit then runs, and returns, the nearest value it can (one
+    evaluation: :class:`_PhysicalMap`), which nothing used to say.  A value
+    of exactly 0 has no magnitude to be relative to and is not judged.
+    """
+    leaves = jax.tree.leaves(params)
+    names = pmap.names()
+    for f in pmap.fitted:
+        if f.leaf in already or f.spec.transform is None:
+            continue
+        spacing = f.spec._resolution(f.dtype)  # noqa: SLF001
+        if spacing <= 0.0:
+            continue
+        values = np.abs(np.asarray(leaves[f.leaf]).astype(np.float64).reshape(-1))
+        tolerance = math.sqrt(float(np.finfo(f.dtype).eps))
+        judged = values > 0.0
+        coarse = judged & (spacing > tolerance * values)
+        if not bool(coarse.any()):
+            continue
+        already.add(f.leaf)
+        worst = int(np.argmax(np.where(coarse, spacing / np.where(judged, values, 1.0), 0.0)))
+        scale = ("eps * |lo|" if f.spec.transform == "log"
+                 else "eps * max(|lo|, |hi|, hi - lo)")
+        warnings.warn(
+            f"{method}: {names[f.start + worst]} = {values[worst]:.6g} {when} cannot be "
+            f"resolved under its {f.spec.transform!r} transform with bounds "
+            f"{f.spec.bounds}: the transform returns {f.dtype.name} values "
+            f"{spacing:.3g} apart ({scale}), {spacing / values[worst]:.2g} of this "
+            f"value, against a tolerance of sqrt(eps) = {tolerance:.2g} of it "
+            f"({_UNRESOLVED_DIGITS_WHY}). The fit can place it no closer than that. "
+            "Tighten the bounds towards the value, declare the parameter with "
+            "transform=None (its bounds are then enforced by clipping, at the "
+            "value's own resolution), or hold it in a wider dtype.",
+            PrecisionLimitWarning, stacklevel=3)
+
+
+def _warn_on_an_edge(method: str, pmap: _PhysicalMap, bounds: _CoordinateBounds,
+                     theta, params: dict) -> None:
+    """Warn, naming it, about every ``log`` / ``logit`` parameter a fit
+    leaves on an edge of the range its transform resolves.
+
+    A fit that ends there has not found an interior optimum.  Either the
+    data pull the parameter onto its bound, which this transform cannot
+    reach, or the fit started out there and no step it could take lowered
+    the loss.  Until 0.4.0's fix nothing said so (MADD-ANO-104).
+    """
+    on = bounds.on_an_edge(theta)
+    if not bool(on.any()):
+        return
+    names = pmap.names()
+    values = pmap.physical(params)
+    th, hi = np.asarray(theta), np.asarray(bounds.hi)
+    transforms = {}
+    for f in pmap.fitted:
+        for k in range(f.start, f.stop):
+            transforms[k] = f.spec
+    listed = "\n".join(
+        f"  - {names[k]} = {values[k]:.9g}: the {'upper' if th[k] >= hi[k] else 'lower'} "
+        f"edge of what its {transforms[k].transform!r} transform resolves inside bounds "
+        f"{transforms[k].bounds}"
+        for k in np.flatnonzero(on)[:6])
+    more = int(on.sum()) - 6
+    warnings.warn(
+        f"{method}: {int(on.sum())} parameter(s) ended on the edge of their "
+        f"transform's usable range:\n{listed}"
+        + (f"\n  (+{more} more)" if more > 0 else "") +
+        "\nA 'log' / 'logit' parameter cannot reach its bound: within sqrt(eps) of "
+        "the bounds' size of it the transform has too few digits left for a fit "
+        "to step on, so the fit stops there and this is not an interior optimum. "
+        "If the parameter belongs on (or beyond) its bound, declare it with "
+        "transform=None, which clips and can sit on the bound; if it does not, "
+        "the fit could not bring it back -- restart it from inside the range.",
+        RuntimeWarning, stacklevel=3)
 
 
 def _inverse_noise_std(noise_std, residual):
@@ -3196,24 +3544,42 @@ def _adam_frame(g0):
     return pow2_frame(g0)
 
 
-def _scaled_value_and_grad(objective, argnums: Any = 0):
-    """``jit((*args, cot) -> (loss, cot * gradient))``: the loss and its
-    gradient with ``cot`` as the cotangent of the backward pass.
+def _model_loss_and_gradient(pmap: "_PhysicalMap", objective, n_extra: int = 0):
+    """``(plain, scaled)``: the loss and its gradient as compiled functions
+    of the physical parameters (:func:`_compile_model`).
+
+    ``objective(params, *extra)`` is the fitter's loss at a physical tree
+    (and, for multiple shooting, the window states).  ``plain(params,
+    *extra)`` returns ``(loss, g_p, *g_extra)`` with ``g_p`` the gradient
+    with respect to the trainable entries of ``params``, raveled in
+    ``theta`` order (:meth:`_PhysicalMap.ravel`); the fitter chains it with
+    :meth:`_PhysicalMap.slope`.  ``scaled(params, *extra, cot)`` is the same
+    with ``cot`` as the cotangent of the backward pass.
 
     A power-of-two ``cot`` scales every intermediate of the backward pass
     exactly, so the result is ``cot`` times the gradient bit for bit
     wherever those intermediates were normal numbers -- and where they were
     not, it lifts them out of the flush (:func:`_gradient_lift`).
     """
-    def run(*args):
-        *values, cot = args
-        loss, pullback = jax.vjp(objective, *values)
-        grads = pullback(cot)
-        if isinstance(argnums, int):
-            return loss, grads[argnums]
-        return loss, tuple(grads[a] for a in argnums)
+    wrt = tuple(range(1 + n_extra))
 
-    return jax.jit(run)
+    def at(params):
+        fitted, others = pmap.split(params)
+        return fitted, lambda leaves, *extra: objective(pmap.join(leaves, others), *extra)
+
+    def plain(params, *extra):
+        fitted, f = at(params)
+        loss, grads = jax.value_and_grad(f, argnums=wrt)(fitted, *extra)
+        return (loss, pmap.ravel(grads[0]), *grads[1:])
+
+    def scaled(params, *args):
+        *extra, cot = args
+        fitted, f = at(params)
+        loss, pullback = jax.vjp(f, fitted, *extra)
+        grads = pullback(cot)
+        return (loss, pmap.ravel(grads[0]), *grads[1:])
+
+    return _compile_model(plain), _compile_model(scaled)
 
 
 #: How many evaluations :func:`_gradient_lift` may spend looking for a
@@ -3225,7 +3591,7 @@ _LIFT_PROBES = 12
 
 def _gradient_lift(scaled, grads, loss):
     """The power of two to take an Adam fit's gradients with (as the
-    cotangent of the backward pass, :func:`_scaled_value_and_grad`), or
+    cotangent of the backward pass, :func:`_model_loss_and_gradient`), or
     ``None`` when the gradient as evaluated is already clear of the flush.
 
     ``scaled(cot)`` returns ``(loss, gradients)`` at the run's start; ``grads``
@@ -3953,25 +4319,6 @@ def _hessian_flatness(hvp, candidates, excited, dtype, method: str,
     return W, s <= cutoff, curvature
 
 
-def _hvp_columns(grad_fn, theta, extra, V):
-    """``H V`` for ``H`` the Jacobian of ``grad_fn(theta, *extra)`` in
-    ``theta``, one forward-over-reverse product per column of ``V``.
-
-    ``lax.map`` evaluates the products one after another, so the memory is
-    one product's whatever the number of columns.  ``grad_fn`` is the
-    fitter's own compiled loss-and-gradient, so the product reuses its
-    trace instead of tracing the objective from Python again -- tracing was
-    half of what the product cost on the spring fixtures.  The product
-    itself is compiled once per call.
-    """
-    def products(t, ex, vs):
-        return jax.lax.map(
-            lambda v: jax.jvp(lambda x: grad_fn(x, *ex), (t,), (v,))[1], vs)
-
-    tangents = jnp.asarray(np.asarray(V).T, dtype=theta.dtype)
-    return np.asarray(jax.jit(products)(theta, extra, tangents), dtype=np.float64).T
-
-
 def _hold_tolerance(loss_sel: float, grad_sel, curvature: float, held, eps: float,
                     *, scale: Optional[np.ndarray] = None,
                     floor: Optional[np.ndarray] = None) -> float:
@@ -4654,28 +5001,28 @@ def fit(
     progress = _progress_notifier(gm, "adam", n_iter, notify_every)
 
     u0 = gm.unconstrain(start)
-    flat_u, unravel = ravel_pytree(u0)
+    flat_u, _ = ravel_pytree(u0)
     idx = _masked_indices(start, mask)
     if idx is None:
         idx = np.arange(flat_u.size)
-    to_params = _physical_params(gm, start, flat_u, unravel, idx)
-    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
+    # The one evaluation of ``theta -> params`` (SYS-071): the loss is a
+    # compiled function of the physical tree ``pmap.params`` returns, and
+    # that tree is what ``callback`` receives and the result holds.
+    pmap = _PhysicalMap(gm, start, flat_u, idx)
     theta0 = flat_u[idx]
-
-    def objective(theta):
-        # At exactly the parameters ``to_params`` returns (SYS-071).
-        return loss_fn(physical(theta))
-
-    value_and_grad = jax.jit(jax.value_and_grad(objective))
-    scaled_value_and_grad = _scaled_value_and_grad(objective)
+    plain, scaled = _model_loss_and_gradient(pmap, loss_fn)
     # The cotangent the run takes its gradients with once a flushed first
     # gradient made it lift them (:func:`_gradient_lift`); ``None`` -- the
-    # plain gradient, bit for bit as before -- otherwise.
+    # plain gradient -- otherwise.
     lift = None
 
-    def evaluate(th):
-        """``(loss, gradient)`` at ``th``, the gradient times ``lift``."""
-        return value_and_grad(th) if lift is None else scaled_value_and_grad(th, lift)
+    def evaluate(th, p=None):
+        """``(loss, gradient)`` at ``th``, the gradient times ``lift``: the
+        model's loss and gradient at the physical tree ``p`` (``pmap.params``
+        of ``th``), the gradient chained with the map's own slope."""
+        p = pmap.params(th) if p is None else p
+        loss, g_p = plain(p) if lift is None else scaled(p, lift)
+        return loss, g_p * pmap.slope(th)
 
     def unlifted(g) -> np.ndarray:
         """A gradient from :func:`evaluate`, in float64 and the loss's units."""
@@ -4683,6 +5030,8 @@ def fit(
         return g64 if lift is None else g64 / float(lift)
 
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
+    unresolved: set = set()
+    _warn_unresolved_values("fit", pmap, start, "at the start of the fit", unresolved)
 
     @jax.jit
     def adam_step(theta, m, v, g, frame, i):
@@ -4693,8 +5042,10 @@ def fit(
         v = b2 * v + (1 - b2) * g * g
         m_hat = m / (1 - b1 ** i)
         v_hat = v / (1 - b2 ** i)
-        # Back onto the bounds of a clipped coordinate (``_CoordinateBounds``):
-        # past its bound it has no gradient and would stay clipped.
+        # Back onto the range of each coordinate (``_CoordinateBounds``): past
+        # its bound a clipped coordinate has no gradient and would stay
+        # clipped, and a ``log`` / ``logit`` one is kept where its transform
+        # still resolves the distance to the bound.
         return bounds.project(theta - lr * m_hat / (jnp.sqrt(v_hat) + eps)), m, v
 
     theta = theta0
@@ -4704,19 +5055,24 @@ def fit(
     coarse = _coarsest_dtype(start, idx)
     tracker = _make_excitation_tracker(hold_undetermined, theta0, coarse)
     best = _BestIterate(theta0)
+    # The physical tree the best iterate was evaluated on: the result's.
+    best_params: Optional[dict] = None
     losses: list[float] = []
     converged = False
     vanished_warned = False
     i = 0
     for i in range(1, n_iter + 1):
-        loss, g = evaluate(theta)
+        p = pmap.params(theta)
+        loss, g = evaluate(theta, p)
         if i == 1:
             # A first gradient in the flush is evaluated again, lifted, and
             # the run takes every gradient that way (``_gradient_lift``).
-            lift = _gradient_lift(lambda cot: scaled_value_and_grad(theta, cot),
-                                  (g,), loss)
+            slope0 = pmap.slope(theta)
+            lift = _gradient_lift(
+                lambda cot: (lambda out: (out[0], out[1] * slope0))(scaled(p, cot)),
+                (g,), loss)
             if lift is not None:
-                loss, g = evaluate(theta)
+                loss, g = evaluate(theta, p)
         loss_f = float(loss)
         losses.append(loss_f)
         if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g))):
@@ -4725,13 +5081,15 @@ def fit(
             )
         # ``theta`` here is the iterate ``i - 1`` updates produced.
         best.offer(theta, i - 1, loss_f)
+        if best.state is theta:
+            best_params = p
         if tracker is not None:
             # Before the ``tol`` break, not after the step: this gradient is
             # information about the loss surface whether or not it moved
             # anything, and a run that stops on ``tol`` has still seen it.
             tracker.observe(unlifted(g))
         if callback is not None or progress is not None:
-            current = to_params(theta)
+            current = pmap.returned(theta, p)
             if callback is not None:
                 callback(i, loss_f, current)
             if progress is not None:
@@ -4766,12 +5124,16 @@ def fit(
         # compile.  The gradient is discarded -- in particular it is not
         # folded into the tracker, which would change ``excited_rank`` for
         # runs whose result is otherwise untouched.
-        _offer_final_iterate(best, theta, i, float(evaluate(theta)[0]), "fit")
+        p_last = pmap.params(theta)
+        _offer_final_iterate(best, theta, i, float(evaluate(theta, p_last)[0]), "fit")
+        if best.state is theta:
+            best_params = p_last
 
     selected = best.state
+    selected_params = pmap.params(selected) if best_params is None else best_params
 
     def _reference():
-        loss_sel, g_sel = evaluate(selected)
+        loss_sel, g_sel = evaluate(selected, selected_params)
         return float(loss_sel), unlifted(g_sel)
 
     def _flatness(candidates, spanned, scale):
@@ -4779,8 +5141,12 @@ def fit(
         # same power of two; the test is relative, the curvature it returns
         # (for the hold's tolerance) is not, so it is unlifted.
         lifted = 1.0 if lift is None else float(lift)
+
+        def gradient(p_):
+            return (plain(p_) if lift is None else scaled(p_, lift))[1]
+
         return _hessian_flatness(
-            lambda V: _hvp_columns(lambda t: evaluate(t)[1], selected, (), V) / lifted,
+            lambda V: _model_hvp(gradient, pmap, selected, selected_params, (), V) / lifted,
             candidates, spanned, coarse, "fit", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
@@ -4791,9 +5157,14 @@ def fit(
                            columns=None if tracker is None else tracker.gradient_scale),
         "fit")
 
-    final = to_params(theta)
+    # The tree the selected iterate was evaluated on, unless the guard moved it.
+    evaluated = selected_params if theta is selected else pmap.params(theta)
+    if i > 0:
+        _warn_on_an_edge("fit", pmap, bounds, theta, evaluated)
+        _warn_unresolved_values("fit", pmap, evaluated, "as fitted", unresolved)
     return FitResult(
-        params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
+        params=pmap.returned(theta, evaluated), losses=np.asarray(losses),
+        converged=converged, n_iter=i,
         excited_rank=excited_rank, undetermined_drift=undetermined_drift,
         best_iteration=best.iteration, best_loss=best.loss,
         hold_declined=hold_declined,
@@ -5206,12 +5577,14 @@ def fit_lm(
     gm.check_params(start)
     mask = _resolve_mask(gm, start, mask)
     u0 = gm.unconstrain(start)
-    flat_u, unravel = ravel_pytree(u0)
+    flat_u, _ = ravel_pytree(u0)
     idx = _masked_indices(start, mask)
     if idx is None:
         idx = np.arange(flat_u.size)
-    to_params = _physical_params(gm, start, flat_u, unravel, idx)
-    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
+    # The one evaluation of ``theta -> params`` (SYS-071): the residual is a
+    # compiled function of the physical tree ``pmap.params`` returns, and
+    # that tree is what ``callback`` receives and the result holds.
+    pmap = _PhysicalMap(gm, start, flat_u, idx)
     theta0 = flat_u[idx]
     theta = theta0
     progress = _progress_notifier(gm, "lm", n_iter, notify_every)
@@ -5220,21 +5593,38 @@ def fit_lm(
     # residual_fn(...))``: the residual is wanted for its *structure*
     # only, and evaluating it cost a whole extra rollout per call --
     # bought nothing at all in the ``noise_std is None`` case, which
-    # returns before looking at it.  Confirmed by counting entries into
-    # ``residual_fn``: 4 per call, of which this was 1, and 1 per call at
-    # ``n_iter=0`` where nothing else ran at all.
-    inv_sigma = _resolved_noise(residual_fn, gm.constrain(u0), noise_std)
+    # returns before looking at it.
+    inv_sigma = _resolved_noise(residual_fn, start, noise_std)
 
-    def _residual(th):
-        # At exactly the parameters ``to_params`` returns (SYS-071).
-        p = physical(th)
+    def _residual(p):
+        # A function of the physical tree alone (``_compile_model``).
         r = ravel_pytree(residual_fn(p))[0]
         return r if inv_sigma is None else r * inv_sigma
 
-    residual_and_jac = jax.jit(lambda th: (_residual(th), jax.jacfwd(_residual)(th)))
-    residual_only = jax.jit(_residual)
+    def _jacobian(p, slope):
+        # ``dr/dtheta``, one forward pass per trainable entry.  Column ``j``
+        # is the model's derivative along entry ``j`` of ``p`` with the
+        # tangent ``slope[j]`` (``dp/dtheta`` there): the tangent the map
+        # itself would push forward, so a column is never formed in the
+        # parameter's own units and a ``log`` coordinate stays unit-free.
+        fitted, others = pmap.split(p)
+
+        def column(tangent):
+            return jax.jvp(lambda leaves: _residual(pmap.join(leaves, others)),
+                           (fitted,), (pmap.unravel(tangent),))[1]
+
+        return jax.vmap(column, out_axes=1)(jnp.diag(slope))
+
+    # One program computes every residual the run takes a loss from, so
+    # ``losses``, the acceptance test and ``best_loss`` are values of one
+    # function at the trees ``pmap.params`` returned; the Jacobian is its own
+    # program and gives no loss.
+    residual_only = _compile_model(_residual)
+    jacobian = _compile_model(_jacobian)
 
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
+    unresolved: set = set()
+    _warn_unresolved_values("fit_lm", pmap, start, "at the start of the fit", unresolved)
     _lm_step = _marquardt_step
 
     # The step test, on the physical trainable entries (see ``step_tol``):
@@ -5245,7 +5635,7 @@ def fit_lm(
                else float(step_tol))
 
     # Mixed precision: a float32 leaf beside a float64 one is a float64
-    # coordinate here (``ravel_pytree`` promotes), but ``unravel`` rounds it
+    # coordinate here (``ravel_pytree`` promotes), but the map rounds it
     # back to float32 before the model sees it (:func:`_leaf_grid`).
     narrow, to_leaf_grid = _leaf_grid(start, idx, theta0.dtype)
     no_hold = jnp.zeros(theta0.shape, dtype=bool)
@@ -5272,19 +5662,30 @@ def fit_lm(
             cand, ok = solve(jnp.asarray(held))
         return to_leaf_grid(cand), bool(ok)
 
-    def _physical(th) -> np.ndarray:
-        p = gm.constrain(unravel(flat_u.at[idx].set(th)))
-        return np.asarray(ravel_pytree(p)[0][idx], dtype=np.float64)
+    def _stepped(th, solver):
+        """``(candidate, representable)`` for a step solved from ``th`` on
+        the linear model: ``solver(origin, lo, hi, held)`` is asked in the
+        tangent frame (:meth:`_CoordinateBounds.tangent_frame`) and its
+        answer read back as coordinates, a ``log`` / ``logit`` one along the
+        shorter of its curve and its tangent."""
+        origin, lo, hi = bounds.tangent_frame(th)
 
-    def _within_step_tol(th, cand) -> bool:
-        before, after = _physical(th), _physical(cand)
+        def solve(held):
+            answer, ok = solver(origin, lo, hi, held)
+            return bounds.from_tangent(th, answer), ok
+
+        return _quantised(th, solve)
+
+    def _within_step_tol(before, after) -> bool:
+        """Whether a step from the physical values ``before`` to ``after``
+        moves every trainable parameter by at most ``step_tol`` of itself."""
         return bool(np.all(np.abs(after - before) <= rel_tol * np.abs(before)))
 
     # Whether every solve a convergence verdict of this iteration rests on
     # was representable (``_marquardt_step``, ``_gauss_newton_step``).
     verdict = {"representable": True}
 
-    def _resolvable(th, g, J) -> np.ndarray:
+    def _resolvable(th, before, g, J) -> np.ndarray:
         """``g`` with every entry zeroed whose coordinate's own Newton step,
         ``g_i / ||J[:, i]||²`` (the others held), moves its parameter by no
         more than ``step_tol`` -- for the on-bound test only.
@@ -5297,10 +5698,10 @@ def fit_lm(
         on ``(0.5, 2.0)`` converged on one bound and not on the other (and
         the other way round under x64).  A pull whose own step is within
         the tolerance moves nothing the tolerance resolves, so it is that
-        noise and counts as zero.  The step is measured physically, so a
-        ``logit`` coordinate at the flat edge of its sigmoid -- a large step
-        in ``u`` for a small one in the value -- is judged by the value's
-        move, as :func:`_within_step_tol` judges every step.
+        noise and counts as zero.  The step is read as every step is (the
+        tangent frame) and measured physically -- ``before`` is the physical
+        value at ``th`` -- so a ``logit`` coordinate at the flat edge of its
+        range is judged by the value's move.
         """
         if not bounds.active:
             return g
@@ -5311,21 +5712,23 @@ def fit_lm(
         curvature = np.sum(np.square(np.asarray(J, dtype=np.float64) * c), axis=0)
         step = np.where(curvature > 0.0,
                         (g * c) * c / np.where(curvature > 0.0, curvature, 1.0), 0.0)
-        moved = np.clip(np.asarray(th, dtype=np.float64) - step,
-                        np.asarray(bounds.lo, dtype=np.float64),
-                        np.asarray(bounds.hi, dtype=np.float64))
-        before = _physical(th)
-        after = _physical(to_leaf_grid(jnp.asarray(moved, dtype=th.dtype)))
+        origin, lo, hi = bounds.tangent_frame(th)
+        answer = np.clip(np.asarray(origin, dtype=np.float64) - step,
+                         np.asarray(lo, dtype=np.float64),
+                         np.asarray(hi, dtype=np.float64))
+        moved = bounds.from_tangent(th, jnp.asarray(answer, dtype=th.dtype))
+        after = pmap.physical(pmap.params(to_leaf_grid(moved)))
         return np.where(np.abs(after - before) <= rel_tol * np.abs(before), 0.0, g)
 
-    def _gauss_newton_stationary(th, r, J, loss_at_th=None) -> bool:
+    def _gauss_newton_stationary(th, before, r, J, loss_at_th=None) -> bool:
         """Whether ``th`` is stationary by the undamped, equilibrated
         Gauss-Newton step from it (:func:`_gauss_newton_step`), which neither
         the damping nor the Marquardt floor can shrink -- required, beside
         the step tests below, before ``converged`` is reported.
 
         Stationary when that step moves every parameter by no more than
-        ``step_tol``.  For the floor rule (``loss_at_th`` given) also when
+        ``step_tol`` (``before`` is the physical value at ``th``).  For the
+        floor rule (``loss_at_th`` given) also when
         the step does not lower the loss: a parameter the data determine
         only weakly has, at its rounding floor, a Gauss-Newton step that
         fits the residual's rounding noise and can be many ulps long, but
@@ -5334,14 +5737,15 @@ def fit_lm(
         structured rounding, whose cosines with the columns measured 0.5-0.9
         on a spring -- so the second test evaluates the step.
         """
-        candidate, ok = _quantised(
-            th, lambda held: _gauss_newton_step(th, r, J, bounds.lo, bounds.hi, held))
+        candidate, ok = _stepped(
+            th, lambda origin, lo, hi, held: _gauss_newton_step(origin, r, J, lo, hi, held))
         verdict["representable"] &= ok
-        if _within_step_tol(th, candidate):
+        candidate_params = pmap.params(candidate)
+        if _within_step_tol(before, pmap.physical(candidate_params)):
             return True
         if loss_at_th is None:
             return False
-        loss_gn = _half_squared_norm(residual_only(candidate))
+        loss_gn = _half_squared_norm(residual_only(candidate_params))
         return not (np.isfinite(loss_gn) and loss_gn < loss_at_th)
 
     lam = float(lam0)
@@ -5350,12 +5754,13 @@ def fit_lm(
     losses: list[float] = []
     # ``theta``'s update count and its loss as last evaluated.  No
     # ``_BestIterate`` here: the acceptance test already makes the current
-    # iterate the lowest, and re-deciding it from ``losses`` would compare
-    # values from two compiled functions (``residual_and_jac`` records,
-    # ``residual_only`` accepts) that can disagree in the last ulp, so a
-    # converged run could hand back an older iterate for a rounding
-    # difference its own test had already decided the other way.
+    # iterate the lowest.
     theta_iteration, theta_loss = 0, None
+    # The physical tree ``theta`` maps to -- what the model is evaluated on
+    # and the result holds -- and the residual there by ``residual_only``
+    # (``None`` until an iteration needs it).
+    theta_params = pmap.params(theta)
+    theta_r = None
     # The last ``(r, J)`` the loop formed and the iterate it belongs to, so
     # that the guard's curvature test reuses it when the run ended without
     # moving off that iterate rather than forming it again.
@@ -5365,7 +5770,10 @@ def fit_lm(
     progressed = False
     i = 0
     for i in range(1, n_iter + 1):
-        r, J = residual_and_jac(theta)
+        if theta_r is None:
+            theta_r = residual_only(theta_params)
+        r = theta_r
+        J = jacobian(theta_params, pmap.slope(theta))
         # On the framed residual (``_half_squared_norm``): ``r * r`` in the
         # working precision flushed a residual of 1e-19 to a loss of 0.0.
         loss = _half_squared_norm(r)
@@ -5386,7 +5794,7 @@ def fit_lm(
             # about the loss surface whether or not a step was taken on it.
             tracker.observe(grad)
         if callback is not None or progress is not None:
-            current = to_params(theta)
+            current = pmap.returned(theta, theta_params)
             if callback is not None:
                 callback(i, loss, current)
             if progress is not None:
@@ -5408,19 +5816,20 @@ def fit_lm(
         # ~1e-162).  No step can lower it, so nothing about the iterate can
         # be read from the step tests.
         vanished = loss == 0.0 and bool(jnp.any(r != 0.0))
+        here = pmap.physical(theta_params)
         # A coordinate on its bound that could lower the loss by moving into
         # the range makes this no constrained stationary point, so its
         # proposal cannot converge the run even if it moves nothing (the
         # coupled solve can point such a coordinate outward); the retries,
         # damped towards the gradient, move it inward.
-        stuck_inward = bounds.inward_descent(theta, _resolvable(theta, grad, J),
-                                             _physical(theta), rel_tol)
-        attempt, cand = -1, theta
+        stuck_inward = bounds.inward_descent(theta, _resolvable(theta, here, grad, J),
+                                             here, rel_tol)
+        attempt, there = -1, here
         while True:
             attempt += 1
             if attempt >= _LM_LADDER and not (
                     progressed and not stuck_inward and lam < _LM_LAMBDA_MAX
-                    and not _within_step_tol(theta, cand)):
+                    and not _within_step_tol(here, there)):
                 # The ladder's end -- unless the floor rule below would be
                 # asked to judge a ladder that stopped short of ``step_tol``:
                 # then it is extended to the damping cap
@@ -5428,17 +5837,20 @@ def fit_lm(
                 # candidate it needs.
                 break
             lam_t = jnp.asarray(lam, theta.dtype)
-            cand, cand_ok = _quantised(
-                theta, lambda held, lam_t=lam_t: _lm_step(theta, r, J, lam_t, bounds.lo,
-                                                          bounds.hi, held))
+            cand, cand_ok = _stepped(
+                theta, lambda origin, lo, hi, held, lam_t=lam_t: _lm_step(
+                    origin, r, J, lam_t, lo, hi, held))
             if attempt == 0:
                 verdict["representable"] &= cand_ok
-            loss_new = _half_squared_norm(residual_only(cand))
+            cand_params = pmap.params(cand)
+            there = pmap.physical(cand_params)
+            cand_r = residual_only(cand_params)
+            loss_new = _half_squared_norm(cand_r)
             proposal_within = (attempt == 0 and not stuck_inward
-                               and _within_step_tol(theta, cand)
-                               and _gauss_newton_stationary(theta, r, J))
+                               and _within_step_tol(here, there)
+                               and _gauss_newton_stationary(theta, here, r, J))
             if np.isfinite(loss_new) and loss_new < loss:
-                theta = cand
+                theta, theta_params, theta_r = cand, cand_params, cand_r
                 theta_iteration, theta_loss = i, loss_new
                 lam = max(lam * lam_down, 1e-12)
                 accepted = True
@@ -5481,17 +5893,19 @@ def fit_lm(
             # development builds ended such a run unconverged there, 40 ulps
             # short, or converged a few ulps away, by which of the two the
             # parameters' units happened to round to (MADD-ANO-174).
-            if _within_step_tol(theta, cand):
-                gn_cand, gn_ok = _quantised(
-                    theta, lambda held: _gauss_newton_step(theta, r, J, bounds.lo,
-                                                           bounds.hi, held))
+            if _within_step_tol(here, there):
+                gn_cand, gn_ok = _stepped(
+                    theta, lambda origin, lo, hi, held: _gauss_newton_step(
+                        origin, r, J, lo, hi, held))
                 verdict["representable"] &= gn_ok
-                if _within_step_tol(theta, gn_cand):
+                gn_params = pmap.params(gn_cand)
+                if _within_step_tol(here, pmap.physical(gn_params)):
                     stationary = True
                 else:
-                    loss_gn = _half_squared_norm(residual_only(gn_cand))
+                    gn_r = residual_only(gn_params)
+                    loss_gn = _half_squared_norm(gn_r)
                     if np.isfinite(loss_gn) and loss_gn < loss:
-                        theta = gn_cand
+                        theta, theta_params, theta_r = gn_cand, gn_params, gn_r
                         theta_iteration, theta_loss = i, loss_gn
                         lam = max(lam * lam_down, 1e-12)
                         accepted = True
@@ -5520,7 +5934,7 @@ def fit_lm(
             # parameters otherwise has too few gradients to measure
             # ``excited_rank`` at all.  The guard's curvature test reads
             # the same ``J`` (``_rj_selected``), so it is formed once.
-            r_end, J_end = residual_and_jac(theta)
+            r_end, J_end = theta_r, jacobian(theta_params, pmap.slope(theta))
             if bool(jnp.all(jnp.isfinite(r_end))) and bool(jnp.all(jnp.isfinite(J_end))):
                 tracker.observe(_framed_gradient(J_end, r_end))
                 rJ, rJ_iteration = (r_end, J_end), theta_iteration
@@ -5528,7 +5942,7 @@ def fit_lm(
             converged = stationary
             break
 
-    selected = theta
+    selected, selected_params = theta, theta_params
     at_selected: dict = {}
 
     def _rj_selected():
@@ -5538,16 +5952,19 @@ def fit_lm(
         # proposal within ``step_tol``, whose ``(r, J)`` it formed for the
         # tracker.
         if "rJ" not in at_selected:
-            at_selected["rJ"] = (rJ if rJ is not None and rJ_iteration == theta_iteration
-                                 else residual_and_jac(selected))
+            if rJ is not None and rJ_iteration == theta_iteration:
+                at_selected["rJ"] = rJ
+            else:
+                r_sel = residual_only(selected_params) if theta_r is None else theta_r
+                at_selected["rJ"] = (r_sel, jacobian(selected_params, pmap.slope(selected)))
         return at_selected["rJ"]
 
     def _loss(th):
-        return _half_squared_norm(residual_only(th))
+        return _half_squared_norm(residual_only(pmap.params(th)))
 
     def _reference():
         r_sel, J_sel = _rj_selected()
-        return _loss(selected), _framed_gradient(J_sel, r_sel)
+        return _half_squared_norm(r_sel), _framed_gradient(J_sel, r_sel)
 
     def _flatness(candidates, spanned, scale):
         return _gauss_newton_flatness(_rj_selected()[1], candidates, coarse,
@@ -5562,9 +5979,14 @@ def fit_lm(
                            transformed=bounds.transformed, columns=_columns),
         "fit_lm")
 
-    final = to_params(theta)
+    # The tree the selected iterate was evaluated on, unless the guard moved it.
+    evaluated = selected_params if theta is selected else pmap.params(theta)
+    if i > 0:
+        _warn_on_an_edge("fit_lm", pmap, bounds, theta, evaluated)
+        _warn_unresolved_values("fit_lm", pmap, evaluated, "as fitted", unresolved)
     return FitResult(
-        params=final, losses=np.asarray(losses), converged=converged, n_iter=i,
+        params=pmap.returned(theta, evaluated), losses=np.asarray(losses),
+        converged=converged, n_iter=i,
         excited_rank=excited_rank, undetermined_drift=undetermined_drift,
         best_iteration=theta_iteration, best_loss=theta_loss,
         hold_declined=hold_declined,
@@ -5693,18 +6115,16 @@ def fit_multiple_shooting(
     progress = _progress_notifier(gm, "multiple_shooting", n_iter, notify_every)
 
     u0 = gm.unconstrain(start)
-    flat_u, unravel = ravel_pytree(u0)
+    flat_u, _ = ravel_pytree(u0)
     idx = _masked_indices(start, mask)
     if idx is None:
         idx = np.arange(flat_u.size)
-    to_params = _physical_params(gm, start, flat_u, unravel, idx)
-    physical = _exact_physical_params(gm, start, flat_u, unravel, idx)
+    # The one evaluation of ``theta -> params`` (SYS-071), as in ``fit``.
+    pmap = _PhysicalMap(gm, start, flat_u, idx)
     theta0 = flat_u[idx]
     ws_flat0, unravel_ws = ravel_pytree(ws0)
 
-    def objective(theta, ws_flat):
-        # At exactly the parameters ``to_params`` returns (SYS-071).
-        p = physical(theta)
+    def objective(p, ws_flat):
         return windowed_loss(
             gm, p, observations, obs_fn=obs_fn, window=window,
             sample_every=sample_every, external_inputs=external_inputs,
@@ -5712,21 +6132,25 @@ def fit_multiple_shooting(
             start_step=start_step,
         )
 
-    value_and_grad = jax.jit(jax.value_and_grad(objective, argnums=(0, 1)))
-    scaled_value_and_grad = _scaled_value_and_grad(objective, argnums=(0, 1))
+    plain, scaled = _model_loss_and_gradient(pmap, objective, n_extra=1)
     # As in ``fit``: the cotangent every gradient is taken with once a
     # flushed first gradient made the run lift them (``_gradient_lift``).
     lift = None
 
-    def evaluate(th, w):
-        return (value_and_grad(th, w) if lift is None
-                else scaled_value_and_grad(th, w, lift))
+    def evaluate(th, w, p=None):
+        """``(loss, (gradient in theta, gradient in the window states))``."""
+        p = pmap.params(th) if p is None else p
+        loss, g_p, g_w = plain(p, w) if lift is None else scaled(p, w, lift)
+        return loss, (g_p * pmap.slope(th), g_w)
 
     def unlifted(g) -> np.ndarray:
         g64 = np.asarray(g, dtype=np.float64)
         return g64 if lift is None else g64 / float(lift)
 
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
+    unresolved: set = set()
+    _warn_unresolved_values("fit_multiple_shooting", pmap, start,
+                            "at the start of the fit", unresolved)
 
     @jax.jit
     def adam(x, m, v, g, frame, i, rate):
@@ -5742,30 +6166,41 @@ def fit_multiple_shooting(
     coarse = _coarsest_dtype(start, idx)
     tracker = _make_excitation_tracker(hold_undetermined, theta0, coarse)
     best = _BestIterate((theta0, ws_flat0))
+    # The physical tree the best iterate was evaluated on: the result's.
+    best_params: Optional[dict] = None
     losses: list[float] = []
     converged = False
     vanished_warned = False
     i = 0
     for i in range(1, n_iter + 1):
-        loss, (g_t, g_s) = evaluate(theta, ws)
+        p = pmap.params(theta)
+        loss, (g_t, g_s) = evaluate(theta, ws, p)
         if i == 1:
-            lift = _gradient_lift(lambda cot: scaled_value_and_grad(theta, ws, cot),
-                                  (g_t, g_s), loss)
+            slope0 = pmap.slope(theta)
+
+            def lifted_at_start(cot):
+                loss_c, g_p, g_w = scaled(p, ws, cot)
+                return loss_c, (g_p * slope0, g_w)
+
+            lift = _gradient_lift(lifted_at_start, (g_t, g_s), loss)
             if lift is not None:
-                loss, (g_t, g_s) = evaluate(theta, ws)
+                loss, (g_t, g_s) = evaluate(theta, ws, p)
         loss_f = float(loss)
         losses.append(loss_f)
         if not np.isfinite(loss_f) or not bool(jnp.all(jnp.isfinite(g_t))) \
                 or not bool(jnp.all(jnp.isfinite(g_s))):
             raise FloatingPointError(f"non-finite loss or gradient at iteration {i}")
-        best.offer((theta, ws), i - 1, loss_f)
+        state = (theta, ws)
+        best.offer(state, i - 1, loss_f)
+        if best.state is state:
+            best_params = p
         if tracker is not None:
             # The parameter block's gradient only: the window states are
             # decision variables of this fit and are returned as the
             # optimiser left them.  Before the ``tol`` break, as in ``fit``.
             tracker.observe(unlifted(g_t))
         if callback is not None or progress is not None:
-            current = to_params(theta)
+            current = pmap.returned(theta, p)
             if callback is not None:
                 callback(i, loss_f, current)
             if progress is not None:
@@ -5790,20 +6225,25 @@ def fit_multiple_shooting(
             # gradients are in different units.
             frames = (_adam_frame(g_t), _adam_frame(g_s))
         theta, m_t, v_t = adam(theta, m_t, v_t, g_t, frames[0], it, lr)
-        # As in ``fit``: a clipped coordinate is put back on its bound.
+        # As in ``fit``: each coordinate is put back onto its range.
         theta = bounds.project(theta)
         ws, m_s, v_s = adam(ws, m_s, v_s, g_s, frames[1], it, lr_s)
 
     if i > 0 and not converged:
         # As in ``fit``: the last update's result was never evaluated.
-        _offer_final_iterate(best, (theta, ws), i,
-                             float(evaluate(theta, ws)[0]),
+        p_last = pmap.params(theta)
+        state = (theta, ws)
+        _offer_final_iterate(best, state, i,
+                             float(evaluate(theta, ws, p_last)[0]),
                              "fit_multiple_shooting")
+        if best.state is state:
+            best_params = p_last
     theta, ws = best.state
     selected = theta
+    selected_params = pmap.params(selected) if best_params is None else best_params
 
     def _reference():
-        loss_sel, (g_sel, _) = evaluate(selected, ws)
+        loss_sel, (g_sel, _) = evaluate(selected, ws, selected_params)
         return float(loss_sel), unlifted(g_sel)
 
     def _flatness(candidates, spanned, scale):
@@ -5811,9 +6251,12 @@ def fit_multiple_shooting(
         # fixed: the guard moves only ``theta``, and does so with ``ws``
         # where the optimiser left them.  Unlifted, as in ``fit``.
         lifted = 1.0 if lift is None else float(lift)
+
+        def gradient(p_, w):
+            return (plain(p_, w) if lift is None else scaled(p_, w, lift))[1]
+
         return _hessian_flatness(
-            lambda V: _hvp_columns(lambda t, w: evaluate(t, w)[1][0],
-                                   selected, (ws,), V) / lifted,
+            lambda V: _model_hvp(gradient, pmap, selected, selected_params, (ws,), V) / lifted,
             candidates, spanned, coarse, "fit_multiple_shooting", scale)
 
     theta, excited_rank, undetermined_drift, hold_declined = _hold_undetermined_directions(
@@ -5824,8 +6267,14 @@ def fit_multiple_shooting(
                            columns=None if tracker is None else tracker.gradient_scale),
         "fit_multiple_shooting")
 
-    final = to_params(theta)
-    return (FitResult(params=final, losses=np.asarray(losses), converged=converged,
+    # The tree the selected iterate was evaluated on, unless the guard moved it.
+    evaluated = selected_params if theta is selected else pmap.params(theta)
+    if i > 0:
+        _warn_on_an_edge("fit_multiple_shooting", pmap, bounds, theta, evaluated)
+        _warn_unresolved_values("fit_multiple_shooting", pmap, evaluated, "as fitted",
+                                unresolved)
+    return (FitResult(params=pmap.returned(theta, evaluated), losses=np.asarray(losses),
+                      converged=converged,
                       n_iter=i, excited_rank=excited_rank,
                       undetermined_drift=undetermined_drift,
                       best_iteration=best.iteration, best_loss=best.loss,

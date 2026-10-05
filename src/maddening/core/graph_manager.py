@@ -69,6 +69,7 @@ from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.node import (
     SimulationNode, _method_accepts_params, _mutable_snapshot, _mutated_keys,
+    _replaced_keys,
 )
 from maddening.core.params import (
     ParamSpec,
@@ -5666,13 +5667,16 @@ class GraphManager:
         takes the node write in, so that write wins in turn.  (Only a leaf
         written through a reference held across the node write, with no
         read in between, loses to it.)  A write is a counted write to the
-        node's ``_ParamsDict``, the mapping replaced (which the node stores
-        as a new ``_ParamsDict``), or a value changed in place -- an element
-        of a list or a NumPy array, which no method of the mapping sees --
-        found by comparing each such value with its copy from the last sync
-        (:func:`~maddening.core.node._mutated_keys`); so a write of the
-        value the node already held counts, and one into a list is not lost
-        (MADD-ANO-175).  Never compiles, so it is safe from a getter and
+        node's ``_ParamsDict``; a key the mapping's replacement changed
+        (``node.params = {**node.params, "k": v}`` is stored as a new
+        ``_ParamsDict`` and writes ``k``, not the keys it hands back with
+        the value they had: :func:`~maddening.core.node._replaced_keys`,
+        MADD-ANO-179); or a value changed in place -- an element of a list
+        or a NumPy array, which no method of the mapping sees -- found by
+        comparing each such value with its copy from the last sync
+        (:func:`~maddening.core.node._mutated_keys`).  So a keyed write of
+        the value the node already held counts, and one into a list is not
+        lost (MADD-ANO-175).  Never compiles, so it is safe from a getter and
         from :meth:`compile`; node values are taken under
         ``jax.ensure_compile_time_eval``, so a sync inside a trace stores
         concrete arrays.
@@ -5689,8 +5693,28 @@ class GraphManager:
                     and not mutated:
                 continue
             key_writes = getattr(params, "_key_writes", None)
-            if params is not seen[0] or key_writes is None:
+            if key_writes is None:
+                # Not a counting mapping (``node.__dict__["params"]`` assigned
+                # directly): nothing says which keys were written, so all were.
                 written = set(params) | set(seen[0] if isinstance(seen[0], dict) else ())
+            elif params is not seen[0]:
+                # The mapping was replaced.  Written: what the old mapping had
+                # pending when it went (its counted writes and in-place
+                # writes since the last sync), the keys the replacement
+                # changed, and the writes counted in the new mapping since.
+                # Not the keys it handed back unchanged: taken as writes they
+                # put the node's own value over every other constant of the
+                # node a fit had calibrated (MADD-ANO-179).
+                old = seen[0]
+                old_writes = getattr(old, "_key_writes", None)
+                if old_writes is None:
+                    pending = set(old) if isinstance(old, dict) else set()
+                else:
+                    pending = {k for k in set(old_writes) | set(seen[2])
+                               if old_writes.get(k, 0) != seen[2].get(k, 0)}
+                    pending |= _mutated_keys(old, seen[3])
+                written = (pending | _replaced_keys(old, params)
+                           | {k for k, n in key_writes.items() if n})
             else:
                 counts = seen[2]
                 written = {k for k in set(key_writes) | set(counts)

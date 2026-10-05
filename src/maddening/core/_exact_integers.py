@@ -25,7 +25,6 @@ follows a passing check is exact on every platform.
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
 
@@ -67,7 +66,7 @@ def lost_as_integer(a: np.ndarray, target: np.dtype) -> np.ndarray:
     if kind == "c":
         return (np.imag(a) != 0) | lost_as_integer(np.asarray(np.real(a)), target)
     signed = info.min < 0
-    past = math.ldexp(1.0, info.bits - (1 if signed else 0))     # max + 1 = 2**k, exact
+    past = float(1 << (info.bits - (1 if signed else 0)))     # max + 1 = 2**k, exact
     low = -past if signed else 0.0
     wide = a.astype(np.float64) if a.dtype.itemsize < 8 else a
     with np.errstate(invalid="ignore"):

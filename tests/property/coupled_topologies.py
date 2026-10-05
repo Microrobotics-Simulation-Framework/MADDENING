@@ -54,6 +54,31 @@ minus its update evaluated in float64 at the values it read -- is:
 The returned state minus the monolithic solution is ``(I - M)^{-1}`` of
 the defect vector, exactly, so the defect bounds give the distance to the
 reference.  Nothing here is a test.
+
+**Geometry-dependent mappings** (:class:`Geometry`).  A mapped edge may be
+built as an edge whose mapping reads a moving geometry held in the state of
+its source or target relay, in one of two ways:
+
+* ``"moving"``: the mapping is ``test_geom_matrix`` and the geometry *is*
+  the matrix, a second state field ``M<edge>`` of the relay that holds it,
+  updated ``M <- M + dM`` with ``dM`` a per-relay parameter.  ``M`` depends
+  on nothing else, so a step is still one linear system in ``x``; the
+  reference (:meth:`LinearModel.bind`) repeats the same float additions in
+  the graph's dtype, so its matrices are the graph's bit for bit, and takes
+  for every edge the matrix the documented time level names: the source's
+  new matrix on a forward or group-internal edge and its pre-step one on a
+  back edge; the target's pre-step matrix, and at sub-step ``k`` of a
+  sub-cycled target ``pre + k dM``.  Both ends of the edge hold a field of
+  that name and shape, with different values, so an anchor read from the
+  wrong end is another matrix.
+* ``"frozen"``: the mapping is the library's ``multilinear_grid`` kind
+  between a one-dimensional grid and points held in a field ``P<edge>``
+  that no update moves; ``values["H"]`` is then the fixed matrix of that
+  gather or scatter and every oracle of the static case applies unchanged.
+
+:func:`single_pass` restates one coupling pass with explicit loops over the
+members and their sub-steps, for the one case a fixed point cannot show:
+what a sub-cycled member reads *during* a pass.
 """
 
 from __future__ import annotations
@@ -121,6 +146,13 @@ def _dt(dtype) -> jnp.dtype:
     return jnp.dtype(dtype)
 
 
+def geometry_dtype(dtype) -> jnp.dtype:
+    """The dtype of a relay's geometry fields: the relay's own when that is
+    float32 or float64 (what a geometry may be), float32 for a 16-bit relay."""
+    dtype = jnp.dtype(dtype)
+    return dtype if dtype in (jnp.dtype("float32"), jnp.dtype("float64")) else jnp.dtype("float32")
+
+
 class TRelay(SimulationNode):
     """``x <- alpha x_pre + sum_j G_j u_j + b + beta dt``, at any float dtype.
 
@@ -130,10 +162,17 @@ class TRelay(SimulationNode):
     """
 
     def __init__(self, name, timestep, *, n, ports, alpha=0.0, beta=0.0, leaves=(),
-                 dtype="float32", constants=None):
+                 dtype="float32", constants=None, geom=()):
         dt_ = _dt(dtype)
         params = {f"G{j}": jnp.zeros((n, n), dt_) for j in range(ports)}
         params["b"] = jnp.zeros(n, dt_)
+        # Geometry fields ``(name, shape, moves)``: state a mapping reads.  A
+        # moving one advances by the parameter ``d<name>`` on every update.
+        self._geom = tuple(geom)
+        self._geom_dtype = geometry_dtype(dt_)
+        for field, shape, moves in self._geom:
+            if moves:
+                params[f"d{field}"] = jnp.zeros(shape, self._geom_dtype)
         if constants is not None:
             for j, G in enumerate(constants["G"]):
                 params[f"G{j}"] = jnp.asarray(G, dt_)
@@ -156,6 +195,8 @@ class TRelay(SimulationNode):
             s["flag"] = jnp.asarray(True)
         if "key" in self._leaves:
             s["key"] = jax.random.key(KEY_SEED)
+        for field, shape, _moves in self._geom:
+            s[field] = jnp.zeros(shape, self._geom_dtype)
         return s
 
     def boundary_input_spec(self):
@@ -180,6 +221,8 @@ class TRelay(SimulationNode):
             out["flag"] = jnp.logical_not(state["flag"])
         if "key" in self._leaves:
             out["key"] = jax.random.fold_in(state["key"], KEY_FOLD)
+        for field, _shape, moves in self._geom:
+            out[field] = state[field] + p[f"d{field}"] if moves else state[field]
         return out
 
     def update_evaluations(self):
@@ -225,6 +268,8 @@ class TNode:
     flux: bool = False
     three_arg: bool = False
     timestep: float = 1.0
+    #: Geometry fields ``(name, shape, moves)`` (see :class:`Geometry`).
+    geom: tuple = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -337,7 +382,81 @@ def fixed_constants(topo: Topology, dtype="float32") -> dict:
 
 def make_node(nd: TNode, dtype="float32", constants=None) -> TRelay:
     return node_class(nd)(nd.name, nd.timestep, n=nd.n, ports=nd.ports, alpha=nd.alpha,
-                          beta=nd.beta, leaves=nd.leaves, dtype=dtype, constants=constants)
+                          beta=nd.beta, leaves=nd.leaves, dtype=dtype, constants=constants,
+                          geom=nd.geom)
+
+
+@dataclasses.dataclass(frozen=True)
+class Geometry:
+    """How :func:`build` realises mapped edges as geometry-dependent mappings.
+
+    ``kind`` is ``"moving"`` or ``"frozen"`` (module docstring).  ``anchors``
+    maps the index of a mapped edge to ``"source"`` or ``"target"``: the end
+    whose state the edge reads its geometry from; a mapped edge it does not
+    name stays a static ``matrix_mapping``.  ``modes`` (``"frozen"`` only)
+    maps an edge to ``"consistent"`` (the source is the grid, gathered at
+    the points) or ``"conservative"`` (the target is the grid, scattered
+    onto); consistent when not named.
+    """
+
+    kind: str
+    anchors: tuple          # ((edge index, anchor), ...)
+    modes: tuple = ()       # ((edge index, mode), ...)
+
+    def __post_init__(self):
+        assert self.kind in ("moving", "frozen"), self.kind
+        assert all(a in ("source", "target") for _i, a in self.anchors), self.anchors
+
+    @property
+    def anchor(self) -> dict:
+        return dict(self.anchors)
+
+    def mode(self, i: int) -> str:
+        return dict(self.modes).get(i, "consistent")
+
+    def field(self, i: int) -> str:
+        """The state field edge *i* reads, held by both of its ends."""
+        return f"{'M' if self.kind == 'moving' else 'P'}{i}"
+
+    def shape(self, topo: "Topology", i: int) -> tuple:
+        e = topo.edges[i]
+        n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
+        if self.kind == "moving":
+            return (n_dst, n_src)
+        return (n_dst, 1) if self.mode(i) == "consistent" else (n_src, 1)
+
+    def holder(self, topo: "Topology", i: int) -> str:
+        e = topo.edges[i]
+        return e.src if self.anchor[i] == "source" else e.dst
+
+
+def with_geometry(topo: Topology, geometry: Optional[Geometry]) -> Topology:
+    """*topo* with the geometry fields of *geometry* on both ends of each edge it names."""
+    if geometry is None:
+        return topo
+    extra: dict = {}
+    for i in sorted(geometry.anchor):
+        e = topo.edges[i]
+        assert e.mapped, f"edge {i} ({e}) is not mapped"
+        for name in dict.fromkeys((e.src, e.dst)):
+            extra.setdefault(name, []).append(
+                (geometry.field(i), geometry.shape(topo, i), geometry.kind == "moving"))
+    return dataclasses.replace(topo, nodes=tuple(
+        dataclasses.replace(nd, geom=nd.geom + tuple(extra.get(nd.name, ())))
+        for nd in topo.nodes))
+
+
+def _geometry_mapping(topo: Topology, geometry: Geometry, i: int):
+    """The geometry-dependent mapping of edge *i* (kinds imported when used)."""
+    from tests.property import geometry_graphs as gg  # noqa: PLC0415
+
+    e = topo.edges[i]
+    n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
+    if geometry.kind == "moving":
+        return gg.geom_matrix_mapping(n_dst, n_src)
+    if geometry.mode(i) == "consistent":
+        return gg.multilinear((0.0,), (1.0,), (n_src,), n_points=n_dst, mode="consistent")
+    return gg.multilinear((0.0,), (1.0,), (n_dst,), n_points=n_src, mode="conservative")
 
 
 @dataclasses.dataclass
@@ -353,17 +472,22 @@ class Built:
     warnings: list
     node_order: tuple
     edge_order: tuple
+    geometry: Optional[Geometry] = None
 
 
 def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order=None,
-          compile: bool = True) -> Built:
+          compile: bool = True, geometry: Optional[Geometry] = None) -> Built:
     """A :class:`GraphManager` for *topo*, nodes and edges added in the given orders.
 
     *knobs* is one ``CouplingGroup`` configuration for every group, or a
     sequence of them, one per group; knobs a configuration leaves inert are
     dropped (:func:`coupled_graphs.live_knobs`).  ``compile()``'s
-    ``UserWarning`` texts are recorded rather than raised.
+    ``UserWarning`` texts are recorded rather than raised.  *geometry*
+    builds the mapped edges it names as geometry-dependent mappings, with
+    their geometry fields on both ends; the returned ``topo`` carries them.
     """
+    topo = with_geometry(topo, geometry)
+    anchors = {} if geometry is None else geometry.anchor
     topo.check()
     node_order = tuple(topo.names if node_order is None else node_order)
     edge_order = tuple(range(len(topo.edges)) if edge_order is None else edge_order)
@@ -377,11 +501,15 @@ def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order
     for i in edge_order:
         e = topo.edges[i]
         mapping = None
-        if e.mapped:
+        extra = {}
+        if e.mapped and i in anchors:
+            mapping = _geometry_mapping(topo, geometry, i)
+            extra = {"geometry": (anchors[i], geometry.field(i))}
+        elif e.mapped:
             n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
             mapping = matrix_mapping(np.zeros((n_dst, n_src), _dt(dtype)))
         gm.add_edge(e.src, e.dst, e.field, f"u{e.port}", transform=e.transform,
-                    additive=e.additive, mapping=mapping)
+                    additive=e.additive, mapping=mapping, **extra)
     per_group = knobs if isinstance(knobs, (list, tuple)) else [knobs] * len(topo.groups)
     for members, group in zip(topo.groups, per_group):
         with warnings.catch_warnings():
@@ -403,7 +531,7 @@ def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order
             if "multi-rate" in str(w.message):
                 continue
             recorded.append(str(w.message))
-    return Built(gm, topo, str(dtype), keys, recorded, node_order, edge_order)
+    return Built(gm, topo, str(dtype), keys, recorded, node_order, edge_order, geometry)
 
 
 # ---------------------------------------------------------------------------
@@ -418,10 +546,13 @@ def _spectral_radius(M: np.ndarray) -> float:
 
 def draw_values(topo: Topology, rng: np.random.Generator, rho: float, *,
                 nonnormal: bool = False, bias_scale: float = 1.0, dtype="float32",
-                group_cfgs=None) -> dict:
+                group_cfgs=None, geometry: Optional[Geometry] = None) -> dict:
     """Gains, biases, mapping matrices and initial states; each group at rate *rho*.
 
     ``{"nodes": {name: {"G": [...], "b": ..., "x0": ...}}, "H": {edge: ...}}``.
+    With *geometry*, also ``"geometry": {(node, field): {"start": ...,
+    "move": ...}}`` for both ends of every edge it names, and ``H`` of such
+    an edge is the matrix its anchor's start gives (:func:`_draw_geometry`).
     Every group's coupling operator (its fixed-point map, sub-cycling
     included: see :class:`LinearModel`) is rescaled so its spectral radius
     -- the Jacobi rate -- is *rho*: the drawn gains of its four-argument
@@ -450,6 +581,8 @@ def draw_values(topo: Topology, rng: np.random.Generator, rho: float, *,
         if e.mapped:
             n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
             values["H"][i] = rng.normal(size=(n_dst, n_src)) / np.sqrt(n_src)
+    if geometry is not None:
+        _draw_geometry(topo, rng, values, geometry, dtype)
     # Ports that read anything other than their own group's members are
     # scaled down; ports wholly inside a group are what the rescale moves.
     for nd in topo.nodes:
@@ -469,6 +602,52 @@ def draw_values(topo: Topology, rng: np.random.Generator, rho: float, *,
         v["x0"] = np.asarray(v["x0"], _dt(dtype))
     values["H"] = {i: np.asarray(H, _dt(dtype)) for i, H in values["H"].items()}
     return values
+
+
+#: A moving matrix's step, relative to the matrix: small enough that a
+#: group drawn at rate ``rho`` is still a contraction a few steps later,
+#: with a member that takes four sub-steps (at 0.05 a group drawn at 0.5
+#: reached 1.34 on its third step), and four orders of magnitude above a
+#: float32 step's rounding.
+MOVE_SCALE = 0.01
+
+
+def _draw_geometry(topo, rng, values, geometry: Geometry, dtype) -> None:
+    """The geometry fields of both ends of every geometry edge, and the edge's ``H``.
+
+    ``"moving"``: a start matrix and a step ``dM`` per end; ``H`` is the
+    anchor's start (what the group's rate is drawn around).  ``"frozen"``:
+    points on the one-dimensional grid at index coordinates that are
+    multiples of 1/8, some outside the hull, so the multilinear weights
+    are exact in every float dtype, 16-bit ones included; ``H`` is the
+    matrix of that gather (or its transpose, for a scatter) from the
+    independent reference stencil.
+    """
+    from tests.core import multilinear_reference as mref  # noqa: PLC0415
+
+    gd = np.dtype(str(geometry_dtype(dtype)))
+    out = values.setdefault("geometry", {})
+    for i in sorted(geometry.anchor):
+        e = topo.edges[i]
+        n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
+        field, shape = geometry.field(i), geometry.shape(topo, i)
+        for name in dict.fromkeys((e.src, e.dst)):
+            if geometry.kind == "moving":
+                start = rng.normal(size=shape) / np.sqrt(n_src)
+                move = rng.normal(size=shape) / np.sqrt(n_src) * MOVE_SCALE
+                out[(name, field)] = {"start": np.asarray(start, gd),
+                                      "move": np.asarray(move, gd)}
+            else:
+                n_grid = n_src if geometry.mode(i) == "consistent" else n_dst
+                index = rng.integers(-3, 8 * (n_grid - 1) + 4, size=shape) / 8.0
+                out[(name, field)] = {"start": np.asarray(index, gd), "move": None}
+        start = np.asarray(out[(geometry.holder(topo, i), field)]["start"], np.float64)
+        if geometry.kind == "moving":
+            values["H"][i] = start
+        elif geometry.mode(i) == "consistent":
+            values["H"][i] = mref.dense_matrix(mref.Grid((0.0,), (1.0,), (n_src,)), start)
+        else:
+            values["H"][i] = mref.dense_matrix(mref.Grid((0.0,), (1.0,), (n_dst,)), start).T
 
 
 def _rescale_group(topo, values, gi, rho, constants, dtype, group_cfgs):
@@ -520,9 +699,14 @@ def params_for(built: Built, values: dict, rename: Optional[dict] = None) -> dic
         for j, G in enumerate(v["G"]):
             nodes[live][f"G{j}"] = jnp.asarray(G, nodes[live][f"G{j}"].dtype)
         nodes[live]["b"] = jnp.asarray(v["b"], nodes[live]["b"].dtype)
+    for (name, field), g in values.get("geometry", {}).items():
+        live = rename.get(name, name)
+        if g["move"] is not None and f"d{field}" in nodes.get(live, {}):
+            nodes[live][f"d{field}"] = jnp.asarray(g["move"], nodes[live][f"d{field}"].dtype)
     mappings = {k: dict(p) for k, p in base.get("mappings", {}).items()}
     for i, key in built.mapping_keys.items():
-        mappings[key]["H"] = jnp.asarray(values["H"][i], mappings[key]["H"].dtype)
+        if "H" in mappings[key]:        # a geometry-dependent mapping has no weights
+            mappings[key]["H"] = jnp.asarray(values["H"][i], mappings[key]["H"].dtype)
     return {**base, "nodes": nodes, "mappings": mappings}
 
 
@@ -532,10 +716,15 @@ def set_initial(built: Built, values: dict, rename: Optional[dict] = None) -> No
     rename = rename or {}
     cg.recover(gm)
     gm.reset_state()
+    starts: dict = {}
+    for (name, field), g in values.get("geometry", {}).items():
+        starts.setdefault(name, {})[field] = g["start"]
     for name, v in values["nodes"].items():
         live = rename.get(name, name)
         s = dict(gm.get_node_state(live))
         s["x"] = jnp.asarray(v["x0"], s["x"].dtype)
+        for field, start in starts.get(name, {}).items():
+            s[field] = jnp.asarray(start, s[field].dtype)
         gm.set_node_state(live, s)
 
 
@@ -741,10 +930,22 @@ class LinearModel:
         ``tolerance``.  Defaults are ``CouplingGroup``'s.
     exact : bool
         Skip the dtype rounding of the constants (used while drawing).
+    geometry : Geometry, optional
+        The geometry-dependent mapped edges.  For ``"moving"`` ones the
+        model must be bound to each step (:meth:`bind`) before it is asked
+        about it.
     """
 
     def __init__(self, topo: Topology, values: dict, *, dtype="float32", node_order=None,
-                 group_cfgs=None, exact: bool = False):
+                 group_cfgs=None, exact: bool = False, geometry: Optional[Geometry] = None):
+        self.geometry = geometry
+        #: Edge -> the matrix it applies at each sub-step of its target, in
+        #: the graph's dtype (``"moving"`` edges, once bound).
+        self._bound: dict = {}
+        #: Edge -> ``[fac G H_k]`` per sub-step of its target.
+        self._substep: dict = {}
+        #: Nodes that do not fire on the bound step (a multi-rate graph).
+        self.idle: frozenset = frozenset()
         self.topo = topo
         self.values = values
         self.dtype = _dt(dtype)
@@ -781,6 +982,9 @@ class LinearModel:
         ``s_d = sum_k alpha**k``.
         """
         rnd = self._rnd
+        if nd.name in self.idle:
+            # A node that does not fire keeps its state: nothing is read.
+            return LD(1), np.zeros(nd.n, LD), []
         v = self.values["nodes"][nd.name]
         alpha = float(rnd(nd.alpha))
         beta = float(rnd(nd.beta))
@@ -796,10 +1000,106 @@ class LinearModel:
                 continue
             G = np.asarray(rnd(v["G"][e.port]), LD)
             fac = LD(TRANSFORM_FACTORS[e.transform] * (2.0 if e.field == "q" else 1.0))
+            if i in self._bound:
+                # One matrix per sub-step: ``x_d = alpha**d x_0 + sum_k
+                # alpha**(d-1-k) (G fac H_k v + ...)``.
+                Ks = [fac * (G @ np.asarray(np.asarray(H, np.float64), LD))
+                      for H in self._bound[i]]
+                assert len(Ks) == d, (i, len(Ks), d)
+                self._substep[i] = Ks
+                inputs.append((i, sum((a ** (d - 1 - k) * Ks[k] for k in range(d)),
+                                      np.zeros_like(Ks[0]))))
+                continue
             H = (np.asarray(rnd(self.values["H"][i]), LD) if e.mapped
                  else np.eye(nd.n, dtype=LD))
             inputs.append((i, s_d * fac * (G @ H)))
         return P, c, inputs
+
+    # -- moving geometry ------------------------------------------------------
+
+    def _updates(self, name) -> int:
+        """How many times *name*'s ``update`` runs in the bound step."""
+        return 0 if name in self.idle else self.divider.get(name, 1)
+
+    def _chain(self, name, field, pre: dict) -> list:
+        """A moving field before each update of the bound step and after the last.
+
+        ``[M, M + dM, (M + dM) + dM, ...]`` by the float additions the relay
+        performs, in its own dtype, so the entries are the graph's bit for bit.
+        """
+        M = np.asarray(pre[name][field])
+        dM = np.asarray(self.values["geometry"][(name, field)]["move"], M.dtype)
+        chain = [M]
+        for _ in range(self._updates(name)):
+            chain.append(np.asarray(chain[-1] + dM, M.dtype))
+        return chain
+
+    def bind(self, pre: dict, firing=None) -> dict:
+        """Fix the step that starts at *pre*; return every moving field's value after it.
+
+        *firing* is the set of nodes whose update the step applies (every
+        node when ``None``; fewer on a multi-rate graph).  For each moving
+        edge the matrix the documented time level names:
+
+        * source anchor: the source's matrix after the step on a forward or
+          group-internal edge (at the fixed point the iterate's matrix is
+          the updated one from the first pass on), its pre-step matrix on a
+          back edge;
+        * target anchor: the target's pre-step matrix, and at sub-step
+          ``k`` of a sub-cycled target the matrix after ``k`` of its updates.
+
+        Returns ``{(node, field): array}``, the graph-dtype value every
+        moving field must hold after the step, bit for bit.
+        """
+        self.idle = frozenset() if firing is None else frozenset(
+            n for n in self.topo.names if n not in firing)
+        self._bound, self._substep, expected = {}, {}, {}
+        g = self.geometry
+        if g is not None and g.kind == "moving":
+            chains = {}
+            for i in sorted(g.anchor):
+                e = self.topo.edges[i]
+                for name in dict.fromkeys((e.src, e.dst)):
+                    chains[(name, g.field(i))] = self._chain(name, g.field(i), pre)
+                    expected[(name, g.field(i))] = chains[(name, g.field(i))][-1]
+            for i in sorted(g.anchor):
+                e = self.topo.edges[i]
+                d = self.divider.get(e.dst, 1)
+                if g.anchor[i] == "source":
+                    chain = chains[(e.src, g.field(i))]
+                    self._bound[i] = [chain[0] if i in self.back else chain[-1]] * d
+                else:
+                    chain = chains[(e.dst, g.field(i))]
+                    self._bound[i] = [chain[min(k, len(chain) - 1)] for k in range(d)]
+        self.terms = {nd.name: self._node_terms(nd) for nd in self.topo.nodes}
+        return expected
+
+    def _geometry_norm_entries(self, gi: int, norm: str, state: dict) -> int:
+        """Entries a group's RMS norm counts beyond the members' ``x``.
+
+        A geometry field is state: the mixed norm reads every floating
+        field of every member, and the interface norm reads the geometry a
+        group-internal edge takes from its source as it reads the edge's
+        value.  Such a field does not depend on the iterate here, so it
+        adds nothing to the sum of squares -- only to the count the mean is
+        taken over (a field that is zero everywhere leaves the norm).
+        """
+        g = self.geometry
+        if g is None or norm == "l2":
+            return 0
+        members = set(self.topo.groups[gi])
+        fields = []
+        for i in sorted(g.anchor):
+            e = self.topo.edges[i]
+            if norm == "mixed":
+                fields += [(name, g.field(i)) for name in dict.fromkeys((e.src, e.dst))
+                           if name in members]
+            elif e.src in members and e.dst in members and g.anchor[i] == "source":
+                fields.append((e.src, g.field(i)))
+        if norm == "mixed":
+            fields = list(dict.fromkeys(fields))
+        return sum(int(np.asarray(state[n][f]).size) for n, f in fields
+                   if np.any(np.asarray(state[n][f]) != 0))
 
     def _vec(self, state: dict) -> np.ndarray:
         x = np.zeros(self.dim, LD)
@@ -861,7 +1161,10 @@ class LinearModel:
                 continue
             fac = abs(TRANSFORM_FACTORS[e.transform]) * (2.0 if e.field == "q" else 1.0)
             v = np.abs(np.asarray(read[(i,)], np.float64))
-            H = np.abs(self._rnd(self.values["H"][i])) if e.mapped else np.eye(nd.n)
+            if i in self._bound:
+                H = np.max([np.abs(np.asarray(Hk, np.float64)) for Hk in self._bound[i]], axis=0)
+            else:
+                H = np.abs(self._rnd(self.values["H"][i])) if e.mapped else np.eye(nd.n)
             out[e.port] = out[e.port] + fac * (H @ v)
         return out
 
@@ -893,6 +1196,8 @@ class LinearModel:
         """
         rnd = self._rnd
         nd = self.topo.node(name)
+        if name in self.idle:
+            return np.zeros(nd.n)       # kept, not computed: exact
         v = self.values["nodes"][name]
         alpha = abs(float(rnd(nd.alpha)))
         const = np.abs(rnd(v["b"])) + abs(float(rnd(nd.beta)) * float(rnd(nd.timestep)))
@@ -970,9 +1275,18 @@ class LinearModel:
                     continue
                 rows = slice(off[m], off[m] + nd.n)
                 cols = slice(off[e.src], off[e.src] + self.topo.node(e.src).n)
+                Ks = self._substep.get(i)
                 if not jacobi and rank[e.src] < rank[m]:
-                    L[rows, cols] += w_in * K
-                    U[rows, cols] += (LD(1) - w_in) * K
+                    if Ks is not None and interp in ("linear", "quadratic") and d > 1:
+                        # One matrix per sub-step: the read at sub-step ``k``
+                        # is ``H_k (incoming + w_k (in-pass - incoming))``.
+                        for kk in range(d):
+                            wk = LD(kk + 1) / LD(d)
+                            L[rows, cols] += alpha ** (d - 1 - kk) * wk * Ks[kk]
+                            U[rows, cols] += alpha ** (d - 1 - kk) * (LD(1) - wk) * Ks[kk]
+                    else:
+                        L[rows, cols] += w_in * K
+                        U[rows, cols] += (LD(1) - w_in) * K
                 else:
                     U[rows, cols] += K
         return L, U
@@ -1021,6 +1335,12 @@ class LinearModel:
             S[r, off[node] + idx] = 1.0
             ref = float(np.max(np.abs(np.asarray(state[node]["x"], np.float64))))
             w[r] = 1.0 / (rtol_eff * ref) if ref > 0 else 0.0
+        extra = self._geometry_norm_entries(gi, norm, state)
+        if extra:
+            # Entries the norm counts and that carry no residual: rows that
+            # select nothing.
+            S = np.vstack([S, np.zeros((extra, k))])
+            w = np.concatenate([w, np.ones(extra)])
         return S, w, rtol_eff, norm != "l2"
 
     def group_report_consistency(self, gi: int, pre: dict, state: dict, residual: float):
@@ -1229,6 +1549,102 @@ class LinearModel:
                     f"beyond {lim[nd.name]}")
             out["monolithic"] = True
         return out
+
+
+def single_pass(model: LinearModel, gi: int, pre: dict, state: Optional[dict] = None) -> dict:
+    """One coupling pass of group *gi* from the pre-step state, with explicit loops.
+
+    What ``max_iterations=1`` returns: every member, in sweep order,
+    integrates from its pre-step state through its sub-steps, reading
+
+    * a member of the group from the incoming iterate (here the pre-step
+      state) -- or, under Gauss-Seidel, a member swept before it from this
+      pass, and then at sub-step ``k`` of ``d`` under linear interpolation
+      ``incoming + w_k (in-pass - incoming)``, ``w_k = (k + 1) / d``;
+    * a node outside the group from *state* (a forward edge) or from *pre*
+      (a back edge).
+
+    A moving geometry is read by the same rule as the value it travels
+    with: a source-anchored matrix from the dict the value came from, and
+    under linear interpolation the *interpolated matrix applied to the
+    interpolated value* (the interpolant of ``M @ v`` is another number);
+    a target-anchored matrix from the member's own sub-step state, which
+    has advanced ``k`` times at sub-step ``k``.
+
+    Returns ``{member: {"x": LD vector, "magnitude": float64 vector,
+    <geometry field>: graph-dtype array}}``; ``magnitude`` bounds the
+    absolute terms that were summed, for the caller's rounding allowance.
+    """
+    topo, g, rnd = model.topo, model.geometry, model._rnd  # noqa: SLF001
+    moving = g is not None and g.kind == "moving"
+    cfg = model.cfgs[gi]
+    jacobi = cfg.get("iteration_mode", "gauss-seidel") == "jacobi"
+    interp = cfg.get("boundary_interpolation", "linear") if cfg.get("subcycling") else None
+    state = pre if state is None else state
+
+    def x_of(fields):
+        return np.asarray(np.asarray(fields["x"], np.float64), LD)
+
+    def matrix_of(fields, field):
+        return np.asarray(np.asarray(fields[field], np.float64), LD)
+
+    in_pass = {m: dict(pre[m]) for m in topo.groups[gi]}
+    out = {}
+    for m in gauss_seidel_order(topo, gi, model.order):
+        nd = topo.node(m)
+        v = model.values["nodes"][m]
+        d = model.divider.get(m, 1)
+        alpha = LD(float(rnd(nd.alpha)))
+        const = np.asarray(rnd(v["b"]), LD) + LD(float(rnd(nd.beta))) * LD(float(rnd(nd.timestep)))
+        x = x_of(pre[m])
+        mag = np.abs(np.asarray(x, np.float64))
+        own = {field: np.asarray(pre[m][field]) for field, _shape, _moves in nd.geom}
+        for k in range(d):
+            w = LD(k + 1) / LD(d)
+            blend = interp in ("linear", "quadratic") and d > 1
+            ports = [np.zeros(nd.n, LD) for _ in range(nd.ports)]
+            port_mag = [np.zeros(nd.n) for _ in range(nd.ports)]
+            for i, e in enumerate(topo.edges):
+                if e.dst != m:
+                    continue
+                fac = LD(TRANSFORM_FACTORS[e.transform] * (2.0 if e.field == "q" else 1.0))
+                internal = topo.group_of(e.src) == gi
+                if internal:
+                    before, now = pre[e.src], (pre[e.src] if jacobi else in_pass[e.src])
+                    value = x_of(before) + w * (x_of(now) - x_of(before)) if blend else x_of(now)
+                else:
+                    before = now = pre[e.src] if i in model.back else state[e.src]
+                    value = x_of(now)
+                if not e.mapped:
+                    H = np.eye(nd.n, dtype=LD)
+                elif moving and i in g.anchor:
+                    field = g.field(i)
+                    if g.anchor[i] == "target":
+                        H = np.asarray(np.asarray(own[field], np.float64), LD)
+                    elif internal and blend:
+                        H = matrix_of(before, field) + w * (
+                            matrix_of(now, field) - matrix_of(before, field))
+                    else:
+                        H = matrix_of(now, field)
+                else:
+                    H = np.asarray(rnd(model.values["H"][i]), LD)
+                ports[e.port] = ports[e.port] + fac * (H @ value)
+                port_mag[e.port] = port_mag[e.port] + abs(float(fac)) * (
+                    np.abs(np.asarray(H, np.float64)) @ np.abs(np.asarray(value, np.float64)))
+            drive = sum((np.asarray(rnd(v["G"][j]), LD) @ ports[j] for j in range(nd.ports)),
+                        np.zeros(nd.n, LD))
+            drive_mag = sum((np.abs(rnd(v["G"][j])) @ port_mag[j] for j in range(nd.ports)),
+                            np.zeros(nd.n))
+            x = alpha * x + const + drive
+            mag = abs(float(alpha)) * mag + np.abs(np.asarray(const, np.float64)) + drive_mag
+            for field, _shape, moves in nd.geom:
+                if moves:
+                    dM = np.asarray(model.values["geometry"][(m, field)]["move"],
+                                    own[field].dtype)
+                    own[field] = np.asarray(own[field] + dM, own[field].dtype)
+        in_pass[m] = {"x": x, **own}
+        out[m] = {"x": x, "magnitude": mag, **own}
+    return out
 
 
 def check_leaves(topo: Topology, state: dict, step: int, dividers: Optional[dict] = None,

@@ -17,15 +17,21 @@
   ``tests/registered_mapping_kinds.py`` describes a registered kind, so
   the harnesses written for a kind that maps one point set onto another
   run it unchanged.
+* :class:`Interface` and :func:`mapped_pair` are the graph those cases are
+  put on: two 1-D interfaces that publish their cell centres and cell
+  boundaries, joined by a mapped edge each way, every array referenced the
+  way a config can carry it.
 """
 
 from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling.mapping import (
@@ -33,6 +39,9 @@ from maddening.core.coupling.mapping import (
     nearest_neighbor_mapping,
     projection_1d_mapping,
 )
+from maddening.core.graph_manager import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.core.static_data import StaticArray
 from maddening.core.coupling.sparse_mapping import (
     StaticSparseMapping,
     sparse_matrix_mapping,
@@ -259,11 +268,13 @@ def stencil_rows(points: dict) -> tuple[np.ndarray, np.ndarray]:
     """A linear-interpolation stencil from the source cell centres to the
     target ones, as ``sparse_matrix`` rows: two entries per target, one
     where a target lies outside the source centres (so a slot is unused and
-    marked ``-1``), written unused slot *first* in every other such row."""
+    marked ``-1``), written unused slot *first* in every other such row.
+    The values are at the default float dtype (float64 under
+    ``jax_enable_x64``), which the weights keep."""
     xs = np.asarray(points["source_points"], dtype=np.float64).ravel()
     xt = np.asarray(points["target_points"], dtype=np.float64).ravel()
     indices = np.full((xt.size, 2), -1, dtype=np.int64)
-    values = np.zeros((xt.size, 2), dtype=np.float32)
+    values = np.zeros((xt.size, 2), dtype=np.dtype(jnp.result_type(float)))
     outside = 0
     for i, x in enumerate(xt):
         j = int(np.searchsorted(xs, x))
@@ -289,7 +300,7 @@ def _matrix() -> SparseCase:
 
     def dense(points):
         indices, values = stencil_rows(points)
-        H = np.zeros((indices.shape[0], int(np.size(points["source_points"]))), np.float32)
+        H = np.zeros((indices.shape[0], int(np.size(points["source_points"]))), values.dtype)
         used = indices >= 0
         rows = np.broadcast_to(np.arange(indices.shape[0])[:, None], indices.shape)
         np.add.at(H, (rows[used], indices[used]), values[used])
@@ -322,3 +333,102 @@ def interface_points(n_source: int, n_target: int, dtype="float64") -> dict:
     xt, bt = cells(n_target)
     return {"source_points": xs.astype(dtype), "target_points": xt.astype(dtype),
             "source_boundaries": bs.astype(dtype), "target_boundaries": bt.astype(dtype)}
+
+
+# ---------------------------------------------------------------------------
+# A graph to put them on
+# ---------------------------------------------------------------------------
+
+class Interface(SimulationNode):
+    """A 1-D interface of ``n`` cells on ``[0, 1]``: a vector that relaxes
+    towards its mapped input, in a chosen dtype, publishing its cell
+    centres (``points``) and cell boundaries (``boundaries``) as static
+    data for a mapping to reference."""
+
+    def __init__(self, name, timestep, n=4, dtype="float32", rate=0.5):
+        super().__init__(name, timestep, n=n, dtype=dtype, rate=rate)
+        boundaries = np.linspace(0.0, 1.0, n + 1)
+        self._boundaries = boundaries
+        self._points = 0.5 * (boundaries[:-1] + boundaries[1:])
+
+    @property
+    def static_data(self):
+        return {"points": StaticArray(self._points),
+                "boundaries": StaticArray(self._boundaries)}
+
+    def initial_state(self):
+        n, dtype = self.params["n"], self.params["dtype"]
+        return {"x": jnp.linspace(1.0, 2.0, n).astype(dtype)}
+
+    def boundary_input_spec(self):
+        return {"inp": BoundaryInputSpec(shape=(self.params["n"],),
+                                         dtype=jnp.dtype(self.params["dtype"]),
+                                         description="the other interface, mapped")}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        rate = (self.params if params is None else params)["rate"]
+        x = state["x"]
+        # A mapped input arrives at the weights' dtype; the interface keeps its own.
+        target = boundary_inputs.get("inp", jnp.zeros_like(x)).astype(x.dtype)
+        return {"x": (x + dt * rate * (target - x)).astype(x.dtype)}
+
+
+REGISTRY = {"Interface": Interface}
+
+A2B = "a.x->b.inp"
+B2A = "b.x->a.inp"
+
+
+def node_points(gm: GraphManager, source: str, target: str) -> dict:
+    """The four arrays a case is built from, read from two interfaces."""
+    def static(name, field):
+        return np.asarray(gm.get_node(name).static_data[field].value)
+    return {"source_points": static(source, "points"),
+            "target_points": static(target, "points"),
+            "source_boundaries": static(source, "boundaries"),
+            "target_boundaries": static(target, "boundaries")}
+
+
+def edge_mapping(case: SparseCase, gm: GraphManager, source: str, target: str, *,
+                 base_dir: Optional[Path] = None) -> StaticSparseMapping:
+    """*case* from interface *source* onto *target*, every array referenced
+    the way a config can carry it: a point set or a boundary array by node
+    field, and the two arrays of a ``sparse_matrix`` as members of one
+    ``.npz`` saved in *base_dir* (left unreferenced, so unserialisable,
+    without one)."""
+    points = node_points(gm, source, target)
+    if case.kind == "sparse_matrix":
+        if base_dir is None:
+            return case.build(points)
+        name = f"{source}_to_{target}.npz"
+        np.savez(Path(base_dir) / name, **case.assets(points))
+        return case.build(points, {array: {"asset": name, "key": array}
+                                   for array in case.arrays})
+    side = {"source": source, "target": target}
+    return case.build(points, {
+        array: {"node": side[array.split("_")[0]], "field": array.split("_")[1]}
+        for array in case.arrays})
+
+
+def mapped_pair(case_ab: SparseCase, case_ba: Optional[SparseCase] = None, *,
+                n_a: int = 4, n_b: int = 6, dtype_a: str = "float32",
+                dtype_b: str = "float32", dt_a: float = 0.125, dt_b: float = 0.125,
+                group: Optional[dict] = None, base_dir: Optional[Path] = None,
+                compile: bool = True) -> GraphManager:
+    """Interfaces ``a`` and ``b``, ``a`` mapped onto ``b`` by *case_ab* and
+    ``b`` back onto ``a`` by *case_ba* (*case_ab* again when omitted),
+    optionally in a coupling group.  Timesteps of 0.125 are exactly
+    representable in every float dtype."""
+    gm = GraphManager()
+    gm.add_node(Interface("a", dt_a, n=n_a, dtype=dtype_a))
+    gm.add_node(Interface("b", dt_b, n=n_b, dtype=dtype_b, rate=0.25))
+    gm.add_edge("a", "b", "x", "inp", mapping=edge_mapping(case_ab, gm, "a", "b",
+                                                           base_dir=base_dir))
+    gm.add_edge("b", "a", "x", "inp", mapping=edge_mapping(case_ba or case_ab, gm, "b", "a",
+                                                           base_dir=base_dir))
+    if group is not None:
+        gm.add_coupling_group(["a", "b"], **group)
+    if compile:
+        gm.compile()
+    return gm
+

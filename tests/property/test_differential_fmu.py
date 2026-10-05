@@ -998,6 +998,9 @@ class WrapperPath:
         self.bridge: Optional[FmuTcpBridge] = None
         self.inst = None
         self.states: list = []
+        #: The one ``fmi3FMUState`` variable a rollback master keeps
+        #: (:meth:`save_for_rollback`).
+        self.rollback = ctypes.c_void_p()
         self.time = 0.0
         self.restart()
 
@@ -1032,10 +1035,11 @@ class WrapperPath:
         return inst
 
     def _free_states(self) -> None:
-        for handle in self.states:
+        for handle in (*self.states, self.rollback):
             if handle is not None:
                 self.w.lib.fmi3FreeFMUState(self.inst, ctypes.byref(handle))
         self.states = []
+        self.rollback = ctypes.c_void_p()
 
     def close(self) -> None:
         if self.inst is not None:
@@ -1104,6 +1108,21 @@ class WrapperPath:
 
     def set_state(self, index: int) -> bool:
         return self.w.lib.fmi3SetFMUState(self.inst, self.states[index]) == self.OK
+
+    def save_for_rollback(self) -> None:
+        """``fmi3GetFMUState`` into the one variable a rollback master keeps,
+        before every step.  FMI 3.0 has a non-NULL ``*FMUState`` be a state
+        "no longer needed" that the FMU overwrites: the wrapper must hand
+        the same object back (it allocated a new one over it on every call,
+        which nothing could free)."""
+        held = self.rollback.value
+        assert self.w.lib.fmi3GetFMUState(self.inst, ctypes.byref(self.rollback)) == self.OK, \
+            self.w.logs[-2:]
+        assert self.rollback.value and (held is None or self.rollback.value == held), \
+            "fmi3GetFMUState returned another object than the one it was handed"
+
+    def roll_back(self) -> bool:
+        return self.w.lib.fmi3SetFMUState(self.inst, self.rollback) == self.OK
 
     def set_blob(self, blob: bytes) -> bool:
         handle = ctypes.c_void_p()
@@ -1484,3 +1503,234 @@ def test_four_fmu_paths_agree_on_sequences_with_node_params_writes(graph, data):
                            wrapper_or_none())
     finally:
         model.stop()
+
+
+# ===========================================================================
+# Clock patterns: how an importer keeps its time, with restores in between
+# ===========================================================================
+#
+# FMU-023: the time the FMU reports stays within a millionth plus a tenth of
+# a master step of the time it has simulated, whatever arithmetic the
+# importer keeps its clock in -- a point computed as ``start + k * h``, a
+# running sum, step sizes that are all a little long, points that are all a
+# little late -- and an importer whose errors add up past that is refused,
+# with nothing advanced.  The bound is counted from the start time and the
+# master steps taken since, and that count is part of the FMU state: saving
+# and restoring a state (``fmi3GetFMUState`` / ``fmi3SetFMUState``) must not
+# move it.  It did -- a restore started the count again at the restored time
+# -- so a master that restored between steps was never refused (B1 round 9,
+# F4): its drift was forgiven at every restore.
+#
+# Each pattern below runs three ways -- no restore, a save and restore after
+# every step, and one rollback part-way (a state saved, two more steps or a
+# refusal, back to it, and on) -- over all four paths: the TCP bridge, the
+# sidecar and the graph (which have no clock, and must hold the state the
+# accepted steps produce, restored as the bridge restores), and the compiled
+# wrapper against a bridge of its own, saving into the one ``fmi3FMUState``
+# variable a rollback master keeps.  The oracle: a restore changes no reply.
+# Every step gets, to the bit, the reply it gets without one, including a
+# step taken again after going back; and the paths agree on every value and
+# the full state after every operation.
+
+from fractions import Fraction                                  # noqa: E402
+
+
+def _clock_graph(dt: float):
+    def build():
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("spring", dt, stiffness=30.0, damping=2.0,
+                                     rest_length=0.4, initial_position=0.5))
+        gm.add_external_input("spring", "anchor_position")
+        gm.compile()
+        return gm
+    return build
+
+
+#: ``name: (master step, start time, clock, steps tried)``, the clock as
+#: ``clock(k, t_fmu, t_own) -> (t, h)``: the step index, the time the FMU
+#: reports and the importer's own running clock in; the communication point
+#: and the step size out.
+CLOCKS = {
+    # FMPy's arithmetic: one rounding per point.  Never refused.
+    "start + k * h": (7e-10, 20000.0, lambda k, t_fmu, t_own: (20000.0 + k * 7e-10, 7e-10), 40),
+    # An honest running sum, where an ulp of the time is 0.005 of the step
+    # and every sum rounds the same way: refused after 47 steps.
+    "running sum": (7e-10, 20000.0, lambda k, t_fmu, t_own: (t_own, 7e-10), 120),
+    # Every step size 0.45 millionths of a step long, on a running sum.
+    "long steps": (1e-2, 0.0, lambda k, t_fmu, t_own: (t_own, 1e-2 * (1 + 0.45e-6)), 12),
+    # Every point 0.05 of a step past the time the FMU reports, which the
+    # communication-point tolerance alone adopts.
+    "late points": (7e-10, 20000.0, lambda k, t_fmu, t_own: (t_fmu + 0.05 * 7e-10, 7e-10), 12),
+}
+
+#: The claimed bound on |reported - simulated|, in master steps: a millionth
+#: plus a tenth, and the float64 clock's own rounding (:func:`drift_bound`).
+DRIFT_BOUND = Fraction(1, 10) + Fraction(1, 10 ** 6)
+CLOCK_ROUNDING_ULPS = 3
+
+
+def drift_bound(dt: float, start: float, steps: int, reported: float) -> Fraction:
+    """The bound FMU-023 states on |reported - simulated|, in master steps,
+    in exact arithmetic: a millionth plus a tenth of a step, plus three ulps
+    of the largest time involved (the reported time, the start time, the
+    time elapsed), which is what the clock's own float64 sums can round by
+    -- the reported time is one sum, the simulated time it was checked
+    against another.  Where the clock resolves a step (16 ulps within a
+    tenth of one) that is under 0.02 of a step."""
+    simulated = Fraction(start) + steps * Fraction(dt)
+    biggest = max(abs(reported), abs(float(simulated)), abs(start), steps * dt)
+    return DRIFT_BOUND + CLOCK_ROUNDING_ULPS * Fraction(float(np.spacing(biggest))) / Fraction(dt)
+
+_CLOCK_MODELS: dict[float, Model] = {}
+
+
+def _clock_model(dt: float) -> Model:
+    if dt not in _CLOCK_MODELS:
+        _CLOCK_MODELS[dt] = Model.build(_clock_graph(dt), f"clock-{dt:g}")
+    return _CLOCK_MODELS[dt]
+
+
+class ClockRun:
+    """One importer over the four paths."""
+
+    def __init__(self, name: str, wrapper) -> None:
+        self.dt, self.start, self.clock, self.tried = CLOCKS[name]
+        self.paths = FourPaths(_clock_model(self.dt), wrapper)
+        self.k, self.done, self.t_own = 0, 0, self.start
+        #: Every reply to step ``k``, in the order they came (a step taken
+        #: again after a rollback is answered again).
+        self.replies: dict[int, list] = {}
+
+    def begin(self) -> None:
+        self.paths.assert_agree("at start")
+        op_initialize(self.paths, self.start)
+        _mirror(self.paths, ("initialize", self.start), True)
+        self.paths.assert_agree("after initialize")
+
+    def step(self) -> bool:
+        paths = self.paths
+        t, h = self.clock(self.k, paths.side_time, self.t_own)
+        reply = paths._wire({"op": "step", "t": t, "dt": h})          # noqa: SLF001
+        note(f"clocked step {self.k}: t={t!r} h={h!r} -> {reply}")
+        self.replies.setdefault(self.k, []).append(reply)
+        if paths.cw is not None:
+            # the same doubles through fmi3DoStep: the same verdict
+            assert paths.cw.step(t, h) is reply["ok"], (self.k, reply, paths.cw.w.logs[-2:])
+        if reply["ok"]:
+            paths.side.step(paths.side_inputs)
+            paths.m.direct.step(external_inputs=paths.gm_inputs)
+            paths.side_time = paths.gm_time = reply["t"]
+            paths.stepped = True
+            self.k, self.done, self.t_own = self.k + 1, self.done + 1, t + h
+            simulated = Fraction(self.start) + self.done * Fraction(self.dt)
+            drift = (Fraction(reply["t"]) - simulated) / Fraction(self.dt)
+            assert abs(drift) <= drift_bound(self.dt, self.start, self.done, reply["t"]), (
+                self.k, float(drift))
+        paths.assert_agree(f"after clocked step {self.k}")           # a refusal advanced nothing
+        return reply["ok"]
+
+    def save(self, *, rollback_variable: bool) -> tuple:
+        """Save the state on every path; the importer's own clock goes with
+        it.  With ``rollback_variable`` the wrapper saves into the one
+        variable it reuses, otherwise into a new one."""
+        paths = self.paths
+        op_get_state(paths)
+        if paths.cw is not None:
+            if rollback_variable:
+                paths.cw.save_for_rollback()
+            else:
+                paths.cw.get_state()
+        paths.assert_agree("after get_state")
+        return (len(paths.snapshots) - 1, self.k, self.done, self.t_own, rollback_variable)
+
+    def restore(self, saved: tuple) -> None:
+        paths = self.paths
+        index, self.k, self.done, self.t_own, rollback_variable = saved
+        op_set_state(paths, index)
+        if paths.cw is not None:
+            cw = paths.cw
+            assert cw.roll_back() if rollback_variable else cw.set_state(len(cw.states) - 1), \
+                cw.w.logs[-2:]
+            cw.time = paths.side_time
+        paths.assert_agree("after set_state")
+
+    def close(self) -> None:
+        self.paths.close()
+
+
+def run_clock(name: str, restore: str, wrapper) -> tuple[dict, int]:
+    """``name`` under ``restore`` (``"none"``, ``"every step"`` or
+    ``"rollback"``): the replies per step index and the steps accepted."""
+    run = ClockRun(name, wrapper)
+    saved, rolled_back = None, False
+    try:
+        run.begin()
+        while run.k < run.tried:
+            if not run.step():
+                if restore == "rollback" and saved is not None and not rolled_back:
+                    run.restore(saved)
+                    rolled_back = True
+                    continue
+                break
+            if restore == "every step":
+                run.restore(run.save(rollback_variable=True))
+            elif restore == "rollback":
+                if saved is None and run.k == max(1, MIDWAY[name]):
+                    saved = run.save(rollback_variable=False)
+                elif saved is not None and not rolled_back and run.k == saved[1] + 2:
+                    run.restore(saved)
+                    rolled_back = True
+        if restore == "rollback":
+            assert rolled_back, "the run never went back"
+        return run.replies, run.done
+    finally:
+        run.close()
+
+
+#: Steps each clock is accepted for with no restore (``None``: all tried),
+#: pinned so that a pattern that stopped being refused -- or started --
+#: is seen, and the step a rollback saves at.
+CLOCK_ACCEPTED = {"start + k * h": None, "running sum": 47, "long steps": 2, "late points": 1}
+MIDWAY = {"start + k * h": 20, "running sum": 24, "long steps": 1, "late points": 1}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _stop_clock_models():
+    yield
+    for model in _CLOCK_MODELS.values():
+        model.stop()
+
+
+@pytest.mark.parametrize("name", sorted(CLOCKS))
+def test_four_fmu_paths_hold_each_clock_pattern_to_the_drift_bound(name):
+    """With no restore: the pattern is accepted for the steps the bound
+    allows and refused at the next, naming the simulated time, on the
+    bridge and through the compiled wrapper alike, and the four paths agree
+    after every step and after the refusal."""
+    replies, done = run_clock(name, "none", wrapper_or_none())
+    accepted = CLOCK_ACCEPTED[name]
+    assert done == (CLOCKS[name][3] if accepted is None else accepted)
+    if accepted is not None:
+        refusal = replies[accepted][-1]
+        assert refusal["ok"] is False
+        assert "from the time the FMU has simulated" in refusal["error"], refusal
+
+
+@pytest.mark.parametrize("restore", ["every step", "rollback"])
+@pytest.mark.parametrize("name", sorted(CLOCKS))
+def test_a_restore_between_steps_changes_no_reply_on_any_fmu_path(name, restore):
+    """Each clock pattern with a save and restore after every step, and
+    with one rollback part-way, over the four paths: every step is answered
+    as it is without a restore, to the bit -- the reported time, and the
+    refusal at the same step in the same words -- and a step taken again
+    after going back is answered as it was the first time."""
+    wrapper = wrapper_or_none()
+    plain, plain_done = run_clock(name, "none", wrapper)
+    replies, done = run_clock(name, restore, wrapper)
+    assert done == plain_done, (done, plain_done)
+    assert sorted(replies) == sorted(plain)
+    for k, seen in replies.items():
+        for reply in seen:
+            assert reply == plain[k][0], (k, reply, plain[k][0])
+    if restore == "rollback":
+        assert any(len(seen) > 1 for seen in replies.values())

@@ -763,7 +763,7 @@ is isotropic there — take `A = [[1, 2], [2, 4]]` and `g = (1, 2)`, whose step
 is `∝ (2, 1)` for every `λ` against a null space spanned by `(2, −1)`.
 
 They differ in how badly.  `fit_lm`'s step vanishes with the gradient, so its
-drift *converges*: on the spring above it settles 0.85% (noiseless) or 0.43%
+drift *converges*: on the spring above it settles 1.78% (noiseless) or 0.66%
 (σ = 0.02) from the scale you supplied and stays there, bit for bit, from
 iteration 10 to 200.  `fit_multiple_shooting` is Adam, so it does not settle:
 2.0% to 4.8% across `lr` 0.01–0.2, a 3.0% spread that the schedule picks and

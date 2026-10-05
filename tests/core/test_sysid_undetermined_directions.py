@@ -430,7 +430,8 @@ def test_fit_lm_unguarded_moves_along_the_scale_direction_but_converges(noisy):
     raw = [fit_lm(gm, residual, n_iter=n, **kw) for n in budgets]
     drifts = [_scale(r.params) / START_SCALE - 1.0 for r in raw]
     # It moves: not the "cannot move" the finding claimed.  Measured on
-    # this fixture: -0.849% noiseless, +0.429% at sigma = 0.02 -- four
+    # this fixture: -1.78% noiseless, -0.66% at sigma = 0.02 (-0.85% and
+    # +0.46% before a ``log`` coordinate's step was read on its tangent) -- four
     # decades above the 1e-7 the guarded runs below leave behind.
     assert all(abs(d) > 1e-3 for d in drifts), dict(zip(budgets, drifts))
     # And it has stopped, so the budget does not decide the answer.  From

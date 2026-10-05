@@ -8643,8 +8643,10 @@ anomalies:
       `fit_lm` reads a step of such a coordinate along the transform's
       curve or along its tangent, whichever moves the value less, so a
       coordinate at a flat end is stepped back as the same parameter under
-      `transform=None` would be, in one step; and all three fitters warn,
-      naming the parameter, when a fit ends on the edge of that range.
+      `transform=None` would be, in one step; all three fitters warn,
+      naming the parameter, when a fit ends on the edge of that range; and
+      `fit` and `fit_multiple_shooting`, whose step is about `lr` whatever
+      the gradient, name a parameter they are started with on it.
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -8680,7 +8682,20 @@ anomalies:
       `fit` and `fit_multiple_shooting` step a coordinate by about `lr`
       whatever the gradient, so a start on the edge of a `logit` range
       takes them about `8 / lr` iterations (float32; `18 / lr` in float64)
-      to leave, and a shorter run ends short of the optimum.  The tangent
+      to leave -- more while the coordinate's gradient, the model's times a
+      slope of `sqrt(eps)` of the range, is below Adam's `eps` of the
+      largest: in float64, on the reproducer's spring with the truth 5% of
+      the range from the edge it started on, 320 annealed updates left the
+      damping 3e-4 above that bound at the default `eps=1e-8` and recovered
+      it at `eps=1e-12` -- and a shorter run ends short of the optimum; they say
+      so before they run.  An Adam
+      fit whose optimum is on a bound closes on the margin without
+      arriving (its step shrinks with the gradient it remembers) and ends
+      short of it, on no edge and unnamed.  With the stiffness of the
+      reproducer's spring started ten or thirty times too stiff the loss
+      has other basins, and Adam in a `log` coordinate reaches them where
+      Adam in the value's own coordinate does not: the two
+      parametrisations then differ with no edge involved.  The tangent
       reading changes `fit_lm`'s path for a `log` / `logit` coordinate
       whose step is not small: answers agree to the fit's tolerance, paths
       and iteration counts do not, and a degenerate fit left unguarded

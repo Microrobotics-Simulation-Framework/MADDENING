@@ -1583,7 +1583,7 @@ claims:
     never passed through its transform, whatever that is, in the result or
     in any evaluation of the objective."
   sources:
-    - src/maddening/sysid.py:4720 (FitResult)
+    - src/maddening/sysid.py:4819 (FitResult)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     a log leaf, which exp(log(p)) would move by an ulp; a leaf left out by
@@ -1706,8 +1706,8 @@ claims:
     float32, 1.5e-8 in float64), and short of where exp floors or
     overflows".
   sources:
-    - src/maddening/sysid.py:4871 (fit)
-    - src/maddening/core/params.py:400 (ParamSpec._usable_margin, _optimiser_interval)
+    - src/maddening/sysid.py:4967 (fit)
+    - src/maddening/core/params.py:377 (ParamSpec._usable_margin, _optimiser_interval)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     a logit leaf pushed hard either way; logit bounds of any sign and size,
@@ -1797,8 +1797,8 @@ claims:
     the parameter under transform=None and the same bounds recovers its
     optimum, this one does too".
   sources:
-    - src/maddening/sysid.py:5415 (fit_lm)
-    - src/maddening/sysid.py:1602 (_CoordinateBounds)
+    - src/maddening/sysid.py:5513 (fit_lm)
+    - src/maddening/sysid.py:1627 (_CoordinateBounds)
     - src/maddening/core/params.py:486 (ParamSpec._tangent_box, _tangent_shift)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
@@ -1861,8 +1861,8 @@ claims:
     fit_multiple_shooting also name, before they run, a parameter started
     on (or beyond) that margin.
   sources:
-    - src/maddening/sysid.py:4890 (fit)
-    - src/maddening/sysid.py:1883 (_warn_starts_on_an_edge, _warn_on_an_edge)
+    - src/maddening/sysid.py:4967 (fit)
+    - src/maddening/sysid.py:1914 (_warn_starts_on_an_edge, _warn_on_an_edge)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     a truth a few float spacings inside a logit bound (fit_lm, float32 and
@@ -2472,9 +2472,9 @@ claims:
     value is the fitter's own program's: a loss you compute yourself from
     params agrees with it to rounding, not to the bit."
   sources:
-    - src/maddening/sysid.py:6253 (fit_multiple_shooting)
-    - src/maddening/sysid.py:4690 (FitResult, best_loss)
-    - src/maddening/sysid.py:1404 (_PhysicalMap)
+    - src/maddening/sysid.py:6206 (fit_multiple_shooting)
+    - src/maddening/sysid.py:4795 (FitResult, best_loss)
+    - src/maddening/sysid.py:1397 (_PhysicalMap)
   conditions: >-
     a run the guard does not hold (the pair exact) and one it holds (within
     the tolerance); every transform, fitted, left out by mask= and frozen,
@@ -3192,8 +3192,8 @@ claims:
     differentiable.
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-    - src/maddening/core/params.py:1071 (constrain)
-    - src/maddening/core/params.py:373 (ParamSpec._resolution)
+    - src/maddening/core/params.py:1042 (constrain)
+    - src/maddening/core/params.py:350 (ParamSpec._resolution)
     - docs/release_notes/v0.4.0.md (ParamSpec and the optimiser surface)
   conditions: >-
     any coordinates, including extreme ones, for constrain landing inside
@@ -3286,8 +3286,8 @@ claims:
     -- the fitters say so in a PrecisionLimitWarning naming the leaf, at
     their start (and again for a leaf that only ends up so)".
   sources:
-    - src/maddening/sysid.py:4742 (FitResult)
-    - src/maddening/sysid.py:1820 (_warn_unresolved_values)
+    - src/maddening/sysid.py:4819 (FitResult)
+    - src/maddening/sysid.py:1849 (_warn_unresolved_values)
     - src/maddening/core/params.py:350 (ParamSpec._resolution)
     - docs/user_guide/parameters.md (ParamSpec)
   conditions: >-
@@ -3813,7 +3813,7 @@ claims:
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - src/maddening/core/node.py:148 (_ParamsDict, _succeed)
-    - src/maddening/core/graph_manager.py:5653 (_sync_node_param_writes)
+    - src/maddening/core/graph_manager.py:5654 (_sync_node_param_writes)
   conditions: >-
     a calibrated constant beside the key assigned; a key handed back with
     the value the node held; a keyed write pending on the mapping replaced

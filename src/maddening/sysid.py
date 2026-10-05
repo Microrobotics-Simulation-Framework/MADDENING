@@ -5720,7 +5720,7 @@ def fit_lm(
         knowing.  LM's step vanishes with the gradient, so the drift
         converges and stops.  Measured on the spring's ``(k, c, m)``
         common-scale degeneracy, the geometric mean of the three lands
-        **−0.849%** (noiseless data) or **+0.429%** (σ = 0.02) from the
+        **−1.78%** (noiseless data) or **−0.66%** (σ = 0.02) from the
         value it was given, and then does not move again: the answer is
         identical to the last bit for ``n_iter`` 10 through 200.  On the
         same data :func:`fit` lands −7.1% at ``lr=0.05`` and −5.4% at

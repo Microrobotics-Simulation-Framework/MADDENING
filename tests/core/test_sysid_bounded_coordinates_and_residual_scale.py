@@ -248,6 +248,224 @@ def test_a_log_and_a_logit_coordinate_are_kept_where_constrain_is_not_clamped():
 
 
 # ---------------------------------------------------------------------------
+# A log / logit coordinate is stepped on its tangent, inside the range its
+# transform resolves (MADD-ANO-104)
+# ---------------------------------------------------------------------------
+
+
+def _logit_value(u, lo, hi):
+    """``lo + (hi - lo) * sigmoid(u)`` in float64 on the host."""
+    return lo + (hi - lo) / (1.0 + np.exp(-np.asarray(u, dtype=np.float64)))
+
+
+@pytest.mark.parametrize("x64", [False, True], ids=["float32", "float64"])
+def test_the_usable_interval_ends_where_the_transform_still_resolves_its_bound(x64):
+    """The range a fitter may step a ``log`` / ``logit`` coordinate to ends
+    ``sqrt(eps)`` of the bounds' own size inside each bound -- where the
+    distance to the bound keeps half the working precision's digits and
+    ``dp/du`` is ``sqrt(eps)`` of the range -- and not, as it did, where
+    ``dp/du`` is a few ``eps`` (the clamp), from which no
+    Levenberg-Marquardt step came back."""
+    dtype = np.float64 if x64 else np.float32
+    eps = float(np.finfo(dtype).eps)
+    root = float(np.sqrt(eps))
+    with _precision(x64):
+        for lo, hi in ((0.5, 2.0), (0.0, 10.0), (-100.0, 1.0), (-1e4, 1e4)):
+            spec = ParamSpec(bounds=(lo, hi), transform="logit")
+            size = max(abs(lo), abs(hi), hi - lo)
+            u_lo, u_hi = spec._optimiser_interval(dtype)  # noqa: SLF001
+            assert _logit_value(u_lo, lo, hi) - lo == pytest.approx(root * size, rel=1e-5)
+            assert hi - _logit_value(u_hi, lo, hi) == pytest.approx(root * size, rel=1e-5)
+            # The slope at either end is that distance (the sigmoid's tail),
+            # thousands of float spacings, where the clamp's is a handful.
+            for u in (u_lo, u_hi):
+                slope = float(jax.grad(spec.to_constrained)(jnp.asarray(u, dtype)))
+                assert slope == pytest.approx(root * size, rel=2.0 * root * size / (hi - lo) + 1e-3)
+                assert slope > 1000.0 * eps * size
+            assert spec._usable_margin(np.finfo(dtype)) == root * size  # noqa: SLF001
+        offset = ParamSpec(bounds=(8.0, None), transform="log")
+        u_lo, u_hi = offset._optimiser_interval(dtype)  # noqa: SLF001
+        assert np.exp(u_lo) == pytest.approx(root * 8.0, rel=1e-5)
+        assert np.isfinite(u_hi) and np.isfinite(float(offset.to_constrained(
+            jnp.asarray(u_hi, dtype))))
+        # A zero bound has no margin: ``exp(u)`` alone keeps the value's own
+        # resolution, down to the smallest normal number.
+        plain = ParamSpec(bounds=(0.0, None), transform="log")
+        assert plain._usable_margin(np.finfo(dtype)) == 0.0  # noqa: SLF001
+        assert np.exp(plain._optimiser_interval(dtype)[0]) < 1e3 * float(  # noqa: SLF001
+            np.finfo(dtype).tiny)
+        # Bounds a few float spacings apart keep their middle half.
+        narrow = ParamSpec(bounds=(1.0, 1.0 + 64.0 * eps), transform="logit")
+        u_lo, u_hi = narrow._optimiser_interval(dtype)  # noqa: SLF001
+        assert u_lo == pytest.approx(-np.log(3.0), rel=1e-6)
+        assert u_hi == pytest.approx(np.log(3.0), rel=1e-6)
+
+
+def _exact_sigmoid(u):
+    """The logistic function to 60 digits: the box and the shift cancel
+    catastrophically in float64 if written from their definitions, which is
+    why the code is not."""
+    from decimal import Decimal, getcontext
+
+    getcontext().prec = 60
+    return 1 / (1 + (-Decimal(u)).exp())
+
+
+def test_the_tangent_of_a_transform_is_its_own():
+    """``ParamSpec._tangent_shift`` and ``_tangent_box`` against what they
+    are defined to be, to 60 digits: with ``s = sigmoid(u)`` a ``logit``
+    value is ``lo + (hi - lo) s`` and its tangent step ``v`` moves ``s`` by
+    ``s (1 - s) v``, so the box ends at ``(s_edge - s) / (s (1 - s))`` and the
+    shift is ``logit(s + s (1 - s) v) - u``; a ``log`` value ``exp(u)`` moves
+    by ``exp(u) v``.  A tangent step that would cross a bound has no such
+    ``du`` (infinite).  The bounds themselves cancel: the transform's shape
+    is all there is."""
+    from decimal import Decimal
+
+    u_lo, u_hi = -17.0, 17.0
+    for bounds in ((0.5, 2.0), (-3.0, 7.0)):
+        spec = ParamSpec(bounds=bounds, transform="logit")
+        for u in (-14.0, -3.0, 0.0, 0.3, 2.5, 9.0, 15.0):
+            sig = _exact_sigmoid(u)
+            slope = sig * (1 - sig)
+            v_lo, v_hi = spec._tangent_box(u, u_lo, u_hi)  # noqa: SLF001
+            assert float(v_lo) == pytest.approx(
+                float((_exact_sigmoid(u_lo) - sig) / slope), rel=1e-12)
+            assert float(v_hi) == pytest.approx(
+                float((_exact_sigmoid(u_hi) - sig) / slope), rel=1e-12)
+            for v in (0.3 * float(v_lo), 0.9 * float(v_lo), 0.5 * float(v_hi),
+                      0.99 * float(v_hi), 1e-3, -1e-3):
+                moved = sig + slope * Decimal(v)
+                expected = float((moved / (1 - moved)).ln() - Decimal(u))
+                assert float(spec._tangent_shift(u, v)) == pytest.approx(  # noqa: SLF001
+                    expected, rel=1e-9)
+            # Past a bound: the tangent has no reading, the curve is shorter.
+            assert spec._tangent_shift(u, 1.01 / float(sig)) == np.inf  # noqa: SLF001
+            assert spec._tangent_shift(u, -1.01 / float(1 - sig)) == -np.inf  # noqa: SLF001
+        # On an end the box is exactly 0 wide on that side, and beyond it the
+        # box excludes 0: every step then moves at least to the end.
+        assert spec._tangent_box(u_hi, u_lo, u_hi)[1] == 0.0  # noqa: SLF001
+        assert spec._tangent_box(u_lo, u_lo, u_hi)[0] == 0.0  # noqa: SLF001
+        assert spec._tangent_box(u_hi + 5.0, u_lo, u_hi)[1] < 0.0  # noqa: SLF001
+        assert spec._tangent_box(u_lo - 5.0, u_lo, u_hi)[0] > 0.0  # noqa: SLF001
+    log = ParamSpec(bounds=(8.0, None), transform="log")
+    for u in (-9.0, 0.0, 4.0):
+        v_lo, v_hi = log._tangent_box(u, -12.0, 30.0)  # noqa: SLF001
+        assert 1.0 + v_lo == pytest.approx(np.exp(-12.0 - u), rel=1e-12)
+        assert 1.0 + v_hi == pytest.approx(np.exp(30.0 - u), rel=1e-12)
+        for v in (-0.9, -0.2, 1e-3, 5.0, 1e6):
+            assert float(log._tangent_shift(u, v)) == pytest.approx(  # noqa: SLF001
+                np.log1p(v), rel=1e-14)
+        assert log._tangent_shift(u, -1.0) == -np.inf  # noqa: SLF001
+        assert log._tangent_shift(u, -7.0) == -np.inf  # noqa: SLF001
+
+
+def _three_kinds():
+    """The spring with a clipped damping (its own spec), a ``log`` stiffness
+    (its own) and a ``logit`` rest length, and the bounds of those three
+    coordinates, in that order."""
+    gm = _spring()
+    gm.set_param_spec("s", "rest_length", ParamSpec(bounds=(0.5, 2.0), transform="logit"))
+    names = [jax.tree_util.keystr(path) for path, _ in
+             jax.tree_util.tree_flatten_with_path(gm.params)[0]]
+    idx = np.asarray([names.index(f"['nodes']['s']['{key}']")
+                      for key in ("damping", "rest_length", "stiffness")])
+    return gm, sysid._CoordinateBounds(gm, gm.params, idx, jnp.float32)  # noqa: SLF001
+
+
+def test_a_step_is_read_along_the_shorter_of_the_curve_and_the_tangent():
+    """How ``fit_lm`` reads a step solved on the linear model
+    (``_CoordinateBounds.tangent_frame`` / ``from_tangent``): an identity
+    coordinate as it is, and a ``log`` / ``logit`` one along the transform's
+    curve or along its tangent, whichever moves the value less -- so a step
+    off a flat end is the step the same parameter would take clipped, and a
+    step towards a bound never lands on it."""
+    _, bounds = _three_kinds()
+    lo, hi = np.asarray(bounds.lo, np.float64), np.asarray(bounds.hi, np.float64)
+    assert bounds.transformed.tolist() == [False, True, True]
+
+    def value(u):                                  # the rest length at ``u``
+        return float(_logit_value(u, 0.5, 2.0))
+
+    def read(theta, answer):
+        return np.asarray(bounds.from_tangent(jnp.asarray(theta, jnp.float32),
+                                              jnp.asarray(answer, jnp.float32)), np.float64)
+
+    theta = np.array([2.0, 0.0, np.log(30.0)])
+    origin, box_lo, box_hi = (np.asarray(x, np.float64) for x in bounds.tangent_frame(
+        jnp.asarray(theta, jnp.float32)))
+    # The identity coordinate keeps its own frame, bit for bit; the others
+    # are stepped from 0, inside the box their tangent may move in.
+    assert (origin[0], box_lo[0], box_hi[0]) == (2.0, 0.0, np.inf)
+    assert origin[1:].tolist() == [0.0, 0.0]
+    assert np.all(box_lo[1:] < 0.0) and np.all(box_hi[1:] > 0.0)
+    # From mid-range the tangent reaches a ``logit`` edge at +-2 (1 / s);
+    # a ``log`` value may fall by all of itself, to its floor.
+    assert box_hi[1] == pytest.approx(2.0, rel=1e-3) and box_lo[1] == pytest.approx(-2.0, rel=1e-3)
+    assert box_lo[2] == pytest.approx(-1.0, abs=1e-6)
+
+    # A small step: the two readings agree to first order.
+    small = read(theta, [1.9, 1e-3, -1e-3])
+    assert small[0] == np.float32(1.9)                       # the identity answer, as given
+    assert small[1] == pytest.approx(1e-3, rel=1e-2) and small[2] - theta[2] == pytest.approx(
+        -1e-3, rel=1e-2)
+
+    # Growing, the tangent is the shorter: a ``log`` value asked to grow by
+    # 3 (of itself) is multiplied by 4, not by e**3.
+    grown = read(theta, [2.0, 0.0, 3.0])
+    assert np.exp(grown[2]) == pytest.approx(30.0 * 4.0, rel=1e-5)
+    # Shrinking, the curve is: asked to lose 90% of itself it loses 1 - 1/e**0.9.
+    shrunk = read(theta, [2.0, 0.0, -0.9])
+    assert np.exp(shrunk[2]) == pytest.approx(30.0 * np.exp(-0.9), rel=1e-5)
+
+    # Towards a bound, the curve: the tangent step that reaches the edge
+    # (the whole box) is read as ``u + v``, well inside.
+    towards = read(theta, [2.0, box_hi[1], 0.0])
+    assert towards[1] == pytest.approx(box_hi[1], rel=1e-5) and towards[1] < hi[1] - 5.0
+    assert 2.0 - value(towards[1]) > 0.1 * (2.0 - value(0.0))
+
+    # Off a flat end, the tangent: on the upper edge, a step that the linear
+    # model says moves the value down by 0.3 does move it down by 0.3 --
+    # the step a clipped parameter takes -- where ``u + v`` (here 435 long,
+    # in a range 16 wide) would land on the opposite edge.
+    edge = np.array([2.0, hi[1], np.log(30.0)])
+    slope = 1.5 * (2.0 - value(hi[1])) / 1.5 * (value(hi[1]) - 0.5) / 1.5
+    v = -0.3 / slope
+    assert v < -400.0 and hi[1] - lo[1] < 17.0
+    back = read(edge, [2.0, v, 0.0])
+    assert value(hi[1]) - value(back[1]) == pytest.approx(0.3, rel=1e-3)
+    assert lo[1] < back[1] < hi[1]
+    # And a step of the whole box from there is the opposite edge itself,
+    # exactly: the linear model says "the other bound", as a clip would.
+    _, edge_lo, _ = (np.asarray(x, np.float64) for x in bounds.tangent_frame(
+        jnp.asarray(edge, jnp.float32)))
+    assert read(edge, [2.0, edge_lo[1], 0.0])[1] == lo[1]
+
+    # On an edge the box is 0 wide on that side: what holds an active edge
+    # out of the coupled step.
+    _, _, edge_hi = (np.asarray(x, np.float64) for x in bounds.tangent_frame(
+        jnp.asarray(edge, jnp.float32)))
+    assert edge_hi[1] == 0.0
+    assert bounds.on_an_edge(jnp.asarray(edge, jnp.float32)).tolist() == [False, True, False]
+    assert not bounds.on_an_edge(jnp.asarray(theta, jnp.float32)).any()
+    # An identity coordinate on its bound is not this warning's business.
+    assert not bounds.on_an_edge(jnp.asarray([0.0, 0.0, 3.0], jnp.float32)).any()
+
+
+def test_an_identity_fit_is_stepped_exactly_as_before():
+    """With no ``log`` / ``logit`` coordinate the tangent frame is the
+    coordinates and their bounds themselves, the same objects, and a
+    solver's answer is returned as it is."""
+    gm = _spring()
+    bounds = sysid._CoordinateBounds(gm, gm.params, np.asarray([0]), jnp.float32)  # noqa: SLF001
+    theta = jnp.asarray([0.7], jnp.float32)
+    origin, lo, hi = bounds.tangent_frame(theta)
+    assert origin is theta and lo is bounds.lo and hi is bounds.hi
+    answer = jnp.asarray([0.25], jnp.float32)
+    assert bounds.from_tangent(theta, answer) is answer
+
+
+# ---------------------------------------------------------------------------
 # fit_lm does not depend on the residual's units
 # ---------------------------------------------------------------------------
 

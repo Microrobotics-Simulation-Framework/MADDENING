@@ -1594,7 +1594,7 @@ def _model_hvp(grad_p, pmap: _PhysicalMap, theta, params: dict, extra: tuple, V)
             + (b * np.asarray(g, dtype=np.float64))[:, None] * V)
 
 
-def _along_the_shorter(spec, u, v, box, interval):
+def _along_the_shorter(spec, u, v, box, interval, snap: float = 0.0):
     """The coordinates a step ``v`` solved on the linear model at ``u``
     stands for, for a ``log`` / ``logit`` leaf: the step read along the
     transform's curve (``u + v``) or along its tangent
@@ -1603,7 +1603,13 @@ def _along_the_shorter(spec, u, v, box, interval):
     ``box`` is the tangent box the solver clipped ``v`` to
     (:meth:`ParamSpec._tangent_box`) and ``interval`` the coordinate's
     range.  A ``v`` on the box is a tangent step that reached the edge of
-    the range, so its tangent reading is that edge exactly.
+    the range, so its tangent reading is that edge exactly.  A result
+    within ``snap`` of an end *is* that end: read along the curve, a step
+    for the edge lands short of it by its own square, so a coordinate
+    heading there closes on the end without arriving, and one that is not
+    exactly on it is not held as an active edge
+    (:class:`_CoordinateBounds` gives ``sqrt(eps)``, within which the value
+    is the end's to one spacing of the transform).
     """
     (v_lo, v_hi), (u_lo, u_hi) = box, interval
     v = np.clip(v, v_lo, v_hi)
@@ -1613,7 +1619,9 @@ def _along_the_shorter(spec, u, v, box, interval):
     moved = u + np.where(shorter, tangent, v)
     # On an edge exactly: ``u + (u_hi - u)`` need not round to ``u_hi``.
     moved = np.where((v >= v_hi) & (np.abs(u_hi - u) <= np.abs(v)), u_hi, moved)
-    return np.where((v <= v_lo) & (np.abs(u_lo - u) <= np.abs(v)), u_lo, moved)
+    moved = np.where((v <= v_lo) & (np.abs(u_lo - u) <= np.abs(v)), u_lo, moved)
+    moved = np.where(np.abs(moved - u_hi) <= snap, u_hi, moved)
+    return np.where(np.abs(moved - u_lo) <= snap, u_lo, moved)
 
 
 class _CoordinateBounds:
@@ -1689,7 +1697,12 @@ class _CoordinateBounds:
                     # others for a step it could not take, and a float32 fit
                     # crawled along the edge for its whole budget).
                     lo, hi = (float(np.asarray(x, leaf_dtype)) for x in (lo, hi))
-                    curved.append((offset, offset + n, spec, (lo, hi)))
+                    # Within ``sqrt(eps)`` of an end the value is that end's
+                    # to one spacing of the transform (the slope there is
+                    # ``sqrt(eps)`` of the bounds' size, the spacing ``eps``
+                    # of it): the coordinate is on the edge.
+                    snap = math.sqrt(float(np.finfo(leaf_dtype).eps))
+                    curved.append((offset, offset + n, spec, (lo, hi), snap))
                 p_lo, p_hi = _physical_edges(spec, leaf_dtype, (lo, hi))
             los.append(np.full(n, lo))
             his.append(np.full(n, hi))
@@ -1721,11 +1734,11 @@ class _CoordinateBounds:
         position = np.full(lo_all.size, -1, dtype=np.intp)
         position[index] = np.arange(index.size)
         self._curved = []
-        for a, b, spec, interval in curved:
+        for a, b, spec, interval, snap in curved:
             where = position[a:b]
             where = where[where >= 0]
             if where.size:
-                self._curved.append((where, spec, interval))
+                self._curved.append((where, spec, interval, snap))
 
     def project(self, theta):
         return jnp.clip(theta, self.lo, self.hi) if self.active else theta
@@ -1734,7 +1747,7 @@ class _CoordinateBounds:
         """Per ``log`` / ``logit`` leaf, the tangent box at ``u`` rounded to
         the solver's ``dtype`` (what the solver clips to)."""
         boxes = []
-        for where, spec, (u_lo, u_hi) in self._curved:
+        for where, spec, (u_lo, u_hi), _ in self._curved:
             v_lo, v_hi = spec._tangent_box(u[where], u_lo, u_hi)  # noqa: SLF001
             boxes.append((np.asarray(v_lo, dtype).astype(np.float64),
                           np.asarray(v_hi, dtype).astype(np.float64)))
@@ -1754,7 +1767,7 @@ class _CoordinateBounds:
         origin = u.copy()
         lo = np.asarray(self.lo, dtype=np.float64).copy()
         hi = np.asarray(self.hi, dtype=np.float64).copy()
-        for (where, _, _), (v_lo, v_hi) in zip(self._curved, self._tangent_boxes(u, dtype)):
+        for (where, _, _, _), (v_lo, v_hi) in zip(self._curved, self._tangent_boxes(u, dtype)):
             origin[where], lo[where], hi[where] = 0.0, v_lo, v_hi
         return (jnp.asarray(origin, dtype), jnp.asarray(lo, dtype), jnp.asarray(hi, dtype))
 
@@ -1769,8 +1782,9 @@ class _CoordinateBounds:
         dtype = np.dtype(theta.dtype)
         u = np.asarray(theta, dtype=np.float64)
         out = np.asarray(answer, dtype=np.float64).copy()
-        for (where, spec, interval), box in zip(self._curved, self._tangent_boxes(u, dtype)):
-            out[where] = _along_the_shorter(spec, u[where], out[where], box, interval)
+        for (where, spec, interval, snap), box in zip(self._curved,
+                                                      self._tangent_boxes(u, dtype)):
+            out[where] = _along_the_shorter(spec, u[where], out[where], box, interval, snap)
         return self.project(jnp.asarray(out, dtype))
 
     def on_an_edge(self, theta) -> np.ndarray:
@@ -1871,8 +1885,64 @@ def _warn_unresolved_values(method: str, pmap: _PhysicalMap, params: dict, when:
             PrecisionLimitWarning, stacklevel=3)
 
 
+def _edge_listing(pmap: _PhysicalMap, bounds: _CoordinateBounds, theta, params: dict,
+                  on: np.ndarray, note: Optional[np.ndarray] = None, why: str = "") -> str:
+    """One line per ``log`` / ``logit`` parameter flagged in ``on`` (the
+    first six): its name, value, which edge, its transform and bounds --
+    and ``why`` for the ones ``note`` flags.  ``theta`` says which edge."""
+    names = pmap.names()
+    values = pmap.physical(params)
+    th, hi = np.asarray(theta), np.asarray(bounds.hi)
+    specs = {}
+    for f in pmap.fitted:
+        for k in range(f.start, f.stop):
+            specs[k] = f.spec
+    listed = "\n".join(
+        f"  - {names[k]} = {values[k]:.9g}: the {'upper' if th[k] >= hi[k] else 'lower'} "
+        f"edge of what its {specs[k].transform!r} transform resolves inside bounds "
+        f"{specs[k].bounds}" + (why if note is not None and note[k] else "")
+        for k in np.flatnonzero(on)[:6])
+    more = int(on.sum()) - 6
+    return listed + (f"\n  (+{more} more)" if more > 0 else "")
+
+
+def _warn_starts_on_an_edge(method: str, pmap: _PhysicalMap, bounds: _CoordinateBounds,
+                            theta0, start: dict, lr: float, eps: float) -> None:
+    """Warn, naming it, about every ``log`` / ``logit`` parameter an Adam fit
+    is started with on (or beyond) an edge of the range its transform
+    resolves.
+
+    Adam's update is about ``lr`` in the coordinate whatever the gradient,
+    and on that edge the transform is flat: a ``logit`` value there is
+    ``log(1 / sqrt(eps))`` units of its coordinate from mid-range -- 8 in
+    float32, 18 in float64 -- so the fit needs that many ``/ lr`` updates
+    before the value moves visibly, and more while the coordinate's
+    gradient (the model's, times the transform's slope, ``sqrt(eps)`` of
+    the range there) is below Adam's ``eps`` of the largest.  A run shorter
+    than that ends between the edge and the optimum with nothing wrong in
+    its result but the distance.  :func:`fit_lm` needs no such warning: its
+    step is read on the transform's tangent and leaves the edge at once.
+    """
+    on = bounds.on_an_edge(theta0)
+    if not bool(on.any()):
+        return
+    depth = max(float(np.max(np.abs(np.asarray(theta0, dtype=np.float64)[on]))), 1.0)
+    warnings.warn(
+        f"{method}: {int(on.sum())} parameter(s) start on the edge of their "
+        f"transform's usable range:\n{_edge_listing(pmap, bounds, theta0, start, on)}"
+        f"\nAdam moves a coordinate by about lr an update whatever its gradient, "
+        f"and a 'log' / 'logit' transform is flat on that edge: it is about "
+        f"{depth:.0f} units of the coordinate out, so the value will not move "
+        f"visibly for about {depth / lr:.0f} updates at lr={lr:g} -- longer while "
+        f"the coordinate's gradient is under eps={eps:g} of the largest, which the "
+        "transform's slope there (sqrt(eps) of the range) can make it. Start the "
+        "parameter inside its range, give the run that many updates (and a "
+        "smaller eps), or use fit_lm, whose step leaves the edge at once.",
+        RuntimeWarning, stacklevel=3)
+
+
 def _warn_on_an_edge(method: str, pmap: _PhysicalMap, bounds: _CoordinateBounds,
-                     theta, params: dict) -> None:
+                     theta, params: dict, last=None) -> None:
     """Warn, naming it, about every ``log`` / ``logit`` parameter a fit
     leaves on an edge of the range its transform resolves.
 
@@ -1880,27 +1950,29 @@ def _warn_on_an_edge(method: str, pmap: _PhysicalMap, bounds: _CoordinateBounds,
     data pull the parameter onto its bound, which this transform cannot
     reach, or the fit started out there and no step it could take lowered
     the loss.  Until 0.4.0's fix nothing said so (MADD-ANO-104).
+
+    ``theta`` and ``params`` are the iterate returned.  ``last`` is the
+    run's last iterate where that can be another one (the Adam fitters
+    return the lowest-loss iterate they evaluated): a parameter the run was
+    still holding against an edge when it stopped is named too, with the
+    value returned for it, because on the flat of the transform which
+    iterate is lowest is the loss's rounding.
     """
     on = bounds.on_an_edge(theta)
-    if not bool(on.any()):
+    only_last = np.zeros_like(on)
+    side = np.asarray(theta)
+    if last is not None:
+        only_last = bounds.on_an_edge(last) & ~on
+        side = np.where(only_last, np.asarray(last), side)
+    flagged = on | only_last
+    if not bool(flagged.any()):
         return
-    names = pmap.names()
-    values = pmap.physical(params)
-    th, hi = np.asarray(theta), np.asarray(bounds.hi)
-    transforms = {}
-    for f in pmap.fitted:
-        for k in range(f.start, f.stop):
-            transforms[k] = f.spec
-    listed = "\n".join(
-        f"  - {names[k]} = {values[k]:.9g}: the {'upper' if th[k] >= hi[k] else 'lower'} "
-        f"edge of what its {transforms[k].transform!r} transform resolves inside bounds "
-        f"{transforms[k].bounds}"
-        for k in np.flatnonzero(on)[:6])
-    more = int(on.sum()) - 6
+    listed = _edge_listing(
+        pmap, bounds, side, params, flagged, only_last,
+        " (the run's last iterate sat on it; this is the lowest-loss one)")
     warnings.warn(
-        f"{method}: {int(on.sum())} parameter(s) ended on the edge of their "
+        f"{method}: {int(flagged.sum())} parameter(s) ended on the edge of their "
         f"transform's usable range:\n{listed}"
-        + (f"\n  (+{more} more)" if more > 0 else "") +
         "\nThe fitters keep a 'log' / 'logit' parameter where its transform can "
         "be stepped on -- at least sqrt(eps) of the bounds' own size inside each "
         "bound, and below the dtype's largest number -- so it cannot reach its "
@@ -5109,6 +5181,8 @@ def fit(
     bounds = _CoordinateBounds(gm, start, idx, theta0.dtype)
     unresolved: set = set()
     _warn_unresolved_values("fit", pmap, start, "at the start of the fit", unresolved)
+    if n_iter > 0:
+        _warn_starts_on_an_edge("fit", pmap, bounds, theta0, start, lr, eps)
 
     @jax.jit
     def adam_step(theta, m, v, g, frame, i):
@@ -5206,6 +5280,7 @@ def fit(
         if best.state is theta:
             best_params = p_last
 
+    last = theta
     selected = best.state
     selected_params = pmap.params(selected) if best_params is None else best_params
 
@@ -5237,7 +5312,7 @@ def fit(
     # The tree the selected iterate was evaluated on, unless the guard moved it.
     evaluated = selected_params if theta is selected else pmap.params(theta)
     if i > 0:
-        _warn_on_an_edge("fit", pmap, bounds, theta, evaluated)
+        _warn_on_an_edge("fit", pmap, bounds, theta, evaluated, last)
         _warn_unresolved_values("fit", pmap, evaluated, "as fitted", unresolved)
     return FitResult(
         params=pmap.returned(theta, evaluated), losses=np.asarray(losses),
@@ -6258,6 +6333,8 @@ def fit_multiple_shooting(
     unresolved: set = set()
     _warn_unresolved_values("fit_multiple_shooting", pmap, start,
                             "at the start of the fit", unresolved)
+    if n_iter > 0:
+        _warn_starts_on_an_edge("fit_multiple_shooting", pmap, bounds, theta0, start, lr, eps)
 
     @jax.jit
     def adam(x, m, v, g, frame, i, rate):
@@ -6345,6 +6422,7 @@ def fit_multiple_shooting(
                              "fit_multiple_shooting")
         if best.state is state:
             best_params = p_last
+    last = theta
     theta, ws = best.state
     selected = theta
     selected_params = pmap.params(selected) if best_params is None else best_params
@@ -6377,7 +6455,7 @@ def fit_multiple_shooting(
     # The tree the selected iterate was evaluated on, unless the guard moved it.
     evaluated = selected_params if theta is selected else pmap.params(theta)
     if i > 0:
-        _warn_on_an_edge("fit_multiple_shooting", pmap, bounds, theta, evaluated)
+        _warn_on_an_edge("fit_multiple_shooting", pmap, bounds, theta, evaluated, last)
         _warn_unresolved_values("fit_multiple_shooting", pmap, evaluated, "as fitted",
                                 unresolved)
     return (FitResult(params=pmap.returned(theta, evaluated), losses=np.asarray(losses),

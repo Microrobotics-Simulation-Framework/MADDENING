@@ -55,8 +55,10 @@ EDGE_ULPS = 8.0
 OTHER_STARTS = (0.1, 0.5, 1.5, 10.0, 30.0)
 FITTERS = ("fit_lm", "fit", "fit_multiple_shooting")
 
-#: The message of the warning a fit that ends on its transform's edge gives.
+#: The message of the warning a fit that ends on its transform's edge gives,
+#: and of the one an Adam fit started on it gives.
 EDGE_WARNING = "ended on the edge of their transform's usable range"
+EDGE_START_WARNING = "start on the edge of their transform's usable range"
 
 _FRACTION = {"5%": 0.05, "50%": 0.5, "95%": 0.95}
 
@@ -105,10 +107,16 @@ def bounds_around(transform: str, truth_at: str) -> tuple[float, float]:
     return TRUTH + gap - WIDTH, TRUTH + gap
 
 
-def value_at(bounds: tuple[float, float], position: str) -> float:
+def value_at(transform: str, bounds: tuple[float, float], position: str) -> float:
+    """The value at ``position`` of ``bounds``: a fraction of the range, or
+    :data:`EDGE_ULPS` float spacings of the bounds' size inside an edge
+    (:data:`_LOG_EDGE_FRACTION` of a plain ``log`` leaf's nominal top, which
+    has no edge at float scale)."""
     lo, hi = bounds
     if position in _FRACTION:
         return lo + _FRACTION[position] * (hi - lo)
+    if transform == "log":
+        return _LOG_EDGE_FRACTION[position] * hi
     gap = EDGE_ULPS * _eps() * max(abs(lo), abs(hi), hi - lo)
     return lo + gap if position == "lower-edge" else hi - gap
 
@@ -163,9 +171,13 @@ class Problem:
     def mask(self):
         if not self.masked:
             return None
+        return self.only("stiffness", "damping")
+
+    def only(self, *keys):
+        """A mask that fits ``keys`` and nothing else."""
         mask = jax.tree.map(lambda _: False, self.gm.params)
-        mask["nodes"]["spring"]["stiffness"] = True
-        mask["nodes"]["spring"]["damping"] = True
+        for key in keys:
+            mask["nodes"]["spring"][key] = True
         return mask
 
 
@@ -250,22 +262,24 @@ def _position(history):
 
 
 def run_fit(problem: Problem, fitter: str, start: dict):
-    """``(result, edge_warned)`` for one fit of ``problem`` from ``start``
-    (the last stage's result for the Adam fitters, :data:`ADAM_STAGES`);
-    ``(None, False)`` for a fit that refused its start loudly (a damping so
-    far out that the explicit step overflows: ``FloatingPointError``).
-    ``edge_warned`` is whether the *last* fit said it ended on an edge."""
+    """``(result, edge_warned, start_warned)`` for one fit of ``problem``
+    from ``start`` (the last stage's result for the Adam fitters,
+    :data:`ADAM_STAGES`); ``(None, False, False)`` for a fit that refused
+    its start loudly (a damping so far out that the explicit step
+    overflows: ``FloatingPointError``).  ``edge_warned``: the *last* fit
+    said it ended on an edge.  ``start_warned``: the first Adam fit said it
+    was started on one."""
     gm = problem.gm
-    res, edge = None, False
+    res, edge, at_start = None, False, False
     try:
         if fitter == "fit_lm":
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 res = fit_lm(gm, problem.residual, params=start, mask=problem.mask())
             edge = any(EDGE_WARNING in str(w.message) for w in caught)
-            return res, edge
+            return res, edge, False
         params, states = start, None
-        for lr, n_iter in ADAM_STAGES:
+        for stage, (lr, n_iter) in enumerate(ADAM_STAGES):
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 if fitter == "fit":
@@ -277,10 +291,12 @@ def run_fit(problem: Problem, fitter: str, start: dict):
                         params=params, mask=problem.mask(), window_states=states,
                         lr=lr, lr_states=1e-6, n_iter=n_iter)
             edge = any(EDGE_WARNING in str(w.message) for w in caught)
+            if stage == 0:
+                at_start = any(EDGE_START_WARNING in str(w.message) for w in caught)
             params = res.params
     except FloatingPointError:
-        return None, False
-    return res, edge
+        return None, False, False
+    return res, edge, at_start
 
 
 #: How near the truth counts as recovered, as a fraction of the damping's
@@ -314,19 +330,43 @@ class Cell:
     converged: bool
     damping: float
     stiffness: float
+    #: Whether the damping came back on (or beyond) an end of the range its
+    #: transform resolves, read from its value.
+    on_edge: bool = False
+    #: Whether an Adam fit said, before it ran, that it was started on one.
+    start_warned: bool = False
 
     @property
     def violates(self) -> bool:
         """The oracle: the control recovered the truth and the transformed
-        fit neither recovered it nor said it ended on an edge."""
-        return self.control_ok and not self.fit_ok and not self.edge_warned
+        fit neither recovered it nor said, naming the parameter, that it
+        ended on an edge of its transform's range or was started on one."""
+        return (self.control_ok and not self.fit_ok
+                and not self.edge_warned and not self.start_warned)
+
+    @property
+    def silent_on_an_edge(self) -> bool:
+        """What no cell may be, whatever its control did: on an edge of its
+        transform's range with no warning."""
+        return self.on_edge and not self.edge_warned
 
     def __str__(self) -> str:
         return (f"{self.transform} truth@{self.truth_at} start@{self.start_at} "
                 f"other x{self.other:g}: control {'ok' if self.control_ok else 'off'}, fit "
                 f"{'ok' if self.fit_ok else 'off'} (damping {self.damping:.9g}, stiffness "
-                f"{self.stiffness:.9g}, converged={self.converged}, "
-                f"edge warning={self.edge_warned})")
+                f"{self.stiffness:.9g}, converged={self.converged}, on an edge="
+                f"{self.on_edge}, edge warning={self.edge_warned}, start warning="
+                f"{self.start_warned})")
+
+
+def usable_range(spec: ParamSpec, dtype) -> tuple[float, float]:
+    """The values the ends of ``spec``'s optimiser interval map to at
+    ``dtype``: the range a fit under that transform can return."""
+    ends = []
+    for u, open_end in zip(spec._optimiser_interval(dtype), (-np.inf, np.inf)):  # noqa: SLF001
+        ends.append(float(spec.to_constrained(jnp.asarray(u, dtype)))
+                    if np.isfinite(u) else open_end)
+    return ends[0], ends[1]
 
 
 def run_cell(problem: Problem, fitter: str, transform: str, truth_at: str, start_at: str,
@@ -336,18 +376,28 @@ def run_cell(problem: Problem, fitter: str, transform: str, truth_at: str, start
     ``bounds`` and ``start_damping`` override the placement, for a cell
     given by its numbers (the reproducer's)."""
     bounds = bounds_around(transform, truth_at) if bounds is None else bounds
-    start_c = value_at(bounds, start_at) if start_damping is None else start_damping
+    start_c = (value_at(transform, bounds, start_at) if start_damping is None
+               else start_damping)
     start = problem.start(other * STIFFNESS, start_c)
     scale = problem.damping if transform == "log" else bounds[1] - bounds[0]
     problem.set_damping_spec(control_for(transform, bounds))
-    control, _ = run_fit(problem, fitter, start)
+    control, _, _ = run_fit(problem, fitter, start)
     problem.set_damping_spec(spec_for(transform, bounds))
-    res, edge = run_fit(problem, fitter, start)
+    res, edge, at_start = run_fit(problem, fitter, start)
     nan = float("nan")
     leaves = {} if res is None else res.params["nodes"]["spring"]
     tolerance = TOLERANCE[fitter]
+    damping = float(leaves.get("damping", nan))
+    on_edge = False
+    if res is not None:
+        dtype = np.asarray(leaves["damping"]).dtype
+        low, high = usable_range(spec_for(transform, bounds), dtype)
+        # Within a few float spacings: the fitter's compiled map and this
+        # eager one may round an end differently.
+        slack = 8.0 * float(np.finfo(dtype).eps) * max(abs(low), abs(damping), 1e-30)
+        on_edge = damping <= low + slack or damping >= high - slack
     return Cell(transform, truth_at, start_at, other,
                 recovered(control, problem.damping, scale, tolerance),
                 recovered(res, problem.damping, scale, tolerance), edge,
                 bool(res is not None and res.converged),
-                float(leaves.get("damping", nan)), float(leaves.get("stiffness", nan)))
+                damping, float(leaves.get("stiffness", nan)), on_edge, at_start)

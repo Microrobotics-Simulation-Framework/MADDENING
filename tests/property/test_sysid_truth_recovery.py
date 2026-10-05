@@ -538,3 +538,218 @@ def test_every_fitter_on_the_spring_converged_means_the_truth(truth, start, fitt
     got = float(res.params["nodes"]["s"]["damping"])
     note(f"{fitter}: truth={truth} start={start} got={got} converged={res.converged}")
     assert abs(got - truth) <= 1e-3 * (1.0 + truth) or not res.converged
+
+
+# ---------------------------------------------------------------------------
+# The transform grid: wherever the identity control recovers the truth, the
+# transformed fit does
+# ---------------------------------------------------------------------------
+#
+# Four audit rounds found a defect where a bounded transform (``log``,
+# ``logit``) meets the floating-point limits inside a fitter, each the
+# neighbour of the one fixed before it.  The last: ``fit_lm`` could not bring
+# a ``logit`` coordinate back from the edge of its range, so a fit that an
+# early step carried there ended on its bound, ``converged=False``, with no
+# warning (audit_040_p4_12/fmu-sysid/repro_F1_logit_edge_trap.py).  So this
+# oracle is over the whole class rather than a case: the guide's spring, its
+# damping under each transform, at every position of truth and start --
+# interior, and a few float spacings from each edge -- beside the same fit
+# with the damping under the identity transform and the same bounds, which
+# clips: the control (``tests/property/sysid_transform_grid.py``).  Wherever
+# the control recovers the truth the transformed fit must, or it must say,
+# naming the parameter, that it ended on the edge of its transform's range.
+
+from tests.property import sysid_transform_grid as grid  # noqa: E402
+
+#: Cells of the audit's reproducer that ended on a bound, as ``(x64, the
+#: damping the data hold, bounds, the damping's start, the stiffness's start
+#: over its truth)``.  Under x64 the trap needed nothing but the guide's own
+#: start; in float32 it needed the stiffness started further off.
+_EDGE_TRAP_CELLS = {
+    # The traced one: 2.0 for a truth of 1.9 in (0.5, 2), n_iter 4.
+    "x64-upper-edge-from-the-guides-start": (True, 1.9, (0.5, 2.0), 0.6, 1.5),
+    # Every start in (0, 10) ended on 10 for a truth of 9.5.
+    "x64-upper-edge-from-mid-range": (True, 9.5, (0.0, 10.0), 5.0, 1.5),
+    # The lower edge: 3.6e-15 (1.9e-6 in float32) for a truth of 1.2 in (0, 4).
+    "x64-lower-edge": (True, 1.2, (0.0, 4.0), 0.2, 5.0 / 30.0),
+    "float32-lower-edge": (False, 1.2, (0.0, 4.0), 0.2, 5.0 / 30.0),
+    "float32-upper-edge": (False, 5.0, (0.0, 10.0), 9.5, 5.0 / 30.0),
+    "float32-upper-edge-stiffness-from-1000": (False, 5.0, (0.0, 10.0), 5.0, 1000.0 / 30.0),
+}
+
+
+@pytest.mark.parametrize("cell", sorted(_EDGE_TRAP_CELLS))
+def test_fit_lm_comes_back_from_the_edge_of_a_logit_range(cell):
+    """The reproducer's cells.  Each ended with the damping on a bound of
+    its ``logit`` range, ``converged=False``, from a start and for a truth
+    well inside it, where the same fit with the bounds clipped recovered the
+    truth.  It comes back -- converged, at the truth -- and, not having
+    ended on an edge, says nothing about one."""
+    x64, truth, bounds, start, other = _EDGE_TRAP_CELLS[cell]
+    with grid.precision(x64):
+        problem = grid.build_problem(masked=False, damping=truth)
+        result = grid.run_cell(problem, "fit_lm", "logit", "-", "-", other, bounds=bounds,
+                               start_damping=start)
+    assert result.control_ok, f"the control no longer recovers this cell: {result}"
+    assert result.fit_ok and result.converged and not result.edge_warned, str(result)
+
+
+#: Per push, the fitter and precision of the two tests below; the grid
+#: (slow) runs every one.  Multiple shooting compiles a windowed loss and
+#: its gradient per fit, which is the grid's to pay for.
+_PER_PUSH = [("fit_lm", False), ("fit_lm", True), ("fit", False)]
+
+
+@pytest.mark.parametrize("fitter, x64", _PER_PUSH,
+                         ids=[f"{f}-{'x64' if x else 'float32'}" for f, x in _PER_PUSH])
+def test_a_start_on_the_edge_of_a_logit_range_comes_back(fitter, x64):
+    """A start the documented interior allows, a few float spacings inside a
+    ``logit`` bound, with the truth at the far side of the range: the fit
+    leaves the edge and recovers it, as its control does.  (``fit`` by the
+    grid's annealed schedule: Adam's step is about ``lr`` whatever the
+    gradient, and the edge is 8 units of the coordinate out in float32, 18
+    in float64.)"""
+    with grid.precision(x64):
+        problem = grid.build_problem(masked=False)
+        with grid.shared_programs({}, fitter):          # one compile for the four fits
+            for start_at, truth_at in (("lower-edge", "95%"), ("upper-edge", "5%")):
+                result = grid.run_cell(problem, fitter, "logit", truth_at, start_at, 1.5)
+                assert result.control_ok, str(result)
+                assert result.fit_ok and not result.edge_warned, str(result)
+                assert not result.on_edge, str(result)
+
+
+_SAYS_SO = [("fit_lm", False), ("fit_lm", True), ("fit", False),
+            ("fit_multiple_shooting", False)]
+
+
+@pytest.mark.parametrize("fitter, x64", _SAYS_SO,
+                         ids=[f"{f}-{'x64' if x else 'float32'}" for f, x in _SAYS_SO])
+def test_a_fit_that_ends_on_the_edge_of_its_transform_says_so(fitter, x64):
+    """The other ending.  A ``logit`` parameter whose optimum is nearer its
+    bound than the transform resolves (``sqrt(eps)`` of the bounds' size)
+    stops on that margin, strictly inside the bounds, and a
+    ``RuntimeWarning`` names the parameter, the edge and the remedy; it
+    ended there in silence.  The control, which clips, sits on the bound
+    itself and has nothing to say.
+
+    ``fit_lm``: the truth a few float spacings inside the upper bound.
+    ``fit``: a loss that pushes at the bound with Adam steps of 50 (Adam
+    alone closes on a flat edge too slowly to arrive: its step shrinks with
+    the gradient it remembers).  ``fit_multiple_shooting``: started on the
+    edge with the truth there, which it says twice -- when it starts and
+    when it ends."""
+    with grid.precision(x64):
+        problem = grid.build_problem(masked=False)
+        gm, only_damping = problem.gm, problem.only("damping")
+        bounds = grid.bounds_around("logit", "upper-edge")
+        start = problem.start(grid.STIFFNESS, grid.value_at("logit", bounds, "50%"))
+        problem.set_damping_spec(grid.spec_for("logit", bounds))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            if fitter == "fit_lm":
+                res = fit_lm(gm, problem.residual, params=start, mask=only_damping)
+            elif fitter == "fit":
+                res = fit(gm, lambda p: -50.0 * p["nodes"]["spring"]["damping"],
+                          params=start, mask=only_damping, lr=50.0, n_iter=40)
+            else:
+                on_edge = problem.start(grid.STIFFNESS,
+                                        grid.value_at("logit", bounds, "upper-edge"))
+                res, _ = fit_multiple_shooting(
+                    gm, problem.observations, obs_fn=lambda h: h["spring"]["position"],
+                    window=20, params=on_edge, mask=only_damping, lr=1e-3, lr_states=1e-6,
+                    n_iter=3)
+        assert all(issubclass(w.category, RuntimeWarning) for w in caught), caught
+        texts = [str(w.message) for w in caught]
+        assert any(grid.EDGE_WARNING in t for t in texts), texts
+        said = [t for t in texts if grid.EDGE_WARNING in t][-1]
+        for part in (f"{fitter}:", "node 'spring', parameter 'damping'", "the upper edge",
+                     "'logit'", "transform=None"):
+            assert part in said, (part, said)
+        if fitter == "fit_multiple_shooting":
+            started = [t for t in texts if grid.EDGE_START_WARNING in t]
+            assert started and "node 'spring', parameter 'damping'" in started[0], texts
+        else:
+            assert not any(grid.EDGE_START_WARNING in t for t in texts), texts
+            value = res.params["nodes"]["spring"]["damping"]
+            margin = float(np.sqrt(np.finfo(np.asarray(value).dtype).eps)) * bounds[1]
+            assert bounds[0] < float(value) < bounds[1]
+            assert bounds[1] - float(value) == pytest.approx(margin, rel=1e-2), float(value)
+        problem.set_damping_spec(grid.control_for("logit", bounds))
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            control = fit_lm(gm, problem.residual, params=start, mask=only_damping)
+        assert float(control.params["nodes"]["spring"]["damping"]) == pytest.approx(
+            bounds[1], abs=2e-3 * (bounds[1] - bounds[0]))
+
+
+#: Compiled model-side programs shared across the cells of one block
+#: (``grid.shared_programs``), and the spring of each precision and mask.
+_GRID_PROGRAMS: dict = {}
+_GRID_PROBLEMS: dict = {}
+
+#: Where the differential oracle holds for the Adam fitters: a stiffness
+#: started within a factor of ten below, or two either side, of its truth.
+#: From ten or thirty times too stiff the loss has other basins (a fast
+#: oscillation is best fitted by damping it out), and Adam in a ``log``
+#: coordinate, whose step multiplies the value, walks into them where Adam
+#: in the value's own coordinate does not: a difference between two
+#: parametrisations of one problem, with no edge in it.  Those cells are
+#: still run, and held to what no parametrisation excuses: never on an
+#: edge of the transform's range without the warning.
+_ADAM_NEAR = (0.1, 0.5, 1.5)
+
+
+def _grid_block(fitter, transform, x64, masked):
+    key = (x64, masked)
+    with grid.precision(x64):
+        if key not in _GRID_PROBLEMS:
+            _GRID_PROBLEMS[key] = grid.build_problem(masked)
+        problem = _GRID_PROBLEMS[key]
+        with grid.shared_programs(_GRID_PROGRAMS, (fitter, x64, masked)):
+            return [grid.run_cell(problem, fitter, transform, truth_at, start_at, other)
+                    for truth_at in grid.POSITIONS for start_at in grid.POSITIONS
+                    for other in grid.OTHER_STARTS]
+
+
+# Per push: tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range
+# Per push: tests/property/test_sysid_truth_recovery.py::test_a_start_on_the_edge_of_a_logit_range_comes_back
+# Per push: tests/property/test_sysid_truth_recovery.py::test_a_fit_that_ends_on_the_edge_of_its_transform_says_so
+@pytest.mark.slow  # 125 cells, two fits each, a block: minutes
+@pytest.mark.parametrize("masked", [False, True], ids=["frozen-by-spec", "left-out-by-mask"])
+@pytest.mark.parametrize("x64", [False, True], ids=["float32", "x64"])
+@pytest.mark.parametrize("transform", grid.TRANSFORMS)
+@pytest.mark.parametrize("fitter", grid.FITTERS)
+def test_the_transformed_fit_recovers_the_truth_wherever_its_control_does(
+        fitter, transform, x64, masked):
+    """The grid: transform x precision x where the truth sits (5%, 50%, 95%
+    of the range, a few float spacings from each edge) x where the start
+    sits (likewise) x the other parameter's start (0.1, 0.5, 1.5, 10 and 30
+    times its truth) x the third leaf frozen by its spec or left out by
+    ``mask=`` under a ``logit`` a million times wider than its value x the
+    three fitters.  Wherever the identity-transform control recovers the
+    truth, the transformed fit does, or it warns by name that it ended on
+    the edge of its transform's range; where truth and start are both well
+    inside the range ``fit_lm`` has no such excuse; and no fit, in any
+    cell, ends on an edge without the warning."""
+    cells = _grid_block(fitter, transform, x64, masked)
+    assert len(cells) == 125
+    silent = [str(c) for c in cells if c.silent_on_an_edge]
+    assert not silent, "\n".join(silent)
+    judged = [c for c in cells if fitter == "fit_lm" or c.other in _ADAM_NEAR]
+    violations = [str(c) for c in judged if c.violates]
+    assert not violations, "\n".join(violations)
+    if fitter == "fit_lm":
+        # Truth and start both well inside: recovery, not a warning.
+        inside = ("5%", "50%", "95%")
+        excused = [str(c) for c in cells if c.control_ok and not c.fit_ok
+                   and c.truth_at in inside and c.start_at in inside]
+        assert not excused, "\n".join(excused)
+        # ``converged=True`` is the truth, or an edge the fit warned about.
+        wrong = [str(c) for c in cells if c.converged and not c.fit_ok and not c.edge_warned]
+        assert not wrong, "\n".join(wrong)
+    # Non-vacuity: the control recovers the truth in most of what is judged,
+    # and the transformed fit recovers it (rather than warning) in most of that.
+    recovered = [c for c in judged if c.control_ok]
+    assert len(recovered) >= len(judged) // 2, (len(recovered), len(judged))
+    assert sum(c.fit_ok for c in recovered) >= (2 * len(recovered)) // 3

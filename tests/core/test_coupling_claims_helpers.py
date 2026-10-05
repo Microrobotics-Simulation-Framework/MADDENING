@@ -36,6 +36,7 @@ from maddening.core.coupling.acceleration import (
 from maddening.core.edge import EdgeSpec
 from maddening.core.graph_manager import (
     _gradient_error_bound_at,
+    _interface_spectral_rate_at,
     _ift_linear_solve,
     _ift_solve,
     _spectral_rate_at,
@@ -120,6 +121,28 @@ def test_arnoldi_costs_n_steps_jacobian_vector_products():
     # one-pass map, plus one evaluation of the map itself for the residual.
     counts = _count_map_evaluations(
         lambda step, x, consts, w: _spectral_rate_at(step, x, consts, w))
+    assert counts == {"jvp": 8, "primal": 1}, counts
+
+
+
+def test_the_spectrum_on_a_transformed_reading_costs_eight_more_products():
+    """CPL-013: "16 under the interface norm with a transform on an internal edge".
+
+    The report of such a group takes a second spectrum, on the norm's
+    reading (``_interface_spectral_rate_at``): eight more Jacobian-vector
+    products of the one-pass map and one evaluation of it, beside the
+    eight of the state's own spectrum.  The reading's products are of the
+    transforms alone.
+    """
+    def reading(x):
+        return jnp.stack([x[0] + 273.15, x[2]])     # an offset on one edge, a selection
+
+    def on_the_reading(step, x, consts, w):
+        ones = jnp.ones(2, F32)
+        return _interface_spectral_rate_at(step, x, consts, w, reading, ones, ones,
+                                           jnp.zeros(2, F32), lambda xx: jnp.abs(reading(xx)))
+
+    counts = _count_map_evaluations(on_the_reading)
     assert counts == {"jvp": 8, "primal": 1}, counts
 
 

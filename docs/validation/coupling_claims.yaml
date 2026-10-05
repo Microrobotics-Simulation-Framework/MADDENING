@@ -594,6 +594,7 @@ claims:
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_jacobian_vector_products
     - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_four_k_plus_five_n_p_products
+    - tests/core/test_coupling_claims_helpers.py::test_the_spectrum_on_a_transformed_reading_costs_eight_more_products
   status: verified
   domains:
     f32: n/a

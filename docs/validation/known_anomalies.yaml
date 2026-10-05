@@ -12294,3 +12294,69 @@ anomalies:
       - "tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_a_usable_gradient_bound_holds_on_the_audit_pair_at_every_cap"
       - "tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn"
     github_issue: null
+  - anomaly_id: "MADD-ANO-177"
+    title: "The adaptive steppers' error norm was computed in a bfloat16 or float16 state's own dtype: run_adaptive did not return on a float16 state above 65,504 elements, run_adaptive_scan refused any 16-bit state"
+    description: >
+      `_tree_error_norm`, the step-doubling error norm that `run_adaptive`,
+      `run_adaptive_scan` and `build_adaptive_step` share, squares
+      `|fine - coarse| / (atol + rtol * max|.|)` per element and sums the
+      squares from a weakly typed `jnp.array(0.0)`, which takes a float16
+      leaf's dtype, then divides by an int32 element count, which the
+      division promotes to float16 -- `inf` above 65,504.  The norm of a
+      finite sum then reads exactly 0.0, and NaN (`inf / inf`) once the sum
+      overflows too: 80,000 float16 elements eight ulps apart read 0.0
+      where the closed form is 0.775 (`rtol=1e-2`), and NaN where it is 7.74
+      (`atol=1e-6`, `rtol=1e-3`).  Below that size a ratio above 256
+      squares past 65,504, so the norm read `inf` on an ordinary rejected
+      attempt and the controller shrank by `min_factor` instead of its own
+      factor.  And the 16-bit norm made the next timestep 16-bit, which the
+      carry of `run_adaptive_scan` refuses: a scan-carry `TypeError` on any
+      bfloat16 or float16 state.  Measured at v0.1.0, v0.2.1 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0): the norm reads 0.0
+      and NaN exactly so, `run_adaptive` on a 70,000-entry float16 decay
+      does not return within 150 s (its NaN error norm, MADD-ANO-173) where
+      a 1,000-entry one takes the float32 state's 13 steps, and
+      `run_adaptive_scan` raises the `TypeError` at either size.  On
+      0.4.0's development builds `run_adaptive` returned that state as NaN
+      after one accepted step, with no error or warning.  The sibling of
+      MADD-ANO-174 at the other norm the library takes, found by sweeping
+      for that defect's pattern.  Resolved in 0.4.0: each leaf is widened to
+      float32 before its difference is formed (the coupling norms'
+      `_widened`) and the sum starts from a float32 zero, so both steppers
+      take the float32 state's steps on the 70,000-entry field and the scan
+      runs a 16-bit state to its end time; a float32 or float64 state takes
+      no new operation.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A NaN state returned as the result of an integration, with no error
+      or warning, is a silent wrong result, never `minor`; on the tagged
+      releases the same state did not return at all.  Not `critical`: it
+      needs a 16-bit state with more than 65,504 floating elements, and a
+      NaN result is conspicuous; the scan's refusal is loud.
+      `context_dependent` because whether an adaptively stepped state is
+      held in 16 bits is the program's choice.
+    affected_components:
+      - "maddening.core.simulation.adaptive._tree_error_norm"
+      - "maddening.core.simulation.adaptive.build_adaptive_step"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Hold an adaptively stepped state in float32, or keep a float16
+      state's floating elements at or below 65,504 and use `run_adaptive`
+      rather than `run_adaptive_scan`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A node's own 16-bit arithmetic still rounds as its dtype does, so a
+      16-bit state's error estimates sit near its resolution at tolerances
+      below about one eps (9.8e-4 for float16, 7.8e-3 for bfloat16) and the
+      controller rejects more attempts than for the float32 state.
+    verification:
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_a_sixteen_bit_error_norm_over_more_than_65504_elements_reads_its_rms"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_a_float16_error_norm_is_finite_where_a_squared_ratio_passes_65504"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_on_a_float16_state_above_65504_elements_steps_as_the_float32_state_does"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_scan_steps_a_sixteen_bit_state_to_its_end_time"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_build_adaptive_step_reports_a_sixteen_bit_states_error_in_float32"
+    github_issue: null

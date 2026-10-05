@@ -88,6 +88,9 @@ from tests.registered_mapping_kinds import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+#: Where the ``maddening`` under test was imported from: a fresh interpreter
+#: is given the same tree, whichever tree this run is testing.
+SRC = Path(mapping_registry.__file__).resolve().parents[3]
 BUILTIN_KINDS = ["matrix", "nearest_neighbor", "projection_1d", "rbf"]
 EDGE = "a.v -> b.inp"
 INLINE3 = {"inline": [0.0, 0.5, 1.0], "dtype": "float64"}
@@ -334,7 +337,7 @@ def clean_process(tmp_path_factory) -> dict:
     }
     (tmp / "payload.json").write_text(json.dumps(payload), encoding="utf-8")
     env = {**os.environ, "JAX_PLATFORMS": "cpu",
-           "PYTHONPATH": os.pathsep.join([str(REPO_ROOT / "src"), str(REPO_ROOT), str(tmp)])}
+           "PYTHONPATH": os.pathsep.join([str(SRC), str(REPO_ROOT), str(tmp)])}
     done = subprocess.run([sys.executable, "-c", _CLEAN_PROCESS, str(tmp / "payload.json")],
                           capture_output=True, text=True, timeout=300, env=env, cwd=tmp)
     assert done.returncode == 0, done.stderr[-4000:]
@@ -410,6 +413,38 @@ def test_the_same_config_loads_once_the_program_imports_the_registering_module(
     assert_same_weights(rebuilt, clean_process["weights"],
                         what="weights rebuilt in another process")
     assert json.loads(report["rebuilt_config"]) == clean_process["config"]
+
+
+def test_a_checkpoint_names_no_kind_and_loading_one_imports_nothing(
+        tmp_path, monkeypatch):
+    """A checkpoint carries weights under edge keys and weight names, never
+    a kind.  One whose member names spell an importable module -- as an
+    edge, as a weight, as a kind-like path -- restores the weights it has
+    for this graph's edges, ignores the rest, and imports nothing."""
+    marker = tmp_path / "imported"
+    (tmp_path / "checkpoint_kind_sentinel.py").write_text(
+        f"open({str(marker)!r}, 'w').write('imported')\n", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    gm = _rods(KINDS[INVERSE_DISTANCE].build)
+    gm.compile()
+    trained = {name: 1.5 * leaf for name, leaf in gm.params["mappings"][C2F].items()}
+    gm.params["mappings"][C2F].update(trained)
+    path = save_state(gm, tmp_path / "ck")
+    with np.load(path, allow_pickle=False) as archive:
+        members = {k: archive[k] for k in archive.files}
+    weight = members[f"_params_mappings/{C2F}/W"]
+    members["_params_mappings/checkpoint_kind_sentinel/W"] = weight
+    members[f"_params_mappings/{C2F}/checkpoint_kind_sentinel"] = weight
+    members["_params_mappings/checkpoint_kind_sentinel.build/kind"] = np.asarray(1.0)
+    members["_params/checkpoint_kind_sentinel/kind"] = np.asarray(1.0)
+    np.savez(path, **members)
+
+    fresh = _rods(KINDS[INVERSE_DISTANCE].build)
+    load_state(fresh, path)
+    assert sorted(fresh.params["mappings"]) == [C2F]
+    assert_same_weights(fresh.params["mappings"][C2F],
+                        {name: np.asarray(leaf) for name, leaf in trained.items()})
+    assert "checkpoint_kind_sentinel" not in sys.modules and not marker.exists()
 
 
 _IMPORT_MACHINERY = ("importlib", "pkgutil", "runpy", "imp", "zipimport", "pkg_resources",
@@ -595,7 +630,7 @@ def test_a_built_in_name_is_taken_before_any_registration_can_claim_it():
             "    register_mapping('rbf', arrays=('x',), hyperparameters={})(lambda x, x_ref=None: None)\n"
             "except ValueError as exc:\n"
             "    print('REFUSED', exc)\n")
-    env = {**os.environ, "JAX_PLATFORMS": "cpu", "PYTHONPATH": str(REPO_ROOT / "src")}
+    env = {**os.environ, "JAX_PLATFORMS": "cpu", "PYTHONPATH": str(SRC)}
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                           timeout=300, env=env)
     assert done.returncode == 0, done.stderr[-2000:]
@@ -1328,9 +1363,10 @@ def test_add_edge_refuses_a_mapping_whose_params_pytree_a_reader_could_not_walk(
     """Asked where the edge is added, before any reader can meet it: on
     the tree before the registry each of these compiled or saved wrongly
     (a ``/`` in a key was silently not restored from a checkpoint, a
-    NumPy or Python leaf drew the "live weights differ" warning on an
-    untouched graph, a NaN made the FMU refuse its own snapshot) or
-    failed deep inside ``compile()`` with an unrelated message."""
+    NumPy or Python leaf drew the "live weights differ" warning on a graph
+    whose weights nobody had changed, a NaN made the FMU refuse its own
+    snapshot) or failed deep inside ``compile()`` with an unrelated
+    message."""
     tree, message = _REFUSED_TREES[case]
     gm = GraphManager()
     gm.add_node(Vec("a", 1.0))
@@ -1434,8 +1470,8 @@ def weights_of_tree(slot: dict) -> dict:
 def test_every_allowed_weight_shape_steps_and_is_restored_by_a_checkpoint(
         graph, request, tmp_path):
     """A scalar, a vector, a matrix, a rank-3 array, an empty array, a
-    16-bit float -- and no weights at all: each steps, and a checkpoint
-    puts every leaf back bit for bit under its own name."""
+    16-bit float (float16) -- and no weights at all: each steps, and a
+    checkpoint puts every leaf back bit for bit under its own name."""
     gm = request.getfixturevalue(graph)
     gm.reset_state()
     gm.reset_params()
@@ -1473,6 +1509,33 @@ def test_a_moved_weight_of_any_allowed_shape_draws_the_live_weights_warning(shap
         with pytest.warns(UserWarning, match=rf"live mapping weights \['{name}'\]"):
             shaped._warn_about_unsaved_mapping_weights()
     shaped.reset_params()
+
+
+def test_an_edit_of_the_live_weights_does_not_reach_the_table_a_mapping_keeps():
+    """``gm.params["mappings"][edge.key]`` is the graph's own copy.  A
+    mapping may hand out the dict it keeps (this one does); kept by
+    reference, an in-place edit of the live weights rewrote the mapping's
+    own, so ``reset_params()`` restored the edit and ``to_dict()`` compared
+    the live weights with themselves and never warned."""
+    kept = {"H": jnp.eye(3, dtype=_F32), "gain": jnp.asarray(2.0, _F32)}
+    mapping = _Bare(kept)
+    assert mapping.params_pytree() is kept
+    gm = _vectors(mapping)
+    gm.compile()
+    live = gm.params["mappings"]["a.v->b.inp"]
+    assert live is not kept and live == kept
+    live["H"] = 5.0 * live["H"]                               # as a fit leaves it
+    live["gain"] = jnp.asarray(-1.0, _F32)
+    assert float(kept["H"][0, 0]) == 1.0 and float(kept["gain"]) == 2.0
+    with pytest.warns(UserWarning, match=r"live mapping weights \['H', 'gain'\]"):
+        gm._warn_about_unsaved_mapping_weights()
+    gm.reset_params()
+    restored = gm.params["mappings"]["a.v->b.inp"]
+    assert restored is not kept
+    assert_same_weights(restored, weights_of_tree(kept))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        gm._warn_about_unsaved_mapping_weights()
 
 
 @pytest.mark.parametrize("graph", ["shaped", "weightless"])

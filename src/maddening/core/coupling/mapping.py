@@ -44,6 +44,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 import math
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 

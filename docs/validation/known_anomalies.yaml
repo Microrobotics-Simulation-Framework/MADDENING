@@ -12122,3 +12122,90 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null
+
+  - anomaly_id: "MADD-ANO-174"
+    title: "A hand-written Mapping class's weight table was kept by reference and unchecked: an edit of gm.params rewrote the mapping, and a weight could be silently left out of a restore"
+    description: >
+      `add_edge(mapping=)` takes any object with the members of the `Mapping`
+      protocol, and at compile time the graph stored whatever its
+      `params_pytree()` returned as `gm.params["mappings"][edge.key]` -- the
+      returned object itself, with no check of what it held.  Every reader
+      of that entry (checkpoints, `POST /checkpoint/load`, `sysid`, the FMU
+      state archive, `to_dict()`'s "live weights differ" warning) takes it
+      for the graph's own flat table of floating-point arrays, which is what
+      the built-in `StaticLinearMapping` returns.  A class of the caller's
+      own could return something else, and nothing said so.  Measured on
+      release/0.4.0 at a7e69509 with three-point vector nodes (CPU, jaxlib
+      0.11.0):
+
+      * **a table the mapping keeps.**  A mapping that returns the dict it
+        holds had it aliased into `gm.params`.  Writing a fitted weight
+        there (`gm.params["mappings"][key]["H"] = 5 * H`) changed the
+        mapping's own `params_pytree()["H"]` from 1.0 to 5.0, so
+        `to_dict()` compared the live weights with themselves and did not
+        warn that the config would drop them, and `reset_params()` left the
+        graph at 5.0;
+      * **a weight name holding `/`.**  `save_state` wrote the leaf as
+        `_params_mappings/<edge>/a/b` and `load_state` split the name at the
+        last `/`, took `<edge>/a` for an edge it did not know and skipped
+        it: a checkpoint saved at 5.0 left the weight at 1.0, with no error;
+      * **a NumPy or Python-number weight.**  The live leaf was coerced to
+        the graph's precision while `params_pytree()` kept returning the
+        original, so `to_dict()` warned that the live weights differed on a
+        graph whose weights nobody had changed (a Python float after the
+        first step; a NumPy float64 matrix after the graph's own checkpoint
+        was loaded, which also rounded it to float32);
+      * **a NaN weight.**  The FMU sidecar refused the snapshot it had just
+        handed out ("value must be finite");
+      * **a nested table.**  `compile()` failed with `ValueError: entry not
+        a 2- or 3- tuple`, naming neither the edge nor the mapping.
+
+      Interface mappings are new in 0.4.0, so no release carried any of
+      this, and the built-in mappings were never affected.  Found while
+      opening the mapping kinds to registration (`register_mapping`), by
+      probing each reader of `params["mappings"]` with a hand-written class.
+
+      Resolved in 0.4.0: the snapshot copies each mapping's table, and
+      `add_edge` refuses, with a `ValueError` naming the edge and the entry,
+      a mapping of any class other than `StaticLinearMapping` whose
+      `params_pytree()` is not a plain dict from Python identifiers to
+      concrete, finite, floating-point JAX arrays, the same on two calls.
+      An empty dict (a mapping without weights) and a leaf of any shape are
+      accepted, and hold on every reader.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Two of the five were silent wrong results, which are never minor: a
+      graph restored from its own checkpoint ran on weights the checkpoint
+      did not hold, and a fit's weights were dropped by a config round trip
+      with the one warning that protects them suppressed.  Not `critical`:
+      each needs a mapping class the caller wrote, returning a table the
+      built-in class never returns.  `context_dependent` because what the
+      mapped interface carries is the model's.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.add_edge"
+      - "maddening.core.graph_manager.GraphManager"
+      - "maddening.core.coupling.mapping.Mapping"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: return a new dict of JAX floating-point arrays from
+      `params_pytree()` on every call, and name weights with identifiers.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      `StaticLinearMapping` is not asked, so what its matrix may hold is
+      unchanged: an integer or boolean matrix is accepted (a fit refuses to
+      train one), and a NaN in a matrix still makes the FMU refuse its own
+      snapshot.  The contract is checked where an edge is added; a mapping
+      that changes its table afterwards is not seen.  A sharded graph and
+      16-bit weights of a registered kind are not exercised.
+    verification:
+      - "tests/core/test_mapping_registry.py::test_an_edit_of_the_live_weights_does_not_reach_the_table_a_mapping_keeps"
+      - "tests/core/test_mapping_registry.py::test_add_edge_refuses_a_mapping_whose_params_pytree_a_reader_could_not_walk"
+      - "tests/core/test_mapping_registry.py::test_a_traced_weight_is_refused_as_traced"
+      - "tests/core/test_mapping_registry.py::test_every_allowed_weight_shape_steps_and_is_restored_by_a_checkpoint"
+      - "tests/core/test_mapping_registry.py::test_the_fmu_state_archive_carries_every_allowed_weight_and_installs_none"
+      - "tests/core/test_mapping_registry.py::test_a_static_linear_mapping_is_not_asked_and_takes_what_it_always_took"
+      - "tests/core/test_registered_mapping_in_every_domain.py::test_a_weight_that_is_not_a_finite_floating_jax_array_is_refused_in_float64_too"
+    github_issue: null

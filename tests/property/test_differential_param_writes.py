@@ -267,15 +267,29 @@ def test_a_heat_diffusivity_written_past_the_fourier_limit_is_refused_or_reloads
     check_params_write(gm, REGISTRY, "rod", {"thermal_diffusivity": jnp.float32(0.6 / 256)})
 
 
-def test_a_rod_length_under_a_mapping_reference_runs_as_its_reload():
+@pytest.mark.parametrize("kind", ["rbf", "inverse_distance"])
+def test_a_rod_length_under_a_mapping_reference_runs_as_its_reload(kind):
     """A ``gm.params`` length for a uniform rod whose ``grid_x`` an interface
     mapping references used to be computed with (the rod on the new length,
     the mapping on the old grid's weights) and saved as a config that did not
-    load.  Refused at the next run and by ``to_dict()`` now."""
+    load.  Refused at the next run and by ``to_dict()`` now -- for the
+    built-in RBF mapping and for one of a registered kind alike."""
     from tests.property.test_differential_rest_params import rods_mapped_by_grid
 
-    gm = rods_mapped_by_grid()
+    gm = rods_mapped_by_grid(kind)
     assert check_params_write(gm, REGISTRY, "a", {"length": jnp.float32(1.5)}) == "refused"
+
+
+@pytest.mark.parametrize("kind", ["rbf", "inverse_distance"])
+def test_a_calibration_of_a_mapped_rod_runs_as_its_reload(kind):
+    """The write the refusal must leave alone: a constant of a mapped rod
+    that moves no referenced point set is computed with, saved and
+    reloaded, with the mapping's weights carried by the checkpoint."""
+    from tests.property.test_differential_rest_params import rods_mapped_by_grid
+
+    gm = rods_mapped_by_grid(kind)
+    assert check_params_write(
+        gm, REGISTRY, "a", {"thermal_diffusivity": jnp.float32(0.004)}) == "accepted"
 
 
 # ---------------------------------------------------------------------------

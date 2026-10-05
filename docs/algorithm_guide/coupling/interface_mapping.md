@@ -128,10 +128,12 @@ stage (`save_graph_to_usd`, attribute `maddening:mappingSpecJson`) as its
                                          "sha256": "ba24aeb27cac..."}}}
 ```
 
-`kind` names the factory, the flat keys are its hyper-parameters
-(`shape` is informational and checked on reload), and `points` maps each
-array argument of the factory (`source_points` / `target_points`,
-`source_boundaries` / `target_boundaries`, `H`) to a **point reference**.
+`kind` names the factory -- one of the four above, or a kind you
+[registered yourself](#registering-your-own-mapping-kind) -- the flat keys
+are its hyper-parameters (`shape` is informational and checked on reload),
+and `points` maps each array argument of the factory (`source_points` /
+`target_points`, `source_boundaries` / `target_boundaries`, `H`) to a
+**point reference**.
 Hyper-parameters are type-checked on the way in and out: `epsilon` and
 `ridge` must be finite reals (a config must stay valid JSON — no
 `Infinity`), `polynomial` a bool, `kernel` / `mode` / `label` strings.
@@ -287,8 +289,9 @@ a larger one leaves the mapping usable but **not serialisable**:
 `gm.to_dict()` and `save_graph_to_usd` refuse with a message naming the
 argument to pass (`gm.to_dict(strict_mappings=False)` still describes it,
 for display — the REST `GET /graph` uses that).  A hand-built
-`StaticLinearMapping` or a custom `Mapping` object has no spec and is
-refused the same way.
+`StaticLinearMapping` or a custom `Mapping` object that carries no spec
+is refused the same way; to make a mapping of your own serialisable,
+[register its kind](#registering-your-own-mapping-kind).
 
 ### References are checked against the points they describe
 
@@ -335,6 +338,165 @@ on an edge.
 Still planned for 0.5.0: matrix-free mappings for moving interfaces
 (`geom`), Wendland / partition-of-unity sparsity, and
 scaled-consistent / nearest-projection variants.
+
+## Registering your own mapping kind
+
+*Experimental in 0.4.0: `register_mapping` may change in a minor release.*
+
+The four kinds above are entries of one registry
+(`maddening.core.coupling.mapping_registry`), and `register_mapping` adds
+yours to it.  A mapping of a registered kind is written by `to_dict()`
+and `save_graph_to_usd` and rebuilt by `from_dict()` and
+`load_graph_from_usd` exactly as a built-in one is: the recipe travels,
+the weights are recomputed bit for bit by your factory.
+
+```python
+import json
+
+import jax.numpy as jnp
+import numpy as np
+
+from maddening.core.coupling.mapping import StaticLinearMapping, register_mapping
+from maddening.core.coupling.mapping_spec import MappingSpec, reference_for_array
+from maddening.core.graph_manager import GraphManager
+from maddening.nodes.heat import HeatNode
+
+
+@register_mapping(
+    "inverse_distance",
+    arrays=("source_points", "target_points"),
+    hyperparameters={"power": float, "normalise": bool},
+    references={"source_points": "source_ref", "target_points": "target_ref"},
+)
+def inverse_distance_mapping(source_points, target_points, *, power=2.0,
+                             normalise=True, source_ref=None, target_ref=None):
+    """Each target value is a distance-weighted mean of the source values."""
+    src = np.asarray(source_points, dtype=np.float64).reshape(-1, 1)
+    tgt = np.asarray(target_points, dtype=np.float64).reshape(-1, 1)
+    weights = 1.0 / (1.0 + np.abs(tgt - src.T) ** power)
+    if normalise:
+        weights = weights / weights.sum(axis=1, keepdims=True)
+    spec = MappingSpec(
+        "inverse_distance",
+        {"power": float(power), "normalise": bool(normalise)},
+        {"source_points": reference_for_array(source_points, source_ref,
+                                              name="source_points"),
+         "target_points": reference_for_array(target_points, target_ref,
+                                              name="target_points")},
+    )
+    return StaticLinearMapping(jnp.asarray(weights, dtype=jnp.float32),
+                               kind="inverse_distance", spec=spec)
+
+
+gm = GraphManager()
+gm.add_node(HeatNode("coarse", 1e-4, n_cells=6, thermal_diffusivity=0.1))
+gm.add_node(HeatNode("fine", 1e-4, n_cells=12, thermal_diffusivity=0.1))
+x_coarse = gm.get_node("coarse").static_data["grid_x"].value
+x_fine = gm.get_node("fine").static_data["grid_x"].value
+gm.add_edge("coarse", "fine", "temperature", "heat_source",
+            mapping=inverse_distance_mapping(
+                x_coarse, x_fine, power=3.0,
+                source_ref={"node": "coarse", "field": "grid_x"},
+                target_ref={"node": "fine", "field": "grid_x"}))
+gm.compile()
+
+config = json.loads(json.dumps(gm.to_dict()))
+stored = config["edges"][0]["mapping"]
+assert stored["kind"] == "inverse_distance" and stored["power"] == 3.0
+assert "H" not in stored                      # the recipe, never the weights
+
+reloaded = GraphManager.from_dict(config, {"HeatNode": HeatNode})
+reloaded.compile()
+key = "coarse.temperature->fine.heat_source"
+assert np.array_equal(np.asarray(reloaded.params["mappings"][key]["H"]),
+                      np.asarray(gm.params["mappings"][key]["H"]))
+```
+
+What the declaration says:
+
+* **`arrays`** -- the factory's array arguments, the point sets or
+  matrices a spec refers to by [reference](#point-references).
+* **`hyperparameters`** -- every other argument a spec may carry, with
+  its type: `str`, `bool` or `float`.  `float` is a real number: a finite
+  `int` or `float` that is not a `bool`, handed to the factory as a
+  `float` (an integer setting is declared `float` and converted in the
+  factory).  A spec's hyper-parameters are checked against these
+  declarations **before** your factory is called, as the built-in ones
+  are, and an unknown one is refused.  The names `kind`, `points`,
+  `shape` and `label` are reserved.
+* **`references`** -- for each array, the factory keyword that carries
+  its reference (`"<array>_ref"` when omitted).
+
+The rebuild calls `factory(**arrays, **hyperparameters, **references)`.
+The declaration is checked against the factory's signature when it is
+registered, so a misspelt name fails at the decorator rather than while
+someone loads a config.  A kind name is any non-empty string; registering
+a name that is taken -- a built-in kind, or another factory's -- is a
+`ValueError`, registering the same factory again with the same
+declaration is a no-op, and nothing removes a kind.
+
+**What the factory returns** is checked when a spec is rebuilt:
+
+* a `Mapping` whose `kind` is the registered kind;
+* carrying, as `.spec`, a `MappingSpec` of that kind which records the
+  references and the hyper-parameters it was given.  Build each reference
+  with `reference_for_array(array, reference, name=...)`, passing the
+  array **as you received it** (its content hash covers the dtype, so
+  hash it before any conversion) and the reference keyword through;
+* whose `params_pytree()` meets the contract below.
+
+The short way is to return a `StaticLinearMapping`, as above: a dense
+matrix whose one weight is `H`.  Pass `kind=` (left at its default, the
+mapping would be written as a `matrix`; `to_dict()` refuses that).  A
+class of your own needs the members of the `Mapping` protocol and a
+`spec` attribute, and no `describe()` method: the edge writes the spec
+for you.
+
+### What `params_pytree()` may contain
+
+The graph snapshots `mapping.params_pytree()` into
+`gm.params["mappings"][edge.key]`, and checkpoints, `POST
+/checkpoint/load`, system identification, the FMU's state archive and
+`to_dict()`'s "live weights differ" warning all read that entry as a flat
+table of arrays.  For a mapping of any class other than
+`StaticLinearMapping`, `add_edge` therefore refuses, with a `ValueError`
+naming the edge, a `params_pytree()` that is not
+
+* a plain `dict` -- empty for a mapping without weights;
+* keyed by Python identifiers (a key is a member name in a checkpoint
+  archive and a key of a config's `param_specs`);
+* holding under each key one concrete JAX array of a floating-point
+  dtype, of any shape, all finite -- not a nested container, not a NumPy
+  array or a Python number (`jnp.asarray(value)` gives it a dtype that no
+  longer depends on `jax_enable_x64`), not an integer or complex array.
+  Indices and other structure stay attributes of the mapping, outside the
+  parameter tree;
+* the same on every call: it is what `reset_params()` restores and what
+  `to_dict()` compares the live weights with.
+
+Every weight is frozen by default and opts in to a fit by name
+(`gm.set_param_spec(edge.key, "<weight>", ParamSpec())`), is carried by a
+checkpoint under its own name, and is fixed in an exported FMU, like `H`.
+
+### A file can only name a kind
+
+A config, a USD stage and a checkpoint are untrusted input.  All one of
+them can say about a mapping is the name of its kind, which is looked up
+in the registry and nowhere else: nothing imports a module, follows a
+dotted path or discovers an entry point because of what a file contains.
+A kind exists only because the running program imported the code that
+registered it.  A file naming a kind this process has not registered is
+a `MappingRebuildError` listing the registered kinds; import the module
+that registers it, then load.
+
+The limits on [point references](#point-references) -- the asset size
+cap, the inline limits, the accepted dtypes, the containment of asset
+paths in the config directory, the content hash -- are enforced by the
+reference resolver before a factory runs, so they hold for a registered
+kind exactly as for a built-in one.  Whatever a registered factory
+raises, `from_dict` and `load_graph_from_usd` report as a
+`MappingRebuildError` naming the edge and the kind, with the factory's
+exception chained as `__cause__`.
 
 ## Legacy closures
 

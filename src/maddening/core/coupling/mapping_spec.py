@@ -173,7 +173,7 @@ import stat
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 import numpy as np
 
@@ -1354,7 +1354,7 @@ def _mapping_config_dict(mapping: Any) -> dict:
     """
     describe = getattr(mapping, "describe", None)
     if callable(describe):
-        return describe()
+        return cast(dict, describe())
     spec = getattr(mapping, "spec", None)
     if isinstance(spec, MappingSpec):
         return {**spec.to_dict(),

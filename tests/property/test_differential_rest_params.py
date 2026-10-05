@@ -289,11 +289,17 @@ def test_a_rest_reset_of_a_diagnostics_group_answers_like_the_in_process_reset()
         assert client.get("/graph/state").status_code == 200
 
 
-def rods_mapped_by_grid() -> GraphManager:
-    """Two uniform rods joined by an RBF mapping whose point sets are
-    references to each rod's ``grid_x`` -- the form ``to_dict`` re-resolves
-    and hash-checks.  ``grid_x`` is built from ``length`` when a rod is
-    constructed.
+#: The mapping kinds the mapped-rod oracles run under: the built-in RBF,
+#: and a kind registered the way another library registers one
+#: (``tests/registered_mapping_kinds.py``; a mapping class of its own).
+MAPPED_ROD_KINDS = ("rbf", "inverse_distance")
+
+
+def rods_mapped_by_grid(kind: str = "rbf") -> GraphManager:
+    """Two uniform rods joined by a mapping of *kind* (RBF by default) whose
+    point sets are references to each rod's ``grid_x`` -- the form
+    ``to_dict`` re-resolves and hash-checks.  ``grid_x`` is built from
+    ``length`` when a rod is constructed.
 
     The mapping is built from ``grid_x`` *as the rod holds it* (float32): a
     reference's recorded hash covers the dtype, so points widened to float64
@@ -303,7 +309,9 @@ def rods_mapped_by_grid() -> GraphManager:
     """
     from maddening.core.coupling.mapping import rbf_mapping
     from maddening.nodes import HeatNode
+    from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
 
+    make = rbf_mapping if kind == "rbf" else REGISTERED_KINDS[kind].build
     gm = GraphManager()
     a = HeatNode("a", 0.01, n_cells=6, length=1.0, thermal_diffusivity=0.005,
                  initial_temperature=np.linspace(1.0, 2.0, 6).tolist())
@@ -311,7 +319,7 @@ def rods_mapped_by_grid() -> GraphManager:
                  initial_temperature=0.5)
     gm.add_node(a)
     gm.add_node(b)
-    gm.add_edge("a", "b", "temperature", "heat_source", mapping=rbf_mapping(
+    gm.add_edge("a", "b", "temperature", "heat_source", mapping=make(
         np.asarray(a.static_data["grid_x"].value),
         np.asarray(b.static_data["grid_x"].value),
         source_ref={"node": "a", "field": "grid_x"},
@@ -320,11 +328,12 @@ def rods_mapped_by_grid() -> GraphManager:
     return gm
 
 
-def test_the_mapped_rods_save_and_reload_before_any_write():
+@pytest.mark.parametrize("kind", MAPPED_ROD_KINDS)
+def test_the_mapped_rods_save_and_reload_before_any_write(kind):
     """The fixture can express the defect: unwritten, the graph saves, its
     config reloads, and the reload steps bit for bit as the original -- so a
     refusal or a disagreement below is the write's."""
-    gm = rods_mapped_by_grid()
+    gm = rods_mapped_by_grid(kind)
     gm.run(WARM_STEPS)
     config = json.loads(json.dumps(gm.to_dict(), allow_nan=True))
     with tmp_dir() as tmp:
@@ -335,14 +344,15 @@ def test_the_mapped_rods_save_and_reload_before_any_write():
                            what="mapped rods against their reload")
 
 
-def test_a_rod_length_under_a_mapping_reference_is_refused_or_runs_as_its_reload():
+@pytest.mark.parametrize("kind", MAPPED_ROD_KINDS)
+def test_a_rod_length_under_a_mapping_reference_is_refused_or_runs_as_its_reload(kind):
     """Found while widening the generated writes to geometry: ``length`` is a
     live leaf of a uniform rod (its step reads it), so every check the route
     made passed and it answered 200; ``grid_x`` is derived from it at
     construction and never rebuilt, the mapping's ``MappingSpec`` points at
     ``grid_x``, and the running graph kept the old grid's weights while the
     saved config no longer loaded.  Refused now, naming the mapped edge."""
-    gm = rods_mapped_by_grid()
+    gm = rods_mapped_by_grid(kind)
     with tmp_dir() as root:
         assert check_rest_write(gm, REGISTRY, "a", Write("geometry", {"length": 1.5}),
                                 root=root) == "refused"

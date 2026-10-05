@@ -747,6 +747,10 @@ same field pair (two additive contributions) gets its own slot,
 `"...#1"`, `"...#2"`, so the two never share weights.  They are `trainable=False`
 by default (an interface operator is geometry, not a physical constant);
 a learned edge opts in with `gm.set_param_spec(edge.key, "H", ParamSpec())`.
+`H` is the one weight of the built-in dense mappings; a mapping of a
+[registered kind](../algorithm_guide/coupling/interface_mapping.md#registering-your-own-mapping-kind)
+names its own weights, each a floating-point array under an identifier,
+and what it may put here is checked when its edge is added.
 See the [interface mapping guide](../algorithm_guide/coupling/interface_mapping.md).
 A config (`to_dict`, USD) stores the mapping's *recipe* (`MappingSpec`:
 kind, hyper-parameters, point references) and rebuilds the weights on

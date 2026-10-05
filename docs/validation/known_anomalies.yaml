@@ -1929,6 +1929,17 @@ anomalies:
       every node, including `BallNode` and `SpringDamperNode`, which
       MADD-ANO-013 does not name.
 
+      (4) Resolved for `SpringDamperNode` in 0.4.0 (B1 round-8 claims audit,
+      2026-10-03): the parameter guide's system-identification recipe and the
+      sysid demo run on this node, and under x64 both raised the carry
+      `TypeError` above (`run_scan_with_history`, `run_sweep`).  Its
+      `initial_state` now seeds position and velocity in the dtype `update`
+      produces from the node's constants -- `jnp.result_type(float32,
+      *params_pytree())`: float64 under x64 for constants given as Python
+      floats, float32 for constants given as float32, float32 with x64 off as
+      before -- so a freshly compiled spring graph scans under x64, in float64
+      when its constants are.  The other nodes named below still seed float32.
+
       Severity.  Recorded `minor` rather than `major`, on three grounds, each
       checked rather than assumed.  The graph-level failure is loud: a
       `TypeError` on the first scan, before any number is produced, naming the
@@ -1974,7 +1985,6 @@ anomalies:
       - "maddening.core.graph_manager.GraphManager.run_sweep"
       - "maddening.core.node.SimulationNode.params_pytree"
       - "maddening.nodes.ball.BallNode.initial_state"
-      - "maddening.nodes.spring.SpringDamperNode.initial_state"
       - "maddening.nodes.lbm.LBMNode.initial_state"
       - "maddening.core.simulation.implicit.implicit_euler_step"
       - "maddening.core.simulation.integrators.integrate_node"
@@ -2000,11 +2010,21 @@ anomalies:
       hand it: `implicit_euler_step(node.implicit_residual, jax.tree.map(
       lambda v: v.astype(jnp.float64), state), bi, dt)` solves in float64.
       Leaving `jax_enable_x64` off is the fourth option and the supported one.
-    resolution_status: "open"
-    resolution_version: null
-    residual_risk: null
+    resolution_status: "partially_resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Only the spring's surface is resolved.  Every other node that seeds its
+      state in float32 -- `BallNode`, `RigidBodyNode`, `RigidBody2DNode`,
+      `LBMNode` and any user node written the same way -- still refuses a
+      graph scan under x64 on a freshly compiled graph, `step()` still
+      promotes such a seed silently, and `implicit_euler_step` and the
+      `update` / `integrate_node` dtype divergence are unchanged; the
+      workarounds above apply to them as before.  A spring whose constants
+      mix float32 and float64 seeds float64 and runs in float64.
     verification:
       - "tests/core/test_x64_graph_scan_limitation.py"
+      - "tests/core/test_x64_graph_scan_limitation.py::TestTheSpringSeedsItsStateInItsConstantsDtype::test_python_float_constants_scan_in_float64_under_x64"
+      - "tests/core/test_x64_graph_scan_limitation.py::TestTheSpringSeedsItsStateInItsConstantsDtype::test_float32_constants_keep_a_float32_scan_under_x64"
       - "tests/core/test_x64_graph_scan_limitation.py::TestTheSolverPathsUnderX64::test_implicit_euler_step_refuses_a_float32_state_whatever_the_params"
       - "tests/core/test_x64_graph_scan_limitation.py::TestTheSolverPathsUnderX64::test_update_and_integrate_node_disagree_in_dtype_but_not_in_value"
       - "tests/core/test_coupling_accelerators_under_x64.py::test_a_float32_group_steps_and_scans_under_x64"
@@ -11588,7 +11608,6 @@ anomalies:
       - "tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_the_checked_state_keeps_its_partitioning"
       - "tests/cloud/multigpu/test_strict_convergence_on_a_multi_device_step.py::test_a_converged_strict_step_with_a_sharded_member_is_the_unchecked_step"
     github_issue: null
-
   - anomaly_id: "MADD-ANO-163"
     title: "POST /checkpoint/load restored parameter values PUT /graph/params refuses -- past a node's constructor limit, outside a ParamSpec's bounds, non-finite, a boolean, a numeric string -- answered 200, and left a graph whose save did not reload and whose steps diverged"
     description: >
@@ -12121,4 +12140,236 @@ anomalies:
       simulation that diverges under `run_adaptive` hangs.
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-174"
+    title: "fit_lm reported converged=True at a wrong point, or at its unmoved start, for a float32 residual or parameter far from unit scale; fit returned its start"
+    description: >
+      In float32, `fit_lm` formed its loss `0.5 * sum(r * r)`, its normal
+      matrix `A = JᵀJ` and gradient `g = Jᵀr` in the working precision, and
+      XLA's CPU backend flushes a product below `tiny` to zero (and
+      overflows one above `max`).  On a noiseless, well-conditioned linear
+      least-squares problem `r = s (A x - y)`, whose solution and iterates
+      are independent of `s`: at `s = 1e-18` and `1e-19` it returned a point
+      2% and 7% off, and at `1e-20` its unmoved start, every time with
+      `converged=True`, `best_loss` `0.0` and no warning.  An identity-
+      transform parameter whose natural scale is `1e-23` (the parameter
+      guide's own example, a 10 nm particle's volume in cubic metres) or
+      `1e23` had `diag(A)` flush to 0 (floored to 1) or overflow to `inf`;
+      the Marquardt solve moved it by nothing, the equilibrated
+      Gauss-Newton stationarity test dropped its column (norm 0 or `inf`),
+      and the fit returned it unmoved, the other parameter compensating,
+      `converged=True`, `best_loss` 5.35 against a minimum of 0, full
+      `excited_rank`.  `fit` (Adam) returned its start at `s = 1e-19`: its
+      gradient's backward products flushed and the gradient read zero.
+      Found by the B1 round-8 claims audit (SYS-083, SYS-084, SYS-088, on
+      d2429a6), with two related round-8 findings resolved by the same
+      change: at the float32 floor `fit_lm`'s `converged` flipped with an
+      identity parameter's units (its damped candidates' rounding) and with
+      the sign of an on-bound gradient's rounding, and with float32 leaves
+      in an x64 graph it took five times the iterations, some runs
+      unconverged.  No tagged release carried it: `maddening.sysid` is new
+      in 0.4.0.  Resolved in 0.4.0 (2026-10-03): the loss is computed on
+      the residual framed by a power of two and unframed in float64; both
+      solves frame every Jacobian column and the residual by powers of two
+      (exact) and unframe the step; `fit_lm` never reports `converged` on a
+      solve with an unrepresentable live column or on a zero loss from a
+      nonzero residual (it warns); the floor rule takes an undamped
+      Gauss-Newton step that still lowers the loss; an on-bound gradient
+      whose own Newton step is within `step_tol` counts as zero; a
+      narrower leaf's coordinate stays on its leaf's grid; and `fit` and
+      `fit_multiple_shooting` take a flushed gradient with a power-of-two
+      cotangent.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: parameters returned away from the optimum, or unfitted, with
+      `converged=True` and a loss reading zero, and no warning.  Graded
+      `major` under the 0.4.0 severity definition (a silent wrong result is
+      never `minor`) and registered although no release carried it,
+      because it is major.  Not `critical`: it needs a residual or a
+      parameter some 18 decades from unit scale in float32.
+      `context_dependent` because what a misidentified constant does
+      depends on the model.
+    affected_components:
+      - "maddening.sysid.fit_lm"
+      - "maddening.sysid.fit"
+      - "maddening.sysid.fit_multiple_shooting"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The range is the working precision's: a Jacobian entry that is itself
+      not a normal number (a residual of `1e-30` and a parameter at `1e30`
+      together, in float32) is lost before any fitter sees it, and is read
+      as a parameter the residual does not depend on; and a residual whose
+      own rounding at the optimum is not a normal number (scale below about
+      `1e-31` in float32) is flushed to an exact zero there, which reads as
+      an exact fit.  A float64 residual
+      whose `0.5 ||r||²` leaves float64's range (above about `1e153`) has no
+      loss to report and is refused as non-finite; below about `1e-162`
+      it reads `0.0` and is not called converged.  `fit`'s loss is the
+      caller's: its value can still flush to `0.0`, which is warned about
+      and does not meet `tol`, and one that overflows is refused.  The
+      Marquardt solve on equilibrated columns pivots differently, so an
+      ordinary fit's iterates move in their last bits.
+    verification:
+      - "tests/property/test_sysid_truth_recovery.py::test_fit_lm_recovers_the_truth_at_every_residual_scale"
+      - "tests/property/test_sysid_truth_recovery.py::test_fit_lm_recovers_the_truth_at_every_parameter_scale"
+      - "tests/property/test_sysid_truth_recovery.py::test_fit_recovers_the_truth_at_every_residual_scale"
+      - "tests/property/test_sysid_truth_recovery.py::test_fit_recovers_the_truth_at_every_parameter_scale"
+      - "tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual"
+      - "tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_never_converges_on_a_solve_it_could_not_form"
+      - "tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_loss_that_underflows_float64_is_never_converged"
+      - "tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_verdict_does_not_depend_on_a_parameters_units"
+      - "tests/core/test_sysid_fit_lm_step_tol.py::test_a_truth_on_either_bound_converges"
+      - "tests/core/test_sysid_claims_under_x64.py::test_float32_constants_in_an_x64_graph_converge_as_fast_as_float64_ones"
+      - "tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-175"
+    title: "node.params writes that never reached gm.params: every write into a replaced mapping, and an in-place element write to a list or array"
+    description: >
+      A `node.params` write reaches the graph at the next read of
+      `gm.params`, run or compile -- a counted write to the node's
+      `_ParamsDict`, or the mapping replaced.  Two writes went through
+      neither.  (A) The idiom `node.params = {**node.params, "k": v}` stored
+      a plain `dict`: the replacement itself was taken in, but every later
+      write into it was lost -- `gm.params`, every run, `compile()` and
+      `to_dict()` kept the old value, and `to_dict()` wrote it over the
+      node's own in the saved configuration.  (B) An element written in
+      place into a list-valued parameter (`node.params["rates"][0] = 5.0`;
+      lists of numbers are parameter leaves) goes through no method of the
+      mapping, and the `_ParamsDict` docstring's "the graph also compares
+      values" was untrue: the write was lost the same way, and a NumPy
+      array or a nested structural `dict` the same.  Found by the B1
+      round-8 claims audit (SYS-115, on d2429a6).  No tagged release
+      carried it: the parameter pytree is new in 0.4.0.  Resolved in 0.4.0
+      (2026-10-03): `SimulationNode.params` is a property whose setter
+      stores any mapping in a fresh `_ParamsDict` (one already counting is
+      kept), and the sync compares every list, array and nested dict value
+      bit for bit with a copy taken at the last sync, so an in-place write
+      is a write of its key.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: the graph ran, and saved, a constant other than the one the
+      node held, with no error.  Graded `major` under the 0.4.0 severity
+      definition (a silent wrong result).  Not `critical`: it needs one of
+      two spellings of a write, and the documented one (`node.params[key] =
+      value`) was unaffected.  `context_dependent` because what a stale
+      constant does depends on the model.
+    affected_components:
+      - "maddening.core.node.SimulationNode"
+      - "maddening.core.graph_manager.GraphManager.params"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A reference to the dict that was assigned is not `node.params`: writes
+      through it reach neither the node nor the graph (write through
+      `node.params`).  The in-place comparison costs a copy and a comparison
+      of each mutable value per sync, so a large NumPy array held in
+      `node.params` is copied once per sync; a value that cannot be copied
+      is not compared.  `node.__dict__["params"]` assigned directly
+      bypasses the setter.
+    verification:
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_replaced_mapping_counts_the_writes_made_into_it_afterwards"
+      - "tests/core/test_node_params_writes_are_observed.py::test_a_replaced_mapping_with_no_later_write_reaches_the_graph"
+      - "tests/core/test_node_params_writes_are_observed.py::test_assigning_node_params_stores_a_counting_mapping"
+      - "tests/core/test_node_params_writes_are_observed.py::test_an_in_place_write_into_a_parameter_reaches_every_reader"
+      - "tests/core/test_node_params_writes_are_observed.py::test_an_in_place_write_into_a_structural_value_recompiles"
+      - "tests/core/test_node_params_writes_are_observed.py::test_an_unchanged_mutable_value_is_not_a_write"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-176"
+    title: "fim and fim_core reported rank 0 silently when F = J^T J flushed to exactly zero from a Jacobian that was not"
+    description: >
+      `fim` flags a rank decided below the range `F` can be formed in
+      (MADD-ANO-152): a cutoff `rank_rtol * max(eigvals)` under `2 * m *
+      tiny`.  Taken to the end, every product `J_ij * J_ik` flushes -- in
+      float32 at `|J|` near `1e-20` -- and `F` is exactly zero although `J`
+      is not; the cutoff is then 0 and `rank` reads 0.  The flag exempted a
+      largest eigenvalue that is not positive, so on a residual of exact
+      rank 2 (and on a full-rank one) at that scale `fim` returned rank 0 of
+      3, every `crb` `inf`, with no `PrecisionLimitWarning`, and `fim_core`
+      returned `precision_limited=False` -- a gate reading "verdict
+      available: nothing is determined".  Found by the B1 round-8 claims
+      audit (SYS-129, on d2429a6).  No tagged release carried it:
+      `maddening.sysid` is new in 0.4.0.  Resolved in 0.4.0 (2026-10-03):
+      a largest eigenvalue that is not positive from a `J` with a nonzero
+      entry is flagged on both paths (a `PrecisionLimitWarning` saying `F`
+      came out zero; `precision_limited`), whatever `rank_rtol` is.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent: an identifiability verdict reported as the data's when it was
+      the arithmetic's, and a live gate told the verdict was available.
+      Graded `major` under the 0.4.0 severity definition (a silent wrong
+      result).  Not `critical`: it needs a Jacobian some 20 decades below
+      unit scale in float32 (170 in float64), and the verdict it gave is
+      the fail-closed one (nothing determined).
+    affected_components:
+      - "maddening.sysid.fim"
+      - "maddening.sysid.fim_core"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Flagged, not repaired: `F`, its eigenvalues and the bounds cannot be
+      represented at that scale in that precision, so the report still
+      reads rank 0 with every `crb` `inf`, and the warning says to rescale
+      the residual or run under x64.  A `J` that is itself all zero (a
+      residual that reads no parameter) is a real rank 0 and is not
+      flagged.
+    verification:
+      - "tests/core/test_sysid_claims_edges.py::test_a_fisher_matrix_flushed_to_zero_from_a_nonzero_jacobian_warns"
+      - "tests/core/test_sysid_claims_edges.py::test_a_residual_that_reads_no_parameter_is_a_real_rank_zero"
+      - "tests/core/test_sysid_claims_under_x64.py::test_a_fisher_matrix_flushed_to_zero_warns_under_x64"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-177"
+    title: "A logit ParamSpec whose width overflows the leaf's dtype was accepted, and constrain mapped the midpoint to the upper edge and far coordinates to NaN"
+    description: >
+      `ParamSpec(bounds=(-3e38, 3e38), transform="logit")` was accepted --
+      each bound is a finite float32 and `lo < hi` -- but its maps compute
+      `hi - lo` in the leaf's dtype, where `6e38` overflows: on a float32
+      leaf `to_constrained(0.0)` returned `3.0e38` (the upper edge; the
+      midpoint is 0), `to_constrained(-100.0)` returned `NaN`, and `check`
+      refused every value, 0 included.  `gm.constrain(u)`, documented as
+      "back to physical values, always inside bounds", returned the wrong
+      values silently.  Found by the B1 round-8 claims audit (SYS-100,
+      SYS-103, SYS-104, on d2429a6).  No tagged release carried it: the
+      parameter specs are new in 0.4.0.  Resolved in 0.4.0 (2026-10-03):
+      every map, check and optimiser interval of a `log` / `logit` leaf
+      refuses, by name, a bound that is not a finite number of the leaf's
+      dtype or a `logit` width that is not a finite normal one.  The spec
+      cannot know its leaf's dtype when it is built, so the same spec
+      still maps a float64 leaf.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      Silent on the direct path: `constrain` returned wrong physical values
+      with no error (a fit refused, loudly, through `check_params`).
+      Graded `major` under the 0.4.0 severity definition (a silent wrong
+      result).  Not `critical`: it needs bounds within a factor of two of
+      float32's largest number.
+    affected_components:
+      - "maddening.core.params.ParamSpec"
+      - "maddening.core.params.constrain"
+      - "maddening.core.params.unconstrain"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Refused at the first use in a dtype that cannot hold the spec, not at
+      construction.
+    verification:
+      - "tests/core/test_param_spec_edge_cases.py::test_a_logit_width_its_dtype_cannot_hold_is_refused"
+      - "tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64"
+      - "tests/core/test_param_spec_edge_cases.py::test_a_log_bound_its_dtype_cannot_hold_is_refused"
     github_issue: null

@@ -203,11 +203,18 @@ def _checkpoint_with(gm, path, member, value):
 
 
 def test_load_state_into_a_float32_field_of_an_x64_graph_refuses_what_float32_cannot_hold(tmp_path):
-    """SYS-123 with mixed dtypes: the built-in spring keeps float32 state under
-    x64, and a float64 checkpoint value it cannot hold -- ``1e39``, ``-1e-50`` --
-    is refused, leaving the graph as it was; ``1e-40`` loads with its sign."""
+    """SYS-123 with mixed dtypes: a spring whose constants are float32 keeps
+    float32 state under x64 (the built-in spring seeds its state in its
+    constants' dtype, MADD-ANO-017), and a float64 checkpoint value it cannot
+    hold -- ``1e39``, ``-1e-50`` -- is refused, leaving the graph as it was;
+    ``1e-40`` loads with its sign."""
     with _x64():
-        gm = _spring_graph()
+        gm = GraphManager()
+        gm.add_node(SpringDamperNode("s", timestep=0.01, **{
+            k: np.float32(v) for k, v in dict(stiffness=10.0, damping=0.5, mass=1.0, rest_length=1.0,
+                                              initial_position=0.0,
+                                              initial_velocity=0.0).items()}))
+        gm.compile()
         assert np.asarray(gm.get_node_state("s")["position"]).dtype == np.float32
         before = np.asarray(gm.get_node_state("s")["position"]).copy()
         for value in (1e39, -1e-50):

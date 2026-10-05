@@ -5892,7 +5892,10 @@ def _write_counts(params) -> Optional[dict]:
     (``_ParamsDict._write_counts``: its own counted writes and those of the
     mappings it replaced), or ``None`` for a mapping that does not count."""
     counter = getattr(params, "_write_counts", None)
-    return counter() if callable(counter) else None
+    if not callable(counter):
+        return None
+    counts = counter()
+    return counts if isinstance(counts, dict) else None
 
 
 @stability(StabilityLevel.STABLE)

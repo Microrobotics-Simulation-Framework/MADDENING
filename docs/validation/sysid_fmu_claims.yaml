@@ -1717,8 +1717,8 @@ claims:
     a logit leaf pushed hard either way; logit bounds of any sign and size,
     an offset and a plain log leaf, bounds a few float spacings apart (the
     middle half); float32, float64 and float32 leaves in an x64 graph. The
-    margin is where the fit ends, not a tolerance on the answer: SYS-134
-    is the warning a fit that ends there gives, SYS-133 the way back. Not
+    margin is where the fit ends, not a tolerance on the answer: SYS-145
+    is the warning a fit that ends there gives, SYS-144 the way back. Not
     claimed for 16-bit floats.
   oracle: >-
     the returned values strictly inside their bounds, and on the margin
@@ -1736,7 +1736,7 @@ claims:
     asked that a fit "stays inside", which a fit trapped on that edge does.
     The interval now ends sqrt(eps) of the bounds' size inside each bound
     and the tests hold a pushed coordinate to that margin and to its
-    warning; coming back from the edge is SYS-133's (MADD-ANO-104).
+    warning; coming back from the edge is SYS-144's (MADD-ANO-104).
   domains:
     f32: tests/core/test_sysid_contract_examples.py::test_a_logit_leaf_pushed_either_way_finishes_inside_its_bounds
     f64: tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64
@@ -1789,7 +1789,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-133
+- id: SYS-144
   area: fit_lm
   claim: >-
     "A step of a log / logit coordinate is read along the transform's curve
@@ -1812,13 +1812,13 @@ claims:
     spacings inside each edge, the stiffness started 0.1, 0.5, 1.5, 10 and
     30 times its truth, the third leaf frozen by its spec or left out by
     mask=, float32 and float64: every cell for fit_lm (a truth on an edge
-    is recovered to the margin, with SYS-134's warning).  For fit and
+    is recovered to the margin, with SYS-145's warning).  For fit and
     fit_multiple_shooting, whose steps are not solved on a linear model and
-    are about lr whatever the gradient, the same holds on an annealed
+    are about lr however steep the loss, the same holds on an annealed
     schedule where the stiffness starts 0.1 to 1.5 times its truth -- from
     10 or 30 times too stiff the loss has other basins, which Adam in a log
     coordinate reaches and Adam in the value's own does not -- and a start
-    on an edge is named before the run (SYS-134).  A float32 leaf in an
+    on an edge is named before the run (SYS-145).  float32 leaves in an
     x64 graph per push.  Not claimed for 16-bit floats.
   oracle: >-
     differential: the same fit with the damping under the identity
@@ -1846,7 +1846,7 @@ claims:
     mixed_dtype: 'tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range[mixed-upper-edge-from-the-guides-start]'
     16bit: narrowed
     jit: n/a
-    grad: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_step_is_read_along_the_shorter_of_the_curve_and_the_tangent
+    grad: n/a
     vmap: n/a
     multi_rate: n/a
     sub_cycled: n/a
@@ -1855,7 +1855,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-134
+- id: SYS-145
   area: fitters
   claim: >-
     "a log / logit parameter cannot be fitted onto its bound: a fit that
@@ -1876,10 +1876,10 @@ claims:
     graph); a multiple-shooting run started on the edge.  The Adam fitters
     return their lowest-loss iterate, so a parameter the run's last iterate
     held on an edge is named with the value returned for it.  Read from the
-    value, in every cell of SYS-133's grid: no fit ends on an edge of its
+    value, in every cell of SYS-144's grid: no fit ends on an edge of its
     transform's range without the warning.  An Adam fit whose optimum is on
-    a bound closes on the margin without arriving (its step shrinks with
-    the gradient it remembers): it ends short of the edge, on no edge, and
+    a bound closes on the margin without arriving (its step shrinks as the
+    slope it remembers does): it ends short of the edge, on no edge, and
     is not named.  Not claimed for 16-bit floats.
   oracle: >-
     the warning's text (the fitter, the parameter, which edge, the
@@ -3280,7 +3280,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-135
+- id: SYS-146
   area: fitters
   claim: >-
     "A fitted log / logit leaf is returned at the resolution of its
@@ -3696,7 +3696,7 @@ claims:
     as well"; "an element written in place into a list, a NumPy array or a
     nested dict ... is found by comparing each such value with a copy taken
     at the last sync"; "The assignment is a write of the keys whose values
-    it changes ... and of no other" (SYS-136).
+    it changes ... and of no other" (SYS-147).
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - docs/validation/known_anomalies.yaml (MADD-ANO-122)
@@ -3738,7 +3738,7 @@ claims:
     sync compares mutable values (MADD-ANO-175).
     Round 9 (B1, on e301c41): the replacement was read as a write of every
     key and reverted the node's other calibrated constants; it writes the
-    keys it changes (SYS-136, MADD-ANO-198).
+    keys it changes (SYS-147, MADD-ANO-198).
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_a_leaf_write_reaches_every_entry_point_too
     f64: narrowed
@@ -3804,7 +3804,7 @@ claims:
     checkpoint_restart: n/a
     sharded: narrowed
 
-- id: SYS-136
+- id: SYS-147
   area: params pytree
   claim: >-
     "The assignment is a write of the keys whose values it changes -- a key

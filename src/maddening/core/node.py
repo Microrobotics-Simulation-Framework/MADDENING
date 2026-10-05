@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, ClassVar, Optional, cast
 
 import jax
+import jax.core
 import jax.numpy as jnp
 import numpy as np
 

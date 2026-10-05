@@ -433,7 +433,9 @@ What the declaration says:
 The rebuild calls `factory(**arrays, **hyperparameters, **references)`.
 The declaration is checked against the factory's signature when it is
 registered, so a misspelt name fails at the decorator rather than while
-someone loads a config.  A kind name is any non-empty string but the three
+someone loads a config.  A required argument must be one a keyword can
+supply: a factory that requires a positional-only argument is refused.
+A kind name is any non-empty string but the three
 a config reserves for non-finite numbers (`NaN`, `Infinity`,
 `-Infinity`); registering a name that is taken -- a built-in kind, or
 another factory's -- is a `ValueError`, registering the same factory

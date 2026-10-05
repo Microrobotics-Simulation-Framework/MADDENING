@@ -3856,12 +3856,22 @@ claims:
     array, hyper-parameter and reference names that are not identifiers, are
     repeated, are reserved or are declared in two roles; a type outside the
     four; references that do not name exactly the arrays; a declared name
-    the factory does not take, and a required argument nothing declares; an
-    object that is not callable; a factory taking **kwargs, and a kind with
-    no array.  Host-side, at the decorator.
-  oracle: the ValueError (TypeError for a non-callable) and its message; the kind is not registered.
+    the factory does not take, a required argument nothing declares, and a
+    required positional-only argument (with and without **kwargs beside
+    it); an object that is not callable; a factory taking **kwargs, and a
+    kind with no array; a factory spelled as a function, a callable object,
+    a method, a classmethod, a class, a functools.partial and a decorator
+    without functools.wraps; a callable whose signature cannot be read,
+    which is taken on trust.  Host-side, at the decorator.
+  oracle: >-
+    the ValueError (TypeError for a non-callable) and its message; the kind
+    is not registered; for each spelling of a factory, whether calling it
+    with every declared name as a keyword raises TypeError.
   tests:
     - tests/core/test_mapping_registry.py::test_a_declaration_the_rebuild_could_not_honour_is_refused_at_registration
+    - tests/core/test_mapping_registry.py::test_registration_refuses_exactly_the_factories_the_rebuild_could_not_call
+    - tests/core/test_mapping_registry.py::test_whether_a_factory_takes_a_declared_name_is_the_packages_one_keyword_rule
+    - tests/core/test_mapping_registry.py::test_a_factory_whose_signature_cannot_be_read_is_taken_on_trust
     - tests/core/test_mapping_registry.py::test_the_registered_object_must_be_callable
     - tests/core/test_mapping_registry.py::test_a_factory_taking_keyword_arguments_freely_or_with_no_arrays_registers
     - tests/core/test_mapping_registry.py::test_the_public_signature_is_the_one_documented

@@ -5,7 +5,7 @@ which saves the process's warnings filters on the way in and puts them
 back on the way out.  The filters are process-wide and the block is not
 thread-safe, so when two threads each ran :meth:`SimulationServer.create_app`
 at once, each put back the filters it had saved -- which could be the other
-thread's, mid-block.  Two things followed (MADD-ANO-174):
+thread's, mid-block.  Two things followed (MADD-ANO-191):
 
 * a warning FastAPI silences while it builds a route
   (pydantic's ``UnsupportedFieldAttributeWarning``) was shown, and raised

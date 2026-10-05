@@ -12122,7 +12122,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null
-  - anomaly_id: "MADD-ANO-174"
+  - anomaly_id: "MADD-ANO-191"
     title: "Apps built at once in several threads left the process's warnings filters changed: a silenced warning was raised, or every UserWarning was ignored from then on"
     description: >
       `SimulationServer.create_app()` builds its routes through FastAPI,

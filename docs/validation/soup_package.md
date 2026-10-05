@@ -236,7 +236,7 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-171 | save_state cannot write a typed PRNG key leaf | `minor` | `not_safety_relevant` | `open` | >=0.1.0 |
 | MADD-ANO-172 | reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform | `minor` | `not_safety_relevant` | `open` | >=0.4.0.dev0 |
 | MADD-ANO-173 | run_adaptive never returns once its step-doubling error norm is NaN | `major` | `context_dependent` | `open` | >=0.1.0 |
-| MADD-ANO-174 | Apps built at once in several threads left the process's warnings filters changed: a silenced warning was raised, or every UserWarning was ignored from then on | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-191 | Apps built at once in several threads left the process's warnings filters changed: a silenced warning was raised, or every UserWarning was ignored from then on | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
 
 *174 anomalies registered.  31 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 23 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->

@@ -2336,7 +2336,7 @@ def _restore_graph_structure(gm, snapshot: dict) -> None:
 #: warning FastAPI silences was shown -- raised, where warnings are errors
 #: -- and ``ignore::UserWarning`` could be left in the filters for good,
 #: silencing every MADDENING warning in the process from then on
-#: (MADD-ANO-174).
+#: (MADD-ANO-191).
 _CREATE_APP_LOCK = threading.RLock()
 
 

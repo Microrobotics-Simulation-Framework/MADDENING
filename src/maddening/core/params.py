@@ -248,10 +248,53 @@ class ParamSpec:
                 "enforced, by clipping, and the dtype is preserved)."
             )
 
+    def _require_representable(self, dtype) -> None:
+        """A ``log`` / ``logit`` spec's bounds -- and a ``logit`` spec's width
+        ``hi - lo`` -- have to be finite numbers of the leaf's dtype.
+
+        The maps compute in the leaf's dtype: ``lo + (hi - lo) *
+        sigmoid(u)`` and ``(p - lo) / (hi - lo)``.  Each bound of
+        ``(-3e38, 3e38)`` is a finite float32, but the width ``6e38`` is not:
+        it overflows to ``inf``, so ``to_constrained(0.0)`` returned the
+        upper edge rather than the midpoint 0, ``to_constrained(-100.0)``
+        returned ``NaN``, and :meth:`check` refused every value, 0 included.
+        A width below the dtype's smallest normal number is flushed to zero
+        by the arithmetic and divides by it.  The spec cannot know its
+        leaf's dtype when it is built (the same spec is fine for a float64
+        leaf), so the refusal is made here, at the first map or check of a
+        leaf in a dtype that cannot hold it, by name.  A non-floating dtype
+        is :meth:`_require_floating`'s to refuse.
+        """
+        if self.transform not in ("log", "logit") or not jnp.issubdtype(dtype, jnp.floating):
+            return
+        fi = jnp.finfo(dtype)
+        lo_b, hi_b = self.bounds
+        quantities = [("lower bound", lo_b), ("upper bound", hi_b)]
+        if self.transform == "logit" and lo_b is not None and hi_b is not None:
+            quantities.append(("width hi - lo", float(hi_b) - float(lo_b)))
+        for what, x in quantities:
+            if x is None:
+                continue
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                rounded = abs(float(np.asarray(float(x), dtype=dtype)))
+            width = what.startswith("width")
+            if math.isfinite(rounded) and not (width and rounded < float(fi.tiny)):
+                continue
+            raise ValueError(
+                f"ParamSpec(bounds={self.bounds}, transform={self.transform!r}) "
+                f"cannot map a {np.dtype(dtype).name} leaf: its {what} {float(x):g} "
+                f"is not a finite{' normal' if width else ''} "
+                f"{np.dtype(dtype).name} number (the range is {float(fi.tiny):g} "
+                f"to {float(fi.max):g}), and the transform computes with it in the "
+                f"leaf's dtype -- p = lo + (hi - lo) * sigmoid(u) for 'logit', "
+                f"p = lo + exp(u) for 'log' -- so every value it mapped would be "
+                f"wrong. Narrow the bounds, or hold the leaf in a wider dtype.")
+
     def to_unconstrained(self, p):
         p = jnp.asarray(p)
         if self.transform in ("log", "logit"):
             self._require_floating(p.dtype)
+            self._require_representable(p.dtype)
         if self.transform == "log":
             return jnp.log(p - self._lo())
         if self.transform == "logit":
@@ -315,6 +358,7 @@ class ParamSpec:
         if self.transform is None:
             return (-math.inf if lo_b is None else float(lo_b),
                     math.inf if hi_b is None else float(hi_b))
+        self._require_representable(dtype)
         fi = np.finfo(dtype)
         if self.transform == "log":
             floor, ceiling = self._log_floor(fi), float(fi.max)
@@ -362,6 +406,7 @@ class ParamSpec:
         # returns ``-inf``.
         floating = jnp.issubdtype(u.dtype, jnp.floating)
         fi = jnp.finfo(u.dtype if floating else jnp.float32)
+        self._require_representable(fi.dtype)
         if self.transform == "log":
             return self._lo() + jnp.clip(jnp.exp(u), self._log_floor(fi), fi.max)
         if self.transform == "logit":
@@ -416,6 +461,11 @@ class ParamSpec:
         lo, hi = self.bounds
         v = np.asarray(p)
         strict = self.transform in ("log", "logit")
+        if strict and jnp.issubdtype(v.dtype, jnp.floating):
+            # Before any comparison: a spec whose maps the dtype cannot
+            # compute is refused by name, not through whichever comparison
+            # its overflowed width happens to fail first.
+            self._require_representable(jax.dtypes.canonicalize_dtype(v.dtype))
         if np.issubdtype(v.dtype, np.complexfloating):
             self._check_through_jnp(jnp.asarray(p), name, strict)
             return

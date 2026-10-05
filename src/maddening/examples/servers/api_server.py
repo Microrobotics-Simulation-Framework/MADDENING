@@ -144,7 +144,7 @@ def main(argv=None) -> None:
     print(f"\nServing on {url}", flush=True)
     print(f"Interactive docs at {url}/docs\n", flush=True)
     try:
-        uvicorn.Server(uvicorn.Config(app)).run(sockets=[sock])
+        uvicorn.Server(uvicorn.Config(app, proxy_headers=False)).run(sockets=[sock])
     except KeyboardInterrupt:   # uvicorn re-raises Ctrl-C after shutting down
         pass
 

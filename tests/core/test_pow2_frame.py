@@ -158,3 +158,29 @@ def test_no_module_outside_the_helper_builds_its_own_power_of_two_frame():
             found += [f"{f.relative_to(REPO)}:{line} {name}" for line, name in _frexp_ldexp_calls(f)]
     assert scanned > 40, f"the scan read {scanned} files: its scope no longer exists"
     assert found == [], "build the frame with maddening.core._pow2_frame.pow2_frame:\n" + "\n".join(found)
+
+
+def test_rescale_unframes_on_the_exponent():
+    """``pow2_rescale(x, up, down)`` is ``x * up / down`` exactly, including
+    where ``up / down`` itself would overflow float32 (``2**126 / 2**-60``)
+    while the result is a normal number."""
+    from maddening.core._pow2_frame import pow2_rescale
+
+    x = jnp.asarray([0.75, -3.0, 1e-5], jnp.float32)
+    up = jnp.asarray(2.0 ** 126, jnp.float32)
+    down = jnp.asarray(2.0 ** -60, jnp.float32)
+    got = pow2_rescale(x * jnp.float32(2.0 ** -100), up, down)  # times 2**-100 * 2**186
+    np.testing.assert_array_equal(np.asarray(got, np.float64),
+                                  np.asarray(x, np.float64) * 2.0 ** 86)
+    entry = jnp.asarray([2.0 ** 10, 2.0 ** -10], jnp.float32)
+    np.testing.assert_array_equal(np.asarray(pow2_rescale(jnp.ones(2, jnp.float32), entry,
+                                                         jnp.float32(2.0))),
+                                  [2.0 ** 9, 2.0 ** -11])
+
+
+@pytest.mark.parametrize("value, exponent", [(1.0, 1), (0.75, 0), (3.0, 2), (-0.125, -2),
+                                             (1e-40, -132), (0.0, 0)])
+def test_the_host_exponent_is_frexps(value, exponent):
+    from maddening.core._pow2_frame import pow2_exponent
+
+    assert pow2_exponent(value) == exponent

@@ -45,7 +45,7 @@ from typing import Callable, Optional
 
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api import server as server_module
 from maddening.api.server import SimulationServer
@@ -66,6 +66,8 @@ FOREIGN_ORIGIN = "http://evil.example"
 REMOTE_PEER = ("203.0.113.5", 44321)
 #: A loopback TCP peer: an IP address, so the Host rule is asked of it.
 LOOPBACK_PEER = ("127.0.0.1", 50123)
+#: A peer that is not an IP address (Starlette's in-process client's own).
+NON_IP_PEER = ("testclient", 50000)
 
 REGISTRY = {"BallNode": BallNode, "SpringDamperNode": SpringDamperNode,
             "HeatNode": HeatNode}
@@ -261,8 +263,8 @@ class Ctx:
         return self.make_client(headers=dict(BEARER) if token else {}, peer=REMOTE_PEER)
 
     def ip_peer(self, headers=None):
-        """A client whose peer is a loopback IP address, so the Host rule is
-        asked (TestClient's own peer, ``testclient``, is not an IP)."""
+        """A client whose peer is a loopback IP address: served without a
+        token on a loopback bind, so the Host rule decides."""
         base = dict(BEARER) if self.enforced else {}
         base.update(headers or {})
         return self.make_client(headers=base, peer=LOOPBACK_PEER)
@@ -310,8 +312,7 @@ def _in_process_client(app):
         kw = {}
         if peer is not None:
             kw["client"] = peer
-            # TestClient's own Host, ``testserver``, is no name of this
-            # machine: an IP peer that sent it would be refused for its Host.
+            # A Host that names this machine, as a local client sends.
             headers = {"Host": "localhost", **headers}
         return TestClient(app, raise_server_exceptions=False, headers=headers, **kw)
     return make
@@ -678,8 +679,17 @@ def _only_the_exact_exempt_paths_are_served_anonymously(ctx):
 
 @check("REST-005", bind="loopback", skip=("restored", "wrapper", "shutdown"))
 def _a_routable_peer_is_challenged_on_a_loopback_bind(ctx):
+    """A routable peer, a peer that is not an IP address, and a request
+    that carries a forwarding header are each asked the token on a
+    loopback bind; a direct loopback connection is not."""
     assert not ctx.enforced
     _anonymous_is_refused_everywhere(ctx, peer=REMOTE_PEER)
+    _anonymous_is_refused_everywhere(ctx, peer=NON_IP_PEER)
+    for forwarded in ({"X-Forwarded-For": "x"}, {"X-Forwarded-For": "127.0.0.1"},
+                      {"Forwarded": "for=127.0.0.1"}):
+        refused(ctx.make_client(headers=forwarded, peer=LOOPBACK_PEER).get("/graph"), 401)
+        resp = ctx.make_client(headers={**forwarded, **BEARER}, peer=LOOPBACK_PEER).get("/graph")
+        assert resp.status_code == 200, (forwarded, resp.text)
     assert ctx.routable_peer(token=True).get("/graph").status_code == 200
     assert ctx.make_client(headers={}, peer=LOOPBACK_PEER).get("/graph").status_code == 200
 
@@ -864,6 +874,13 @@ def _a_loopback_bind_answers_only_to_the_names_this_machine_is_reached_by(ctx):
     for host in ("localhost", "localhost:8000", "127.0.0.1:9", "[::1]:8000", "LOCALHOST.",
                  "127.3.4.5"):
         assert ctx.ip_peer({"Host": host}).get("/graph").status_code == 200, host
+    # The rule keys on the Host, not the peer: a forwarding header naming a
+    # loopback peer does not skip it (the header asks the token, which a
+    # rebound page does not hold), and a valid token is what does.
+    refused(ctx.ip_peer({"Host": "attacker.example", "X-Forwarded-For": "127.0.0.1"})
+            .get("/graph"), 401)
+    resp = ctx.ip_peer({"Host": "attacker.example", **BEARER}).get("/graph")
+    assert resp.status_code == 200, resp.text
 
 
 @check("REST-026", bind="loopback", skip=("restored", "wrapper", "shutdown"),

@@ -134,7 +134,7 @@ def test_an_integer_that_would_wrap_is_refused_and_one_that_fits_loads(tmp_path)
 def test_the_rest_route_answers_the_refusal_naming_no_path(tmp_path):
     """POST /checkpoint/load passes load_state's own refusal on, without the server's
     paths."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
 
     from maddening.api.server import SimulationServer
     from tests.property.differential import no_cloud_launch

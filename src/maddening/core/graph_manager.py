@@ -67,7 +67,9 @@ from maddening.core.coupling.acceleration import (
 )
 from maddening.core.edge import EdgeSpec
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import SimulationNode, _method_accepts_params
+from maddening.core.node import (
+    SimulationNode, _method_accepts_params, _mutable_snapshot, _mutated_keys,
+)
 from maddening.core.params import (
     ParamSpec,
     check_bounds as _check_bounds,
@@ -2684,6 +2686,10 @@ _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
 
 # Key for internal multi-rate metadata in the full state dict.
 _META_KEY = "_meta"
+#: State and checkpoint keys a node may not be named: the graph's own state
+#: (``_meta``) and a checkpoint's params prefixes
+#: (``maddening.core.simulation.checkpoint``).
+_RESERVED_STATE_KEYS = frozenset({_META_KEY, "_params", "_params_mappings"})
 
 #: The ``_meta`` slots ``coupling_diagnostics()`` reads a group's report
 #: from, as ``coupling_{group key}_{suffix}``.  A step writes them; they
@@ -5560,7 +5566,7 @@ class GraphManager:
         self._params: dict = {"nodes": {}, "mappings": {}}
         # What the last sync saw of each node: its params mapping and write
         # counts.  A ``node.params`` write is what moved them since.
-        self._node_writes_seen: dict[str, tuple] = {}
+        self._node_writes_seen: dict[str, tuple[Any, Any, dict, dict]] = {}
         # Graph-level ParamSpec overrides: {node: {key: ParamSpec}}.
         self._param_spec_overrides: dict[str, dict[str, ParamSpec]] = {}
         # The raw (uncounted, unjitted) step of the last compile, for the
@@ -5664,9 +5670,14 @@ class GraphManager:
         takes the node write in, so that write wins in turn.  (Only a leaf
         written through a reference held across the node write, with no
         read in between, loses to it.)  A write is a counted write to the
-        node's ``_ParamsDict``, or the mapping replaced, so a write of the
-        value the node already held counts.  Never compiles, so it is safe
-        from a getter and from :meth:`compile`; node values are taken under
+        node's ``_ParamsDict``, the mapping replaced (which the node stores
+        as a new ``_ParamsDict``), or a value changed in place -- an element
+        of a list or a NumPy array, which no method of the mapping sees --
+        found by comparing each such value with its copy from the last sync
+        (:func:`~maddening.core.node._mutated_keys`); so a write of the
+        value the node already held counts, and one into a list is not lost
+        (MADD-ANO-175).  Never compiles, so it is safe from a getter and
+        from :meth:`compile`; node values are taken under
         ``jax.ensure_compile_time_eval``, so a sync inside a trace stores
         concrete arrays.
         """
@@ -5677,7 +5688,9 @@ class GraphManager:
             seen = self._node_writes_seen.get(name)
             if seen is None:
                 continue                    # added since the last compile
-            if params is seen[0] and getattr(params, "_writes", None) == seen[1]:
+            mutated = _mutated_keys(params, seen[3]) if params is seen[0] else set()
+            if params is seen[0] and getattr(params, "_writes", None) == seen[1] \
+                    and not mutated:
                 continue
             key_writes = getattr(params, "_key_writes", None)
             if params is not seen[0] or key_writes is None:
@@ -5685,7 +5698,7 @@ class GraphManager:
             else:
                 counts = seen[2]
                 written = {k for k in set(key_writes) | set(counts)
-                           if key_writes.get(k, 0) != counts.get(k, 0)}
+                           if key_writes.get(k, 0) != counts.get(k, 0)} | mutated
             live = nodes_live.get(name)
             values: dict = {}
             if written and live is not None:
@@ -5699,17 +5712,21 @@ class GraphManager:
                 with jax.ensure_compile_time_eval():
                     live[key] = jnp.asarray(values[key], dtype=jnp.asarray(live[key]).dtype)
             self._node_writes_seen[name] = (params, getattr(params, "_writes", None),
-                                            dict(key_writes or {}))
+                                            dict(key_writes or {}),
+                                            _mutable_snapshot(params))
         if marked:
             self._dirty = True
         return marked
 
     def _record_param_sync(self) -> None:
-        """After a compile commits: every node's mapping and write counts, as
-        of now, are what the next sync compares against."""
+        """After a compile commits: every node's mapping, write counts and
+        in-place-mutable values (a copy of each list or array,
+        :func:`~maddening.core.node._mutable_snapshot`), as of now, are what
+        the next sync compares against."""
         self._node_writes_seen = {
             name: (spec.node.params, getattr(spec.node.params, "_writes", None),
-                   dict(getattr(spec.node.params, "_key_writes", None) or {}))
+                   dict(getattr(spec.node.params, "_key_writes", None) or {}),
+                   _mutable_snapshot(spec.node.params))
             for name, spec in self._nodes.items()
         }
 
@@ -6804,6 +6821,33 @@ class GraphManager:
         from maddening.serialization.json_codec import (  # noqa: PLC0415
             NON_FINITE_TOKENS,
         )
+        if node.name in _RESERVED_STATE_KEYS:
+            # The graph's own state lives under ``_meta`` (coupling and
+            # multirate carries) and a checkpoint keeps the params under
+            # ``_params`` and ``_params_mappings``.  A node named for one of
+            # them was taken (POST /graph/nodes answered 201), the next
+            # compile dropped its state, every step was a KeyError and a
+            # checkpoint save was refused until the node was deleted.
+            raise ValueError(
+                f"Node name {node.name!r} is invalid: it is a key the graph "
+                f"reserves for its own state and checkpoints "
+                f"({', '.join(sorted(_RESERVED_STATE_KEYS))}).  A different "
+                f"spelling ({node.name.lstrip('_')!r}, say) is fine."
+            )
+        try:
+            timestep = float(node.delta_t)
+        except (TypeError, ValueError):
+            timestep = math.nan
+        if not (math.isfinite(timestep) and timestep > 0.0):
+            # NaN or an infinity made every step a 400 until the node was
+            # deleted (the multirate schedule takes an integer ratio of the
+            # timesteps), and 0 or a negative value stepped the node not at
+            # all, or backwards, with every reply a 200.  No node in the
+            # library runs with a timestep that is not a positive number.
+            raise ValueError(
+                f"Node {node.name!r} has timestep {node.delta_t!r}: a node's "
+                "timestep must be a finite number > 0."
+            )
         if node.name in NON_FINITE_TOKENS:
             # MADD-ANO-010: the JSON surfaces refuse a string that spells a
             # non-finite token, and a node name is a JSON *value* in

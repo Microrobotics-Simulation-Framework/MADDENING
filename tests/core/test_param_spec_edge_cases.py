@@ -85,6 +85,69 @@ def test_logit_constrain_is_strictly_inside_for_large_bounds(u, lo, delta):
     assert np.isfinite(float(spec.to_unconstrained(p)))
 
 
+_F32_MAX = float(np.finfo(np.float32).max)
+
+
+@pytest.mark.parametrize("bounds", [(-3e38, 3e38), (-2e38, 2e38), (0.0, 1e-40)],
+                         ids=["width-overflows", "width-overflows-just",
+                              "width-subnormal"])
+def test_a_logit_width_its_dtype_cannot_hold_is_refused(bounds):
+    """Each bound of ``(-3e38, 3e38)`` is a finite float32, but the width is
+    not: ``to_constrained(0.0)`` returned the upper edge instead of 0,
+    ``to_constrained(-100.0)`` returned NaN and ``check`` refused every value
+    (audit_040_p4_10/fmu-sysid/repro_logit_width_overflow.py).  Every map
+    and check of a float32 leaf now refuses the spec by name; a width the
+    arithmetic flushes to zero is refused the same way."""
+    spec = ParamSpec(bounds=bounds, transform="logit")          # dtype-free: accepted
+    x = jnp.asarray(0.5 * (bounds[0] + bounds[1]), jnp.float32)
+    for call in (lambda: spec.to_constrained(jnp.asarray(0.0, jnp.float32)),
+                 lambda: spec.to_unconstrained(x),
+                 lambda: spec.check(x),
+                 lambda: spec._optimiser_interval(jnp.float32)):  # noqa: SLF001
+        with pytest.raises(ValueError, match="width hi - lo .* is not a finite normal float32"):
+            call()
+
+
+def test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64():
+    """The refusal reaches a fit through ``check_params`` and ``unconstrain``,
+    and the same spec maps a float64 leaf correctly (its width is a finite
+    float64)."""
+    from tests.core.test_params_claims_in_float64 import _x64
+
+    gm = _spring_gm()
+    gm.set_param_spec("s", "damping", ParamSpec(bounds=(-3e38, 3e38), transform="logit"))
+    with pytest.raises(ValueError, match="width hi - lo"):
+        gm.check_params(gm.params)
+    with pytest.raises(ValueError, match="width hi - lo"):
+        gm.unconstrain(gm.params)
+    spec = ParamSpec(bounds=(-3e38, 3e38), transform="logit")
+    with _x64():
+        assert float(spec.to_constrained(jnp.asarray(0.0, jnp.float64))) == 0.0
+        assert float(spec.to_constrained(jnp.asarray(-100.0, jnp.float64))) == pytest.approx(-3e38)
+        spec.check(jnp.asarray(0.0, jnp.float64))
+        # Mixed dtypes: a float32 leaf in the same x64 process is still a
+        # float32 leaf, and is refused.
+        with pytest.raises(ValueError, match="cannot map a float32 leaf"):
+            spec.to_constrained(jnp.asarray(0.0, jnp.float32))
+
+
+def test_a_log_bound_its_dtype_cannot_hold_is_refused():
+    spec = ParamSpec(bounds=(1e5, None), transform="log")     # beyond float16's 65504
+    with pytest.raises(ValueError, match="lower bound 100000 is not a finite float16"):
+        spec.to_constrained(jnp.asarray(0.0, jnp.float16))
+    assert float(spec.to_constrained(jnp.asarray(0.0, jnp.float32))) == 1e5 + 1.0
+
+
+def test_the_widest_logit_width_a_float32_holds_still_maps():
+    """Non-vacuity: a width just inside float32's range is a normal spec."""
+    half = float(np.float32(0.49 * _F32_MAX))
+    spec = ParamSpec(bounds=(-half, half), transform="logit")
+    assert float(spec.to_constrained(jnp.asarray(0.0, jnp.float32))) == 0.0
+    p = spec.to_constrained(jnp.asarray(-3.0, jnp.float32))
+    spec.check(p)
+    assert np.isfinite(float(spec.to_unconstrained(p)))
+
+
 @given(lo=st.floats(-1e3, 1e3, allow_nan=False, width=32),
        x=st.floats(0.0009765625, 1e6, allow_nan=False, width=32))
 @settings(**SETTINGS)

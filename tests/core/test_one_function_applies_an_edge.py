@@ -21,8 +21,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
-SRC = REPO / "src" / "maddening"
+import maddening
+
+#: The package under test, wherever it was imported from: the scan reads the
+#: source the other tests run.
+SRC = Path(maddening.__file__).resolve().parent
 #: The one module that may apply an edge.
 RULE = SRC / "core" / "edge.py"
 
@@ -56,7 +59,7 @@ def test_only_the_edge_rule_applies_an_edges_mapping_or_its_transform():
         scanned += 1
         if path == RULE:
             continue
-        found += [f"{path.relative_to(REPO)}:{line} {call}"
+        found += [f"{path.relative_to(SRC.parent)}:{line} {call}"
                   for line, call in edge_applications(path.read_text(encoding="utf-8"))]
     assert scanned > 150, f"the scan read {scanned} files: its scope no longer exists"
     assert found == [], (

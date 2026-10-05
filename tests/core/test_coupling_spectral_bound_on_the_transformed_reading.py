@@ -863,15 +863,17 @@ def test_an_identity_mapping_reads_the_bound_an_unmapped_edge_does(mode):
 
 
 def test_a_usable_bound_holds_on_a_mapped_pair():
-    """A mapping then a selection, a scale and an offset on one edge; a
-    mapping that delivers one entry of two on the other.
+    """A mapping on each edge and no transform anywhere: three entries
+    delivered from two on one edge, one from two on the other.
 
+    With no transform in the group, only the mappings put the report on the
+    reading's analysis; on the source fields it is another norm's bound.
     One compiled structure, three drawn pairs (the matrices drawn with the
-    gains and passed through ``params``); the property below draws every
-    structure.
+    gains and passed through ``params``); the audit fixtures hold a mapping
+    before a transform, and the property below draws every structure.
     """
     rng = np.random.default_rng(23)
-    ab, ba = "mapped-then-unit", "mapped-wide"
+    ab, ba = "mapped-tall", "mapped-wide"
     gm = _cached_graph(ab, ba, "jacobi", "none", 3)
     for _ in range(3):
         values = _values(rng, ab, ba, 0.9)
@@ -890,7 +892,7 @@ def test_weights_passed_for_one_step_are_read_as_the_mapping_objects_own_are():
     gradient bound and every flag.  Stepped with its own (decoy) weights it
     reports another solve.
     """
-    ab, ba = "mapped-then-unit", "mapped-wide"       # the pair above: compiled once
+    ab, ba = "mapped-tall", "mapped-wide"       # the pair above: compiled once
     values = _values(np.random.default_rng(5), ab, ba, 0.85)
     gm = _cached_graph(ab, ba, "jacobi", "none", 3)
     passed = dict(_run(gm, values))

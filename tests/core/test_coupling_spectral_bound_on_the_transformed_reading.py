@@ -412,6 +412,54 @@ def test_the_bound_holds_in_the_transformed_reading_in_every_float_dtype_and_swe
     _assert_the_bound_holds_in(domain, mode, fixture)
 
 
+@pytest.mark.parametrize("kind", ["transform", "mapping"])
+def test_a_stalled_float32_pair_behind_edges_that_widen_is_bounded_at_float32_resolution(kind):
+    """A delivered value is no finer than the field it was computed from.
+
+    Float32 members under ``jax_enable_x64`` whose internal edges deliver
+    float64 -- a transform that returns float64, or a float64 mapping
+    matrix, which is what a NumPy matrix becomes there.  The pair stalls
+    at ``residual=0.0`` a float32 rounding from its fixed point (0.66 in
+    the norm's units), so the bound is the reading's float floor,
+    amplified.  Taken at the delivered dtype's eps that floor was
+    ``2**-29`` of float32's, and behind the widening transform the bound
+    read 6.7e-7 of the true distance with ``spectral_usable=True``.
+    """
+    _tj, tn, gA, cA, gB, cB, uA0, uB0 = AUDIT_FIXTURES["extract-last"]
+    with cd.x64(True):
+        gm = GraphManager()
+        gm.add_node(_LinVecIn("A", gA, cA, uA0, jnp.float32))
+        gm.add_node(_LinVecIn("B", gB, cB, uB0, jnp.float32))
+        if kind == "transform":
+            gm.add_edge("A", "B", "u", "inp", transform=lambda v: v[-1:].astype(jnp.float64))
+            gm.add_edge("B", "A", "u", "inp", transform=lambda v: v[:1].astype(jnp.float64))
+        else:
+            gm.add_edge("A", "B", "u", "inp",
+                        mapping=matrix_mapping(np.array([[0.0, 1.0]], np.float64)))
+            gm.add_edge("B", "A", "u", "inp", mapping=matrix_mapping(np.ones((1, 1), np.float64)))
+        gm.add_coupling_group(["A", "B"], max_iterations=3, convergence_norm="interface",
+                              rtol=RTOL, diagnostics=True, iteration_mode="gauss-seidel",
+                              acceleration="aitken")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")     # a lambda transform is not serialisable: noted
+            gm.compile()
+        gm.step()
+        d = gm.coupling_diagnostics()[KEY]
+        uA = np.asarray(gm.get_node_state("A")["u"])
+        uB = np.asarray(gm.get_node_state("B")["u"])
+    assert uA.dtype == uB.dtype == np.float32           # the premise: float32 members
+    gA, cA, gB, cB = (np.asarray(v, F32).astype(np.float64) for v in (gA, cA, gB, cB))
+    s_star = (gB[0] * tn(cA) + cB[0]) / (1.0 - gB[0] * (tn(gA + cA) - tn(cA)))
+    uA_s = gA * s_star + cA
+    true = _rms_over_own_magnitude([
+        (np.atleast_1d(tn(uA.astype(np.float64))), np.atleast_1d(tn(uA_s))),
+        (uB.astype(np.float64)[:1], (gB * tn(uA_s) + cB)[:1]),
+    ])
+    assert d["residual"] == 0.0 and d["precision_limited"] and true > 0, (dict(d), true)
+    assert d["spectral_usable"], dict(d)
+    _assert_bound_holds(d, true, ("widened", kind))
+
+
 def test_the_mixed_norm_with_the_same_transforms_keeps_the_raw_fields():
     """Under "mixed" the norm reads the raw fields whatever the edges transform.
 

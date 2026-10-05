@@ -3786,7 +3786,7 @@ claims:
     every tag).  The rule is the FMU's (MADD-ANO-137).
     Wrong on e301c41 for an integer of the other signedness: the check cast
     to the leaf's type and back, which cannot see a same-width sign change,
-    so -1 for a uint32 field loaded as 4294967295 (MADD-ANO-189; found in
+    so -1 for a uint32 field loaded as 4294967295 (MADD-ANO-200; found in
     the sibling sweep of B1 round 9's F5).  The tags kept the checkpoint's
     own dtype and did not wrap.
   domains:
@@ -4734,7 +4734,7 @@ claims:
     Wrong on e301c41 (B1 round 9, F4): set_state started the drift
     reference again at the restored time, so with a save and restore after
     every step a biased importer was never refused and an honest running
-    sum drifted 1.78 master steps in 4000 (MADD-ANO-186).  The same battery
+    sum drifted 1.78 master steps in 4000 (MADD-ANO-197).  The same battery
     met a running sum 0.0013 of a step past "a millionth plus a tenth": the
     reported and the simulated time are each a float64 sum, and the claim
     now carries that rounding.
@@ -6181,7 +6181,7 @@ claims:
     Wrong on e301c41 (B1 round 9, F5): a get widened the model's int64 to
     float64, so fmi3GetInt64 answered fmi3OK with 9007199254740992 for a
     model holding 9007199254740993, and a JSON set of 2**53 + 1 was stored
-    as 2**53 (MADD-ANO-187).  A limit, and a loud one: such a value is not
+    as 2**53 (MADD-ANO-198).  A limit, and a loud one: such a value is not
     readable or settable through the FMU's variables.
   domains:
     f32: n/a
@@ -6221,7 +6221,7 @@ claims:
     - tests/fmi/test_c_unit.py::test_c_unit_tests
   status: verified
   notes: >-
-    Found by the typed battery while fixing F5 (MADD-ANO-188): over JSON
+    Found by the typed battery while fixing F5 (MADD-ANO-199): over JSON
     frames fmi3SetFloat64(-0.0) stored +0.0, and over binary frames -0.0.
   domains:
     f32: n/a
@@ -6274,7 +6274,7 @@ claims:
   notes: >-
     Missing from the inventory, and silent, on e301c41 (B1 round 9, F7):
     selected_outputs=[("spring", "positon")] exported no outputs and said
-    nothing, at v0.3.0 and v0.3.1 too (MADD-ANO-190).
+    nothing, at v0.3.0 and v0.3.1 too (MADD-ANO-201).
   domains:
     f32: n/a
     f64: n/a

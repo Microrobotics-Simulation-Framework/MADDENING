@@ -12703,7 +12703,7 @@ anomalies:
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-186"
+  - anomaly_id: "MADD-ANO-197"
     title: "Restoring an FMU state started the bridge's drift count again at the restored time, so a master that saved and restored between steps was never held to the time-drift bound"
     description: >
       The FMU bridge holds the time it reports to the time it has
@@ -12765,7 +12765,7 @@ anomalies:
       - "tests/property/test_differential_fmu.py::test_a_restore_between_steps_changes_no_reply_on_any_fmu_path"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-187"
+  - anomaly_id: "MADD-ANO-198"
     title: "The FMU wire rounded an Int64 / UInt64 above 2**53: fmi3GetInt64 answered fmi3OK with a neighbouring integer, and a JSON set of 2**53 + 1 was stored as 2**53"
     description: >
       The FMU bridge carries every value as a float64, which holds every
@@ -12838,7 +12838,7 @@ anomalies:
       - "tests/property/test_differential_fmu.py::test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-188"
+  - anomaly_id: "MADD-ANO-199"
     title: "A set of negative zero through the FMU's C wrapper on a JSON connection was stored as positive zero"
     description: >
       On a connection without binary frames the C wrapper writes each value
@@ -12848,7 +12848,7 @@ anomalies:
       answered `fmi3OK`, while the same call over binary frames kept the
       sign: the two wire forms disagreed on a value the guide says both
       carry.  Any JSON client that writes `-0` (a C `printf("%g")`) lost
-      the sign the same way.  Found while fixing MADD-ANO-187, by the
+      the sign the same way.  Found while fixing MADD-ANO-198, by the
       battery that sends every FMI type's extreme values through the
       bridge, the sidecar, the graph and the compiled wrapper.  No tagged
       release carried it: the bridge and the C wrapper are new in 0.4.0.
@@ -12882,7 +12882,7 @@ anomalies:
       - "tests/fmi/test_c_unit.py::test_c_unit_tests"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-189"
+  - anomaly_id: "MADD-ANO-200"
     title: "load_state loaded an integer of the other signedness wrapped: -1 for a uint32 field as 4294967295, 4000000000 for an int32 field as -294967296"
     description: >
       MADD-ANO-138's fix made `GraphManager.load_state` refuse a checkpoint
@@ -12896,7 +12896,7 @@ anomalies:
       said, although the docstring said "an integer that would wrap" is
       refused.  A complex value with an imaginary part loaded into a real
       field with the imaginary part dropped.  Found in the sibling sweep of
-      MADD-ANO-187 (every check that decides whether an integer fits),
+      MADD-ANO-198 (every check that decides whether an integer fits),
       with the reproducer in the PR.  No tagged release wrapped: at v0.1.0,
       v0.2.0, v0.2.1, v0.3.0 and v0.3.1 (`git archive` of each tag, CPU,
       jaxlib 0.11.0, under an 8 GiB address-space cap) `load_state` kept
@@ -12935,7 +12935,7 @@ anomalies:
       - "tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py::test_the_two_values_the_old_comparisons_took"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-190"
+  - anomaly_id: "MADD-ANO-201"
     title: "build_model_description(selected_outputs=...) exported nothing, without a word, for a pair that named no state field"
     description: >
       `build_model_description(selected_outputs=[(node, field), ...])`

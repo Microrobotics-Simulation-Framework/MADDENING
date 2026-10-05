@@ -896,10 +896,10 @@ _REFUSALS_UNDER_A_CAP = '''
             return "MemoryError"
         return "built"
 
-    # A million sources nearest to one of a hundred thousand targets: the
-    # padded gather would be 1e5 x 1e6 slots, 8e11 bytes.
-    source = np.linspace(0.0, 1e-3, 1_000_000)
-    target = np.concatenate([[0.0], np.linspace(10.0, 20.0, 99_999)])
+    # Four hundred thousand sources nearest to one of fifty thousand
+    # targets: the padded gather would be 5e4 x 4e5 slots, 1.6e11 bytes.
+    source = np.linspace(0.0, 1e-3, 400_000)
+    target = np.concatenate([[0.0], np.linspace(10.0, 20.0, 49_999)])
     out["skewed gather"] = outcome(lambda: sm.sparse_nearest_neighbor_mapping(
         source, target, mode="conservative"))
     scattered = sm.sparse_nearest_neighbor_mapping(source, target, mode="conservative",
@@ -929,13 +929,13 @@ _REFUSALS_UNDER_A_CAP = '''
 def test_the_allocation_bounds_hold_in_a_process_with_a_capped_address_space():
     """Each bound is checked before the allocation it bounds: in a process
     capped at 6 GiB of address space, a pattern whose padded gather would
-    need 800 GB, a tie set of 9e8 candidates and a projection row of five
+    need 160 GB, a tie set of 9e8 candidates and a projection row of five
     million slots across fifty thousand rows are each a refusal, not a
     ``MemoryError``."""
     report = _capped(_REFUSALS_UNDER_A_CAP, address_space=6 * _GIB)
     assert report["skewed gather"].startswith("refused: "), report
-    assert "100000 rows of 1000000 slots" in report["skewed gather"]
-    assert report["skewed scatter"] == [1_000_000, 1]
+    assert "50000 rows of 400000 slots" in report["skewed gather"]
+    assert report["skewed scatter"] == [400_000, 1]
     assert report["degenerate ties"].startswith("refused: "), report
     assert "degenerate" in report["degenerate ties"]
     assert report["wide projection row"].startswith("refused: "), report

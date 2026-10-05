@@ -722,10 +722,10 @@ claims:
     "The sparse and the dense mapping are two float evaluations of the same
     sums.  Each output entry is within (k + 2) eps sum |w| |f| of the exact
     sum over its row's k entries (eps of the result dtype), so the two agree
-    to rounding, entry by entry -- not bit for bit.  With one entry per row
-    (the consistent nearest neighbour) they are the same number."  A row
-    "reads only its own entries, so an infinity or a NaN in the source field
-    reaches only the targets that list it".
+    to rounding, entry by entry -- not bit for bit."  "With one entry per
+    row the two are the same number when the mapping is applied on its
+    own."  A row "reads only its own entries, so an infinity or a NaN in the
+    source field reaches only the targets that list it".
   sources:
     - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, What "equal to the dense mapping" means)
     - src/maddening/core/coupling/sparse_mapping.py (StaticSparseMapping, Notes)
@@ -739,9 +739,10 @@ claims:
     directly and under jit; the gradient with respect to the weights and to
     the field; a batch of fields and a batch of weights under vmap, each
     member within eight eps of the mapping applied to it alone; one entry
-    per target in both layouts, equal to the dense product exactly; an
-    infinity at index 0 with padded slots pointing there.  The mapping
-    alone: what a graph with sparse edges does is MAP-015.
+    per target in both layouts, applied on its own under jit, equal to the
+    dense product exactly; an infinity at index 0 with padded slots pointing
+    there.  The mapping alone: what a graph with sparse edges does is
+    MAP-015.
   oracle: >-
     the sum over each row's own slots in 80-bit extended precision, and its
     sum of magnitudes for the bound; the dense matrix the rows scatter into,
@@ -780,12 +781,16 @@ claims:
   area: sparse mapping
   claim: >-
     A graph whose mapped edges are sparse steps as the graph whose edges
-    hold the same matrices densely: with one entry per target the two return
-    the same states and the same coupling reports exactly (a zero may differ
-    in sign); with several entries in a row the sparse graph satisfies the
-    monolithic reference the dense graph is held to, unchanged.
+    hold the same matrices densely: "with one entry per target, each a power
+    of two, a graph with sparse edges returns the states and coupling
+    reports of its dense twin exactly"; "with several entries per row it
+    satisfies the same monolithic reference the dense graph is held to, and
+    its gradients are the dense graph's."  Inside a compiled step "the same
+    number" holds "where the product is exact, as it is for a nearest
+    neighbour's weights of one; otherwise the two agree to rounding."
   sources:
     - docs/release_notes/v0.4.0.md (Sparse interface mappings)
+    - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, What "equal to the dense mapping" means)
     - tests/property/coupled_topologies.py (module docstring, The mapping kind)
   conditions: >-
     five structures of linear relays -- rings, chains, stars and nested
@@ -795,8 +800,9 @@ claims:
     configurations of each; every mapped edge a sparse mapping over a
     pattern fixed per structure: every entry in the gather layout, a ragged
     pattern with padded slots, that pattern in the scatter layout, and one
-    entry per target in each layout; the drawn matrix zeroed outside the
-    pattern for the sparse and the dense build alike; float32, float64
+    entry per target in each layout, drawn from plus or minus 0.5, 1 and 2;
+    the drawn matrix zeroed outside the pattern for the sparse and the
+    dense build alike; float32, float64
     under x64, bfloat16 and float16; a multi-rate graph; a sub-cycled group;
     three draws under one vmap of the step; a group with a predictor, whose
     warm start the next step reads; a checkpoint restart, whose archive
@@ -823,7 +829,11 @@ claims:
     The property strategies (tests/property/strategies.py) draw the sparse
     nearest neighbour and the sparse projection among their mappings, so
     the round-trip, replay, write-door and checkpoint properties built on
-    graph_recipes() run over sparse edges too.
+    graph_recipes() run over sparse edges too.  The exact comparison was
+    first written with Gaussian one-entry weights and failed in the slow
+    lane on a structure with additive mapped edges, by one rounding: the two
+    compiled programs contract a product and a neighbouring addition
+    differently.  Hence the powers of two, and the wording.
   domains:
     f32: 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[f32-mapped-ring-wide-sparse-single-0]'
     f64:
@@ -1148,7 +1158,7 @@ claims:
     refusals while a config is loaded; an asset past MAX_ASSET_BYTES for an
     array of each sparse kind; and, at the default bounds in a process whose
     address space is capped at 6 GiB, a pattern whose padded gather would
-    need 800 GB, a tie set of 9e8 candidates, a projection row of five
+    need 160 GB, a tie set of 9e8 candidates, a projection row of five
     million slots among fifty thousand, and n_source = 2**31 - 1.  Host-side
     refusals, raised while a mapping is built.
   oracle: >-

@@ -117,13 +117,8 @@ KEY_FOLD = 7
 #:   (one row full, the others shorter where the sizes allow), in the
 #:   gather layout: padded slots, masked;
 #: * ``"sparse-scatter"``: the ragged pattern in the scatter layout (a row
-#:   lists the targets of a *source*);
-#: * ``"sparse-single"`` and ``"sparse-single-scatter"``: one entry per
-#:   target, in each layout.  With one term per row the sparse result and
-#:   the dense one are the same number (the dense sum adds exact zeros),
-#:   so a graph built this way must step exactly as its dense twin.
-MAPPING_KINDS = ("matrix", "sparse-full", "sparse-ragged", "sparse-scatter",
-                 "sparse-single", "sparse-single-scatter")
+#:   lists the targets of a *source*).
+MAPPING_KINDS = ("matrix", "sparse-full", "sparse-ragged", "sparse-scatter")
 SPARSE_KINDS = MAPPING_KINDS[1:]
 
 #: The reference's working precision.  The defects it measures are of the
@@ -413,9 +408,6 @@ def mapping_pattern(topo: Topology, edge_index: int, mapping_kind: str) -> Optio
     place = sum(1 for other in topo.edges[:edge_index] if other.mapped)
     rng = np.random.default_rng(20_000 + 131 * place + 17 * n_dst + n_src)
     mask = np.zeros((n_dst, n_src), dtype=bool)
-    if mapping_kind.startswith("sparse-single"):
-        mask[np.arange(n_dst), rng.integers(0, n_src, size=n_dst)] = True
-        return mask
     # Ragged: one row full and every other row a proper, non-empty subset,
     # so the shorter rows are padded; a single row is a proper subset
     # itself (where it has more than one column to choose from).

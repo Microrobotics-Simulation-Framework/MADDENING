@@ -44,8 +44,7 @@ Two layouts, and the conservative nearest neighbour
 ``layout="gather"`` (the default): row ``i`` lists the sources of target
 ``i``, and ``apply`` is ``sum_j W[i, j] * field[indices[i, j]]`` -- a
 gather and a sum along each row.  Every output row is reduced on its own,
-so the result of a compiled program is a function of its inputs on any
-backend.
+with no accumulator shared between rows.
 
 ``layout="scatter"``: row ``j`` lists the targets of *source* ``j``, and
 ``apply`` adds ``W[j, m] * field[j]`` into target ``indices[j, m]`` -- a
@@ -81,8 +80,11 @@ The row sum is deterministic for one compiled program.  It is not the
 dense mapping's summation order, and it is not bit-stable between a
 ``jax.vmap`` of a step and the step alone (neither is ``H @ field``): the
 sparse and the dense mapping agree to rounding, entry by entry, not bit
-for bit.  For one entry per row (nearest neighbour) the two are equal as
-numbers.
+for bit.  For one entry per row the two are equal as numbers when the
+mapping is applied on its own; inside a compiled step they are where the
+one product is exact (a nearest neighbour's weights are one), because the
+compiler may fuse a rounded product with a neighbouring addition in one
+program and not in the other.
 
 Limits
 ------
@@ -169,9 +171,12 @@ _EPS64 = float(np.finfo(np.float64).eps)
 #: both together.  Wider only costs a re-examination, never a result.
 _TIE_BAND_EPSILONS = 1024
 
-#: Below this distance a squared coordinate difference is subnormal and
-#: the dense expression no longer resolves which point is nearer.  Every
-#: point this close to the nearest one is re-examined with it.
+#: Below this distance a squared coordinate difference is subnormal: it is
+#: rounded to a multiple of the smallest float, so two ways of computing a
+#: squared distance (a tree's, with a fused multiply-add on some builds,
+#: and the dense expression's) can differ by far more than the band above.
+#: Every point this close to the nearest one is handed to the dense
+#: expression, whatever distances the tree reported for them.
 _UNDERFLOW_RADIUS = 2.0 * math.sqrt(float(np.finfo(np.float64).tiny))
 
 
@@ -227,9 +232,10 @@ class StaticSparseMapping:
         ``j`` holds the target indices of source ``j``.  Kept on the
         mapping as a read-only ``int32`` host array and baked into the
         compiled step; never part of the parameter tree.
-    weights : floating-point JAX array, shape ``(n_rows, k)``
-        One weight per slot: the mapping's one parameter,
-        ``params_pytree() == {"W": weights}``.  A padded slot holds 0.
+    weights : floating-point array, shape ``(n_rows, k)``
+        One weight per slot, held as a JAX array (``jnp.asarray(weights)``):
+        the mapping's one parameter, ``params_pytree() == {"W": weights}``.
+        A padded slot holds 0.
     n_source : int
         Size of the source field along its first axis.  It cannot be
         inferred from a gather index (the largest index used may be

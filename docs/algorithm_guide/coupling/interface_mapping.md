@@ -671,10 +671,16 @@ runs even where the forward result does not.
 The sparse and the dense mapping are two float evaluations of the same
 sums.  Each output entry is within `(k + 2) · eps · Σ|w|·|f|` of the exact
 sum over its row's `k` entries (`eps` of the result dtype), so the two
-agree to rounding, entry by entry -- not bit for bit.  With one entry per
-row (the consistent nearest neighbour) they are the same number.  The row
-sum is deterministic for one compiled program; like `H @ field`, it is
-not bit-stable between a `jax.vmap` of a step and the step alone.
+agree to rounding, entry by entry -- not bit for bit.  The row sum is
+deterministic for one compiled program; like `H @ field`, it is not
+bit-stable between a `jax.vmap` of a step and the step alone.
+
+With one entry per row the two are the same number when the mapping is
+applied on its own.  Inside a compiled step that holds only where the one
+product is exact, as it is for a nearest neighbour's weights of one: the
+compiler may fuse a product with an addition next to it (an additive
+edge, a transform) in one program and not in the other, and then a graph
+with sparse edges and its dense twin part by a rounding.
 
 One difference is deliberate.  A row reads only its own entries, so an
 infinity or a NaN in the source field reaches only the targets that list

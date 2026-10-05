@@ -65,7 +65,7 @@ def lost_as_integer(a: np.ndarray, target: np.dtype) -> np.ndarray:
             lost |= a > a.dtype.type(info.max)
         return lost
     if kind == "c":
-        return (a.imag != 0) | lost_as_integer(np.asarray(a.real), target)
+        return (np.imag(a) != 0) | lost_as_integer(np.asarray(np.real(a)), target)
     signed = info.min < 0
     past = math.ldexp(1.0, info.bits - (1 if signed else 0))     # max + 1 = 2**k, exact
     low = -past if signed else 0.0

@@ -551,7 +551,7 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
         finite = np.isfinite(a) if a.dtype.kind in "fc" else np.ones(a.shape, bool)
         lost = (finite & ~np.isfinite(cast)) | ((a != 0) & (cast == 0))
         if a.dtype.kind == "c" and target.kind == "f":
-            lost = lost | (a.imag != 0)        # the cast drops an imaginary part
+            lost = lost | (np.imag(a) != 0)    # the cast drops an imaginary part
     elif target.kind in "iu":
         # By range and wholeness, never by a cast there and back: that is a
         # bijection between a signed and an unsigned type of one width, so

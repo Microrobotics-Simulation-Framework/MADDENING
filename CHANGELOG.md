@@ -372,6 +372,8 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **Apps built at once in several threads** (MADD-ANO-174, since 0.1.0): `SimulationServer.create_app()` builds one app at a time. FastAPI builds each route inside `warnings.catch_warnings()`, which is not thread-safe, so two builds at once could raise a warning FastAPI silences or leave `ignore::UserWarning` in the process's filters for good, dropping every MADDENING warning after it.
+  Action: none on 0.4.0; before it, build the apps one after another.  An app built while another thread is inside a `catch_warnings` block of its own is not covered (the entry's residual risk).
 - **The known coupling, sysid and FMU findings** (MADD-ANO-158 to 162, CPL-087, SYS-024, SYS-071): `jax.grad` / `jax.jvp` through a bfloat16 or float16 group under `solver="ift"` works (the adjoint solve runs in float32); a 16-bit group's spectral slots are float32; `strict_convergence` on a step spanning several devices raises instead of aborting the process; a typed PRNG key steps under `"ift"` with Aitken or fixed relaxation;
   the precision warning names float64 leaves when x64 is already on; `best_loss` and `losses` are the loss of exactly the parameters a fit returns (an untouched `log` leaf was evaluated at its round trip, an ulp away).
   Action: none; a 16-bit group's gradient is to its dtype's resolution.  MADD-ANO-156 and 157 (flux edges across a group's boundary or staggered by an ungrouped cycle) stay open for 0.5.0.

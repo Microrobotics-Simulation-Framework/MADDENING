@@ -12122,3 +12122,65 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null
+  - anomaly_id: "MADD-ANO-174"
+    title: "Apps built at once in several threads left the process's warnings filters changed: a silenced warning was raised, or every UserWarning was ignored from then on"
+    description: >
+      `SimulationServer.create_app()` builds its routes through FastAPI,
+      which builds each route's fields inside `warnings.catch_warnings()`
+      and sets an `ignore` there (for pydantic's
+      `UnsupportedFieldAttributeWarning`, and for `UserWarning` while it
+      looks for `pydantic.v1`).  `catch_warnings` saves the process's
+      filter list on the way in and puts it back on the way out, and is
+      not thread-safe: when two threads each ran `create_app()` at once,
+      each put back the list it had saved, which could be the other's,
+      taken mid-block.  Two things followed.  A warning FastAPI silences
+      was shown -- raised out of `create_app()` where warnings are errors
+      (`-W error`, a test suite's filter).  And an `ignore` could be left
+      at the front of the filters for good: `ignore::UserWarning` there
+      drops every warning class of `maddening.warnings` (each derives from
+      `UserWarning`) and every bare `warnings.warn(...)` for the rest of
+      the process, with no sign.  Four servers, each built in its own
+      thread and released together, 300 rounds, nothing widened and no
+      request sent (Python 3.12.3, FastAPI 0.136.1, pydantic 2.13.4, CPU,
+      three cores shared with another job, empty HOME): on the extracted
+      0.1.0, 0.2.0, 0.2.1, 0.3.0 and 0.3.1 trees and on the 0.4.0
+      development tree at a7e6950, a thread raised in 66 to 87 rounds, the
+      filters were left changed in 115 to 138, and `ignore::UserWarning`
+      was left behind in 1 to 5.  Found as an intermittent CI failure: the
+      REST inventory's concurrent domain ran four copies of a check that
+      each built a second server (REST-006).  Resolved in 0.4.0:
+      `create_app()` builds one app at a time, under a module lock; the
+      same 300 rounds raise nothing and leave the filters as they were.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      No value is computed wrongly, but the warnings are how the library
+      says a result is provisional (a unit mismatch, a rank decided at the
+      precision floor, a performance hazard), and the silent form removes
+      them for the rest of the process.  Graded `major` for that.
+      `context_dependent`: it takes apps built at once in several threads
+      of one process, which one server started the documented way
+      (`uvicorn.run(server.create_app())`) never does.
+    affected_components:
+      - "maddening.api.server.SimulationServer.create_app"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Before 0.4.0, build the apps one after another (or under one lock of
+      your own) before starting the threads that serve them.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      The lock serialises `create_app()` against `create_app()` and nothing
+      else.  `warnings.catch_warnings` is not thread-safe (before Python
+      3.14's context-aware warnings), so an app built while another thread
+      is inside any other such block -- the caller's, a dependency's, or
+      one of the library's own parameter-write and compile probes, which
+      are new in 0.4.0 -- can still trade filters with it.  The probes one
+      server's routes reach run under its graph lock, one at a time.
+    verification:
+      - "tests/api/test_create_app_from_several_threads.py::test_apps_built_in_several_threads_at_once_leave_the_warnings_filters_as_they_were"
+      - "tests/api/test_create_app_from_several_threads.py::test_a_maddening_warning_still_reaches_the_caller_after_apps_built_at_once"
+      - "tests/api/test_create_app_from_several_threads.py::test_create_app_holds_the_build_lock_while_it_builds"
+      - "tests/api/test_create_app_from_several_threads.py::test_an_app_is_built_while_another_thread_holds_the_graph"
+      - "tests/api/test_create_app_from_several_threads.py::test_a_build_that_builds_another_app_does_not_wait_for_itself"
+    github_issue: null

@@ -731,7 +731,7 @@ NaN everywhere.
 |------|-------|
 | each referenced array | `MAX_ASSET_BYTES` (256 MiB), read from the file's header before anything is allocated -- the reference resolver's, as for every kind |
 | the row structure (index plus weights) | `sparse_mapping.MAX_SPARSE_STRUCTURE_BYTES`, by default the same 256 MiB: 33.5 million float32 slots, say 4.2 million targets with eight entries each.  Checked from the row counts **before** the padded arrays are allocated; the refusal names the row count, the longest and the median row and the number of entries |
-| a nearest-neighbour search over a degenerate point set | `TIE_CANDIDATES_PER_POINT` (8) candidates per searched point plus `TIE_CANDIDATES_FLOOR` (a million) in total.  Very many points at one distance from very many others (points on a sphere around the ones they are searched from) are refused, not resolved |
+| a nearest-neighbour search over a degenerate point set | `TIE_CANDIDATES_PER_POINT` (8) candidates per searched point plus `TIE_CANDIDATES_FLOOR` (a million) in total.  Very many points at one distance from very many others (points on a sphere around the ones they are searched from) are refused, not resolved.  The search runs 4096 points at a time and counts a chunk's candidates before it collects any, so the refusal comes after the chunk that passes the bound, not after every point has been measured against every other |
 | index values | `0 <= index < n_source <= 2**31 - 1` (the index is `int32`) |
 
 Each refusal is a `SparseMappingLimitError`, a `ValueError`; from

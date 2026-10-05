@@ -189,8 +189,8 @@ def test_the_nearest_index_is_the_dense_argmin_on_a_set_with_ties_of_every_size(
 
 
 def test_the_tie_search_runs_in_bounded_batches(monkeypatch):
-    """The same answer when the tied points are resolved a few at a time
-    and each batch of candidate lists is small: the chunking is not part of
+    """The same answer when the points are searched a few at a time and
+    each batch of candidate lists is small: the chunking is not part of
     the rule."""
     rng = np.random.default_rng(4)
     points = rng.integers(0, 5, size=(400, 2)).astype(np.float64)
@@ -754,6 +754,7 @@ def test_the_default_byte_cap_is_the_asset_cap():
     assert sparse_mapping.MAX_SPARSE_STRUCTURE_BYTES == MAX_ASSET_BYTES == 256 * 1024 * 1024
     assert sparse_mapping.TIE_CANDIDATES_PER_POINT == 8
     assert sparse_mapping.TIE_CANDIDATES_FLOOR == 1_000_000
+    assert sparse_mapping._TIE_CHUNK == 4096        # the guide's "4096 points at a time"
 
 
 def _degenerate(n_target=30):
@@ -780,6 +781,63 @@ def test_a_degenerate_tie_set_is_refused_before_its_candidates_are_collected(mon
     monkeypatch.setattr(sparse_mapping, "TIE_CANDIDATES_FLOOR", n_candidates - 2 * 30)
     _same_matrix(sparse_nearest_neighbor_mapping(source, target),
                  nearest_neighbor_mapping(source, target))
+
+
+class _CountingTree:
+    """The real k-d tree, recording how many points each search was asked
+    for and how many each collection of candidate lists was."""
+
+    def __init__(self, points, searched, collected):
+        from scipy.spatial import KDTree
+
+        self._tree = KDTree(points)
+        self._searched = searched
+        self._collected = collected
+
+    def query(self, x, k=2):
+        self._searched.append(len(x))
+        return self._tree.query(x, k=k)
+
+    def query_ball_point(self, x, r, **kwargs):
+        if not kwargs.get("return_length"):
+            self._collected.append(len(x))
+        return self._tree.query_ball_point(x, r, **kwargs)
+
+
+def test_a_degenerate_set_is_refused_after_the_chunk_that_passes_the_bound(monkeypatch):
+    """The search runs a chunk of points at a time and counts each chunk's
+    candidates against one bound for the whole search.  A set on which the
+    tree cannot prune -- every search measures every point -- is refused
+    as soon as the count passes the bound: the points after that chunk are
+    never searched, and that chunk's candidates are counted, not collected."""
+    source, target = _degenerate()          # 30 targets, each tied with every source
+    per_chunk = 7 * len(source)
+    searched: list = []
+    collected: list = []
+    monkeypatch.setattr(sparse_mapping, "_kdtree",
+                        lambda: (lambda pts: _CountingTree(pts, searched, collected)))
+    monkeypatch.setattr(sparse_mapping, "_TIE_CHUNK", 7)
+    monkeypatch.setattr(sparse_mapping, "TIE_CANDIDATES_PER_POINT", 0)
+    # one candidate short of the first chunk's: refused after it
+    monkeypatch.setattr(sparse_mapping, "TIE_CANDIDATES_FLOOR", per_chunk - 1)
+    with pytest.raises(SparseMappingLimitError,
+                       match=f"after 7 of 30 searched points there were {per_chunk},"):
+        sparse_nearest_neighbor_mapping(source, target)
+    assert searched == [7] and collected == []
+    # one chunk fits and two do not: the count is of the whole search
+    searched.clear()
+    monkeypatch.setattr(sparse_mapping, "TIE_CANDIDATES_FLOOR", 2 * per_chunk - 1)
+    with pytest.raises(SparseMappingLimitError,
+                       match=f"after 14 of 30 searched points there were {2 * per_chunk},"):
+        sparse_nearest_neighbor_mapping(source, target)
+    assert searched == [7, 7] and collected == [7]
+    # with room for every candidate, the chunks give the dense matrix
+    searched.clear()
+    collected.clear()
+    monkeypatch.setattr(sparse_mapping, "TIE_CANDIDATES_FLOOR", 30 * len(source))
+    _same_matrix(sparse_nearest_neighbor_mapping(source, target),
+                 nearest_neighbor_mapping(source, target))
+    assert searched == [7, 7, 7, 7, 2] and collected == [7, 7, 7, 7, 2]
 
 
 def test_the_tie_bound_counts_the_points_searched_from_in_each_mode(monkeypatch):

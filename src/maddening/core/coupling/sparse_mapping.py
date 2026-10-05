@@ -154,8 +154,9 @@ _INDEX_BYTES = 4
 #: The largest size an int32 index can address.
 _MAX_SIZE = 2 ** 31 - 1
 
-#: Tied points are resolved this many at a time, and each batch of
-#: candidate lists holds at most this many candidates.
+#: Points are searched this many at a time (so a degenerate set is refused
+#: after one chunk's search), and each batch of candidate lists of the
+#: tied ones holds at most this many candidates.
 _TIE_CHUNK = 4096
 _TIE_BATCH_CANDIDATES = 1_000_000
 
@@ -685,82 +686,94 @@ def _nearest_lowest_index(what: str, points: np.ndarray, queries: np.ndarray) ->
     nearer; every other query collects each point within the band and the
     dense expression decides among them.  The tree never decides a tie, so
     the result does not depend on the tree or on the scipy version.
+
+    The queries are searched :data:`_TIE_CHUNK` at a time, and the
+    candidates the tied ones would collect are counted before any is
+    collected.  A degenerate set -- on which a tree cannot prune, so that a
+    search measures every query against every point -- is therefore
+    refused after one chunk has been searched, not after all of them.
     """
     dim = points.shape[1]
     unique, first = _unique_points(points)
+    n_queries = queries.shape[0]
     if unique.shape[0] == 1:
-        return np.full(queries.shape[0], first[0], dtype=np.int64)
+        return np.full(n_queries, first[0], dtype=np.int64)
     tree = _kdtree()(unique)
-    found = tree.query(queries, k=2)
-    distance, index = np.asarray(found[0]), np.asarray(found[1])
-    if not bool(np.all(np.isfinite(distance))) or int(index.max()) >= unique.shape[0]:
-        raise ValueError(
-            f"{what}: the nearest-neighbour search found no finite distance for some "
-            f"point; the coordinates are outside the range a float64 distance holds"
-        )
     band = (_TIE_BAND_EPSILONS + 2 * dim) * _EPS64
-    # units: dimensionless, a relative widening of a distance
-    radius = distance[:, 0] * (1.0 + band)
-    # units: the coordinates' own; the floor is where their squares go subnormal
-    radius = np.maximum(radius, _UNDERFLOW_RADIUS)
-    nearest = first[index[:, 0]]
-    tied = np.nonzero(distance[:, 1] <= radius)[0]
-    if tied.size:
-        nearest[tied] = _resolve_ties(what, tree, unique, first, queries, tied, radius[tied])
+    limit = TIE_CANDIDATES_PER_POINT * n_queries + TIE_CANDIDATES_FLOOR
+    nearest = np.empty(n_queries, dtype=np.int64)
+    total = 0
+    for start in range(0, n_queries, _TIE_CHUNK):
+        stop = min(start + _TIE_CHUNK, n_queries)
+        q = queries[start:stop]
+        found = tree.query(q, k=2)
+        distance, index = np.asarray(found[0]), np.asarray(found[1])
+        if not bool(np.all(np.isfinite(distance))) or int(index.max()) >= unique.shape[0]:
+            raise ValueError(
+                f"{what}: the nearest-neighbour search found no finite distance for some "
+                f"point; the coordinates are outside the range a float64 distance holds"
+            )
+        # units: dimensionless, a relative widening of a distance
+        radius = distance[:, 0] * (1.0 + band)
+        # units: the coordinates' own; the floor is where their squares go subnormal
+        radius = np.maximum(radius, _UNDERFLOW_RADIUS)
+        chosen = first[index[:, 0]]
+        tied = np.nonzero(distance[:, 1] <= radius)[0]
+        if tied.size:
+            sizes = np.asarray(
+                tree.query_ball_point(q[tied], radius[tied], return_length=True),
+                dtype=np.int64)
+            total += int(sizes.sum())
+            if total > limit:
+                raise SparseMappingLimitError(
+                    f"{what}: the point set is degenerate: resolving which point is "
+                    f"nearest needs more than {limit} candidates "
+                    f"(TIE_CANDIDATES_PER_POINT={TIE_CANDIDATES_PER_POINT} for each of "
+                    f"{n_queries} searched points, plus TIE_CANDIDATES_FLOOR="
+                    f"{TIE_CANDIDATES_FLOOR}); after {stop} of {n_queries} searched "
+                    f"points there were {total}, the largest tie being "
+                    f"{int(sizes.max())} points at one distance.  Very many points are "
+                    f"equidistant from very many others (points on a sphere around the "
+                    f"ones they are searched from, say); perturb or thin them"
+                )
+            chosen[tied] = _resolve_ties(what, tree, unique, first, q[tied], radius[tied],
+                                         sizes)
+        nearest[start:stop] = chosen
     return nearest
 
 
 def _resolve_ties(what: str, tree, unique: np.ndarray, first: np.ndarray,
-                  queries: np.ndarray, tied: np.ndarray, radius: np.ndarray) -> np.ndarray:
-    """The dense rule for the queries *tied*: among the points within
-    *radius*, the lowest original index at the minimal dense squared
-    distance.  Chunked, and bounded in total."""
-    limit = TIE_CANDIDATES_PER_POINT * queries.shape[0] + TIE_CANDIDATES_FLOOR
-    out = np.empty(tied.size, dtype=np.int64)
-    total = 0
-    for start in range(0, tied.size, _TIE_CHUNK):
-        stop = min(start + _TIE_CHUNK, tied.size)
-        q = queries[tied[start:stop]]
-        r = radius[start:stop]
-        sizes = np.asarray(tree.query_ball_point(q, r, return_length=True), dtype=np.int64)
-        total += int(sizes.sum())
-        if total > limit:
-            raise SparseMappingLimitError(
-                f"{what}: the point set is degenerate: resolving which point is "
-                f"nearest needs more than {limit} candidates "
-                f"(TIE_CANDIDATES_PER_POINT={TIE_CANDIDATES_PER_POINT} for each of "
-                f"{queries.shape[0]} searched points, plus TIE_CANDIDATES_FLOOR="
-                f"{TIE_CANDIDATES_FLOOR}); after {stop} of {tied.size} tied points "
-                f"there were {total}, the largest tie being {int(sizes.max())} points "
-                f"at one distance.  Very many points are equidistant from very many "
-                f"others (points on a sphere around the ones they are searched from, "
-                f"say); perturb or thin them"
+                  q: np.ndarray, r: np.ndarray, sizes: np.ndarray) -> np.ndarray:
+    """The dense rule for the tied queries *q*: among the points within
+    *r* of each, the lowest original index at the minimal dense squared
+    distance.  *sizes* is how many points each will collect, already
+    counted against the bound; they are collected in batches of whole
+    queries, each holding a bounded number of candidates."""
+    out = np.empty(q.shape[0], dtype=np.int64)
+    edges = [0]
+    running = 0
+    for i, size in enumerate(sizes.tolist()):
+        if running and running + size > _TIE_BATCH_CANDIDATES:
+            edges.append(i)
+            running = 0
+        running += size
+    edges.append(len(sizes))
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        lists = tree.query_ball_point(q[lo:hi], r[lo:hi])
+        lengths = np.fromiter((len(found) for found in lists), dtype=np.int64,
+                              count=hi - lo)
+        if bool(np.any(lengths == 0)):
+            raise RuntimeError(
+                f"{what}: the tie search lost the nearest point of a query it "
+                f"had found; this is a defect, please report it"
             )
-        # Batches of whole queries, each holding a bounded number of candidates.
-        edges = [0]
-        running = 0
-        for i, size in enumerate(sizes.tolist()):
-            if running and running + size > _TIE_BATCH_CANDIDATES:
-                edges.append(i)
-                running = 0
-            running += size
-        edges.append(len(sizes))
-        for lo, hi in zip(edges[:-1], edges[1:]):
-            lists = tree.query_ball_point(q[lo:hi], r[lo:hi])
-            lengths = np.fromiter((len(found) for found in lists), dtype=np.int64,
-                                  count=hi - lo)
-            if bool(np.any(lengths == 0)):
-                raise RuntimeError(
-                    f"{what}: the tie search lost the nearest point of a query it "
-                    f"had found; this is a defect, please report it"
-                )
-            flat = np.fromiter(itertools.chain.from_iterable(lists), dtype=np.int64,
-                               count=int(lengths.sum()))
-            rows = np.repeat(np.arange(hi - lo), lengths)
-            d2 = np.sum((q[lo:hi][rows] - unique[flat]) ** 2, axis=-1)
-            original = first[flat]
-            order = np.lexsort((original, d2, rows))
-            out[start + lo:start + hi] = original[order[np.cumsum(lengths) - lengths]]
+        flat = np.fromiter(itertools.chain.from_iterable(lists), dtype=np.int64,
+                           count=int(lengths.sum()))
+        rows = np.repeat(np.arange(hi - lo), lengths)
+        d2 = np.sum((q[lo:hi][rows] - unique[flat]) ** 2, axis=-1)
+        original = first[flat]
+        order = np.lexsort((original, d2, rows))
+        out[lo:hi] = original[order[np.cumsum(lengths) - lengths]]
     return out
 
 

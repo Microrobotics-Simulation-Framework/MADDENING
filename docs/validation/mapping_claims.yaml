@@ -693,8 +693,9 @@ claims:
     where nine queries in ten tie and a tie holds up to dozens of points,
     many of them exact duplicates; the point sets of MAP-012, whose lattices
     tie two, four and eight ways and whose 1e-160 scale makes every squared
-    distance underflow; the tied queries resolved seven at a time in batches
-    of five candidates; a coordinate of 2e150, refused.  The search runs on
+    distance underflow; the points searched seven at a time and the tied
+    ones' candidates collected in batches of five; a coordinate of 2e150,
+    refused.  The search runs on
     the host; the scipy installed is the one the test ran against.
   oracle: np.argmin over the dense table of squared distances, index for index; the dense factory's matrix.
   tests:
@@ -1159,7 +1160,10 @@ claims:
     refusal names the row count, the longest and the median row and the
     number of entries"; past it the conservative gather form refuses "with
     an error that names transpose="scatter""; a degenerate point set is
-    "refused, not resolved"; "Each refusal is a SparseMappingLimitError, a
+    "refused, not resolved.  The search runs 4096 points at a time and
+    counts a chunk's candidates before it collects any, so the refusal comes
+    after the chunk that passes the bound, not after every point has been
+    measured against every other"; "Each refusal is a SparseMappingLimitError, a
     ValueError; from from_dict or load_graph_from_usd it is a
     MappingRebuildError naming the edge.  n_source sizes nothing, so a
     config cannot allocate through it."
@@ -1172,7 +1176,10 @@ claims:
     neighbour, the projection and sparse_matrix; forty sources nearest to
     one of ten targets for the gather form, with the scatter form of the
     same input built; integer points on one circle around thirty targets for
-    the tie bound, searched from the targets and from the sources; the same
+    the tie bound, searched from the targets and from the sources; that set
+    searched seven points at a time by a tree that records each search,
+    with the bound one candidate under one chunk's count and under two
+    chunks', and the chunk size read back as 4096; the same
     refusals while a config is loaded; an asset past MAX_ASSET_BYTES for an
     array of each sparse kind; and, at the default bounds in a process whose
     address space is capped at 6 GiB, a pattern whose padded gather would
@@ -1188,6 +1195,7 @@ claims:
     - tests/core/test_sparse_mapping_builders.py::test_every_builder_checks_the_row_structure_against_the_byte_cap
     - tests/core/test_sparse_mapping_builders.py::test_the_default_byte_cap_is_the_asset_cap
     - tests/core/test_sparse_mapping_builders.py::test_a_degenerate_tie_set_is_refused_before_its_candidates_are_collected
+    - tests/core/test_sparse_mapping_builders.py::test_a_degenerate_set_is_refused_after_the_chunk_that_passes_the_bound
     - tests/core/test_sparse_mapping_builders.py::test_the_tie_bound_counts_the_points_searched_from_in_each_mode
     - tests/core/test_sparse_mapping_builders.py::test_a_limit_met_while_loading_a_config_names_the_edge
     - tests/core/test_sparse_mapping_builders.py::test_the_asset_cap_bounds_the_arrays_of_every_sparse_kind

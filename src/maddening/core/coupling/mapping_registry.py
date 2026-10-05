@@ -239,13 +239,13 @@ def _declare(kind: str, factory: Callable[..., Any], arrays: Any, hyperparameter
         refs = dict(zip(array_names, keywords))
 
     used: dict[str, str] = {}
-    for role, names in (("array", array_names), ("hyper-parameter", hyper_names),
-                        ("reference keyword", tuple(refs.values()))):
+    for role, names in (("an array", array_names), ("a hyper-parameter", hyper_names),
+                        ("a reference keyword", tuple(refs.values()))):
         for name in names:
             if name in used:
                 raise ValueError(
-                    f"mapping kind {kind!r}: {name!r} is declared as both a "
-                    f"{used[name]} and a {role}; the factory takes each as a "
+                    f"mapping kind {kind!r}: {name!r} is declared as both "
+                    f"{used[name]} and {role}; the factory takes each as a "
                     f"keyword argument, so the names must differ"
                 )
             used[name] = role

@@ -5608,8 +5608,13 @@ class GraphManager:
                 for name, spec in self._nodes.items()
                 if spec.accepts_params
             },
+            # A copy of each table: ``gm.params`` is edited in place, and a
+            # mapping may hand out the dict it keeps.  Stored as it came,
+            # an edit of the live weights rewrote the mapping's own --
+            # ``reset_params()`` then restored the edit, and ``to_dict``
+            # compared the live weights with themselves and never warned.
             "mappings": {
-                edge.key: edge.mapping.params_pytree()
+                edge.key: dict(edge.mapping.params_pytree())
                 for edge in self._edges
                 if edge.mapping is not None
             },

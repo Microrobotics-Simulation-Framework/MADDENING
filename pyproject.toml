@@ -42,7 +42,7 @@ classifiers = [
 # It is still imported lazily -- see the note on the `ift` extra.
 #
 # `scipy` is declared because the sparse interface mappings use it
-# directly (`scipy.spatial.cKDTree`, the nearest-neighbour search of
+# directly (`scipy.spatial.KDTree`, the nearest-neighbour search of
 # `maddening.core.coupling.sparse_mapping`).  It adds nothing to an
 # install: jax and jaxlib already require it, and the floor is theirs
 # (jax 0.10 asks for scipy>=1.14).  It is imported by the builder that

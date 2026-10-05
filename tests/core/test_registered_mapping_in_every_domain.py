@@ -1,6 +1,6 @@
 """A registered mapping kind in each numeric domain of the claims inventory.
 
-``docs/validation/sysid_fmu_claims.yaml`` gives every row a domain matrix
+``docs/validation/mapping_claims.yaml`` gives every row a domain matrix
 (``testing_standards.md``, "The domain matrix"), and the registry's rows
 state two things that depend on the domain a graph runs in:
 
@@ -316,7 +316,7 @@ def check_round_trip_and_checkpoint(domain: Domain, tmp_path,
 
 @pytest.mark.parametrize("name", sorted(DOMAINS))
 def test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint(name, tmp_path):
-    """SYS-139 and SYS-141 in each domain: float32; float64 under x64; a
+    """MAP-007 and MAP-009 in each domain: float32; float64 under x64; a
     float32 member beside a float64 one under x64 (mixed dtype); a
     multi-rate graph; a sub-cycled coupling group; a group with a predictor
     whose warm start the next step reads; and a checkpoint restart taken
@@ -412,7 +412,8 @@ def test_run_adaptive_reads_a_registered_kinds_restored_weights(tmp_path):
 @pytest.mark.parametrize("name", sorted(DOMAINS))
 @pytest.mark.parametrize("case", sorted(SPARSE))
 def test_a_sparse_kind_round_trips_and_its_weights_survive_a_checkpoint(case, name, tmp_path):
-    """Every sparse case in each domain: the config carries the recipe, a
+    """MAP-016 and MAP-017 in each domain, for every sparse case: the
+    config carries the recipe, a
     reload rebuilds the index and every weight bit for bit and steps
     exactly as the graph it was saved from; the weights are live
     parameters a checkpoint restores into a reload -- which holds the same
@@ -508,7 +509,7 @@ def test_run_adaptive_reads_a_sparse_kinds_restored_weights(case, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# SYS-140: what add_edge accepts as a weight, by dtype
+# MAP-008: what add_edge accepts as a weight, by dtype
 # ---------------------------------------------------------------------------
 
 class _Weighted:

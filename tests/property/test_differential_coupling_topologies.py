@@ -1154,14 +1154,14 @@ def test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_doma
 
 def _exact_cases():
     """The first configuration on the structure with wide interfaces per
-    push, in each domain and layout; the other structures, and the
-    configuration that puts Aitken and the interface norm on its group, are
-    slow."""
+    push, in each domain and layout.  Slow: the same structure under the
+    configuration that puts Aitken and the interface norm on its group, and
+    the other structures under the first."""
     cases = []
     for domain in ("f32",) + DOMAINS:
         for kind in _SPARSE_EXACT_KINDS:
             for name in sorted(STRUCTURES):
-                for choice in (0, 2):
+                for choice in ((0, 2) if name in MAPPED else (0,)):
                     per_push = name in MAPPED and choice == 0
                     cases.append(pytest.param(
                         domain, name, kind, choice, id=f"{domain}-{name}-{kind}-{choice}",
@@ -1184,8 +1184,8 @@ def _same_numbers(a, b) -> list:
 
 # Per push: tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain
 # (on mapped-ring-wide under configuration 0, in every domain and both
-# layouts; the slow cases are the same check on the other structures and
-# under configuration 2)
+# layouts; the slow cases are the same check under configuration 2 and on
+# the other structures)
 @pytest.mark.parametrize("domain, name, mapping_kind, choice", _exact_cases())
 def test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain(
         domain, name, mapping_kind, choice):
@@ -1247,11 +1247,65 @@ def test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_e
                                             dtype=_domain_dtype(domain))
 
 
+def _flat_gradient(tree) -> dict:
+    return {jax.tree_util.keystr(path): np.asarray(leaf, np.float64)
+            for path, leaf in jax.tree_util.tree_leaves_with_path(tree)}
+
+
+@pytest.mark.parametrize("mapping_kind", ["sparse-ragged", "sparse-scatter"])
+@pytest.mark.parametrize("domain", ["f32", "f64"])
+def test_the_gradient_through_sparse_mapped_edges_is_the_dense_graphs(domain, mapping_kind):
+    """``jax.grad`` of a loss over two steps of the structure with wide
+    interfaces, with respect to every parameter leaf: the gradient to each
+    node constant is the dense graph's, and the gradient to a sparse edge's
+    ``W`` is the dense graph's gradient to ``H`` read through the edge's
+    pattern -- zero in a padded slot.  Through the coupling group's
+    implicit rule and through the staggered edges, in float32 and under
+    x64; the two graphs converge to rounding of one another, so the
+    gradients agree to the group's tolerance, not bit for bit."""
+    name = "mapped-ring-wide"
+    topo, knobs, dense = _built_in(domain, name, 0)
+    _t, _k, sparse = _built_in(domain, name, 0, mapping_kind=mapping_kind)
+    values = _domain_values(topo, knobs, domain, mapping_kind)[1]
+
+    def gradient(built):
+        with _x64(domain == "f64"):
+            ct.set_initial(built, values)
+            gm = built.gm
+            state0, ext, step = gm._state, gm._default_external_inputs(), gm._raw_step_fn
+
+            def loss(params):
+                state = step(step(state0, ext, params), ext, params)
+                return sum(jnp.sum(state[n]["x"] ** 2) for n in topo.names)
+
+            return jax.jit(jax.grad(loss))(ct.params_for(built, values))
+
+    g_dense, g_sparse = gradient(dense), gradient(sparse)
+    rtol = 1e-7 if domain == "f64" else 2e-3
+    nodes_d, nodes_s = _flat_gradient(g_dense["nodes"]), _flat_gradient(g_sparse["nodes"])
+    assert nodes_d.keys() == nodes_s.keys() and nodes_d
+    scale = max(float(np.max(np.abs(leaf))) for leaf in nodes_d.values())
+    assert scale > 0.0
+    for key, leaf in nodes_d.items():
+        np.testing.assert_allclose(nodes_s[key], leaf, rtol=rtol, atol=rtol * scale,
+                                   err_msg=f"{domain}/{mapping_kind} d/d{key}")
+    moved = 0
+    for i, key in sparse.mapping_keys.items():
+        slots = sparse.slots[i]
+        dH = np.asarray(g_dense["mappings"][dense.mapping_keys[i]]["H"], np.float64)
+        dW = np.asarray(g_sparse["mappings"][key]["W"], np.float64)
+        np.testing.assert_allclose(dW, slots.weights(dH), rtol=rtol, atol=rtol * scale,
+                                   err_msg=f"{domain}/{mapping_kind} d/dW of {key}")
+        assert not dW[~slots.valid].any(), "a padded weight has no derivative"
+        moved += int(np.count_nonzero(dW))
+    assert moved > 0, "premise: the loss depends on the mapping weights"
+
+
 # Per push: tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain
 # (the exact comparison with the dense graph runs per push in every domain;
 # these are the bit-for-bit invariances between two sparse builds)
 @pytest.mark.slow
-@pytest.mark.parametrize("name", sorted(STRUCTURES))
+@pytest.mark.parametrize("name", ["chain-into-ring", *sorted(MAPPED)])
 @pytest.mark.parametrize("mapping_kind", ["sparse-ragged", "sparse-scatter"])
 @pytest.mark.parametrize("domain", DOMAINS)
 def test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain(

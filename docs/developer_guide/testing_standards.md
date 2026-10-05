@@ -741,6 +741,7 @@ audit area that a user could rely on:
 | `coupling_claims.yaml` | `CPL` | coupling groups, their solvers, schedules and accelerations; sub-cycling, multi-rate groups and the adaptive steppers on coupled graphs; `coupling_diagnostics()`, `coupling_report()` and `strict_convergence`; the precision floor and every bound and `*_usable` flag; IFT gradients; the profiler's coupling statistics; `windowed_loss`'s convergence mask |
 | `sysid_fmu_claims.yaml` | `SYS`, `FMU` | `maddening.sysid` (`windowed_loss`, `fim`, `fim_core`, the three fitters and their results, truth recovery and units); `ParamSpec` bounds and transforms; `node.params` and `gm.params` as fitting and export see them; the FMI 3.0 export: model description, TCP bridge, sidecar, FMU state, C wrapper, conformance, refusals, timeouts, tokens and the terminated state |
 | `rest_runpod_claims.yaml` | `REST`, `RPD` | the HTTP API: authentication, the `Host` and `Origin` rules, request bounds and budgets, the graph lock and its 409/503, `/graph/*`, `/sim/*`, `/checkpoint/*`, shutdown and the runner behind `/sim/start` (not the experimental surrogate and streaming endpoints); `benchmarks/multigpu/run_pod.py`, its runbook, records, verdicts and exit codes |
+| `mapping_claims.yaml` | `MAP` | interface mappings: the registry of mapping kinds (`register_mapping`: names, declarations, the trust boundary of a file that names a kind, what a factory may raise and must return); what a mapping may put into `gm.params["mappings"]` and how those weights are fitted, checkpointed and exported; the sparse mappings (`StaticSparseMapping`, its two layouts, the three sparse kinds, their limits) and the structure digest a checkpoint carries for sparse weights |
 
 Each row records:
 
@@ -807,8 +808,8 @@ Audits kept breaking claims in a *domain* their conditions covered but no
 test exercised: x64, a predictor inside a windowed fit, a write pending at
 an FMU export. So an inventory can name a `domain_set` at its top level,
 and then every row carries a `domains` mapping that says, for each domain
-of the set, how the claim stands there. The coupling and sysid+FMU
-inventories use the `numeric` set below; the REST and run_pod inventory
+of the set, how the claim stands there. The coupling, sysid+FMU and
+mapping inventories use the `numeric` set below; the REST and run_pod inventory
 uses the `server` set ("The server set", at the end of this section). A
 new set is one entry in the guard's `DOMAIN_SETS`, with the spellings its
 conditions use and the words its tests must name.

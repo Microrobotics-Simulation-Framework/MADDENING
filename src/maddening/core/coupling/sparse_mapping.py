@@ -689,18 +689,18 @@ def _padded_rows(what: str, n_rows: int, rows: np.ndarray, columns: np.ndarray,
 # ---------------------------------------------------------------------------
 
 
-def _ckdtree():
-    """``scipy.spatial.cKDTree``.  scipy is a base dependency; it is
+def _kdtree():
+    """``scipy.spatial.KDTree``.  scipy is a base dependency; it is
     imported here, on first use, so that ``import maddening`` does not pay
     for it."""
     try:
-        from scipy.spatial import cKDTree  # noqa: PLC0415
+        from scipy.spatial import KDTree  # noqa: PLC0415
     except ImportError as exc:
         raise ImportError(
-            "sparse_nearest_neighbor_mapping needs scipy (scipy.spatial.cKDTree), "
+            "sparse_nearest_neighbor_mapping needs scipy (scipy.spatial.KDTree), "
             f"which could not be imported: {exc}"
         ) from exc
-    return cKDTree
+    return KDTree
 
 
 def _unique_points(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -730,8 +730,9 @@ def _nearest_lowest_index(what: str, points: np.ndarray, queries: np.ndarray) ->
     unique, first = _unique_points(points)
     if unique.shape[0] == 1:
         return np.full(queries.shape[0], first[0], dtype=np.int64)
-    tree = _ckdtree()(unique)
-    distance, index = tree.query(queries, k=2)
+    tree = _kdtree()(unique)
+    found = tree.query(queries, k=2)
+    distance, index = np.asarray(found[0]), np.asarray(found[1])
     if not bool(np.all(np.isfinite(distance))) or int(index.max()) >= unique.shape[0]:
         raise ValueError(
             f"{what}: the nearest-neighbour search found no finite distance for some "
@@ -998,20 +999,18 @@ def sparse_projection_1d_mapping(
     })
     n_source, n_target = sb.size - 1, tb.size - 1
     low, high = tb[:-1], tb[1:]
-    # The source cells that can overlap target cell i, one wider on each
-    # side than the search says; the dense expression below decides.
-    j_first = np.clip(np.searchsorted(sb, low, side="right") - 2, 0, n_source - 1)
-    j_last = np.clip(np.searchsorted(sb, high, side="left"), 0, n_source - 1)
-    # Consecutive windows share at most three cells, so the candidates are
-    # fewer than n_source + 3 * n_target whatever the grids look like.
-    window = (j_last - j_first + 1).astype(np.int64)
-    rows = np.repeat(np.arange(n_target, dtype=np.int64), window)
-    offsets = np.cumsum(window) - window
+    # Source cell j overlaps target cell i exactly when sb[j + 1] > low_i and
+    # sb[j] < high_i -- the dense factory's ``overlap > 0``, for boundaries
+    # that rise.  That is a run of consecutive cells, found by two searches.
+    j_first = np.maximum(np.searchsorted(sb, low, side="right") - 1, 0)
+    j_last = np.minimum(np.searchsorted(sb, high, side="left") - 1, n_source - 1)
+    run = np.maximum(j_last - j_first + 1, 0).astype(np.int64)
+    rows = np.repeat(np.arange(n_target, dtype=np.int64), run)
+    offsets = np.cumsum(run) - run
     columns = np.arange(rows.size, dtype=np.int64) - offsets[rows] + j_first[rows]
+    # The dense factory's own expression, entry by entry, in float64.
     overlap = np.minimum(high[rows], sb[columns + 1]) - np.maximum(low[rows], sb[columns])
-    kept = overlap > 0
-    rows, columns = rows[kept], columns[kept]
-    values = (overlap[kept] / (high - low)[rows]).astype(np.float32)
+    values = (overlap / (high - low)[rows]).astype(np.float32)
     indices, weights, counts = _padded_rows(what, n_target, rows, columns, values)
     return StaticSparseMapping(
         indices, jnp.asarray(weights), n_source=n_source, counts=counts,

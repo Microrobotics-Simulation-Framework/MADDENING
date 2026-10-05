@@ -203,6 +203,60 @@ def test_the_tie_search_runs_in_bounded_batches(monkeypatch):
         sparse_mapping._nearest_lowest_index("test", points, queries), expected)
 
 
+class _NoisyTree:
+    """A k-d tree whose reported distances are off by a relative *noise*,
+    as another build's arithmetic (a fused multiply-add in the squared
+    distance) or a pruning bound may make them.  The points it finds within
+    a radius are the real tree's."""
+
+    def __init__(self, points, noise):
+        from scipy.spatial import KDTree
+
+        self._tree = KDTree(points)
+        self._noise = noise
+        self._rng = np.random.default_rng(99)
+
+    def query(self, x, k=2):
+        distance, index = self._tree.query(x, k=k)
+        distance = distance * (1.0 + self._noise * self._rng.uniform(-1.0, 1.0, distance.shape))
+        order = np.argsort(distance, axis=1, kind="stable")
+        return (np.take_along_axis(distance, order, axis=1),
+                np.take_along_axis(index, order, axis=1))
+
+    def query_ball_point(self, x, r, **kwargs):
+        return self._tree.query_ball_point(x, r, **kwargs)
+
+
+@pytest.mark.parametrize("scale, noise", [
+    (1.0, 200 * np.finfo(np.float64).eps),
+    (1e9, 200 * np.finfo(np.float64).eps),
+    (1e-156, 1e-9),
+    (1e-158, 1e-6),
+], ids=["rounding at scale one", "rounding at scale 1e9", "squares gone subnormal",
+        "squares almost gone"])
+def test_the_tree_only_proposes_candidates_whatever_its_distances_round_to(
+        monkeypatch, scale, noise):
+    """The rule is the dense expression's, not the tree's.  A tree whose
+    distances are off -- by a few hundred epsilons anywhere, or by far more
+    where the squared distance is subnormal and one build's rounding of it
+    need not be another's -- still gives the dense ``argmin``: every point
+    it cannot tell from the nearest is handed to the dense expression."""
+    grid, centres = _lattice(3, n=4)
+    points = np.random.default_rng(5).permutation(np.concatenate([grid, grid])) * scale
+    queries = np.concatenate([centres, grid[::3] + 0.25]) * scale
+    d2 = np.sum((queries[:, None, :] - points[None, :, :]) ** 2, axis=-1)
+    expected = np.argmin(d2, axis=1)
+    assert ((d2 == d2.min(axis=1, keepdims=True)).sum(axis=1) > 1).all(), "premise: every query ties"
+    monkeypatch.setattr(sparse_mapping, "_kdtree",
+                        lambda: (lambda pts: _NoisyTree(pts, noise)))
+    np.testing.assert_array_equal(
+        sparse_mapping._nearest_lowest_index("test", points, queries), expected)
+    # the premise: this tree, taken at its word, would choose otherwise
+    tree = _NoisyTree(np.unique(points, axis=0), noise)
+    distance, _index = tree.query(queries)
+    assert (distance[:, 1] > distance[:, 0]).any(), "premise: the noise separates tied points"
+
+
 def test_the_weights_are_float32_ones_under_x64_as_the_dense_kinds_are():
     src, tgt = POINT_SETS["random-2d"]
     with x64(True):

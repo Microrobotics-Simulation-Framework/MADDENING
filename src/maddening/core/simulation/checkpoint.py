@@ -159,7 +159,7 @@ def _mapping_structures(graph_manager: "GraphManager") -> dict[str, bytes]:
         digest_of = getattr(edge.mapping, "structure_digest", None)
         if not callable(digest_of):
             continue
-        digest = digest_of()
+        digest: Any = digest_of()
         try:
             raw = bytes.fromhex(digest)
         except (TypeError, ValueError):

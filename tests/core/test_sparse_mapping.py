@@ -145,6 +145,27 @@ def test_apply_and_apply_T_are_the_dense_operator_to_rounding(w_dtype, f_dtype, 
                                 extra=4.0)
 
 
+@pytest.mark.parametrize("layout", ["gather", "scatter"])
+def test_apply_T_of_a_square_mapping_is_the_transpose_and_not_the_mapping(layout):
+    """Between interfaces of one size the mapping and its transpose take
+    and return the same shapes, so only the values tell them apart: ``apply``
+    is ``H @ field``, ``apply_T`` is ``H.T @ field``, and the two differ."""
+    n = 6
+    indices, counts = _pattern(3, n_rows=n, n_columns=n)
+    weights = jnp.asarray(_weights(indices, counts, "float32", seed=4))
+    extra = {} if layout == "gather" else {"n_target": n, "layout": "scatter"}
+    m = StaticSparseMapping(indices, weights, n_source=n, counts=counts, **extra)
+    H = densify(m)
+    assert not np.array_equal(H, H.T), "premise: the operator is not symmetric"
+    f = _field(n, "float32", seed=6)
+    forward, back = jax.jit(m.apply)(f), jax.jit(m.apply_T)(f)
+    assert_within_rows(forward, m, f, what=f"apply {layout}")
+    assert_within_rows(back, m, f, transpose=True, what=f"apply_T {layout}")
+    np.testing.assert_allclose(np.asarray(forward), H @ np.asarray(f), rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(back), H.T @ np.asarray(f), rtol=1e-5, atol=1e-6)
+    assert not np.allclose(np.asarray(forward), np.asarray(back), rtol=1e-3, atol=1e-3)
+
+
 def test_the_fixture_has_a_full_row_an_empty_row_a_repeat_and_padding():
     """The fixture can express the defects: a mask that is dropped (padded
     slots exist, and the field is not zero at index 0), a row that is not
@@ -597,8 +618,12 @@ def test_the_digest_changes_with_every_part_of_the_structure():
     weights = _weights(indices, counts, "float32")
     cut = weights.copy()
     cut[0, K - 1] = 0.0
+    last = indices.copy()
+    assert counts[-1] >= 1, "premise: the last row has an entry"
+    last[-1, counts[-1] - 1] = (last[-1, counts[-1] - 1] + 1) % N_SOURCE
     variants = {
         "an index moved": dict(indices=moved),
+        "the last entry moved": dict(indices=last),
         "two slots swapped": dict(indices=swapped),
         "a larger n_source": dict(n_source=N_SOURCE + 1),
         "a row shortened": dict(indices=trimmed, counts=shorter, weights=jnp.asarray(cut)),
@@ -628,6 +653,23 @@ def test_counts_that_fill_every_row_are_the_structure_without_counts():
     padded = StaticSparseMapping(np.array([[0, 1], [2, 0]]), jnp.asarray([[1.0, 1.0], [1.0, 0.0]]),
                                  n_source=3, counts=[2, 1])
     assert padded.structure_digest() != full.structure_digest()
+
+
+def test_two_structures_that_differ_in_their_counts_alone_have_two_digests():
+    """One index array, two operators: a slot holding index 0 is an entry of
+    source 0 under one count and padding under another.  The counts are
+    part of the pattern, not only the index."""
+    index = np.array([[0, 0], [1, 0], [2, 0]])
+    both = StaticSparseMapping(index, jnp.asarray([[1.0, 2.0], [1.0, 0.0], [1.0, 0.0]]),
+                               n_source=3, counts=[2, 1, 1])
+    one = StaticSparseMapping(index, jnp.asarray([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]]),
+                              n_source=3, counts=[1, 1, 1])
+    other = StaticSparseMapping(index, jnp.asarray([[1.0, 0.0], [1.0, 2.0], [1.0, 0.0]]),
+                                n_source=3, counts=[1, 2, 1])
+    assert both.indices.tobytes() == one.indices.tobytes() == other.indices.tobytes()
+    assert len({both.structure_digest(), one.structure_digest(),
+                other.structure_digest()}) == 3
+    assert not np.array_equal(densify(both), densify(other))
 
 
 # ---------------------------------------------------------------------------

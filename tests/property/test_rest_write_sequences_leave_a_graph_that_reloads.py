@@ -22,7 +22,7 @@ through the state-changing routes in whatever order Hypothesis picks --
 -- and predicts no answer.  Whatever the server replies, the invariants of
 ``tests/property/rest_oracle.py`` are asked after every rule:
 
-1. no reply is a 5xx;
+1. no reply is a 5xx, and a 2xx is strict JSON;
 2. a refused request changes nothing: the config, every parameter, the
    whole state, the files under the checkpoint root and the streams' clock
    are bit for bit what they were;
@@ -187,8 +187,11 @@ USUAL_TYPE = {"rod": "HeatNode", "spring": "SpringDamperNode", "ball": "BallNode
 START_SLOT = "start.npz"
 SLOTS = ("a.npz", "b.npz", "nested/c")
 REFUSED_SLOTS = ("../escaped.npz", "")
-#: State values, float32-exact.
-STATE_VALUES = (-1.0, 0.0, 0.5, 2.0)
+#: State values, float32-exact; the last is the largest float32, from which
+#: a spring's next step overflows, so that replies carry non-finite values
+#: (which a reply writes as quoted tokens, never as bare ``Infinity``).
+LARGEST = float(np.finfo(np.float32).max)
+STATE_VALUES = (-1.0, 0.0, 0.5, 2.0) * 4 + (LARGEST,)
 #: What a state write does to one field of an otherwise valid body, beside
 #: leaving a field out or adding one.
 STATE_CHANGES = {"shape": [1.0, 2.0, 3.0], "nan": float("nan"), "string": "a string",
@@ -273,6 +276,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         #: (node, key) -> the value the node was built with
         self.built_with: dict = {}
         self.last = "the start"
+        #: the kind of the last request sent ("add edge", "put params", ...)
+        self.last_kind = "start"
         #: whether the last rule and its invariants ran to their end
         self.settled = False
         #: whether anything was accepted since invariants 3 to 5 were last
@@ -326,6 +331,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         what = O.describe(method, url, body if body is not None else params)
         note(f"{what} -> {resp.status_code} {resp.text[:300]}")
         O.assert_no_server_error(resp, what)
+        if resp.status_code < 300:
+            O.assert_strict_json(resp, what)
         outcome = "accepted" if resp.status_code < 400 else "refused"
         event(f"{rule_name}: {outcome}")
         type(self).counts[(rule_name, outcome)] += 1
@@ -333,26 +340,23 @@ class RestWriteSequences(RuleBasedStateMachine):
             O.assert_nothing_changed(before, O.snapshot(self.served), what)
         else:
             self.unchecked = True
+            self.last_kind = rule_name
         self.last = what
         return resp
 
     def check_graph(self, what: str) -> None:
         """Invariants 3, 4 and 5 of the served graph as it stands."""
         assert self.served is not None
-        gm = self.gm
-        O.assert_within_stability_limits(gm, what)
-        rebuilt = O.rebuilt_from_its_save(self.served, what, twins=O.TWINS)
-        compiled = not gm._dirty and gm._compiled_step is not None  # noqa: SLF001
-        if rebuilt is None:
-            assert not compiled, (
-                f"after {what} the served graph is compiled, but the graph its save "
-                "reloads cannot compile")
-            type(self).counts["a graph that cannot compile"] += 1
-            return
-        type(self).counts["reloaded"] += 1
-        if compiled:
-            O.assert_runs_as_its_reload(self.served, rebuilt, what)
-            type(self).counts["stepped beside its reload"] += 1
+        reached = O.check_accepted_graph(
+            self.served, what, twins=O.TWINS,
+            # the start graph is what it is; an edge may join two shapes
+            shapes_may_differ=self.last_kind in ("add edge", "start"))
+        counts = type(self).counts
+        if reached == "cannot step":
+            counts["a graph that cannot compile"] += 1
+        else:
+            counts["reloaded"] += 1
+            counts["stepped beside its reload"] += reached == "stepped"
 
     def _nodes(self) -> list[str]:
         return list(self.gm._nodes)  # noqa: SLF001
@@ -612,6 +616,7 @@ class RestWriteSequences(RuleBasedStateMachine):
         type(self).counts[("fit", "kept")] += 1
         event("fit: kept")
         self.unchecked = True
+        self.last_kind = "fit"
         self.last = f"a gm.params write {name}.{key} = {value!r} (in process, as a fit)"
         note(self.last)
         return True
@@ -883,6 +888,13 @@ def test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused():
                  {"thermal_diffusivity": ALPHAS[-1], "length": 0.5}, "put several params")
         answered(200, machine.do_put_state, "ball", {"position": 2.0, "velocity": 0.5})
         answered(400, machine.do_put_state, "ball", {"position": 2.0})
+        # A state at the edge of float32 overflows on the next steps: the
+        # replies carry non-finite values, as quoted tokens.
+        answered(200, machine.do_put_state, "spring", {"position": LARGEST, "velocity": 0.0})
+        answered(200, machine.do_run, 3)
+        assert not np.all(np.isfinite([float(np.asarray(v)) for v in
+                                       machine.gm.get_node_state("spring").values()]))
+        answered(200, machine.do_put_state, "spring", {"position": 0.5, "velocity": 0.0})
         answered(201, machine.do_add_node, "extra", "HeatNode", 0.02,
                  {"n_cells": N_CELLS, "thermal_diffusivity": ALPHAS[0],
                   "initial_temperature": 1.0})

@@ -42,7 +42,9 @@ Nothing is predicted of a malformed request.  Whatever the server answers:
    (``rest_oracle.assert_nothing_changed``) -- and neither did a ``GET``;
 3. a 4xx detail names no absolute server path the request did not carry;
 4. a 2xx reply of a JSON route is strict JSON: no ``NaN`` or ``Infinity``
-   token;
+   token; and what a write route accepted is a graph whose save reloads,
+   inside its stability limits, that can still step
+   (``rest_oracle.check_accepted_graph``);
 
 and, of the three header rules, which are refusals by their definition:
 
@@ -211,6 +213,8 @@ SAVED = "saved.npz"
 
 def serve(graph: str = "standard") -> O.Served:
     registry = dict(O.REGISTRY)
+    if graph == "lattice":
+        registry["LBMNode"] = LBMNode        # so the graph's save reloads
     served = O.serve(GRAPHS[graph](), registry=registry)
     resp = served.client.post("/checkpoint/save", params={"path": SAVED})
     assert resp.status_code == 200, resp.text
@@ -410,6 +414,29 @@ def is_the_known_422_echo_defect(req: Request, status: int) -> bool:
     return status == 500 and carries_a_token_as_text(req)
 
 
+def is_a_known_accepted_defect(op: Operation, req: Request) -> Optional[str]:
+    """Two more defects this oracle found, in what the server *accepts*;
+    each is a strict xfail below and is counted, not failed, by the
+    batteries and the fuzzer until it is fixed.  Returns which, or ``None``.
+
+    * ``POST /graph/edges`` checks the source field and takes any target
+      field.  One that is the text ``NaN``, ``Infinity`` or ``-Infinity``
+      is a 201, and ``GET /graph`` is then a 500 until the edge is
+      removed: ``to_dict`` cannot write the string
+      (``test_an_edge_to_a_target_field_named_as_a_non_finite_token_...``).
+    * ``POST /graph/nodes`` takes a name with a NUL in it.  The graph
+      steps, ``POST /checkpoint/save`` answers 200, and the checkpoint it
+      wrote does not load: an archive member's name ends at the NUL
+      (``test_a_checkpoint_of_a_node_named_with_a_nul_...``)."""
+    body = req.body if isinstance(req.body, dict) else {}
+    if op.key == "POST /graph/edges" and body.get("target_field") in TOKEN_TEXTS:
+        return "an edge to a target field named as a non-finite token"
+    if op.key == "POST /graph/nodes" and isinstance(body.get("name"), str) \
+            and "\x00" in body["name"]:
+        return "a node named with a NUL"
+    return None
+
+
 def exchange(served: O.Served, op: Operation, req: Request, *,
              must_refuse: bool = False) -> tuple[list, Any]:
     """Send *req* and hold the reply to the invariants: ``(problems, reply)``.
@@ -456,6 +483,19 @@ def exchange(served: O.Served, op: Operation, req: Request, *,
             problems.append(str(exc)[:400])
     if must_refuse and status < 400:
         problems.append(f"{status}: served, where the Host, Origin or forwarding rule refuses")
+    if 200 <= status < 300 and req.method != "GET":
+        # What the server accepted is a graph its save reloads, inside its
+        # stability limits, that can still step (rest_oracle, 3 and 5; the
+        # sequence oracle also steps it beside its reload).
+        try:
+            O.check_accepted_graph(served, req.describe(), step=False,
+                                   shapes_may_differ=op.key == "POST /graph/edges")
+        except AssertionError as exc:
+            known = is_a_known_accepted_defect(op, req)
+            if known is None:
+                problems.append(f"{status}: {str(exc)[:500]}")
+            else:
+                KNOWN_DEFECT_SEEN[known] = KNOWN_DEFECT_SEEN.get(known, 0) + 1
     return problems, resp
 
 
@@ -892,10 +932,57 @@ def test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500(method, url, 
         served.close()
 
 
-def test_the_known_defect_is_all_the_batteries_tolerate():
-    """The tolerance is as narrow as the defect: a 500 on a request that
+@pytest.mark.parametrize("token", TOKEN_TEXTS)
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "found by the request oracle: POST /graph/edges takes a target field that is the text "
+    "'NaN', 'Infinity' or '-Infinity' (it checks the source field only), and GET /graph is "
+    "then a 500 until the edge is removed, because to_dict cannot write the string"))
+def test_an_edge_to_a_target_field_named_as_a_non_finite_token_is_refused_or_saves(token):
+    """Minimal reproducer: ``POST /graph/edges {"source_node": "ball",
+    "target_node": "spring", "source_field": "position", "target_field":
+    "NaN"}`` answers 201, and the next ``GET /graph`` answers 500."""
+    served = serve()
+    try:
+        resp = served.client.post("/graph/edges", json={
+            "source_node": "ball", "target_node": "spring", "source_field": "position",
+            "target_field": token})
+        assert resp.status_code < 500
+        assert served.client.get("/graph").status_code == 200, "GET /graph after the edge"
+        if resp.status_code < 300:
+            O.check_accepted_graph(served, f"an edge to {token!r}", step=False,
+                                   shapes_may_differ=True)
+    finally:
+        served.close()
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "found by the request oracle: POST /graph/nodes takes a name with a NUL in it; a "
+    "checkpoint of the graph is then saved with a 200 (or refused, where warnings are "
+    "errors) and does not load, because an archive member's name ends at the NUL"))
+def test_a_checkpoint_of_a_node_named_with_a_nul_loads_or_the_name_is_refused():
+    """Minimal reproducer: ``POST /graph/nodes {"type": "BallNode", "name":
+    "a\\u0000b", "timestep": 0.01}`` answers 201; ``POST /checkpoint/save``
+    then answers 200 and ``POST /checkpoint/load`` of that file 400 ("it is
+    not an .npz archive of plain arrays saved by this API")."""
+    served = serve()
+    try:
+        resp = served.client.post("/graph/nodes", json={
+            "type": "BallNode", "name": "a\x00b", "timestep": 0.01, "params": {}})
+        assert resp.status_code < 500
+        if resp.status_code < 300:
+            saved = served.client.post("/checkpoint/save", params={"path": "nul.npz"})
+            assert saved.status_code == 200, saved.text
+            loaded = served.client.post("/checkpoint/load", params={"path": "nul.npz"})
+            assert loaded.status_code == 200, loaded.text
+    finally:
+        served.close()
+
+
+def test_the_known_defects_are_all_the_batteries_tolerate():
+    """Each tolerance is as narrow as its defect: a 500 on a request that
     carries a token as text, and nothing else -- not another status, not a
-    500 on a request without one, not a bare (numeric) NaN."""
+    500 on a request without one, not a bare (numeric) NaN; an edge to a
+    target field that is exactly a token; a new node's name with a NUL."""
     def req(query=(), body=ABSENT):
         return Request("POST", "/sim/run", {}, list(query), body, {})
 
@@ -906,6 +993,14 @@ def test_the_known_defect_is_all_the_batteries_tolerate():
     assert not is_the_known_422_echo_defect(req(query=[("n_steps", "NaNs")]), 500)
     assert not is_the_known_422_echo_defect(req(body={"a": float("nan")}), 500)
     assert not is_the_known_422_echo_defect(req(body={"a": "not NaN"}), 500)
+    edges, nodes = IN_SCOPE["POST /graph/edges"], IN_SCOPE["POST /graph/nodes"]
+    assert is_a_known_accepted_defect(edges, req(body={"target_field": "NaN"}))
+    assert not is_a_known_accepted_defect(edges, req(body={"target_field": "nan"}))
+    assert not is_a_known_accepted_defect(edges, req(body={"source_field": "NaN"}))
+    assert not is_a_known_accepted_defect(nodes, req(body={"target_field": "NaN"}))
+    assert is_a_known_accepted_defect(nodes, req(body={"name": "a\x00b"}))
+    assert not is_a_known_accepted_defect(nodes, req(body={"name": "a b"}))
+    assert not is_a_known_accepted_defect(edges, req(body={"name": "a\x00b"}))
 
 
 # ---------------------------------------------------------------------------

@@ -14,12 +14,15 @@ server answered, and this module is where those questions are written once:
    leaves, the whole state (``_meta`` included), the files under the
    checkpoint root (names and SHA-256) and the streams' clock are what they
    were;
-3. **an accepted graph reloads** (:func:`rebuilt_from_its_save`):
+3. **an accepted graph reloads** (:func:`rebuilt_from_its_save`): its
+   config carries the values its step reads,
    ``GraphManager.from_dict(gm.to_dict())`` succeeds, and a checkpoint saved
    now loads into that rebuilt graph and restores the state bit for bit;
 4. **an accepted graph is the one its save reloads**
    (:func:`assert_runs_as_its_reload`): the live graph and the rebuilt one,
-   stepped side by side, give bit-identical states -- or neither can step;
+   stepped side by side, give bit-identical states -- or neither can step,
+   which only an edge between fields of different shapes may bring about
+   (:func:`check_accepted_graph`);
 5. **a stable configuration stays stable**
    (:func:`stability_violations`): a stock node whose constructor enforces
    a stability limit is never left past it, by the values its step reads
@@ -134,6 +137,9 @@ class Served:
     root: Path
     registry: dict
     tmp: tempfile.TemporaryDirectory
+    #: whether the graph could step when :func:`check_accepted_graph` last
+    #: looked (a graph is served able to)
+    could_step: bool = True
 
     @property
     def gm(self) -> GraphManager:
@@ -291,6 +297,31 @@ def assert_nothing_changed(before: dict, after: dict, what: str) -> None:
 # 3. An accepted graph reloads
 # ---------------------------------------------------------------------------
 
+def save_differs_from_what_the_step_reads(gm: GraphManager, config: dict) -> list[str]:
+    """Every constructor parameter the saved *config* carries with another
+    value than the live ``gm.params`` leaf the step reads (compared in the
+    leaf's dtype): a save must carry the graph that runs."""
+    out = []
+    saved = {node["name"]: node.get("params", {}) for node in config.get("nodes", [])}
+    for name, leaves in (gm.params.get("nodes") or {}).items():
+        if name not in gm._nodes:  # noqa: SLF001 - a removed node's leaves, until a compile
+            continue
+        for key, leaf in leaves.items():
+            if key not in saved.get(name, {}):
+                continue
+            leaf = np.asarray(leaf)
+            try:
+                carried = np.asarray(saved[name][key], dtype=leaf.dtype)
+            except (TypeError, ValueError):
+                out.append(f"the save carries {name}.{key} = {saved[name][key]!r}, which is "
+                           f"not a {leaf.dtype} as the live leaf is")
+                continue
+            if leaves_identical(leaf, carried) is not None:
+                out.append(f"the save carries {name}.{key} = {saved[name][key]!r}, the step "
+                           f"reads {leaf.tolist()!r}")
+    return out
+
+
 #: Compiled reloads kept for reuse, by the config they were rebuilt from
 #: (:func:`rebuilt_from_its_save`, ``twins=``): the reload of a config is
 #: rebuilt every time -- that *is* the question -- but stepping it needs an
@@ -329,6 +360,8 @@ def rebuilt_from_its_save(served: Served, what: str, *,
         raise AssertionError(
             f"after {what} the graph's save does not reload: from_dict raised "
             f"{type(exc).__name__}: {exc}\nconfig: {json.dumps(config)[:1500]}") from exc
+    carried = save_differs_from_what_the_step_reads(gm, config)
+    assert not carried, f"after {what} " + "; ".join(carried)
     key = json.dumps(config, sort_keys=True, allow_nan=True)
     if twins is not None and key in twins:
         rebuilt = twins.pop(key)        # put back below, once it has been used
@@ -416,6 +449,41 @@ def assert_runs_as_its_reload(served: Served, rebuilt: GraphManager, what: str,
                            what="a checkpoint of the live graph, loaded back: state")
     assert_trees_identical(held_params, params_tree(gm),
                            what="a checkpoint of the live graph, loaded back: params")
+
+
+def check_accepted_graph(served: Served, what: str, *, shapes_may_differ: bool = False,
+                         twins: Optional[collections.OrderedDict] = None,
+                         step: bool = True) -> str:
+    """Invariants 3, 4 and 5 of the served graph as it stands, after a
+    request the server accepted (*what*).  Returns what was reached:
+    ``"stepped"`` (the graph is compiled and was stepped beside its reload),
+    ``"reloaded"`` (it is waiting for a compile, or *step* is off) or
+    ``"cannot step"``.
+
+    A graph that cannot compile is an accepted graph in one case only:
+    ``POST /graph/edges`` takes an edge between fields of different shapes
+    (*shapes_may_differ*), and the graph then answers 400 to every step
+    until the edge is removed.  Any other accepted request that turns a
+    graph that could step into one that cannot -- a node added with a
+    timestep the scheduler cannot use, say -- fails here."""
+    gm = served.gm
+    assert_within_stability_limits(gm, what)
+    rebuilt = rebuilt_from_its_save(served, what, twins=twins)
+    compiled = not gm._dirty and gm._compiled_step is not None  # noqa: SLF001
+    if rebuilt is None:
+        assert not compiled, (
+            f"after {what} the served graph is compiled, but the graph its save "
+            "reloads cannot compile")
+        assert not (served.could_step and gm._nodes and not shapes_may_differ), (  # noqa: SLF001
+            f"after {what} the graph, which could step, cannot compile any more: an "
+            "accepted request left a graph that answers 400 to every step")
+        served.could_step = False
+        return "cannot step"
+    served.could_step = True
+    if compiled and step:
+        assert_runs_as_its_reload(served, rebuilt, what)
+        return "stepped"
+    return "reloaded"
 
 
 def assert_the_reload_cannot_step_either(served: Served, what: str) -> None:

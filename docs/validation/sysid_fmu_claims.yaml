@@ -20,7 +20,7 @@
 #          them -- the weights an interface mapping puts into
 #          gm.params["mappings"] included, and with them the registry of
 #          mapping kinds (src/maddening/core/coupling/mapping_registry.py,
-#          register_mapping; SYS-131 to SYS-141), which no other inventory
+#          register_mapping; SYS-133 to SYS-143), which no other inventory
 #          holds: coupling_claims.yaml leaves interface mappings out;
 #   FMU -- src/maddening/fmi/ (model description, TCP bridge, sidecar, FMU
 #          state, the C wrapper and packaging), FMI 3.0 conformance,
@@ -1183,19 +1183,30 @@ claims:
     precision ..., the products the smallest directions are built from
     flush to zero and the verdict moves with the scale ... and fim says so
     with a PrecisionLimitWarning (and FIMCore with precision_limited) rather
-    than reporting it."
+    than reporting it."; "The same is said when every product flushed and
+    F came out exactly zero although J has a nonzero entry".
   sources:
-    - src/maddening/sysid.py:734 (FIMReport, rank)
-    - src/maddening/sysid.py:1774 (FIMCore, precision_limited)
+    - src/maddening/sysid.py:745 (FIMReport, rank)
+    - src/maddening/sysid.py:1790 (FIMCore, precision_limited)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
-    float32; |J| near 1e-3 with sigma 1 to 1e15; the core under jit. Not
-    claimed for 16-bit floats or vmap.
+    float32; |J| near 1e-3 with sigma 1 to 1e15; an F flushed to exactly
+    zero from a J that is not (|J| near 1e-20 in float32, 1e-170 in
+    float64), for rank_rtol None and 0, a rank-2 and a full-rank residual;
+    a J of zeros (a real rank 0: silent); the core under jit. Not claimed
+    for 16-bit floats or vmap.
   oracle: the warning and the flag where the cutoff is below the range, neither above it.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_a_rank_decided_below_the_normal_range_warns
+    - tests/core/test_sysid_claims_edges.py::test_a_fisher_matrix_flushed_to_zero_from_a_nonzero_jacobian_warns
+    - tests/core/test_sysid_claims_edges.py::test_a_residual_that_reads_no_parameter_is_a_real_rank_zero
+    - tests/core/test_sysid_claims_under_x64.py::test_a_fisher_matrix_flushed_to_zero_warns_under_x64
   status: verified
-  notes: New in round 7 (MADD-ANO-152).
+  notes: >-
+    New in round 7 (MADD-ANO-152).  Round 8 (B1, on d2429a6): an F flushed to exactly
+    zero (|J| near 1e-20) read rank 0 of 3 silently and precision_limited
+    False: the flag exempted a largest eigenvalue that is not positive.  It
+    is now flagged when J is not zero (MADD-ANO-176).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_a_rank_decided_below_the_normal_range_warns
     f64: tests/core/test_sysid_claims_under_x64.py::test_a_rank_below_the_normal_range_warns_under_x64
@@ -1803,12 +1814,16 @@ claims:
     betas, eps, notify_every, lam_up / lam_down) and accept their
     documented defaults.
   sources:
-    - src/maddening/sysid.py:3625 (fit)
-    - src/maddening/sysid.py:3942 (fit_lm)
+    - src/maddening/sysid.py:4389 (fit)
+    - src/maddening/sysid.py:4878 (fit_lm)
   conditions: >-
     zero, negative, NaN and wrongly typed values -- bools in every
     spelling, strings, lists, complex numbers -- and real numbers in every
-    spelling (NumPy and JAX scalars, 0-d arrays, ints) still read.
+    spelling (NumPy and JAX scalars, 0-d arrays, ints) still read; the
+    counts (n_iter, notify_every, sample_every, start_step) read an integer
+    in every spelling (a Python or NumPy integer, a JAX integer scalar, a
+    0-d integer array of either library) and refuse a float, a bool and a
+    non-0-d array.
   oracle: the ValueError; the defaults inside the accepted range.
   tests:
     - tests/core/test_sysid_degenerate_inputs.py::test_fit_rejects_a_hyper_parameter_with_no_reading
@@ -1817,16 +1832,71 @@ claims:
     - tests/core/test_sysid_degenerate_inputs.py::test_a_bool_or_a_non_number_hyper_parameter_is_refused
     - tests/core/test_sysid_degenerate_inputs.py::test_windowed_loss_and_its_fitter_refuse_a_bool_continuity_weight
     - tests/core/test_sysid_degenerate_inputs.py::test_a_real_number_in_any_spelling_is_still_read
+    - tests/core/test_sysid_degenerate_inputs.py::test_an_integer_count_in_any_spelling_is_read
+    - tests/core/test_sysid_degenerate_inputs.py::test_a_count_that_is_not_an_integer_is_refused
   status: verified
   notes: >-
     Round 7 (B1, on 04bc3e5): a bool passed float() -- fit(tol=True) stopped
     at its first evaluation and reported converged=True at the unfitted
-    start -- and so did a numeric string (MADD-ANO-153).
+    start -- and so did a numeric string (MADD-ANO-153).  Round 8 (B1, on d2429a6):
+    n_iter and notify_every refused a 0-d NumPy array and a JAX integer
+    (loud, so minor and no registry entry); they now read them.
   domains:
     f32: n/a
     f64: n/a
     mixed_dtype: n/a
     16bit: n/a
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: SYS-132
+  area: fitters
+  claim: >-
+    fit's eps "is *relative*: it floors Adam's denominator in units of the
+    run's first gradient ..., so the iterates do not depend on the units the
+    loss is written in"; "a gradient whose products flush below tiny ...
+    the gradients are taken with a power-of-two cotangent that lifts the
+    backward pass out of the flush, exactly"; loss_fn's own value "can
+    still flush to 0.0: a RuntimeWarning says so once, and such a 0.0 with
+    a nonzero gradient does not meet tol".
+  sources:
+    - src/maddening/sysid.py:4389 (fit, eps)
+    - src/maddening/sysid.py:3140 (_gradient_lift)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: >-
+    a loss 0.5 ||s r||² for s from 1e-30 to 1e18 in float32 (the loss
+    representable; above, it overflows and fit refuses it), 1e-170 for
+    float64 leaves; a loss scaled by 2**-40 to 2**30 and by 2**-100 and
+    2**-120 (the steps the same to the bit); log and logit parameters at
+    natural scales 1e-30 to 1e30.  Not an identity parameter at another
+    scale (Adam's step is about lr in its own coordinate, MADD-ANO-135).
+    Not claimed for 16-bit floats.
+  oracle: the unscaled fit's answer and steps; the truth; the
+    FloatingPointError above the range.
+  tests:
+    - tests/property/test_sysid_truth_recovery.py::test_fit_recovers_the_truth_at_every_residual_scale
+    - tests/property/test_sysid_truth_recovery.py::test_fit_refuses_a_loss_that_overflows
+    - tests/property/test_sysid_truth_recovery.py::test_fit_recovers_the_truth_at_every_parameter_scale
+    - tests/core/test_sysid_adam_in_any_units.py::test_fit_takes_the_same_steps_for_a_loss_in_any_units
+    - tests/core/test_sysid_adam_in_any_units.py::test_fit_takes_the_same_steps_for_a_loss_whose_gradient_flushes
+    - tests/core/test_sysid_adam_in_any_units.py::test_fit_multiple_shooting_takes_the_same_steps_for_a_loss_in_any_units
+  status: verified
+  notes: >-
+    Round 8 (B1, on d2429a6): at s = 1e-19 fit returned its start (its
+    gradient's products flushed and it read zero), and at 1e-18 a point 1%
+    off (MADD-ANO-174).
+  domains:
+    f32: tests/property/test_sysid_truth_recovery.py::test_fit_recovers_the_truth_at_every_residual_scale
+    f64: tests/core/test_sysid_claims_under_x64.py::test_fit_recovers_the_truth_when_its_gradient_flushes_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fit_recovers_the_truth_when_its_gradient_flushes_under_x64
+    16bit: narrowed
     jit: n/a
     grad: n/a
     vmap: n/a
@@ -2248,6 +2318,7 @@ claims:
   tests:
     - tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
     - tests/core/test_sysid_claims_edges.py::test_best_loss_is_the_loss_of_exactly_the_params_returned
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_gauss_newton_iterate_is_evaluated_as_it_is_returned
   status: verified
   notes: >-
     f64 domain failing on d2429a6: a log leaf no step moved was returned as
@@ -2257,6 +2328,10 @@ claims:
     fit, fit_lm and fit_multiple_shooting evaluate exactly the parameters
     to_params returns (_exact_physical_params), so without the guard the
     pair is exact in float32 and float64.
+    fit_lm's other way to an iterate, the Gauss-Newton step its floor rule
+    takes (SYS-080), is evaluated through the same objective: best_loss is
+    that candidate's loss as the run's last act, and the next iteration's
+    once it converges on it.
     Ambiguous in the first edition: fit_multiple_shooting said "the loss of
     exactly the pair returned" and FitResult "the value before the guard",
     and round 7 (B1, on 04bc3e5) measured a held pair 1.9e-9 off best_loss.
@@ -2326,14 +2401,23 @@ claims:
     trainable parameter converges at its start; "And neither test fires
     unless the undamped Gauss-Newton step from the iterate ... would also
     move every parameter by no more than step_tol, or, at the floor, would
-    not lower the loss: a shrunken step cannot read as stationary."
+    not lower the loss: a shrunken step cannot read as stationary"; at the
+    floor "if it moves a parameter by more than step_tol and lowers the
+    loss it is taken as the iterate and the run goes on"; converged "is
+    never reported on a solve whose live columns were not representable
+    even framed, or on a loss of 0.0 from a residual that is not zero".
   sources:
-    - src/maddening/sysid.py:3942 (fit_lm)
-    - src/maddening/sysid.py:3400 (FitResult, converged)
+    - src/maddening/sysid.py:4878 (fit_lm)
+    - src/maddening/sysid.py:4158 (FitResult, converged)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     a noiseless fit at its optimum in float32 and under x64; a run of
-    rejected candidates; a residual reading nothing trainable.  Not a
+    rejected candidates; a Marquardt step shrunk to within step_tol,
+    rejected from the start (float32) and accepted to the end of the budget
+    (x64); a residual reading nothing trainable; a noisy fit
+    at the float32 floor, an identity parameter in units 1e-8 to 1e8 (the
+    verdict and the answer the same in every unit); an unrepresentable
+    solve and a float64 loss that underflows (never converged).  Not a
     parameter whose truth is exactly 0: it has no relative resolution, and
     such a run stops at its floor unconverged unless given a tol (SYS-130).
     Not claimed for 16-bit floats.
@@ -2347,15 +2431,29 @@ claims:
     - tests/core/test_sysid_noise_model.py::test_fit_lm_never_accepting_a_step_returns_cleanly
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_shrunken_step_never_reads_as_stationary
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_run_of_stalled_candidates_is_not_the_rounding_floor
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_gauss_newton_iterate_is_evaluated_as_it_is_returned
     - tests/core/test_sysid_fit_lm_step_tol.py::test_a_run_that_never_lowered_the_loss_is_not_converged_by_the_floor_rule
     - tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_rule_never_fires_while_a_bound_coordinate_could_descend
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_the_floor_verdict_does_not_depend_on_a_parameters_units
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_never_converges_on_a_solve_it_could_not_form
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_loss_that_underflows_float64_is_never_converged
   status: verified
   notes: >-
     Round 7 (B1, on 04bc3e5): under x64 the floor rule's twelve damped
     candidates ended one rung short of step_tol (4.4e-15 against 3.6e-15)
     and a fit at loss 2.3e-30 read converged=False.  The ladder now goes on
     for the floor rule until a candidate is within step_tol or lam reaches
-    its cap.
+    its cap.  Round 8 (B1, on d2429a6): at the float32 floor of a noisy fit the
+    verdict flipped with an identity parameter's units (40 ulps short and
+    unconverged in units 1e-6, 1e3 and 1e8; converged in the others): the
+    damped candidates' verdicts were the loss's rounding while the
+    Gauss-Newton step still pointed at the optimum.  The floor rule now
+    takes that step (MADD-ANO-174).  With that rule and SYS-071's fix
+    together, the shrunken-step test's one float32 run (a millionth of the
+    step) stopped being stuck: its first candidate had only tied with the
+    start, and once it lowered the loss the floor rule's Gauss-Newton step
+    carried the run to the truth, converged there, as claimed.  The test now
+    holds the step within step_tol in the two runs that leave a fit stuck.
   domains:
     f32: tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float32_fit_at_its_optimum_is_converged
     f64: tests/core/test_sysid_fit_lm_step_tol.py::test_a_noiseless_float64_fit_at_its_floor_is_converged
@@ -2411,18 +2509,29 @@ claims:
   area: fit_lm
   claim: >-
     "No converged test fires while a coordinate on its bound could lower
-    the loss by moving into the range."
+    the loss by moving into the range -- by more than step_tol, measured by
+    its own Newton step: a pull smaller than that is the residual's
+    rounding ... and counts as zero."
   sources:
-    - src/maddening/sysid.py:3942 (fit_lm)
-    - src/maddening/sysid.py:3400 (FitResult, converged)
+    - src/maddening/sysid.py:4878 (fit_lm)
+    - src/maddening/sysid.py:4158 (FitResult, converged)
   conditions: >-
-    a coordinate with a descent direction into the range. Not claimed for
-    16-bit floats.
+    a coordinate with a descent direction into the range, including a
+    logit coordinate at the flat edge of its sigmoid; a noiseless truth
+    exactly on either bound of an identity parameter, float32 and float64
+    (converged on both). Not claimed for 16-bit floats.
   oracle: the flag; the inward-descent predicate.
   tests:
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on_the_bound
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_inward_descent_predicate
+    - tests/core/test_sysid_fit_lm_step_tol.py::test_a_truth_on_either_bound_converges
+    - tests/property/test_sysid_truth_recovery.py::test_fit_lm_converged_means_the_truth
   status: verified
+  notes: >-
+    Round 8 (B1, on d2429a6): with the truth exactly on a bound the on-bound
+    gradient is rounding, and its sign decided the verdict -- converged on
+    one bound of (0.5, 2.0) and not the other, and the opposite pair under
+    x64.  A pull within step_tol now counts as zero (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_coordinate_with_a_descent_direction_into_the_range_never_converges_on_the_bound
     f64: tests/core/test_sysid_claims_under_x64.py::test_no_converged_test_fires_while_a_bound_coordinate_could_descend_under_x64
@@ -2446,26 +2555,43 @@ claims:
     the residual and of each parameter"; the guide: "The solve's floor is
     eps times each column's own curvature".
   sources:
-    - src/maddening/sysid.py:3942 (fit_lm)
+    - src/maddening/sysid.py:4878 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
     - docs/validation/known_anomalies.yaml (MADD-ANO-121)
   conditions: >-
-    the residual scaled from 1e-10 to 1e10; noise_std 1 and 1e8; a spring in
-    SI units and in tonnes, float32 and float64. Not claimed for 16-bit
-    floats.
+    any residual whose entries, and whose Jacobian's, are normal numbers of
+    the working precision at every iterate, the fit's own rounding at the
+    optimum (about s * eps for a residual of scale s) included: scaled from
+    1e-30 to 1e37 in float32 (r * r, JᵀJ and Jᵀr flush below about 1e-19
+    and overflow above 1e19 bare; below about 1e-31 the rounding itself
+    flushes to an exact zero, which reads as an exact fit) and
+    from 1e-157 to 1e150 in float64 (a residual whose 0.5 ||r||² is a
+    nonzero, finite float64 at every iterate: below the smallest subnormal
+    the loss reads 0.0 and fit_lm refuses to call the iterate converged;
+    above about 1e153 it is refused as non-finite); noise_std 1e-20 to 1e20; a spring in SI units and in tonnes,
+    float32 and float64. Not claimed for a Jacobian entry that is not a
+    normal number, or for 16-bit floats.
   oracle: the optimum of the unscaled problem; the iteration count.
   tests:
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_noise_std_is_the_same_scaling
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system
+    - tests/property/test_sysid_truth_recovery.py::test_fit_lm_recovers_the_truth_at_every_residual_scale
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_frames_reach_the_gauss_newton_test_too
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_marquardt_step_scales_exactly_with_its_residual
+    - tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64
   status: verified
   notes: >-
     Until #203 the floor was eps times the mean of diag(JᵀJ); fit_lm's
     docstring still said so after #203 changed the code and the guide, and
-    is corrected here.
+    is corrected here.  Round 8 (B1, on d2429a6): in float32, from a residual scale of
+    1e-18 down, r * r, JᵀJ and Jᵀr flushed, and fit_lm reported
+    converged=True 2% and 7% off (1e-18, 1e-19) or at its start (1e-20),
+    best_loss 0.0.  The loss and both solves are now framed by powers of
+    two (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual
-    f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system[float64]'
+    f64: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_for_every_scaling_of_the_residual_under_x64
     mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_for_every_scaling_with_float32_leaves_under_x64
     16bit: narrowed
     jit: n/a
@@ -2486,24 +2612,33 @@ claims:
     parameter: "for the handful of physical constants a model has it
     converges in a few iterations where Adam needs hundreds".
   sources:
-    - src/maddening/sysid.py:3942 (fit_lm)
-    - src/maddening/sysid.py:3883 (_marquardt_step, comment)
+    - src/maddening/sysid.py:4878 (fit_lm)
+    - src/maddening/sysid.py:4766 (_marquardt_step, comment)
   conditions: >-
     one parameter of each transform in units 1e-4 and 1e4; an
-    identity-transform parameter in units 1e-5 to 1e6; the guard off. Not
-    claimed for 16-bit floats.
+    identity-transform parameter in units 1e-5 to 1e6, and at natural
+    scales from 1e-30 to 1e30 in float32 (1e-160 to 1e160 in float64) --
+    any scale at which its Jacobian column holds normal numbers -- and a
+    logit parameter likewise; the guard off and on. Not claimed for a
+    Jacobian entry that is not a normal number, or for 16-bit floats.
   oracle: the answer and the iteration count at unit 1.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter
     - tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units
     - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system
+    - tests/property/test_sysid_truth_recovery.py::test_fit_lm_recovers_the_truth_at_every_parameter_scale
+    - tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_at_every_parameter_scale_under_x64
   status: verified
   notes: >-
     Failing in the first edition of this inventory (unit 1e-3 stopped
     unconverged at loss 0.92; 1e-5 read converged=True without moving):
     the floor was shared across columns.  #203 (MADD-ANO-121) made it per
     column.  With the identifiability guard on, the answer still depends on
-    a parameter's units at the extremes: SYS-063 and SYS-088.
+    a parameter's units at the extremes: SYS-063 and SYS-088.  Round 8 (B1, on d2429a6):
+    an identity parameter whose natural scale is 1e-23 (the guide's own
+    example) or 1e23 had diag(JᵀJ) flush or overflow and came back unmoved,
+    converged=True, best_loss 5.35 against 0.  The columns are now framed
+    before A is formed (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_the_marquardt_step_does_not_depend_on_the_units_of_a_parameter
     f64: 'tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_fit_lm_answers_the_same_in_every_unit_system[float64]'
@@ -2559,10 +2694,11 @@ claims:
     (recovers k and c of the spring), and noise_std "weights the residual
     as in fim".
   sources:
-    - src/maddening/sysid.py:3942 (fit_lm)
+    - src/maddening/sysid.py:4878 (fit_lm)
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
-    the spring with mass frozen; a per-leaf noise model. Not claimed for
+    the spring with mass frozen; a per-leaf noise model; float32 constants
+    in an x64 graph, in as few iterations as float64 ones. Not claimed for
     16-bit floats.
   oracle: the truth; the iteration count against Adam's at equal budget.
   tests:
@@ -2570,10 +2706,15 @@ claims:
     - tests/core/test_sysid.py::test_fit_lm_beats_adam_at_equal_budget
     - tests/core/test_sysid_noise_model.py::test_fit_lm_noise_std_pytree_dict
   status: verified
+  notes: >-
+    Round 8 (B1, on d2429a6): with a float32 constant in an x64 graph fit_lm took
+    25-39 iterations against 5-6 (its float64 coordinate crept below one
+    float32 ulp a step) and a truth on a bound ran out of n_iter.  The
+    coordinate now stays on its leaf's grid (MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid.py::test_fit_lm_recovers_k_c_in_few_iterations
     f64: tests/property/test_sysid_truth_recovery.py::test_fit_lm_converged_means_the_truth_under_x64
-    mixed_dtype: tests/property/test_sysid_truth_recovery.py::test_fit_lm_converged_means_the_truth_under_x64
+    mixed_dtype: tests/core/test_sysid_claims_under_x64.py::test_float32_constants_in_an_x64_graph_converge_as_fast_as_float64_ones
     16bit: narrowed
     jit: n/a
     grad: tests/core/test_sysid.py::test_fit_lm_recovers_k_c_in_few_iterations
@@ -2624,13 +2765,19 @@ claims:
     - docs/user_guide/parameters.md (System identification)
   conditions: >-
     fit_lm as called by default, hold_undetermined=True; one
-    identity-transform parameter in units 1e-3, 1e-5 and 1e6. Not claimed
-    for 16-bit floats.
+    identity-transform parameter in units 1e-3, 1e-5 and 1e6, and at
+    natural scales from 1e-30 to 1e30 in float32 (1e-160 to 1e160 in
+    float64); any residual of normal magnitude (SYS-083's range). Not
+    claimed for a Jacobian entry that is not a normal number, or for
+    16-bit floats.
   oracle: the physical answer at unit 1.
   tests:
     - tests/core/test_sysid_claims_edges.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults
     - tests/core/test_sysid_hold_in_any_units.py::test_fit_lm_with_its_defaults_answers_the_same_in_any_units
     - tests/property/test_sysid_truth_recovery.py::test_fit_lm_answers_the_same_in_any_units
+    - tests/property/test_sysid_truth_recovery.py::test_fit_lm_recovers_the_truth_at_every_parameter_scale
+    - tests/property/test_sysid_truth_recovery.py::test_fit_lm_recovers_the_truth_at_every_residual_scale
+    - tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_at_every_parameter_scale_under_x64
   status: verified
   notes: >-
     Failing in the first edition: the Marquardt step was unit-invariant
@@ -2638,7 +2785,8 @@ claims:
     identifiability guard held the damping direction at u = 1e-5 (damping
     returned at 2.0 against 3) and at u = 1e6 (3.085), and declined with a
     RuntimeWarning at 1e-3.  Root cause SYS-063's; closed with it
-    (MADD-ANO-135).
+    (MADD-ANO-135).  Round 8 (B1, on d2429a6): at natural scales 1e-23 and 1e23 the
+    answer was the start, "converged" (SYS-084's root cause, MADD-ANO-174).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults
     f64: tests/core/test_sysid_claims_under_x64.py::test_fit_lm_answers_the_same_in_any_units_with_its_defaults_under_x64
@@ -2814,9 +2962,10 @@ claims:
     finite is refused too."
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-    - src/maddening/core/params.py:386 (ParamSpec.check)
+    - src/maddening/core/params.py:431 (ParamSpec.check)
   conditions: >-
-    large bounds; an interval a few ulps wide; float32 values within 40 ulps
+    large bounds whose width the leaf's dtype holds (a wider one is
+    refused, SYS-131); an interval a few ulps wide; float32 values within 40 ulps
     of either bound, the coordinate infinite and finite. Not claimed for
     mixed dtypes or 16-bit floats.
   oracle: strict inequality; check accepts exactly the values unconstrain gives a finite coordinate.
@@ -2854,11 +3003,12 @@ claims:
     differentiable.
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
-    - src/maddening/core/params.py:767 (constrain)
+    - src/maddening/core/params.py:909 (constrain)
     - docs/release_notes/v0.4.0.md (ParamSpec and the optimiser surface)
   conditions: >-
     any coordinates, including extreme ones, for constrain landing inside
-    bounds and unconstrain(constrain(u)) being finite; the inverse --
+    bounds and unconstrain(constrain(u)) being finite, for bounds the
+    leaf's dtype holds (others are refused, SYS-131); the inverse --
     constrain(unconstrain(p)) == p to a few ulps -- for a p inside the
     clamp's interior, at least 4 * eps * max(|lo|, |hi|, hi - lo) from a
     logit bound (within that margin p comes back on the clamp, up to 800
@@ -2880,6 +3030,49 @@ claims:
     jit: tests/core/test_params_spec.py::test_maps_are_jittable_and_differentiable
     grad: tests/core/test_params_spec.py::test_maps_are_jittable_and_differentiable
     vmap: narrowed
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: SYS-131
+  area: ParamSpec
+  claim: >-
+    A log / logit spec's bounds -- and a logit spec's width hi - lo -- have
+    to be finite numbers of the leaf's dtype (the width a normal one):
+    "the refusal is made here, at the first map or check of a leaf in a
+    dtype that cannot hold it, by name"; the same spec maps a float64 leaf.
+  sources:
+    - src/maddening/core/params.py:251 (ParamSpec._require_representable)
+    - docs/validation/known_anomalies.yaml (MADD-ANO-177)
+  conditions: >-
+    a logit width that overflows float32 (6e38 and 4e38) or is subnormal
+    there (1e-40), through to_constrained, to_unconstrained, check, the
+    optimiser interval, gm.check_params and gm.unconstrain; the same spec on
+    a float64 leaf under x64; a log bound beyond float16's range; a width
+    just inside float32's range (still mapped).
+  oracle: the ValueError naming the width or bound; the float64 maps' values.
+  tests:
+    - tests/core/test_param_spec_edge_cases.py::test_a_logit_width_its_dtype_cannot_hold_is_refused
+    - tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64
+    - tests/core/test_param_spec_edge_cases.py::test_a_log_bound_its_dtype_cannot_hold_is_refused
+    - tests/core/test_param_spec_edge_cases.py::test_the_widest_logit_width_a_float32_holds_still_maps
+  status: verified
+  notes: >-
+    Round 8 (B1, on d2429a6): ParamSpec(bounds=(-3e38, 3e38),
+    transform="logit") was accepted, and on a float32 leaf constrain mapped
+    the midpoint to the upper edge and far coordinates to NaN while check
+    refused every value (MADD-ANO-177).
+  domains:
+    f32: tests/core/test_param_spec_edge_cases.py::test_a_logit_width_its_dtype_cannot_hold_is_refused
+    f64: tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64
+    mixed_dtype: tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64
+    16bit: tests/core/test_param_spec_edge_cases.py::test_a_log_bound_its_dtype_cannot_hold_is_refused
+    jit: n/a
+    grad: n/a
+    vmap: n/a
     multi_rate: n/a
     sub_cycled: n/a
     predictors_warm_starts: n/a
@@ -3250,12 +3443,19 @@ claims:
     (step, run, every run_scan*, the fitters, windowed_loss), or compiles
     it, whichever comes first: one sync point takes it in ... so every
     entry point runs the same model"; writing a constructor value back
-    reverts a calibration.
+    reverts a calibration; "Assigning it ... stores the items in a fresh
+    counting mapping, so writes made through node.params afterwards count
+    as well"; "an element written in place into a list, a NumPy array or a
+    nested dict ... is found by comparing each such value with a copy taken
+    at the last sync".
   sources:
     - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
     - docs/validation/known_anomalies.yaml (MADD-ANO-122)
   conditions: >-
-    every mutation through the mapping; each reader and entry point; a
+    every mutation through the mapping; a replaced mapping, with and
+    without a later write into it; an in-place write to an element of a
+    list, a NumPy array or a nested (structural) dict, and an unchanged
+    value holding NaN (no write); each reader and entry point; a
     structural write. Not claimed for float64 (x64), mixed dtypes, 16-bit
     floats, vmap, run_adaptive or sharded graphs.
   oracle: each reader's and entry point's result against gm.step's.
@@ -3266,6 +3466,12 @@ claims:
     - tests/core/test_node_params_writes_are_observed.py::test_a_structural_write_reaches_gm_step_without_a_compile
     - tests/core/test_node_params_writes_are_observed.py::test_windowed_loss_runs_the_written_model_as_gm_step_does
     - tests/core/test_node_params_writes_are_observed.py::test_a_fitter_starts_from_the_written_value
+    - tests/core/test_node_params_writes_are_observed.py::test_assigning_node_params_stores_a_counting_mapping
+    - tests/core/test_node_params_writes_are_observed.py::test_a_replaced_mapping_counts_the_writes_made_into_it_afterwards
+    - tests/core/test_node_params_writes_are_observed.py::test_a_replaced_mapping_with_no_later_write_reaches_the_graph
+    - tests/core/test_node_params_writes_are_observed.py::test_an_in_place_write_into_a_parameter_reaches_every_reader
+    - tests/core/test_node_params_writes_are_observed.py::test_an_in_place_write_into_a_structural_value_recompiles
+    - tests/core/test_node_params_writes_are_observed.py::test_an_unchanged_mutable_value_is_not_a_write
     - tests/property/test_differential_entry_points_after_a_node_write.py::test_every_reader_reads_the_written_model
     - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_description_over_a_pending_structural_write_is_refused
     - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_after_compile_the_fmu_runs_the_written_model
@@ -3276,6 +3482,11 @@ claims:
     gm.params (MADD-ANO-122).  B1 round 7 found the FMU export, which reads
     gm.params, running the old model after a structural write; it now
     refuses the dirty graph (MADD-ANO-147), and parameters.md says so.
+    Round 8 (B1, on d2429a6): after node.params = {**node.params, ...} (a plain
+    dict) every later write into it was lost, and so was an in-place write
+    to a list-valued parameter, against _ParamsDict's "the graph also
+    compares values".  The setter now stores a counting mapping and the
+    sync compares mutable values (MADD-ANO-175).
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_a_leaf_write_reaches_every_entry_point_too
     f64: narrowed
@@ -3586,7 +3797,7 @@ claims:
 # The interface-mapping registry: register_mapping and a mapping's weights
 # ---------------------------------------------------------------------------
 
-- id: SYS-131
+- id: SYS-133
   area: mapping registry
   claim: >-
     "A kind name is any non-empty string but the three a config reserves for
@@ -3631,7 +3842,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-132
+- id: SYS-134
   area: mapping registry
   claim: >-
     "The declaration is checked against the factory's signature when it is
@@ -3672,7 +3883,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-133
+- id: SYS-135
   area: mapping registry
   claim: >-
     "A spec's hyper-parameters are checked against these declarations before
@@ -3726,7 +3937,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-134
+- id: SYS-136
   area: mapping registry
   claim: >-
     "A config, a USD stage and a checkpoint are untrusted input.  All one of
@@ -3781,7 +3992,7 @@ claims:
     checkpoint_restart: tests/core/test_mapping_registry.py::test_a_checkpoint_names_no_kind_and_loading_one_imports_nothing
     sharded: n/a
 
-- id: SYS-135
+- id: SYS-137
   area: mapping registry
   claim: >-
     "The limits on point references -- the asset size cap, the inline limits,
@@ -3825,7 +4036,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-136
+- id: SYS-138
   area: mapping registry
   claim: >-
     "Whatever a registered factory raises, from_dict and load_graph_from_usd
@@ -3879,7 +4090,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-137
+- id: SYS-139
   area: mapping registry
   claim: >-
     "A mapping of a registered kind is written by to_dict() and
@@ -3936,7 +4147,7 @@ claims:
     checkpoint_restart: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[checkpoint_restart]'
     sharded: narrowed
 
-- id: SYS-138
+- id: SYS-140
   area: mapping registry
   claim: >-
     "For a mapping of any class other than StaticLinearMapping, add_edge
@@ -3983,7 +4194,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-139
+- id: SYS-141
   area: mapping registry
   claim: >-
     "Every weight is frozen by default and opts in to a fit by name
@@ -4050,7 +4261,7 @@ claims:
     checkpoint_restart: 'tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint[checkpoint_restart]'
     sharded: narrowed
 
-- id: SYS-140
+- id: SYS-142
   area: mapping registry
   claim: >-
     The built-in kinds "write and rebuild exactly what they did" before they
@@ -4096,7 +4307,7 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
-- id: SYS-141
+- id: SYS-143
   area: mapping registry
   claim: >-
     gm.params["mappings"][edge.key] is the graph's own copy of the table a
@@ -4118,7 +4329,7 @@ claims:
   status: verified
   notes: >-
     Until this change the snapshot kept the returned dict by reference
-    (MADD-ANO-174, never shipped): the edit rewrote the mapping's own
+    (MADD-ANO-178, never shipped): the edit rewrote the mapping's own
     weights, reset_params() restored the edit and to_dict() never warned.
   domains:
     f32: n/a

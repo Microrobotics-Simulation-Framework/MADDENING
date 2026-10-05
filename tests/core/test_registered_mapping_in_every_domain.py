@@ -245,7 +245,7 @@ def check_round_trip_and_checkpoint(domain: Domain, tmp_path) -> None:
 
 @pytest.mark.parametrize("name", sorted(DOMAINS))
 def test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint(name, tmp_path):
-    """SYS-137 and SYS-139 in each domain: float32; float64 under x64; a
+    """SYS-139 and SYS-141 in each domain: float32; float64 under x64; a
     float32 member beside a float64 one under x64 (mixed dtype); a
     multi-rate graph; a sub-cycled coupling group; a group with a predictor
     whose warm start the next step reads; and a checkpoint restart taken
@@ -335,7 +335,7 @@ def test_run_adaptive_reads_a_registered_kinds_restored_weights(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# SYS-138: what add_edge accepts as a weight, by dtype
+# SYS-140: what add_edge accepts as a weight, by dtype
 # ---------------------------------------------------------------------------
 
 class _Weighted:

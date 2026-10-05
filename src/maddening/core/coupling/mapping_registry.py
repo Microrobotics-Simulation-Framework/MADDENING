@@ -119,19 +119,29 @@ _BUILTINS_LOADED = False
 
 
 def _ensure_builtins() -> None:
-    """Import the module that registers the built-in kinds.
+    """Import the modules that register the kinds this library ships.
 
     The built-in factories live in :mod:`maddening.core.coupling.mapping`,
     which registers them as it is imported.  Everything that reads the
     table asks for that import first, so a spec can be validated by a
     program that imported only ``mapping_spec``, and a built-in name is
-    always taken before :func:`register_mapping` can be offered it.  This
-    is the one import the registry performs, and its target is fixed.
+    always taken before :func:`register_mapping` can be offered it.
+
+    The sparse kinds of :mod:`maddening.core.coupling.sparse_mapping` are
+    loaded with them, for the same two reasons: a config that names one
+    loads in a program that imported nothing but the graph, and their
+    names are taken first.  They are registered through the public
+    :func:`register_mapping`, not as built-ins, so everything a registered
+    kind is held to holds for them.
+
+    These are the only imports the registry performs, and their targets
+    are fixed: nothing a file contains chooses one.
     """
     global _BUILTINS_LOADED
     if _BUILTINS_LOADED:
         return
     import maddening.core.coupling.mapping  # noqa: F401, PLC0415
+    import maddening.core.coupling.sparse_mapping  # noqa: F401, PLC0415
 
     _BUILTINS_LOADED = True
 

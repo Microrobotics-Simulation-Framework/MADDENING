@@ -36,6 +36,13 @@ if TYPE_CHECKING:
 _META_KEY = "_meta"
 _PARAMS_KEY = "_params"
 _MAPPINGS_KEY = "_params_mappings"
+#: Beside a mapping's weights, under the same edge: the SHA-256 (32 bytes,
+#: uint8) of the structure those weights are applied through, for a mapping
+#: that has one (``structure_digest()``: a sparse mapping's index).  Not a
+#: Python identifier, so it can never be taken for a weight: a weight's
+#: name is one (``register_mapping``'s contract for ``params_pytree()``).
+_STRUCTURE_MEMBER = "structure.sha256"
+_DIGEST_BYTES = hashlib.sha256().digest_size
 
 # Schema version for the integrity manifest.
 #
@@ -118,6 +125,13 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
     for edge_key, weights in graph_manager.params.get("mappings", {}).items():
         for wname, value in weights.items():
             arrays[f"{_MAPPINGS_KEY}/{edge_key}/{wname}"] = np.asarray(value)
+    # Weights that are applied through a structure the checkpoint does not
+    # carry (a sparse mapping's index) mean something only against that
+    # structure: its digest goes beside them, and the load compares it.
+    for edge_key, digest in _mapping_structures(graph_manager).items():
+        if graph_manager.params.get("mappings", {}).get(edge_key):
+            arrays[f"{_MAPPINGS_KEY}/{edge_key}/{_STRUCTURE_MEMBER}"] = np.frombuffer(
+                digest, dtype=np.uint8)
 
     # numpy types `savez` as `savez(file, *args, allow_pickle=True,
     # **kwds)`, so a checker matches every `**` value against
@@ -128,6 +142,98 @@ def save_state(graph_manager: "GraphManager", path: str | Path) -> Path:
     # numpy.savez appends .npz if not already present
     resolved = path if path.suffix == ".npz" else path.with_suffix(path.suffix + ".npz")
     return resolved
+
+
+def _mapping_structures(graph_manager: "GraphManager") -> dict[str, bytes]:
+    """``{edge key: structure digest}`` for every mapped edge whose mapping
+    applies its weights through a structure of its own.
+
+    A mapping says so by defining ``structure_digest()``, returning the
+    SHA-256 (hex) of that structure -- for a
+    :class:`~maddening.core.coupling.sparse_mapping.StaticSparseMapping`,
+    its layout, sizes, index and row counts.  A dense matrix has none: its
+    weights are the whole operator.
+    """
+    out: dict[str, bytes] = {}
+    for edge in graph_manager.edges:
+        digest_of = getattr(edge.mapping, "structure_digest", None)
+        if not callable(digest_of):
+            continue
+        digest = digest_of()
+        try:
+            raw = bytes.fromhex(digest)
+        except (TypeError, ValueError):
+            raw = b""
+        if len(raw) != _DIGEST_BYTES:
+            raise ValueError(
+                f"mapping {edge.mapping!r} on edge {edge.key}: structure_digest() must "
+                f"return a SHA-256 as {2 * _DIGEST_BYTES} hexadecimal characters, got "
+                f"{digest!r}"
+            )
+        out[edge.key] = raw
+    return out
+
+
+def _check_mapping_structures(graph_manager: "GraphManager", archive: "_CheckpointArchive",
+                              mapping_keys: dict[str, dict[str, str]]) -> None:
+    """Refuse mapping weights the checkpoint saved for another structure.
+
+    A sparse mapping's weights are one number per slot of an index the
+    checkpoint does not carry.  Restored onto a different index of the same
+    shape they would run an operator nobody computed, and nothing about
+    their shape or values could tell.  So for every edge whose weights this
+    load would install, the structure digest saved beside them must be the
+    live mapping's -- both absent (a dense mapping, whose weights are the
+    whole operator) or both present and equal.  Raises before anything is
+    read into the graph.
+    """
+    live = _mapping_structures(graph_manager)
+    current = graph_manager.params.get("mappings", {})
+    for edge_key, saved in mapping_keys.items():
+        if edge_key not in current:
+            continue
+        installs = sorted(name for name in saved
+                          if name != _STRUCTURE_MEMBER and name in current[edge_key])
+        if not installs:
+            continue
+        recorded: Optional[bytes] = None
+        key = saved.get(_STRUCTURE_MEMBER)
+        if key is not None:
+            if archive.shape(key) != (_DIGEST_BYTES,) or archive.dtype(key) != np.uint8:
+                raise ValueError(
+                    f"Checkpoint mapping structure for edge {edge_key!r} is "
+                    f"{archive.dtype(key)}{list(archive.shape(key))} data, not a "
+                    f"{_DIGEST_BYTES}-byte digest.  Nothing was loaded."
+                )
+            recorded = archive.read(key).tobytes()
+        mine = live.get(edge_key)
+        if recorded == mine:
+            continue
+        weights = ", ".join(repr(name) for name in installs)
+        if recorded is not None and mine is not None:
+            raise ValueError(
+                f"Checkpoint mapping weights {weights} for edge {edge_key!r} were saved "
+                f"for a different sparsity pattern ({recorded.hex()[:12]}..., this "
+                f"graph's is {mine.hex()[:12]}...): the mapping was rebuilt from other "
+                f"points, another index or another layout since.  A sparse mapping's "
+                f"weights are one number per slot of its index, so on another index "
+                f"they are another operator.  Nothing was loaded."
+            )
+        if recorded is not None:
+            raise ValueError(
+                f"Checkpoint mapping weights {weights} for edge {edge_key!r} were saved "
+                f"for a sparse mapping (sparsity pattern {recorded.hex()[:12]}...), and "
+                f"the mapping on this edge now is not one: the weights are one number "
+                f"per slot of an index this graph does not have.  Nothing was loaded."
+            )
+        assert mine is not None      # the two differ and the checkpoint has none
+        raise ValueError(
+            f"Checkpoint mapping weights {weights} for edge {edge_key!r} do not say "
+            f"which sparsity pattern they were saved for, and the mapping on this edge "
+            f"applies its weights through one ({mine.hex()[:12]}...): they were saved "
+            f"for a dense mapping, or by something other than save_state.  Nothing was "
+            f"loaded."
+        )
 
 
 def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
@@ -154,6 +260,10 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         that would wrap, text, or a boolean for a numeric leaf
         (:func:`_checked_cast`; a value that rounds to a subnormal loads,
         and a state value already ``inf`` or ``NaN`` loads as it was).
+        Also if it holds weights of a sparse interface mapping that were
+        saved for another sparsity pattern than the live mapping's -- or
+        for a dense mapping, or the reverse -- whatever their shape
+        (:func:`_check_mapping_structures`).
         A parameter leaf is not asked what ``PUT /graph/params`` asks --
         its ``ParamSpec`` bounds, finiteness, the node's constructor -- as a
         ``gm.params`` write is not: bounds are metadata to a graph, and a
@@ -313,6 +423,7 @@ def _load_from_archive(graph_manager: "GraphManager", archive: "_CheckpointArchi
                     key, live.dtype, f"params {section}[{owner!r}][{pname!r}]"))))
         return writes
 
+    _check_mapping_structures(graph_manager, archive, mapping_keys)
     staged_params = (
         _stage_params("nodes", param_keys)
         + _stage_params("mappings", mapping_keys)

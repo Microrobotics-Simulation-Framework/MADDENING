@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core._exact_integers import lost_as_integer
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 
@@ -402,7 +403,11 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
     and is kept; a value that is already ``inf`` or ``NaN`` is stored as
     it was (a diverged state, a ``NaN``-seeded diagnostics slot).  An
     integer that would wrap or truncate, and a non-finite value for an
-    integer leaf, are refused too.
+    integer leaf, are refused too -- an integer of the other signedness
+    included (``-1`` for an unsigned leaf, 4000000000 for an ``int32``
+    one), which a cast there and back cannot see
+    (:func:`maddening.core._exact_integers.lost_as_integer`) -- and so is a
+    complex value with an imaginary part for a real leaf.
     """
     a = np.asarray(arr)
     target = np.dtype(dtype)
@@ -423,11 +428,15 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
     if target.kind in "fc":
         finite = np.isfinite(a) if a.dtype.kind in "fc" else np.ones(a.shape, bool)
         lost = (finite & ~np.isfinite(cast)) | ((a != 0) & (cast == 0))
+        if a.dtype.kind == "c" and target.kind == "f":
+            lost = lost | (a.imag != 0)        # the cast drops an imaginary part
     elif target.kind in "iu":
-        if a.dtype.kind in "fc":
-            lost = ~np.isfinite(a) | (cast.astype(np.float64) != a.astype(np.float64))
-        else:
-            lost = cast.astype(a.dtype) != a
+        # By range and wholeness, never by a cast there and back: that is a
+        # bijection between a signed and an unsigned type of one width, so
+        # -1 for a uint64 leaf came back as -1 and loaded as
+        # 18446744073709551615; and a comparison through float64 rounds
+        # both sides above 2**53.
+        lost = lost_as_integer(a, target)
     elif target.kind == "b":
         lost = (a != 0) & (a != 1)
     else:

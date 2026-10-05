@@ -72,7 +72,13 @@ the model description records (``ModelDescription.graph_timestep``); one
 stops at the first one after :meth:`FmuTcpBridge.stop`.
 
 ``values`` are flat numbers in value-reference order; an array variable
-contributes ``prod(shape)`` entries in row-major order.  A **non-finite**
+contributes ``prod(shape)`` entries in row-major order.  The wire carries
+every value as a float64, which holds every value of every FMI type but
+two: an ``Int64`` or ``UInt64`` above 2**53 in magnitude that is not itself
+a float64.  Such a value is never rounded: a ``get`` of a variable holding
+one is refused, and so is a ``set`` of one to an integer variable, each
+naming the variable and the integer (both used to answer ``ok`` with the
+neighbouring integer).  A **non-finite**
 value is written as the quoted token ``"NaN"``, ``"Infinity"`` or
 ``"-Infinity"`` rather than the bare token ``json.dumps`` would write,
 which is not JSON (``MADD-ANO-006``); a ``get`` reply from a diverged
@@ -433,6 +439,28 @@ serving is refused at its commit: nothing a worker computes after
 ``stop()`` is written into the model (see ``FmuTcpBridge._committing``)."""
 
 
+class _MinusZero(int):
+    """The JSON integer literal ``-0``: the integer 0 everywhere, and the
+    float ``-0.0`` as a ``set`` value (:func:`_flat_numbers`)."""
+
+    __slots__ = ()
+
+
+_MINUS_ZERO = _MinusZero(0)
+
+
+def _json_int(text: str) -> int:
+    """A JSON integer literal as a Python ``int``, with ``-0`` kept apart.
+
+    ``json.loads("-0")`` is the integer 0: the sign is gone.  C's ``%.17g``
+    writes negative zero as ``-0`` (so does any ``printf("%g")``), so a
+    JSON client's ``set`` of ``-0.0`` -- the compiled wrapper's, on a
+    connection without binary frames -- was stored as ``+0.0`` and answered
+    ``ok``, while the binary path kept the sign.
+    """
+    return _MINUS_ZERO if text == "-0" else int(text)
+
+
 def _json_object(body: bytes, what: str) -> Any:
     """``json.loads`` of ``body``; every failure is a ``ValueError``.
 
@@ -447,7 +475,7 @@ def _json_object(body: bytes, what: str) -> Any:
         # well as the quoted ones this module writes, so a peer of either
         # vintage is understood; ``decode_non_finite`` turns the quoted
         # form into the float the bare form already produced.
-        return decode_non_finite(json.loads(body.decode("utf-8")))
+        return decode_non_finite(json.loads(body.decode("utf-8"), parse_int=_json_int))
     except RecursionError as exc:
         raise ValueError(f"{what} is nested too deeply") from exc
     except ValueError as exc:                  # JSONDecodeError, UnicodeDecodeError
@@ -675,9 +703,60 @@ def _real_number(x: Any, what: str) -> float:
     return v
 
 
-def _flat_numbers(values: Any) -> np.ndarray:
+_FLOAT64_EXACT_INTEGERS = 2 ** 53
+"""Every integer up to this magnitude is a float64; above it only some are
+(the multiples of the float64 spacing there), and the rest round."""
+
+
+def _integers_float64_rounds(a: np.ndarray) -> dict[int, int]:
+    """``{flat index: integer}`` for the entries of the integer array ``a``
+    that a float64 cannot hold: those ``astype(float64)`` would round.
+
+    Compared as integers.  Only a 64-bit integer type reaches past
+    :data:`_FLOAT64_EXACT_INTEGERS`, so narrower arrays are never scanned.
+    """
+    if a.dtype.kind not in "iu" or a.dtype.itemsize < 8 or a.size == 0:
+        return {}
+    flat = a.ravel()
+    as_float = flat.astype(np.float64)
+    suspects = np.flatnonzero(np.abs(as_float) >= float(_FLOAT64_EXACT_INTEGERS))
+    return {int(i): int(flat[i]) for i in suspects if int(as_float[i]) != int(flat[i])}
+
+
+def _wire_float64(value: Any, var: "FMIVariable") -> np.ndarray:
+    """``value`` (a leaf of the model) flat, as the float64 the wire carries,
+    refused when that would be another number.
+
+    The wire carries every value as a float64, which holds every value of
+    every FMI type but two: an ``Int64`` or ``UInt64`` above 2**53 in
+    magnitude is a float64 only if it is a multiple of the spacing there.
+    A ``get`` used to convert regardless, so ``fmi3GetInt64`` answered
+    ``fmi3OK`` with a neighbouring integer (9007199254740992 for a model
+    holding 9007199254740993).
+
+    Raises
+    ------
+    ValueError
+        Naming the variable and the integer; nothing is read.
+    """
+    leaf = np.asarray(value)
+    rounded = _integers_float64_rounds(leaf)
+    if rounded:
+        index, integer = next(iter(rounded.items()))
+        where = f" (entry {index})" if leaf.size > 1 else ""
+        raise ValueError(
+            f"variable {var.name!r} holds {integer}{where}, which the float64 this "
+            f"protocol carries every value as cannot hold: a get would answer "
+            f"{int(float(integer))}, another integer.  An {_fmi_type_of(var)} above 2**53 "
+            "in magnitude is carried only where a float64 is exactly it; nothing was "
+            "read")
+    return np.asarray(leaf, dtype=np.float64).ravel()
+
+
+def _flat_numbers(values: Any) -> tuple[np.ndarray, dict[int, int]]:
     """A ``set`` request's ``values`` as float64, refused unless every entry
-    already is a number.
+    already is a number; and the integers among them that the float64
+    rounded, as ``{index: integer}``.
 
     ``np.asarray(values, dtype=float64)`` parses the string ``"45"`` and
     turns ``true`` into 1.0, so both used to be stored as numbers with the
@@ -686,14 +765,24 @@ def _flat_numbers(values: Any) -> np.ndarray:
     downstream to refuse by variable name -- and so is a float or integer
     array (the binary path's, or an in-process caller's).
 
+    An integer above 2**53 in magnitude that is not a float64 is rounded by
+    that conversion.  For a float variable that is what a decimal literal
+    means (the nearest float); for an integer variable it is another
+    integer, so the caller refuses it there (``FmuTcpBridge._set``): a JSON
+    ``set`` of ``2**53 + 1`` to an ``Int64`` input used to be stored as
+    ``2**53`` and answered ``ok``.
+
     Raises
     ------
     ValueError
         If ``values`` is not a flat sequence of numbers.
     """
+    rounded: dict[int, int] = {}
     if isinstance(values, np.ndarray):
         if values.dtype.kind not in "iuf":
             raise ValueError(f"values must be numbers, got an array of {values.dtype}")
+        if values.ndim == 1:
+            rounded = _integers_float64_rounds(values)
         arr = values.astype(np.float64)
     elif isinstance(values, (list, tuple)):
         for i, x in enumerate(values):
@@ -704,11 +793,20 @@ def _flat_numbers(values: Any) -> np.ndarray:
             arr = np.asarray(values, dtype=np.float64)
         except OverflowError as exc:
             raise ValueError(f"values must be finite numbers: {exc}") from exc
+        if arr.ndim == 1:
+            # the JSON literal -0 is the float -0.0 here (see _json_int)
+            minus_zero = [i for i, x in enumerate(values) if x is _MINUS_ZERO]
+            if minus_zero:
+                arr[minus_zero] = -0.0
+            for i in np.flatnonzero(np.abs(arr) >= float(_FLOAT64_EXACT_INTEGERS)):
+                x = values[int(i)]
+                if isinstance(x, (int, np.integer)) and int(x) != int(arr[i]):
+                    rounded[int(i)] = int(x)
     else:
         raise ValueError(f"values must be a flat list of numbers, got {type(values).__name__}")
     if arr.ndim != 1:
         raise ValueError("values must be a flat list of numbers")
-    return arr
+    return arr, rounded
 
 
 def _size(var: FMIVariable) -> int:
@@ -2363,7 +2461,7 @@ class FmuTcpBridge:
         if not isinstance(vrs, (list, tuple)):
             raise ValueError("vr must be a list of value references")
         fmi_type = _requested_type(fmi_type)
-        values = _flat_numbers(values)
+        values, rounded = _flat_numbers(values)
         pos = 0
         staged: list[tuple[FMIVariable, np.ndarray]] = []
         named: set[int] = set()
@@ -2388,6 +2486,17 @@ class FmuTcpBridge:
             chunk = values[pos:pos + n]
             if chunk.size != n:
                 raise ValueError(f"vr {vr} ({var.name}) expects {n} values, got {chunk.size}")
+            if rounded and np.dtype(var.dtype).kind in "iu":
+                # An integer the float64 wire form rounded, for an integer
+                # variable: it would be stored as its neighbour.
+                lost = next((rounded[i] for i in range(pos, pos + n) if i in rounded), None)
+                if lost is not None:
+                    raise ValueError(
+                        f"variable {var.name!r}: the integer {lost} cannot be carried "
+                        f"exactly as the float64 this protocol carries every value as "
+                        f"(it would be stored as {int(float(lost))}); an "
+                        f"{_fmi_type_of(var)} above 2**53 in magnitude is carried only "
+                        "where a float64 is exactly it.  Nothing was written")
             pos += n
             staged.append((var, chunk.reshape(var.shape or ())))
         if pos != len(values):
@@ -2493,21 +2602,23 @@ class FmuTcpBridge:
 
     def _value_of(self, var: FMIVariable, params: dict) -> np.ndarray:
         """``var``'s current value, flat, as float64 (``params``: the
-        sidecar's :meth:`~FmuSidecar.get_params`, read once per ``get``)."""
+        sidecar's :meth:`~FmuSidecar.get_params`, read once per ``get``);
+        ``ValueError`` for an ``Int64`` / ``UInt64`` value a float64 cannot
+        hold (:func:`_wire_float64`)."""
         if var.causality == "independent":
             return np.asarray([self._time], dtype=np.float64)
         if var.causality == "parameter":
-            return np.asarray(params[var.name], dtype=np.float64).ravel()
+            return _wire_float64(params[var.name], var)
         if var.causality == "input":
             node, field = var.node_field()
             val = self._inputs.get(node, {}).get(field)
             if val is None:
                 val = np.zeros(var.shape or (), dtype=np.float64)
-            return np.asarray(val, dtype=np.float64).ravel()
+            return _wire_float64(val, var)
         if var.is_clock:
             return np.zeros(1, dtype=np.float64)
         node, field = var.node_field()
-        return np.asarray(self._sidecar.state[node][field], dtype=np.float64).ravel()
+        return _wire_float64(self._sidecar.state[node][field], var)
 
 
 __all__ = ["FmuTcpBridge", "PROTOCOL_VERSION", "checked_value", "decode_binary",

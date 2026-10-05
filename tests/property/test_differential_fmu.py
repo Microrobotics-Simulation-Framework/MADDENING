@@ -984,7 +984,16 @@ import os                                                        # noqa: E402
 
 from maddening.fmi.package import build_fmu_binary, find_c_compiler  # noqa: E402
 
-_FMI_TYPE = {"float32": "Float32", "float64": "Float64", "int32": "Int32", "bool": "Boolean"}
+#: numpy dtype name -> (FMI 3.0 type, the C type of its fmi3Get / fmi3Set).
+_FMI_C_TYPES = {
+    "float32": ("Float32", ctypes.c_float), "float64": ("Float64", ctypes.c_double),
+    "int8": ("Int8", ctypes.c_int8), "uint8": ("UInt8", ctypes.c_uint8),
+    "int16": ("Int16", ctypes.c_int16), "uint16": ("UInt16", ctypes.c_uint16),
+    "int32": ("Int32", ctypes.c_int32), "uint32": ("UInt32", ctypes.c_uint32),
+    "int64": ("Int64", ctypes.c_int64), "uint64": ("UInt64", ctypes.c_uint64),
+    "bool": ("Boolean", ctypes.c_bool),
+}
+_FMI_TYPE = {dtype: fmi_type for dtype, (fmi_type, _) in _FMI_C_TYPES.items()}
 
 
 class WrapperPath:
@@ -1196,6 +1205,14 @@ def _load_wrapper():
     directory = tempfile.mkdtemp(prefix="maddening-diff-wrapper-")
     wrapper = _Wrapper(build_fmu_binary(directory))
     lib = wrapper.lib
+    # every FMI numeric type's getter and setter, for the typed battery
+    for fmi_type, ctype in _FMI_C_TYPES.values():
+        wrapper.ctypes_of[fmi_type] = ctype
+        for op in ("Get", "Set"):
+            f = getattr(lib, f"fmi3{op}{fmi_type}")
+            f.restype = ctypes.c_int
+            f.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
+                          ctypes.POINTER(ctype), ctypes.c_size_t]
     for name in ("fmi3Reset", "fmi3Terminate", "fmi3ExitInitializationMode"):
         getattr(lib, name).restype = ctypes.c_int
         getattr(lib, name).argtypes = [ctypes.c_void_p]
@@ -1734,3 +1751,421 @@ def test_a_restore_between_steps_changes_no_reply_on_any_fmu_path(name, restore)
             assert reply == plain[k][0], (k, reply, plain[k][0])
     if restore == "rollback":
         assert any(len(seen) > 1 for seen in replies.values())
+
+
+# ===========================================================================
+# Every FMI type, both directions, at its extreme values
+# ===========================================================================
+#
+# FMU-024 / FMU-043 / FMU-045: a value is checked in the variable's own
+# type, and the wire carries every value as a float64.  A float64 holds
+# every value of every FMI type but two: an Int64 or UInt64 above 2**53 in
+# magnitude is a float64 only where it is a multiple of the spacing there.
+# The paths used to round such a value in silence (B1 round 9, F5): a get
+# widened the model's int64 to float64, so fmi3GetInt64 answered fmi3OK with
+# a neighbouring integer, and a JSON set of 2**53 + 1 was stored as 2**53.
+#
+# The battery: one node with an input and an output of every FMI type (and
+# the two float parameters a graph can have), under x64 so the 64-bit types
+# exist.  For every type, each of its extreme values goes in through the
+# typed setter -- the TCP bridge's JSON set, and fmi3Set<Type> of the
+# compiled wrapper against a bridge of its own, over binary frames and over
+# JSON -- and comes back through the typed getter, as an input and, a step
+# later, as an output; the sidecar and the graph are given the value as an
+# array of the type itself, never through a float64.  The oracle, with no
+# tolerance:
+#
+# * a value the wire can carry reads back as itself, to the bit, on every
+#   path and through every getter;
+# * a value the type holds but a float64 does not is *refused* by the set
+#   (bridge and wrapper, nothing written) -- and, once the model holds it,
+#   put there through the FMU-state archive, which carries the type's own
+#   bytes, by every get of it (bridge and wrapper, nothing read), while the
+#   four paths still hold exactly that value;
+# * a value the type cannot hold is refused by every door.
+
+import contextlib                                                # noqa: E402
+
+import jax                                                       # noqa: E402
+
+from maddening.core.compliance.metadata import StabilityLevel   # noqa: E402
+from maddening.core.compliance.stability import stability       # noqa: E402
+from maddening.core.node import BoundaryInputSpec, SimulationNode  # noqa: E402
+
+TYPED = tuple(_FMI_C_TYPES)
+FLOAT_PARAMS = ("float32", "float64")
+
+
+@contextlib.contextmanager
+def _x64():
+    previous = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        yield
+    finally:
+        jax.config.update("jax_enable_x64", previous)
+
+
+@stability(StabilityLevel.STABLE)
+class _Latch(SimulationNode):
+    """``out_<type> <- in_<type>`` for every FMI type, and ``held_<type> <-
+    gain_<type>`` for the two float types a graph parameter can have: a
+    value set on an input (or a parameter) is an output a step later, in
+    its own type all the way."""
+
+    def __init__(self, name, timestep):
+        super().__init__(name, timestep,
+                         **{f"gain_{t}": jnp.asarray(1.0, t) for t in FLOAT_PARAMS})
+
+    def initial_state(self):
+        return {**{f"out_{t}": jnp.zeros((), t) for t in TYPED},
+                **{f"held_{t}": jnp.zeros((), t) for t in FLOAT_PARAMS}}
+
+    def boundary_input_spec(self):
+        return {f"in_{t}": BoundaryInputSpec(shape=(), dtype=np.dtype(t),
+                                             default=jnp.zeros((), t)) for t in TYPED}
+
+    def update(self, state, boundary_inputs, dt, *, params=None):
+        p = self.params if params is None else {**self.params, **params}
+        out = {f"out_{t}": jnp.asarray(boundary_inputs.get(f"in_{t}", jnp.zeros((), t)), t)
+               for t in TYPED}
+        out.update({f"held_{t}": jnp.asarray(p[f"gain_{t}"], t) for t in FLOAT_PARAMS})
+        return out
+
+
+def _latch():
+    gm = GraphManager()
+    gm.add_node(_Latch("latch", 0.01))
+    for t in TYPED:
+        gm.add_external_input("latch", f"in_{t}", dtype=np.dtype(t))
+    gm.compile()
+    return gm
+
+
+def _f32(x: float) -> float:
+    return float(np.float32(x))
+
+
+_F32, _F64 = np.finfo(np.float32), np.finfo(np.float64)
+
+#: Per type: values it holds (its extremes, and the largest integers it and
+#: the float64 wire hold exactly), and values it cannot hold.
+TYPE_VALUES: dict[str, tuple[list, list]] = {
+    "float32": ([float(_F32.max), -float(_F32.max), float(_F32.tiny), -float(_F32.tiny),
+                 _f32(1e-45), -_f32(1e-45), -0.0, 16777216.0, 16777217.0, _f32(1 / 3)],
+                [3.5e38, -3.5e38, 1e-50, -1e-50]),
+    "float64": ([float(_F64.max), -float(_F64.max), float(_F64.tiny), 5e-324, -5e-324, -0.0,
+                 2.0 ** 53, 2.0 ** 53 + 2.0, 1 / 3, 2 ** 53 + 1],
+                []),
+    "bool": ([True, False], [2, -1, 0.5]),
+    "int64": ([0, 1, -1, 2 ** 53, -(2 ** 53), 2 ** 53 + 1, -(2 ** 53) - 1, 2 ** 53 + 2,
+               2 ** 62, -(2 ** 63), 2 ** 63 - 1024, 2 ** 63 - 1, -(2 ** 63) + 1],
+              [2 ** 63, -(2 ** 63) - 1025, 2 ** 64, 0.5]),
+    "uint64": ([0, 1, 2 ** 53, 2 ** 53 + 1, 2 ** 53 + 2, 2 ** 63, 2 ** 63 + 1,
+                2 ** 64 - 2048, 2 ** 64 - 1],
+               [2 ** 64, -1, 0.5]),
+}
+for _bits in (8, 16, 32):
+    TYPE_VALUES[f"int{_bits}"] = (
+        [0, 1, -1, 2 ** (_bits - 1) - 1, -(2 ** (_bits - 1))],
+        [2 ** (_bits - 1), -(2 ** (_bits - 1)) - 1, 0.5, 2 ** 53 + 1])
+    TYPE_VALUES[f"uint{_bits}"] = (
+        [0, 1, 2 ** _bits - 1], [2 ** _bits, -1, 0.5, 2 ** 53 + 1])
+
+
+def _exact(dtype: str, value) -> np.ndarray:
+    """``value`` as a scalar of ``dtype``, built in the type itself."""
+    return np.asarray(value, dtype=np.dtype(dtype))
+
+
+def wire_carries(dtype: str, value) -> bool:
+    """Is ``value``, held in ``dtype``, a float64?  Decided here in Python
+    integers -- an independent statement of the rule, not the bridge's."""
+    if np.dtype(dtype).kind not in "iu":
+        return True
+    return int(float(int(value))) == int(value)
+
+
+class TypedPaths(FourPaths):
+    """The four paths over the typed latch, compared in each type's own
+    bytes (the generic comparison reads every variable as a float64, which
+    is what this battery is about)."""
+
+    def var(self, name: str):
+        return next(v for v in self.m.md.variables if v.name == name)
+
+    def states(self) -> dict[str, dict]:
+        assert self.cw is not None and self.cw.bridge is not None
+        return {"bridge": self.bridge._sidecar.state,                   # noqa: SLF001
+                "sidecar": self.side.state,
+                "graph": self.m.direct._state,                          # noqa: SLF001
+                "wrapper": self.cw.bridge._sidecar.state}               # noqa: SLF001
+
+    def assert_states_identical(self, what: str) -> None:
+        trees = {k: {n: dict(f) for n, f in v.items()} for k, v in self.states().items()}
+        for other in ("sidecar", "graph", "wrapper"):
+            assert_trees_identical(trees["bridge"], trees[other],
+                                   what=f"{what}: bridge vs {other} state")
+        assert self.cw is not None and self.cw.bridge is not None
+        for mine in (self.bridge._inputs, self.cw.bridge._inputs):      # noqa: SLF001
+            assert_trees_identical({n: dict(f) for n, f in mine.items()},
+                                   {n: dict(f) for n, f in self.side_inputs.items()},
+                                   what=f"{what}: a bridge's pending inputs vs the oracle's")
+
+    # -- typed access --------------------------------------------------------
+    def tcp_set(self, var, value) -> dict:
+        wire = (1 if value else 0) if isinstance(value, bool) else value
+        return self._wire({"op": "set", "type": _FMI_TYPE[var.dtype],
+                           "vr": [var.value_reference], "values": [wire]})
+
+    def tcp_get(self, var) -> dict:
+        return self._wire({"op": "get", "type": _FMI_TYPE[var.dtype],
+                           "vr": [var.value_reference]})
+
+    def c_set(self, var, value) -> int:
+        assert self.cw is not None
+        return self.cw.w.call("Set", _FMI_TYPE[var.dtype], self.cw.inst,
+                              [var.value_reference], [value])[0]
+
+    def c_get(self, var, sentinel=1):
+        """``(status, the C value)``; the output slot starts at a sentinel,
+        which a refused get must leave."""
+        assert self.cw is not None
+        status, got = self.cw.w.call("Get", _FMI_TYPE[var.dtype], self.cw.inst,
+                                     [var.value_reference], [sentinel])
+        return status, got[0]
+
+    def reads_back(self, var, value, what: str) -> None:
+        """Every getter answers ``value``, exactly, in ``var``'s type."""
+        want = _exact(var.dtype, value)
+        reply = self.tcp_get(var)
+        assert reply["ok"], (what, reply)
+        got = reply["values"][0]
+        status, c_value = self.c_get(var)
+        assert status == WrapperPath.OK, (what, self.cw.w.logs[-2:])
+        if np.dtype(var.dtype).kind in "iu":
+            assert float(got).is_integer() and int(got) == int(want), (what, got, int(want))
+            assert int(c_value) == int(want), (what, c_value, int(want))
+        elif np.dtype(var.dtype).kind == "b":
+            assert got in (0.0, 1.0) and bool(got) is bool(want) and bool(c_value) is bool(want)
+        else:
+            assert np.float64(got).tobytes() == np.float64(want).tobytes(), (what, got, want)
+            assert _exact(var.dtype, c_value).tobytes() == want.tobytes(), (what, c_value, want)
+
+    def get_is_refused(self, var, value, what: str) -> None:
+        """Neither getter answers for a value the wire cannot carry: an
+        error naming the variable and the integer, and nothing read."""
+        reply = self.tcp_get(var)
+        assert reply["ok"] is False, (what, reply)
+        assert f"variable {var.name!r} holds {int(value)}" in reply["error"], (what, reply)
+        assert "nothing was read" in reply["error"]
+        status, c_value = self.c_get(var, sentinel=7)
+        assert status != WrapperPath.OK and c_value == 7, (what, status, c_value)
+        assert f"holds {int(value)}" in self.cw.w.logs[-1], self.cw.w.logs[-1]
+
+    def step_all(self) -> None:
+        op_step(self, 1)
+        assert self.cw is not None
+        assert self.cw.step(self.cw.time, self.m.dt), self.cw.w.logs[-2:]
+
+    def install_input_through_the_archive(self, var, value) -> dict:
+        """Put ``value`` into ``var`` (an input) through the FMU-state door,
+        whose archive carries the type's own bytes: the TCP bridge's
+        set_state, and fmi3DeserializeFMUState / fmi3SetFMUState of the
+        wrapper.  Returns the TCP reply; the wrapper's verdict must match."""
+        node, field = var.node_field()
+
+        def edited(blob: bytes) -> bytes:
+            return _edit_archive(blob, lambda members, _fmt: members.__setitem__(
+                f"i/{node}/{field}", np.asarray(value)))
+
+        blob = state_of(self._wire({"op": "get_state"}))
+        reply = self._wire({"op": "set_state",
+                            "state": base64.b64encode(edited(blob)).decode("ascii")})
+        cw = self.cw
+        assert cw is not None
+        cw.get_state()
+        handle = cw.states.pop()
+        size = ctypes.c_size_t()
+        assert cw.w.lib.fmi3SerializedFMUStateSize(cw.inst, handle, ctypes.byref(size)) == cw.OK
+        buf = (ctypes.c_char * size.value)()
+        assert cw.w.lib.fmi3SerializeFMUState(cw.inst, handle, buf, size.value) == cw.OK
+        cw.w.lib.fmi3FreeFMUState(cw.inst, ctypes.byref(handle))
+        raw = bytes(buf)
+        if raw.startswith(b"PK"):                  # binary frames: the npz itself
+            forged = edited(raw)
+        else:                                      # JSON: the npz as base64 text
+            forged = base64.b64encode(edited(base64.b64decode(raw)))
+        assert cw.set_blob(forged) is reply["ok"], (reply, cw.w.logs[-2:])
+        return reply
+
+
+_TYPED_MODEL: list = []
+
+
+def _typed_model() -> Model:
+    """The latch, built once (under x64, as every use of it is)."""
+    if not _TYPED_MODEL:
+        _TYPED_MODEL.append(Model.build(_latch, "typed-latch"))
+    return _TYPED_MODEL[0]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _stop_typed_model():
+    yield
+    for model in _TYPED_MODEL:
+        model.stop()
+
+
+def _json_only(bridge: FmuTcpBridge) -> None:
+    """Make ``bridge`` answer hello as a JSON-only bridge does, so the
+    wrapper carries every value as ``%.17g`` text and reads replies with
+    ``strtod``."""
+    dispatch = bridge._dispatch                                         # noqa: SLF001
+
+    def answer(req):
+        reply = dispatch(req)
+        if req.get("op") == "hello" and reply.get("ok"):
+            reply = {**reply, "binary": False}
+        return reply
+
+    bridge._dispatch = answer                                           # type: ignore[method-assign]  # noqa: SLF001
+
+
+@contextlib.contextmanager
+def typed_paths(wire: str):
+    """The four paths over the latch, in Step Mode, the wrapper's bridge
+    speaking ``wire`` (``"binary"`` or ``"json"``)."""
+    wrapper = wrapper_or_none()
+    if wrapper is None:
+        pytest.skip("no C compiler: the typed battery needs the compiled wrapper as its "
+                    "fourth path")
+    with _x64():
+        paths = TypedPaths(_typed_model(), wrapper)
+        try:
+            cw = paths.cw
+            assert cw is not None
+            if wire == "json":
+                cw.close()
+                cw.bridge = FmuTcpBridge(paths.m.sidecar(resolver=False), paths.m.md,
+                                         master_dt=paths.m.dt)
+                _json_only(cw.bridge)
+                cw.bridge.start()
+                cw.inst = cw._instantiate()                             # noqa: SLF001
+                cw.time = 0.0
+            cw._into_step_mode()                                        # noqa: SLF001
+            # the wire form asked for is the one in use: one get through the
+            # wrapper is answered in a binary frame, or is not
+            assert cw.bridge.binary_frames_served == 0
+            status, _ = paths.c_get(paths.var("time"), sentinel=0.0)
+            assert status == cw.OK, cw.w.logs[-2:]
+            assert cw.bridge.binary_frames_served == (1 if wire == "binary" else 0)
+            yield paths
+        finally:
+            paths.close()
+
+
+@pytest.mark.parametrize("wire", ["binary", "json"])
+@pytest.mark.parametrize("dtype", TYPED)
+def test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths(dtype, wire):
+    """Set and get, as an input and as an output, each value the type
+    holds: exact on every path where a float64 is that value, refused --
+    set and get, bridge and wrapper -- where it is not (an Int64 / UInt64
+    above 2**53), with the four paths still holding the model's own value."""
+    holds, _ = TYPE_VALUES[dtype]
+    with typed_paths(wire) as paths:
+        inp, out = paths.var(f"latch.in_{dtype}"), paths.var(f"latch.out_{dtype}")
+        node, field = inp.node_field()
+        refused_some = False
+        for value in holds:
+            what = f"{dtype} {value!r} over {wire}"
+            want = jnp.asarray(_exact(dtype, value))
+            if wire_carries(dtype, value):
+                assert paths.tcp_set(inp, value) == {"ok": True}, what
+                assert paths.c_set(inp, _exact(dtype, value).item()) == WrapperPath.OK, (
+                    what, paths.cw.w.logs[-2:])
+                paths.side_inputs[node][field] = paths.gm_inputs[node][field] = want
+                paths.assert_states_identical(f"{what}: after set")
+                paths.reads_back(inp, value, f"{what}: the input")
+                paths.step_all()
+                paths.assert_states_identical(f"{what}: after the step")
+                held = np.asarray(paths.side.state["latch"][f"out_{dtype}"])
+                assert held.dtype == np.dtype(dtype) and held.tobytes() == np.asarray(want).tobytes()
+                paths.reads_back(out, value, f"{what}: the output")
+                continue
+            # The type holds it and a float64 does not: no set stores a neighbour ...
+            refused_some = True
+            before = paths.tcp_get(inp)
+            reply = paths.tcp_set(inp, value)
+            assert reply["ok"] is False and "cannot be carried exactly" in reply["error"], (what, reply)
+            assert f"the integer {int(value)}" in reply["error"], reply
+            served = paths.cw.bridge.requests_served
+            assert paths.c_set(inp, value) != WrapperPath.OK, what
+            assert "cannot be carried exactly" in paths.cw.w.logs[-1]
+            assert paths.cw.bridge.requests_served == served          # refused before sending
+            assert paths.tcp_get(inp) == before
+            paths.assert_states_identical(f"{what}: after the refused set")
+            # ... and, once the model holds it, no get answers with one.
+            assert paths.install_input_through_the_archive(inp, _exact(dtype, value))["ok"], what
+            paths.side_inputs[node][field] = paths.gm_inputs[node][field] = want
+            paths.assert_states_identical(f"{what}: installed through the archive")
+            paths.get_is_refused(inp, value, f"{what}: the input")
+            paths.step_all()
+            paths.assert_states_identical(f"{what}: after the step")
+            held = np.asarray(paths.bridge._sidecar.state["latch"][f"out_{dtype}"])  # noqa: SLF001
+            assert held.dtype == np.dtype(dtype) and int(held) == int(value), (what, held)
+            paths.get_is_refused(out, value, f"{what}: the output")
+            # the refusals broke nothing: another variable still reads
+            paths.reads_back(paths.var("latch.out_float32"), 0.0, f"{what}: a neighbour")
+        assert refused_some is (dtype in ("int64", "uint64"))
+
+
+@pytest.mark.parametrize("dtype", TYPED)
+def test_a_value_an_fmi_type_cannot_hold_is_refused_by_every_door(dtype):
+    """A value outside the type: the bridge's set refuses it and writes
+    nothing, and so does the FMU-state archive, in whichever dtype the
+    archive carries it."""
+    _, outside = TYPE_VALUES[dtype]
+    with typed_paths("binary") as paths:
+        inp = paths.var(f"latch.in_{dtype}")
+        before = paths.tcp_get(inp)
+        for value in outside:
+            what = f"{dtype} {value!r}"
+            reply = paths.tcp_set(inp, value)
+            assert reply["ok"] is False, (what, reply)
+            assert paths.tcp_get(inp) == before, what
+            for carrier in (np.float64, np.int64, np.uint64):
+                try:
+                    member = np.asarray(value, dtype=carrier)
+                except (OverflowError, ValueError):
+                    continue                       # this carrier cannot spell the value
+                if member.item() != value:
+                    continue
+                assert paths.install_input_through_the_archive(inp, member)["ok"] is False, (
+                    what, carrier)
+                assert paths.tcp_get(inp) == before, what
+            paths.assert_states_identical(f"{what}: after the refusals")
+
+
+@pytest.mark.parametrize("dtype", FLOAT_PARAMS)
+def test_a_float_parameter_carries_its_extreme_values_on_all_four_paths(dtype):
+    """The parameter direction, for the two types a graph parameter has:
+    set through both typed setters, read back through both getters, and
+    the output a step later is the parameter on every path."""
+    holds, outside = TYPE_VALUES[dtype]
+    with typed_paths("binary") as paths:
+        par, out = paths.var(f"latch.params.gain_{dtype}"), paths.var(f"latch.held_{dtype}")
+        for value in holds:
+            what = f"parameter {dtype} {value!r}"
+            assert paths.tcp_set(par, value) == {"ok": True}, what
+            assert paths.c_set(par, _exact(dtype, value).item()) == WrapperPath.OK, what
+            leaf = jnp.asarray(_exact(dtype, value))
+            paths.side.set_params({par.name: leaf})
+            paths.m.direct.params["nodes"]["latch"][f"gain_{dtype}"] = leaf
+            paths.reads_back(par, value, f"{what}: the parameter")
+            paths.step_all()
+            paths.assert_states_identical(f"{what}: after the step")
+            paths.reads_back(out, value, f"{what}: the output")
+        for value in outside:
+            reply = paths.tcp_set(par, value)
+            assert reply["ok"] is False and "does not fit its type" in reply["error"], (value, reply)

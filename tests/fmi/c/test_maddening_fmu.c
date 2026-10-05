@@ -551,6 +551,24 @@ static void test_get_set_step(void) {
         CHECK(fmi3SetInt32((fmi3Instance)in, vr, 2, vi, 2) == fmi3OK);
     });
     CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Int32\",\"vr\":[7,9],\"values\":[-5,7]}") == 0);
+    /* negative zero keeps its sign in the text: %.17g alone writes "-0",
+     * which a JSON reader takes for the integer 0 */
+    fmi3Float64 zeros[3] = { -0.0, 0.0, -0.0 };
+    WITH_SERVER("{\"ok\":true}", 0, {
+        CHECK(fmi3SetFloat64((fmi3Instance)in, vr, 3, zeros, 3) == fmi3OK);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Float64\",\"vr\":[7,9,11],\"values\":[-0.0,0,-0.0]}") == 0);
+    fmi3Float32 zero32[1] = { -0.0f };
+    WITH_SERVER("{\"ok\":true}", 0, {
+        CHECK(fmi3SetFloat32((fmi3Instance)in, vr, 1, zero32, 1) == fmi3OK);
+    });
+    CHECK(strcmp(g_seen, "{\"op\":\"set\",\"type\":\"Float32\",\"vr\":[7],\"values\":[-0.0]}") == 0);
+    /* and a reply's "-0.0" (or a bare "-0") is read back negative */
+    fmi3Float64 back[2] = { 1.0, 1.0 };
+    WITH_SERVER("{\"ok\":true,\"values\":[-0.0,-0]}", 0, {
+        CHECK(fmi3GetFloat64((fmi3Instance)in, vr, 2, back, 2) == fmi3OK);
+    });
+    CHECK(back[0] == 0.0 && signbit(back[0]) && back[1] == 0.0 && signbit(back[1]));
     fmi3Boolean vb[1] = { fmi3True };
     WITH_SERVER("{\"ok\":true}", 0, {
         CHECK(fmi3SetBoolean((fmi3Instance)in, vr, 1, vb, 1) == fmi3OK);

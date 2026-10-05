@@ -29,8 +29,15 @@
  * double.  A getter also refuses a reply value its C type cannot hold (a
  * fraction, NaN or an out-of-range number for an integer, anything but
  * 0/1 for a Boolean), so no conversion here is undefined behaviour or a
- * silent truncation; an Int64/UInt64 setter refuses a value a double
- * cannot carry exactly.
+ * silent truncation.  A double holds every value of every FMI type but
+ * two: an Int64 / UInt64 above 2^53 in magnitude is a double only where it
+ * is a multiple of the spacing there.  Such a value is never rounded, in
+ * either direction: an Int64 / UInt64 setter refuses one before anything is
+ * sent, and the bridge refuses a get of a variable holding one (the error
+ * names the variable and the integer), so fmi3GetInt64 / fmi3GetUInt64
+ * return fmi3Error rather than a neighbouring integer.  A double the bridge
+ * does send converts exactly (FITS_I64 / FITS_U64).  A set of negative zero
+ * keeps its sign on the JSON path too ("-0.0", never "-0").
  *
  * The endpoint is read from "<resourcePath>/endpoint.txt" ("host:port"),
  * or from the MADDENING_FMU_ENDPOINT environment variable.
@@ -823,9 +830,12 @@ static fmi3Status do_set(Instance *in, const char *type, const fmi3ValueReferenc
     w += sprintf(w, ",\"vr\":[");
     for (size_t i = 0; i < nvr; ++i) w += sprintf(w, "%s%u", i ? "," : "", (unsigned)vr[i]);
     w += sprintf(w, "],\"values\":[");
+    /* %.17g writes negative zero as "-0", which a JSON reader takes for the
+     * integer 0: the sign was lost on this path (and kept on the binary
+     * one).  "-0.0" is a float to every reader. */
     for (size_t i = 0; i < nvalues; ++i)
-        w += c_snprintf(in, w, in->req_cap - (size_t)(w - in->req), "%s%.17g", i ? "," : "",
-                        values[i]);
+        w += c_snprintf(in, w, in->req_cap - (size_t)(w - in->req), "%s%.17g%s", i ? "," : "",
+                        values[i], (values[i] == 0.0 && signbit(values[i])) ? ".0" : "");
     w += sprintf(w, "]}");
     if ((size_t)(w - in->req) > FRAME_MAX) {
         inst_log(in, fmi3Error, "logStatusError", too_big);
@@ -1151,7 +1161,12 @@ FMI3_Export fmi3Status fmi3Reset(fmi3Instance instance) {
 
 /* An Int64 / UInt64 value the double on the wire cannot carry exactly
  * (|v| > 2^53, most of them) is refused rather than rounded; every other
- * width converts to double exactly. */
+ * width converts to double exactly.  The other direction is the bridge's
+ * to guard, since only it knows the integer: it refuses a get of a
+ * variable holding such a value, so the double a getter is handed is the
+ * integer itself and FITS_I64 / FITS_U64 above convert it exactly (the
+ * bridge used to send the rounded double, which is a whole number in range
+ * and passed them). */
 #define EXACT_ANY(v) 1
 #define EXACT_I64(v) ((double)(v) < 9223372036854775808.0 && (fmi3Int64)(double)(v) == (v))
 #define EXACT_U64(v) ((double)(v) < 18446744073709551616.0 && (fmi3UInt64)(double)(v) == (v))

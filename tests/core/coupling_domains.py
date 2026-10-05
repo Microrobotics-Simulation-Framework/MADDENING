@@ -63,10 +63,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maddening.core.coupling.mapping import matrix_mapping
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 
 KEY = "a+b"
+#: The library's keys of the pair's two edges, ``b -> a`` and ``a -> b``:
+#: where a mapped edge's weights live in ``params["mappings"]``.
+EDGE_KEYS = ("b.x->a.u", "a.x->b.u")
 #: Exactly representable in every float dtype.
 DT = 0.125
 
@@ -216,17 +220,28 @@ def group_kwargs(domain: Domain, **kw) -> dict:
 
 
 def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, node=Lin,
-         fields=("x", "x"), **group_kw) -> GraphManager:
+         fields=("x", "x"), mappings=None, **group_kw) -> GraphManager:
     """``x_a <- g_a x_b + c_a``, ``x_b <- g_b x_a + c_b`` in *domain*, compiled.
 
     Build it inside :func:`entered`.  *group_kw* go to the group, with the
     domain's settings added by :func:`group_kwargs`.  *node* is the
     members' class (:class:`Lin` or :class:`Flux`) and *fields* the source
     fields of the edges ``b -> a`` and ``a -> b`` (``"q"`` is a flux edge).
+
+    *mappings* is ``(H_ba, H_ab)``: an ``n x n`` matrix for the interface
+    mapping on ``b -> a`` and on ``a -> b`` (``None`` for an edge without
+    one), so the pair is ``x_a <- g_a (H_ba x_b) + c_a``, ``x_b <- g_b
+    (H_ab x_a) + c_b``.  Each mapping is built in the dtype of the member
+    its edge feeds, and the edge's cast (the mixed-dtype domain) follows it.
+    The matrices are the mapping objects' own weights; :func:`params_with`
+    passes others for a step.
     """
     gm = GraphManager()
     da, db = domain.dtypes
     tb = DT / 2 if domain.subcycled else DT
+    maps = tuple(
+        None if H is None else matrix_mapping(jnp.asarray(_mapping_matrix(domain, H), dtype))
+        for H, dtype in zip(mappings or (None, None), (da, db)))
     if domain.sharded:
         n, g, c = n * N_SHARD, tuple(_tiled(v) for v in g), tuple(_tiled(v) for v in c)
     gm.add_node(node("a", DT, da, n, g=g[0], c=c[0]))
@@ -238,11 +253,11 @@ def pair(domain: Domain, *, n=1, g=(0.5, 0.5), c=(1.0, 0.0), x0=None, node=Lin,
                                         shard_axes=0)
     gm.add_node(member_b)
     if da == db:
-        gm.add_edge("b", "a", fields[0], "u")
-        gm.add_edge("a", "b", fields[1], "u")
+        gm.add_edge("b", "a", fields[0], "u", mapping=maps[0])
+        gm.add_edge("a", "b", fields[1], "u", mapping=maps[1])
     else:
-        gm.add_edge("b", "a", fields[0], "u", transform=lambda v: v.astype(da))
-        gm.add_edge("a", "b", fields[1], "u", transform=lambda v: v.astype(db))
+        gm.add_edge("b", "a", fields[0], "u", transform=lambda v: v.astype(da), mapping=maps[0])
+        gm.add_edge("a", "b", fields[1], "u", transform=lambda v: v.astype(db), mapping=maps[1])
     if domain.multirate:
         gm.add_node(Ticker("tick", DT / 2))
     with warnings.catch_warnings():
@@ -262,6 +277,13 @@ def _tiled(v):
     """*v* (a scalar, or one value per entry) as ``N_SHARD`` copies of its entries."""
     a = np.asarray(v, np.float64)
     return a if a.ndim == 0 else np.tile(a, N_SHARD)
+
+
+def _mapping_matrix(domain: Domain, H) -> np.ndarray:
+    """*H* in float64, as ``N_SHARD`` diagonal copies where the sharded domain
+    multiplied the entries (each copy of the field mapped by itself)."""
+    H = np.asarray(H, np.float64)
+    return np.kron(np.eye(N_SHARD), H) if domain.sharded else H
 
 
 def _fit(v, shape):
@@ -284,8 +306,12 @@ def set_x(gm: GraphManager, x0) -> None:
         gm._state[name] = {**gm._state[name], "x": new}
 
 
-def params_with(gm: GraphManager, *, g=None, c=None) -> dict:
-    """The graph's parameter pytree with ``g`` and ``c`` replaced, in each leaf's dtype."""
+def params_with(gm: GraphManager, *, g=None, c=None, mappings=None) -> dict:
+    """The graph's parameter pytree with ``g`` and ``c`` replaced, in each leaf's dtype.
+
+    *mappings* is ``(H_ba, H_ab)``: the weights of the pair's mapped edges
+    for the step (``None`` keeps an edge's own), as :func:`pair` takes them.
+    """
     p = jax.tree.map(lambda v: v, gm.params)
     for i, name in enumerate(("a", "b")):
         leaves = p["nodes"][name]
@@ -293,6 +319,14 @@ def params_with(gm: GraphManager, *, g=None, c=None) -> dict:
             leaves["g"] = jnp.asarray(_fit(g[i], leaves["g"].shape), leaves["g"].dtype)
         if c is not None:
             leaves["c"] = jnp.asarray(_fit(c[i], leaves["c"].shape), leaves["c"].dtype)
+    for key, H in zip(EDGE_KEYS, mappings or ()):
+        if H is None:
+            continue
+        leaf = p["mappings"][key]["H"]
+        H = np.asarray(H, np.float64)
+        if H.shape != leaf.shape:           # the sharded domain's copies
+            H = np.kron(np.eye(leaf.shape[0] // H.shape[0]), H)
+        p["mappings"][key]["H"] = jnp.asarray(H, leaf.dtype)
     return p
 
 
@@ -323,6 +357,14 @@ class Solve:
     def forcing(self) -> tuple:
         return tuple(np.asarray(self.params["nodes"][n]["c"], np.float64) for n in ("a", "b"))
 
+    def mapping_matrices(self) -> tuple:
+        """``(H_ba, H_ab)`` in float64 as the step held them; the identity
+        for an edge without a mapping."""
+        maps = self.params.get("mappings", {})
+        n = self.x("a").shape[0]
+        return tuple(np.asarray(maps[key]["H"], np.float64) if key in maps else np.eye(n)
+                     for key in EDGE_KEYS)
+
 
 def fixed_point(s: Solve) -> tuple:
     """``(x_a*, x_b*)`` in float64 from the step's parameters, as stored."""
@@ -330,6 +372,19 @@ def fixed_point(s: Solve) -> tuple:
     ca, cb = s.forcing()
     xa = (ca + ga * cb) / (1.0 - ga * gb)
     return xa, gb * xa + cb
+
+
+def mapped_fixed_point(s: Solve) -> tuple:
+    """``(x_a*, x_b*)`` of a pair with mapped edges, in float64 from the
+    step's parameters and mapping weights as stored: the solution of
+    ``x_a = g_a (H_ba x_b) + c_a``, ``x_b = g_b (H_ab x_a) + c_b``."""
+    ga, gb = (np.broadcast_to(np.asarray(g, np.float64), s.x("a").shape) for g in s.gains())
+    ca, cb = s.forcing()
+    h_ba, h_ab = s.mapping_matrices()
+    n = len(ca)
+    system = np.block([[np.eye(n), -ga[:, None] * h_ba], [-gb[:, None] * h_ab, np.eye(n)]])
+    x = np.linalg.solve(system, np.concatenate([ca, cb]))
+    return x[:n], x[n:]
 
 
 def _host(tree):

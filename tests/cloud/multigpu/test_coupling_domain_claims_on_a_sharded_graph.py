@@ -24,6 +24,7 @@ import pytest
 from tests.core import coupling_domains as cd
 from tests.core import test_coupling_accelerations_in_every_domain as accelerations
 from tests.core import test_coupling_configuration_in_every_domain as configuration
+from tests.core import test_coupling_mapped_edges_in_every_domain as mapped
 from tests.core import test_coupling_norm_edges_in_every_domain as norms
 
 pytestmark = pytest.mark.skipif(len(jax.devices()) < cd.N_SHARD,
@@ -47,6 +48,10 @@ CASES = {
     "CPL-015": [configuration.test_relaxation_one_is_no_relaxation],
     "CPL-016": [configuration.test_one_pass_reads_the_iterate_its_mode_documents],
     "CPL-142": [configuration.test_the_initial_guess_gets_a_zero_derivative],
+    # The interface norm and its bound on mapped internal edges: the mapping
+    # is applied to a sharded field, and the norm reads what it delivers.
+    "CPL-041": [mapped.test_the_interface_norm_measures_what_mapped_edges_deliver],
+    "CPL-088": [mapped.test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver],
 }
 
 

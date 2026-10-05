@@ -553,7 +553,7 @@ MUTANTS: tuple[Mutant, ...] = (
     _M("K21", _CLAIMS, "    dropped = {n for imp in ast.walk(node) if _imports_transport(imp)\n",
        "    dropped = {n for imp in ast.walk(node) if False\n", TRANSPORT,
        "the line that imports the in-process client inside a test read as the test naming loopback"),
-    _M("K22", _CLAIMS, '_REAL_SERVER = re.compile(r"uvicorn(?:\\(\\))?\\.(?:run|Server)\\(")\n',
+    _M("K22", _CLAIMS, '_REAL_SERVER = re.compile(r"(?<!`)\\b\\w*uvicorn(?:\\(\\))?\\.(?:run|Server)\\(")\n',
        '_REAL_SERVER = re.compile(r"uvicorn|socket|http://127\\.0\\.0\\.1", re.IGNORECASE)\n', SERVER_WORDS,
        "a real server read from a loopback URL, a WebSocket or the word uvicorn: in-process "
        "threads through a client that names a loopback Host witness concurrent"),

@@ -934,8 +934,9 @@ helpers': a call that starts a server (`uvicorn.run(...)`, in a server
 script too, or `uvicorn.Server(...)`, which
 `rest_claims_support.loopback_server` makes) and requests sent at once
 (the word "simultaneous", a barrier, a gather, or a thread the test
-starts). A loopback URL, a WebSocket and the word "uvicorn" are no
-server, and the thread the server itself runs in is no second request.
+starts). A loopback URL, a WebSocket, the word "uvicorn" and the call
+quoted in backticks in a docstring are no server, and the thread the
+server itself runs in is no second request.
 
 A REST row's run_pod domains are `n/a`, and so are an RPD row's server
 domains but `hostile_input`. Within a REST row `n/a` is kept for these:

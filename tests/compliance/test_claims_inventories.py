@@ -264,8 +264,10 @@ DOMAIN_WITNESS: dict[str, re.Pattern] = {
 #: which ``rest_claims_support.loopback_server`` makes -- because an
 #: in-process client has no reason to make it.  A URL, a ``127.0.0.1``, the
 #: word "socket" (every WebSocket test says it) or "uvicorn" in passing are
-#: no evidence: a client that names a loopback Host says all of them.
-_REAL_SERVER = re.compile(r"uvicorn(?:\(\))?\.(?:run|Server)\(")
+#: no evidence: a client that names a loopback Host says all of them.  Nor
+#: is the call quoted in backticks, as a docstring quotes it.  (Prose that
+#: spells the call unquoted still reads as one: a floor, as every witness is.)
+_REAL_SERVER = re.compile(r"(?<!`)\b\w*uvicorn(?:\(\))?\.(?:run|Server)\(")
 #: ... and the requests must be simultaneous: the word, a barrier or a
 #: gather, or a thread the test starts.  Two things the helper that starts
 #: the server says are no evidence, or every test that starts one would be
@@ -1304,6 +1306,10 @@ def test_the_witness_rule_reads_the_server_vocabulary():
     assert not witnesses("concurrent", in_process + "\n    TestClient(app, 'http://127.0.0.1')"
                          ".websocket_connect('/ws')  # as uvicorn's proxy_headers would\n"
                          "LOOPBACK_BASE_URL = 'http://127.0.0.1'\nsocket.socket()")
+    # ... nor a docstring that quotes the call
+    assert not witnesses("concurrent", in_process.replace(
+        "\n", '\n    """``uvicorn.run(app, host="0.0.0.0")`` and ``_uvicorn().Server(config)``'
+        ' never tell the app."""\n', 1))
     # ... and a server's own thread and domain tag are no simultaneous requests
     assert not witnesses("concurrent", served % "httpx.get(s)  # one request at a time")
     assert not witnesses("concurrent", "def test_c():\n    uvicorn.run(app)  # one request")

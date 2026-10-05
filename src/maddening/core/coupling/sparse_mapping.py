@@ -895,13 +895,13 @@ def sparse_nearest_neighbor_mapping(
             f"transpose) is applied; mode='consistent' has none and takes only "
             f"transpose='gather'"
         )
+    source = _checked_points("source_points", source_points)
+    target = _checked_points("target_points", target_points)
+    _check_same_dimension(source, target)
     spec = MappingSpec("sparse_nearest_neighbor", {"mode": mode, "transpose": transpose}, {
         "source_points": reference_for_array(source_points, source_ref, name="source_points"),
         "target_points": reference_for_array(target_points, target_ref, name="target_points"),
     })
-    source = _checked_points("source_points", source_points)
-    target = _checked_points("target_points", target_points)
-    _check_same_dimension(source, target)
     n_source, n_target = int(source.shape[0]), int(target.shape[0])
     one = np.dtype(np.float32).itemsize
 
@@ -988,14 +988,14 @@ def sparse_projection_1d_mapping(
         target cell spanning very many source cells).
     """
     what = "sparse_projection_1d_mapping"
+    sb = _checked_boundaries("source_boundaries", source_boundaries)
+    tb = _checked_boundaries("target_boundaries", target_boundaries)
     spec = MappingSpec("sparse_projection_1d", {}, {
         "source_boundaries": reference_for_array(
             source_boundaries, source_ref, name="source_boundaries"),
         "target_boundaries": reference_for_array(
             target_boundaries, target_ref, name="target_boundaries"),
     })
-    sb = _checked_boundaries("source_boundaries", source_boundaries)
-    tb = _checked_boundaries("target_boundaries", target_boundaries)
     n_source, n_target = sb.size - 1, tb.size - 1
     low, high = tb[:-1], tb[1:]
     # The source cells that can overlap target cell i, one wider on each

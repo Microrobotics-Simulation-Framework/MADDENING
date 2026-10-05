@@ -12703,7 +12703,7 @@ anomalies:
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-186"
+  - anomaly_id: "MADD-ANO-196"
     title: "A hand-written Mapping class's weight table was kept by reference and unchecked: an edit of gm.params rewrote the mapping, and a weight could be silently left out of a restore"
     description: >
       `add_edge(mapping=)` takes any object with the members of the `Mapping`

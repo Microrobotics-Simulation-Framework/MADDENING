@@ -4339,7 +4339,7 @@ claims:
   status: verified
   notes: >-
     Until this change the snapshot kept the returned dict by reference
-    (MADD-ANO-186, never shipped): the edit rewrote the mapping's own
+    (MADD-ANO-196, never shipped): the edit rewrote the mapping's own
     weights, reset_params() restored the edit and to_dict() never warned.
   domains:
     f32: n/a

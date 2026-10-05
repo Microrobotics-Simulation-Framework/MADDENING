@@ -12372,7 +12372,6 @@ anomalies:
       - "tests/core/test_param_spec_edge_cases.py::test_a_logit_width_its_dtype_cannot_hold_is_refused"
       - "tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64"
       - "tests/core/test_param_spec_edge_cases.py::test_a_log_bound_its_dtype_cannot_hold_is_refused"
-    github_issue: null
   - anomaly_id: "MADD-ANO-178"
     title: "A PUT /graph/params that wrote a leaf back to the node's own value skipped the combined checks: after a fit or a checkpoint load, a 200 left a rod past its Fourier limit and a save that did not reload"
     description: >
@@ -12701,6 +12700,291 @@ anomalies:
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_an_extra_node_is_refused_before_any_member_is_read"
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_members_the_load_ignores_are_never_read"
       - "tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-186"
+    title: "A bfloat16 or float16 coupling group's norms and floor were computed in its own dtype: residual 0.0 above 65,504 active entries, inf on a finite state at the default rtol"
+    description: >
+      `coupling_residual_mixed` and `coupling_residual_interface` square
+      `|dx| / (rtol * scale)` per entry and sum the squares from a weakly
+      typed `jnp.array(0.0)`, which takes a float16 field's dtype, then
+      divide by an int32 entry count, which the division promotes to
+      float16 -- `inf` above 65,504.  The RMS of a finite sum then reads
+      exactly 0.0: two 40,000-entry float16 fields each moving by one ulp
+      read 0.0 where the closed form is 0.0976 (`rtol=1e-2`).  At a small
+      `rtol` the squares overflow instead: a change of one float16 ulp at
+      `rtol=1e-6` is a ratio of about 977, its square past 65,504, so the
+      residual read `inf` on a finite state, and `residual_precision_floor`
+      read `inf` for every `rtol` below about 3.8e-6 and above 65,504
+      entries under every norm.  Measured at v0.1.0, v0.2.1 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0): the norm reads 0.0
+      and `inf` exactly so.  Under those releases' raw-residual criterion
+      the overflowed sum stayed non-finite until the true RMS fell below
+      `sqrt(65504 / n)`, so a group stopped where the float32 group's test
+      would (4.1% from its fixed point against 5.1%) while reporting a
+      residual of 0.0.  Under 0.4.0's error-estimate criterion the same
+      group stopped 4.1% from its fixed point with `converged=True` where
+      the float32 group runs to 0.94%, and `strict_convergence` read the
+      overflowed `inf` as divergence ("no larger max_iterations would
+      help").  Found by the round-6 coupling audit (CPL-040, CPL-051,
+      CPL-072, CPL-100).  Resolved in 0.4.0: every norm and the floor widen
+      a 16-bit field to float32 before forming anything from it (through an
+      `optimization_barrier`, so the value measured is the rounded one the
+      state holds), the sums start from a float32 zero, a 16-bit group's
+      residual, loop carries and `_meta` slots are float32, and
+      `strict_convergence` decides "non-finite state" from the state.  The
+      L2 norm's overflow rule (CPL-043) applies in float32 too, so a float16
+      field is measured up to 65,504 where it read `inf` from `2**14` up.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A reported residual of 0.0 for a group still moving, and on 0.4.0's
+      development builds `converged=True` 4% from the fixed point, are
+      silent wrong results, never `minor`.  Not `critical`: it needs a
+      16-bit group under "mixed" or "interface" with more than 65,504
+      active entries (the 0.0) or a small `rtol` (the `inf`, which reads as
+      unconverged).  `context_dependent` because whether the verdict gates
+      anything is the program's choice.
+    affected_components:
+      - "maddening.core.coupling.acceleration.coupling_residual_mixed"
+      - "maddening.core.coupling.acceleration.coupling_residual_interface"
+      - "maddening.core.coupling.acceleration.residual_precision_floor"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Hold a coupling group's fields in float32, or keep a float16 group's
+      active entries at or below 65,504 and its `rtol` at or above 1e-2.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A node's own 16-bit arithmetic still rounds as its dtype does; the
+      norm now measures that rounded state exactly.
+    verification:
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_norm_over_more_than_65504_entries_reads_its_rms"
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_float16_group_above_65504_entries_does_not_stop_on_a_zero_residual"
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_a_sixteen_bit_norm_at_the_default_rtol_is_finite_on_a_finite_change"
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_the_sixteen_bit_floor_is_four_eps_over_rtol"
+      - "tests/core/test_coupling_sixteen_bit_norms_in_float32.py::test_strict_convergence_names_the_cap_on_a_finite_float16_state"
+      - "tests/core/test_coupling_norm_edges_in_every_domain.py::test_every_norm_reads_a_field_it_cannot_evaluate_as_inf_at_each_dtypes_edges"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-187"
+    title: "spectral_error_bound under convergence_norm='interface' with a transform on an internal edge read 0.0014-0.098x the true distance, spectral_usable=True"
+    description: >
+      The interface norm measures each internal edge's source value after
+      the edge's transform, each over its own magnitude
+      (`coupling_residual_interface`).  The spectral analysis behind
+      `spectral_error_bound` took its weights from the raw source fields
+      (`_read_fields`, `_norm_weights`, `_field_magnitudes`), so the bound
+      multiplied a residual measured in one set of coordinates by a
+      resolvent norm measured in another.  An offset changes the magnitude a
+      change is divided by (a unit conversion's 273.15, or 1000 in the
+      reproducer) and a selection changes which magnitude an entry is
+      divided by: on a linear Jacobi pair with `x[0] + 1000` on one edge the
+      bound read 0.0014x the true distance in the interface norm, and with
+      the registered `"extract_last"` 0.078x, both with
+      `spectral_usable=True`, at `max_iterations=2`.  Found by the round-6
+      coupling audit (CPL-088).  Resolved in 0.4.0: the report's spectral
+      triple is taken on the reading itself
+      (`_interface_spectral_rate_at`), whose iteration matrix `Phi' G'`
+      has the Jacobian's non-zero spectrum, through an Arnoldi that carries
+      each Krylov vector's state-space preimage (`_arnoldi_through`), so no
+      transform is inverted; on the same fixtures the bound reads
+      1.001-1.1x the true distance at the caps where the Jacobi residual is
+      small and more at the others.
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it
+      (the spectral bound is new in 0.4.0's development), because it is
+      major.  Not `critical`: only the interface norm with a transform on
+      an internal edge reads it, and the iteration and `converged` were
+      unaffected.  `context_dependent` because whether the bound gates
+      anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager._spectral_rate_at"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: read the bound under convergence_norm="mixed", or put the
+      transform's offset and selection into the node instead of the edge.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A transform that is not affine makes the map non-linear in the
+      reading, and the bound is then asymptotic, as for any non-linear map.
+      An internal edge with an interface mapping is read by the interface
+      norm, its float floor and this analysis at its source field (through
+      the transform alone where it has one), not at the value the mapping
+      delivers: the bound is in the reading the residual is in, but that
+      reading is not what the consumer sees.  With the audit's selection
+      written as a mapping the bound reads 1.02-5.2x the distance in the
+      source fields and 0.064-0.32x the distance in the delivered values.
+      That is the mapped-edge anomaly registered with the interface-mapping
+      fixes (open), not this one.
+    verification:
+      - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures"
+      - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_transformed_pair"
+      - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_an_identity_transform_reads_the_bound_an_untransformed_edge_does"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-188"
+    title: "gradient_relative_error_bound read 0.65-0.986x the true gradient error, gradient_bound_usable=True, on a group stopped far from its fixed point"
+    description: >
+      The gradient bound is leading-order in the distance and carries a
+      Newton-Kantorovich check for the rest, with `h = beta L ||delta||`.
+      `L`, the Jacobian's Lipschitz constant, was its change along the
+      Newton step `delta` alone, and the part of `x* - x_k` the Newton step
+      misses was not carried.  On a pair bilinear in its state stopped at
+      `max_iterations=2` the check passed at `h = 0.19` and the bound read
+      0.986x the true gradient error with `gradient_bound_usable=True`; on a
+      pair 57% from its fixed point `h` read 0.37 along `delta` where the
+      affine-covariant form of the same change gives 0.65 -- past
+      Kantorovich's 1/2; the fixed point lay 0.568 away against the
+      certified radius 0.552 -- and the bound read 0.65x, flag set.  Found
+      by the round-6 coupling audit (CPL-093).  Resolved in 0.4.0: `h` is
+      the larger of the directional value and Deuflhard's affine-covariant
+      `||(I - J)^{-1} (J(x_k + delta) - J(x_k))||` as an operator on the
+      Jacobian's row space (`3 k` more Jacobian-vector products), each
+      probe adds the Newton step's second-order miss
+      (`beta ||secant|| (t* - ||delta||) / (||delta|| ||t|| sqrt(1 - 2h))`),
+      and Kantorovich's radius is formed without cancellation.  Over 240
+      random bilinear pairs at caps 2-4 every usable bound holds; the first
+      pair reads 1.21x and the second fails the check (unusable).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A bound below its quantity with its flag set is a silent wrong
+      result, never `minor`; registered although no release carried it
+      (the gradient bound is new in 0.4.0's development), because it is
+      major.  Not `critical`: it needs a group stopped far enough from its
+      fixed point that its Jacobian moves appreciably across one Newton
+      step, and the forward state is unaffected.  `context_dependent`
+      because whether the bound gates anything is the program's choice.
+    affected_components:
+      - "maddening.core.graph_manager._gradient_error_bound_at"
+      - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
+    affected_versions: "none"
+    workaround: >
+      Not applicable to a tagged release.  On the affected development
+      builds: raise max_iterations until the forward is near its fixed point
+      before reading the gradient bound.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      Both rates the check uses are measured across the Newton step, so the
+      flag rests on the map changing no faster between `x_k` and `x*` than
+      across that step -- exact for an affine map, and the condition a group
+      far from its fixed point is likeliest to break.
+    verification:
+      - "tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_a_usable_gradient_bound_holds_on_the_audit_pair_at_every_cap"
+      - "tests/core/test_coupling_gradient_bound_far_from_the_fixed_point.py::test_far_from_its_fixed_point_the_gradient_bound_holds_or_is_withdrawn"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-189"
+    title: "The adaptive steppers' error norm was computed in a bfloat16 or float16 state's own dtype: run_adaptive did not return on a float16 state above 65,504 elements, run_adaptive_scan refused any 16-bit state"
+    description: >
+      `_tree_error_norm`, the step-doubling error norm that `run_adaptive`,
+      `run_adaptive_scan` and `build_adaptive_step` share, squares
+      `|fine - coarse| / (atol + rtol * max|.|)` per element and sums the
+      squares from a weakly typed `jnp.array(0.0)`, which takes a float16
+      leaf's dtype, then divides by an int32 element count, which the
+      division promotes to float16 -- `inf` above 65,504.  The norm of a
+      finite sum then reads exactly 0.0, and NaN (`inf / inf`) once the sum
+      overflows too: 80,000 float16 elements eight ulps apart read 0.0
+      where the closed form is 0.775 (`rtol=1e-2`), and NaN where it is 7.74
+      (`atol=1e-6`, `rtol=1e-3`).  Below that size a ratio above 256
+      squares past 65,504, so the norm read `inf` on an ordinary rejected
+      attempt and the controller shrank by `min_factor` instead of its own
+      factor.  And the 16-bit norm made the next timestep 16-bit, which the
+      carry of `run_adaptive_scan` refuses: a scan-carry `TypeError` on any
+      bfloat16 or float16 state.  Measured at v0.1.0, v0.2.1 and v0.3.1
+      (`git archive` of each tag, CPU, jaxlib 0.11.0): the norm reads 0.0
+      and NaN exactly so, `run_adaptive` on a 70,000-entry float16 decay
+      does not return within 150 s (its NaN error norm, MADD-ANO-173) where
+      a 1,000-entry one takes the float32 state's 13 steps, and
+      `run_adaptive_scan` raises the `TypeError` at either size.  On
+      0.4.0's development builds `run_adaptive` returned that state as NaN
+      after one accepted step, with no error or warning.  The sibling of
+      MADD-ANO-186 at the other norm the library takes, found by sweeping
+      for that defect's pattern.  Resolved in 0.4.0: each leaf is widened to
+      float32 before its difference is formed (the coupling norms'
+      `_widened`) and the sum starts from a float32 zero, so both steppers
+      take the float32 state's steps on the 70,000-entry field and the scan
+      runs a 16-bit state to its end time where the default float is
+      float32; a float32 or float64 state takes no new operation.  Under
+      `jax_enable_x64` the scan still refuses a 16-bit state, as it does a
+      float32 one (MADD-ANO-190, a different cause).
+    severity: "major"
+    safety_relevance: "context_dependent"
+    safety_relevance_rationale: >
+      A NaN state returned as the result of an integration, with no error
+      or warning, is a silent wrong result, never `minor`; on the tagged
+      releases the same state did not return at all.  Not `critical`: it
+      needs a 16-bit state with more than 65,504 floating elements, and a
+      NaN result is conspicuous; the scan's refusal is loud.
+      `context_dependent` because whether an adaptively stepped state is
+      held in 16 bits is the program's choice.
+    affected_components:
+      - "maddening.core.simulation.adaptive._tree_error_norm"
+      - "maddening.core.simulation.adaptive.build_adaptive_step"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive"
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0, <0.4.0"
+    workaround: >
+      Hold an adaptively stepped state in float32, or keep a float16
+      state's floating elements at or below 65,504 and use `run_adaptive`
+      rather than `run_adaptive_scan`.
+    resolution_status: "resolved"
+    resolution_version: "0.4.0"
+    residual_risk: >
+      A node's own 16-bit arithmetic still rounds as its dtype does, so a
+      16-bit state's error estimates sit near its resolution at tolerances
+      below about one eps (9.8e-4 for float16, 7.8e-3 for bfloat16) and the
+      controller rejects more attempts than for the float32 state.
+    verification:
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_a_sixteen_bit_error_norm_over_more_than_65504_elements_reads_its_rms"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_a_float16_error_norm_is_finite_where_a_squared_ratio_passes_65504"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_on_a_float16_state_above_65504_elements_steps_as_the_float32_state_does"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_scan_steps_a_sixteen_bit_state_to_its_end_time"
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_build_adaptive_step_reports_a_sixteen_bit_states_error_in_float32"
+    github_issue: null
+  - anomaly_id: "MADD-ANO-190"
+    title: "run_adaptive_scan raises a scan-carry TypeError on a float32, bfloat16 or float16 state under jax_enable_x64"
+    description: >
+      `run_adaptive_scan` carries its clock -- the time and the timestep --
+      through `lax.scan` from weakly typed seeds (`jnp.array(0.0)` and the
+      Python `dt_initial`), which are float64 under `jax_enable_x64`.  The
+      next timestep is the old one times the controller's factor, whose
+      dtype is the error norm's, and a weakly typed float64 times a float32
+      factor is float32: the carry goes in float64 and comes out float32,
+      and `lax.scan` refuses it -- `TypeError: scan body function carry
+      input and carry output must have equal types`.  So under x64 the scan
+      steps only an all-float64 state.  One explicit-Euler decay node with a
+      float32 (or float16) field raises on the tree and on the extracted
+      0.1.0, 0.2.1 and 0.3.1 trees (CPU, empty HOME, jaxlib 0.11.0), where
+      the same node in float64 takes 13 steps and `run_adaptive`, the host
+      loop, steps all three.  Loud: nothing is returned.  Found while
+      verifying MADD-ANO-189, whose fix lets the scan step a 16-bit state
+      where the default float is float32 and leaves this one as it was.
+    severity: "minor"
+    safety_relevance: "not_safety_relevant"
+    safety_relevance_rationale: >
+      An exception when the scan is traced: no state is returned, so none
+      can be wrong.  The cost is that a float32 graph cannot be stepped by
+      the differentiable adaptive stepper in an x64 process.
+    affected_components:
+      - "maddening.core.graph_manager.GraphManager.run_adaptive_scan"
+    affected_versions: ">=0.1.0"
+    workaround: >
+      Use `run_adaptive` (the host loop), hold the adaptively stepped state
+      in float64 in an x64 process, or run the float32 graph without
+      `jax_enable_x64`.  Deferred to 0.5.0.
+    resolution_status: "open"
+    residual_risk: >
+      Open in 0.4.0 and deferred to 0.5.0, which is to hold the scan's clock
+      in one strongly typed dtype without handing the nodes a strongly typed
+      timestep (a 16-bit node's own arithmetic would be promoted by it).
+    verification:
+      - "tests/core/test_adaptive_error_norm_in_sixteen_bit_states.py::test_run_adaptive_scan_steps_a_state_narrower_than_float64_under_x64"
     github_issue: null
   - anomaly_id: "MADD-ANO-191"
     title: "Apps built at once in several threads left the process's warnings filters changed: a silenced warning was raised, or every UserWarning was ignored from then on"

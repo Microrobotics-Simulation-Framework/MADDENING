@@ -77,8 +77,15 @@ class CouplingGroup:
         largest magnitude (the larger of its two iterates' ``max|v|``),
         so this is a *relative* tolerance: it equals the pre-0.4.0
         absolute threshold exactly when every field's largest magnitude
-        is 1, and is an absolute threshold of ``tolerance * max|v|`` per
-        field otherwise.
+        is 1.  It is one threshold for the whole group, not one per
+        field: the norm is the root-sum-square, over every entry of
+        every floating field of every member, of that entry's change
+        divided by its field's largest magnitude.  A field of ``n``
+        entries each moving by ``tolerance * max|v|`` therefore reads
+        ``tolerance * sqrt(n)``, and so do ``n`` one-entry fields each
+        moving by that much of their own magnitude; to hold every entry
+        to ``tolerance`` of its field, divide by the square root of the
+        number of entries the group's norm reads.
 
         Read **only** when ``convergence_norm="l2"``.  The other two
         norms carry their tolerance in ``rtol`` and test against a
@@ -124,8 +131,10 @@ class CouplingGroup:
         ``spectral_error_bound``, ``spectral_usable``) and the IFT
         gradient-error bound (``gradient_relative_error_bound``,
         ``gradient_bound_usable``), which cost ``8`` Jacobian-vector
-        products for the spectrum and ``11 + k + 5 n_p`` more for the
-        bound per group per step (plus one linearisation and ``k``
+        products for the spectrum (``16`` under the interface norm with
+        a transform on an internal edge, whose report takes a second
+        spectrum on the transformed reading) and ``11 + 4 k + 5 n_p``
+        more for the bound per group per step (plus one linearisation and ``k``
         reverse-mode products where the state has more than ``k``
         entries; ``k <= 8``, ``n_p`` the probes: every entry of a
         floating constant of at most 64 entries, one per larger

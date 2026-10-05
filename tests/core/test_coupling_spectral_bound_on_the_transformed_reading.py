@@ -79,7 +79,7 @@ AUDIT_FIXTURES = {
 }
 
 
-def _audit_graph(fixture, acceleration, cap, norm="interface"):
+def _audit_graph(fixture, acceleration, cap, norm="interface", mode="jacobi"):
     tj, _tn, gA, cA, gB, cB, uA0, uB0 = AUDIT_FIXTURES[fixture]
     gm = GraphManager()
     gm.add_node(_LinVec("A", gA, cA, uA0))
@@ -87,14 +87,15 @@ def _audit_graph(fixture, acceleration, cap, norm="interface"):
     gm.add_edge("A", "B", "u", "inp", transform=tj)
     gm.add_edge("B", "A", "u", "inp", transform="extract_first")
     gm.add_coupling_group(["A", "B"], max_iterations=cap, convergence_norm=norm, rtol=RTOL,
-                          diagnostics=True, iteration_mode="jacobi", acceleration=acceleration)
+                          diagnostics=True, iteration_mode=mode, acceleration=acceleration)
     gm.compile()
     return gm
 
 
-def _audit_exact(fixture):
+def _audit_exact(fixture, held_in=np.float64):
+    """The float64 fixed point of the affine map, its constants as *held_in* rounds them."""
     _tj, tn, gA, cA, gB, cB, _uA0, _uB0 = AUDIT_FIXTURES[fixture]
-    gA, cA, gB, cB = (np.asarray(v, np.float64) for v in (gA, cA, gB, cB))
+    gA, cA, gB, cB = (np.asarray(v, held_in).astype(np.float64) for v in (gA, cA, gB, cB))
     t0 = tn(cA)
     slope = tn(gA + cA) - t0
     s = (gB[0] * t0 + cB[0]) / (1.0 - gB[0] * slope)
@@ -108,9 +109,9 @@ def _rms_over_own_magnitude(pairs, rtol=RTOL):
     return float(np.sqrt(np.mean(terms ** 2)))
 
 
-def _audit_distance(fixture, gm):
+def _audit_distance(fixture, gm, held_in=np.float64):
     _tj, tn, *_ = AUDIT_FIXTURES[fixture]
-    uA_s, uB_s = _audit_exact(fixture)
+    uA_s, uB_s = _audit_exact(fixture, held_in)
     uA = np.asarray(gm.get_node_state("A")["u"], np.float64)
     uB = np.asarray(gm.get_node_state("B")["u"], np.float64)
     return _rms_over_own_magnitude([
@@ -140,6 +141,56 @@ def test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures(fixtur
     d = gm.coupling_diagnostics()[KEY]
     assert d["spectral_usable"], dict(d)        # the fixture premise: a resolved spectrum
     _assert_bound_holds(d, _audit_distance(fixture, gm), (fixture, acceleration, cap))
+
+
+def test_a_stalled_transformed_pair_is_bounded_through_the_readings_float_floor():
+    """Where the residual reads zero the bound is the reading's float floor, amplified.
+
+    Gauss-Seidel with Aitken lands the ``extract_last`` pair on its float32
+    fixed point by the third pass: the residual is exactly 0.0, the state
+    is still a rounding away from the fixed point of the map its float32
+    constants define (0.66 in the norm's units), and what bounds that is
+    the floor taken on the reading (each transformed value at its own
+    eps), which the residual is added to before it is amplified.
+    """
+    gm = _audit_graph("extract-last", "aitken", 3, mode="gauss-seidel")
+    gm.step()
+    d = gm.coupling_diagnostics()[KEY]
+    true = _audit_distance("extract-last", gm, held_in=F32)
+    assert d["residual"] == 0.0 and d["precision_limited"] and true > 0, (dict(d), true)
+    assert d["spectral_usable"], dict(d)
+    _assert_bound_holds(d, true, "stalled")
+
+
+@pytest.mark.parametrize("gain", [0.9, 0.999])
+def test_the_bound_holds_in_the_returned_readings_weights_on_a_growing_pair(gain):
+    """``A <- B + 1``, ``B <- gain * A`` from zero, read through a selection on each edge.
+
+    The residual divides each transformed value by the larger of its
+    magnitudes over the pair the pass compared, the bound's factor is in
+    the returned state's weights, and on a pair still growing toward its
+    fixed point the two differ: the factor carries their ratio on the
+    reading as it does on the state (MADD-ANO-146; without it the
+    untransformed pair read 0.94x at this cap).
+    """
+    gm = GraphManager()
+    gm.add_node(_LinVec("A", [1.0], [1.0], [0.0]))
+    gm.add_node(_LinVec("B", [gain], [0.0], [0.0]))
+    gm.add_edge("B", "A", "u", "inp", transform="extract_first")
+    gm.add_edge("A", "B", "u", "inp", transform="extract_first")
+    gm.add_coupling_group(["A", "B"], max_iterations=2, convergence_norm="interface", rtol=RTOL,
+                          diagnostics=True)
+    gm.compile()
+    gm.step()
+    d = gm.coupling_diagnostics()[KEY]
+    g32 = float(F32(gain))
+    a_star = 1.0 / (1.0 - g32)
+    true = _rms_over_own_magnitude([
+        (np.asarray(gm.get_node_state("A")["u"], np.float64), np.asarray([a_star])),
+        (np.asarray(gm.get_node_state("B")["u"], np.float64), np.asarray([g32 * a_star])),
+    ])
+    assert d["spectral_usable"], dict(d)
+    _assert_bound_holds(d, true, ("growing", gain))
 
 
 # Per push: tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures

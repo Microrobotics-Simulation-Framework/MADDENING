@@ -85,6 +85,7 @@ _CLAIMS = "tests/compliance/test_claims_inventories.py"
 CLAIMS = (_CLAIMS,)
 CPL = "docs/validation/coupling_claims.yaml"
 RST = "docs/validation/rest_runpod_claims.yaml"
+SYS = "docs/validation/sysid_fmu_claims.yaml"
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
@@ -131,6 +132,9 @@ _AL_LAST = ("tests/core/test_compile_counts.py::"
 _KEPT = ("tests/core/test_coupling_diagnostics_leave_the_state_alone.py::"
          "test_diagnostics_leave_the_returned_state_bit_identical")
 _ZMQ = "tests/security/test_zmq_transport_auth.py"
+# A test under tests/usd that a claims row cites.
+_USD_SPEC = "tests/usd/test_usd_mapping_spec.py"
+_USD_GONE = "test_a_stage_written_with_a_kind_that_is_no_longer_registered_is_refused"
 
 MUTANTS: tuple[Mutant, ...] = (
     # --- R: the time budget, scripts/report_test_durations.py --------------
@@ -476,6 +480,24 @@ MUTANTS: tuple[Mutant, ...] = (
        '("token_enforced",)),\n', "", CLAIMS,
        "a non-loopback bind no longer covers token_enforced: the token cell of a row about "
        "such a bind could hide as n/a"),
+    # A cited test under tests/usd needs usd-core.  These must be caught where pytest collects
+    # the file (usd-core installed) and where its items are read from source (it is not).
+    _M("K10", SYS, f"    - {_USD_SPEC}::{_USD_GONE}\n", f"    - {_USD_SPEC}::{_USD_GONE}_too\n", CLAIMS,
+       "a row citing a tests/usd test that does not exist: unverifiable where usd-core is "
+       "absent, so taken on trust there"),
+    _M("K11", CI, "            tests/usd/ \\\n", "", CLAIMS,
+       "the one job that installs usd-core no longer runs tests/usd: a row's cited USD test "
+       "runs in no per-push job"),
+    _M("K12", _USD_SPEC, f"\n\ndef {_USD_GONE}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_USD_GONE}():",
+       CLAIMS, "a cited tests/usd test skip-marked: it is collected and never runs"),
+    _M("K13", CI, "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        run: |\n          python -m pip install --upgrade pip\n"
+       '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci,usd]"\n',
+       "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        run: |\n          python -m pip install --upgrade pip\n"
+       '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci]"\n',
+       CLAIMS, "the compliance job without usd-core: no per-push job compares the claims "
+       "guard's source reader with what pytest collects from tests/usd"),
 )
 
 

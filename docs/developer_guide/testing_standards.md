@@ -777,6 +777,22 @@ self-tests in the same module:
   strict, cited by that row, and names a row some inventory holds;
 - every row of a file with a domain matrix fills it (below).
 
+A row may cite a test under `tests/usd/`, which needs `usd-core`. The
+sharded lanes do not install it and skip that directory, so such a test
+runs on every push in the `test-usd` job only, and the guard fails if that
+job's selection does not hold it. The guard itself runs both with
+`usd-core` (the `compliance` job) and without (the sharded lanes). Without
+it pytest cannot import those modules, so the guard reads their items from
+source: each test function, with the `slow`, `skip` and `xfail` marks
+written on it, on its class or in the module's `pytestmark`. The same
+rules then run, so a citation of a USD test that does not exist, never
+runs or disagrees with its row's status fails in both. The reader expands
+no parameters and reads no mark attached to one parameter or imported from
+another module; the `compliance` job compares it with what pytest collects
+from the cited files on every push, so a spelling it does not know fails
+there. A test directory behind another optional extra needs the same three
+things: the job that runs it, the lane rule, and the reader's comparison.
+
 ### The domain matrix
 
 Audits kept breaking claims in a *domain* their conditions covered but no

@@ -853,8 +853,13 @@ def test_registration_refuses_exactly_the_factories_the_rebuild_could_not_call(s
         with temporary_kind("probe", factory, **_DECLARATION):
             pass
     else:
-        with pytest.raises(ValueError, match=message):
-            register_mapping("probe", **_DECLARATION)(factory)
+        try:
+            with pytest.raises(ValueError, match=message):
+                register_mapping("probe", **_DECLARATION)(factory)
+            assert "probe" not in mapping_registry._registered_kinds()
+        finally:    # a kind that did register must not reach the next test
+            if "probe" in mapping_registry._registered_kinds():
+                mapping_registry._unregister("probe")
     assert "probe" not in mapping_registry._registered_kinds()
 
 

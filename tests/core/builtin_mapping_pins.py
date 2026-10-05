@@ -4,19 +4,21 @@
 ``projection_1d`` and ``matrix`` mappings and records, for each: the exact
 JSON text of ``GraphManager.to_dict()``, the weights of every mapped edge
 and of the same edge after ``from_dict``, and the message of every refusal
-a malformed spec draws.  :func:`capture_usd` records the
-``maddening:mappingSpecJson`` attribute each edge writes to a USD stage.
+a malformed spec draws.
 
-``tests/core/data/builtin_mapping_pins.json`` is the output of this module
-on the tree *before* the mapping kinds became a registry
-(``release/0.4.0`` at ``a7e69509``)::
+``tests/core/data/builtin_mapping_pins.json`` is the output of this module,
+and of its USD half ``tests/usd/builtin_mapping_usd_pins.py`` (which needs
+``usd-core`` and so lives with the tests the USD job runs), on the tree
+*before* the mapping kinds became a registry (``release/0.4.0`` at
+``a7e69509``)::
 
     python -m tests.core.builtin_mapping_pins tests/core/data/builtin_mapping_pins.json
+    python -m tests.usd.builtin_mapping_usd_pins tests/core/data/builtin_mapping_pins.json
 
 ``tests/core/test_mapping_registry.py`` and
-``tests/usd/test_usd_mapping_spec.py`` run it again on the current tree and
-compare, so a change to what a built-in kind writes or rebuilds fails with
-the two values side by side.
+``tests/usd/test_usd_mapping_spec.py`` run them again on the current tree
+and compare, so a change to what a built-in kind writes or rebuilds fails
+with the two values side by side.
 
 The weights are compared exactly, so the cases are chosen for arithmetic
 that does not depend on the machine: selection and projection matrices
@@ -296,43 +298,15 @@ def capture() -> dict:
         }
 
 
-def capture_usd() -> dict:
-    """The ``maddening:mappingSpecJson`` text of every mapped edge of the
-    two weight-pinned graphs, and the weights a stage rebuilds."""
-    from pxr import Usd  # noqa: PLC0415
-
-    from maddening.usd.serialization import (  # noqa: PLC0415
-        load_graph_from_usd,
-        save_graph_to_usd,
-    )
-
-    out = {}
-    with tempfile.TemporaryDirectory() as tmp:
-        base = Path(tmp)
-        graphs = {
-            "rods_with_node_references": rods_with_node_references(),
-            "vectors_with_inline_and_asset_references":
-                vectors_with_inline_and_asset_references(base),
-        }
-        for name, gm in graphs.items():
-            stage = Usd.Stage.CreateNew(str(base / f"{name}.usda"))
-            save_graph_to_usd(gm, stage)
-            stage.GetRootLayer().Save()
-            attrs = {}
-            for prim in stage.GetPrimAtPath("/Simulation/edges").GetChildren():
-                attr = prim.GetAttribute("maddening:mappingSpecJson")
-                attrs[prim.GetName()] = attr.Get() if attr else None
-            reloaded = load_graph_from_usd(Usd.Stage.Open(str(base / f"{name}.usda")),
-                                           node_registry=REGISTRY)
-            out[name] = {"attributes": attrs, "rebuilt_weights": _weights(reloaded)}
-    return out
-
-
 def main(path: str) -> None:
-    pins = capture()
-    pins["usd"] = capture_usd()
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(pins, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    """Write the config-side pins, keeping whatever else the file holds
+    (the ``usd`` section is written by ``tests/usd/builtin_mapping_usd_pins.py``,
+    which needs ``usd-core``)."""
+    target = Path(path)
+    pins = json.loads(target.read_text(encoding="utf-8")) if target.exists() else {}
+    pins.update(capture())
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(pins, indent=1, sort_keys=True) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

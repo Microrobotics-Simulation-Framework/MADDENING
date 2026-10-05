@@ -19,9 +19,10 @@ from maddening.core.coupling.mapping_spec import MappingRebuildError, point_arra
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.heat import HeatNode
 from maddening.usd.serialization import load_graph_from_usd, save_graph_to_usd
-from tests.core.builtin_mapping_pins import PINS, capture_usd
+from tests.core.builtin_mapping_pins import PINS
 from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
 from tests.registered_mapping_kinds import assert_same_weights, temporary_kind
+from tests.usd.builtin_mapping_usd_pins import capture_usd
 
 C2F = "coarse.temperature->fine.heat_source"
 
@@ -236,7 +237,7 @@ def test_a_built_in_kind_writes_the_stage_attribute_it_wrote_before_the_registry
         graph, usd_pins):
     """The ``maddening:mappingSpecJson`` text of every mapped edge, and the
     weights a stage rebuilds, against the capture taken on the tree before
-    the registry (``tests/core/builtin_mapping_pins.py``)."""
+    the registry (``tests/usd/builtin_mapping_usd_pins.py``)."""
     pinned, captured = usd_pins["pinned"][graph], usd_pins["captured"][graph]
     assert len(pinned["attributes"]) in (2, 7)
     assert captured["attributes"] == pinned["attributes"]

@@ -209,7 +209,7 @@ def test_a_rest_write_of_the_cell_count_is_refused_on_a_sharded_rod(n_cells):
     correct step), where the unsharded node's step was a 500.  Refused on
     both before anything is written; the sharded rod still steps as the
     rod it was built as."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
     from maddening.api.server import SimulationServer
 
     gm, node = _rod_graph(sharded=True)
@@ -264,7 +264,7 @@ def test_a_stencil_order_write_reaches_a_sharded_rod_after_a_recompile(surface):
     stepped a field matching neither order (4.0e-2 off both, at v0.2.0,
     v0.3.1 and this cycle alike).  The layout is rebuilt on every
     ``compile()`` now, and the step is the unsharded order-4 step."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
     from maddening.api.server import SimulationServer
 
     node = _ramp_rod(2)

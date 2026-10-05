@@ -183,15 +183,36 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint file not found: {path}")
 
-    data = _read_checkpoint_archive(path)
+    # Every member's name, shape and dtype, from its header: no data is
+    # read until the names and shapes have been checked against the live
+    # graph, and a member the load does not use is never read
+    # (_CheckpointArchive).
+    archive = _CheckpointArchive(path)
+    try:
+        _load_from_archive(graph_manager, archive)
+    finally:
+        archive.close()
 
-    # Separate meta keys from node keys.
-    meta_keys: dict[str, np.ndarray] = {}
-    node_keys: dict[str, dict[str, np.ndarray]] = {}
-    param_keys: dict[str, dict[str, np.ndarray]] = {}
-    mapping_keys: dict[str, dict[str, np.ndarray]] = {}
 
-    for flat_key in data:
+def _load_from_archive(graph_manager: "GraphManager", archive: "_CheckpointArchive") -> None:
+    """:func:`load_state`'s checks and restore, on *archive*'s headers
+    first and its data only for the members it restores."""
+
+    def read(key: str, want: Any, what: str) -> np.ndarray:
+        """Member *key*, cast to the live leaf's dtype; its shape is
+        checked by the caller, its dtype here, both before it is read."""
+        refusal = archive.numeric_refusal(key, what)
+        if refusal is not None:
+            raise ValueError(refusal)
+        return _checked_cast(archive.read(key), want, what)
+
+    # Separate meta keys from node keys (member names, not data).
+    meta_keys: dict[str, str] = {}
+    node_keys: dict[str, dict[str, str]] = {}
+    param_keys: dict[str, dict[str, str]] = {}
+    mapping_keys: dict[str, dict[str, str]] = {}
+
+    for flat_key in archive:
         parts = flat_key.split("/", 1)
         if len(parts) != 2:
             raise ValueError(
@@ -200,15 +221,15 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
             )
         prefix, field = parts
         if prefix == _META_KEY:
-            meta_keys[field] = data[flat_key]
+            meta_keys[field] = flat_key
         elif prefix == _PARAMS_KEY:
             node_name, pname = field.split("/", 1)
-            param_keys.setdefault(node_name, {})[pname] = data[flat_key]
+            param_keys.setdefault(node_name, {})[pname] = flat_key
         elif prefix == _MAPPINGS_KEY:
             edge_key, wname = field.rsplit("/", 1)
-            mapping_keys.setdefault(edge_key, {})[wname] = data[flat_key]
+            mapping_keys.setdefault(edge_key, {})[wname] = flat_key
         else:
-            node_keys.setdefault(prefix, {})[field] = data[flat_key]
+            node_keys.setdefault(prefix, {})[field] = flat_key
 
     # A graph that has never compiled has no params pytree and no _meta;
     # compile first so load-then-run equals compile-then-load (otherwise
@@ -245,19 +266,24 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
             )
 
     # ---- Validate shapes, coerce dtypes, then apply ----
+    # Every shape first, from the headers, so a member of another shape is
+    # refused before any member is read.
+    for node_name in current_nodes:
+        live = graph_manager.get_node_state(node_name)
+        for field, key in node_keys[node_name].items():
+            want_shape = tuple(jnp.shape(live[field]))
+            if archive.shape(key) != want_shape:
+                raise ValueError(
+                    f"Checkpoint field '{node_name}/{field}' has shape {archive.shape(key)}, "
+                    f"graph has {want_shape}"
+                )
     staged_states: dict[str, dict] = {}
     for node_name in current_nodes:
         live = graph_manager.get_node_state(node_name)
         new_state = {}
-        for field, arr in node_keys[node_name].items():
+        for field, key in node_keys[node_name].items():
             want = jnp.asarray(live[field])
-            if tuple(arr.shape) != tuple(want.shape):
-                raise ValueError(
-                    f"Checkpoint field '{node_name}/{field}' has shape {tuple(arr.shape)}, "
-                    f"graph has {tuple(want.shape)}"
-                )
-            new_state[field] = jnp.asarray(_checked_cast(
-                arr, want.dtype, f"field '{node_name}/{field}'"))
+            new_state[field] = jnp.asarray(read(key, want.dtype, f"field '{node_name}/{field}'"))
         staged_states[node_name] = new_state
 
     # Stage the graph parameters the same way, so a leaf that does not
@@ -275,17 +301,17 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
         for owner, saved in saved_tree.items():
             if owner not in current:
                 continue
-            for pname, arr in saved.items():
+            for pname, key in saved.items():
                 if pname not in current[owner]:
                     continue
                 live = jnp.asarray(current[owner][pname])
-                if tuple(arr.shape) != tuple(live.shape):
+                if archive.shape(key) != tuple(live.shape):
                     raise ValueError(
                         f"Checkpoint params {section}[{owner!r}][{pname!r}] has shape "
-                        f"{tuple(arr.shape)}, graph has {tuple(live.shape)}"
+                        f"{archive.shape(key)}, graph has {tuple(live.shape)}"
                     )
-                writes.append((current[owner], pname, jnp.asarray(_checked_cast(
-                    arr, live.dtype, f"params {section}[{owner!r}][{pname!r}]"))))
+                writes.append((current[owner], pname, jnp.asarray(read(
+                    key, live.dtype, f"params {section}[{owner!r}][{pname!r}]"))))
         return writes
 
     staged_params = (
@@ -320,15 +346,15 @@ def load_state(graph_manager: "GraphManager", path: str | Path) -> None:
             live_meta = raw_state.get(_META_KEY) or {}
             merged = dict(live_meta)
             dropped, reshaped = [], []
-            for field, arr in meta_keys.items():
+            for field, key in meta_keys.items():
                 if field not in live_meta:
                     dropped.append(field)
                     continue
                 want = jnp.asarray(live_meta[field])
-                if tuple(np.shape(arr)) != tuple(want.shape):
+                if archive.shape(key) != tuple(want.shape):
                     reshaped.append(field)
                     continue
-                merged[field] = jnp.asarray(_checked_cast(arr, want.dtype, f"_meta '{field}'"))
+                merged[field] = jnp.asarray(read(key, want.dtype, f"_meta '{field}'"))
             if merged:
                 raw_state[_META_KEY] = merged
             if dropped or reshaped:
@@ -360,6 +386,111 @@ class CheckpointFormatError(ValueError):
     arrays, or one whose members cannot be read without unpickling."""
 
 
+#: The npy header versions a checkpoint member may use (``np.savez``
+#: writes 1.0, or 2.0 for a header over 64 KiB); 3.0 is for structured
+#: dtypes with non-latin-1 field names, which no checkpoint holds.
+_NPY_HEADER_READERS = {
+    (1, 0): np.lib.format.read_array_header_1_0,
+    (2, 0): np.lib.format.read_array_header_2_0,
+}
+
+#: Dtype kinds a checkpoint member may hold: numbers and booleans.  Text,
+#: bytes, void and objects are refused from the header, before a byte of
+#: their data is read (text was refused after it, by _checked_cast).
+_NUMERIC_KINDS = "biufc"
+
+
+class _CheckpointArchive:
+    """The members of a checkpoint ``.npz``: every member's name, shape and
+    dtype read from its ``.npy`` header -- nothing of its data -- and the
+    data of a member read only when :meth:`read` asks for it.
+
+    ``load_state`` used to decompress every member before it checked a
+    single name or shape, so a small file cost as much memory as its
+    members declared: a 2 MB archive holding an extra 2 GiB member of zeros
+    filled 2 GiB before ``POST /checkpoint/load`` answered "node mismatch".
+    Now the names and shapes are checked against the live graph first, and
+    only a member whose shape is a live leaf's, with a numeric dtype, is
+    read: what a load reads is bounded by the live graph's own sizes, at
+    one numeric element of the archive's dtype per live element.
+    """
+
+    def __init__(self, path: Path) -> None:
+        what = (f"{path} is not a checkpoint: an .npz archive of plain arrays, "
+                "saved by GraphManager.save_state, is expected")
+        self.path = path
+        try:
+            self._zip = zipfile.ZipFile(path)
+        except (OSError, ValueError, EOFError, zipfile.BadZipFile):
+            raise CheckpointFormatError(what) from None
+        self.headers: dict[str, tuple[tuple[int, ...], np.dtype]] = {}
+        self._members: dict[str, str] = {}
+        try:
+            for info in self._zip.infolist():
+                name = info.filename
+                if not name.endswith(".npy") or info.is_dir():
+                    raise CheckpointFormatError(
+                        f"{path} is not a checkpoint: its member {name!r} is not an "
+                        ".npy array")
+                key = name[: -len(".npy")]
+                if key in self.headers:
+                    raise CheckpointFormatError(
+                        f"{path} is not a checkpoint: it holds {key!r} twice")
+                with self._zip.open(info) as member:
+                    version = np.lib.format.read_magic(member)
+                    reader = _NPY_HEADER_READERS.get(version)
+                    if reader is None:
+                        raise CheckpointFormatError(
+                            f"{path} is not a checkpoint: member {key!r} has npy "
+                            f"header version {version}")
+                    shape, _fortran, dtype = reader(member)
+                if dtype.hasobject:
+                    raise CheckpointFormatError(
+                        f"{path} is not a checkpoint: one of its members holds Python "
+                        "objects or is damaged")
+                self.headers[key] = (tuple(int(n) for n in shape), dtype)
+                self._members[key] = name
+        except CheckpointFormatError:
+            self._zip.close()
+            raise
+        except (OSError, ValueError, EOFError, zipfile.BadZipFile, KeyError):
+            self._zip.close()
+            raise CheckpointFormatError(
+                f"{path} is not a checkpoint: one of its members holds Python objects "
+                "or is damaged") from None
+
+    def __iter__(self):
+        return iter(self.headers)
+
+    def shape(self, key: str) -> tuple[int, ...]:
+        return self.headers[key][0]
+
+    def dtype(self, key: str) -> np.dtype:
+        return self.headers[key][1]
+
+    def numeric_refusal(self, key: str, what: str) -> Optional[str]:
+        """Why member *key* cannot be a number (its header's dtype), in
+        :func:`_checked_cast`'s words, or ``None``."""
+        dtype = self.dtype(key)
+        if dtype.kind not in _NUMERIC_KINDS or dtype.fields is not None \
+                or dtype.subdtype is not None:
+            return f"Checkpoint {what} holds {dtype} data, not a number.  Nothing was loaded."
+        return None
+
+    def read(self, key: str) -> np.ndarray:
+        """The data of member *key*, read now (``allow_pickle=False``)."""
+        try:
+            with self._zip.open(self._members[key]) as member:
+                return np.lib.format.read_array(member, allow_pickle=False)
+        except (OSError, ValueError, EOFError, zipfile.BadZipFile):
+            raise CheckpointFormatError(
+                f"{self.path} is not a checkpoint: one of its members holds Python "
+                "objects or is damaged") from None
+
+    def close(self) -> None:
+        self._zip.close()
+
+
 def _read_checkpoint_archive(path: Path) -> dict[str, np.ndarray]:
     """Every member of the ``.npz`` at *path*, read with
     ``allow_pickle=False``, or :class:`CheckpointFormatError`.
@@ -369,24 +500,15 @@ def _read_checkpoint_archive(path: Path) -> dict[str, np.ndarray]:
     (object) data ...") -- a message about how to load the file unsafely,
     which a caller passing ``ValueError`` on as a checkpoint mismatch used
     to show to whoever had named the file.  A damaged archive (``EOFError``,
-    ``zipfile.BadZipFile``) is the same answer.
+    ``zipfile.BadZipFile``) is the same answer.  ``load_state`` reads its
+    members through :class:`_CheckpointArchive` instead, which checks every
+    member's header before it reads any data.
     """
-    what = (f"{path} is not a checkpoint: an .npz archive of plain arrays, "
-            "saved by GraphManager.save_state, is expected")
+    archive = _CheckpointArchive(path)
     try:
-        data = np.load(path, allow_pickle=False)
-    except (ValueError, EOFError, zipfile.BadZipFile):
-        raise CheckpointFormatError(what) from None
-    if not isinstance(data, np.lib.npyio.NpzFile):
-        raise CheckpointFormatError(what)
-    try:
-        return {key: data[key] for key in data.files}
-    except (ValueError, EOFError, zipfile.BadZipFile, KeyError):
-        raise CheckpointFormatError(
-            f"{path} is not a checkpoint: one of its members holds Python objects "
-            "or is damaged") from None
+        return {key: archive.read(key) for key in archive}
     finally:
-        data.close()
+        archive.close()
 
 
 def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:

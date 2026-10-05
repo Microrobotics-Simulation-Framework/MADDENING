@@ -226,7 +226,7 @@ def test_every_reader_reads_the_written_model(case, tmp_path):
     fresh.step()
     assert _x(fresh) == pytest.approx(model(np.float32(X0), after), rel=1e-6), "save_state"
 
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
     from maddening.api.server import SimulationServer
 
     gm = _graph(factory)

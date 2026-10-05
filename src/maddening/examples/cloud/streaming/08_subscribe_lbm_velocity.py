@@ -188,7 +188,8 @@ def main() -> int:
     # Serve from a daemon thread; drive the simulation forward from the
     # main loop so /ws/state/binary has frames to send.
     uv_server = uvicorn.Server(uvicorn.Config(server.create_app(),
-                                              log_level="warning"))
+                                              log_level="warning",
+                                              proxy_headers=False))
     t = threading.Thread(target=_run_server, args=(uv_server, sock), daemon=True)
     t.start()
 

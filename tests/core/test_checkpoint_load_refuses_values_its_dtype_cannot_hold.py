@@ -196,7 +196,7 @@ def test_a_complex_value_with_an_imaginary_part_is_refused_for_a_real_field(tmp_
 def test_the_rest_route_answers_the_refusal_naming_no_path(tmp_path):
     """POST /checkpoint/load passes load_state's own refusal on, without the server's
     paths."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
 
     from maddening.api.server import SimulationServer
     from tests.property.differential import no_cloud_launch

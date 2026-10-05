@@ -257,11 +257,32 @@ DOMAIN_WITNESS: dict[str, re.Pattern] = {
         ("relabelled_records", r"relabel"),
         ("mixed_commits", r"commit"),
     )}
-#: A real server's marks, for ``concurrent``: the requests must meet on one
+#: A real server's mark, for ``concurrent``: the requests must meet on one
 #: server's socket, event loop and worker pool, not each on its own
-#: in-process client.
-_REAL_SERVER = re.compile(r"uvicorn|socket|http://127\.0\.0\.1", re.IGNORECASE)
-_SIMULTANEOUS = re.compile(r"concurren|thread|simultaneous|barrier|gather", re.IGNORECASE)
+#: in-process client.  The mark is the call that starts one --
+#: ``uvicorn.run(...)`` (a server script's too) or ``uvicorn.Server(...)``,
+#: which ``rest_claims_support.loopback_server`` makes -- because an
+#: in-process client has no reason to make it.  A URL, a ``127.0.0.1``, the
+#: word "socket" (every WebSocket test says it) or "uvicorn" in passing are
+#: no evidence: a client that names a loopback Host says all of them.  Nor
+#: is the call quoted in backticks, as a docstring quotes it.  (Prose that
+#: spells the call unquoted still reads as one: a floor, as every witness is.)
+_REAL_SERVER = re.compile(r"(?<!`)\b\w*uvicorn(?:\(\))?\.(?:run|Server)\(")
+#: ... and the requests must be simultaneous: the word, a barrier or a
+#: gather, or a thread the test starts.  Two things the helper that starts
+#: the server says are no evidence, or every test that starts one would be
+#: simultaneous by that alone: the thread the server itself runs in
+#: (``Thread(target=userver.run)``), and the domain's own name, which the
+#: helper passes as a tag (``make_server("concurrent", ...)``).
+_SIMULTANEOUS = re.compile(r"simultaneous|barrier|gather|Thread\(\s*target=(?!\w+\.run\b)",
+                           re.IGNORECASE)
+#: Test modules whose definitions are not read as a test's own words.  The
+#: shared in-process client names a loopback Host and peer for every REST
+#: test that constructs it (and annotates a ``str``), so read as evidence it
+#: would witness ``loopback_bind``, ``no_token`` and ``hostile_input`` for a
+#: test of none of them, and its URL once read as a real server.  What a
+#: test says of its domain it says itself, or in a helper written for it.
+TRANSPORT_MODULES = frozenset({"tests/_loopback_client.py"})
 
 
 def witnesses(domain: str, text: str) -> bool:
@@ -718,16 +739,34 @@ def _module(rel: str, repo_root: Path = REPO_ROOT):
     return text, tree, defs
 
 
+def _imports_transport(node) -> bool:
+    """Whether *node* is an import of (or from) one of :data:`TRANSPORT_MODULES`."""
+    def path(dotted: str) -> str:
+        return dotted.replace(".", "/") + ".py"
+    if isinstance(node, ast.ImportFrom) and node.module:
+        return path(node.module) in TRANSPORT_MODULES or any(
+            path(f"{node.module}.{a.name}") in TRANSPORT_MODULES for a in node.names)
+    return isinstance(node, ast.Import) and any(path(a.name) in TRANSPORT_MODULES
+                                                for a in node.names)
+
+
 def _segment(text: str, node) -> str:
+    """*node*'s source lines, decorators included, less any import of a
+    transport module inside it: the import names the client, not a domain."""
     lines = text.splitlines()
     first = min([d.lineno for d in getattr(node, "decorator_list", [])] + [node.lineno])
-    return "\n".join(lines[first - 1:node.end_lineno])
+    dropped = {n for imp in ast.walk(node) if _imports_transport(imp)
+               for n in range(imp.lineno, imp.end_lineno + 1)}
+    return "\n".join(ln for n, ln in enumerate(lines[first - 1:node.end_lineno], first)
+                     if n not in dropped)
 
 
 def _resolve(entry, repo_root: Path):
     """A definition entry ``(file, node)`` or an import ``(file, name)`` -> ``(text, node)``."""
     rel, node = entry
     if node is None:                    # a module alias: nothing to read by itself
+        return None
+    if rel in TRANSPORT_MODULES:        # the shared client: no test's own words
         return None
     if isinstance(node, str):           # imported from another test module
         mod = _module(rel, repo_root)
@@ -1250,11 +1289,29 @@ def test_the_domain_rule_passes_a_filled_server_matrix():
 
 
 def test_the_witness_rule_reads_the_server_vocabulary():
-    real = ("def test_c():\n    with S.loopback_server(chk, root) as s:  # uvicorn\n"
-            "        simultaneously([job] * 4)  # threads")
+    # concurrent: a call that starts a server, and requests that meet on it
+    helper = ("def loopback_server(chk, root):\n    server = make_server('concurrent', chk, root)\n"
+              "    userver = _uvicorn().Server(config)\n"
+              "    thread = threading.Thread(target=userver.run)  # uvicorn, in a thread\n")
+    served = "def test_c():\n    with S.loopback_server(chk, root) as s:\n        %s\n" + helper
+    real = served % "simultaneously([job] * 4)"
     in_process = "def test_c():\n    threads = [threading.Thread(target=TestClient(app).get)]"
     assert witnesses("concurrent", real)
+    assert witnesses("concurrent", served % "threading.Thread(target=lambda: get(s)).start()")
+    assert witnesses("concurrent", "def test_c():\n    Popen([_SERVER]); threading.Thread(target=run)"
+                                   "\n_SERVER = 'uvicorn.run(app, port=8000)'")
     assert not witnesses("concurrent", in_process), "TestClient threads are no real server"
+    # ... which a URL, a WebSocket, a client named for loopback and the word
+    # "uvicorn" do not make them
+    assert not witnesses("concurrent", in_process + "\n    TestClient(app, 'http://127.0.0.1')"
+                         ".websocket_connect('/ws')  # as uvicorn's proxy_headers would\n"
+                         "LOOPBACK_BASE_URL = 'http://127.0.0.1'\nsocket.socket()")
+    # ... nor a docstring that quotes the call
+    assert not witnesses("concurrent", in_process.replace(
+        "\n", '\n    """``uvicorn.run(app, host="0.0.0.0")`` and ``_uvicorn().Server(config)``'
+        ' never tell the app."""\n', 1))
+    # ... and a server's own thread and domain tag are no simultaneous requests
+    assert not witnesses("concurrent", served % "httpx.get(s)  # one request at a time")
     assert not witnesses("concurrent", "def test_c():\n    uvicorn.run(app)  # one request")
     # loopback and no token are the defaults: anything but a test that only
     # runs on another bind / always presents the token
@@ -1290,3 +1347,38 @@ def test_the_witness_rule_reads_the_server_vocabulary():
     sources["tests/api/test_x.py::test_c"] = real
     sources["tests/api/test_x.py::test_s"] = "def test_s(): signal.raise_signal(SIGTERM)"
     assert domain_witness_problems([row], source=sources.get) == []
+
+
+def test_the_shared_in_process_client_is_no_tests_own_words(tmp_path, monkeypatch):
+    """The client every REST test constructs names a loopback Host and peer.
+    Read as a test's own words it witnesses a loopback bind, a tokenless
+    request and hostile input for a test of none of them (and its URL once
+    read as a real server), so neither its source nor the line that imports
+    it is read -- here a test of a non-loopback bind that always presents
+    the token, from threads, through the real client."""
+    client = "tests/_loopback_client.py"
+    assert client in TRANSPORT_MODULES and (REPO_ROOT / client).is_file()
+    (tmp_path / "tests" / "api").mkdir(parents=True)
+    (tmp_path / client).write_text((REPO_ROOT / client).read_text(encoding="utf-8"),
+                                   encoding="utf-8")
+    (tmp_path / "tests" / "api" / "test_z.py").write_text(
+        "import threading\n"
+        "from tests._loopback_client import LoopbackTestClient as TestClient\n\n\n"
+        "def test_public():\n"
+        "    from tests._loopback_client import (\n        LoopbackTestClient as Client,\n    )\n"
+        "    app = SimulationServer({}, bind_host='0.0.0.0').create_app()\n"
+        "    Client(app, headers={'Authorization': 'Bearer t'}).get('/graph')\n"
+        "    jobs = [threading.Thread(target=TestClient(app).get) for _ in range(8)]\n",
+        encoding="utf-8")
+    nodeid = "tests/api/test_z.py::test_public"
+    text = source_of_test(nodeid, repo_root=tmp_path)
+    assert "bind_host='0.0.0.0'" in text and "Loopback" not in text and "127.0.0.1" not in text
+    for domain in ("loopback_bind", "no_token", "hostile_input", "concurrent"):
+        assert not witnesses(domain, text), domain
+    assert witnesses("non_loopback_bind", text) and witnesses("token_enforced", text)
+    # What that keeps out: the same test, the client read as its own words.
+    monkeypatch.setattr(sys.modules[__name__], "TRANSPORT_MODULES", frozenset())
+    read = source_of_test(nodeid, repo_root=tmp_path)
+    assert "LOOPBACK_BASE_URL" in read
+    for domain in ("loopback_bind", "no_token", "hostile_input"):
+        assert witnesses(domain, read), domain

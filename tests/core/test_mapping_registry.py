@@ -28,6 +28,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import ast
 import dataclasses
+import functools
 import inspect
 import json
 import subprocess
@@ -43,6 +44,7 @@ import numpy as np
 import pytest
 import yaml
 
+from maddening.core import node as node_module
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.coupling import mapping as mapping_module
 from maddening.core.coupling import mapping_registry, mapping_spec
@@ -753,6 +755,146 @@ def test_a_factory_taking_keyword_arguments_freely_or_with_no_arrays_registers()
             "points": {}}
         rebuilt = GraphManager.from_dict(config, REGISTRY).edges[0].mapping
         np.testing.assert_array_equal(np.asarray(rebuilt.H), np.eye(3))
+
+
+#: What the rebuild passes a factory declared with ``_DECLARATION``: every
+#: declared name, by keyword.
+_DECLARED = ("source_points", "target_points", "scale", "flip", "name",
+             "source_points_ref", "target_points_ref")
+
+
+def _taking_each_name(source_points, target_points, *, scale=1.0, flip=False, name="x",
+                      source_points_ref=None, target_points_ref=None):
+    return "called"
+
+
+def _needing_a_tolerance(source_points, target_points, tolerance, **hyper_and_references):
+    return "called"
+
+
+def _without_a_name(source_points, target_points, *, scale=1.0, flip=False,
+                    source_points_ref=None, target_points_ref=None):
+    return "called"
+
+
+def _positional_arrays(source_points, target_points, /, *, scale=1.0, flip=False, name="x",
+                       source_points_ref=None, target_points_ref=None):
+    return "called"
+
+
+def _positional_arrays_beside_kwargs(source_points, target_points, /, **hyper_and_references):
+    return "called"
+
+
+def _forgetting_wraps(fn):
+    def inner(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return inner
+
+
+class _FactoryOwner:
+    def __init__(self, source_points=None, target_points=None, **hyper_and_references):
+        pass
+
+    def method(self, source_points, target_points, **hyper_and_references):
+        return "called"
+
+    @classmethod
+    def build(cls, source_points, target_points, **hyper_and_references):
+        return "called"
+
+    def __call__(self, source_points, target_points, *, scale=1.0, flip=False, name="x",
+                 source_points_ref=None, target_points_ref=None):
+        return "called"
+
+
+_POSITIONAL = r"requires positional-only argument\(s\) \['source_points', 'target_points'\]"
+#: How a factory may be spelled -> the refusal registering it draws, or
+#: None when the rebuild's keyword call binds.
+_FACTORY_SPELLINGS = {
+    "function": (_taking_each_name, None),
+    "var_keyword": (lambda **kwargs: "called", None),
+    "callable_object": (_FactoryOwner(), None),
+    "bound_method": (_FactoryOwner().method, None),
+    "classmethod": (_FactoryOwner.build, None),
+    "class": (_FactoryOwner, None),
+    "no_wraps_decorator": (_forgetting_wraps(_taking_each_name), None),
+    "partial_supplying_the_extra_argument":
+        (functools.partial(_needing_a_tolerance, tolerance=1), None),
+    "required_argument_undeclared":
+        (_needing_a_tolerance, r"requires argument\(s\) \['tolerance'\]"),
+    "declared_name_not_taken":
+        (_without_a_name, r"takes no keyword argument\(s\) \['name'\]"),
+    "required_positional_only": (_positional_arrays, _POSITIONAL),
+    "required_positional_only_beside_kwargs": (_positional_arrays_beside_kwargs, _POSITIONAL),
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(_FACTORY_SPELLINGS))
+def test_registration_refuses_exactly_the_factories_the_rebuild_could_not_call(spelling):
+    """However the factory is spelled -- a function, a callable object, a
+    bound method, a class, a ``functools.partial``, a decorator without
+    ``functools.wraps`` -- it registers when ``factory(**declared)`` binds
+    and is refused when it does not.  Each body here is trivial, so a
+    ``TypeError`` from the call is a failure to bind.
+
+    A required positional-only argument beside ``**kwargs`` registered
+    until the check asked for the required arguments apart from the
+    keywords taken: the keyword lands in ``**kwargs`` and the positional
+    one is still missing."""
+    factory, message = _FACTORY_SPELLINGS[spelling]
+    try:
+        factory(**dict.fromkeys(_DECLARED))
+        binds = True
+    except TypeError:
+        binds = False
+    assert binds is (message is None)
+    if message is None:
+        with temporary_kind("probe", factory, **_DECLARATION):
+            pass
+    else:
+        with pytest.raises(ValueError, match=message):
+            register_mapping("probe", **_DECLARATION)(factory)
+    assert "probe" not in mapping_registry._registered_kinds()
+
+
+def test_whether_a_factory_takes_a_declared_name_is_the_packages_one_keyword_rule(monkeypatch):
+    """The registry asks ``maddening.core.node._signature_takes_keyword``,
+    the rule every optional keyword in the package is probed with, about
+    each declared name and obeys the answer: it has no rule of its own
+    (``tests/core/test_params_probe_agreement.py`` scans for one)."""
+    assert mapping_registry._signature_takes_keyword is node_module._signature_takes_keyword
+    asked = []
+
+    def rule(fn, keyword):
+        asked.append((fn, keyword))
+        return keyword != "scale"
+
+    monkeypatch.setattr(mapping_registry, "_signature_takes_keyword", rule)
+    with pytest.raises(ValueError, match=r"takes no keyword argument\(s\) \['scale'\], which "
+                                         r"the registration declares \(scale: a hyper-parameter"):
+        register_mapping("probe", **_DECLARATION)(_factory)
+    assert sorted(asked, key=lambda pair: pair[1]) == [(_factory, name)
+                                                       for name in sorted(_DECLARED)]
+    assert "probe" not in mapping_registry._registered_kinds()
+
+
+def test_a_factory_whose_signature_cannot_be_read_is_taken_on_trust():
+    """Nothing can be checked at the decorator, so nothing is refused
+    there; the rebuild's own call is what fails if the declaration is
+    wrong."""
+    class Opaque:
+        __signature__ = "not a signature"
+
+        def __call__(self, **kwargs):
+            return "called"
+
+    opaque = Opaque()
+    with pytest.raises((TypeError, ValueError)):
+        inspect.signature(opaque)
+    with temporary_kind("probe", opaque, **_DECLARATION):
+        assert mapping_registry._MAPPING_REGISTRY["probe"].factory is opaque
+    assert "probe" not in mapping_registry._registered_kinds()
 
 
 # ===========================================================================

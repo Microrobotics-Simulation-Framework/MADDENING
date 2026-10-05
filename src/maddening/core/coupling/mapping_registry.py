@@ -60,12 +60,12 @@ hold for every kind, registered or built in.
 
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence, TypeVar
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.node import _signature_required_arguments, _signature_takes_keyword
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -263,35 +263,35 @@ def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str
     The rebuild calls ``factory(**arrays, **hyperparameters, **references)``.
     A declared name the factory does not take would only surface there, as
     a ``TypeError`` while loading someone's config; a required argument
-    nothing declares would too.  A callable whose signature cannot be read
-    is taken on trust.
+    nothing declares would too, and so would a required positional-only
+    one, which no keyword reaches.  A callable whose signature cannot be
+    read is taken on trust.
+
+    Both questions are asked of ``maddening.core.node``, the one module
+    that reads a signature.  Whether the factory takes a keyword is the
+    rule every optional keyword in the package is probed with
+    (``_signature_takes_keyword``: named in the signature, or forwarded by
+    ``**kwargs``), not one of this module's own.
     """
-    try:
-        parameters = inspect.signature(factory).parameters
-    except (TypeError, ValueError):
+    required = _signature_required_arguments(factory)
+    if required is None:
         return
-    kinds = {p.kind for p in parameters.values()}
-    if inspect.Parameter.VAR_KEYWORD not in kinds:
-        absent = sorted(
-            name for name in used
-            if name not in parameters
-            or parameters[name].kind is inspect.Parameter.POSITIONAL_ONLY
+    absent = sorted(name for name in used if not _signature_takes_keyword(factory, name))
+    if absent:
+        raise ValueError(
+            f"mapping kind {kind!r}: {_qualified(factory)} takes no keyword "
+            f"argument(s) {absent}, which the registration declares "
+            f"({', '.join(f'{n}: {used[n]}' for n in absent)}); the rebuild "
+            f"calls factory(**arrays, **hyperparameters, **references)"
         )
-        if absent:
-            raise ValueError(
-                f"mapping kind {kind!r}: {_qualified(factory)} takes no keyword "
-                f"argument(s) {absent}, which the registration declares "
-                f"({', '.join(f'{n}: {used[n]}' for n in absent)}); the rebuild "
-                f"calls factory(**arrays, **hyperparameters, **references)"
-            )
-    undeclared = sorted(
-        name for name, p in parameters.items()
-        if p.default is inspect.Parameter.empty
-        and p.kind in (inspect.Parameter.POSITIONAL_ONLY,
-                       inspect.Parameter.POSITIONAL_OR_KEYWORD,
-                       inspect.Parameter.KEYWORD_ONLY)
-        and name not in used
-    )
+    positional = sorted(name for name, by_keyword in required.items() if not by_keyword)
+    if positional:
+        raise ValueError(
+            f"mapping kind {kind!r}: {_qualified(factory)} requires positional-only "
+            f"argument(s) {positional}, which no serialised mapping could supply: "
+            f"the rebuild calls factory(**arrays, **hyperparameters, **references)"
+        )
+    undeclared = sorted(name for name in required if name not in used)
     if undeclared:
         raise ValueError(
             f"mapping kind {kind!r}: {_qualified(factory)} requires argument(s) "
@@ -404,7 +404,7 @@ def register_mapping(
         name is not an identifier, is reserved or is declared twice; if a
         hyper-parameter type is not one of the four; or if the factory's
         signature does not take every declared name as a keyword, or
-        requires an argument that is not declared.
+        requires an argument that is not declared or is positional-only.
     TypeError
         If the decorated object is not callable.
 

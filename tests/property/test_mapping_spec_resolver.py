@@ -65,12 +65,14 @@ from maddening.core.coupling.mapping_spec import (
     MappingRebuildError,
     MappingSpec,
     PointReferenceError,
+    _mapping_config_dict,
     make_point_resolver,
     normalise_point_reference,
     point_array_digest,
     reference_for_array,
 )
 from maddening.core.graph_manager import GraphManager
+from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
 
 from tests.conftest import EXAMPLES_CHEAP, EXAMPLES_COSTLY, EXAMPLES_STANDARD
 from tests.property.invariants import assert_states_identical
@@ -202,12 +204,20 @@ _KERNELS = ("gaussian", "multiquadric", "inverse_multiquadric", "thin_plate_spli
 
 @st.composite
 def _valid_spec_dicts(draw) -> dict:
-    """``describe()`` dicts of mappings the real factories built -- the
-    exact shape ``GraphManager.to_dict`` writes into a config."""
-    kind = draw(st.sampled_from(("rbf", "nearest_neighbor", "projection_1d", "matrix")))
+    """What an edge writes for a mapping the real factories built -- the
+    exact shape ``GraphManager.to_dict`` puts into a config -- over the
+    built-in kinds and the registered ones
+    (``tests/registered_mapping_kinds.py``)."""
+    kind = draw(st.sampled_from(("rbf", "nearest_neighbor", "projection_1d", "matrix",
+                                 *sorted(REGISTERED_KINDS))))
     mode = draw(st.sampled_from(("consistent", "conservative")))
     src = np.asarray(_INLINE_1D[:draw(st.integers(3, 5))])
     tgt = np.asarray(_INLINE_1D[:draw(st.integers(3, 5))])
+    if kind in REGISTERED_KINDS:
+        registered = REGISTERED_KINDS[kind]
+        hyper = {name: draw(st.sampled_from(values))
+                 for name, values in registered.hyper.items()}
+        return _mapping_config_dict(registered.build(src, tgt, **hyper))
     if kind == "rbf":
         mapping = rbf_mapping(src, tgt, mode=mode,
                               kernel=draw(st.sampled_from(_KERNELS)),
@@ -234,6 +244,7 @@ def _valid_spec_dicts(draw) -> dict:
 #: slip past a type check is one whose type is right.
 _LOOKALIKES = (
     "rbf", "nearest_neighbor", "projection_1d", "matrix", "supermesh",
+    *sorted(REGISTERED_KINDS),
     "gaussian", "thin_plate_spline", "consistent", "conservative",
     "float64", "float32", "int64", "complex128", "float128", "object", "U8",
     {"inline": _INLINE_1D, "dtype": "float64"}, {"node": "rod", "field": "grid_x"},
@@ -401,6 +412,12 @@ def test_a_mutated_spec_dict_parses_to_a_canonical_spec_or_a_value_error(data):
     )
 
 
+#: Real-valued hyper-parameters, of the built-in kinds and the registered
+#: one the recipes draw: an integer where a float was written is the same
+#: recipe.
+_REAL_HYPERS = ("epsilon", "ridge", "power")
+
+
 @st.composite
 def _equivalent(draw, mapping: dict) -> tuple[dict, str]:
     """``mapping`` rewritten without changing what it means.
@@ -419,7 +436,7 @@ def _equivalent(draw, mapping: dict) -> tuple[dict, str]:
     if any(isinstance(out["points"][k].get("sha256"), str) for k in refs):
         ops.append("drop_sha256")
     if any(isinstance(out.get(k), float) and float(out[k]).is_integer()
-           for k in ("epsilon", "ridge")):
+           for k in _REAL_HYPERS):
         ops.append("int_hyper")
     if any("inline" in out["points"][k] for k in refs):
         ops += ["dtype_alias", "bare_inline"]
@@ -438,7 +455,7 @@ def _equivalent(draw, mapping: dict) -> tuple[dict, str]:
         for key in refs:
             out["points"][key].pop("sha256", None)
     elif op == "int_hyper":
-        for key in ("epsilon", "ridge"):
+        for key in _REAL_HYPERS:
             if isinstance(out.get(key), float) and float(out[key]).is_integer():
                 out[key] = int(out[key])
     elif op == "dtype_alias":

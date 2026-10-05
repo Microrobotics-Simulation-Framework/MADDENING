@@ -37,6 +37,7 @@ from fastapi.testclient import TestClient
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes import HeatNode, SpringDamperNode
+from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
 
 REGISTRY = {"HeatNode": HeatNode, "SpringDamperNode": SpringDamperNode}
 ROD = dict(n_cells=10, length=1.0)
@@ -66,19 +67,35 @@ def _spring(damping: float) -> SpringDamperNode:
     return SpringDamperNode("s", 0.01, damping=damping, **SPRING)
 
 
-def _mapped_graph() -> GraphManager:
-    """A 3-cell rod feeding a 5-cell rod through a cell-average projection,
-    whose weight matrix holds zeros (cells that do not overlap)."""
+def _mapping(kind: str):
+    """A 3 -> 5 mapping of *kind*: the built-in cell-average projection, or
+    a kind registered the way another library registers one
+    (``tests/registered_mapping_kinds.py``)."""
     from maddening.core.coupling.mapping import projection_1d_mapping
 
+    if kind == "projection_1d":
+        return projection_1d_mapping(np.linspace(0.0, 1.0, 4), np.linspace(0.0, 1.0, 6))
+    return REGISTERED_KINDS[kind].build(np.linspace(0.0, 1.0, 3), np.linspace(0.0, 1.0, 5))
+
+
+#: The weights each of those mappings puts into ``params["mappings"]``.
+MAPPING_WEIGHTS = {"projection_1d": ("H",),
+                   **{name: kind.weights for name, kind in REGISTERED_KINDS.items()}}
+#: One case per weight of each kind.
+EVERY_WEIGHT = [(kind, weight) for kind, weights in MAPPING_WEIGHTS.items()
+                for weight in weights]
+
+
+def _mapped_graph(kind: str = "projection_1d") -> GraphManager:
+    """A 3-cell rod feeding a 5-cell rod through a cell-average projection,
+    whose weight matrix holds zeros (cells that do not overlap) -- or
+    through a mapping of another *kind*."""
     gm = GraphManager()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         gm.add_node(HeatNode("coarse", 0.01, n_cells=3, length=1.0, thermal_diffusivity=0.01))
         gm.add_node(HeatNode("fine", 0.01, n_cells=5, length=1.0, thermal_diffusivity=0.01))
-        gm.add_edge("coarse", "fine", "temperature", "heat_source",
-                    mapping=projection_1d_mapping(np.linspace(0.0, 1.0, 4),
-                                                  np.linspace(0.0, 1.0, 6)))
+        gm.add_edge("coarse", "fine", "temperature", "heat_source", mapping=_mapping(kind))
         gm.compile()
     return gm
 
@@ -342,14 +359,15 @@ def test_a_python_write_the_constructor_refuses_still_reloads_its_own_checkpoint
     assert _same(before, _snapshot(fresh))
 
 
-def test_a_weight_matrix_is_asked_about_the_entries_a_load_moves(tmp_path):
+@pytest.mark.parametrize("kind", ["projection_1d", "linear_1d"])
+def test_a_weight_matrix_is_asked_about_the_entries_a_load_moves(tmp_path, kind):
     """Per element: a mapping weight matrix holding zeros under a ``log``
     spec (which refuses 0, and which the graph was built with) loads when
     the checkpoint moves only its non-zero entries, and is refused when it
     moves one to a value the spec refuses."""
     from maddening.core.params import ParamSpec
 
-    gm = _mapped_graph()
+    gm = _mapped_graph(kind)
     edge, = gm.params["mappings"]
     held = np.asarray(gm.params["mappings"][edge]["H"])
     assert (held == 0).any() and (held != 0).any(), held
@@ -360,7 +378,7 @@ def test_a_weight_matrix_is_asked_about_the_entries_a_load_moves(tmp_path):
     gm.params["mappings"][edge]["H"] = jnp.asarray(np.where(held > 0, -held, held), held.dtype)
     gm.save_state(str(tmp_path / "negative.npz"))
 
-    target = _mapped_graph()
+    target = _mapped_graph(kind)
     target.set_param_spec(edge, "H", ParamSpec(bounds=(0.0, None), transform="log"))
     _server, client = _client(target, tmp_path)
     before = _snapshot(target)
@@ -371,3 +389,82 @@ def test_a_weight_matrix_is_asked_about_the_entries_a_load_moves(tmp_path):
     assert ok.status_code == 200, ok.text
     np.testing.assert_array_equal(np.asarray(target.params["mappings"][edge]["H"]),
                                   np.asarray(scaled))
+
+
+def _weights(gm: GraphManager) -> dict:
+    return {edge: {name: np.asarray(leaf).copy() for name, leaf in leaves.items()}
+            for edge, leaves in gm.params["mappings"].items()}
+
+
+def _same_weights(a: dict, b: dict) -> bool:
+    return a.keys() == b.keys() and all(
+        a[e].keys() == b[e].keys()
+        and all(a[e][n].dtype == b[e][n].dtype
+                and np.array_equal(a[e][n], b[e][n], equal_nan=True) for n in a[e])
+        for e in a)
+
+
+@pytest.mark.parametrize("kind, weight", EVERY_WEIGHT,
+                         ids=[f"{kind}.{weight}" for kind, weight in EVERY_WEIGHT])
+@pytest.mark.parametrize("installs, refusal", [
+    ("a NaN", "value must be finite"),
+    ("an infinity", "value must be finite"),
+    ("a value past its bound", "above bound"),
+    ("a value inside its bounds", None),
+])
+def test_the_route_judges_every_weight_of_every_mapping_kind_a_load_installs(
+        tmp_path, kind, weight, installs, refusal):
+    """Every weight a mapping exposes -- the built-in matrix ``H``, and each
+    of a registered kind's own (a matrix and a scalar) -- is asked what
+    ``PUT /graph/params`` asks of a value: a checkpoint that installs a
+    non-finite one, or one outside its ``ParamSpec`` bounds, is a 400 that
+    writes nothing; one inside them loads, bit for bit."""
+    from maddening.core.params import ParamSpec
+
+    bounds = ParamSpec(bounds=(-50.0, 50.0))
+    gm = _mapped_graph(kind)
+    edge, = gm.params["mappings"]
+    held = np.asarray(gm.params["mappings"][edge][weight])
+    moved = np.array(held, copy=True)
+    moved.flat[0] = {"a NaN": np.nan, "an infinity": np.inf,
+                     "a value past its bound": 75.0,
+                     "a value inside its bounds": 0.375}[installs]
+    gm.params["mappings"][edge][weight] = jnp.asarray(moved, held.dtype)
+    gm.save_state(str(tmp_path / "moved.npz"))
+
+    target = _mapped_graph(kind)
+    target.set_param_spec(edge, weight, bounds)
+    _server, client = _client(target, tmp_path)
+    before, before_weights = _snapshot(target), _weights(target)
+    load = client.post("/checkpoint/load", params={"path": "moved.npz"})
+    if refusal is None:
+        assert load.status_code == 200, load.text
+        installed = _weights(target)[edge]
+        assert installed[weight].tobytes() == moved.astype(held.dtype).tobytes()
+        for other in MAPPING_WEIGHTS[kind]:
+            if other != weight:
+                assert np.array_equal(installed[other], before_weights[edge][other])
+    else:
+        assert load.status_code == 400, load.text
+        detail = load.json()["detail"]
+        assert refusal in detail and f"mapping {edge!r}" in detail and weight in detail
+        assert _same(before, _snapshot(target))
+        assert _same_weights(before_weights, _weights(target))
+
+
+def test_a_checkpoint_of_a_graph_whose_mapping_has_no_weights_loads(tmp_path):
+    """A registered kind without weights puts ``{}`` into
+    ``params["mappings"]``: a checkpoint carries nothing for it and the
+    route has nothing to refuse."""
+    gm = _mapped_graph("selection")
+    edge, = gm.params["mappings"]
+    assert gm.params["mappings"][edge] == {}
+    gm.step()
+    gm.save_state(str(tmp_path / "stepped.npz"))
+    target = _mapped_graph("selection")
+    _server, client = _client(target, tmp_path)
+    load = client.post("/checkpoint/load", params={"path": "stepped.npz"})
+    assert load.status_code == 200, load.text
+    assert target.params["mappings"] == {edge: {}}
+    np.testing.assert_array_equal(np.asarray(target.get_node_state("fine")["temperature"]),
+                                  np.asarray(gm.get_node_state("fine")["temperature"]))

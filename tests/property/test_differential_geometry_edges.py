@@ -90,10 +90,11 @@ SOURCES = dict(down="source", up="source")
 # ---------------------------------------------------------------------------
 
 #: Per push.  The four the module docstring names, and one of every other
-#: call site.
+#: call site: the first two put a source-anchored and a target-anchored
+#: geometry on a forward and on a back edge each.
 PER_PUSH = [
-    case("forward and back edge", adv=0.3, **P_HOLDS),
-    case("back and forward edge, F holds", order=("P", "F"), adv=0.3, **F_HOLDS),
+    case("forward and back edge, source anchors", adv=0.3, **SOURCES),
+    case("back and forward edge, target anchors", order=("P", "F"), adv=0.3, **TARGETS),
     case("flux reads the mapped input", flux="reader", adv=0.3, **TARGETS),
     case("group, the geometry follows the iterate", group=_TIGHT32, adv=0.3, **P_HOLDS),
     case("sub-cycled target, one pass", dt_p=DT / 4, adv=0.3, **SOURCES,
@@ -106,6 +107,8 @@ PER_PUSH = [
 #: The slow lane: the rest of the product.
 SLOW = [
     # plain steps
+    case("forward and back edge, P holds", adv=0.3, **P_HOLDS),
+    case("back and forward edge, F holds", order=("P", "F"), adv=0.3, **F_HOLDS),
     case("forward edge only, target anchor", up=None, down="target", adv=0.3),
     case("forward edge only, source anchor", up=None, down="source"),
     case("the reverse edge only", down=None, up="source", order=("F", "P"), adv=0.3),
@@ -443,3 +446,244 @@ def test_a_geometry_edge_that_is_not_the_last_into_its_port_is_refused_by_the_tw
     graph.edges[0], graph.edges[1] = geometry, plain
     with pytest.raises(AssertionError, match="last edge into its port"):
         gg.inline_geometry(graph)
+
+
+# ---------------------------------------------------------------------------
+# A geometry that never moves gives the static mapping built from the same points
+# ---------------------------------------------------------------------------
+#
+# A frozen multilinear map is a fixed linear map, so a graph whose mapped
+# edges gather from or scatter onto a grid at points that no update moves
+# is, exactly, the graph with the static ``matrix_mapping`` of that gather
+# (or its transpose).  Three statements:
+#
+# * the two-body graph with its geometry frozen, against its static twin
+#   (``H`` from the independent reference stencil, at arbitrary points):
+#   states to rounding, in float32, float64 and with a float64 geometry
+#   under a float32 field, in and out of a group, and the same gradient
+#   with respect to a value-side parameter;
+# * the named coupled topologies with every mapped edge built as a frozen
+#   multilinear edge (``Geometry("frozen", ...)``: both anchors, both
+#   modes) reproduce the monolithic reference with ``values["H"]`` the
+#   reference stencil's matrix -- every oracle of the static case,
+#   unchanged -- and their points are bit for bit where they started;
+# * the same graphs in the topology harness's other numeric domains
+#   (float64, bfloat16 and float16 fields under a float32 geometry,
+#   multi-rate, sub-cycled, ``vmap``, predictors and warm starts,
+#   checkpoint and restart), against the static graph of the same
+#   structure and values.  The points are multiples of 1/8 of a cell, so
+#   the weights are exact in every float dtype.
+
+from tests.property import coupled_topologies as ct  # noqa: E402
+from tests.property import test_differential_coupling_topologies as topo_tests  # noqa: E402
+
+NAMED = ct.named_topologies()
+_FROZEN = dict(rate=0.0, adv=0.0)
+FROZEN_CASES = [
+    case("frozen, multilinear", kind="multilinear", **_FROZEN, **P_HOLDS),
+    case("frozen, matrix, F holds", order=("P", "F"), **_FROZEN, **F_HOLDS),
+]
+FROZEN_SLOW = [
+    case("frozen group, multilinear, F holds", kind="multilinear", group=_TIGHT32, **_FROZEN,
+         **F_HOLDS),
+    case("frozen, multilinear 2-D, float64", kind="multilinear", d=2, dtype="float64",
+         **_FROZEN, **TARGETS),
+    case("frozen, multilinear 3-D", kind="multilinear", d=3, **_FROZEN, **SOURCES),
+    case("frozen, multilinear, float64 geometry under a float32 field", kind="multilinear",
+         geom_dtype="float64", **_FROZEN, **P_HOLDS),
+    case("frozen group, matrix, float64", group=_TIGHT64, dtype="float64", **_FROZEN,
+         **TARGETS),
+    case("frozen group, multilinear, Jacobi, IQN-ILS", kind="multilinear", dtype="float64",
+         **_FROZEN, **SOURCES,
+         group=dict(_TIGHT64, acceleration="iqn-ils", iteration_mode="jacobi")),
+    case("frozen, sub-cycled, multilinear", kind="multilinear", dt_p=DT / 2, **_FROZEN,
+         **P_HOLDS, group=dict(_TIGHT32, **_SUB, boundary_interpolation="linear")),
+    case("frozen, multi-rate, multilinear", kind="multilinear", dt_f=DT / 2, steps=4,
+         **_FROZEN, **F_HOLDS),
+]
+
+
+def assert_frozen_equals_static(c: gg.Case) -> None:
+    assert c.rate == 0.0 and c.adv == 0.0, "premise: nothing moves the geometry"
+    with gg.x64(c.needs_x64):
+        frozen, static = gg.build(gg.two_body(c)), gg.build(gg.static_twin(c))
+        start = gg.snapshot(frozen)
+        a, b = gg.run_steps(frozen, c.steps), gg.run_steps(static, c.steps)
+        for step, (sa, sb) in enumerate(zip(a, b), start=1):
+            assert_same_states(c, sa, sb, step=step)
+            for body in ("F", "P"):
+                for field in start[body]:
+                    if field != "x":
+                        assert sa[body][field].tobytes() == start[body][field].tobytes(), (
+                            c.label, body, field, "a frozen geometry moved")
+        assert np.any(a[-1]["F"]["x"] != start["F"]["x"]), "premise: the values do move"
+        # The same derivative with respect to a value-side parameter.
+        loss_f, theta = gg.loss_of(frozen, c)
+        loss_s, _theta = gg.loss_of(static, c)
+        key = ("params", "F", "c")
+        gf = np.asarray(jax.grad(lambda v: loss_f({**theta, key: v}))(theta[key]), np.float64)
+        gs = np.asarray(jax.grad(lambda v: loss_s({**theta, key: v}))(theta[key]), np.float64)
+        rel = 1e-8 if c.dtype == "float64" else 1e-4
+        assert np.max(np.abs(gf - gs)) <= rel * np.max(np.abs(gs)), (c.label, gf, gs)
+
+
+@pytest.mark.parametrize("c", FROZEN_CASES, ids=repr)
+def test_a_frozen_geometry_steps_as_the_static_mapping_of_the_same_points(c):
+    """Per push; slow sibling :func:`test_every_frozen_geometry_steps_as_its_static_mapping`."""
+    assert_frozen_equals_static(c)
+
+
+# Slow: two graphs and two gradients compiled per case.
+# Per push: tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_steps_as_the_static_mapping_of_the_same_points
+@pytest.mark.slow
+@pytest.mark.parametrize("c", FROZEN_SLOW, ids=repr)
+def test_every_frozen_geometry_steps_as_its_static_mapping(c):
+    assert_frozen_equals_static(c)
+
+
+#: ``(anchor, mode)`` of a topology's mapped edges, in rotation.
+_COMBINATIONS = (("source", "consistent"), ("target", "conservative"),
+                 ("target", "consistent"), ("source", "conservative"))
+
+
+def frozen_geometry(topo, variant: int = 0):
+    """Every mapped edge of *topo* as a frozen multilinear edge, anchors and
+    modes rotating over the four combinations from *variant* on."""
+    mapped = [i for i, e in enumerate(topo.edges) if e.mapped]
+    picks = [_COMBINATIONS[(k + variant) % 4] for k in range(len(mapped))]
+    return ct.Geometry("frozen", tuple((i, p[0]) for i, p in zip(mapped, picks)),
+                       tuple((i, p[1]) for i, p in zip(mapped, picks)))
+
+
+@functools.lru_cache(maxsize=24)
+def _frozen_built(domain: str, name: str, variant: int):
+    """``(topology, knobs, geometry, Built)`` of a named structure in *domain*,
+    its mapped edges frozen multilinear ones."""
+    topo = topo_tests._domain_topology(NAMED[name], domain)            # noqa: SLF001
+    knobs = topo_tests._domain_knobs(ct.topology_knobs(topo, 0), domain)   # noqa: SLF001
+    geometry = frozen_geometry(topo, variant)
+    with gg.x64(domain == "f64"):
+        built = ct.build(topo, knobs, dtype=topo_tests._domain_dtype(domain),  # noqa: SLF001
+                         geometry=geometry)
+    return topo, knobs, geometry, built
+
+
+def _frozen_values(topo, knobs, geometry, domain) -> list:
+    with gg.x64(domain == "f64"):
+        return [ct.draw_values(topo, np.random.default_rng(seed), rho,
+                               dtype=topo_tests._domain_dtype(domain),      # noqa: SLF001
+                               group_cfgs=ct.group_cfgs_of(knobs), geometry=geometry)
+                for seed, rho in topo_tests._DRAWS]                         # noqa: SLF001
+
+
+def _assert_points_never_moved(starts: list, traj, where: str) -> None:
+    """Every geometry field holds, after every step, the bits one of the
+    drawn *starts* gave it.  (One of them, not a particular one: the
+    harness's batched runs start every member of the batch from the last
+    draw's state.)"""
+    for node, field in starts[0]["geometry"]:
+        first = np.asarray(traj[0].state[node][field])
+        candidates = [v["geometry"][(node, field)]["start"] for v in starts]
+        assert any(first.dtype == c.dtype and first.tobytes() == c.tobytes()
+                   for c in candidates), f"{where}: {node}.{field} is not where it started"
+        for step in traj:
+            assert np.asarray(step.state[node][field]).tobytes() == first.tobytes(), (
+                f"{where}: {node}.{field} moved")
+
+
+def _assert_frozen_premises(topo, geometry, name: str) -> None:
+    assert len(geometry.anchor) == sum(e.mapped for e in topo.edges) >= 2, name
+    assert {geometry.mode(i) for i in geometry.anchor} == {"consistent", "conservative"}
+    assert set(geometry.anchor.values()) == {"source", "target"}
+
+
+_NAMED_PARAMS = [n if n == "chain-into-ring" else pytest.param(n, marks=pytest.mark.slow)
+                 for n in sorted(NAMED)]
+
+
+# Per push: tests/property/test_differential_geometry_edges.py::test_a_named_topology_with_frozen_geometry_edges_reproduces_the_monolithic_reference
+# (on chain-into-ring, both rotations; the slow structures are the same check)
+@pytest.mark.parametrize("variant", [0, 2])
+@pytest.mark.parametrize("name", _NAMED_PARAMS)
+def test_a_named_topology_with_frozen_geometry_edges_reproduces_the_monolithic_reference(
+        name, variant):
+    """Every mapped edge a frozen gather or scatter, anchored at either end:
+    the graph passes the static case's oracles with ``H`` the reference
+    stencil's matrix.  The two rotations give every edge both anchors and
+    both modes."""
+    topo, knobs, geometry, built = _frozen_built("f32", name, variant)
+    _assert_frozen_premises(topo, geometry, name)
+    model_kw = dict(node_order=built.node_order, group_cfgs=ct.group_cfgs_of(knobs),
+                    geometry=geometry)
+    for draw, values in enumerate(_frozen_values(topo, knobs, geometry, "f32")):
+        model = ct.LinearModel(built.topo, values, **model_kw)
+        traj = ct.run(built, values, 3)
+        for k, step in enumerate(traj, start=1):
+            where = f"{name} frozen variant {variant} draw {draw} step {k}"
+            model.check_step(step.pre, step.state, step.reports,
+                             thresholds=ct.thresholds_of(knobs), where=where)
+            ct.check_leaves(built.topo, step.state, k, dividers=model.divider, where=where)
+        _assert_points_never_moved([values], traj, f"{name} variant {variant}")
+
+
+def _assert_close_runs(domain: str, knobs, a, b, what: str) -> None:
+    """Two runs of the same linear maps, one through a gather / scatter and
+    one through the dense matrix: the same to rounding, plus what the
+    groups' tolerances allow where they converge."""
+    dtype = np.dtype(topo_tests._domain_dtype(domain))                 # noqa: SLF001
+    eps = float(jnp.finfo(dtype).eps)
+    ulps = 16 if dtype.itemsize == 2 else ROUNDING_ULPS
+    tolerance = max((float(g.get("tolerance", 1e-6)) if g.get("convergence_norm", "l2") == "l2"
+                     else float(g.get("rtol", 1e-6)) for g in knobs), default=0.0)
+    for k, (sa, sb) in enumerate(zip(a, b), start=1):
+        scale = max(float(np.max(np.abs(np.asarray(f["x"], np.float64))))
+                    for f in list(sa.state.values()) + list(sb.state.values()))
+        allowed = k * (ulps * eps * scale + 2 * TOLERANCE_SLACK * tolerance * max(scale, 1.0))
+        for node in sb.state:
+            gap = float(np.max(np.abs(np.asarray(sa.state[node]["x"], np.float64)
+                                      - np.asarray(sb.state[node]["x"], np.float64))))
+            assert gap <= allowed, (
+                f"{what} step {k}: {node}.x through the frozen geometry is {gap:.3e} from "
+                f"the static mapping's ({allowed:.3e} allowed)")
+        assert set(sa.reports) == set(sb.reports)
+        for gi in sa.reports:
+            assert bool(sa.reports[gi]["converged"]) == bool(sb.reports[gi]["converged"]) or (
+                dtype.itemsize == 2), (what, k, gi, sa.reports[gi], sb.reports[gi])
+
+
+_DOMAIN_PARAMS = [(d, "chain-into-ring", 0) for d in topo_tests.DOMAINS] + [
+    pytest.param(d, n, v, marks=pytest.mark.slow)
+    for d in topo_tests.DOMAINS for n in sorted(NAMED) for v in (0, 2)
+    if (n, v) != ("chain-into-ring", 0)]
+
+
+# Per push: tests/property/test_differential_geometry_edges.py::test_a_frozen_geometry_equals_the_static_mapping_in_every_domain
+# (on chain-into-ring, one rotation, in every domain; the slow parameters are
+# the same check on the other structures and the other rotation)
+@pytest.mark.parametrize("domain, name, variant", _DOMAIN_PARAMS)
+def test_a_frozen_geometry_equals_the_static_mapping_in_every_domain(domain, name, variant):
+    """The frozen-geometry graph against the static graph of the same
+    structure and values, in *domain*; and in the domains the monolithic
+    reference models, against that reference too."""
+    topo, knobs, geometry, built = _frozen_built(domain, name, variant)
+    _assert_frozen_premises(topo, geometry, name)
+    _t, static_knobs, static = topo_tests._built_in(domain, name, 0)        # noqa: SLF001
+    assert static_knobs == knobs
+    values = _frozen_values(topo, knobs, geometry, domain)
+    runs = topo_tests._runs_in(domain, built, values)                       # noqa: SLF001
+    twins = topo_tests._runs_in(domain, static, values)                     # noqa: SLF001
+    for draw, (v, a, b) in enumerate(zip(values, runs, twins)):
+        what = f"{domain}/{name} variant {variant} draw {draw}"
+        _assert_close_runs(domain, knobs, a, b, what)
+        _assert_points_never_moved(values, a, what)
+        want = ct.geometry_dtype(topo_tests._domain_dtype(domain))          # noqa: SLF001
+        assert all(np.asarray(a[-1].state[n][f]).dtype == want for n, f in v["geometry"])
+        if domain in topo_tests._REFERENCE_DOMAINS:                         # noqa: SLF001
+            with gg.x64(domain == "f64"):
+                model = ct.LinearModel(built.topo, v, node_order=built.node_order,
+                                       group_cfgs=ct.group_cfgs_of(knobs), geometry=geometry,
+                                       dtype=topo_tests._domain_dtype(domain))  # noqa: SLF001
+                for k, step in enumerate(a, start=1):
+                    model.check_step(step.pre, step.state, step.reports,
+                                     thresholds=ct.thresholds_of(knobs),
+                                     where=f"{what} step {k}")

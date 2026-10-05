@@ -518,6 +518,9 @@ class Case:
     dtype: str = "float32"
     geom_dtype: Optional[str] = None
     steps: int = 3
+    #: The rate every geometry field moves at; with ``rate=0`` and ``adv=0``
+    #: the geometry is frozen.
+    rate: float = 0.3
 
     @property
     def knobs(self) -> Optional[dict]:
@@ -586,7 +589,8 @@ def two_body(c: Case) -> GGraph:
     n_grid, n_pts = sizes(c)
     geoms = geometry_fields(c)
     spacing = min(_grid_of(c)[1]) if c.kind == "multilinear" else 1.0
-    common = dict(dtype=c.dtype, geom_dtype=c.geom_dtype, adv=c.adv, geom_scale=spacing)
+    common = dict(dtype=c.dtype, geom_dtype=c.geom_dtype, adv=c.adv, geom_scale=spacing,
+                  rate=c.rate)
     p_cls = FluxBody if c.flux else Body
     make = {
         "F": lambda: Body("F", c.dt_f, n=n_grid, geoms=geoms["F"], a=0.3, g=0.15, seed=11,
@@ -616,6 +620,37 @@ def two_body(c: Case) -> GGraph:
 def graphs(c: Case) -> tuple:
     """``(edge-mapped GraphManager, node-inlined GraphManager)``, both compiled."""
     return build(two_body(c)), build(inline_geometry(two_body(c)))
+
+
+def static_matrix(c: Case, edge: str) -> np.ndarray:
+    """The fixed matrix a geometry edge of *c* applies while its geometry
+    stays where it starts: the holder's matrix itself, or for the
+    multilinear kind the gather matrix of the holder's points from the
+    independent reference stencil (its transpose for the scatter edge)."""
+    from tests.core import multilinear_reference as mref  # noqa: PLC0415
+
+    start = geometry_fields(c)[holder(c, edge)]
+    gd = np.dtype(c.geom_dtype or c.dtype)
+    if c.kind == "geom_matrix":
+        return np.asarray(start["A" if edge == "down" else "B"], gd).astype(np.float64)
+    gather = mref.dense_matrix(mref.Grid(*_grid_of(c)), np.asarray(start["pos"], gd))
+    return gather if edge == "down" else gather.T
+
+
+def static_twin(c: Case) -> GGraph:
+    """*c*'s graph with every geometry edge replaced by a static ``matrix_mapping``
+    of :func:`static_matrix` (the bodies still hold their geometry fields)."""
+    from maddening.core.coupling.mapping import matrix_mapping  # noqa: PLC0415
+
+    graph = two_body(c)
+    edges = []
+    for e in graph.edges:
+        if e.geometry is not None:
+            which = "down" if e.src == "F" else "up"
+            e = dataclasses.replace(e, geometry=None, mapping=matrix_mapping(
+                np.asarray(static_matrix(c, which), np.dtype(c.dtype))))
+        edges.append(e)
+    return GGraph(graph.nodes, edges, graph.groups)
 
 
 # ---------------------------------------------------------------------------

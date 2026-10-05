@@ -1,0 +1,588 @@
+"""What a geometry edge accepts, what it refuses, and what a config carries of it.
+
+``add_edge(..., mapping=m, geometry=(anchor, field))`` names the moving
+geometry a geometry-dependent mapping reads: a state field of the edge's
+own source (``"source"``) or target (``"target"``) node.  Every way of
+getting that wrong is refused where it is made, with a message that says
+what to do, and never runs:
+
+====  ====================  ===============================================
+G1    ``add_edge``          a geometry without a mapping
+G2    ``add_edge``          a geometry on a static mapping (it would be
+                            ignored)
+G3    ``add_edge``          a geometry-dependent mapping without a geometry
+G4    ``add_edge``          anything but ``("source" | "target", <field>)``,
+                            another node's name included
+G5    ``compile``           the field is not in the anchor's state
+G6    ``compile``           the field is a boundary flux of the anchor
+G7    ``compile``           the field is not float32 or float64
+G8    ``compile``           the field's shape is not the mapping's
+                            ``geometry_shape``
+G9    ``compile``           either end is sharded
+G10   adaptive steppers     any geometry edge in the graph
+G11   ``replace_node``      the replacement drops the geometry field
+G12   ``DatasetGenerator``  the target receives a geometry edge
+G13   ``build_mapping``     a factory's product disagrees with its kind's
+                            ``needs_geometry``
+====  ====================  ===============================================
+
+(G14, a non-floating field through the ``multilinear_grid`` kind, is with
+that kind's tests in ``test_multilinear_grid_kernel.py``.)
+
+``add_edge`` raises ``ValueError``; ``validate()`` returns the compile-time
+ones as ``ERROR:`` issues and ``compile()`` raises them as
+``RuntimeError``.  Each test asserts the exception type and the phrase of
+the message that tells the user what is wrong, and -- where the refusal
+promises it -- that nothing was changed.  Each has a control beside it:
+the same call with the one thing put right goes through.
+"""
+
+from __future__ import annotations
+
+import inspect
+import json
+import warnings
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from maddening.core.coupling.mapping import matrix_mapping, nearest_neighbor_mapping, register_mapping
+from maddening.core.coupling.mapping_registry import _unregister
+from maddening.core.coupling.mapping_spec import MappingRebuildError, MappingSpec
+from maddening.core.edge import EdgeSpec
+from maddening.core.graph_manager import GraphManager
+from maddening.core.node import BoundaryInputSpec, SimulationNode
+from maddening.surrogates.dataset import DatasetGenerator
+from maddening.surrogates.replace import replace_node
+
+from tests.property import geometry_graphs as gg
+
+KEY = "a.x->b.u"
+N_SOURCE, N_TARGET = 3, 2
+SHAPE = (N_TARGET, N_SOURCE)
+
+
+class Holder(SimulationNode):
+    """``x <- 0.5 x + u`` and a kept field ``g`` of shape ``(rows, cols)``.
+
+    Its constructor arguments are plain integers, so a graph of these
+    round-trips through ``to_dict`` / ``from_dict``.
+    """
+
+    g_dtype = "float32"
+
+    def __init__(self, name, timestep, n=3, rows=N_TARGET, cols=N_SOURCE):
+        super().__init__(name, timestep, n=n, rows=rows, cols=cols)
+
+    def _geometry(self):
+        shape = (int(self.params["rows"]), int(self.params["cols"]))
+        size = shape[0] * shape[1]
+        if self.g_dtype == "key":
+            return jax.random.split(jax.random.key(0), size).reshape(shape)
+        # Different at the two ends of an edge, so the anchor matters.
+        values = np.arange(1, size + 1).reshape(shape) + 3 * (ord(self.name[0]) - ord("a"))
+        if self.g_dtype == "bool":
+            return jnp.asarray(values % 2 == 0)
+        dtype = jnp.dtype(self.g_dtype)
+        return jnp.asarray(values / 8 if jnp.issubdtype(dtype, jnp.floating) else values, dtype)
+
+    def initial_state(self):
+        n = int(self.params["n"])
+        return {"x": jnp.arange(1, n + 1, dtype=jnp.float32), "g": self._geometry()}
+
+    def boundary_input_spec(self):
+        n = int(self.params["n"])
+        return {"u": BoundaryInputSpec(shape=(n,), dtype=jnp.float32,
+                                       default=jnp.zeros(n, jnp.float32))}
+
+    def update(self, state, boundary_inputs, dt):
+        u = boundary_inputs.get("u", jnp.zeros_like(state["x"]))
+        return {"x": jnp.float32(0.5) * state["x"] + u, "g": state["g"]}
+
+
+class FluxHolder(Holder):
+    """A :class:`Holder` with fluxes: ``q`` and ``gq``, which has the geometry's shape."""
+
+    def compute_boundary_fluxes(self, state, boundary_inputs, dt):
+        return {"q": jnp.float32(2.0) * state["x"], "gq": jnp.float32(2.0) * state["g"]}
+
+
+def _holder_of(dtype: str) -> type:
+    return type(f"Holder_{dtype}", (Holder,), {"g_dtype": dtype})
+
+
+REGISTRY = {"Holder": Holder}
+
+
+def _graph(source=Holder, target=Holder, **edge):
+    """``a (3) -> b (2)`` with the edge given by *edge* (none when empty)."""
+    gm = GraphManager()
+    gm.add_node(source("a", 1.0, n=N_SOURCE))
+    gm.add_node(target("b", 1.0, n=N_TARGET))
+    if edge:
+        gm.add_edge("a", "b", "x", "u", **edge)
+    return gm
+
+
+def _geom():
+    return gg.geom_matrix_mapping(N_TARGET, N_SOURCE)
+
+
+def _static():
+    return matrix_mapping(np.ones(SHAPE, np.float32))
+
+
+# ---------------------------------------------------------------------------
+# What add_edge accepts
+# ---------------------------------------------------------------------------
+
+
+def test_geometry_is_the_last_keyword_only_argument_of_add_edge_and_defaults_to_none():
+    params = inspect.signature(GraphManager.add_edge).parameters
+    assert list(params)[-1] == "geometry"
+    assert params["geometry"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["geometry"].default is None
+    gm = _graph(mapping=_static())
+    assert gm.edges[0].geometry is None
+
+
+def test_an_edge_spec_holds_the_geometry_as_its_last_field_and_carries_it_through_a_re_add():
+    names = [f.name for f in EdgeSpec.__dataclass_fields__.values()]
+    assert names[-2:] == ["ordinal", "geometry"]
+    gm = _graph(mapping=_geom(), geometry=("target", "g"))
+    edge = gm.edges[0]
+    assert edge.geometry == ("target", "g") and type(edge.geometry) is tuple
+    hash(edge)
+    assert edge.add_edge_kwargs()["geometry"] == ("target", "g")
+    # The geometry is not part of an edge's identity.
+    assert edge.key == KEY
+    gm.remove_edge("a", "b", "x", "u")
+    assert gm.edges == []
+    gm.add_edge(**edge.add_edge_kwargs())
+    assert gm.edges[0].geometry == ("target", "g")
+
+
+@pytest.mark.parametrize("spelling", [("source", "g"), ["source", "g"],
+                                      {"anchor": "source", "field": "g"},
+                                      {"field": "g", "anchor": "source"}],
+                         ids=["tuple", "list", "dict", "dict-reordered"])
+def test_every_accepted_spelling_is_normalised_to_the_tuple(spelling):
+    gm = _graph(mapping=_geom(), geometry=spelling)
+    assert gm.edges[0].geometry == ("source", "g") and type(gm.edges[0].geometry) is tuple
+
+
+@pytest.mark.parametrize("anchor", ["source", "target"])
+def test_a_well_formed_geometry_edge_compiles_and_steps(anchor):
+    """The control for every refusal below."""
+    gm = _graph(mapping=_geom(), geometry=(anchor, "g"))
+    assert not [i for i in gm.validate() if i.startswith("ERROR")]
+    gm.compile()
+    gm.step()
+    held = gm.get_node_state("a" if anchor == "source" else "b")["g"]
+    assert np.any(np.asarray(gm.get_node_state("a")["g"]) != np.asarray(
+        gm.get_node_state("b")["g"])), "premise: the two ends hold different geometries"
+    # ``a`` runs first and has no input: ``b`` reads ``0.5 * a.x0``.
+    want = np.asarray(held) @ (0.5 * np.arange(1.0, N_SOURCE + 1))
+    assert gm.params["mappings"][KEY] == {}
+    np.testing.assert_allclose(
+        np.asarray(gm.get_node_state("b")["x"]), 0.5 * np.arange(1.0, N_TARGET + 1) + want,
+        rtol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# G1 to G4: add_edge
+# ---------------------------------------------------------------------------
+
+
+def _refused_add_edge(phrases, **edge):
+    gm = _graph()
+    with pytest.raises(ValueError) as refused:
+        gm.add_edge("a", "b", "x", "u", **edge)
+    message = str(refused.value)
+    for phrase in (f"add_edge({KEY})", *phrases):
+        assert phrase in message, (phrase, message)
+    assert gm.edges == [], "a refused edge was added"
+    return message
+
+
+def test_g1_a_geometry_without_a_mapping_is_refused():
+    _refused_add_edge(["was given without a mapping", "pass mapping=", "drop geometry="],
+                      geometry=("source", "g"))
+
+
+@pytest.mark.parametrize("make", [_static, lambda: nearest_neighbor_mapping(
+    np.linspace(0, 1, N_SOURCE), np.linspace(0, 1, N_TARGET))], ids=["matrix", "nearest"])
+def test_g2_a_geometry_on_a_static_mapping_is_refused(make):
+    message = _refused_add_edge(["is static (it reads no geometry)", "would be ignored"],
+                                mapping=make(), geometry=("source", "g"))
+    assert "('source', 'g')" in message
+
+
+def test_g3_a_geometry_dependent_mapping_without_a_geometry_is_refused():
+    _refused_add_edge(["reads a moving geometry and none was given",
+                       'geometry=("source", <state field>)', 'geometry=("target", <state field>)'],
+                      mapping=_geom())
+
+
+@pytest.mark.parametrize("bad", [
+    "g", "source", ("g",), ("source",), ("source", "g", "extra"), ("a", "g"), ("b", "g"),
+    ("other", "g"), ("Source", "g"), ("SOURCE", "g"), (" target", "g"), ("source", ""),
+    ("", "g"), ("source", None), (None, "g"), ("source", 3), (0, "g"), ("g", "source"),
+    {"anchor": "source"}, {"field": "g"}, {"anchor": "a", "field": "g"},
+    {"anchor": "source", "field": ""}, {"anchor": "source", "field": "g", "node": "a"},
+    {"node": "a", "field": "g"}, 5, 2.5, True, {"source", "g"}, [("source", "g")], (),
+], ids=repr)
+def test_g4_a_malformed_geometry_or_one_on_another_node_is_refused(bad):
+    """Not ``("source" | "target", <field>)`` in one of the accepted
+    spellings: a bare field name, a node's name as the anchor (a geometry
+    held by another node is not supported), a wrong length, an empty or
+    non-string part, a dict with other keys."""
+    message = _refused_add_edge(
+        ['geometry must be ("source", <field>) or ("target", <field>)',
+         "A geometry held by any other node is not supported"],
+        mapping=_geom(), geometry=bad)
+    assert repr(bad) in message
+
+
+# ---------------------------------------------------------------------------
+# G5 to G9: compile
+# ---------------------------------------------------------------------------
+
+
+def _refused_compile(gm, phrases):
+    errors = [i for i in gm.validate() if i.startswith("ERROR")]
+    hits = [i for i in errors if all(p in i for p in phrases)]
+    assert len(hits) == 1, (phrases, errors)
+    assert hits[0].startswith(f"ERROR: edge {KEY}: "), hits[0]
+    with pytest.raises(RuntimeError) as refused:
+        gm.compile()
+    for phrase in phrases:
+        assert phrase in str(refused.value), (phrase, str(refused.value))
+    return hits[0]
+
+
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_g5_a_geometry_field_the_anchor_does_not_hold_is_refused(anchor, node):
+    gm = _graph(mapping=_geom(), geometry=(anchor, "positions"))
+    issue = _refused_compile(gm, [f"geometry field 'positions' is not in the state of its "
+                                  f"{anchor} node {node!r}", "State fields:"])
+    assert "'g'" in issue and "'x'" in issue
+
+
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_g6_a_boundary_flux_as_the_geometry_is_refused(anchor, node):
+    """``gq`` has the geometry's shape and dtype: it is refused for being a
+    flux (recomputed within a step, no single time level), not for either."""
+    gm = _graph(source=FluxHolder, target=FluxHolder, mapping=_geom(),
+                geometry=(anchor, "gq"))
+    _refused_compile(gm, [f"geometry field 'gq' of {node!r} is a boundary flux",
+                          "not a state field", f"Hold the geometry in {node!r}'s state"])
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "bool", "float16", "bfloat16", "key"])
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_g7_a_geometry_that_is_not_float32_or_float64_is_refused(anchor, node, dtype):
+    cls = _holder_of(dtype)
+    gm = _graph(source=cls, target=cls, mapping=_geom(), geometry=(anchor, "g"))
+    _refused_compile(gm, [f"geometry field {node}.g has dtype",
+                          "a geometry must be a float32 or float64 array"])
+
+
+def test_g7_a_float64_geometry_is_accepted():
+    with gg.x64(True):
+        cls = _holder_of("float64")
+        gm = _graph(source=cls, target=cls, mapping=_geom(), geometry=("source", "g"))
+        assert not [i for i in gm.validate() if i.startswith("ERROR")]
+        gm.compile()
+        assert gm.get_node_state("a")["g"].dtype == jnp.float64
+
+
+@pytest.mark.parametrize("rows, cols", [(N_SOURCE, N_TARGET), (N_TARGET, N_SOURCE + 1),
+                                        (N_TARGET * N_SOURCE, 1), (1, N_TARGET * N_SOURCE)])
+@pytest.mark.parametrize("anchor, node", [("source", "a"), ("target", "b")])
+def test_g8_a_geometry_of_another_shape_is_refused(anchor, node, rows, cols):
+    gm = GraphManager()
+    gm.add_node(Holder("a", 1.0, n=N_SOURCE, rows=rows, cols=cols))
+    gm.add_node(Holder("b", 1.0, n=N_TARGET, rows=rows, cols=cols))
+    gm.add_edge("a", "b", "x", "u", mapping=_geom(), geometry=(anchor, "g"))
+    _refused_compile(gm, [f"geometry field {node}.g has shape {(rows, cols)}",
+                          f"reads a geometry of shape {SHAPE}"])
+
+
+class _Wrapper(Holder):
+    """A node that holds another as ``_inner``, as a wrapper does."""
+
+    def __init__(self, name, timestep, n=3):
+        super().__init__(name, timestep, n=n)
+        self._inner = Holder(name, timestep, n=n)
+
+
+def _mesh():
+    return jax.sharding.Mesh(np.asarray(jax.devices()[:1]), ("x",))
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["sharded", "wraps-a-sharded-node"])
+@pytest.mark.parametrize("anchor", ["source", "target"])
+@pytest.mark.parametrize("which, node", [("source", "a"), ("target", "b")])
+def test_g9_a_sharded_end_is_refused(which, node, anchor, wrapped):
+    """Either end, whichever end holds the geometry: a node carrying a
+    device mesh (the ``Sharded*Node`` convention: a non-``None``
+    ``_mesh``), or wrapping one that does."""
+    gm = GraphManager()
+    for name, n in (("a", N_SOURCE), ("b", N_TARGET)):
+        nd = (_Wrapper if wrapped else Holder)(name, 1.0, n=n)
+        if name == node:
+            (nd._inner if wrapped else nd)._mesh = _mesh()     # noqa: SLF001
+        gm.add_node(nd)
+    gm.add_edge("a", "b", "x", "u", mapping=_geom(), geometry=(anchor, "g"))
+    errors = [i for i in gm.validate() if i.startswith("ERROR")]
+    hits = [i for i in errors if f"its {which} node {node!r} is sharded" in i]
+    assert len(hits) == 1 and hits[0].startswith(f"ERROR: edge {KEY}: "), errors
+    assert "not supported on an edge with a sharded end" in hits[0]
+    assert "Use an unsharded node on both ends" in hits[0]
+
+
+def test_every_compile_refusal_is_about_geometry_edges_only():
+    """The controls: the same nodes with a static mapping, or with no edge
+    at all, raise none of G5 to G9 (a flux producer, an integer field and a
+    field of another shape are ordinary state there)."""
+    for cls in (FluxHolder, _holder_of("int32"), _holder_of("key")):
+        gm = _graph(source=cls, target=cls, mapping=_static())
+        assert not [i for i in gm.validate() if "geometry" in i]
+        gm.compile()
+
+
+# ---------------------------------------------------------------------------
+# G10: the adaptive steppers
+# ---------------------------------------------------------------------------
+
+
+class _Counting(gg.GeomMatrixMapping):
+    calls = 0
+
+    def apply(self, field, weights=None, geom=None):
+        type(self).calls += 1
+        return super().apply(field, weights, geom)
+
+
+@pytest.mark.parametrize("entry", ["run_adaptive", "run_adaptive_scan", "_build_dt_step_fn"])
+def test_g10_the_adaptive_steppers_refuse_a_graph_with_a_geometry_edge(entry):
+    """Before any trace: the time level a geometry is read at across half
+    steps and rejected attempts is not defined."""
+    mapping = _Counting(N_TARGET, N_SOURCE, _geom().spec)
+    gm = _graph(mapping=mapping, geometry=("target", "g"))
+    gm.compile()
+    before = (_Counting.calls, gm.trace_count)
+    call = {"run_adaptive": lambda: gm.run_adaptive(0.5, dt_initial=0.1),
+            "run_adaptive_scan": lambda: gm.run_adaptive_scan(0.5, max_steps=8, dt_initial=0.1),
+            "_build_dt_step_fn": lambda: gm._build_dt_step_fn()}[entry]    # noqa: SLF001
+    with pytest.raises(RuntimeError) as refused:
+        call()
+    message = str(refused.value)
+    assert message.startswith(f"{entry}: "), message
+    for phrase in ("geometry-dependent mapping", KEY,
+                   "the adaptive steppers do not support in 0.4.0", "Use step / run_scan"):
+        assert phrase in message, (phrase, message)
+    assert (_Counting.calls, gm.trace_count) == before, "the refusal came after a trace"
+
+
+def test_g10_the_adaptive_steppers_still_run_the_same_graph_with_a_static_mapping():
+    gm = _graph(mapping=_static())
+    gm.compile()
+    with warnings.catch_warnings():
+        # (The holder's update is not a time integrator, so the stepper
+        # complains about its error estimate; that is not what is asked.)
+        warnings.simplefilter("ignore", UserWarning)
+        gm.run_adaptive(0.2, dt_initial=0.1)
+        gm._build_dt_step_fn()      # noqa: SLF001
+
+
+# ---------------------------------------------------------------------------
+# G11: replace_node
+# ---------------------------------------------------------------------------
+
+
+class _NoGeometry(Holder):
+    def initial_state(self):
+        return {"x": super().initial_state()["x"]}
+
+    def update(self, state, boundary_inputs, dt):
+        return {"x": state["x"]}
+
+
+@pytest.mark.parametrize("replacement", [
+    _NoGeometry, _holder_of("int32"), _holder_of("float16"),
+    lambda name, dt, n: Holder(name, dt, n=n, rows=N_SOURCE, cols=N_TARGET),
+], ids=["no-field", "integer", "float16", "another-shape"])
+@pytest.mark.parametrize("anchor, node, n", [("source", "a", N_SOURCE), ("target", "b", N_TARGET)])
+def test_g11_replacing_the_node_that_holds_a_geometry_with_one_that_does_not_is_refused(
+        anchor, node, n, replacement):
+    gm = _graph(mapping=_geom(), geometry=(anchor, "g"))
+    gm.compile()
+    nodes, edges = dict(gm._nodes), list(gm.edges)       # noqa: SLF001
+    with pytest.raises(ValueError) as refused:
+        replace_node(gm, node, replacement(node, 1.0, n=n))
+    message = str(refused.value)
+    for phrase in (f"replace_node({node!r})", f"edge {KEY} reads its geometry from {node}.g",
+                   f"shape {SHAPE}", "float32", "does not hold", "Nothing was changed."):
+        assert phrase in message, (phrase, message)
+    assert dict(gm._nodes) == nodes and gm.edges == edges     # noqa: SLF001
+    assert all(a is b for a, b in zip(gm.edges, edges))
+    gm.step()       # and the graph still runs
+
+
+@pytest.mark.parametrize("anchor, other, n", [("source", "b", N_TARGET),
+                                               ("target", "a", N_SOURCE)])
+def test_g11_replacing_the_other_end_of_a_geometry_edge_is_unaffected(anchor, other, n):
+    gm = _graph(mapping=_geom(), geometry=(anchor, "g"))
+    gm.compile()
+    replace_node(gm, other, _NoGeometry(other, 1.0, n=n))
+    assert gm.edges[0].geometry == (anchor, "g") and gm.edges[0].key == KEY
+    gm.compile()
+    gm.step()
+
+
+@pytest.mark.parametrize("anchor, node, n", [("source", "a", N_SOURCE), ("target", "b", N_TARGET)])
+def test_g11_a_replacement_that_holds_the_geometry_keeps_the_edge_s_geometry(anchor, node, n):
+    gm = _graph(mapping=_geom(), geometry=(anchor, "g"))
+    gm.compile()
+    replace_node(gm, node, Holder(node, 1.0, n=n))
+    assert gm.edges[0].geometry == (anchor, "g")
+    gm.compile()
+    gm.step()
+
+
+# ---------------------------------------------------------------------------
+# G12: the surrogate dataset generator
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("anchor", ["source", "target"])
+def test_g12_the_dataset_generator_refuses_a_target_fed_through_a_geometry_edge(anchor):
+    gm = _graph(mapping=_geom(), geometry=(anchor, "g"))
+    gm.compile()
+    with pytest.raises(ValueError) as refused:
+        DatasetGenerator.from_graph(gm, "b", 4)
+    message = str(refused.value)
+    for phrase in ("DatasetGenerator", "node 'b' receives edge", KEY,
+                   "geometry-dependent mapping",
+                   "cannot be rebuilt from a state history"):
+        assert phrase in message, (phrase, message)
+    with pytest.raises(ValueError, match="cannot be rebuilt from a state history"):
+        DatasetGenerator.from_sweep(gm, "b", 4, {
+            name: {k: jnp.stack([v, v]) for k, v in gm.get_node_state(name).items()}
+            for name in ("a", "b")})
+
+
+def test_g12_the_dataset_generator_still_serves_the_source_of_a_geometry_edge():
+    """The other end receives nothing through the edge: its inputs are rebuilt as before."""
+    gm = _graph(mapping=_geom(), geometry=("source", "g"))
+    gm.compile()
+    data = DatasetGenerator.from_graph(gm, "a", 4)
+    assert data is not None
+
+
+# ---------------------------------------------------------------------------
+# G13: a kind's registration and its factory must agree
+# ---------------------------------------------------------------------------
+
+
+def _config(mapping_dict, geometry=None) -> dict:
+    edge = {"source_node": "a", "target_node": "b", "source_field": "x", "target_field": "u",
+            "mapping": mapping_dict}
+    if geometry is not None:
+        edge["geometry"] = geometry
+    return {"nodes": [{"type": "Holder", "name": "a", "timestep": 1.0,
+                       "params": {"n": N_SOURCE}},
+                      {"type": "Holder", "name": "b", "timestep": 1.0,
+                       "params": {"n": N_TARGET}}],
+            "edges": [edge], "external_inputs": []}
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_g13_a_factory_whose_product_disagrees_with_its_registration_is_refused(declared):
+    """A kind registered as geometry-dependent whose factory returns a static
+    mapping, and the reverse: a config could then be accepted or refused by
+    the flag and run by the object.  Refused when the mapping is rebuilt,
+    naming the kind."""
+    kind = f"test_disagrees_{'geometry' if declared else 'static'}"
+
+    class Product(gg.GeomMatrixMapping):
+        needs_geometry = not declared
+
+    def factory(*, n_target, n_source):
+        m = Product(n_target, n_source, MappingSpec(kind, {"n_target": int(n_target),
+                                                           "n_source": int(n_source)}, {}))
+        m.kind = kind
+        return m
+
+    register_mapping(kind, arrays=(), hyperparameters={"n_target": int, "n_source": int},
+                     needs_geometry=declared)(factory)
+    try:
+        spec = {"kind": kind, "n_target": N_TARGET, "n_source": N_SOURCE, "points": {}}
+        with pytest.raises(ValueError) as refused:
+            MappingSpec.from_dict(spec).build(lambda ref: None)
+        assert kind in str(refused.value), str(refused.value)
+        geometry = {"anchor": "source", "field": "g"} if declared else None
+        with pytest.raises(MappingRebuildError) as wrapped:
+            GraphManager.from_dict(_config(spec, geometry), REGISTRY)
+        assert kind in str(wrapped.value) and "a.x -> b.u" in str(wrapped.value)
+    finally:
+        _unregister(kind)
+
+
+def test_g13_the_test_kind_s_registration_and_product_agree():
+    """The control: ``test_geom_matrix`` rebuilds from its spec."""
+    mapping = _geom()
+    rebuilt = mapping.spec.build(lambda ref: None)
+    assert type(rebuilt) is gg.GeomMatrixMapping and rebuilt.needs_geometry is True
+    assert rebuilt.geometry_shape == SHAPE
+
+
+# ---------------------------------------------------------------------------
+# What a config carries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("anchor", ["source", "target"])
+def test_a_config_carries_the_geometry_and_from_dict_restores_it(anchor):
+    gm = _graph(mapping=_geom(), geometry=(anchor, "g"))
+    config = json.loads(json.dumps(gm.to_dict()))
+    assert config["edges"][0]["geometry"] == {"anchor": anchor, "field": "g"}
+    assert config["edges"][0]["mapping"]["kind"] == gg.GEOM_MATRIX
+    loaded = GraphManager.from_dict(config, REGISTRY)
+    assert loaded.edges[0].geometry == (anchor, "g")
+    assert type(loaded.edges[0].mapping) is gg.GeomMatrixMapping
+    assert json.loads(json.dumps(loaded.to_dict())) == config
+    loaded.compile()
+    gm.compile()
+    loaded.step()
+    gm.step()
+    for name in ("a", "b"):
+        assert np.array_equal(loaded.get_node_state(name)["x"], gm.get_node_state(name)["x"])
+
+
+def test_a_config_without_a_geometry_edge_has_no_geometry_key():
+    """A graph that uses none of this writes the config it always wrote."""
+    nearest = nearest_neighbor_mapping(np.linspace(0, 1, N_SOURCE), np.linspace(0, 1, N_TARGET))
+    for edge in ({}, dict(mapping=nearest), dict(transform="negate")):
+        config = _graph(**edge).to_dict()
+        assert all("geometry" not in e for e in config["edges"]), config["edges"]
+
+
+@pytest.mark.parametrize("bad", ["g", ["a", "g"], {"anchor": "source"}, {"anchor": "b",
+                                                                         "field": "g"}, 7],
+                         ids=repr)
+def test_a_malformed_geometry_in_a_config_is_a_value_error_naming_the_edge(bad):
+    spec = _geom().spec.to_dict()
+    with pytest.raises(ValueError) as refused:
+        GraphManager.from_dict(_config(spec, bad), REGISTRY)
+    assert KEY in str(refused.value) and "geometry" in str(refused.value)
+
+
+def test_a_config_whose_geometry_dependent_mapping_lost_its_geometry_is_refused():
+    """G3 at the door a file comes through."""
+    with pytest.raises(ValueError, match="reads a moving geometry and none was given"):
+        GraphManager.from_dict(_config(_geom().spec.to_dict()), REGISTRY)

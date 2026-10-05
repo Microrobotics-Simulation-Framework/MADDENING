@@ -724,7 +724,8 @@ def set_initial(built: Built, values: dict, rename: Optional[dict] = None) -> No
         s = dict(gm.get_node_state(live))
         s["x"] = jnp.asarray(v["x0"], s["x"].dtype)
         for field, start in starts.get(name, {}).items():
-            s[field] = jnp.asarray(start, s[field].dtype)
+            if field in s:      # (the static twin of a geometry graph holds none)
+                s[field] = jnp.asarray(start, s[field].dtype)
         gm.set_node_state(live, s)
 
 

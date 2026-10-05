@@ -81,10 +81,13 @@ dense mapping's summation order, and it is not bit-stable between a
 ``jax.vmap`` of a step and the step alone (neither is ``H @ field``): the
 sparse and the dense mapping agree to rounding, entry by entry, not bit
 for bit.  For one entry per row the two are equal as numbers when the
-mapping is applied on its own; inside a compiled step they are where the
-one product is exact (a nearest neighbour's weights are one), because the
-compiler may fuse a rounded product with a neighbouring addition in one
-program and not in the other.
+mapping is applied on its own.  Inside a compiled step not even that
+carries over, whatever the weights: a graph with a sparse mapping and the
+same graph with the dense matrix are two programs, and the compiler
+evaluates the arithmetic around the mapping differently in each (a
+product fused with a neighbouring addition in one and not in the other).
+The two graphs step to within rounding of one another, and nothing closer
+is claimed.
 
 Limits
 ------
@@ -115,6 +118,7 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.coupling import _mapping_checks as _checks
 from maddening.core.coupling.mapping import _MODES
 from maddening.core.coupling.mapping_registry import register_mapping
 from maddening.core.coupling.mapping_spec import (
@@ -546,61 +550,36 @@ class StaticSparseMapping:
 # What a builder is given
 # ---------------------------------------------------------------------------
 #
-# The same questions the dense factories' private input checks ask (a
-# point set that is not an (n,) or (n, d) array of finite reals, boundaries
-# that do not rise), under the same names, so the two can share one module.
+# The geometry checks are the dense factories' own (``_mapping_checks``): a
+# point set that is not an (n,) or (n, d) array of finite coordinates, and
+# boundaries that do not strictly rise, are refused in the same words.  Two
+# things are asked first that the dense factories leave to NumPy, and one
+# is added for the tree.
 
 
 def _real_array(name: str, values: Any) -> np.ndarray:
-    """*values* as a float64 host array; anything but a real numeric array
-    (bool, integer, float) is refused rather than coerced."""
+    """*values* as a host array of a real numeric dtype (bool, integer,
+    float); a complex, text or object array is refused by name rather than
+    coerced, and so is a traced value."""
     raw = _host_array(name, values)
     if raw.dtype.kind not in "biuf":
         raise ValueError(
             f"{name} must be a real numeric array (bool, integer or float), got dtype "
             f"{raw.dtype}"
         )
-    return np.asarray(raw, dtype=np.float64)
-
-
-def _check_finite(name: str, arr: np.ndarray) -> None:
-    bad = ~np.isfinite(arr)
-    if bool(bad.any()):
-        at = _first(bad)
-        shown = str(at[0]) if len(at) == 1 else str(at)
-        raise ValueError(
-            f"{name} holds a non-finite value at index {shown} ({arr[at].item()!r}); "
-            f"every entry must be finite"
-        )
+    return raw
 
 
 def _checked_points(name: str, values: Any) -> np.ndarray:
     """A point set as an ``(n, d)`` float64 array, or a ``ValueError``.
 
     ``(n,)`` is read as *n* points on a line.  The set must hold at least
-    one point with at least one coordinate, all finite and none beyond the
-    magnitude whose square a float64 holds.
+    one point with at least one coordinate, all finite (the dense
+    factories' checks) and none beyond the magnitude whose square a
+    float64 holds.  Both sides must hold a point: a sparse mapping has at
+    least one row.
     """
-    arr = _real_array(name, values)
-    shape = arr.shape
-    if arr.ndim == 1:
-        arr = arr.reshape(-1, 1)
-    if arr.ndim != 2:
-        raise ValueError(
-            f"{name} must be an (n,) or (n, d) array of point coordinates, got shape "
-            f"{shape}"
-        )
-    if arr.shape[1] == 0:
-        raise ValueError(f"{name} has shape {arr.shape}: its points have no coordinates")
-    if arr.shape[0] == 0:
-        raise ValueError(f"{name} holds no points; there is nothing to map")
-    bad = ~np.isfinite(arr)
-    if bool(bad.any()):
-        at = _first(bad)
-        raise ValueError(
-            f"{name} holds a non-finite coordinate at index {at[0]} "
-            f"(point {arr[at[0]].tolist()}); every coordinate must be finite"
-        )
+    arr = _checks.checked_points(name, _real_array(name, values))
     huge = np.abs(arr) > _COORDINATE_LIMIT
     if bool(huge.any()):
         at = _first(huge)
@@ -612,36 +591,11 @@ def _checked_points(name: str, values: Any) -> np.ndarray:
     return arr
 
 
-def _check_same_dimension(source: np.ndarray, target: np.ndarray) -> None:
-    if source.shape[1] != target.shape[1]:
-        raise ValueError(
-            f"source and target points must share a dimension, got "
-            f"{source.shape[1]} and {target.shape[1]}"
-        )
-
-
 def _checked_boundaries(name: str, values: Any) -> np.ndarray:
     """Cell boundaries of a 1-D grid as a float64 array, or a ``ValueError``:
-    one-dimensional, at least two values, finite, strictly increasing."""
-    arr = _real_array(name, values)
-    if arr.ndim != 1:
-        raise ValueError(
-            f"{name} must be a one-dimensional array of cell boundaries, got shape "
-            f"{arr.shape}"
-        )
-    if arr.size < 2:
-        raise ValueError(f"{name} needs at least two boundaries (one cell), got {arr.size}")
-    _check_finite(name, arr)
-    not_rising = np.diff(arr) <= 0
-    if bool(not_rising.any()):
-        i = int(np.argmax(not_rising)) + 1
-        raise ValueError(
-            f"{name} must be strictly increasing, but {name}[{i}] = {float(arr[i])!r} "
-            f"is not greater than {name}[{i - 1}] = {float(arr[i - 1])!r}.  The "
-            f"boundaries are not sorted or reversed for you: the field keeps its cell "
-            f"order, so pass the boundaries (and the field) in increasing order"
-        )
-    return arr
+    one-dimensional, at least two values, finite, strictly increasing (the
+    dense factory's check)."""
+    return _checks.checked_boundaries(name, _real_array(name, values))
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +858,7 @@ def sparse_nearest_neighbor_mapping(
         )
     source = _checked_points("source_points", source_points)
     target = _checked_points("target_points", target_points)
-    _check_same_dimension(source, target)
+    _checks.check_same_dimension(source, target)
     spec = MappingSpec("sparse_nearest_neighbor", {"mode": mode, "transpose": transpose}, {
         "source_points": reference_for_array(source_points, source_ref, name="source_points"),
         "target_points": reference_for_array(target_points, target_ref, name="target_points"),
@@ -1149,11 +1103,7 @@ def sparse_matrix_mapping(
         )
     # Judged as float64 values: a 16-bit dtype widens exactly.
     judged = given if given.dtype.kind == "f" else given.astype(np.float64)
-    if not bool(np.all(np.isfinite(judged))):
-        at = _first(~np.isfinite(judged))
-        raise ValueError(
-            f"{what}: values[{at[0]}, {at[1]}] is not finite ({judged[at].item()!r})"
-        )
+    _checks.check_finite("values", judged)
     dropped = unused & (judged != 0)
     if bool(dropped.any()):
         at = _first(dropped)

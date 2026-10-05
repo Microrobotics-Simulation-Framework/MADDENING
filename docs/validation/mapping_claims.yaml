@@ -784,44 +784,56 @@ claims:
   area: sparse mapping
   claim: >-
     A graph whose mapped edges are sparse steps as the graph whose edges
-    hold the same matrices densely: "with one entry per target, each a power
-    of two, a graph with sparse edges returns the states and coupling
-    reports of its dense twin exactly"; "with several entries per row it
-    satisfies the same monolithic reference the dense graph is held to, and
-    its gradients are the dense graph's."  Inside a compiled step "the same
-    number" holds "where the product is exact, as it is for a nearest
-    neighbour's weights of one; otherwise the two agree to rounding."
+    hold the same matrices densely, to rounding: "a graph with sparse edges
+    satisfies the same monolithic reference the dense graph is held to, its
+    gradients are the dense graph's, and under a constant iterator its
+    states are within rounding of its dense twin's (at most 7.5 eps of the
+    largest entry measured, 256 allowed)".  "Not bit for bit, whatever the
+    weights": "'the same number' holds for a mapping applied on its own and
+    not for a step."  A renamed or reordered sparse graph returns the
+    original's states and reports "bit for bit".
   sources:
     - docs/release_notes/v0.4.0.md (Sparse interface mappings)
     - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, What "equal to the dense mapping" means)
+    - src/maddening/core/coupling/sparse_mapping.py (module docstring, Summation order)
     - tests/property/coupled_topologies.py (module docstring, The mapping kind)
   conditions: >-
     five structures of linear relays -- rings, chains, stars and nested
     cycles with outside nodes, additive ports, mapped flux edges, two mapped
     edges on one field pair and a mapped edge between equal sizes, with
-    interfaces of one to four entries -- under the first two coupling
-    configurations of each; every mapped edge a sparse mapping over a
-    pattern fixed per structure: every entry in the gather layout, a ragged
-    pattern with padded slots, that pattern in the scatter layout, and one
-    entry per target in each layout, drawn from plus or minus 0.5, 1 and 2;
-    the drawn matrix zeroed outside the pattern for the sparse and the
-    dense build alike; float32, float64
-    under x64, bfloat16 and float16; a multi-rate graph; a sub-cycled group;
-    three draws under one vmap of the step; a group with a predictor, whose
-    warm start the next step reads; a checkpoint restart, whose archive
-    carries the sparse weights and their pattern's digest; the gradient of a
-    loss over two steps with respect to every parameter leaf, the mapping
-    weights included, in float32 and under x64; the steps compiled (jit) by
-    the graph.  Not claimed for mixed dtypes, run_adaptive or sharded
-    graphs.
+    interfaces of one to four entries; every mapped edge a sparse mapping
+    over a pattern fixed per structure: every entry in the gather layout, a
+    ragged pattern with padded slots, and that pattern in the scatter
+    layout; the drawn matrix zeroed outside the pattern for the sparse and
+    the dense build alike.  The dense twin, under Gauss-Seidel with no
+    acceleration and up to eight passes, so that no convergence criterion
+    decides how far each graph goes: float32, float64 under x64, a
+    multi-rate graph, a sub-cycled group, three draws under one vmap of the
+    step, a group with a predictor, whose warm start the next step reads,
+    and a checkpoint restart, whose archive carries the sparse weights and
+    their pattern's digest and which resumes bit for bit; the allowance is
+    256 eps of the dtype times the largest state entry, the largest gap
+    measured was 7.5 (jaxlib 0.11.0), and mapped matrices a tenth off move
+    the states by more than sixteen times the allowance.  The monolithic
+    reference, under the first two coupling configurations of each
+    structure: float32, float64 under x64, a sub-cycled member, a
+    predictor's other starting guess.  The gradient of a loss over two
+    steps with respect to every parameter leaf, the mapping weights
+    included, in float32 and under x64.  Renaming and reordering: those
+    domains, and bfloat16 and float16, where the dense twin is not compared
+    (a rounding there is a percent of the state) and the mapping alone is
+    held to its bound (MAP-014).  The steps compiled (jit) by the graph.
+    Not claimed for mixed dtypes, run_adaptive or sharded graphs.
   oracle: >-
     the dense build of the same structure on the same draws, state for state
-    and report for report as numbers; the float64 monolithic solve of the
-    step with its rounding and residual allowances
-    (tests/property/coupled_topologies.py, LinearModel); the dense graph's
-    gradient, read through the pattern for the weights.
+    to the allowance, every leaf that does not depend on the mapping equal;
+    the float64 monolithic solve of the step with its rounding and residual
+    allowances (tests/property/coupled_topologies.py, LinearModel); the
+    dense graph's gradient, read through the pattern for the weights; the
+    original build's states and reports, bit for bit, for a renamed or
+    reordered one.
   tests:
-    - tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain
+    - tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain
     - tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_the_monolithic_reference
     - tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain
     - tests/property/test_differential_coupling_topologies.py::test_the_sparse_patterns_of_the_named_structures_can_express_a_wrong_index
@@ -832,32 +844,35 @@ claims:
     The property strategies (tests/property/strategies.py) draw the sparse
     nearest neighbour and the sparse projection among their mappings, so
     the round-trip, replay, write-door and checkpoint properties built on
-    graph_recipes() run over sparse edges too.  The exact comparison was
-    first written with Gaussian one-entry weights and failed in the slow
-    lane on a structure with additive mapped edges, by one rounding: the two
-    compiled programs contract a product and a neighbouring addition
-    differently.  Hence the powers of two, and the wording.
+    graph_recipes() run over sparse edges too.  The twin comparison was
+    first written as an equality, for one entry per target, and failed in
+    the slow lane on the structure with three additive mapped edges into
+    one port, by one rounding -- with Gaussian weights and again with
+    weights that are powers of two.  The two graphs are different compiled
+    programs, and the compiler evaluates the arithmetic around a mapping
+    differently in each.  Hence the comparison to rounding under a constant
+    iterator, and the wording.
   domains:
-    f32: 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[f32-mapped-ring-wide-sparse-single-0]'
+    f32: 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[f32-mapped-ring-wide-sparse-ragged]'
     f64:
-      - 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[f64-mapped-ring-wide-sparse-single-scatter-0]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[f64-mapped-ring-wide-sparse-scatter]'
       - 'tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain[f64-mapped-ring-wide-sparse-ragged]'
     mixed_dtype: narrowed
     16bit:
-      - 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[bfloat16-mapped-ring-wide-sparse-single-0]'
-      - 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[float16-mapped-ring-wide-sparse-single-scatter-0]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain[bfloat16-sparse-ragged-mapped-ring-wide]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain[float16-sparse-scatter-mapped-ring-wide]'
     jit: tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_the_monolithic_reference
     grad: tests/property/test_differential_coupling_topologies.py::test_the_gradient_through_sparse_mapped_edges_is_the_dense_graphs
-    vmap: 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[vmap-mapped-ring-wide-sparse-single-0]'
-    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[multi_rate-mapped-ring-wide-sparse-single-0]'
+    vmap: 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[vmap-mapped-ring-wide-sparse-ragged]'
+    multi_rate: 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[multi_rate-mapped-ring-wide-sparse-scatter]'
     sub_cycled:
-      - 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[sub_cycled-mapped-ring-wide-sparse-single-0]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[sub_cycled-mapped-ring-wide-sparse-ragged]'
       - 'tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain[sub_cycled-mapped-ring-wide-sparse-scatter]'
     predictors_warm_starts:
-      - 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[predictors_warm_starts-mapped-ring-wide-sparse-single-0]'
+      - 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[predictors_warm_starts-mapped-ring-wide-sparse-scatter]'
       - 'tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain[predictors_warm_starts-mapped-ring-wide-sparse-ragged]'
     adaptive: narrowed
-    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain[checkpoint_restart-mapped-ring-wide-sparse-single-scatter-0]'
+    checkpoint_restart: 'tests/property/test_differential_coupling_topologies.py::test_a_sparse_mapped_topology_steps_as_its_dense_twin_to_rounding_in_every_domain[checkpoint_restart-mapped-ring-wide-sparse-ragged]'
     sharded: narrowed
 
 - id: MAP-016
@@ -1204,9 +1219,13 @@ claims:
     0: a weight that would be dropped is refused rather than dropped";
     index values satisfy "0 <= index < n_source <= 2**31 - 1"; a
     StaticSparseMapping is "Validated once, on the host, when it is
-    constructed"; and "A field whose first axis is not the mapping's size is
+    constructed"; "A field whose first axis is not the mapping's size is
     a ValueError when the step is traced (a gather would otherwise clamp the
-    index and return a result)."
+    index and return a result)"; and "The sparse builders ask of their
+    coordinates what the dense factories ask ..., through the same checks
+    and in the same words, and three things more: both point sets must hold
+    a point ..., a complex, text or object array is refused by name, and so
+    is a coordinate past 1e150."
   sources:
     - docs/algorithm_guide/coupling/interface_mapping.md (Sparse mappings, The three kinds)
     - src/maddening/core/coupling/sparse_mapping.py (StaticSparseMapping, Notes)
@@ -1220,7 +1239,12 @@ claims:
     and traced weights; fifteen point sets the nearest neighbour cannot map
     (empty, of another rank or dimension, NaN, infinite, past 1e150,
     complex, text, objects, unknown mode or form); ten boundary arrays that
-    do not strictly rise; twenty-three sparse_matrix inputs (a value in an
+    do not strictly rise; the dense factories' own battery (MADD-ANO-192)
+    given to the sparse projection and to the sparse nearest neighbour in
+    both modes and both conservative forms -- eleven boundary arrays on
+    either side, a NaN and either infinity in either point set, point sets
+    of different dimensions, of three axes, without coordinates, scalar,
+    and empty on either side; twenty-three sparse_matrix inputs (a value in an
     unused slot, an index below -1 or not below n_source, the wrong array
     types and shapes, a NaN, an n_source that is not a size, a reference
     that is not an asset file); extended-precision arrays, refused and not
@@ -1241,6 +1265,12 @@ claims:
     - tests/core/test_sparse_mapping_builders.py::test_extended_precision_and_traced_points_are_refused_not_narrowed
     - tests/core/test_sparse_mapping_builders.py::test_a_missing_scipy_is_an_import_error_that_names_it
     - tests/core/test_sparse_mapping_builders.py::test_the_sparse_projection_refuses_boundaries_that_do_not_rise
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_boundaries_that_are_not_strictly_increasing_are_refused_by_name
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_non_finite_point_is_refused_by_name_and_index
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_point_sets_of_different_dimension_are_refused
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_point_array_with_more_than_two_axes_is_refused
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_a_point_set_without_coordinates_is_refused
+    - tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_an_empty_set_to_map_from_is_refused_by_name
     - tests/core/test_sparse_mapping_builders.py::test_sparse_matrix_refuses_rows_it_would_have_to_guess_at
     - tests/core/test_sparse_mapping_builders.py::test_sparse_matrix_keeps_each_rows_entries_in_the_order_given
     - tests/core/test_sparse_mapping_builders.py::test_a_repeated_index_in_a_row_adds

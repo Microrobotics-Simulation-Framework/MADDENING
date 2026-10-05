@@ -618,7 +618,12 @@ magnitude (a larger one is refused: its squared distance overflows).
 
 `sparse_projection_1d_mapping` requires **strictly increasing** boundaries
 on both sides and refuses anything else.  It does not sort or reverse them
-for you, because the field keeps its cell order.
+for you, because the field keeps its cell order.  The sparse builders ask
+of their coordinates what the dense factories ask (*Shapes and validation*
+above), through the same checks and in the same words, and three things
+more: both point sets must hold a point (a sparse mapping has at least one
+row and one column), a complex, text or object array is refused by name,
+and so is a coordinate past `1e150`.
 
 `sparse_matrix_mapping` takes an integer `indices` array and a
 floating-point `values` array, both `(n_target, k)`, and `n_source`, which
@@ -704,11 +709,16 @@ deterministic for one compiled program; like `H @ field`, it is not
 bit-stable between a `jax.vmap` of a step and the step alone.
 
 With one entry per row the two are the same number when the mapping is
-applied on its own.  Inside a compiled step that holds only where the one
-product is exact, as it is for a nearest neighbour's weights of one: the
-compiler may fuse a product with an addition next to it (an additive
-edge, a transform) in one program and not in the other, and then a graph
-with sparse edges and its dense twin part by a rounding.
+applied on its own.  Inside a compiled step not even that carries over,
+whatever the weights: a graph with sparse edges and the same graph with
+dense ones are two programs, and the compiler evaluates the arithmetic
+around a mapping differently in each (it may fuse a product with an
+addition next to it -- an additive edge, a transform -- in one and not in
+the other).  A graph with sparse edges and its dense twin therefore step
+to within rounding of one another, not to the same bits.  Under a
+constant iterator the two were at most 7.5 `eps` of the largest state
+entry apart, over every structure, layout and domain the coupling
+topology harness compares them in; the harness allows 256.
 
 One difference is deliberate.  A row reads only its own entries, so an
 infinity or a NaN in the source field reaches only the targets that list

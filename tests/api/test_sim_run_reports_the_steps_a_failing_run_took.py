@@ -18,7 +18,7 @@ import warnings
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 eqx = pytest.importorskip("equinox", reason="the run-time check is equinox.error_if")
 

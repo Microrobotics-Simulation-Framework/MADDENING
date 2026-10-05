@@ -310,7 +310,7 @@ def _position_after(gm, steps=5):
 
 
 def _client(gm):
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
     from maddening.api.server import SimulationServer
     from maddening.nodes.spring import SpringDamperNode
 
@@ -583,7 +583,7 @@ _LEGACY_WRITES = {"stencil": ("D", 0.1, 2.0), "unstructured": ("w", 0.5, 0.9)}
 def test_a_legacy_nodes_param_write_reaches_the_sharded_step_after_a_recompile(kind, surface):
     """One step at the old value (which traces the sharded step), the write,
     one more step: the second must use the new value, as unsharded."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
     from maddening.api.server import SimulationServer
 
     key, old, new = _LEGACY_WRITES[kind]
@@ -620,7 +620,7 @@ def test_a_rest_write_to_a_value_the_wrapped_node_copied_at_construction_is_refu
     node, which shares the params dict, is asked instead: a value it copied
     in ``__init__`` is refused, one its step reads (above) is accepted, and
     the wrapper's cache is not touched by the asking."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
     from maddening.api.server import SimulationServer
 
     gm, inner, _, _ = _legacy_graph(kind, _LEGACY_WRITES[kind][1])

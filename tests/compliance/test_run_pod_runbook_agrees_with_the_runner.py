@@ -73,3 +73,20 @@ def test_every_record_carries_the_keys_the_runbook_lists(rp, runbook):
         assert set(environment) <= set(doc["environment"]), path.name
         for c in doc["checks"]:
             assert {"name", "value", "limit", "sense", "passed"} <= set(c), (path.name, c)
+
+
+def test_the_runbooks_exit_statuses_are_the_runners(rp, runbook):
+    """Section 2b reads each goal's exit status and section 3 stops on
+    every non-zero one; both name the runner's own statuses for a refusal
+    and a crash (RPD-009 for the summary's).  The runbook used to read exit
+    1 as "a check failed" when a refusal and a crash exited 1 as well."""
+    assert (rp.EXIT_REFUSED, rp.EXIT_CRASHED) == (2, 5)
+    section_2b = runbook.split("### 2b.", 1)[1].split("```", 1)[0]
+    for fragment in ("**0** = no check failed", "**1** = a check failed",
+                     f"**{rp.EXIT_REFUSED}** = the runner refused the run",
+                     f"**{rp.EXIT_CRASHED}** = a goal raised", "**124** = the time box ran out"):
+        assert fragment in " ".join(section_2b.split()), fragment
+    section_3 = " ".join(runbook.split("## 3. Stop condition", 1)[1].split("## 4.", 1)[0].split())
+    for fragment in ("`1` (a check failed)", f"`{rp.EXIT_REFUSED}` (the runner refused the run)",
+                     f"`{rp.EXIT_CRASHED}` (a goal raised)", "`124` (its time box ran out)"):
+        assert fragment in section_3, fragment

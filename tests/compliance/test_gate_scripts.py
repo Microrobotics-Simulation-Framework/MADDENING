@@ -4488,13 +4488,13 @@ class TestDoctestGate:
     #: ``min_mappings_floor.json`` gives the mapping pins
     #: (audit_040_r2/gates, finding G6).  Raise both when examples are
     #: added; lowering both belongs in a commit that says why.
-    COMMITTED_EXAMPLE_FLOOR = 111
+    COMMITTED_EXAMPLE_FLOOR = 112
 
     #: The committed per-file pins, the second half of ``EXAMPLES_PER_FILE``'s
     #: ratchet.  Deleting the only example in ``core/compliance/metadata.py``
     #: dropped the whole file out of the gate with "OK" (audit_040_p4_1, D6).
     COMMITTED_EXAMPLES_PER_FILE = {
-        "src/maddening/api/auth.py": 7,
+        "src/maddening/api/auth.py": 8,
         "src/maddening/api/server.py": 3,
         "src/maddening/core/compliance/metadata.py": 1,
         "src/maddening/core/coupling/acceleration.py": 37,

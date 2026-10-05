@@ -247,26 +247,48 @@ claims:
   area: auth
   claim: >-
     "A request that arrives from a routable IP is challenged even when the
-    server was told the bind is loopback.  That backstop is why forgetting
-    bind_host costs you a 401, not an open API"; a peer that is not an IP
-    address (TestClient's "testclient", a Unix socket) is not treated as
-    remote.
+    server was told the bind is loopback. That backstop is why forgetting
+    bind_host costs you a 401, not an open API"; on a loopback bind only a
+    direct connection from a loopback address is served without the token: a
+    peer that is not a loopback IP literal (a name such as TestClient's
+    "testclient", a Unix socket's empty peer, whatever a proxy header put
+    there) and a request carrying X-Forwarded-For or Forwarded must present
+    it. The peer is scope["client"] as the ASGI server reports it; under
+    uvicorn's proxy_headers it is a trusted proxy's X-Forwarded-For value.
   sources:
     - src/maddening/api/README.md:43 (Security)
     - src/maddening/api/auth.py:16 (module docstring, rule 2)
     - src/maddening/api/auth.py:156 (is_routable_peer)
     - docs/release_notes/v0.4.0.md:4227 (The API authenticates when it is not bound to loopback)
+    - src/maddening/api/auth.py:485 (APIAuth.required_for_peer)
+    - src/maddening/api/auth.py:512 (APIAuth._required_for_request)
   conditions: >-
     loopback bind; peers: public and private IPv4, IPv6, IPv4-mapped IPv6
-    (::ffff:203.0.113.5), scoped link-local (fe80::1%eth0); loopback and
-    non-IP peers.
-  oracle: 401 without the token, 200 with it; loopback and non-IP peers served.
+    (::ffff:203.0.113.5), scoped link-local (fe80::1%eth0), names
+    (testclient, localhost, x), an empty peer; X-Forwarded-For naming x,
+    testclient, 127.0.0.1, ::1 or localhost, and a Forwarded header, on a
+    real loopback uvicorn with uvicorn's default proxy settings and
+    in-process behind a proxy middleware that trusts every peer; the
+    WebSocket handshake, at the middleware and in the handlers; the token
+    presented.
+  oracle: >-
+    401 without the token, 200 with it; only a direct loopback IP peer
+    served without it; nothing stepped, saved or added.
   tests:
     - tests/api/test_bearer_auth.py::test_a_routable_peer_is_challenged_even_on_a_believed_loopback_bind
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_routable_peer_of_any_spelling_is_challenged_on_a_loopback_bind
     - tests/api/test_bearer_auth.py::test_a_loopback_peer_is_not_challenged_on_a_loopback_bind
     - tests/api/test_bearer_auth.py::test_routable_peer_classification
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_routable_peer_is_challenged_on_a_websocket_handshake_too
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_forwarding_header_needs_the_token_even_naming_this_machine
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_routable_peer_cannot_forge_its_way_past_the_backstop
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_starlettes_own_in_process_client_must_present_the_token
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_connection_with_no_peer_address_must_present_the_token
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_only_a_loopback_ip_literal_is_served_without_a_token_on_a_loopback_bind
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_forwarding_header_makes_even_a_loopback_peer_present_the_token
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_forwarded_websocket_handshake_is_refused
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_the_handlers_own_websocket_check_asks_the_same_rule
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_the_token_still_authenticates_a_forwarded_request
   status: verified
   domains:
     loopback_bind: tests/api/test_bearer_auth.py::test_a_routable_peer_is_challenged_even_on_a_believed_loopback_bind
@@ -277,7 +299,9 @@ claims:
     runner_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_the_runner_runs[REST-005]'
     sim_run_active: 'tests/api/test_rest_claims_in_every_domain.py::test_the_claim_holds_while_a_sim_run_is_in_flight[REST-005]'
     large_payload: n/a
-    hostile_input: tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_routable_peer_of_any_spelling_is_challenged_on_a_loopback_bind
+    hostile_input:
+      - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_routable_peer_of_any_spelling_is_challenged_on_a_loopback_bind
+      - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_routable_peer_cannot_forge_its_way_past_the_backstop
     shutdown: n/a
     wrapper_nodes: n/a
     checkpoint_restore: n/a
@@ -938,7 +962,9 @@ claims:
     loopback bind, a loopback TCP peer, no token; every HTTP route
     (enumerated, /healthz and /viz/* included, /cloud/launch excluded) with
     Host attacker.example; loopback spellings with a port, LOCALHOST., the
-    WebSocket handshake.
+    WebSocket handshake; a rebound page that adds X-Forwarded-For (x,
+    testclient, 127.0.0.1, ::1, localhost) or Forwarded, over a real
+    loopback uvicorn with uvicorn's default proxy settings.
   oracle: 403 on every route and nothing changed; 200 for the loopback names.
   tests:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_foreign_host_is_refused_on_every_route_the_exempt_ones_included
@@ -946,6 +972,8 @@ claims:
     - tests/api/test_cross_origin_requests.py::test_the_loopback_names_are_served
     - tests/api/test_cross_origin_requests.py::test_a_host_that_is_not_a_loopback_name_fails_closed
     - tests/api/test_cross_origin_requests.py::test_a_dns_rebound_page_cannot_reach_the_cloud_launch_route
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_rebound_page_with_a_forwarding_header_is_refused
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_the_loopback_flow_without_a_forwarding_header_is_unchanged
   status: verified
   domains:
     loopback_bind: tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_foreign_host_is_refused_on_every_route_the_exempt_ones_included
@@ -1001,20 +1029,30 @@ claims:
 - id: REST-027
   area: host-origin
   claim: >-
-    The Host check is "asked only where nothing else authenticates the
-    caller" (not where the token is demanded), "only of a peer that is an IP
-    address", and "a request with no Host at all is not a browser's either
-    and is served".
+    The Host check is asked of every request to a loopback bind that did not
+    present a valid token -- HTTP and the WebSocket handshake -- whatever
+    its peer: it keys on the bind and the Host header, never on the peer,
+    which a proxy header can rewrite; it is not asked on a non-loopback bind
+    (the token decides) nor of a request that presents a valid token; "a
+    request with no Host at all is not a browser's either and is served".
   sources:
     - src/maddening/api/server.py:1651 (_rebinding_refusal)
     - docs/release_notes/v0.4.0.md:4340 (A web page is not an authorised caller, DNS rebinding)
+    - src/maddening/api/server.py:2076 (_rebinding_refusal)
   conditions: >-
-    a non-loopback bind with a rebound Host; peer "testclient"; Host absent
+    a non-loopback bind with a rebound Host; a loopback bind with a rebound
+    Host and a forwarding header naming a loopback peer (x, testclient,
+    127.0.0.1, ::1, localhost), and with the token presented; Host absent
     (asked of the function: an HTTP/1.1 client always sends one).
-  oracle: the token decides on a non-loopback bind; _rebinding_refusal returns None with no Host.
+  oracle: >-
+    the token decides on a non-loopback bind; on a loopback bind a rebound
+    Host is refused (403, or the 401 a forwarding header asks) unless the
+    token is presented; _rebinding_refusal returns None with no Host.
   tests:
     - tests/api/test_cross_origin_requests.py::test_the_token_a_non_loopback_bind_demands_refuses_a_rebound_page
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_request_with_no_host_header_is_not_refused_for_its_host
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_a_rebound_page_with_a_forwarding_header_is_refused
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_the_token_still_authenticates_a_forwarded_request
   status: verified
   domains:
     loopback_bind: tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_request_with_no_host_header_is_not_refused_for_its_host
@@ -1040,12 +1078,18 @@ claims:
     loopback bind, 401 where the token is demanded.
   sources:
     - src/maddening/api/server.py:2684 (_require_bearer_token, scope path)
-  conditions: malformed Host headers ([::1]x and others) over HTTP and the WebSocket handshake.
+  conditions: >-
+    malformed Host headers ([::1]x and others) over HTTP and the WebSocket
+    handshake; a port of non-ASCII digits (the latin-1 superscripts a client
+    can send, other Unicode digits), which str.isdigit accepts and int()
+    refuses.
   oracle: status code.
   tests:
     - tests/api/test_cross_origin_requests.py::test_a_malformed_host_on_a_loopback_bind_is_a_403_not_a_500
     - tests/api/test_cross_origin_requests.py::test_a_malformed_host_where_a_token_is_demanded_is_a_401_not_a_500
     - tests/api/test_cross_origin_requests.py::test_how_a_host_header_is_read
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_host_port_of_non_ascii_digits_is_not_a_port
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_host_port_of_a_latin1_superscript_is_refused_not_a_500
   status: verified
   domains:
     loopback_bind: tests/api/test_cross_origin_requests.py::test_a_malformed_host_on_a_loopback_bind_is_a_403_not_a_500
@@ -1092,6 +1136,7 @@ claims:
     - tests/api/test_request_memory_is_bounded.py::test_a_streamed_body_without_a_length_is_refused_as_it_passes_the_limit
     - tests/api/test_request_memory_is_bounded.py::test_a_declared_length_over_the_limit_is_refused_without_reading_the_body
     - tests/api/test_request_memory_is_bounded.py::test_a_body_under_the_limit_is_served_as_before
+    - tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_declared_length_over_the_limit_is_a_413_before_a_byte_is_read
   status: verified
   domains:
     loopback_bind: tests/api/test_request_bounds_hold_at_their_boundaries.py::test_a_body_of_exactly_the_limit_is_read_and_one_byte_more_is_a_413
@@ -1678,6 +1723,7 @@ claims:
     - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_each_request_behind_a_long_holder_answers_within_about_one_timeout
     - tests/api/test_runner_routes_do_not_wait_for_a_worker.py::test_a_runner_route_that_needs_no_graph_answers_at_once
     - tests/api/test_runner_routes_do_not_wait_for_a_worker.py::test_a_runner_route_that_waits_for_the_graph_answers_within_one_timeout
+    - tests/api/test_runner_routes_answer_within_a_lock_timeout.py::test_a_runner_route_waits_for_the_runner_lock_only_until_its_deadline
   status: verified
   notes: >-
     failing until fix/p4-13-rest (#205): the runner lock was taken with no
@@ -2469,6 +2515,8 @@ claims:
     - tests/api/test_api.py::TestGraphEndpoints::test_add_node_unknown_type
     - tests/api/test_api.py::TestGraphEndpoints::test_add_duplicate_node
     - tests/api/test_graph_endpoint_validation.py::test_add_node_with_bad_params_is_400_and_not_added
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_finite_positive_timestep_is_taken
   status: verified
   domains:
     loopback_bind: tests/api/test_api.py::TestGraphEndpoints::test_get_empty_graph
@@ -2657,19 +2705,32 @@ claims:
   area: state
   claim: >-
     "PUT /graph/state/{node_name}: Overwrite node state ({state: {field:
-    value}}).  A value the field's dtype cannot hold (1e39 into float32) or a
-    non-finite one is a 400, and nothing is written"; "Every field is
-    required, coerced to the live leaf's dtype, and must match its shape".
+    value}}). A value the field's dtype cannot hold (1e39 into float32; for
+    an integer field, a non-integral value or one outside its range: 0.5 or
+    256 into uint8), a non-finite one, text, null or a boolean for a numeric
+    field is a 400 naming the field, and nothing is written"; "Every field
+    is required, coerced to the live leaf's dtype, and must match its
+    shape".
   sources:
     - src/maddening/api/README.md:126 (State)
     - src/maddening/api/server.py:3006 (set_node_state)
-  conditions: a missing or extra field, a wrong shape, NaN, 1e39 into float32, the largest float32.
+  conditions: >-
+    a missing or extra field, a wrong shape, NaN, 1e39 into float32, the
+    largest float32; LBMNode's uint8 wall mask with 0.5, 1.7, -0.25, 256,
+    -1, 1e10, 2**64, text, a boolean, null, a list and the non-finite
+    tokens, and 0, 1, 2, 255, 7.0; text, a boolean, null, an object and
+    10**400 for a float field.
   oracle: 400 naming the field and the state unchanged; 200 for a valid write.
   tests:
     - tests/api/test_graph_endpoint_validation.py::test_put_state_validates_before_writing
     - tests/api/test_values_the_leaf_dtype_cannot_hold.py::test_a_state_write_of_an_overflowing_value_is_a_clean_400
     - tests/api/test_values_the_leaf_dtype_cannot_hold.py::test_the_largest_float32_still_reaches_the_checks_after_the_cast
     - tests/api/test_api.py::TestStateEndpoints::test_set_node_state
+    - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_refuses_what_its_dtype_cannot_hold_exactly
+    - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_takes_integral_values_in_its_range
+    - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_refuses_a_non_finite_json_number
+    - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_a_float_field_refuses_text_booleans_and_what_float_cannot_hold
+    - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_the_state_rule_is_the_checkpoint_loads
   status: verified
   domains:
     loopback_bind: tests/api/test_graph_endpoint_validation.py::test_put_state_validates_before_writing
@@ -2877,7 +2938,12 @@ claims:
     - src/maddening/api/README.md:141 (Parameters)
     - src/maddening/api/server.py:1380 (_saved_graph_write_reason)
     - docs/validation/known_anomalies.yaml (MADD-ANO-048)
-  conditions: a live leaf past the HeatNode Fourier limit; rho_gas above rho_liquid alone and together; a value refused only against a live value a fit moved.
+  conditions: >-
+    a live leaf past the HeatNode Fourier limit; rho_gas above rho_liquid
+    alone and together; a value refused only against a live value a fit
+    moved; a leaf written back to the node's own value after a fit or a POST
+    /checkpoint/load moved the live leaves, alone and with another key, and
+    a load that puts a leaf back to the node's own value.
   oracle: 400 naming the keys and the constructor's message; the graph still saves and reloads.
   tests:
     - tests/api/test_params_endpoint_reload_agreement.py::test_a_live_leaf_above_the_fourier_limit_is_refused_and_the_graph_still_saves
@@ -2887,6 +2953,10 @@ claims:
     - tests/api/test_params_writes_are_checked_together.py::test_a_combination_the_constructor_refuses_is_refused_naming_its_keys
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_value_the_constructor_refuses_at_this_timestep_is_not_loaded
     - tests/core/test_hybrid_node.py::test_a_rest_write_to_a_hybrid_is_checked_against_the_node_it_wraps
+    - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_write_back_after_a_fit_is_asked_with_the_fitted_values
+    - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_single_key_written_back_after_a_load_is_asked_with_the_loaded_values
+    - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_two_key_write_back_after_a_load_is_asked_with_the_loaded_values
+    - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_load_that_puts_a_leaf_back_to_the_nodes_own_value_is_asked_with_the_live_values
   status: verified
   notes: MADD-ANO-048 is partially_resolved; its residual risk (a write that does not come through the route) is outside this inventory.
   domains:
@@ -3033,6 +3103,7 @@ claims:
     - tests/api/test_params_endpoint_validation.py::test_put_string_for_live_float_is_400_and_writes_nothing
     - tests/api/test_params_endpoint_validation.py::test_put_null_for_live_float_is_400
     - tests/api/test_graph_endpoint_validation.py::test_put_params_boolean_for_numeric_leaf_is_400
+    - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_write_of_the_live_value_changes_nothing_and_is_a_200
   status: verified
   domains:
     loopback_bind: tests/api/test_params_endpoint_validation.py::test_put_rejects_whole_request_when_a_later_key_is_invalid
@@ -3355,6 +3426,8 @@ claims:
     - tests/property/test_differential_rest_params.py::test_a_rest_write_into_a_coupled_member_with_a_param_spec_runs_as_its_reload
     - tests/property/test_differential_rest_params.py::test_a_rest_param_write_to_a_costly_node_is_refused_whole_or_runs_as_its_reload
     - tests/property/test_differential_rest_params.py::test_a_rest_param_write_into_a_generated_graph_is_refused_whole_or_runs_as_its_reload
+    - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_write_back_the_live_values_take_is_still_a_200_whose_save_reloads
+    - tests/api/test_params_write_back_to_the_nodes_own_value.py::test_a_single_key_written_back_after_a_load_is_asked_with_the_loaded_values
   status: verified
   domains:
     loopback_bind: tests/property/test_differential_rest_params.py::test_a_rest_param_write_is_refused_whole_or_runs_as_its_reload
@@ -3397,6 +3470,9 @@ claims:
     - tests/property/test_stateful_api.py::test_arbitrary_rest_sequences_keep_the_server_and_the_model_in_step
     - tests/property/test_stateful_api.py::test_params_written_before_the_first_compile_survive_a_reset
     - tests/api/test_profile_endpoints.py::test_a_graph_that_cannot_compile_is_a_400_and_the_state_is_kept
+    - tests/api/test_state_writes_refuse_what_other_surfaces_refuse.py::test_an_integer_field_refuses_what_its_dtype_cannot_hold_exactly
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_host_port_of_a_latin1_superscript_is_refused_not_a_500
   status: verified
   notes: The promise is stated in the test module, not in a user document; the row is here so the next audit attacks it with the rest.
   domains:
@@ -3889,9 +3965,11 @@ claims:
     after both exist, the checkpoint first and its manifest last: a save
     refused before that (400, "nothing was written") leaves any earlier file
     of either name as it was, and a name that is not a file is refused
-    before anything is written.  If only the manifest's move fails, the 400
-    says the checkpoint was written without it ...  No 4xx detail names the
-    server's absolute paths."
+    before anything is written. If only the manifest's move fails, the 400
+    says the checkpoint was written without it ... No 4xx detail names the
+    server's absolute paths"; a 200 reply does: /checkpoint/save's path is
+    the file's absolute path on the server, as the JAX trace routes' log_dir
+    is.
   sources:
     - src/maddening/api/README.md:147 (Checkpoints)
     - src/maddening/api/server.py:3467 (checkpoint_save)
@@ -3906,6 +3984,7 @@ claims:
     - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_every_name_the_filesystem_holds_saves_with_its_manifest
     - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_name_too_long_is_refused_before_any_directory_is_made
     - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_refused_after_its_directories_were_made_removes_them
+    - tests/api/test_checkpoint_save_is_all_or_nothing.py::test_a_save_reply_names_the_file_by_its_absolute_server_path
   status: verified
   notes: >-
     Failing in the first edition: the manifest was written beside the target
@@ -4414,13 +4493,25 @@ claims:
     - benchmarks/multigpu/README.md:379 (5. Read the result)
     - benchmarks/multigpu/run_pod.py:3483 (summarise)
     - benchmarks/multigpu/run_pod.py:2719 (_load_results)
-  conditions: a goal file a killed run left truncated; one that is valid JSON but a list, null or a string; an empty file; one not in UTF-8; a goal-named file (halo_rerun.json) holding {}, an object with no goal, or another goal's record.
+  conditions: >-
+    a goal file a killed run left truncated; one that is valid JSON but a
+    list, null or a string; an empty file; one not in UTF-8; a goal-named
+    file (halo_rerun.json) holding {}, an object with no goal, or another
+    goal's record; a JSON object with a field of another type (environment
+    null or a string, its jax, platform or device_kinds null, checks null, a
+    check that is a string, a result that is null, n_devices [4], a config
+    that is a list, a value past the float range), and one field of any
+    record changed to a JSON value of any shape or deleted (generated); a
+    table value past the float range.
   oracle: summarise's return value and the file named as unreadable in its output.
   tests:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_truncated_goal_file_reads_invalid_and_the_summary_exits_3
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_goal_file_that_is_not_an_object_reads_invalid_and_the_summary_exits_3
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_any_goal_file_that_is_not_a_json_object_reads_invalid_naming_the_file
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_goal_named_file_that_records_another_goal_reads_invalid
+    - tests/cloud/multigpu/test_run_pod_summary_reads_any_goal_file.py::test_a_goal_file_of_any_shape_gets_a_verdict_not_a_traceback
+    - tests/cloud/multigpu/test_run_pod_summary_reads_any_goal_file.py::test_each_mistyped_field_the_audit_named_reads_invalid
+    - tests/cloud/multigpu/test_run_pod_summary_reads_any_goal_file.py::test_a_table_value_past_the_float_range_leaves_the_file_out_of_the_tables
   status: verified
   notes: >-
     Failing in the first edition: json.load and doc.get were called on every
@@ -4503,6 +4594,7 @@ claims:
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_recorded_commit_that_is_not_a_sha_counts_as_none
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_recorded_commit_that_is_not_a_sha_is_no_commit
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_summarise_exits_4_when_no_file_records_a_commit
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_only_a_full_sha_counts_as_a_recorded_commit
   status: verified
   notes: failing until fix/p4-13-rest (#205), which recorded "HEAD" as the commit of every file.
   domains:
@@ -4726,6 +4818,7 @@ claims:
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_check_status_rederives_pass_fail_from_the_value_and_limit
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_summarise_does_not_trust_a_recorded_pass
     - tests/cloud/multigpu/test_run_pod_dry_run.py::test_summarise_exits_3_and_lists_a_failed_check
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_non_finite_value_fails_a_less_or_equal_check
   status: verified
   domains:
     loopback_bind: n/a
@@ -4757,7 +4850,10 @@ claims:
     - benchmarks/multigpu/run_pod.py:99 (module docstring)
     - benchmarks/multigpu/run_pod.py:2919 (record_problems)
     - benchmarks/multigpu/README.md:397 (5. Read the result)
-  conditions: a committed real dry-run record relabelled as a 4-GPU run, each seed corrupting it one way.
+  conditions: >-
+    a committed real dry-run record relabelled as a 4-GPU run, each seed
+    corrupting it one way; a file with no checks key (a schema-2
+    file), alone and beside a valid file of its goal.
   oracle: the relabelled record closes all six items; each seed reopens exactly the items it touches and names the file and the reason.
   tests:
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_recorded_dry_run_is_evidence_this_runner_would_write
@@ -4765,6 +4861,7 @@ claims:
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_a_corrupted_record_reopens_the_items_it_decides_and_says_why
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_order_of_a_files_checks_is_not_evidence
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_summarise_lists_a_record_that_cannot_decide_and_exits_3
+    - tests/cloud/multigpu/test_run_pod_summary_reads_any_goal_file.py::test_a_goal_file_with_no_checks_reads_invalid_and_the_summary_exits_3
   status: verified
   domains:
     loopback_bind: n/a
@@ -4917,6 +5014,7 @@ claims:
     - tests/cloud/multigpu/test_run_pod_verdict_integrity.py::test_the_transport_ranking_uses_only_a_file_that_passes
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_row_decides_on_its_requested_size_measured_at_no_fewer_cells
     - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_the_speedup_is_rederived_from_the_medians_and_must_be_finite
+    - tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_row_measured_one_cell_short_of_its_request_never_decides
   status: verified
   notes: >-
     Failing in the round-7 audit: with the default --synthetic grid the
@@ -5236,7 +5334,10 @@ claims:
     The checklist: item 1 decided by stencil and forward, 2 by halo, 3 by
     stencil, gradient and coupled, 4 by hybrid, 5 by indivisible, 6 by
     coupled; "Every goal's checks are now a pure function of its recorded
-    results (GOAL_CHECKS), which the runner and --summarise share".
+    results (GOAL_CHECKS), which the runner and --summarise share". Item 3's
+    sharded_cg rows compare the library's solver with and without a mesh,
+    run on run_pod's own sharded matvec: they test placement and that
+    matvec, not the solver or its adjoint.
   sources:
     - benchmarks/multigpu/README.md:21 (The sharding checklist)
     - benchmarks/multigpu/run_pod.py:231 (CHECKLIST)
@@ -5486,15 +5587,26 @@ claims:
   claim: >-
     A token with whitespace before or after it raises, from the token=
     argument and from MADDENING_API_TOKEN alike: "a client's Authorization
-    header is read stripped, so no client could ever present it".
+    header is read stripped, so no client could ever present it"; so does a
+    token holding a character that is not printable ASCII, which no client
+    can present either (header bytes are decoded as latin-1), named by the
+    character and not the token.
   sources:
     - src/maddening/api/README.md:49 (The token)
     - src/maddening/api/auth.py:33 (module docstring, Where the token comes from)
     - src/maddening/api/auth.py:370 (APIAuth.__init__)
-  conditions: a trailing space, a leading space, a trailing newline, a leading tab, on token= and in the environment; whitespace inside a token (taken, and presented).
+    - src/maddening/api/auth.py:457 (APIAuth.__init__, a token no client can present)
+  conditions: >-
+    a trailing space, a leading space, a trailing newline, a leading tab, on
+    token= and in the environment; whitespace inside a token (taken, and
+    presented); Cyrillic and latin-1 letters, an emoji, a tab, DEL and a
+    no-break space inside a token; every printable ASCII character (taken,
+    and presented).
   oracle: ValueError naming the whitespace; 200 with the inner-space token.
   tests:
     - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_with_whitespace_around_it_is_refused_at_construction
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_token_no_client_can_present_is_refused_at_construction
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_printable_ascii_token_is_taken_and_can_be_presented
   status: verified
   notes: Found by the round-7 audit, where such a token locked out every client with a 401 and nothing said at start-up.
   domains:
@@ -5580,5 +5692,285 @@ claims:
     wrapper_nodes: n/a
     checkpoint_restore: n/a
     dry_run_cpu: tests/cloud/multigpu/test_run_pod_documented_edges.py::test_a_dry_run_is_pinned_whenever_the_parser_reads_one
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: REST-110
+  area: graph
+  claim: >-
+    POST /graph/nodes and GraphManager.add_node refuse a node named for a
+    key the graph reserves for its own state and checkpoints -- _meta,
+    _params, _params_mappings -- as "Node name ... is invalid", as they
+    refuse the other reserved names; a lookalike (meta, __meta, _Meta,
+    _meta_, params) is taken.
+  sources:
+    - src/maddening/core/graph_manager.py:6601 (GraphManager.add_node)
+    - src/maddening/core/graph_manager.py:2619 (_RESERVED_STATE_KEYS)
+  conditions: >-
+    each reserved name over REST and in-process; seven lookalikes; the graph
+    compiles, steps and saves after a refusal.
+  oracle: >-
+    400 and ValueError naming the name as invalid, no node added; 201 and a
+    graph that steps for a lookalike.
+  tests:
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_reserved_state_key_is_refused_as_a_node_name
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_lookalike_of_a_reserved_key_is_taken
+  status: verified
+  domains:
+    loopback_bind: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_reserved_state_key_is_refused_as_a_node_name
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_reserved_state_key_is_refused_as_a_node_name
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: REST-111
+  area: graph
+  claim: >-
+    A node whose timestep is not a finite number > 0 is refused: POST
+    /graph/nodes answers 422 from its request model -- encoded without a 500
+    even when the refused value is NaN or Infinity -- and adds nothing, and
+    GraphManager.add_node raises ValueError ("timestep must be a finite
+    number > 0") for every caller.
+  sources:
+    - src/maddening/api/server.py:599 (AddNodeRequest)
+    - src/maddening/api/server.py:3211 (_request_validation_error)
+    - src/maddening/core/graph_manager.py:6582 (GraphManager.add_node)
+  conditions: >-
+    NaN, Infinity, -Infinity, 0, 0.0, -0.0, -0.01 and -1e308 over REST, and
+    NaN, the infinities, zero and a negative timestep in-process; 0.005
+    taken.
+  oracle: >-
+    422 whose body parses, naming the timestep, and no node; ValueError and
+    the graph unchanged; 201 for a valid timestep.
+  tests:
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_add_node_refuses_a_timestep_that_is_not_a_finite_positive_number
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_finite_positive_timestep_is_taken
+  status: verified
+  domains:
+    loopback_bind: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_a_timestep_that_is_not_a_finite_positive_number_is_refused
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: REST-112
+  area: checkpoint
+  claim: >-
+    POST /checkpoint/load and GraphManager.load_state check every archive
+    member's name, shape and dtype from its .npy header before reading any
+    member's data, and never read a member the load does not restore: what a
+    load reads is bounded by the live graph's own sizes.
+  sources:
+    - src/maddening/core/simulation/checkpoint.py:402 (_CheckpointArchive)
+    - src/maddening/core/simulation/checkpoint.py:196 (_load_from_archive)
+  conditions: >-
+    an extra node member declaring 1 GiB that holds no data; a state field
+    and a params leaf declaring another shape; members a load ignores (an
+    unknown params owner or key, a stale _meta key); text, object, damaged
+    and non-npy members; a valid checkpoint, each member it restores read
+    once; the route on a loopback bind.
+  oracle: >-
+    ValueError or CheckpointFormatError (a 400 over REST) with no member's
+    data read; the members a valid load restores read once each.
+  tests:
+    - tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_an_extra_node_is_refused_before_any_member_is_read
+    - tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_a_field_of_another_shape_is_refused_from_its_header
+    - tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_a_params_leaf_of_another_shape_is_refused_from_its_header
+    - tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_members_the_load_ignores_are_never_read
+    - tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_a_member_of_text_is_refused_from_its_header
+    - tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_a_member_that_is_not_a_plain_array_is_not_a_checkpoint
+    - tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_a_valid_checkpoint_reads_each_member_it_restores_once
+    - tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it
+  status: verified
+  domains:
+    loopback_bind: tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_the_rest_route_refuses_the_archive_without_reading_it
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_a_member_that_is_not_a_plain_array_is_not_a_checkpoint
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: tests/core/test_checkpoint_load_reads_nothing_before_it_checks_names_and_shapes.py::test_a_valid_checkpoint_reads_each_member_it_restores_once
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: REST-113
+  area: runner
+  claim: >-
+    POST /sim/start on a graph with no nodes is a 409 ("The graph has no
+    nodes, so there is nothing to run") and starts no runner; it answered
+    "started", and the runner's thread died on its first frame.
+  sources:
+    - src/maddening/api/server.py:4417 (sim_start)
+  conditions: >-
+    a server built on an empty graph; then one node added, the runner
+    started and stopped.
+  oracle: >-
+    409 and no runner alive; pause answers that the runner is not started;
+    200 once a node is added.
+  tests:
+    - tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_starting_the_runner_on_a_graph_with_no_nodes_is_refused
+  status: verified
+  domains:
+    loopback_bind: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_starting_the_runner_on_a_graph_with_no_nodes_is_refused
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_starting_the_runner_on_a_graph_with_no_nodes_is_refused
+    concurrent: n/a
+    runner_active: tests/api/test_new_nodes_need_a_usable_name_and_timestep.py::test_starting_the_runner_on_a_graph_with_no_nodes_is_refused
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: REST-114
+  area: auth
+  claim: >-
+    The library's own launch paths -- the cloud entrypoint and the shipped
+    example servers -- pass proxy_headers to uvicorn: False, or in the
+    entrypoint True only when the operator sets uvicorn's
+    FORWARDED_ALLOW_IPS; the docs say loopback must not be configured as a
+    trusted proxy.
+  sources:
+    - src/maddening/cloud/entrypoint.py:111 (main, uvicorn.run)
+    - src/maddening/api/README.md:43 (Security)
+    - src/maddening/api/auth.py:30 (module docstring, the peer)
+  conditions: >-
+    every uvicorn.run and uvicorn.Config call under src/maddening, the
+    scripts the examples write out included (a static check).
+  oracle: >-
+    each call passes proxy_headers, a literal False or the
+    FORWARDED_ALLOW_IPS opt-in.
+  tests:
+    - tests/api/test_forwarded_headers_cannot_name_a_trusted_peer.py::test_every_launch_path_the_library_ships_passes_proxy_headers
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: REST-115
+  area: auth
+  claim: >-
+    The browser's WebSocket credential is read whether the server passes the
+    offered subprotocols as the list ASGI specifies or as one comma-joined
+    entry (uvicorn 0.50.0 does), and maddening.v1 is selected either way.
+  sources:
+    - src/maddening/api/auth.py:338 (bearer_from_subprotocols)
+    - src/maddening/api/server.py:2037 (_offered_subprotocols)
+  conditions: >-
+    a comma-joined entry carrying the token, and one carrying a wrong token,
+    on a non-loopback bind; the list form.
+  oracle: >-
+    the handshake accepted with maddening.v1 selected; refused with a wrong
+    token.
+  tests:
+    - tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_comma_joined_subprotocol_entry_still_carries_the_browser_token
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_comma_joined_subprotocol_entry_still_carries_the_browser_token
+    token_enforced: tests/api/test_auth_and_host_rules_hold_at_their_edges.py::test_a_comma_joined_subprotocol_entry_still_carries_the_browser_token
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: n/a
+    relabelled_records: n/a
+    mixed_commits: n/a
+
+- id: RPD-039
+  area: run_pod-cli
+  claim: >-
+    A goal run's exit status says what happened: "0 = no check failed; 1 = a
+    check failed (the log names it on a CHECK FAILED line); 2 = the runner
+    refused the run (an option it does not take, more devices than are
+    visible, a device count or a --mesh it cannot use; the reason is the
+    last line); 5 = a goal raised (its traceback, then a CRASHED line); 124
+    = the time box ran out"; section 3 stops on each; --summarise's statuses
+    (0, 1, 3, 4) are its own.
+  sources:
+    - benchmarks/multigpu/README.md:249 (2b. The goals, in this order)
+    - benchmarks/multigpu/run_pod.py:3894 (exit_status)
+    - benchmarks/multigpu/run_pod.py:216 (EXIT_REFUSED, EXIT_CRASHED)
+  conditions: >-
+    every run a dry run: a refusal (more devices than are visible), a goal
+    replaced by one that raises, with and without --keep-going, a failed and
+    a passing check, an option it does not take, and a --mesh file that does
+    not exist in a real process; the runbook's sections 2b and 3.
+  oracle: >-
+    the status, the last line of stderr, and the runbook's text.
+  tests:
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_the_statuses_are_distinct_from_a_failed_check_and_from_the_summarys
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_refusal_exits_refused_with_its_reason_last
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_goal_that_raises_exits_crashed_after_its_traceback
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_with_keep_going_a_raise_is_a_failed_check_and_exits_1
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_failed_check_still_exits_1_and_a_pass_0
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_an_option_it_does_not_take_still_exits_2
+    - tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_the_process_exit_status_of_a_crash
+    - tests/compliance/test_run_pod_runbook_agrees_with_the_runner.py::test_the_runbooks_exit_statuses_are_the_runners
+  status: verified
+  domains:
+    loopback_bind: n/a
+    non_loopback_bind: n/a
+    token_enforced: n/a
+    no_token: n/a
+    concurrent: n/a
+    runner_active: n/a
+    sim_run_active: n/a
+    large_payload: n/a
+    hostile_input: n/a
+    shutdown: n/a
+    wrapper_nodes: n/a
+    checkpoint_restore: n/a
+    dry_run_cpu: tests/cloud/multigpu/test_run_pod_exit_status_says_what_happened.py::test_a_refusal_exits_refused_with_its_reason_last
     relabelled_records: n/a
     mixed_commits: n/a

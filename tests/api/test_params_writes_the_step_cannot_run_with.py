@@ -23,7 +23,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api.server import (
     MAX_NODE_PARAM_INT,

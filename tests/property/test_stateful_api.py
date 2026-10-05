@@ -32,7 +32,7 @@ from pathlib import Path
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,

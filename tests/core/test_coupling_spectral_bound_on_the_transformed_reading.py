@@ -193,6 +193,80 @@ def test_the_bound_holds_in_the_returned_readings_weights_on_a_growing_pair(gain
     _assert_bound_holds(d, true, ("growing", gain))
 
 
+def test_the_arnoldi_through_an_identity_reading_is_the_plain_arnoldi():
+    """``_arnoldi_through`` with the reading the state itself is ``arnoldi_spectral_radius``.
+
+    Radius, Arnoldi residual and resolvent norm agree to rounding, where
+    the start vector's Krylov space breaks down too: the start lies in one
+    invariant block (radius 0.5), the residual in the other (0.9), and the
+    space continues from the residual's direction, carried with its
+    preimage.  Without the residual only the start's block is seen.
+    """
+    from maddening.core.coupling.acceleration import _arnoldi_through, arnoldi_spectral_radius
+
+    A = np.zeros((5, 5), F32)
+    A[:2, :2] = [[0.5, 0.2], [0.0, 0.3]]
+    A[2:, 2:] = [[0.9, 0.3, 0.0], [0.0, 0.1, 0.0], [0.0, 0.0, -0.4]]
+    A = jnp.asarray(A)
+    start = jnp.asarray([1.0, 1.0, 0.0, 0.0, 0.0], jnp.float32)
+    residual = jnp.asarray([0.0, 0.0, 1.0, 1.0, 1.0], jnp.float32)
+
+    def matvec(v):
+        return A @ v
+
+    plain = arnoldi_spectral_radius(matvec, start, v_extra=residual)
+    through = _arnoldi_through(matvec, lambda v: v, start, extra=(residual, residual))
+    for name, a, b in zip(("rho", "residual", "amplification"), plain, through):
+        assert float(b) == pytest.approx(float(a), rel=1e-5, abs=1e-6), name
+    assert float(through[0]) == pytest.approx(0.9, rel=1e-5)
+    alone = _arnoldi_through(matvec, lambda v: v, start)
+    assert float(alone[0]) == pytest.approx(0.5, rel=1e-5)
+
+
+#: ``(gA, cA, gB, cB, a0, b0)``: B's value stays inside the dead band
+#: (``|b| <= atol``) and drives A through a large gain; the loop gain is 0.5
+#: and 0.8.  In the second, A's first pass returns its start exactly.
+_DEAD_BANDED = {
+    "moving": (1e4, 0.5, 5e-5, 5e-5, 0.5, 1e-5),
+    "read-edge-at-rest": (2e3, 1.0, 4e-4, 1e-4, 3.0, 1e-3),
+}
+_DEAD_BAND = 1e-2
+
+
+@pytest.mark.parametrize("case", sorted(_DEAD_BANDED))
+def test_a_dead_banded_transformed_edge_is_folded_into_the_bound(case):
+    """An edge the dead band excludes still drives the edge the norm reads.
+
+    ``|b| <= atol`` takes B's value out of the interface norm, but A is
+    ``gA * b + cA`` with a large gain, so B's unread change is most of A's
+    distance to its fixed point.  The analysis folds the unread share of
+    the residual into the factor, on the reading as on the state's fields:
+    against the read residual, or, where that is exactly zero (A has not
+    moved between the two passes the norm compared), against the reading's
+    float floor.  Without the fold the bound reads 0.23x the distance of
+    the edge the norm reads; without the floor it is ``inf``.
+    """
+    gA, cA, gB, cB, a0, b0 = _DEAD_BANDED[case]
+    gm = GraphManager()
+    gm.add_node(_LinVec("A", [gA], [cA], [a0]))
+    gm.add_node(_LinVec("B", [gB], [cB], [b0]))
+    gm.add_edge("A", "B", "u", "inp", transform="extract_first")
+    gm.add_edge("B", "A", "u", "inp", transform="extract_first")
+    gm.add_coupling_group(["A", "B"], max_iterations=2, convergence_norm="interface", rtol=RTOL,
+                          atol=_DEAD_BAND, diagnostics=True, iteration_mode="jacobi")
+    gm.compile()
+    gm.step()
+    d = gm.coupling_diagnostics()[KEY]
+    gA, cA, gB, cB = (float(F32(v)) for v in (gA, cA, gB, cB))
+    a_star = (gA * cB + cA) / (1.0 - gA * gB)
+    a = np.asarray(gm.get_node_state("A")["u"], np.float64)
+    b = float(np.asarray(gm.get_node_state("B")["u"], np.float64)[0])
+    assert abs(b) <= _DEAD_BAND < abs(a[0]), (a, b)          # the fixture premise
+    true = _rms_over_own_magnitude([(a, np.asarray([a_star]))])
+    assert d["spectral_usable"], dict(d)
+    _assert_bound_holds(d, true, ("dead band", case))
+
+
 # Per push: tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures
 @pytest.mark.slow
 @pytest.mark.parametrize("acceleration", ["none", "fixed", "aitken", "iqn-ils"])

@@ -279,3 +279,19 @@ def test_strict_convergence_names_a_state_beyond_its_dtypes_range():
     with pytest.raises(Exception, match="state is non-finite") as info:
         gm.step()
     assert "Raise max_iterations" not in str(info.value)
+
+
+def test_a_single_pass_names_its_cause_from_the_state_too():
+    """``max_iterations=1`` takes the same rule through its own path.
+
+    One pass of a pair forced with NaN leaves a non-finite state, and the
+    message names it; one pass of a finite pair is told to raise the cap.
+    """
+    gm = _relay_pair(jnp.float32, c=float("nan"), max_iterations=1, strict_convergence=True)
+    with pytest.raises(Exception, match="state is non-finite") as info:
+        gm.step()
+    assert "Raise max_iterations" not in str(info.value)
+    gm = _relay_pair(jnp.float32, max_iterations=1, strict_convergence=True)
+    with pytest.raises(Exception, match="Raise max_iterations") as info:
+        gm.step()
+    assert "non-finite" not in str(info.value)

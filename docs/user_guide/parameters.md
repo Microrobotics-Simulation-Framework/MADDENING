@@ -335,6 +335,22 @@ gm.constrain(u)            # back to physical values, always inside bounds
 gm.check_params(p)         # ValueError naming the first leaf out of range
 ```
 
+`gm.constrain(gm.unconstrain(p))` returns `p` to the transform's own
+resolution, which its bounds set and not the value: within 16 of its
+spacings -- `eps * max(|lo|, |hi|, hi - lo)` for `logit`, `eps * |lo|` for
+`log` -- plus 16 `eps` of the value, because the maps rebuild the value as
+`lo + ...` in the leaf's dtype.  Under bounds far
+wider than the value that is coarse -- a float32 `2.0` under `logit`
+bounds `(-1e6, 1e6)` comes back up to 0.12 away, and not at the same
+float from eager and jitted code -- so give a transformed parameter
+bounds near its own size, or `transform=None`.  The fitters make that map
+once per iterate, run the model on the arrays it returns and hand those
+arrays back, so what they report is always the loss of what they return;
+and they warn (`PrecisionLimitWarning`, naming the leaf) about a
+parameter they are asked to fit whose value its transform resolves to
+worse than `sqrt(eps)` of itself.  A leaf a fit does not move is never
+passed through its transform at all.
+
 ## System identification: `maddening.sysid`
 
 <!-- snippet: continues -->
@@ -591,13 +607,44 @@ bound converges on either bound.  A float32 constant in an x64 graph is
 optimised on float32's grid, as the model sees it, so it converges in as
 few iterations as a float64 one.
 
-Every fitter keeps each optimiser coordinate where `constrain` is its
-transform and not a clamp: a `transform=None` leaf inside its bounds,
-and a `log` / `logit` leaf short of where `exp` floors or overflows and
-the sigmoid meets the edge of its representable range.  Past those the
-derivative is 0, and a coordinate one step carried there used to stay
-there: a spring's damping started at 4 against a truth of 0.05 landed on
-0 and `fit_lm` called it converged.
+Every fitter keeps each optimiser coordinate where its transform can be
+stepped on: a `transform=None` leaf inside its bounds (clipped, with the
+one-sided derivative on a bound), and a `log` / `logit` leaf at least
+`sqrt(eps)` of its bounds' own size inside each bound (3.5e-4 of the
+range in float32, 1.5e-8 in float64), and short of where `exp` floors or
+overflows.  Nearer a bound than that the transform is flat to the working
+precision: the distance to the bound has lost half its digits, and a unit
+step of the coordinate moves the value by a few float spacings.  So **a
+`log` / `logit` parameter cannot be fitted onto its bound**: a fit that
+ends on that margin -- its data pull the parameter to the bound, or it
+started out there and could not come back within its budget -- says so in
+a `RuntimeWarning` naming the parameter.  Declare a parameter that belongs
+on its bound with `transform=None`, which clips and can sit there.
+
+`fit_lm` reads each step of a `log` / `logit` coordinate along the
+transform's curve or along its tangent, whichever moves the value less.
+The two agree to first order.  Where the transform is flat, the tangent's
+reading is the step the same parameter would take under `transform=None`,
+so a coordinate at the edge of its range comes back in one step; where a
+step heads for a bound, the curve's closes the distance by a factor of
+*e* at most and never lands on it.  So wherever the same fit with the
+parameter clipped instead of transformed recovers its optimum, the
+transformed one does too, from any start its bounds allow.  `fit` and
+`fit_multiple_shooting` step a coordinate by about `lr` whatever the
+gradient, so they leave such an edge only over about `8 / lr` updates in
+float32 and `18 / lr` in float64 (more while the coordinate's gradient is
+below Adam's `eps` of the largest); they name a parameter started there
+before they run.
+
+Until 0.4.0's fix a coordinate one step carried to such an edge stayed
+there.  A `transform=None` damping started at 4 against a truth of 0.05
+landed on 0 and `fit_lm` called it converged.  A `logit` coordinate's
+range ended where its derivative was a few `eps` of the bounds, from
+where every Levenberg-Marquardt candidate, `1/eps` long, landed on the
+opposite edge: under x64 on the spring above, a damping bounded to
+`(0.5, 2)` came back 2.0 for a truth of 1.9 from 20 of 60 starts, not
+converged and without a word, where the same fit with the bounds clipped
+recovered the truth from every one.
 
 For noisy data, `fit_multiple_shooting` replaces teacher forcing with
 free per-window initial states and a continuity penalty

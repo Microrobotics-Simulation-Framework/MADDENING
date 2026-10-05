@@ -561,20 +561,23 @@ def test_every_fitter_on_the_spring_converged_means_the_truth(truth, start, fitt
 
 from tests.property import sysid_transform_grid as grid  # noqa: E402
 
-#: Cells of the audit's reproducer that ended on a bound, as ``(x64, the
-#: damping the data hold, bounds, the damping's start, the stiffness's start
-#: over its truth)``.  Under x64 the trap needed nothing but the guide's own
-#: start; in float32 it needed the stiffness started further off.
+#: Cells of the audit's reproducer that ended on a bound, as ``(precision,
+#: the damping the data hold, bounds, the damping's start, the stiffness's
+#: start over its truth)``.  Under x64 the trap needed nothing but the
+#: guide's own start; in float32 it needed the stiffness started further
+#: off.  ``mixed`` is float32 leaves in an x64 graph.
 _EDGE_TRAP_CELLS = {
     # The traced one: 2.0 for a truth of 1.9 in (0.5, 2), n_iter 4.
-    "x64-upper-edge-from-the-guides-start": (True, 1.9, (0.5, 2.0), 0.6, 1.5),
+    "x64-upper-edge-from-the-guides-start": ("x64", 1.9, (0.5, 2.0), 0.6, 1.5),
+    "mixed-upper-edge-from-the-guides-start": ("mixed", 1.9, (0.5, 2.0), 0.6, 1.5),
     # Every start in (0, 10) ended on 10 for a truth of 9.5.
-    "x64-upper-edge-from-mid-range": (True, 9.5, (0.0, 10.0), 5.0, 1.5),
+    "x64-upper-edge-from-mid-range": ("x64", 9.5, (0.0, 10.0), 5.0, 1.5),
     # The lower edge: 3.6e-15 (1.9e-6 in float32) for a truth of 1.2 in (0, 4).
-    "x64-lower-edge": (True, 1.2, (0.0, 4.0), 0.2, 5.0 / 30.0),
-    "float32-lower-edge": (False, 1.2, (0.0, 4.0), 0.2, 5.0 / 30.0),
-    "float32-upper-edge": (False, 5.0, (0.0, 10.0), 9.5, 5.0 / 30.0),
-    "float32-upper-edge-stiffness-from-1000": (False, 5.0, (0.0, 10.0), 5.0, 1000.0 / 30.0),
+    "x64-lower-edge": ("x64", 1.2, (0.0, 4.0), 0.2, 5.0 / 30.0),
+    "float32-lower-edge": ("float32", 1.2, (0.0, 4.0), 0.2, 5.0 / 30.0),
+    "float32-upper-edge": ("float32", 5.0, (0.0, 10.0), 9.5, 5.0 / 30.0),
+    "float32-upper-edge-stiffness-from-1000": ("float32", 5.0, (0.0, 10.0), 5.0,
+                                               1000.0 / 30.0),
 }
 
 
@@ -585,13 +588,18 @@ def test_fit_lm_comes_back_from_the_edge_of_a_logit_range(cell):
     well inside it, where the same fit with the bounds clipped recovered the
     truth.  It comes back -- converged, at the truth -- and, not having
     ended on an edge, says nothing about one."""
-    x64, truth, bounds, start, other = _EDGE_TRAP_CELLS[cell]
-    with grid.precision(x64):
-        problem = grid.build_problem(masked=False, damping=truth)
+    kind, truth, bounds, start, other = _EDGE_TRAP_CELLS[cell]
+    with grid.precision(kind != "float32"):
+        problem = grid.build_problem(masked=False, damping=truth,
+                                     float32_leaves=kind == "mixed")
         result = grid.run_cell(problem, "fit_lm", "logit", "-", "-", other, bounds=bounds,
                                start_damping=start)
+        if kind == "mixed":
+            assert problem.truth["nodes"]["spring"]["damping"].dtype == np.float32
+            assert problem.truth["nodes"]["spring"]["mass"].dtype == np.float64
     assert result.control_ok, f"the control no longer recovers this cell: {result}"
     assert result.fit_ok and result.converged and not result.edge_warned, str(result)
+    assert not result.on_edge, str(result)
 
 
 #: Per push, the fitter and precision of the two tests below; the grid

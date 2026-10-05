@@ -181,12 +181,14 @@ class Problem:
         return mask
 
 
-def build_problem(masked: bool, damping: float = TRUTH) -> Problem:
+def build_problem(masked: bool, damping: float = TRUTH, float32_leaves: bool = False) -> Problem:
     """The spring at the current precision.  ``masked``: ``rest_length`` is
     left trainable under :data:`MASKED_OUT_SPEC` and kept out of the fit by
     ``mask=``; otherwise it is frozen by its spec and the fit takes the
     graph's own trainable set.  ``damping`` is the truth the record is
-    generated with (the grid's is :data:`TRUTH`)."""
+    generated with (the grid's is :data:`TRUTH`).  ``float32_leaves``, under
+    x64: the stiffness and the damping are float32 leaves of a float64 graph
+    (``ravel_pytree`` promotes the optimiser's vector around them)."""
     gm = GraphManager()
     gm.add_node(SpringDamperNode("spring", DT, initial_position=0.5, stiffness=STIFFNESS,
                                  damping=damping, mass=MASS, rest_length=REST_LENGTH))
@@ -202,6 +204,10 @@ def build_problem(masked: bool, damping: float = TRUTH) -> Problem:
             "position"][0]
 
     truth = jax.tree.map(lambda x: x, gm.params)
+    if float32_leaves:
+        for key in ("stiffness", "damping"):
+            truth["nodes"]["spring"][key] = jnp.asarray(truth["nodes"]["spring"][key],
+                                                        jnp.float32)
     measured = positions(truth)
     history = gm.run_scan_with_history(N_STEPS, params=truth)[1]
     gm.reset_state()

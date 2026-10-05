@@ -1606,10 +1606,10 @@ def _along_the_shorter(spec, u, v, box, interval, snap: float = 0.0):
     the range, so its tangent reading is that edge exactly.  A result
     within ``snap`` of an end *is* that end: read along the curve, a step
     for the edge lands short of it by its own square, so a coordinate
-    heading there closes on the end without arriving, and one that is not
-    exactly on it is not held as an active edge
-    (:class:`_CoordinateBounds` gives ``sqrt(eps)``, within which the value
-    is the end's to one spacing of the transform).
+    heading there closes on the end without arriving -- the run converges
+    a step tolerance short of it -- and one that is not exactly on the end
+    is neither held as an active edge nor named as having ended on one
+    (:class:`_CoordinateBounds` gives the default step tolerance's width).
     """
     (v_lo, v_hi), (u_lo, u_hi) = box, interval
     v = np.clip(v, v_lo, v_hi)
@@ -1697,11 +1697,13 @@ class _CoordinateBounds:
                     # others for a step it could not take, and a float32 fit
                     # crawled along the edge for its whole budget).
                     lo, hi = (float(np.asarray(x, leaf_dtype)) for x in (lo, hi))
-                    # Within ``sqrt(eps)`` of an end the value is that end's
-                    # to one spacing of the transform (the slope there is
-                    # ``sqrt(eps)`` of the bounds' size, the spacing ``eps``
-                    # of it): the coordinate is on the edge.
-                    snap = math.sqrt(float(np.finfo(leaf_dtype).eps))
+                    # Within ``2**4 * sqrt(eps)`` of an end the value is that
+                    # end's to ``2**4`` spacings of the transform (the slope
+                    # there is ``sqrt(eps)`` of the bounds' size, a spacing
+                    # ``eps`` of it) -- the default step tolerance, inside
+                    # which ``fit_lm`` calls a step nothing: the coordinate
+                    # is on the edge.
+                    snap = _STEP_TOL_ULPS * math.sqrt(float(np.finfo(leaf_dtype).eps))
                     curved.append((offset, offset + n, spec, (lo, hi), snap))
                 p_lo, p_hi = _physical_edges(spec, leaf_dtype, (lo, hi))
             los.append(np.full(n, lo))
@@ -1749,8 +1751,11 @@ class _CoordinateBounds:
         boxes = []
         for where, spec, (u_lo, u_hi), _ in self._curved:
             v_lo, v_hi = spec._tangent_box(u[where], u_lo, u_hi)  # noqa: SLF001
-            boxes.append((np.asarray(v_lo, dtype).astype(np.float64),
-                          np.asarray(v_hi, dtype).astype(np.float64)))
+            # A ``log`` value far below its ceiling has a box beyond the
+            # solver's dtype: no bound at all on that side.
+            with np.errstate(over="ignore"):
+                boxes.append((np.asarray(v_lo, dtype).astype(np.float64),
+                              np.asarray(v_hi, dtype).astype(np.float64)))
         return boxes
 
     def tangent_frame(self, theta):

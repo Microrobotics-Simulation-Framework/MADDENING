@@ -1785,6 +1785,125 @@ claims:
     checkpoint_restart: n/a
     sharded: n/a
 
+- id: SYS-133
+  area: fit_lm
+  claim: >-
+    "A step of a log / logit coordinate is read along the transform's curve
+    or along its tangent, whichever moves the value less ... Where the
+    transform is flat ... the tangent's is the shorter: the step the same
+    parameter would take under transform=None ... Where a step heads for a
+    bound the curve's is the shorter: it closes the distance by a factor of
+    e at most and never lands on the bound ... So wherever the same fit
+    with the parameter under transform=None and the same bounds recovers
+    its optimum, this one does too, from any start".
+  sources:
+    - src/maddening/sysid.py:5415 (fit_lm)
+    - src/maddening/sysid.py:1602 (_CoordinateBounds)
+    - src/maddening/core/params.py:486 (ParamSpec._tangent_box, _tangent_shift)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: >-
+    the guide's spring (stiffness 30, a damping, 100 noiseless position
+    samples), the damping under log, an offset log and logit, the truth
+    and the start each at 5%, 50% and 95% of the range and a few float
+    spacings inside each edge, the stiffness started 0.1, 0.5, 1.5, 10 and
+    30 times its truth, the third leaf frozen by its spec or left out by
+    mask=, float32 and float64: every cell for fit_lm (a truth on an edge
+    is recovered to the margin, with SYS-134's warning).  For fit and
+    fit_multiple_shooting, whose steps are not solved on a linear model and
+    are about lr whatever the gradient, the same holds on an annealed
+    schedule where the stiffness starts 0.1 to 1.5 times its truth -- from
+    10 or 30 times too stiff the loss has other basins, which Adam in a log
+    coordinate reaches and Adam in the value's own does not -- and a start
+    on an edge is named before the run (SYS-134).  A float32 leaf in an
+    x64 graph per push.  Not claimed for 16-bit floats.
+  oracle: >-
+    differential: the same fit with the damping under the identity
+    transform and the same bounds, which clips; the transform's closed form
+    to 60 digits for the two readings of a step.
+  tests:
+    - tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range
+    - tests/property/test_sysid_truth_recovery.py::test_a_start_on_the_edge_of_a_logit_range_comes_back
+    - tests/property/test_sysid_truth_recovery.py::test_the_transformed_fit_recovers_the_truth_wherever_its_control_does
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_step_is_read_along_the_shorter_of_the_curve_and_the_tangent
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_the_tangent_of_a_transform_is_its_own
+    - tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_an_identity_fit_is_stepped_exactly_as_before
+  status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): from the edge of a logit range, where dp/du
+    was about 4 eps of the bounds, every Levenberg-Marquardt candidate was
+    1/eps long in the coordinate and landed on the opposite edge, the
+    twelve damped retries with it; a fit that an early overshoot carried
+    there ended on its bound, converged=False, no warning -- 20 of 60
+    starts under x64 on the guide's spring, where the control recovered the
+    truth from all 60 (MADD-ANO-104).
+  domains:
+    f32: 'tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range[float32-upper-edge]'
+    f64: 'tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range[x64-upper-edge-from-the-guides-start]'
+    mixed_dtype: 'tests/property/test_sysid_truth_recovery.py::test_fit_lm_comes_back_from_the_edge_of_a_logit_range[mixed-upper-edge-from-the-guides-start]'
+    16bit: narrowed
+    jit: n/a
+    grad: tests/core/test_sysid_bounded_coordinates_and_residual_scale.py::test_a_step_is_read_along_the_shorter_of_the_curve_and_the_tangent
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: SYS-134
+  area: fitters
+  claim: >-
+    "a log / logit parameter cannot be fitted onto its bound: a fit that
+    ends on that margin -- its data pull the parameter to the bound, or it
+    started out there and could not come back within its budget -- says so
+    in a RuntimeWarning naming the parameter"; fit and
+    fit_multiple_shooting also name, before they run, a parameter started
+    on (or beyond) that margin.
+  sources:
+    - src/maddening/sysid.py:4890 (fit)
+    - src/maddening/sysid.py:1883 (_warn_starts_on_an_edge, _warn_on_an_edge)
+    - docs/user_guide/parameters.md (System identification)
+  conditions: >-
+    a truth a few float spacings inside a logit bound (fit_lm, float32 and
+    float64: the fit stops sqrt(eps) of the bounds' size inside the bound);
+    a loss that pushes a logit and a log coordinate onto their edges with
+    Adam steps of 50 (fit: float32, float64 and float32 leaves in an x64
+    graph); a multiple-shooting run started on the edge.  The Adam fitters
+    return their lowest-loss iterate, so a parameter the run's last iterate
+    held on an edge is named with the value returned for it.  Read from the
+    value, in every cell of SYS-133's grid: no fit ends on an edge of its
+    transform's range without the warning.  An Adam fit whose optimum is on
+    a bound closes on the margin without arriving (its step shrinks with
+    the gradient it remembers): it ends short of the edge, on no edge, and
+    is not named.  Not claimed for 16-bit floats.
+  oracle: >-
+    the warning's text (the fitter, the parameter, which edge, the
+    transform, the remedy); the returned value against the margin; the
+    control, which clips, sitting on the bound with no warning.
+  tests:
+    - tests/property/test_sysid_truth_recovery.py::test_a_fit_that_ends_on_the_edge_of_its_transform_says_so
+    - tests/property/test_sysid_truth_recovery.py::test_the_transformed_fit_recovers_the_truth_wherever_its_control_does
+    - tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64
+  status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): a fit that ended with a logit damping on its
+    bound gave no warning in any of 96 starts.
+  domains:
+    f32: 'tests/property/test_sysid_truth_recovery.py::test_a_fit_that_ends_on_the_edge_of_its_transform_says_so[fit_lm-float32]'
+    f64: 'tests/property/test_sysid_truth_recovery.py::test_a_fit_that_ends_on_the_edge_of_its_transform_says_so[fit_lm-x64]'
+    mixed_dtype: 'tests/core/test_sysid_claims_under_x64.py::test_log_and_logit_coordinates_stay_inside_when_pushed_hard_under_x64[mixed]'
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
 - id: SYS-059
   area: fitters
   claim: >-
@@ -3067,9 +3186,9 @@ claims:
   claim: >-
     "gm.constrain(u) # back to physical values, always inside bounds";
     constrain inverts unconstrain inside bounds "to the transform's own
-    resolution, which its bounds set and not the value: within a few
-    multiples of eps * max(|lo|, |hi|, hi - lo) for logit and of eps * |lo|
-    for log (of eps * p when lo is 0)"; both maps are jittable and
+    resolution, which its bounds set and not the value: within 16 of its
+    spacings -- eps * max(|lo|, |hi|, hi - lo) for logit, eps * |lo| for log
+    -- plus 16 eps of the value"; both maps are jittable and
     differentiable.
   sources:
     - docs/user_guide/parameters.md (ParamSpec)
@@ -3080,12 +3199,15 @@ claims:
     any coordinates, including extreme ones, for constrain landing inside
     bounds and unconstrain(constrain(u)) being finite, for bounds the
     leaf's dtype holds (others are refused, SYS-131); the inverse --
-    |constrain(unconstrain(p)) - p| <= 4 * (ParamSpec._resolution(dtype) +
+    |constrain(unconstrain(p)) - p| <= 16 * (ParamSpec._resolution(dtype) +
     eps * |p|), eager and under jax.jit, which need not return the same
     float -- for a p inside the clamp's interior, at least 4 * eps *
     max(|lo|, |hi|, hi - lo) from a logit bound (within that margin p comes
-    back on the clamp); bounds up to 1e6 times wider than the value, where
-    that resolution is 12% of a float32 value; list leaves. Not claimed for
+    back on the clamp), and values and bounds between 1e-6 and 1e6 in size
+    (a log value at the far ends of its dtype's range adds eps * |p| *
+    |log(p - lo)|: measured 4.4 of 16 over that range, 11 for logit in
+    float64); bounds up to 1e6 times wider than the value, where that
+    resolution is 12% of a float32 value; list leaves. Not claimed for
     mixed dtypes, 16-bit floats or vmap.
   oracle: the bounds; the round trip against the stated resolution; jax.jit and jax.grad.
   tests:
@@ -3144,6 +3266,54 @@ claims:
     f64: tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64
     mixed_dtype: tests/core/test_param_spec_edge_cases.py::test_a_wide_logit_spec_is_refused_on_a_graph_and_kept_for_float64
     16bit: tests/core/test_param_spec_edge_cases.py::test_a_log_bound_its_dtype_cannot_hold_is_refused
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: n/a
+    sub_cycled: n/a
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: n/a
+
+- id: SYS-135
+  area: fitters
+  claim: >-
+    "A fitted log / logit leaf is returned at the resolution of its
+    transform, which is set by its bounds and not by its value ... Where
+    that leaves fewer than half the working precision's digits of a value
+    -- more than sqrt(eps) of it: a float32 3.0 under logit bounds 1e4 wide
+    -- the fitters say so in a PrecisionLimitWarning naming the leaf, at
+    their start (and again for a leaf that only ends up so)".
+  sources:
+    - src/maddening/sysid.py:4742 (FitResult)
+    - src/maddening/sysid.py:1820 (_warn_unresolved_values)
+    - src/maddening/core/params.py:350 (ParamSpec._resolution)
+    - docs/user_guide/parameters.md (ParamSpec)
+  conditions: >-
+    a float32 damping of 3 fitted under logit bounds (0.5, 3.5) and
+    (-1e3, 1e3) (no warning: the spacing is under sqrt(eps) of the value)
+    and (-1e4, 1e4) and (-1e6, 1e6) (named, with the spacing and the
+    remedy).  Only a leaf the fit moves is judged: one it does not is never
+    passed through its transform (SYS-054).  A value of exactly 0 has no
+    magnitude to be relative to and is not judged.  Not claimed for
+    float64 (x64), mixed dtypes or 16-bit floats.
+  oracle: >-
+    the spacing eps * max(|lo|, |hi|, hi - lo) against sqrt(eps) of the
+    value; the warning's category and text.
+  tests:
+    - tests/property/test_sysid_one_evaluation.py::test_a_value_its_transform_cannot_resolve_is_named_at_the_start_of_the_fit
+    - tests/property/test_sysid_one_evaluation.py::test_best_loss_is_the_loss_of_the_parameters_returned_under_a_wide_logit
+  status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): SYS-104 said "to a few ulps" without saying
+    of what; under logit (-1e6, 1e6) a float32 fit placed a damping of 2 to
+    0.12 and said nothing.
+  domains:
+    f32: tests/property/test_sysid_one_evaluation.py::test_a_value_its_transform_cannot_resolve_is_named_at_the_start_of_the_fit
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
     jit: n/a
     grad: n/a
     vmap: n/a
@@ -3617,6 +3787,61 @@ claims:
     compile kept gm.params' value and compile() warned.
   domains:
     f32: tests/core/test_node_params_write_after_compile.py::test_the_later_of_two_disagreeing_writes_wins
+    f64: narrowed
+    mixed_dtype: narrowed
+    16bit: narrowed
+    jit: n/a
+    grad: n/a
+    vmap: n/a
+    multi_rate: narrowed
+    sub_cycled: narrowed
+    predictors_warm_starts: n/a
+    adaptive: n/a
+    checkpoint_restart: n/a
+    sharded: narrowed
+
+- id: SYS-136
+  area: params pytree
+  claim: >-
+    "The assignment is a write of the keys whose values it changes -- a key
+    added, dropped, or given another value, bit for bit -- and of no other:
+    the keys it hands back unchanged are the node's own values, not writes,
+    so a constant of that node you calibrated in gm.params stays calibrated
+    ... node.params = {**node.params, "k": v} with the v the node already
+    held writes nothing, while node.params["k"] = v is a write whatever the
+    value."
+  sources:
+    - docs/user_guide/parameters.md (Live values, recompiles and partial pytrees)
+    - src/maddening/core/node.py:148 (_ParamsDict, _succeed)
+    - src/maddening/core/graph_manager.py:5653 (_sync_node_param_writes)
+  conditions: >-
+    a calibrated constant beside the key assigned; a key handed back with
+    the value the node held; a keyed write pending on the mapping replaced
+    (also of an unchanged value), through two replacements; a list or
+    array value shared by the replacement, written in place before and
+    after it, replaced by an equal one and by a different one; a counting
+    mapping from elsewhere stored as it is; 400 generated sequences of
+    keyed writes, replacements, gm.params writes and reads against "the
+    later write wins".  Not claimed for float64 (x64), mixed dtypes, 16-bit
+    floats, multi-rate graphs, sub-cycled groups or sharded graphs.
+  oracle: >-
+    gm.params, the value the next step integrates with and the saved
+    configuration; a reference model of the two stores and the keys
+    written since the last sync.
+  tests:
+    - tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
+    - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_that_hands_a_key_back_unchanged_is_not_a_write_of_it
+    - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_carries_the_writes_the_old_mapping_had_pending
+    - tests/core/test_node_params_writes_are_observed.py::test_a_replacement_and_an_in_place_write_do_not_hide_each_other
+    - tests/core/test_node_params_writes_are_observed.py::test_a_counting_mapping_from_elsewhere_writes_the_keys_it_changes
+    - tests/core/test_node_params_writes_are_observed.py::test_the_later_write_wins_over_generated_sequences_of_writes
+  status: verified
+  notes: >-
+    Round 9 (B1, on e301c41): node.params = {**node.params, "damping": 5.0}
+    after a stiffness calibrated to 45 put the stiffness back to the node's
+    30, with no warning (MADD-ANO-179).
+  domains:
+    f32: tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
     f64: narrowed
     mixed_dtype: narrowed
     16bit: narrowed

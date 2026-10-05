@@ -1226,12 +1226,13 @@ class TestFIMMaskingAndScaling:
         largest (its default rank cutoff), which the conditioning
         magnifies into the smallest eigenvalue -- the one ``cond`` is
         divided by and the largest bound is the inverse of.  Each of the
-        two float32 runs rounds on its own; measured over 8000 draws the
-        two drift apart by at most 1.4 times that estimate, so they are
-        held to four times it.  A fixed 1e-3 on the bound was too tight
-        at the conditioning the test admits (up to 1e4, where the
-        estimate is about 5e-3) and far looser than the rounding on a
-        well-conditioned draw."""
+        two float32 runs rounds on its own; over 64 000 draws (jaxlib
+        0.10.2, 0.11.0 and 0.11.2) the two differ by at most 1.6 times
+        that estimate, in ``cond`` and in each bound, so they are held to
+        four times it.  A fixed 1e-3 on the bound was too tight at the
+        conditioning the test admits (up to 1e4, where the estimate is
+        about 5e-3; 19 of the 54 790 draws it admits failed it) and far
+        looser than the rounding on a well-conditioned draw."""
         residual, keys, theta = problem
         note(f"sigma={sigma}")
         params = {k: jnp.asarray(v, jnp.float32) for k, v in zip(keys, theta)}
@@ -1261,15 +1262,17 @@ class TestFIMMaskingAndScaling:
         assume(np.all(np.isfinite(crb_b)))
         # fim's rounding estimate for F's eigenvalues, relative to the
         # largest, magnified by the conditioning: the relative rounding of
-        # the smallest eigenvalue, hence of ``cond`` and of the largest
-        # bound (and, in norm, of every bound).
+        # the smallest eigenvalue, hence of ``cond`` -- and of every bound,
+        # each on its own: an error ``dF`` in F moves the bound
+        # ``(F^-1)_ii`` by ``e_i^T F^-1 dF F^-1 e_i``, at most
+        # ``(F^-1)_ii * ||dF|| / min(eigvals)``.
         drift = (max(len(keys), np.sqrt(n_res)) * float(np.finfo(np.float32).eps)
                  * float(base.cond))
         # A uniform rescaling cannot change which direction is weakest.
         assert np.isclose(scaled.cond, base.cond, rtol=4 * drift, atol=0.0), (
             scaled.cond, base.cond, drift)
         want = crb_b * sigma**2
-        assert np.allclose(crb_s, want, rtol=0.0, atol=4 * drift * np.abs(want).max()), (
+        assert np.allclose(crb_s, want, rtol=4 * drift, atol=0.0), (
             crb_s, want, drift)
 
 

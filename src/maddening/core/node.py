@@ -318,21 +318,34 @@ def _params_empty(params: Any) -> bool:
 def _signature_takes_keyword(fn: Any, keyword: str) -> bool:
     """Would calling ``fn(..., <keyword>=x)`` deliver ``x``?
 
-    True for a signature that names ``keyword`` and for one that forwards
-    ``**kwargs`` (``inspect.Parameter.VAR_KEYWORD``).  A signature that
-    cannot be inspected is ``False``: the refusals built on it fail
-    closed.  :func:`_signature_takes_params` is this rule for
-    ``params``; the sharded wrappers read it for ``static_padded`` and
-    ``shard_info`` too, so one spelling means the same thing for every
-    optional keyword a wrapper forwards.
+    True for a signature that names ``keyword`` as a parameter a keyword
+    can reach, and for one that forwards ``**kwargs``
+    (``inspect.Parameter.VAR_KEYWORD``).  A signature that cannot be
+    inspected is ``False``: the refusals built on it fail closed.
+    :func:`_signature_takes_params` is this rule for ``params``; the
+    sharded wrappers read it for ``static_padded`` and ``shard_info`` too,
+    so one spelling means the same thing for every optional keyword a
+    wrapper forwards.
+
+    A parameter of that name which a keyword cannot reach is ``False``:
+    positional-only (``def f(params, /)``, ``def f(params=None, /)``) or
+    the name of ``*args`` (``def f(*params)``).  Until 0.4.0 shipped the
+    name alone answered ``True`` for those, so the caller passed the
+    keyword and Python raised ``TypeError`` -- from inside the first
+    trace of a step, for a node.  The answer is now the one the question
+    has: such a hook takes no ``params`` keyword, and is treated as any
+    hook that does not (a node whose ``update`` needs the argument still
+    fails when it is called without it).
     """
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):
         return False
-    return keyword in sig.parameters or any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-    )
+    named = sig.parameters.get(keyword)
+    if named is not None and named.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
 
 
 def _signature_required_arguments(fn: Any) -> Optional[dict[str, bool]]:

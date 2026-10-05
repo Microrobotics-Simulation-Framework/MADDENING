@@ -103,6 +103,28 @@ def _legacy(method):
     return hook
 
 
+def _positional_only(method):
+    """Names ``params``, where no keyword reaches it."""
+    def hook(self, a, b, c, params=None, /):
+        return _impl(self, method, a, b, c, params=params)
+    return hook
+
+
+def _var_positional_named_params(method):
+    """``*params``: the name of the rest of the positional arguments."""
+    def hook(self, *params):
+        return _impl(self, method, *params)
+    return hook
+
+
+def _positional_only_beside_var_keyword(method):
+    """A positional-only ``params`` beside ``**kwargs``: the keyword is
+    delivered, through ``**kwargs``."""
+    def hook(self, a, b, c, params=None, /, **kwargs):
+        return _impl(self, method, a, b, c, **kwargs)
+    return hook
+
+
 def _no_wraps(fn):
     """A decorator that forgets ``functools.wraps``."""
     def inner(*args, **kwargs):
@@ -139,6 +161,9 @@ _CLASS_SPELLINGS = {
     "var_keyword": _var_keyword,
     "no_wraps": lambda m: _no_wraps(_explicit(m)),
     "legacy": _legacy,
+    "positional_only": _positional_only,
+    "var_positional_named_params": _var_positional_named_params,
+    "positional_only_beside_var_keyword": _positional_only_beside_var_keyword,
 }
 _INSTANCE_SPELLINGS = {
     "partial": lambda node, m: functools.partial(_impl, node, m),
@@ -353,6 +378,86 @@ def test_the_matrix_exercises_both_answers():
     truths = {(k, s): _delivers(_make(k, s), "update") for k, s in SPELLINGS}
     assert {v for v in truths.values()} == {True, False}
     assert not truths[("node", "legacy")] and not truths[("duck", "legacy")]
+
+
+def test_a_params_parameter_no_keyword_reaches_is_not_a_params_keyword():
+    """The rows this matrix lacked.  A hook that names ``params``
+    positional-only, or as ``*params``, was answered ``True`` by the name
+    alone, so the graph passed the keyword and Python raised ``TypeError``
+    from inside the first trace.  Calling with ``params=`` does not
+    deliver there, and beside ``**kwargs`` it does."""
+    truths = {(k, s): _delivers(_make(k, s), "update") for k, s in SPELLINGS}
+    for kind in ("node", "duck"):
+        assert not truths[(kind, "positional_only")]
+        assert not truths[(kind, "var_positional_named_params")]
+        assert truths[(kind, "positional_only_beside_var_keyword")]
+
+
+def _f_positional_only(a, /): ...
+def _f_positional_only_default(a=1, /): ...
+def _f_var_positional(*a): ...
+def _f_var_keyword(**a): ...
+def _f_plain(a): ...
+def _f_keyword_only(*, a): ...
+def _f_other_positional_only_beside_kwargs(b, /, **kwargs): ...
+def _f_same_positional_only_beside_kwargs(a=1, /, **kwargs): ...
+def _f_absent(b): ...
+
+
+@pytest.mark.parametrize("fn, call", [
+    (_f_positional_only, lambda f: f(a=3)),
+    (_f_positional_only_default, lambda f: f(a=3)),
+    (_f_var_positional, lambda f: f(a=3)),
+    (_f_var_keyword, lambda f: f(a=3)),
+    (_f_plain, lambda f: f(a=3)),
+    (_f_keyword_only, lambda f: f(a=3)),
+    (_f_other_positional_only_beside_kwargs, lambda f: f(0, a=3)),
+    (_f_same_positional_only_beside_kwargs, lambda f: f(a=3)),
+    (_f_absent, lambda f: f(0, a=3)),
+], ids=lambda v: getattr(v, "__name__", ""))
+def test_the_keyword_rule_answers_what_a_call_with_the_keyword_does(fn, call):
+    """``_signature_takes_keyword(fn, "a")`` against the call itself, for
+    every kind of parameter a signature can give the name to."""
+    try:
+        call(fn)
+        accepted = True
+    except TypeError:
+        accepted = False
+    assert _signature_takes_keyword(fn, "a") is accepted
+
+
+def test_a_node_whose_update_names_params_positional_only_runs_as_a_node_without_params():
+    """What the corrected answer means for a graph.  The node below used
+    to fail its first step with ``TypeError: ... got some positional-only
+    arguments passed as keyword arguments: 'params'``.  It is a node that
+    takes no ``params`` keyword: it steps on its constructor constants,
+    it has no entry in ``gm.params``, and a pytree that names it is
+    refused by the contract's own message."""
+
+    class PositionalOnly(_Base):
+        def update(self, state, boundary_inputs, dt, params=None, /):
+            assert params is None
+            return {"x": state["x"] * self.params["k"]}
+
+    gm = GraphManager()
+    gm.add_node(PositionalOnly(halo=False))
+    gm.compile()
+    gm.step()
+    np.testing.assert_array_equal(np.asarray(gm.get_node_state("n")["x"]), 2.0 * np.ones(N))
+    assert "n" not in gm.params.get("nodes", {})
+    assert "n" in gm.nodes_without_params()
+    with pytest.raises(ValueError, match="takes no 'params' keyword"):
+        gm.step(params={"nodes": {"n": {"k": jnp.float32(3.0)}}})
+
+    class Required(_Base):
+        def update(self, state, boundary_inputs, dt, params, /):
+            return dict(state)
+
+    gm = GraphManager()
+    gm.add_node(Required(halo=False))
+    with pytest.raises(TypeError, match="missing 1 required positional argument: 'params'"):
+        gm.compile()
+        gm.step()
 
 
 def test_verify_node_runs_the_params_checks_on_a_duck_typed_params_node():

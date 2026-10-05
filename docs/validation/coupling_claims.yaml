@@ -1495,7 +1495,10 @@ claims:
     - src/maddening/core/coupling/acceleration.py:358 (coupling_residual_interface)
   conditions: >-
     convergence_norm="interface"; state edges (a flux edge is refused at
-    compile: CPL-075). Not claimed for mixed dtypes, 16-bit floats, vmap,
+    compile: CPL-075) without an interface mapping: the norm reads a mapped
+    edge's source field through the transform and never applies the mapping,
+    so it is not the change of what that edge delivers (MADD-ANO-195, open).
+    Not claimed for mixed dtypes, 16-bit floats, vmap,
     multi-rate graphs, run_adaptive, checkpoint restarts or sharded graphs.
   oracle: closed form over the transformed edge values.
   tests:

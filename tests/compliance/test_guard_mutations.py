@@ -89,6 +89,7 @@ SERVER_WORDS = (f"{_CLAIMS}::test_the_witness_rule_reads_the_server_vocabulary",
 TRANSPORT = (f"{_CLAIMS}::test_the_shared_in_process_client_is_no_tests_own_words",)
 CPL = "docs/validation/coupling_claims.yaml"
 RST = "docs/validation/rest_runpod_claims.yaml"
+SYS = "docs/validation/sysid_fmu_claims.yaml"
 #: The shipped allowlist: the reason check (fast) first, then collection.
 ALLOW = (_REASONS, _COLLECTS)
 #: Workflows, the root conftest and the pytest configuration.
@@ -159,6 +160,11 @@ def _cell(domain: str, test: str) -> str:
 def _wrong_cell(id: str, domain: str, cited: str, wrong: str, lets_through: str) -> Mutant:
     """A REST or run_pod row's *domain* cell made to cite *wrong*, a test of another domain."""
     return _M(id, RST, _cell(domain, cited), _cell(domain, wrong), WITNESS, lets_through)
+
+
+# A test under tests/usd that a claims row cites.
+_USD_SPEC = "tests/usd/test_usd_mapping_spec.py"
+_USD_GONE = "test_a_stage_written_with_a_kind_that_is_no_longer_registered_is_refused"
 
 MUTANTS: tuple[Mutant, ...] = (
     # --- R: the time budget, scripts/report_test_durations.py --------------
@@ -562,6 +568,24 @@ MUTANTS: tuple[Mutant, ...] = (
        '_SIMULTANEOUS = re.compile(r"concurren|thread|simultaneous|barrier|gather", re.IGNORECASE)\n',
        SERVER_WORDS, "the server's own thread and domain tag read as simultaneous requests: every test "
        "that starts a real server witnesses concurrent"),
+    # A cited test under tests/usd needs usd-core.  These must be caught where pytest collects
+    # the file (usd-core installed) and where its items are read from source (it is not).
+    _M("K24", SYS, f"    - {_USD_SPEC}::{_USD_GONE}\n", f"    - {_USD_SPEC}::{_USD_GONE}_too\n", CLAIMS,
+       "a row citing a tests/usd test that does not exist: unverifiable where usd-core is "
+       "absent, so taken on trust there"),
+    _M("K25", CI, "            tests/usd/ \\\n", "", CLAIMS,
+       "the one job that installs usd-core no longer runs tests/usd: a row's cited USD test "
+       "runs in no per-push job"),
+    _M("K26", _USD_SPEC, f"\n\ndef {_USD_GONE}():", f"\n\n@pytest.mark.skip(reason='x')\ndef {_USD_GONE}():",
+       CLAIMS, "a cited tests/usd test skip-marked: it is collected and never runs"),
+    _M("K27", CI, "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        run: |\n          python -m pip install --upgrade pip\n"
+       '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci,usd]"\n',
+       "      # running them locally relies on.\n      - name: Install dependencies\n"
+       "        run: |\n          python -m pip install --upgrade pip\n"
+       '          pip install "jax==0.10.2" "jaxlib==0.10.2"\n          pip install -e ".[ci]"\n',
+       CLAIMS, "the compliance job without usd-core: no per-push job compares the claims "
+       "guard's source reader with what pytest collects from tests/usd"),
 )
 
 

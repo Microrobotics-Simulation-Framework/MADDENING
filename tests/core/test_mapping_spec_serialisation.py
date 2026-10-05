@@ -34,6 +34,7 @@ from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.simulation.checkpoint import load_state, save_state
 from maddening.nodes.heat import HeatNode
 from maddening.serialization import config as cfg
+from tests.registered_mapping_kinds import KINDS as REGISTERED_KINDS
 
 N_COARSE, N_FINE = 6, 12
 C2F = "coarse.temperature->fine.heat_source"
@@ -79,21 +80,41 @@ def _refs(points):
             for n, r in points.items()}
 
 
-def _two_rods_with_node_refs(kernel="thin_plate_spline"):
+#: The kinds a two-rod graph is mapped with, as ``make(source, target,
+#: source_ref=, target_ref=, **mode)``: the built-in RBF, and each kind
+#: registered the way another library registers one
+#: (``tests/registered_mapping_kinds.py``), which the same tests hold to
+#: the same round trips.  ``MODES`` says which take ``mode=``.
+POINT_KINDS = {
+    "rbf": lambda source, target, **kw: rbf_mapping(
+        source, target, epsilon=2.0, kernel="thin_plate_spline", **kw),
+    **{name: kind.build for name, kind in REGISTERED_KINDS.items()},
+}
+MODES = {"rbf": True, **{name: "mode" in kind.hyper
+                         for name, kind in REGISTERED_KINDS.items()}}
+#: The weights each kind puts into ``params["mappings"]`` (none for a
+#: mapping without any).
+WEIGHTS = {"rbf": ("H",), **{name: kind.weights for name, kind in REGISTERED_KINDS.items()}}
+
+
+def _two_rods_with_node_refs(kernel="thin_plate_spline", kind="rbf"):
     """Mappings built from the rods' own ``grid_x`` static data and
     referenced by node field, so the config carries no coordinates.
     (No coupling group: ``to_dict`` does not carry those, and the
     trajectories are compared exactly.)"""
     gm = _rods()
     xc, xf = _grid(gm, "coarse"), _grid(gm, "fine")
+    make = POINT_KINDS[kind] if kind != "rbf" else (
+        lambda source, target, **kw: rbf_mapping(source, target, epsilon=2.0,
+                                                 kernel=kernel, **kw))
+    conservative = {"mode": "conservative"} if MODES[kind] else {}
     gm.add_edge("coarse", "fine", "temperature", "heat_source",
-                mapping=rbf_mapping(xc, xf, epsilon=2.0, kernel=kernel,
-                                    source_ref={"node": "coarse", "field": "grid_x"},
-                                    target_ref={"node": "fine", "field": "grid_x"}))
+                mapping=make(xc, xf, source_ref={"node": "coarse", "field": "grid_x"},
+                             target_ref={"node": "fine", "field": "grid_x"}))
     gm.add_edge("fine", "coarse", "temperature", "heat_source",
-                mapping=rbf_mapping(xf, xc, epsilon=2.0, kernel=kernel, mode="conservative",
-                                    source_ref={"node": "fine", "field": "grid_x"},
-                                    target_ref={"node": "coarse", "field": "grid_x"}))
+                mapping=make(xf, xc, source_ref={"node": "fine", "field": "grid_x"},
+                             target_ref={"node": "coarse", "field": "grid_x"},
+                             **conservative))
     gm.compile()
     gm.set_node_state("coarse", {"temperature": jnp.asarray(300 + 50 * xc ** 2, jnp.float32)})
     gm.set_node_state("fine", {"temperature": jnp.asarray(350 - 40 * xf, jnp.float32)})
@@ -104,9 +125,12 @@ def _same_weights_and_trajectory(gm, gm2, keys):
     gm2.compile()
     assert set(gm2.params["mappings"]) == set(keys)
     for k in keys:
-        np.testing.assert_array_equal(np.asarray(gm2.params["mappings"][k]["H"]),
-                                      np.asarray(gm.params["mappings"][k]["H"]))
-        assert gm2.params["mappings"][k]["H"].dtype == gm.params["mappings"][k]["H"].dtype
+        # every weight of the edge, whatever the kind calls them
+        assert list(gm2.params["mappings"][k]) == list(gm.params["mappings"][k])
+        for name, weight in gm.params["mappings"][k].items():
+            np.testing.assert_array_equal(np.asarray(gm2.params["mappings"][k][name]),
+                                          np.asarray(weight))
+            assert gm2.params["mappings"][k][name].dtype == weight.dtype
     for name in gm.node_names:
         gm2.set_node_state(name, gm.get_node_state(name))
     a, b = gm.run_scan(20), gm2.run_scan(20)
@@ -119,19 +143,28 @@ def _same_weights_and_trajectory(gm, gm2, keys):
 # ---------------------------------------------------------------- round trips
 
 @pytest.mark.parametrize("codec", ["json", "yaml"])
-def test_rbf_node_field_references_round_trip(codec):
-    gm = _two_rods_with_node_refs()
+@pytest.mark.parametrize("kind", sorted(POINT_KINDS))
+def test_rbf_node_field_references_round_trip(codec, kind):
+    """(Named for the kind it was written for; it now runs every kind that
+    maps one point set onto another, registered ones included.)"""
+    gm = _two_rods_with_node_refs(kind=kind)
     d = cfg.to_dict(gm)
     text = json.dumps(d) if codec == "json" else yaml.safe_dump(d)
-    assert "grid_x" in text and "\"H\"" not in text and "'H'" not in text
+    assert "grid_x" in text
+    for weight in WEIGHTS[kind]:
+        assert f"\"{weight}\"" not in text and f"'{weight}'" not in text
     back = json.loads(text) if codec == "json" else yaml.safe_load(text)
     m = back["edges"][0]["mapping"]
+    assert m["kind"] == kind
     assert _refs(m["points"]) == {"source_points": {"node": "coarse", "field": "grid_x"},
                                   "target_points": {"node": "fine", "field": "grid_x"}}
     assert m["points"]["source_points"]["sha256"] == point_array_digest(
         np.asarray(_grid(gm, "coarse")))
-    assert m["kernel"] == "thin_plate_spline" and m["mode"] == "consistent"
-    assert back["edges"][1]["mapping"]["mode"] == "conservative"
+    if kind == "rbf":
+        assert m["kernel"] == "thin_plate_spline"
+    if MODES[kind]:
+        assert m["mode"] == "consistent"
+        assert back["edges"][1]["mapping"]["mode"] == "conservative"
     gm2 = cfg.from_dict(back, REGISTRY)
     assert gm2.edges[0].mapping.spec == gm.edges[0].mapping.spec
     _same_weights_and_trajectory(gm, gm2, [C2F, F2C])
@@ -259,6 +292,31 @@ def test_large_point_set_without_reference_is_usable_but_not_serialisable():
         rbf_mapping(pts, [0.0, 1.0], source_ref={"inline": pts.tolist()})
 
 
+@pytest.mark.parametrize("kind", sorted(REGISTERED_KINDS))
+def test_add_edge_accepts_a_registered_spec_and_its_dict_form(kind):
+    """The same two forms, of a registered kind: a hand-written spec with
+    no content hash and no optional hyper-parameter, and its dict."""
+    registered = REGISTERED_KINDS[kind]
+    points = {"source_points": {"node": "coarse", "field": "grid_x"},
+              "target_points": {"node": "fine", "field": "grid_x"}}
+    gm = _rods()
+    gm.add_edge("coarse", "fine", "temperature", "heat_source",
+                mapping=MappingSpec(kind, {}, points))
+    gm.add_edge("coarse", "fine", "temperature", "heat_source", additive=True,
+                mapping={"kind": kind, "points": points})
+    expected = registered.build(_grid(gm, "coarse"), _grid(gm, "fine"))
+    for edge in gm.edges:
+        rebuilt = edge.mapping
+        assert rebuilt.kind == kind and _refs(rebuilt.spec.points) == points
+        assert rebuilt.spec.points["source_points"]["sha256"] == point_array_digest(
+            np.asarray(_grid(gm, "coarse")))
+        assert rebuilt.spec.hyperparameters == expected.spec.hyperparameters   # defaults
+        assert list(rebuilt.params_pytree()) == list(registered.weights)
+        for name, weight in expected.params_pytree().items():
+            np.testing.assert_array_equal(np.asarray(rebuilt.params_pytree()[name]),
+                                          np.asarray(weight))
+
+
 def test_add_edge_accepts_a_spec_and_its_dict_form():
     gm = _rods()
     spec = MappingSpec("rbf", {"kernel": "gaussian", "epsilon": 2.0, "mode": "consistent"},
@@ -287,26 +345,30 @@ def test_add_edge_accepts_a_spec_and_its_dict_form():
 
 # ---------------------------------------------------------------- checkpoints
 
-def test_checkpoint_weights_win_over_the_rebuilt_spec(tmp_path):
+@pytest.mark.parametrize("kind", [k for k in sorted(POINT_KINDS) if WEIGHTS[k]])
+def test_checkpoint_weights_win_over_the_rebuilt_spec(tmp_path, kind):
     """Config carries the recipe, the checkpoint the (possibly trained)
-    weights: loading both restores the checkpoint's."""
-    gm = _two_rods_with_node_refs()
-    trained = 1.5 * gm.params["mappings"][C2F]["H"]
-    gm.params["mappings"][C2F]["H"] = trained
+    weights: loading both restores the checkpoint's -- every weight the
+    kind exposes."""
+    gm = _two_rods_with_node_refs(kind=kind)
+    trained = {name: 1.5 * weight for name, weight in gm.params["mappings"][C2F].items()}
+    gm.params["mappings"][C2F].update(trained)
     ck = save_state(gm, tmp_path / "ck")
     with pytest.warns(UserWarning, match="save a checkpoint"):
         config = json.loads(json.dumps(gm.to_dict()))
-    assert "H" not in config["edges"][0]["mapping"]
+    assert not set(WEIGHTS[kind]) & set(config["edges"][0]["mapping"])
 
     gm2 = cfg.from_dict(config, REGISTRY)
     gm2.compile()
-    geometric = rbf_mapping(_grid(gm2, "coarse"), _grid(gm2, "fine"), epsilon=2.0,
-                            kernel="thin_plate_spline").H
-    np.testing.assert_array_equal(np.asarray(gm2.params["mappings"][C2F]["H"]),
-                                  np.asarray(geometric))                 # rebuilt
+    geometric = POINT_KINDS[kind](_grid(gm2, "coarse"), _grid(gm2, "fine")).params_pytree()
+    assert list(geometric) == list(WEIGHTS[kind])
+    for name in WEIGHTS[kind]:
+        np.testing.assert_array_equal(np.asarray(gm2.params["mappings"][C2F][name]),
+                                      np.asarray(geometric[name]))       # rebuilt
     load_state(gm2, ck)
-    np.testing.assert_array_equal(np.asarray(gm2.params["mappings"][C2F]["H"]),
-                                  np.asarray(trained))                   # checkpoint wins
+    for name in WEIGHTS[kind]:
+        np.testing.assert_array_equal(np.asarray(gm2.params["mappings"][C2F][name]),
+                                      np.asarray(trained[name]))         # checkpoint wins
     np.testing.assert_array_equal(np.asarray(gm2.step()["fine"]["temperature"]),
                                   np.asarray(gm.step()["fine"]["temperature"]))
 
@@ -357,6 +419,40 @@ INLINE3 = {"inline": [0.0, 0.5, 1.0], "dtype": "float64"}
       "points": {"source_points": 7, "target_points": INLINE3}},
      "must be a dict"),
     ({"kind": "nearest_neighbor", "shape": [3, 9],
+      "points": {"source_points": INLINE3, "target_points": INLINE3}},
+     "recorded \\[3, 9\\]"),
+    # ... and the same problems in a spec of a registered kind
+    ({"kind": "inverse_distance", "mode": "consistent"}, "no 'points'"),
+    ({"kind": "inverse_distance", "sigma": 2.0,
+      "points": {"source_points": INLINE3, "target_points": INLINE3}},
+     "no hyper-parameter\\(s\\) \\['sigma'\\]"),
+    ({"kind": "linear_1d", "points": {"source_points": INLINE3}},
+     "takes point sets \\['source_points', 'target_points'\\]"),
+    ({"kind": "selection",
+      "points": {"source_points": {"node": "zed", "field": "v"}, "target_points": INLINE3}},
+     "unknown node 'zed'"),
+    ({"kind": "selection",
+      "points": {"source_points": {"node": "a", "field": "grid"}, "target_points": INLINE3}},
+     "no point field 'grid'"),
+    ({"kind": "linear_1d",
+      "points": {"source_points": {"asset": "missing.npy"}, "target_points": INLINE3}},
+     "missing point asset 'missing.npy'"),
+    ({"kind": "inverse_distance",
+      "points": {"source_points": {"asset": "../escape.npy"}, "target_points": INLINE3}},
+     "must not contain '..'"),
+    ({"kind": "inverse_distance",
+      "points": {"source_points": {"asset": "/etc/passwd"}, "target_points": INLINE3}},
+     "must be relative"),
+    ({"kind": "linear_1d",
+      "points": {"source_points": {"mesh": "a"}, "target_points": INLINE3}},
+     "unknown point reference"),
+    ({"kind": "selection",
+      "points": {"source_points": {"node": "a"}, "target_points": INLINE3}},
+     "a node reference is"),
+    ({"kind": "selection",
+      "points": {"source_points": 7, "target_points": INLINE3}},
+     "must be a dict"),
+    ({"kind": "inverse_distance", "shape": [3, 9],
       "points": {"source_points": INLINE3, "target_points": INLINE3}},
      "recorded \\[3, 9\\]"),
 ])

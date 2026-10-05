@@ -23,7 +23,10 @@ on the next ones exactly:
 Drawn over coupled groups with no predictor and with ``linear`` and
 ``quadratic`` predictors, IQN-ILS and IQN-IMVJ with Jacobian reuse (warm
 starts carried in ``_meta``), a group short of convergence (so the carried
-history matters), multi-rate graphs, and a sub-cycling group.
+history matters), multi-rate graphs, a sub-cycling group, and rods joined
+by interface mappings of a *registered* kind
+(``tests/registered_mapping_kinds.py``), staggered and inside a group --
+whose weights are part of what a replay and a checkpoint must carry.
 
 Tolerance: none.  The replay evaluates the step the record was made with,
 from the same state, in the same order; any non-zero loss is a state that
@@ -65,6 +68,7 @@ from maddening.sysid import (
 )
 
 from tests.conftest import EXAMPLES_COSTLY
+from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS
 from tests.property.differential import (
     assert_trees_identical,
     checkpoint_path,
@@ -172,6 +176,35 @@ def _chain():
     return build
 
 
+def _registered_mapping_rods(coupled: bool):
+    """A coarse and a fine rod exchanging their whole profile through
+    mappings of a registered kind, built from node references -- a class of
+    its own with two weights (a matrix and a scalar), both moved away from
+    what the factory builds, as a fit would leave them."""
+    def build():
+        gm = GraphManager()
+        gm.add_node(HeatNode("coarse", 0.01, n_cells=6, thermal_diffusivity=0.01,
+                             initial_temperature=np.linspace(1.0, 2.0, 6).tolist()))
+        gm.add_node(HeatNode("fine", 0.01, n_cells=12, thermal_diffusivity=0.01,
+                             initial_temperature=0.5))
+        make = KINDS[INVERSE_DISTANCE].build
+        grid = {n: gm.get_node(n).static_data["grid_x"].value for n in ("coarse", "fine")}
+        for source, target, mode in (("coarse", "fine", "consistent"),
+                                     ("fine", "coarse", "conservative")):
+            gm.add_edge(source, target, "temperature", "heat_source", mapping=make(
+                grid[source], grid[target], mode=mode, power=3.5,
+                source_ref={"node": source, "field": "grid_x"},
+                target_ref={"node": target, "field": "grid_x"}))
+        if coupled:
+            gm.add_coupling_group(["coarse", "fine"], max_iterations=6, tolerance=1e-12)
+        gm.compile()
+        for slot in gm.params["mappings"].values():
+            slot["gain"] = (slot["gain"] * 0.75).astype(slot["gain"].dtype)
+            slot["W"] = (slot["W"] * 1.25).astype(slot["W"].dtype)
+        return gm
+    return build
+
+
 #: Families whose next step reads nothing carried in ``_meta`` but the
 #: multi-rate step counter, which ``start_step`` reconstructs.
 PLAIN = {
@@ -181,6 +214,8 @@ PLAIN = {
     "multirate-chain": _chain(),
     "multirate-rods": _rods(False),
     "subcycled-rods": _rods(True),
+    "registered-mapping": _registered_mapping_rods(False),
+    "registered-mapping-coupled": _registered_mapping_rods(True),
 }
 #: Families whose next step reads carried history: a predictor short of
 #: convergence, IMVJ warm starts, a sub-cycled group with a predictor.

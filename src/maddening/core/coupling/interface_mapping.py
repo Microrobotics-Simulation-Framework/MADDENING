@@ -11,6 +11,15 @@ All returned transforms have the signature::
 
 where ``source_values`` is an array on the source grid and
 ``target_values`` is the interpolated result on the target grid.
+
+Coordinates a factory cannot map are refused with a ``ValueError`` naming
+the argument and the first offending index, instead of producing a
+transform that is silently wrong: a NaN or infinite coordinate, points of
+different dimensions, unsorted source coordinates for the linear
+interpolation, cell boundaries that are not strictly increasing for the
+projection.  Nothing is sorted for you.  Coordinates passed as JAX
+tracers (a factory called inside ``jit`` / ``grad``) have no values to
+check and are taken as given.
 """
 
 from __future__ import annotations
@@ -18,6 +27,8 @@ from __future__ import annotations
 from typing import Callable
 
 import jax.numpy as jnp
+
+from maddening.core.coupling import _mapping_checks as _checks
 
 
 def nearest_neighbor_1d(
@@ -40,6 +51,11 @@ def nearest_neighbor_1d(
         ``source_values`` has shape ``(..., N_src)`` and
         ``target_values`` has shape ``(..., N_tgt)``.
     """
+    if not _checks.is_traced(source_x, target_x):
+        # A NaN distance is what ``argmin`` returns: every target would
+        # read the one source that has no position.
+        _checks.check_finite("source_x", source_x)
+        _checks.check_finite("target_x", target_x)
     source_x = jnp.asarray(source_x)
     target_x = jnp.asarray(target_x)
     # Pre-compute index mapping: for each target point, find nearest source
@@ -72,6 +88,10 @@ def linear_interpolation_1d(
     callable
         ``(source_values,) -> target_values``
     """
+    if not _checks.is_traced(source_x):
+        # ``searchsorted`` assumes it: on a descending grid it brackets
+        # nothing and every target read an end value.
+        _checks.check_ascending("source_x", source_x)
     source_x = jnp.asarray(source_x)
     target_x = jnp.asarray(target_x)
     n_src = source_x.shape[0]
@@ -170,6 +190,11 @@ def conservative_projection_1d(
         ``source_values`` has shape ``(N_src,)`` and
         ``target_values`` has shape ``(N_tgt,)``.
     """
+    if not _checks.is_traced(source_boundaries, target_boundaries):
+        # The overlap below assumes increasing boundaries: descending ones
+        # gave a matrix of zeros, non-monotone ones rows summing past one.
+        _checks.checked_boundaries("source_boundaries", source_boundaries)
+        _checks.checked_boundaries("target_boundaries", target_boundaries)
     source_boundaries = jnp.asarray(source_boundaries)
     target_boundaries = jnp.asarray(target_boundaries)
     n_src = source_boundaries.shape[0] - 1
@@ -222,6 +247,13 @@ def nearest_neighbor_2d(
         ``source_values`` has shape ``(N_src,)`` or ``(N_src, C)``
         and ``target_values`` has the corresponding target shape.
     """
+    if not _checks.is_traced(source_points, target_points):
+        # A NaN distance is what ``argmin`` returns, and an (n, 1) set
+        # against an (m, 2) one broadcasts instead of failing.
+        _checks.check_same_dimension(
+            _checks.checked_points("source_points", source_points, allow_empty=True),
+            _checks.checked_points("target_points", target_points, allow_empty=True),
+        )
     source_points = jnp.asarray(source_points)
     target_points = jnp.asarray(target_points)
 

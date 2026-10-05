@@ -17,9 +17,11 @@ What stays open is MADD-ANO-022: a traced or explicit ``params=`` pytree
 constructor's geometry, because no write is made for anything to refuse.
 
 The question is asked of the mapping's ``MappingSpec``, whatever its kind,
-so every test here runs twice: with the built-in RBF mapping it was written
-for, and with a mapping of a kind registered the way another library
-registers one (``tests/registered_mapping_kinds.py``; a class of its own).
+so every test here runs three times: with the built-in RBF mapping it was
+written for, with a mapping of a kind registered the way another library
+registers one (``tests/registered_mapping_kinds.py``; a class of its own
+with two weights), and with a registered kind that has no weights at all
+(its entry of ``params["mappings"]`` is ``{}``).
 """
 
 from __future__ import annotations
@@ -39,14 +41,15 @@ from maddening.api.server import SimulationServer
 from maddening.core.coupling.mapping import rbf_mapping
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.heat import HeatNode
-from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS
+from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS, SELECTION
 
 EDGE = "a.temperature->b.heat_source"
 REGISTRY = {"HeatNode": HeatNode}
 
 #: ``make(source, target, source_ref=, target_ref=)`` for each mapping kind
 #: the module runs under.
-_MAKERS = {"rbf": rbf_mapping, INVERSE_DISTANCE: KINDS[INVERSE_DISTANCE].build}
+_MAKERS = {"rbf": rbf_mapping, INVERSE_DISTANCE: KINDS[INVERSE_DISTANCE].build,
+           SELECTION: KINDS[SELECTION].build}
 _MAKE = {"mapping": rbf_mapping}
 
 

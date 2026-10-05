@@ -3635,15 +3635,15 @@ claims:
   claim: >-
     "The declaration is checked against the factory's signature when it is
     registered, so a misspelt name fails at the decorator rather than while
-    someone loads a config"; a hyper-parameter is declared as str, bool or
-    float; "The names kind, points, shape and label are reserved."
+    someone loads a config"; a hyper-parameter is declared as str, bool, int
+    or float; "The names kind, points, shape and label are reserved."
   sources:
     - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
     - src/maddening/core/coupling/mapping_registry.py (register_mapping)
   conditions: >-
     array, hyper-parameter and reference names that are not identifiers, are
     repeated, are reserved or are declared in two roles; a type outside the
-    three; references that do not name exactly the arrays; a declared name
+    four; references that do not name exactly the arrays; a declared name
     the factory does not take, and a required argument nothing declares; an
     object that is not callable; a factory taking **kwargs, and a kind with
     no array.  Host-side, at the decorator.
@@ -3653,6 +3653,7 @@ claims:
     - tests/core/test_mapping_registry.py::test_the_registered_object_must_be_callable
     - tests/core/test_mapping_registry.py::test_a_factory_taking_keyword_arguments_freely_or_with_no_arrays_registers
     - tests/core/test_mapping_registry.py::test_the_public_signature_is_the_one_documented
+    - tests/core/test_mapping_registry.py::test_the_registry_record_is_a_dataclass_that_can_gain_a_defaulted_field
     - tests/core/test_mapping_registry.py::test_register_mapping_is_experimental_and_returns_the_factory_unchanged
   status: verified
   domains:
@@ -3676,23 +3677,33 @@ claims:
     "A spec's hyper-parameters are checked against these declarations before
     your factory is called, as the built-in ones are, and an unknown one is
     refused"; float "is a real number: a finite int or float that is not a
-    bool, handed to the factory as a float"; "The rebuild calls
-    factory(**arrays, **hyperparameters, **references)."
+    bool, handed to the factory as a float"; int "is an integer (a count, a
+    size): an int that is not a bool, of a magnitude a float64 can hold,
+    handed to the factory as an int; a float is refused for it"; "The rebuild
+    calls factory(**arrays, **hyperparameters, **references)."
   sources:
     - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
     - src/maddening/core/coupling/mapping_spec.py (build_mapping)
   conditions: >-
-    every hyper-parameter of three registered kinds against every value its
-    declared type refuses (text, None, a bool for a real, a number for a
-    bool, a container, an infinity, a NaN); an unknown hyper-parameter; a
-    missing, an extra and an unrecorded point set; through from_dict and
-    through MappingSpec itself.  The values are Python scalars read from a
-    config, checked on the host before the factory exists to be called.
+    every hyper-parameter of three registered kinds, one of each of the
+    four types, against every value its declared type refuses (text, None, a
+    bool for a number, a number for a bool, a float for an integer, a
+    container, an infinity, a NaN, an integer of 401 digits); integers up to
+    2**1023 for an integer; an integer too large for a double for a real of
+    a built-in kind too, and through the rbf factory itself; an unknown
+    hyper-parameter; a missing, an extra and an unrecorded point set;
+    through from_dict and through MappingSpec itself.  The values are Python
+    scalars read from a config, checked on the host before the factory
+    exists to be called.
   oracle: the MappingRebuildError naming the edge and the kind; a recorder in the factory's place sees no call; the stored value's type.
   tests:
     - tests/core/test_mapping_registry.py::test_a_registered_hyper_parameter_of_the_wrong_type_is_refused_before_the_factory
     - tests/core/test_mapping_registry.py::test_the_hyper_parameter_battery_covers_every_declared_type
     - tests/core/test_mapping_registry.py::test_a_real_hyper_parameter_takes_any_finite_number_and_stores_a_float
+    - tests/core/test_mapping_registry.py::test_an_integer_hyper_parameter_takes_an_int_and_stores_an_int
+    - tests/core/test_mapping_registry.py::test_an_integer_hyper_parameter_reaches_the_factory_and_the_config_as_an_int
+    - tests/core/test_mapping_registry.py::test_an_integer_no_float64_holds_is_a_refused_real_naming_the_edge
+    - tests/core/test_mapping_registry.py::test_the_rbf_factory_itself_refuses_an_integer_no_float64_holds
     - tests/core/test_mapping_registry.py::test_an_unknown_hyper_parameter_of_a_registered_kind_is_refused_before_the_factory
     - tests/core/test_mapping_registry.py::test_a_registered_spec_with_the_wrong_or_missing_point_sets_is_refused_before_the_factory
     - tests/core/test_mapping_registry.py::test_a_missing_reference_names_the_keyword_the_kind_declared
@@ -3818,8 +3829,10 @@ claims:
   claim: >-
     "Whatever a registered factory raises, from_dict and load_graph_from_usd
     report as a MappingRebuildError naming the edge and the kind, with the
-    factory's exception chained as __cause__"; "What the factory returns is
-    checked when a spec is rebuilt": a Mapping whose kind is the registered
+    factory's exception chained as __cause__ -- an ImportError included, for
+    a factory that needs a package the loading environment lacks"; "What the
+    factory returns is checked when a spec is rebuilt": a Mapping whose kind
+    is the registered
     kind, carrying a MappingSpec of that kind "which records the references
     and the hyper-parameters it was given".
   sources:
@@ -3827,9 +3840,11 @@ claims:
     - src/maddening/core/graph_manager.py (GraphManager._rebuild_mapping)
     - src/maddening/core/coupling/mapping_spec.py (_check_registered_result)
   conditions: >-
-    twenty-one exception types, those no built-in factory raises included; a
-    BaseException, which is not wrapped; an unlisted type from a built-in
-    kind's rebuild, which still surfaces as itself; a factory returning
+    twenty-three exception types, those no built-in factory raises included;
+    an ImportError and a ModuleNotFoundError while rebuilding a built-in kind
+    too; a BaseException, which is not wrapped; any other unlisted type from
+    a built-in kind's rebuild, which still surfaces as itself; a factory
+    returning
     None, a dict, a matrix, an object short of a member, a mapping of
     another kind, one without a spec, with another kind's spec, with a spec
     that dropped a reference or changed a hyper-parameter; a required
@@ -3838,6 +3853,7 @@ claims:
   oracle: the wrapped error's edge, kind and __cause__ (the raised object itself); the same factory returning the right mapping rebuilds.
   tests:
     - tests/core/test_mapping_registry.py::test_any_exception_from_a_registered_factory_is_a_rebuild_error_naming_the_edge
+    - tests/core/test_mapping_registry.py::test_an_import_error_while_rebuilding_a_built_in_kind_names_the_edge_too
     - tests/core/test_mapping_registry.py::test_a_base_exception_from_a_registered_factory_is_not_swallowed
     - tests/core/test_mapping_registry.py::test_an_unlisted_exception_from_a_built_in_rebuild_still_surfaces_as_itself
     - tests/core/test_mapping_registry.py::test_a_value_the_factory_itself_refuses_names_the_edge
@@ -3986,7 +4002,10 @@ claims:
     a multi-rate graph, a sub-cycled group and a group with a predictor;
     run_adaptive on restored weights; a checkpoint restart, and POST
     /checkpoint/load asking each weight what a write is asked; the FMU's
-    state archive.  Not claimed for sharded graphs.
+    state archive, through the sidecar and the bridge, for a mapping
+    without weights too; the writes that move a referenced point set, at
+    every door, beside a weighted and a weightless registered mapping.  Not
+    claimed for sharded graphs.
   oracle: >-
     the trainable mask; the fitted tree against its start, leaf by leaf and
     bit for bit; the checkpoint's member names and the restored leaves; the
@@ -4005,6 +4024,9 @@ claims:
     - tests/core/test_mapping_registry.py::test_a_checkpoint_beats_the_config_for_a_registered_kinds_trained_weights
     - tests/core/test_mapping_registry.py::test_a_trainable_spec_on_a_registered_kinds_weight_round_trips
     - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_an_archive_with_new_mapping_weights_is_refused
+    - tests/fmi/test_an_archive_cannot_install_mapping_weights.py::test_an_fmu_of_a_weightless_mapping_snapshots_restores_and_takes_no_weight
+    - tests/core/test_mapping_point_reference_writes.py::test_the_route_refuses_a_length_under_a_reference_and_writes_nothing
+    - tests/core/test_mapping_point_reference_writes.py::test_the_checkpoint_route_refuses_and_undoes_a_moved_length
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_the_route_judges_every_weight_of_every_mapping_kind_a_load_installs
     - tests/api/test_checkpoint_load_refuses_what_a_params_write_refuses.py::test_a_checkpoint_of_a_graph_whose_mapping_has_no_weights_loads
     - tests/core/test_registered_mapping_in_every_domain.py::test_a_registered_kind_round_trips_and_its_weights_survive_a_checkpoint
@@ -4043,7 +4065,7 @@ claims:
     config text; the weights of nearest_neighbor, projection_1d and matrix
     mappings and of Gaussian rbf mappings narrow against the point spacing
     (the others' solves are not exact across machines), as float32 arrays
-    with x64 off; seventeen malformed specs; the unknown-kind refusal in a
+    in the default lane; seventeen malformed specs; the unknown-kind refusal in a
     process that registered nothing.  Against a capture taken on
     release/0.4.0 at a7e69509.  Not claimed for float64 (x64), mixed dtypes
     or 16-bit floats.

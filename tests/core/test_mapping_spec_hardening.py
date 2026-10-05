@@ -472,6 +472,8 @@ def _numpy_ufunc_type_error() -> TypeError:
     zipfile.BadZipFile("not a zip"),
     json.JSONDecodeError("nope", "{", 0),
     _numpy_ufunc_type_error(),
+    ImportError("cannot import name 'cKDTree' from 'scipy.spatial'"),
+    ModuleNotFoundError("No module named 'scipy'"),
 ])
 def test_rebuild_reports_the_edge_for_every_failure_type(exc, kind):
     """``_rebuild_mapping`` is the only place that knows which edge a

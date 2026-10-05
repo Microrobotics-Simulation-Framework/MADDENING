@@ -77,8 +77,8 @@ class Mapping(Protocol):
     ignored by static mappings.
 
     ``params_pytree()`` is snapshotted into ``gm.params["mappings"]``,
-    which checkpoints, ``PUT /graph/params``, system identification, the
-    FMU's state archive and ``to_dict`` all walk as a flat table of
+    which checkpoints, ``POST /checkpoint/load``, system identification,
+    the FMU's state archive and ``to_dict`` all walk as a flat table of
     arrays.  For any class other than :class:`StaticLinearMapping`,
     ``GraphManager.add_edge`` therefore refuses one that is not a plain
     ``dict`` (empty for a mapping without weights) from Python identifiers
@@ -229,8 +229,9 @@ def _params_contract_problem(mapping: Any) -> Optional[str]:
     * ``param_specs`` / ``set_param_spec``, the trainable mask and
       ``sysid`` address a weight as ``mappings -> edge -> name``, three
       keys deep, and fit only floating-point leaves;
-    * ``PUT /graph/params`` and ``POST /checkpoint/load`` judge each leaf
-      as one numeric array;
+    * ``POST /checkpoint/load`` judges each leaf it would install as one
+      numeric array, against its bounds (``PUT /graph/params`` is per node
+      and has no door to a mapping's weights);
     * ``to_dict`` warns when the live weights differ from
       ``params_pytree()``, and ``reset_params()`` restores it, so two
       calls must agree, and a NaN (unequal to itself) would warn forever.
@@ -294,7 +295,14 @@ def _finite_real(name: str, value) -> float:
     ``Infinity`` / ``NaN``)."""
     if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
         raise ValueError(f"{name} must be a real number, got {value!r}")
-    if not math.isfinite(value):
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        # An integer no float64 holds: ``math.isfinite`` raises for it.
+        raise ValueError(f"{name} must be finite, got an integer of "
+                         f"{len(str(abs(int(value))))} digits, which no float64 holds"
+                         ) from None
+    if not finite:
         raise ValueError(f"{name} must be finite, got {value!r}")
     return float(value)
 

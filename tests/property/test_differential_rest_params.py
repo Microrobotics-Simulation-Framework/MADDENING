@@ -290,9 +290,10 @@ def test_a_rest_reset_of_a_diagnostics_group_answers_like_the_in_process_reset()
 
 
 #: The mapping kinds the mapped-rod oracles run under: the built-in RBF,
-#: and a kind registered the way another library registers one
-#: (``tests/registered_mapping_kinds.py``; a mapping class of its own).
-MAPPED_ROD_KINDS = ("rbf", "inverse_distance")
+#: and two kinds registered the way another library registers one
+#: (``tests/registered_mapping_kinds.py``): a mapping class of its own with
+#: two weights, and one with no weights at all.
+MAPPED_ROD_KINDS = ("rbf", "inverse_distance", "selection")
 
 
 def rods_mapped_by_grid(kind: str = "rbf") -> GraphManager:

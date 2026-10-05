@@ -323,8 +323,9 @@ def clean_process(tmp_path_factory) -> dict:
                       "maddening.plugins", "maddening")), encoding="utf-8")
 
     gm = _rods(KINDS[INVERSE_DISTANCE].build, power=3.5, normalise=False,
-               mode="conservative")
+               mode="conservative", neighbours=4)
     config = json.loads(json.dumps(gm.to_dict()))
+    assert type(config["edges"][0]["mapping"]["neighbours"]) is int
     payload = {
         "config": config, "pair": PAIR, "marker": str(marker),
         "registering_module": "tests.registered_mapping_kinds",
@@ -523,6 +524,32 @@ def test_register_mapping_is_experimental_and_returns_the_factory_unchanged():
     assert "probe" not in mapping_registry._registered_kinds()
 
 
+def test_the_registry_record_is_a_dataclass_that_can_gain_a_defaulted_field():
+    """A later change adds what a kind declares (whether it needs a moving
+    geometry, for one).  The record is a frozen dataclass built by keyword,
+    so a new field with a default changes no entry and no caller."""
+    record = mapping_registry._MappingKind
+    assert dataclasses.is_dataclass(record) and record.__dataclass_params__.frozen
+    fields = {f.name: f for f in dataclasses.fields(record)}
+    assert list(fields) == ["kind", "factory", "arrays", "hyperparameters", "references",
+                            "builtin"]
+    assert fields["builtin"].default is False
+
+    @dataclasses.dataclass(frozen=True)
+    class Grown(record):
+        needs_something_later: bool = False
+
+    for entry in mapping_registry._MAPPING_REGISTRY.values():
+        grown = Grown(**{name: getattr(entry, name) for name in fields})
+        assert grown.needs_something_later is False
+        assert dataclasses.replace(grown, needs_something_later=True).kind == entry.kind
+    # every construction in the module is by keyword
+    source = inspect.getsource(mapping_registry)
+    calls = [node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Name) and node.func.id == "_MappingKind"]
+    assert calls and all(not call.args for call in calls)
+
+
 def test_the_public_signature_is_the_one_documented():
     signature = inspect.signature(register_mapping)
     assert [(p.name, p.kind.name, p.default is inspect.Parameter.empty)
@@ -655,12 +682,14 @@ def test_nothing_public_removes_a_kind():
     (dict(arrays=None), "arrays must be a tuple or list"),
     (dict(hyperparameters=("scale",)), "hyperparameters must be a dict"),
     (dict(hyperparameters=None), "hyperparameters must be a dict"),
-    (dict(hyperparameters={"scale": int}), "choose from str, bool and float"),
-    (dict(hyperparameters={"scale": "real"}), "choose from str, bool and float"),
-    (dict(hyperparameters={"scale": None}), "choose from str, bool and float"),
-    (dict(hyperparameters={"scale": complex}), "choose from str, bool and float"),
-    (dict(hyperparameters={"scale": np.float64}), "choose from str, bool and float"),
-    (dict(hyperparameters={"scale": list}), "choose from str, bool and float"),
+    (dict(hyperparameters={"scale": "real"}), "choose from str, bool, int and float"),
+    (dict(hyperparameters={"scale": "int"}), "choose from str, bool, int and float"),
+    (dict(hyperparameters={"scale": None}), "choose from str, bool, int and float"),
+    (dict(hyperparameters={"scale": complex}), "choose from str, bool, int and float"),
+    (dict(hyperparameters={"scale": np.float64}), "choose from str, bool, int and float"),
+    (dict(hyperparameters={"scale": np.int64}), "choose from str, bool, int and float"),
+    (dict(hyperparameters={"scale": list}), "choose from str, bool, int and float"),
+    (dict(hyperparameters={"scale": bytes}), "choose from str, bool, int and float"),
     (dict(hyperparameters={"sc ale": float}), "hyperparameters must be Python identifiers"),
     (dict(hyperparameters={"kind": str}), r"name\(s\) \['kind'\] are reserved"),
     (dict(hyperparameters={"points": str}), r"name\(s\) \['points'\] are reserved"),
@@ -730,12 +759,25 @@ def test_a_factory_taking_keyword_arguments_freely_or_with_no_arrays_registers()
 # 4. A registered kind's spec is checked before its factory runs
 # ===========================================================================
 
+#: An integer a JSON config can carry and no float64 can hold.
+_HUGE = 10 ** 400
+
 #: Values no declaration of that type accepts, with the refusal each draws.
 _WRONG = {
     float: [("abc", "must be a real number"), (None, "must be a real number"),
             (True, "must be a real number"), ([1.0], "must be a real number"),
             ({"v": 1.0}, "must be a real number"), (float("inf"), "must be finite"),
-            (float("-inf"), "must be finite"), (float("nan"), "must be finite")],
+            (float("-inf"), "must be finite"), (float("nan"), "must be finite"),
+            (_HUGE, "must be finite, got an integer of 401 digits"),
+            (-_HUGE, "must be finite, got an integer of 401 digits")],
+    int: [("3", "must be an integer"), (None, "must be an integer"),
+          (True, "must be an integer"), (False, "must be an integer"),
+          (2.0, "must be an integer"), (2.5, "must be an integer"),
+          ([2], "must be an integer"), ({"v": 2}, "must be an integer"),
+          (float("inf"), "must be an integer"), (float("nan"), "must be an integer"),
+          (np.float32(2.0), "must be an integer"),
+          (_HUGE, "must be an integer of a magnitude float64 can hold, got one of 401"),
+          (-_HUGE, "must be an integer of a magnitude float64 can hold, got one of 401")],
     bool: [(1, "must be a bool"), (0, "must be a bool"), ("true", "must be a bool"),
            (None, "must be a bool"), (1.0, "must be a bool"), ([True], "must be a bool")],
     str: [(3, "must be a str"), (None, "must be a str"), (True, "must be a str"),
@@ -744,7 +786,8 @@ _WRONG = {
 
 _HYPER_CASES = [
     pytest.param(kind, name, value, message,
-                 id=f"{kind}.{name}={value!r}")
+                 id=f"{kind}.{name}={str(value)[:12]!r}" if isinstance(value, int)
+                 and not isinstance(value, bool) else f"{kind}.{name}={value!r}")
     for kind in REGISTERED
     for name, declared in mapping_registry._MAPPING_REGISTRY[kind].hyperparameters.items()
     for value, message in _WRONG[declared]
@@ -771,7 +814,8 @@ def test_a_registered_hyper_parameter_of_the_wrong_type_is_refused_before_the_fa
 def test_the_hyper_parameter_battery_covers_every_declared_type():
     declared = {t for k in REGISTERED
                 for t in mapping_registry._MAPPING_REGISTRY[k].hyperparameters.values()}
-    assert declared == {str, bool, float} == set(_WRONG)
+    assert declared == {str, bool, int, float} == set(_WRONG)
+    assert declared == set(mapping_registry._HYPERPARAMETER_TYPES)
 
 
 @pytest.mark.parametrize("kind", REGISTERED)
@@ -784,6 +828,62 @@ def test_a_real_hyper_parameter_takes_any_finite_number_and_stores_a_float(
     for name in reals:
         value = MappingSpec(kind, {name: given}, PAIR).hyperparameters[name]
         assert value == stored and type(value) is float
+
+
+@pytest.mark.parametrize("given, stored", [
+    (2, 2), (0, 0), (-3, -3), (np.int32(4), 4), (np.uint8(5), 5), (2 ** 63, 2 ** 63),
+    (2 ** 1023, 2 ** 1023),
+], ids=["int", "zero", "negative", "numpy int32", "numpy uint8", "past int64",
+        "the largest power of two a float64 holds"])
+def test_an_integer_hyper_parameter_takes_an_int_and_stores_an_int(given, stored):
+    """An ``int``-declared hyper-parameter: any integer that is not a bool,
+    up to the magnitude a float64 can hold (the bound a real has), kept
+    exactly as a Python ``int`` through the spec and its JSON."""
+    spec = MappingSpec(INVERSE_DISTANCE, {"neighbours": given}, PAIR)
+    value = spec.hyperparameters["neighbours"]
+    assert value == stored and type(value) is int
+    back = MappingSpec.from_dict(json.loads(json.dumps(spec.to_dict())))
+    assert back == spec and type(back.hyperparameters["neighbours"]) is int
+    assert back.hyperparameters["neighbours"] == stored
+    back = MappingSpec.from_dict(yaml.safe_load(yaml.safe_dump(spec.to_dict())))
+    assert back.hyperparameters["neighbours"] == stored
+
+
+def test_an_integer_hyper_parameter_reaches_the_factory_and_the_config_as_an_int(
+        monkeypatch):
+    calls = _spy(monkeypatch, INVERSE_DISTANCE)
+    gm = _load({"kind": INVERSE_DISTANCE, "neighbours": 2, "points": PAIR})
+    (_, kwargs), = calls
+    assert kwargs["neighbours"] == 2 and type(kwargs["neighbours"]) is int
+    stored = json.loads(json.dumps(gm.to_dict()))["edges"][0]["mapping"]["neighbours"]
+    assert stored == 2 and type(stored) is int
+    # ... and it changed what was built: two sources per target, not three
+    assert int(np.count_nonzero(np.asarray(gm.edges[0].mapping.W)[0])) == 2
+
+
+@pytest.mark.parametrize("kind, hyper", [("rbf", "epsilon"), ("rbf", "ridge"),
+                                         (INVERSE_DISTANCE, "power")])
+@pytest.mark.parametrize("value", [_HUGE, -_HUGE, 2 ** 1024])
+def test_an_integer_no_float64_holds_is_a_refused_real_naming_the_edge(kind, hyper, value):
+    """JSON integers have no size limit.  One too large to be a float used
+    to leave ``MappingSpec`` as an ``OverflowError`` -- which no loader
+    wraps, so for a built-in kind the edge was never named.  It is "must
+    be finite" now, for a built-in kind and a registered one alike."""
+    config = json.loads(json.dumps(_config({"kind": kind, hyper: value, "points": PAIR})))
+    with pytest.raises(MappingRebuildError, match="must be finite, got an integer of "
+                                                  r"\d+ digits") as refused:
+        GraphManager.from_dict(config, REGISTRY)
+    assert refused.value.edge == EDGE and refused.value.kind == kind
+    assert type(refused.value.__cause__) is ValueError
+    with pytest.raises(ValueError, match="must be finite"):
+        MappingSpec(kind, {hyper: value}, PAIR)
+
+
+@pytest.mark.parametrize("argument", ["epsilon", "ridge"])
+def test_the_rbf_factory_itself_refuses_an_integer_no_float64_holds(argument):
+    with pytest.raises(ValueError, match=f"{argument} must be finite, got an integer of "
+                                         "401 digits"):
+        rbf_mapping([0.0, 0.5, 1.0], [0.0, 1.0], **{argument: _HUGE})
 
 
 @pytest.mark.parametrize("kind", REGISTERED)
@@ -1010,6 +1110,8 @@ def test_a_registered_factory_is_called_with_checked_arrays_hyper_parameters_and
     assert kwargs[described.source_ref] == {"asset": "source.npy"}
     assert kwargs[described.target_ref] == INLINE3
     assert {name: kwargs[name] for name in hyper} == hyper
+    assert {name: type(kwargs[name]) for name in hyper} == {
+        name: type(value) for name, value in hyper.items()}
 
 
 # ===========================================================================
@@ -1031,7 +1133,8 @@ _RAISED = [
     # ... and the types the built-in factories raise, for a registered kind
     ValueError("power must be positive"), TypeError("bad operand"), KeyError("missing"),
     OSError("disk went away"), MemoryError("out of memory"),
-    zipfile.BadZipFile("not a zip"), ImportError("no module named scipy"),
+    zipfile.BadZipFile("not a zip"), ImportError("cannot import name 'cKDTree'"),
+    ModuleNotFoundError("No module named 'scipy'"), OverflowError("int too large"),
 ]
 
 
@@ -1054,6 +1157,29 @@ def test_any_exception_from_a_registered_factory_is_a_rebuild_error_naming_the_e
         with pytest.raises(type(raised)) as direct:
             _vectors(MappingSpec("failing", {}, PAIR))
         assert direct.value is raised
+
+
+@pytest.mark.parametrize("missing", [ImportError("cannot import name 'cKDTree'"),
+                                     ModuleNotFoundError("No module named 'scipy'")],
+                         ids=lambda exc: type(exc).__name__)
+def test_an_import_error_while_rebuilding_a_built_in_kind_names_the_edge_too(missing):
+    """A factory that needs a package this environment lacks.  The edge
+    that needs it is what the user has to be told, whichever kind it is:
+    ``ImportError`` is one of the errors the loader reports for a built-in
+    kind as well (it used not to be)."""
+    def resolver(reference):
+        raise missing
+
+    for kind in ("nearest_neighbor", "rbf", "projection_1d", INVERSE_DISTANCE):
+        points = ({"source_boundaries": INLINE3, "target_boundaries": INLINE3}
+                  if kind == "projection_1d" else PAIR)
+        edge = {"source_node": "a", "target_node": "b", "source_field": "v",
+                "target_field": "inp", "mapping": {"kind": kind, "points": points}}
+        with pytest.raises(MappingRebuildError) as wrapped:
+            GraphManager._rebuild_mapping(edge, resolver)
+        assert wrapped.value.edge == EDGE and wrapped.value.kind == kind
+        assert wrapped.value.__cause__ is missing
+        assert type(missing).__name__ in str(wrapped.value)
 
 
 def test_a_base_exception_from_a_registered_factory_is_not_swallowed():

@@ -71,8 +71,10 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 
 #: The types a hyper-parameter may be declared as.  ``float`` is a *real
 #: number*: a finite ``int`` or ``float`` that is not a ``bool``, stored as
-#: a ``float`` (JSON has no ``Infinity`` / ``NaN``).
-_HYPERPARAMETER_TYPES: tuple[type, ...] = (str, bool, float)
+#: a ``float`` (JSON has no ``Infinity`` / ``NaN``).  ``int`` is an integer:
+#: an ``int`` that is not a ``bool``, of a magnitude a float64 can hold
+#: (the bound a real has), stored as an ``int``.
+_HYPERPARAMETER_TYPES: tuple[type, ...] = (str, bool, int, float)
 
 #: Keys of a serialised spec that are not hyper-parameters: ``kind``,
 #: ``points`` and the ``shape`` a mapping's description adds.
@@ -97,7 +99,7 @@ class _MappingKind:
     factory: Callable[..., Any]
     #: The factory's array arguments, in the order a spec lists them.
     arrays: tuple[str, ...]
-    #: Hyper-parameter name -> ``str``, ``bool`` or ``float`` (a real).
+    #: Hyper-parameter name -> ``str``, ``bool``, ``int`` or ``float`` (a real).
     hyperparameters: dict[str, type]
     #: Array argument -> the factory keyword that carries its reference.
     references: dict[str, str]
@@ -201,7 +203,7 @@ def _declare(kind: str, factory: Callable[..., Any], arrays: Any, hyperparameter
     if not isinstance(hyperparameters, Mapping):
         raise ValueError(
             f"mapping kind {kind!r}: hyperparameters must be a dict of name -> type "
-            f"(str, bool or float), got {hyperparameters!r}"
+            f"(str, bool, int or float), got {hyperparameters!r}"
         )
     hyper_names = _names(kind, "hyperparameters", list(hyperparameters))
     hyper: dict[str, type] = {}
@@ -210,8 +212,8 @@ def _declare(kind: str, factory: Callable[..., Any], arrays: Any, hyperparameter
         if not any(declared is t for t in _HYPERPARAMETER_TYPES):
             raise ValueError(
                 f"mapping kind {kind!r}: hyper-parameter {name!r} is declared as "
-                f"{declared!r}; choose from str, bool and float (float is a real "
-                f"number: a finite int or float that is not a bool)"
+                f"{declared!r}; choose from str, bool, int and float (float is a "
+                f"real number: a finite int or float that is not a bool)"
             )
         hyper[name] = declared
     reserved = sorted(set(hyper) & {*_RESERVED_KEYS, *(() if builtin else (_MATRIX_LABEL,))})
@@ -373,9 +375,12 @@ def register_mapping(
         list).  May be empty.
     hyperparameters : mapping of str to type
         Every other argument a spec may carry, with its type: ``str``,
-        ``bool`` or ``float``.  ``float`` is a real number -- a finite
-        ``int`` or ``float`` that is not a ``bool`` -- and reaches the
-        factory as a ``float``.  A spec's hyper-parameters are checked
+        ``bool``, ``int`` or ``float``.  ``float`` is a real number -- a
+        finite ``int`` or ``float`` that is not a ``bool`` -- and reaches
+        the factory as a ``float``.  ``int`` is an integer (a count, a
+        size): an ``int`` that is not a ``bool``, of a magnitude a float64
+        can hold, and reaches the factory as an ``int``; a float is refused
+        for it, whatever its value.  A spec's hyper-parameters are checked
         against these declarations before the factory is called.  The
         names ``kind``, ``points``, ``shape`` and ``label`` are reserved.
     references : mapping of str to str, optional
@@ -395,7 +400,7 @@ def register_mapping(
         declaration (registering the same factory again with the same
         declaration is a no-op); if a name is not an identifier, is
         reserved or is declared twice; if a hyper-parameter type is not
-        one of the three; or if the factory's signature does not take
+        one of the four; or if the factory's signature does not take
         every declared name as a keyword, or requires an argument that is
         not a declared array.
     TypeError
@@ -422,8 +427,8 @@ def register_mapping(
     dense matrix, whose one weight is ``H`` -- or a class of your own.
 
     **What ``params_pytree()`` may contain.**  The graph snapshots it into
-    ``gm.params["mappings"][edge.key]``, and checkpoints, ``PUT
-    /graph/params``, system identification, the FMU's state archive and
+    ``gm.params["mappings"][edge.key]``, and checkpoints, ``POST
+    /checkpoint/load``, system identification, the FMU's state archive and
     ``to_dict``'s "live weights differ" warning all walk that entry as a
     flat table of arrays.  So, for any mapping that is not a
     ``StaticLinearMapping``, ``add_edge`` refuses a ``params_pytree()``

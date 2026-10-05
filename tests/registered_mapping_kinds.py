@@ -10,7 +10,8 @@ what they prove of a third party's kind:
 ``inverse_distance``
     A mapping class of its own with **two** weights of different rank --
     a matrix ``W`` and a scalar ``gain`` -- and one hyper-parameter of
-    each declarable type.  This is the kind the property strategies draw
+    each declarable type (a real, a bool, a string and an integer).  This
+    is the kind the property strategies draw
     (``tests/property/strategies.py``) and the parametrised harnesses run.
 ``linear_1d``
     Returns the library's ``StaticLinearMapping`` (one weight, ``H``), the
@@ -100,35 +101,47 @@ class InverseDistanceMapping:
 
 
 def _shepard(source: np.ndarray, target: np.ndarray, power: float,
-             normalise: bool) -> np.ndarray:
+             normalise: bool, neighbours: int) -> np.ndarray:
     """Bounded inverse-distance weights ``1 / (1 + r**power)``, each row
-    scaled to sum to one when ``normalise``."""
+    scaled to sum to one when ``normalise``.  With ``neighbours > 0`` only
+    that many nearest sources of each target keep a weight (the lower
+    index wins a tie)."""
     w = 1.0 / (1.0 + _distances(target, source) ** power)
+    if 0 < neighbours < w.shape[1]:
+        nearest = np.argsort(-w, axis=1, kind="stable")[:, :neighbours]
+        kept = np.zeros_like(w)
+        np.put_along_axis(kept, nearest, np.take_along_axis(w, nearest, axis=1), axis=1)
+        w = kept
     return w / np.sum(w, axis=1, keepdims=True) if normalise else w
 
 
 @register_mapping(
     INVERSE_DISTANCE,
     arrays=("source_points", "target_points"),
-    hyperparameters={"power": float, "normalise": bool, "mode": str},
+    hyperparameters={"power": float, "normalise": bool, "mode": str, "neighbours": int},
     references={"source_points": "source_ref", "target_points": "target_ref"},
 )
 def inverse_distance_mapping(source_points, target_points, *, power: float = 2.0,
                              normalise: bool = True, mode: str = "consistent",
+                             neighbours: int = 0,
                              source_ref=None, target_ref=None) -> InverseDistanceMapping:
-    """Inverse-distance (Shepard) weights between two point sets."""
+    """Inverse-distance (Shepard) weights between two point sets, from every
+    source or from each target's ``neighbours`` nearest ones."""
     if mode not in _MODES:
         raise ValueError(f"mode={mode!r} not in {_MODES}")
     if not power > 0:
         raise ValueError(f"power must be positive, got {power!r}")
+    if neighbours < 0:
+        raise ValueError(f"neighbours must not be negative, got {neighbours!r}")
     src, tgt = _as_points(source_points), _as_points(target_points)
     if mode == "consistent":
-        W = _shepard(src, tgt, power, normalise)
+        W = _shepard(src, tgt, power, normalise, neighbours)
     else:
-        W = _shepard(tgt, src, power, normalise).T
+        W = _shepard(tgt, src, power, normalise, neighbours).T
     spec = MappingSpec(
         INVERSE_DISTANCE,
-        {"power": float(power), "normalise": bool(normalise), "mode": mode},
+        {"power": float(power), "normalise": bool(normalise), "mode": mode,
+         "neighbours": int(neighbours)},
         {"source_points": reference_for_array(source_points, source_ref,
                                               name="source_points"),
          "target_points": reference_for_array(target_points, target_ref,
@@ -270,7 +283,8 @@ KINDS: dict[str, RegisteredKind] = {
     INVERSE_DISTANCE: RegisteredKind(
         INVERSE_DISTANCE, inverse_distance_mapping, ("W", "gain"),
         "source_ref", "target_ref",
-        {"power": (1.0, 2.0, 3.5), "normalise": (True, False), "mode": _MODES}),
+        {"power": (1.0, 3.5), "normalise": (True, False), "mode": _MODES,
+         "neighbours": (0, 2)}),
     LINEAR_1D: RegisteredKind(
         LINEAR_1D, linear_1d_mapping, ("H",),
         "source_points_ref", "target_points_ref", {"clamp": (True, False)}),

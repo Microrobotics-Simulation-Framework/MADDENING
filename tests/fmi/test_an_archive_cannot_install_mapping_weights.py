@@ -35,7 +35,7 @@ from maddening.fmi import build_model_description
 from maddening.fmi.fmu_state import serialize_fmu_state
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
 from maddening.fmi.tcp_bridge import FmuTcpBridge, state_of, values_of
-from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS
+from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS, SELECTION
 
 DT = 0.01
 FORGED = np.asarray([[0.0, 10.0], [-3.0, 0.0]], np.float32)
@@ -192,3 +192,61 @@ def test_the_sidecars_own_restore_door_refuses_the_same_weights(gm, served, case
     assert reply["error"] == f"ValueError: {refused.value}"                 # one message
     # and the unedited snapshot restores through the same door
     sidecar.set_fmu_state(sidecar.get_fmu_state())
+
+
+# ---------------------------------------------------------------------------
+# A mapping without weights: the archive carries nothing for it
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def weightless():
+    """The same two nodes joined by a registered kind that has no weights
+    (a gather; here the identity), whose entry of ``params["mappings"]`` is
+    ``{}``."""
+    gm = GraphManager()
+    gm.add_node(_Source("a", DT))
+    gm.add_node(_Sink("b", DT))
+    gm.add_edge("a", "b", "v", "inp", mapping=KINDS[SELECTION].build([0.0, 1.0], [0.0, 1.0]))
+    gm.compile()
+    assert gm.params["mappings"] == {EDGE: {}}
+    return gm
+
+
+def test_an_fmu_of_a_weightless_mapping_snapshots_restores_and_takes_no_weight(weightless):
+    """The FMU's own snapshot carries no mapping member and restores; an
+    archive that adds one for the edge is not this FMU's and is refused by
+    the bridge and by the sidecar's own door, with nothing written."""
+    md = build_model_description(weightless, model_name="M")
+    sidecar = _sidecar(weightless, md)
+    bridge = FmuTcpBridge(sidecar, md, master_dt=DT)
+    try:
+        assert [v.name for v in md.variables if v.causality == "parameter"] == []
+        bridge.handle({"op": "step", "t": 0.0, "dt": DT})
+        assert _bx(md, bridge) == [1.0, 2.0]
+        snapshot = bridge.handle({"op": "get_state"})
+        blob = state_of(snapshot)
+        with np.load(io.BytesIO(blob), allow_pickle=False) as data:
+            arrays = {k: data[k] for k in data.files}
+        assert not [k for k in arrays if k.startswith("p/mappings/")]
+        assert bridge.handle({"op": "set_state", "state": snapshot["state"]})["ok"] is True
+
+        arrays[f"p/mappings/{EDGE}/W"] = FORGED
+        buf = io.BytesIO()
+        np.savez(buf, **arrays)
+        forged = base64.b64encode(buf.getvalue()).decode("ascii")
+        reply = bridge.handle({"op": "set_state", "state": forged})
+        assert reply["ok"] is False, reply
+        assert bridge.handle({"op": "get_state"})["state"] == snapshot["state"]
+        bridge.handle({"op": "step", "t": DT, "dt": DT})
+        assert _bx(md, bridge) == [1.0, 2.0]
+        assert sidecar.params["mappings"] == {EDGE: {}}
+
+        params = {"nodes": {}, "mappings": {EDGE: {"W": jnp.asarray(FORGED)}}}
+        with pytest.raises(ValueError):
+            sidecar.set_fmu_state(serialize_fmu_state(
+                state=weightless._state, schema_token=md.instantiation_token,
+                params=params))
+        assert sidecar.params["mappings"] == {EDGE: {}}
+        sidecar.set_fmu_state(sidecar.get_fmu_state())
+    finally:
+        bridge.stop()

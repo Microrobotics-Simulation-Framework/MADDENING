@@ -414,7 +414,8 @@ def test_a_mutated_spec_dict_parses_to_a_canonical_spec_or_a_value_error(data):
 
 #: Real-valued hyper-parameters, of the built-in kinds and the registered
 #: one the recipes draw: an integer where a float was written is the same
-#: recipe.
+#: recipe.  (Not the reverse: the registered kind's integer hyper-parameter
+#: refuses a float, and the mutations above find that.)
 _REAL_HYPERS = ("epsilon", "ridge", "power")
 
 

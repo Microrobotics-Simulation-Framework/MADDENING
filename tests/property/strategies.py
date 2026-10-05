@@ -400,6 +400,9 @@ class MappingRecipe:
     polynomial: bool = True
     ridge: float = 1e-6
     mode: str = "consistent"
+    #: The registered kind's integer hyper-parameter (how many nearest
+    #: sources weigh in; ``0`` is all of them).  The built-in kinds take none.
+    neighbours: int = 0
 
     @property
     def weights(self) -> tuple[str, ...]:
@@ -437,11 +440,12 @@ class MappingRecipe:
             )
         if self.kind == INVERSE_DISTANCE:
             # The registered kind: ``epsilon`` is drawn as its real
-            # hyper-parameter (the power) and ``polynomial`` as its bool
-            # (whether the rows are normalised).
+            # hyper-parameter (the power), ``polynomial`` as its bool
+            # (whether the rows are normalised) and ``neighbours`` as its
+            # integer.
             return KINDS[INVERSE_DISTANCE].build(
                 src, tgt, power=self.epsilon, normalise=self.polynomial, mode=self.mode,
-                source_ref=src_ref, target_ref=tgt_ref)
+                neighbours=self.neighbours, source_ref=src_ref, target_ref=tgt_ref)
         raise AssertionError(self.kind)
 
 
@@ -714,6 +718,7 @@ def _mapping(draw, source: NodeRecipe, source_field: str,
         epsilon=draw(st.sampled_from([1.0, 2.0, 4.0])),
         polynomial=draw(st.booleans()),
         mode=draw(st.sampled_from(["consistent", "conservative"])),
+        neighbours=draw(st.sampled_from([0, 1, 3])) if kind == INVERSE_DISTANCE else 0,
     )
 
 

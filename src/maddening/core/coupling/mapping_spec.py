@@ -1045,14 +1045,39 @@ def _node_point_field(node: Any, node_name: str, field_name: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def _float64_overflows(value: Any) -> bool:
+    """Whether *value* is an integer too large to be a float64 at all.
+
+    A config may hold one -- JSON integers have no size limit -- and
+    ``math.isfinite`` does not answer for it: it raises ``OverflowError``,
+    which is not one of the errors a loader reports with the edge.
+    """
+    try:
+        float(value)
+    except OverflowError:
+        return True
+    return False
+
+
 def _check_hyperparameter(kind: str, key: str, value: Any, expected: type) -> Any:
-    """*value* as the kind declares hyper-parameter *key* (``str``, ``bool``
-    or ``float`` -- a real number), or a ``ValueError``."""
+    """*value* as the kind declares hyper-parameter *key* -- ``str``,
+    ``bool``, ``int`` or ``float`` (a real number) -- or a ``ValueError``.
+
+    A real is a finite ``int`` or ``float`` that is not a ``bool``, stored
+    as a ``float``.  An integer is an ``int`` that is not a ``bool``, of a
+    magnitude a float64 can hold (the bound a real has), stored as an
+    ``int``: a float is not an integer, whatever its value.
+    """
     if expected is float:
         if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
             raise ValueError(
                 f"mapping kind {kind!r}: hyper-parameter {key!r} must be a real number, "
                 f"got {value!r}"
+            )
+        if _float64_overflows(value):
+            raise ValueError(
+                f"mapping kind {kind!r}: hyper-parameter {key!r} must be finite, got an "
+                f"integer of {len(str(abs(int(value))))} digits, which no float64 holds"
             )
         if not math.isfinite(value):
             raise ValueError(
@@ -1060,6 +1085,19 @@ def _check_hyperparameter(kind: str, key: str, value: Any, expected: type) -> An
                 f"{value!r} (JSON cannot represent it)"
             )
         return float(value)
+    if expected is int:
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError(
+                f"mapping kind {kind!r}: hyper-parameter {key!r} must be an integer, "
+                f"got {value!r}"
+            )
+        if _float64_overflows(value):
+            raise ValueError(
+                f"mapping kind {kind!r}: hyper-parameter {key!r} must be an integer of "
+                f"a magnitude float64 can hold, got one of "
+                f"{len(str(abs(int(value))))} digits"
+            )
+        return int(value)
     if not isinstance(value, expected):
         raise ValueError(
             f"mapping kind {kind!r}: hyper-parameter {key!r} must be a "
@@ -1082,9 +1120,10 @@ class MappingSpec:
     hyperparameters : dict
         The factory's non-array keyword arguments (``kernel``, ``epsilon``,
         ``mode``, ...), JSON-able and type-checked (``epsilon`` / ``ridge``
-        finite reals, ``polynomial`` a bool, the rest strings).  For
-        ``"matrix"`` a ``label`` entry is the user-facing ``kind`` label
-        of ``matrix_mapping``.
+        finite reals, ``polynomial`` a bool, the rest strings; a
+        registered kind declares each of its own as ``str``, ``bool``,
+        ``int`` or ``float``).  For ``"matrix"`` a ``label`` entry is the
+        user-facing ``kind`` label of ``matrix_mapping``.
     points : dict
         Array-argument name → point reference (see the module docstring),
         or ``None`` for a set that was not recorded.

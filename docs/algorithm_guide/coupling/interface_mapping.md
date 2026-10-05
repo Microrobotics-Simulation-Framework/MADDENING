@@ -136,7 +136,8 @@ and `points` maps each array argument of the factory (`source_points` /
 **point reference**.
 Hyper-parameters are type-checked on the way in and out: `epsilon` and
 `ridge` must be finite reals (a config must stay valid JSON — no
-`Infinity`), `polynomial` a bool, `kernel` / `mode` / `label` strings.
+`Infinity` — and an integer too large to be a float64 is refused the same
+way), `polynomial` a bool, `kernel` / `mode` / `label` strings.
 Every factory attaches the spec to the mapping it returns
 (`mapping.spec`, `mapping.describe()`); `GraphManager.from_dict` and
 `load_graph_from_usd` rebuild the mapping by calling the same factory on
@@ -146,8 +147,9 @@ the resolved points (`MappingSpec.build(resolve_points)`), so the rebuilt
 also accepts a `MappingSpec` (or its dict) directly.  Anything that goes
 wrong while rebuilding one edge — a malformed spec, a reference that does
 not resolve, an unreadable asset, a hyper-parameter of the wrong type, a
-singular solve — is a `MappingRebuildError` (a `ValueError`) naming that
-edge, with the original exception chained as `__cause__`.
+singular solve, a package a factory cannot import — is a
+`MappingRebuildError` (a `ValueError`) naming that edge, with the original
+exception chained as `__cause__`.
 
 `describe()["kind"]` is the mapping's **user-facing** kind: for
 `matrix_mapping(H, kind="supermesh")` it stays `"supermesh"` (that is
@@ -417,13 +419,14 @@ What the declaration says:
 * **`arrays`** -- the factory's array arguments, the point sets or
   matrices a spec refers to by [reference](#point-references).
 * **`hyperparameters`** -- every other argument a spec may carry, with
-  its type: `str`, `bool` or `float`.  `float` is a real number: a finite
-  `int` or `float` that is not a `bool`, handed to the factory as a
-  `float` (an integer setting is declared `float` and converted in the
-  factory).  A spec's hyper-parameters are checked against these
-  declarations **before** your factory is called, as the built-in ones
-  are, and an unknown one is refused.  The names `kind`, `points`,
-  `shape` and `label` are reserved.
+  its type: `str`, `bool`, `int` or `float`.  `float` is a real number: a
+  finite `int` or `float` that is not a `bool`, handed to the factory as a
+  `float`.  `int` is an integer (a count, a size): an `int` that is not a
+  `bool`, of a magnitude a float64 can hold, handed to the factory as an
+  `int`; a float is refused for it, whatever its value.  A spec's
+  hyper-parameters are checked against these declarations **before** your
+  factory is called, as the built-in ones are, and an unknown one is
+  refused.  The names `kind`, `points`, `shape` and `label` are reserved.
 * **`references`** -- for each array, the factory keyword that carries
   its reference (`"<array>_ref"` when omitted).
 
@@ -496,7 +499,8 @@ reference resolver before a factory runs, so they hold for a registered
 kind exactly as for a built-in one.  Whatever a registered factory
 raises, `from_dict` and `load_graph_from_usd` report as a
 `MappingRebuildError` naming the edge and the kind, with the factory's
-exception chained as `__cause__`.
+exception chained as `__cause__` -- an `ImportError` included, for a
+factory that needs a package the loading environment lacks.
 
 ## Legacy closures
 

@@ -6944,7 +6944,7 @@ class GraphManager:
                     f"mapping must implement the Mapping protocol (missing {attr!r})"
                 )
         # What the mapping puts into params["mappings"][edge.key].  Every
-        # reader of that entry -- checkpoints, PUT /graph/params, sysid,
+        # reader of that entry -- checkpoints, POST /checkpoint/load, sysid,
         # the FMU archive, to_dict's "live weights differ" warning -- takes
         # it for a flat table of floating-point arrays and none of them
         # checks, so a mapping class of the caller's own is asked here,
@@ -11212,7 +11212,9 @@ class GraphManager:
         :class:`~maddening.core.coupling.mapping_spec.MappingRebuildError`
         (a ``ValueError``) naming this edge, with the original exception
         chained: a config is untrusted input and the edge it broke on is
-        the only thing that makes the failure actionable.
+        the only thing that makes the failure actionable.  So does a
+        factory's ``ImportError`` (an optional package it needs is not
+        installed).
 
         A kind added with
         :func:`~maddening.core.coupling.mapping_registry.register_mapping`
@@ -11251,9 +11253,12 @@ class GraphManager:
                         f"{list(shape)}; the referenced point sets changed"
                     )
         except (ValueError, TypeError, KeyError, OSError, MemoryError,
-                zipfile.BadZipFile) as exc:
+                zipfile.BadZipFile, ImportError) as exc:
             # json.JSONDecodeError is a ValueError and numpy's
-            # UFuncTypeError a TypeError, so both land here too.
+            # UFuncTypeError a TypeError, so both land here too.  An
+            # ImportError is a factory that needs a package this
+            # environment lacks: the edge that needs it is what the user
+            # has to be told, whichever kind's factory it is.
             raise MappingRebuildError(where, kind, exc) from exc
         except Exception as exc:
             # Any other type is the edge's to report only when the kind's

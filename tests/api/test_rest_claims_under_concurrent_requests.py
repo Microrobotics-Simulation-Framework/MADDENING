@@ -548,6 +548,60 @@ def test_a_run_that_cannot_have_the_graph_among_simultaneous_requests_says_how_f
         assert body["steps_run"] == server.relay.step_count > 0
 
 
+def test_a_run_among_simultaneous_requests_stops_at_its_next_slice_at_shutdown(tmp_path):
+    """REST-052: a /sim/run in flight on a real server (its slices slowed)
+    while three clients read the state and two write a parameter, all
+    released together by a barrier with the thread that calls
+    ``request_shutdown()``.  The run answers the 503 'interrupted' body with
+    the steps it took, the graph is left after exactly those steps, and
+    every request sent beside the shutdown is served."""
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
+        gm = server.gm
+        real_run, done = gm.run, threading.Event()
+
+        def slow(n, *args, **kwargs):     # one 30 ms step a slice until the run is answered
+            if not done.is_set():
+                time.sleep(0.03)
+            return real_run(n, *args, **kwargs)
+
+        gm.run = slow
+        out: dict = {}
+        run = threading.Thread(target=lambda: out.setdefault(
+            "r", _client(base, server).post("/sim/run", params={"n_steps": 100_000})))
+        run.start()
+        try:
+            assert S.wait_for(lambda: server.relay.step_count >= 2), "the run never stepped"
+
+            def read():
+                with _client(base, server) as c:
+                    return [c.get("/graph/state/ball").status_code for _ in range(8)]
+
+            def write():
+                with _client(base, server) as c:
+                    return [c.put("/graph/params/spring",
+                                  json={"params": {"stiffness": 40.0}}).status_code
+                            for _ in range(4)]
+
+            def shut_down():
+                time.sleep(0.02)          # the reads and writes are in flight
+                server.request_shutdown()
+                return []
+
+            replies = simultaneously([read] * 3 + [write] * 2 + [shut_down])
+            run.join(30)
+        finally:
+            done.set()
+            gm.run = real_run
+        assert not run.is_alive(), "the run did not stop at the shutdown"
+        resp = out["r"]
+        assert resp.status_code == 503, resp.text
+        body = resp.json()
+        assert body["status"] == "interrupted" and body["n_steps"] == 100_000
+        assert 0 < body["steps_run"] < 100_000
+        assert server.relay.step_count == body["steps_run"]
+        assert [code for codes in replies for code in codes] == [200] * (3 * 8 + 2 * 4), replies
+
+
 def test_simultaneous_saves_of_one_name_leave_a_manifest_that_hashes_to_the_file(tmp_path):
     """REST-091, REST-101: eight POST /checkpoint/save of one name at once,
     between steps: whichever lands last, the file and the manifest beside it

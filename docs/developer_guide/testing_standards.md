@@ -1086,6 +1086,63 @@ draws the same examples on every run. Each oracle was mutation-tested on a
 scratch copy of `src/` (the PR that added them lists the mutants and the
 test that caught each).
 
+### The REST oracles: generated sequences, and requests from the schema
+
+Files: `tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py`,
+`tests/property/test_rest_requests_generated_from_the_schema.py`; the
+invariants both ask are in `tests/property/rest_oracle.py`. The REST tests
+before them are fixed scenarios, and two audit rounds in a row found a
+defect that only a *sequence* reaches (PUT, save, PUT, load, PUT a value
+back) or that is one malformed value on a documented field (a NaN
+`timestep`). These two generate those inputs. Neither predicts an answer:
+whatever the server replies, no reply is a 5xx; a refused request changed
+nothing (the config, every parameter, the whole state, the files under the
+checkpoint root, the streams' clock); an accepted graph reloads
+(`from_dict(to_dict())`, with a checkpoint on top), steps bit for bit as its
+reload and is inside the stability limit its constructor enforces; a 4xx
+names no directory of the deployment; a 2xx is strict JSON.
+
+- **The sequence oracle** is a Hypothesis `RuleBasedStateMachine` over the
+  state-changing routes, with a direct `gm.params` write between requests
+  standing in for a fit. Its vocabulary puts a rod *at* its Fourier limit,
+  returns to values the graph has already held as often as it proposes new
+  ones, and reuses four node names and four checkpoint names, which is what
+  makes a sequence like MADD-ANO-178's reachable. Ten requests a sequence
+  per push, drawn the same on every run; fifty in the slow lane at the
+  profile's depth. Each historical sequence is also pinned, replayed
+  through the machine's own `do_*` requests.
+  **To add a rule:** write a `do_<request>` method that sends one request
+  through `send()` (which asks the first two invariants) and a `@rule`
+  that draws its arguments and calls it; add the request, in a form the
+  server takes and one it refuses, to
+  `test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused`.
+  The other invariants are asked after every rule without being named. A
+  node class with a stability limit also gets an entry in
+  `rest_oracle.STABILITY_LIMITS` (a test fails for a stock node that has
+  none) and its values in `VOCABULARY`.
+- **The request oracle** reads the routes from the app's OpenAPI document.
+  Each has a *seed* in `SEEDS`: a request the served graph takes, which is
+  the part a schema cannot say. The battery replaces every path parameter,
+  query parameter and body member of every seed, in turn, by every
+  malformed value of its kind, and does the same to the headers a proxy or
+  the HTTP server interprets (in process, and as raw HTTP to a uvicorn
+  server on loopback); a fuzzer draws combinations.
+  **To add a route:** add it to the server, and
+  `test_every_documented_route_has_a_request_generator` fails until `SEEDS`
+  has an entry for it, with every parameter the route declares; the fields
+  and their malformed values follow from the schema. A route whose
+  acceptance leaves its seed valid goes in `KEEPS_ITS_SEED`; a route that
+  changes the state also gets a rule in the sequence oracle. The
+  out-of-scope prefixes (`/surrogate/`, `/ws/`, `/cloud/`) are listed in
+  `OUT_OF_SCOPE`, and nothing is ever sent to them.
+
+A defect either oracle finds is kept as a strict xfail with its minimal
+request, and, where the generators would otherwise report nothing else, a
+tolerance exactly as narrow as the defect that goes when the xfail passes
+(`is_the_known_422_echo_defect` is the example). To show an oracle can
+still fail, run it against an older tree: `git archive <commit> src` into
+a scratch directory, and that `src` on `PYTHONPATH` with this tree's tests.
+
 ### Coupling and numerics
 
 `tests/property/test_differential_*.py`, over graphs of synthetic nodes

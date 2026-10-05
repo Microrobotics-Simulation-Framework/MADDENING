@@ -816,12 +816,19 @@ def _run_battery(op: Operation, seeds: tuple, chosen: Callable[[Variant], bool])
                           + "\n".join(problems[:30]))
 
 
-@pytest.mark.parametrize("key", sorted(IN_SCOPE))
-def test_every_malformed_value_of_every_field_is_refused_whole_or_served(key):
+#: One case per seed (a route with three seeds sends some three hundred
+#: requests, and serves a fresh graph after each one it accepts).
+_SEEDED = [pytest.param(key, i, id=key + (f" ({seed.label})" if seed.label else ""))
+           for key in sorted(SEEDS) for i, seed in enumerate(SEEDS[key])]
+
+
+@pytest.mark.parametrize("key, index", _SEEDED)
+def test_every_malformed_value_of_every_field_is_refused_whole_or_served(key, index):
     """The battery over a route's own fields: each path parameter, query
     parameter and body member replaced in turn by every malformed value of
     its kind, left out, or joined by one the route does not have."""
-    _run_battery(IN_SCOPE[key], SEEDS[key], lambda v: not v.where.startswith("header"))
+    _run_battery(IN_SCOPE[key], SEEDS[key][index:index + 1],
+                 lambda v: not v.where.startswith("header"))
 
 
 @pytest.mark.parametrize("key", sorted(IN_SCOPE) + sorted(FRAMEWORK))
@@ -933,6 +940,8 @@ def generated_requests(draw, op: Operation, seeds: tuple):
         choices.append(("query", name, _is_count(schema)))
     if op.body is not None and not callable(seed.body):
         choices += [("body", pointer) for pointer in _members(seed.body)] + [("body", ())]
+    by_kind = {"number": NUMBER_VALUES, "boolean": NUMBER_VALUES, "string": STRING_VALUES,
+               "object": OBJECT_VALUES}
     changes = []
     for _ in range(draw(st.integers(0, min(3, len(choices))), label="fields changed")):
         choice = draw(st.sampled_from(choices), label="field")
@@ -946,9 +955,16 @@ def generated_requests(draw, op: Operation, seeds: tuple):
             changes.append(Variant(f"query {choice[1]}", repr(value),
                                    _set_query(choice[1], value)))
         else:
-            value = draw(_JSON, label=_pointer_text(choice[1]))
-            changes.append(Variant(_pointer_text(choice[1]), repr(value)[:80],
-                                   _put(choice[1], value)))
+            # Half the time one of the battery's values for a member of
+            # this kind (so they are met in combination), else any JSON.
+            pointer = choice[1]
+            listed = [v for _, v in by_kind.get(
+                _kind(_at(seed.body, pointer), _schema_at(op.body, pointer)), ())
+                if not isinstance(v, Raw) and v is not ABSENT] if pointer else []
+            value = draw(st.one_of(st.sampled_from(listed), _JSON) if listed else _JSON,
+                         label=_pointer_text(pointer))
+            changes.append(Variant(_pointer_text(pointer), repr(value)[:80],
+                                   _put(pointer, value)))
     if draw(st.integers(0, 3), label="a header") == 0:
         changes.append(draw(st.sampled_from(list(header_variants())), label="header"))
     return seed, changes

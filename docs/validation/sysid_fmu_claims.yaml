@@ -3589,10 +3589,11 @@ claims:
 - id: SYS-131
   area: mapping registry
   claim: >-
-    "A kind name is any non-empty string; registering a name that is taken
-    -- a built-in kind, or another factory's -- is a ValueError, registering
-    the same factory again with the same declaration is a no-op, and nothing
-    removes a kind."
+    "A kind name is any non-empty string but the three a config reserves for
+    non-finite numbers (NaN, Infinity, -Infinity); registering a name that
+    is taken -- a built-in kind, or another factory's -- is a ValueError,
+    registering the same factory again with the same declaration is a no-op,
+    and nothing removes a kind."
   sources:
     - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
     - src/maddening/core/coupling/mapping_registry.py (register_mapping, Raises)

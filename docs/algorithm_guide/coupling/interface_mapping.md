@@ -433,10 +433,11 @@ What the declaration says:
 The rebuild calls `factory(**arrays, **hyperparameters, **references)`.
 The declaration is checked against the factory's signature when it is
 registered, so a misspelt name fails at the decorator rather than while
-someone loads a config.  A kind name is any non-empty string; registering
-a name that is taken -- a built-in kind, or another factory's -- is a
-`ValueError`, registering the same factory again with the same
-declaration is a no-op, and nothing removes a kind.
+someone loads a config.  A kind name is any non-empty string but the three
+a config reserves for non-finite numbers (`NaN`, `Infinity`,
+`-Infinity`); registering a name that is taken -- a built-in kind, or
+another factory's -- is a `ValueError`, registering the same factory
+again with the same declaration is a no-op, and nothing removes a kind.
 
 **What the factory returns** is checked when a spec is rebuilt:
 

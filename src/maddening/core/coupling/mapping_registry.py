@@ -367,8 +367,10 @@ def register_mapping(
     Parameters
     ----------
     kind : str
-        The name a serialised mapping carries.  Non-empty; the names of
-        the built-in kinds are taken.
+        The name a serialised mapping carries.  Any non-empty string but
+        ``"NaN"``, ``"Infinity"`` and ``"-Infinity"``, which a config
+        reserves for non-finite numbers; the names of the built-in kinds
+        are taken.
     arrays : sequence of str
         The factory's array arguments: the point sets or matrices a spec
         refers to by reference (node field, asset file or small inline
@@ -395,14 +397,14 @@ def register_mapping(
     Raises
     ------
     ValueError
-        If *kind* is not a non-empty string, names a built-in kind, or is
-        already registered to a different factory or with a different
-        declaration (registering the same factory again with the same
-        declaration is a no-op); if a name is not an identifier, is
-        reserved or is declared twice; if a hyper-parameter type is not
-        one of the four; or if the factory's signature does not take
-        every declared name as a keyword, or requires an argument that is
-        not a declared array.
+        If *kind* is not a non-empty string, spells a non-finite JSON
+        token, names a built-in kind, or is already registered to a
+        different factory or with a different declaration (registering the
+        same factory again with the same declaration is a no-op); if a
+        name is not an identifier, is reserved or is declared twice; if a
+        hyper-parameter type is not one of the four; or if the factory's
+        signature does not take every declared name as a keyword, or
+        requires an argument that is not declared.
     TypeError
         If the decorated object is not callable.
 

@@ -452,7 +452,7 @@ def test_an_in_place_write_is_taken_in_once_and_a_later_calibration_wins():
 
 
 # ---------------------------------------------------------------------------
-# A replaced mapping writes the keys it changes, and no others (MADD-ANO-179)
+# A replaced mapping writes the keys it changes, and no others (MADD-ANO-192)
 # ---------------------------------------------------------------------------
 
 

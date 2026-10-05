@@ -1417,7 +1417,7 @@ class _PhysicalMap:
     ran its ``constrain(unconstrain(p))`` round trip whenever the eager
     round trip happened to be exact: left out by ``mask=`` at ``2.0`` under
     those bounds it was run at 2.0266, and the stiffness fitted beside it
-    came back 30.06 for a truth of 30, ``converged=True`` (MADD-ANO-178).
+    came back 30.06 for a truth of 30, ``converged=True`` (MADD-ANO-191).
     Two evaluations cannot be made to agree in the last bit across
     compilers; there is now one.
 
@@ -4812,7 +4812,7 @@ class FitResult:
         landed on different floats: an ulp apart for a ``log`` leaf, and
         under a ``logit`` whose bounds are wide beside the value, far enough
         that ``best_loss`` read 1.3e-8 for parameters whose loss was 4.5e-10,
-        MADD-ANO-178.)  The value is the fitter's own program's: a loss you
+        MADD-ANO-191.)  The value is the fitter's own program's: a loss you
         compute yourself from ``params`` agrees with it to rounding, not to
         the bit.  ``None`` when nothing was evaluated (``n_iter=0``).
 

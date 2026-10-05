@@ -5680,7 +5680,7 @@ class GraphManager:
         (``node.params = {**node.params, "k": v}`` is stored as a new
         ``_ParamsDict`` that takes over the old one's counts and counts
         ``k``, not the keys it hands back with the value they had:
-        ``_ParamsDict._succeed``, MADD-ANO-179); or a value changed in place
+        ``_ParamsDict._succeed``, MADD-ANO-192); or a value changed in place
         -- an element of a list or a NumPy array, which no method of the
         mapping sees -- found by comparing each such value with its copy
         from the last sync (:func:`~maddening.core.node._mutated_keys`).  So
@@ -5714,7 +5714,7 @@ class GraphManager:
                 written = _mutated_keys(params, snapshot)
             elif continued:
                 # Counted writes -- a replacement counts the keys it changed,
-                # not the ones it handed back (MADD-ANO-179) -- and values
+                # not the ones it handed back (MADD-ANO-192) -- and values
                 # changed in place.
                 written = {k for k in set(counts) | set(counts_seen)
                            if counts.get(k, 0) != counts_seen.get(k, 0)}

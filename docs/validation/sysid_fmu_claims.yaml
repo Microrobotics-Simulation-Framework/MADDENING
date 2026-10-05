@@ -1612,7 +1612,7 @@ claims:
     whenever the eager round trip happened to be exact -- a damping left
     out by mask= at 2.0 under logit (-1e6, 1e6) was run at 2.0266 and the
     stiffness fitted beside it came back 30.06 for a truth of 30,
-    converged=True (MADD-ANO-178).  The claim now covers what the model is
+    converged=True (MADD-ANO-191).  The claim now covers what the model is
     run at, and the tests read the arrays each evaluation received.
   domains:
     f32: tests/core/test_sysid_degenerate_inputs.py::test_a_fit_that_takes_no_step_returns_its_input_bit_for_bit
@@ -2521,7 +2521,7 @@ claims:
     is 4.5e-10 under logit (-1e4, 1e4), a returned damping of 2.0 for an
     objective run at 2.0266 under (-1e6, 1e6).  One evaluation was removed:
     _PhysicalMap is the only map, its arrays are what the model-side
-    programs take and what the result holds (MADD-ANO-178).
+    programs take and what the result holds (MADD-ANO-191).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
     f64:
@@ -3734,7 +3734,7 @@ claims:
     sync compares mutable values (MADD-ANO-175).
     Round 9 (B1, on e301c41): the replacement was read as a write of every
     key and reverted the node's other calibrated constants; it writes the
-    keys it changes (SYS-136, MADD-ANO-179).
+    keys it changes (SYS-136, MADD-ANO-192).
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_a_leaf_write_reaches_every_entry_point_too
     f64: narrowed
@@ -3839,7 +3839,7 @@ claims:
   notes: >-
     Round 9 (B1, on e301c41): node.params = {**node.params, "damping": 5.0}
     after a stiffness calibrated to 45 put the stiffness back to the node's
-    30, with no warning (MADD-ANO-179).
+    30, with no warning (MADD-ANO-192).
   domains:
     f32: tests/core/test_node_params_writes_are_observed.py::test_replacing_the_mapping_leaves_the_other_calibrated_constants_alone
     f64: narrowed

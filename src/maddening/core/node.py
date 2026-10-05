@@ -176,7 +176,7 @@ class _ParamsDict(dict):
     own values handed back, so they are not writes.  Until 0.4.0 shipped
     the graph read a replaced mapping as a write of *every* key, which put
     the node's own value over every other constant of that node a fit had
-    calibrated in ``gm.params`` (MADD-ANO-179).
+    calibrated in ``gm.params`` (MADD-ANO-192).
 
     Behaves as a ``dict`` everywhere else: ``isinstance(p, dict)``, JSON, a
     JAX pytree with the dict's own flattening, and a copy (``dict(p)``,
@@ -698,7 +698,7 @@ class SimulationNode(ABC):
         when the assignment hands its key back unchanged.  (For a time
         during 0.4.0 development it was a write of every key, and the
         one-key idiom silently reverted every other calibrated constant of
-        the node, MADD-ANO-179.)  To write a value the node already holds --
+        the node, MADD-ANO-192.)  To write a value the node already holds --
         to revert a calibration -- write the key: ``node.params[key] =
         value``.
         """
@@ -717,7 +717,7 @@ class SimulationNode(ABC):
             old = self.__dict__.get("params")
             if isinstance(old, _ParamsDict):
                 # The replacement writes the keys it changes, not the ones
-                # it hands back (MADD-ANO-179).
+                # it hands back (MADD-ANO-192).
                 value._succeed(old)
         cast(dict, self.__dict__)["params"] = value
 

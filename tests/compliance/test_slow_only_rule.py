@@ -414,6 +414,20 @@ def test_every_named_per_push_witness_runs_in_the_default_lane(collection):
         + "\n  ".join(problems))
 
 
+def test_no_witness_or_table_row_names_a_test_that_needs_usd_core():
+    """A witness is a test the default lane runs, and the collection above
+    hands every named file to pytest.  ``tests/usd/`` is neither where
+    ``usd-core`` is not installed, which is every sharded lane: its conftest
+    skips the directory, and pytest handed one of its files exits with that
+    skip as an error.  This says so in every lane, with the reason, where
+    the collection would only fail in some."""
+    named = sorted(f for f in _files_named() if f.startswith("tests/usd/"))
+    assert not named, (
+        f"{named}: named by a `# Per push:` comment or the slow-only table, but the default "
+        "lane skips tests/usd (no usd-core), so nothing there is a per-push witness.  Name a "
+        "test the sharded lanes run")
+
+
 def test_the_slow_only_table_and_the_exemptions_name_real_slow_tests(collection):
     problems = []
     for target in slow_only_table(STANDARDS.read_text(encoding="utf-8")):

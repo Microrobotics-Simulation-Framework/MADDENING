@@ -52,7 +52,13 @@ from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode, ShardedS
 from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
 from maddening.core import graph_manager as gm_mod
 from maddening.core.graph_manager import GraphManager
-from maddening.core.node import SimulationNode, _method_accepts_params, _signature_takes_params
+from maddening.core.node import (
+    SimulationNode,
+    _method_accepts_params,
+    _signature_required_arguments,
+    _signature_takes_keyword,
+    _signature_takes_params,
+)
 from maddening.core.simulation.hybrid_node import HybridNode
 from maddening.testing import verification as ver_mod
 
@@ -378,6 +384,14 @@ _ALLOWED = {
     # arguments the constructor would run with (``maddening.core._size_estimate``).
     # It never decides whether a method takes ``params``.
     ("core/_size_estimate.py", "constructor_arguments"),
+    # Not a keyword probe: lists the arguments a call must supply (those
+    # without a default), which a yes/no answer about one keyword cannot
+    # enumerate.  The mapping registry needs both to check a declaration
+    # against its factory, and asks ``_signature_takes_keyword`` whether a
+    # declared name is taken; this one never decides that.  It lives in
+    # ``core/node.py`` so that one module still holds every signature read
+    # behind a keyword decision.
+    ("core/node.py", "_signature_required_arguments"),
 }
 
 
@@ -417,10 +431,102 @@ def test_only_the_shared_helper_reads_a_signature():
     """A probe that inspects a signature itself is how the explicit-only
     rule got into ``ShardedUnstructuredNode`` and the duck-typed
     fallbacks.  Every reader goes through
-    ``core/node.py::_signature_takes_keyword``."""
+    ``core/node.py::_signature_takes_keyword``; ``_ALLOWED`` says what the
+    two other reads are for, and neither decides whether a callable takes
+    a keyword."""
     reads = _signature_reads()
     assert set(reads) <= _ALLOWED, sorted(set(reads) - _ALLOWED)
     assert ("core/node.py", "_signature_takes_keyword") in reads
+
+
+# What ``_signature_required_arguments`` is asked about.  Each body is
+# trivial, so a ``TypeError`` from a call below is a failure to bind.
+
+def _by_name(a, b, c=0):
+    return "called"
+
+
+def _keyword_only(a, *, b, c=0):
+    return "called"
+
+
+def _positional_only(a, b=0, /, *, c):
+    return "called"
+
+
+def _variadic(*args, **kwargs):
+    return "called"
+
+
+def _positional_only_beside_kwargs(a, /, b, **kwargs):
+    return "called"
+
+
+class _RequiringOwner:
+    def __init__(self, a, b=0, *, c):
+        pass
+
+    def method(self, a, *, b):
+        return "called"
+
+    @classmethod
+    def build(cls, a, b=0):
+        return "called"
+
+    def __call__(self, a, /, b):
+        return "called"
+
+
+_REQUIRED = {
+    "by_name": (_by_name, {"a": True, "b": True}),
+    "keyword_only": (_keyword_only, {"a": True, "b": True}),
+    "positional_only": (_positional_only, {"a": False, "c": True}),
+    "variadic": (_variadic, {}),
+    "positional_only_beside_kwargs": (_positional_only_beside_kwargs, {"a": False, "b": True}),
+    "class": (_RequiringOwner, {"a": True, "c": True}),
+    "bound_method": (_RequiringOwner(1, c=2).method, {"a": True, "b": True}),
+    "classmethod": (_RequiringOwner.build, {"a": True}),
+    "callable_object": (_RequiringOwner(1, c=2), {"a": False, "b": True}),
+    "partial_by_keyword": (functools.partial(_by_name, b=1), {"a": True}),
+    "partial_by_position": (functools.partial(_by_name, 1), {"b": True}),
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(_REQUIRED))
+def test_the_required_arguments_are_the_ones_a_call_cannot_leave_out(spelling):
+    """``_signature_required_arguments`` against the call itself: supplying
+    exactly what it lists binds (a positional-only one by position), and
+    leaving any one of them out does not.  A positional-only argument is
+    one no keyword supplies."""
+    fn, expected = _REQUIRED[spelling]
+    required = _signature_required_arguments(fn)
+    assert required == expected
+    positional = [name for name, by_keyword in required.items() if not by_keyword]
+    named = {name: 0 for name, by_keyword in required.items() if by_keyword}
+    fn(*[0] * len(positional), **named)
+    for left_out in named:
+        with pytest.raises(TypeError):
+            fn(*[0] * len(positional), **{k: v for k, v in named.items() if k != left_out})
+    if positional:
+        with pytest.raises(TypeError):
+            fn(*[0] * (len(positional) - 1), **named)
+        with pytest.raises(TypeError):
+            fn(**dict.fromkeys(required, 0))
+
+
+def test_an_unreadable_signature_has_no_required_arguments_to_report():
+    """``None``, not an empty answer: the caller decides what an unreadable
+    signature means, where the keyword rule answers ``False`` (it fails
+    closed)."""
+    class Opaque:
+        __signature__ = "not a signature"
+
+        def __call__(self, **kwargs):
+            return "called"
+
+    assert _signature_required_arguments(Opaque()) is None
+    assert _signature_required_arguments(3) is None
+    assert _signature_takes_keyword(Opaque(), "anything") is False
 
 
 class _OldStyleProbe(SimulationNode):

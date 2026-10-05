@@ -33,10 +33,12 @@ and the module runs under :func:`tests.property.differential.no_cloud_launch`.
 from __future__ import annotations
 
 import contextlib
+import gc
 import hashlib
 import json
 import os
 import socket
+import ssl
 import threading
 import time
 import warnings
@@ -148,6 +150,35 @@ def reading(base: str, headers: dict):
         stop.set()
         t.join(30)
     assert not bad, bad[:3]
+
+
+@contextlib.contextmanager
+def collector_off():
+    """Python's cyclic garbage collector switched off for the block.
+
+    A test here that times a request shares its process with the server it
+    asks, and a full (oldest-generation) collection stops every thread of
+    that process -- the client, the server's event loop and its workers --
+    for as long as it takes: 0.1 to 0.4 s in these tests on an idle core,
+    longer on a busy one.  The collector runs once enough objects have been
+    allocated, so a test that has just built and sent a hundred requests is
+    where one falls, and one that falls inside a timed request is counted
+    as the route's own time.  The two misses reproduced here (jax 0.10.2,
+    one busy core: a stop at 0.54 s and at 0.60 s against 0.5 s) each had
+    a collection of 0.46 s and of 0.42 s inside the request; CI's three,
+    0.70 to 0.76 s, are read the same way.  What the routes are asked for
+    -- not to wait for a worker thread, or for the graph -- has nothing to
+    do with it.
+
+    A collection another thread has already begun is not stopped, so a
+    test enters this before it starts its server or any thread."""
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
 
 
 # ---------------------------------------------------------------------------
@@ -565,8 +596,9 @@ def test_simultaneous_saves_of_one_name_leave_a_manifest_that_hashes_to_the_file
 def test_healthz_answers_while_every_worker_waits_for_the_graph(tmp_path):
     """REST-018: the graph held, more reads queued than anyio has worker
     threads (40), each waiting for the graph in a worker; /healthz, answered
-    on the event loop, still answers within two seconds."""
-    with S.loopback_server(_ANY, tmp_path) as (server, base):
+    on the event loop, still answers within two seconds.  No collection
+    runs meanwhile (:func:`collector_off`)."""
+    with collector_off(), S.loopback_server(_ANY, tmp_path) as (server, base):
         lock = server._graph_lock
         assert lock.acquire(timeout=20)
         queued = []
@@ -593,7 +625,14 @@ def test_healthz_answers_while_every_worker_waits_for_the_graph(tmp_path):
 #: The graph-lock timeout of the saturated-pool test, and how many reads it
 #: queues behind a held graph: three times anyio's 40 workers, so a route
 #: that needs a worker waits two waves of timed-out reads for one.
-LOCK_TIMEOUT = 1.0
+#:
+#: The timeout is also how long the test has to arrange that: every read
+#: must have arrived before the first of them gives up.  The 120 take 0.07
+#: to 0.14 s to arrive on three idle cores and up to 0.54 s on three busy
+#: ones (0.89 s with a collection among them, before ``collector_off``):
+#: too near a 1 s timeout.  The route's bounds are counted in timeouts, so
+#: a longer one leaves the claim as it was.
+LOCK_TIMEOUT = 2.0
 QUEUED = 120
 #: Runner routes behind a saturated worker pool: (route, the row, the
 #: runner running?, what it must answer, within how many lock timeouts).
@@ -605,50 +644,118 @@ _ROUTES = [
 ]
 
 
+class _ServerClock:
+    """When each request reached the app and when its answer began, read on
+    the server: an ASGI wrapper around the app :func:`S.loopback_server`
+    serves (``SimulationServer.create_app`` patched to return it wrapped).
+
+    What a route does about a request starts when the request reaches the
+    app.  A client's clock also counts the time before that -- the request
+    waiting for the event loop and the CPU behind whatever else the test
+    process does at that moment -- which no route can shorten."""
+
+    def __init__(self) -> None:
+        self.events: list = []        # (path, "arrived" | "answered", time); appended on the loop
+
+    def wrap(self, app):
+        async def timed(scope, receive, send):
+            if scope["type"] != "http":
+                return await app(scope, receive, send)
+            path = scope["path"]
+            self.events.append((path, "arrived", time.monotonic()))
+
+            async def answering(message):
+                if message["type"] == "http.response.start":
+                    self.events.append((path, "answered", time.monotonic()))
+                await send(message)
+            return await app(scope, receive, answering)
+        return timed
+
+    def count(self, path: str, kind: str) -> int:
+        return sum(1 for p, k, _ in list(self.events) if p == path and k == kind)
+
+    def took(self, path: str):
+        """Seconds from the last arrival of *path* to its answer; ``None``
+        when it was not answered."""
+        events = [(k, t) for p, k, t in list(self.events) if p == path]
+        arrived = [t for k, t in events if k == "arrived"]
+        answered = [t for k, t in events if k == "answered" and arrived and t >= arrived[-1]]
+        return answered[0] - arrived[-1] if answered else None
+
+
 @pytest.mark.parametrize("method, url, row, running, want, timeouts", [
     pytest.param(*r, id=r[1].split("?")[0].rsplit("/", 1)[1]) for r in _ROUTES])
 def test_a_runner_route_answers_in_time_while_every_worker_waits_for_the_graph(
-        tmp_path, method, url, row, running, want, timeouts):
+        tmp_path, monkeypatch, method, url, row, running, want, timeouts):
     """REST-044, REST-045, REST-046, REST-105 on a real server: the graph held
     by a long request and 120 reads queued for it -- three times anyio's 40
     workers, every one of them waiting -- then a runner route arrives: stop
     and stride answer at once (well inside one lock timeout), start and a
     reset that stopped the runner answer their 503 within about one timeout
-    of their arrival, not after a worker freed up."""
+    of their arrival, not after a worker freed up.
+
+    Timed on the server, from the route's arrival to its answer
+    (:class:`_ServerClock`), asked only once every read has arrived and
+    none has been answered, and with the garbage collector off
+    (:func:`collector_off`).  The reads used to be sent from threads that
+    each built their own client first -- an SSL context each, up to 1.6 s
+    for the 120 on three cores -- so the first reads timed out before the
+    last were sent, and the route was timed by the client in the middle of
+    it: behind clients still being built, 503s being sent and -- in both
+    misses reproduced with the collector watched -- a full collection of
+    what had just been allocated.  That was 0.70 to 0.76 s on a CI runner
+    for a stride or a stop that answers in milliseconds.  A route that
+    needed a worker would wait about two lock timeouts here: for the two
+    waves of reads queued ahead of it to time out."""
     chk = S.Check(fn=None, rows=(), bind="any", contexts=frozenset(), server_kw={},
                   patch={"_GRAPH_LOCK_TIMEOUT": LOCK_TIMEOUT}, xfail={})
-    with S.loopback_server(chk, tmp_path) as (server, base):
+    clock = _ServerClock()
+    build = server_module.SimulationServer.create_app
+    monkeypatch.setattr(server_module.SimulationServer, "create_app",
+                        lambda self: clock.wrap(build(self)))
+    path = url.split("?")[0]
+    with collector_off(), S.loopback_server(chk, tmp_path) as (server, base):
         if running:
             with _client(base, server) as c:
                 assert c.post("/sim/start").status_code == 200
             assert S.wait_for(lambda: server.relay.step_count > 1)
+        # Every read's client built before any read is sent, sharing one
+        # SSL context (each httpx client otherwise loads its own).
+        tls = ssl.create_default_context()
+        readers = [httpx.Client(base_url=base, timeout=60.0, verify=tls,
+                                headers=dict(S.BEARER) if server.auth.enforced else {})
+                   for _ in range(QUEUED)]
         lock = server._graph_lock
         assert lock.acquire(timeout=20)
-        threads = []
+        threads = [threading.Thread(target=c.get, args=("/graph/state",)) for c in readers]
         try:
-            def read():
-                with _client(base, server) as c:
-                    c.get("/graph/state")
-
-            threads = [threading.Thread(target=read) for _ in range(QUEUED)]
             for t in threads:
                 t.start()
-            # every worker waiting for the graph (a running runner queues too)
-            assert S.wait_for(lambda: len(lock._queue) >= 40 + running, 20), len(lock._queue)
+            # every read at the server and every worker waiting for the
+            # graph (a running runner queues too) ...
+            assert S.wait_for(lambda: clock.count("/graph/state", "arrived") >= QUEUED
+                              and len(lock._queue) >= 40 + running, 20), \
+                (clock.count("/graph/state", "arrived"), len(lock._queue))
+            # ... and still waiting: none has timed out
+            assert clock.count("/graph/state", "answered") == 0, \
+                "a read was answered before the route was asked"
             with _client(base, server) as c:
                 t0 = time.monotonic()
                 try:
-                    resp = c.request(method, url, timeout=10.0)
-                    status = resp.status_code
+                    status = c.request(method, url, timeout=10.0).status_code
                 except httpx.TimeoutException:
                     status = None
-                elapsed = time.monotonic() - t0
+                seen_by_client = time.monotonic() - t0
+            took = clock.took(path)
         finally:
             lock.release()
             for t in threads:
                 t.join(60)
+            for c in readers:
+                c.close()
             S.stop_runner(server)
-    assert status in want and elapsed < timeouts * LOCK_TIMEOUT, (row, status, elapsed)
+    assert status in want and took is not None and took < timeouts * LOCK_TIMEOUT, \
+        (row, status, took, seen_by_client)
 
 
 def test_simultaneous_websocket_handshakes_need_the_credential(tmp_path):

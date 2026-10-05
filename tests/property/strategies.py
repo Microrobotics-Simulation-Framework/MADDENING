@@ -26,8 +26,12 @@ transform, additive edges, edge units, live parameter overrides (a
 "calibrated" graph), :class:`ParamSpec` overrides including trainable
 mapping weights, external inputs, interface mappings built by the real
 factories (RBF, nearest neighbour, 1-D projection) from either a
-node-field point reference or an inlined point set, and **coupling
-groups** over random valid combinations of their settings.
+node-field point reference or an inlined point set -- and by a factory
+*registered* the way another library registers one
+(``tests/registered_mapping_kinds.py``: a mapping class of its own with two
+weights), so every property built on these recipes holds a registered kind
+to what it holds the built-in ones to -- and **coupling groups** over
+random valid combinations of their settings.
 
 Coupling groups
 ---------------
@@ -117,6 +121,7 @@ from maddening.nodes.rigid_body import RigidBodyNode
 from maddening.nodes.rigid_body_2d import RigidBody2DNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.table import TableNode
+from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS
 
 # ``scale(f)`` registers ``"scale_<f>"`` on first call and returns the
 # cached callable afterwards, so importing this module makes the two
@@ -395,6 +400,16 @@ class MappingRecipe:
     polynomial: bool = True
     ridge: float = 1e-6
     mode: str = "consistent"
+    #: The registered kind's integer hyper-parameter (how many nearest
+    #: sources weigh in; ``0`` is all of them).  The built-in kinds take none.
+    neighbours: int = 0
+
+    @property
+    def weights(self) -> tuple[str, ...]:
+        """The names of the weights this mapping puts into
+        ``params["mappings"]``: ``H`` for the built-in dense matrix, a
+        registered kind's own otherwise."""
+        return KINDS[self.kind].weights if self.kind in KINDS else ("H",)
 
     @staticmethod
     def _points(gm: GraphManager, ref, n: int):
@@ -423,6 +438,14 @@ class MappingRecipe:
                 np.linspace(0.0, 1.0, self.n_source + 1, dtype=np.float64),
                 np.linspace(0.0, 1.0, self.n_target + 1, dtype=np.float64),
             )
+        if self.kind == INVERSE_DISTANCE:
+            # The registered kind: ``epsilon`` is drawn as its real
+            # hyper-parameter (the power), ``polynomial`` as its bool
+            # (whether the rows are normalised) and ``neighbours`` as its
+            # integer.
+            return KINDS[INVERSE_DISTANCE].build(
+                src, tgt, power=self.epsilon, normalise=self.polynomial, mode=self.mode,
+                neighbours=self.neighbours, source_ref=src_ref, target_ref=tgt_ref)
         raise AssertionError(self.kind)
 
 
@@ -575,8 +598,8 @@ class GraphRecipe:
     #: ``factor``, which is what a calibration would have left behind.
     param_overrides: tuple[tuple[str, str, float], ...] = ()
     spec_overrides: tuple[SpecOverride, ...] = ()
-    #: Scales ``params["mappings"][key]["H"]`` after compile, standing in
-    #: for weights moved by ``sysid``.  ``1.0`` leaves them alone.
+    #: Scales every weight of ``params["mappings"][key]`` after compile,
+    #: standing in for weights moved by ``sysid``.  ``1.0`` leaves them alone.
     mapping_weight_scale: float = 1.0
 
     # -- introspection ---------------------------------------------------
@@ -677,7 +700,8 @@ def _mapping(draw, source: NodeRecipe, source_field: str,
              target: NodeRecipe, target_field: str) -> MappingRecipe:
     n_source = source.outputs[source_field].shape[0]
     n_target = target.inputs[target_field].shape[0]
-    kind = draw(st.sampled_from(["rbf", "nearest_neighbor", "projection_1d"]))
+    kind = draw(st.sampled_from(["rbf", "nearest_neighbor", "projection_1d",
+                                 INVERSE_DISTANCE]))
     if kind == "projection_1d":
         # Built from cell boundaries, which no node publishes; always
         # inlined, and always conservative.
@@ -694,6 +718,7 @@ def _mapping(draw, source: NodeRecipe, source_field: str,
         epsilon=draw(st.sampled_from([1.0, 2.0, 4.0])),
         polynomial=draw(st.booleans()),
         mode=draw(st.sampled_from(["consistent", "conservative"])),
+        neighbours=draw(st.sampled_from([0, 1, 3])) if kind == INVERSE_DISTANCE else 0,
     )
 
 
@@ -965,7 +990,8 @@ def _spec_overrides(draw, nodes, edges) -> tuple[SpecOverride, ...]:
         if edge.mapping is None:
             continue
         base = f"{edge.source}.{edge.source_field}->{edge.target}.{edge.target_field}"
-        owners.append((_edge_key(edge, seen.get(base, 0)), "H"))
+        owners.extend((_edge_key(edge, seen.get(base, 0)), weight)
+                      for weight in edge.mapping.weights)
         seen[base] = seen.get(base, 0) + 1
     if not owners:
         return ()

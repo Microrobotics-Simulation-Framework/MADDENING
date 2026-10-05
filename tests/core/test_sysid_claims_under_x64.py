@@ -885,7 +885,7 @@ def test_multiple_shooting_best_loss_is_exactly_the_returned_pairs_under_x64(lea
     ``log`` round trip moves by one float64 ulp; float32 leaves round-trip
     through the float64 optimiser's coordinates exactly.  The run evaluated
     the round trip until the fitters' objectives took the leaves no step
-    moved as they went in (``_exact_physical_params``)."""
+    moved as they went in (``_PhysicalMap``)."""
     with _x64():
         gm = _spring(leaves)
         obs = _record(gm, leaves, 200)

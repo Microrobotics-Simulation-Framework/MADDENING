@@ -22,7 +22,6 @@ every cell (:func:`shared_programs`).
 from __future__ import annotations
 
 import contextlib
-import itertools
 import os
 import warnings
 from dataclasses import dataclass
@@ -223,6 +222,11 @@ def build_problem(masked: bool, damping: float = TRUTH, float32_leaves: bool = F
                    damping=float(damping))
 
 
+#: The sharing in force (:func:`shared_programs`), as ``[cache, key, next
+#: slot]``; ``None`` outside one.
+_SHARING: list | None = None
+
+
 @contextlib.contextmanager
 def shared_programs(cache: dict, key):
     """Share the fitters' compiled model-side programs between fits that
@@ -236,13 +240,18 @@ def shared_programs(cache: dict, key):
     them once per ``key`` instead of once per fit is what makes six thousand
     fits affordable.  It is also a check of that statement: a fitter that
     put anything cell-specific into a model-side program would run the
-    wrong one here.  Per-push cells run without it.
+    wrong one here.  The programs a fit asks for are matched to the cached
+    ones by the order it asks in, which :func:`run_fit` restarts before
+    every fit.
     """
+    global _SHARING
     real = sysid._compile_model  # noqa: SLF001
-    order = itertools.count()
+    outer = _SHARING
+    _SHARING = [cache, key, 0]
 
     def compile_once(fn):
-        slot = (key, next(order))
+        slot = (key, _SHARING[2])
+        _SHARING[2] += 1
         if slot not in cache:
             cache[slot] = real(fn)
         return cache[slot]
@@ -252,6 +261,14 @@ def shared_programs(cache: dict, key):
         yield
     finally:
         sysid._compile_model = real  # noqa: SLF001
+        _SHARING = outer
+
+
+def _begin_fit() -> None:
+    """Before each call of a fitter: its programs are matched from the
+    first again."""
+    if _SHARING is not None:
+        _SHARING[2] = 0
 
 
 #: Adam's schedule in the grid, as ``(lr, n_iter)`` stages, each started from
@@ -279,6 +296,7 @@ def run_fit(problem: Problem, fitter: str, start: dict):
     res, edge, at_start = None, False, False
     try:
         if fitter == "fit_lm":
+            _begin_fit()
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 res = fit_lm(gm, problem.residual, params=start, mask=problem.mask())
@@ -286,6 +304,7 @@ def run_fit(problem: Problem, fitter: str, start: dict):
             return res, edge, False
         params, states = start, None
         for stage, (lr, n_iter) in enumerate(ADAM_STAGES):
+            _begin_fit()
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 if fitter == "fit":

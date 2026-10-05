@@ -5001,7 +5001,16 @@ def fit(
     pull the parameter to the bound, or it started out there and could not
     come back within its budget -- says so in a :class:`RuntimeWarning`
     naming the parameter.  Declare a parameter that belongs on its bound
-    with ``transform=None``, which clips.
+    with ``transform=None``, which clips.  Adam's update is about ``lr`` in
+    the coordinate whatever the gradient, and on that margin the transform
+    is flat, so a parameter *started* there is named before the run as
+    well: the value does not move visibly for about ``8 / lr`` updates in
+    float32 and ``18 / lr`` in float64 -- longer while the coordinate's
+    gradient is below ``eps`` of the largest -- where :func:`fit_lm`, whose
+    step is read on the transform's tangent, leaves the edge at once.  And
+    an optimum *on* a bound is approached without being reached (Adam's
+    step shrinks with the gradient it remembers): such a run ends short of
+    the margin, on no edge, and is not named.
 
     A degeneracy is rarely one parameter, though — the spring's data
     determines ``k/m`` and ``c/m`` but not the scale of ``(k, c, m)``,
@@ -5388,6 +5397,14 @@ def _marquardt_step(th, r, J, lam, lo, hi, held):
     Module-level, so its compiled form is shared by every :func:`fit_lm`
     call of the same shapes rather than compiled again per call.
 
+    :func:`fit_lm` calls it in the tangent frame
+    (:meth:`_CoordinateBounds.tangent_frame`): ``th``, ``lo`` and ``hi`` are
+    the coordinates and their bounds for an identity coordinate, and for a
+    ``log`` / ``logit`` one the origin 0 and the box of steps over which the
+    transform's tangent stays inside its range, so the candidate there is
+    the step itself (:meth:`_CoordinateBounds.from_tangent` reads it back).
+    ``J`` is with respect to the coordinates either way.
+
     **The solve is equilibrated and framed.**  ``J``'s columns are each
     multiplied by the power of two that brings their largest entry into
     ``[0.5, 1)`` and ``r`` by the one that brings its own there, and the
@@ -5474,7 +5491,8 @@ def _gauss_newton_step(th, r, J, lo, hi, held):
     for bit.  ``representable`` is False when a column with a nonzero entry
     of ``J``, not held, still has a norm that is zero or not finite.  A
     coordinate held on its bound (its gradient pointing out of the range)
-    is left out, as in the step, and so is one ``held`` holds.
+    is left out, as in the step, and so is one ``held`` holds.  Called in
+    the tangent frame, as :func:`_marquardt_step` is.
     """
     c = _column_frame(J)
     f = pow2_frame(r)
@@ -5550,9 +5568,13 @@ def fit_lm(
     closes the distance by a factor of ``e`` at most and never lands on the
     bound.  And every step is confined to the range the transform resolves,
     ``sqrt(eps)`` of the bounds' size inside each bound
-    (:class:`_CoordinateBounds`).  So wherever the same fit with the
-    parameter under ``transform=None`` and the same bounds recovers its
-    optimum, this one does too, from any start; and a fit that ends on the
+    (:class:`_CoordinateBounds`).  The fitter is held to the consequence
+    over a grid of the parameter guide's spring -- each transform, the truth
+    and the start anywhere in the range and a few float spacings inside
+    each edge, float32 and float64
+    (``tests/property/test_sysid_truth_recovery.py``): wherever the same
+    fit with the parameter under ``transform=None`` and the same bounds
+    recovers its optimum, this one does too.  And a fit that ends on the
     edge of that range -- the data pull the parameter onto its bound, which
     this transform cannot reach -- says so in a :class:`RuntimeWarning`
     naming the parameter.  Until 0.4.0's fix a ``logit`` coordinate that an

@@ -1793,9 +1793,9 @@ claims:
     transform is flat ... the tangent's is the shorter: the step the same
     parameter would take under transform=None ... Where a step heads for a
     bound the curve's is the shorter: it closes the distance by a factor of
-    e at most and never lands on the bound ... So wherever the same fit
-    with the parameter under transform=None and the same bounds recovers
-    its optimum, this one does too, from any start".
+    e at most and never lands on the bound ... wherever the same fit with
+    the parameter under transform=None and the same bounds recovers its
+    optimum, this one does too".
   sources:
     - src/maddening/sysid.py:5415 (fit_lm)
     - src/maddening/sysid.py:1602 (_CoordinateBounds)
@@ -2499,21 +2499,13 @@ claims:
     - tests/property/test_sysid_one_evaluation.py::test_every_fitter_evaluates_what_it_returns
   status: verified
   notes: >-
-    Round 9 (B1, on e301c41), the third round to find two evaluations of
-    theta -> params disagreeing in their last bits: the jitted objective
-    and the eager gm.constrain behind FitResult.params landed on different
-    points of a logit's grid -- best_loss 1.27e-8 for parameters whose loss
-    is 4.5e-10 under logit (-1e4, 1e4), a returned damping of 2.0 for an
-    objective run at 2.0266 under (-1e6, 1e6).  One evaluation was removed:
-    _PhysicalMap is the only map, its arrays are what the model-side
-    programs take and what the result holds (MADD-ANO-178).
     f64 domain failing on d2429a6: a log leaf no step moved was returned as
     it went in while the run evaluated its exp(log(p)) round trip, so
     best_loss differed from the returned pair's loss by the loss's change
-    over that ulp (5.2e-13 relative at k = 30.03). Fixed: the objectives of
-    fit, fit_lm and fit_multiple_shooting evaluate exactly the parameters
-    to_params returns (_exact_physical_params), so without the guard the
-    pair is exact in float32 and float64.
+    over that ulp (5.2e-13 relative at k = 30.03). Fixed then by making
+    the objectives of fit, fit_lm and fit_multiple_shooting select the
+    value that went in for a leaf no step moved, so that without the guard
+    the pair is exact in float32 and float64.
     fit_lm's other way to an iterate, the Gauss-Newton step its floor rule
     takes (SYS-080), is evaluated through the same objective: best_loss is
     that candidate's loss as the run's last act, and the next iteration's
@@ -2522,6 +2514,14 @@ claims:
     exactly the pair returned" and FitResult "the value before the guard",
     and round 7 (B1, on 04bc3e5) measured a held pair 1.9e-9 off best_loss.
     The two docstrings now say the same, which is what the test asserts.
+    Round 9 (B1, on e301c41), the third round to find two evaluations of
+    theta -> params disagreeing in their last bits: the jitted objective
+    and the eager gm.constrain behind FitResult.params landed on different
+    points of a logit's grid -- best_loss 1.27e-8 for parameters whose loss
+    is 4.5e-10 under logit (-1e4, 1e4), a returned damping of 2.0 for an
+    objective run at 2.0266 under (-1e6, 1e6).  One evaluation was removed:
+    _PhysicalMap is the only map, its arrays are what the model-side
+    programs take and what the result holds (MADD-ANO-178).
   domains:
     f32: tests/core/test_sysid_claims_edges.py::test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance
     f64:

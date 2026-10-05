@@ -710,6 +710,11 @@ _ADAM_NEAR = (0.1, 0.5, 1.5)
 
 def _grid_block(fitter, transform, x64, masked):
     key = (x64, masked)
+    # A fit compiles a handful of small programs of its own (its Adam update,
+    # the guard's products); thousands of fits in one process keep them all.
+    for stale in [slot for slot in _GRID_PROGRAMS if slot[0] != (fitter, x64, masked)]:
+        del _GRID_PROGRAMS[stale]
+    jax.clear_caches()
     with grid.precision(x64):
         if key not in _GRID_PROBLEMS:
             _GRID_PROBLEMS[key] = grid.build_problem(masked)

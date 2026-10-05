@@ -627,9 +627,11 @@ The two agree to first order.  Where the transform is flat, the tangent's
 reading is the step the same parameter would take under `transform=None`,
 so a coordinate at the edge of its range comes back in one step; where a
 step heads for a bound, the curve's closes the distance by a factor of
-*e* at most and never lands on it.  So wherever the same fit with the
-parameter clipped instead of transformed recovers its optimum, the
-transformed one does too, from any start its bounds allow.  `fit` and
+*e* at most and never lands on it.  The test suite holds `fit_lm` to the
+consequence over a grid of this spring (each transform, the truth and the
+start anywhere in the range and a few float spacings inside each edge,
+both precisions): wherever the same fit with the parameter clipped instead
+of transformed recovers its optimum, the transformed one does too.  `fit` and
 `fit_multiple_shooting` step a coordinate by about `lr` whatever the
 gradient, so they leave such an edge only over about `8 / lr` updates in
 float32 and `18 / lr` in float64 (more while the coordinate's gradient is

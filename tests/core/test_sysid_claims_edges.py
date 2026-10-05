@@ -423,8 +423,11 @@ def test_with_the_default_tol_fit_never_reports_converged():
 
 
 def test_losses_zero_is_the_starting_points_loss():
-    """SYS-050: ``losses[0]`` is the loss of the start, to the last bits a ``log`` leaf's
-    round trip through the optimiser's coordinates moves it."""
+    """SYS-050: ``losses[0]`` is the loss of the start, bit for bit: the run
+    evaluates a leaf no step has moved at the value that went in, not at its
+    ``log`` round trip through the optimiser's coordinates (``exp(log(30.0))``
+    is not 30.0 in float32), which until SYS-071's fix moved it in the last
+    bits."""
     gm = _spring()
     mask = _only(gm, "stiffness")
 
@@ -432,14 +435,13 @@ def test_losses_zero_is_the_starting_points_loss():
         return (p["nodes"]["s"]["stiffness"] - 25.0) ** 2
 
     res = fit(gm, loss, mask=mask, n_iter=4, lr=0.1)
-    assert float(res.losses[0]) == pytest.approx(float(loss(gm.params)), rel=4e-6)
+    assert float(res.losses[0]) == float(loss(gm.params))
 
     def residual(p):
         return jnp.atleast_1d(p["nodes"]["s"]["stiffness"] - 25.0)
 
     lm = fit_lm(gm, residual, mask=mask, n_iter=4)
-    assert float(lm.losses[0]) == pytest.approx(0.5 * float(residual(gm.params)[0]) ** 2,
-                                                rel=4e-6)
+    assert float(lm.losses[0]) == float(0.5 * jnp.sum(residual(gm.params) ** 2))
 
 
 def test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tolerance():
@@ -461,7 +463,69 @@ def test_multiple_shooting_best_loss_is_the_returned_pairs_within_the_guards_tol
             assert res.excited_rank == 2 and res.undetermined_drift > 0.0, res
             assert again == pytest.approx(res.best_loss, rel=2.0 ** 10 * 1.2e-7)
         else:
-            assert again == pytest.approx(res.best_loss, rel=1e-6)
+            # Exactly: the run evaluates the leaves no step moved at the
+            # values that went in, the values ``params`` returns (SYS-071).
+            assert again == float(res.best_loss), (again, res.best_loss)
+
+
+def _quadratic_residual(p):
+    """Zero at ``stiffness = 25``, ``damping = 1``: an ulp of ``stiffness`` near 30
+    moves the loss by more than the loss's own ulp."""
+    s = p["nodes"]["s"]
+    return jnp.stack([s["stiffness"] - 25.0, s["damping"] - 1.0])
+
+
+@pytest.mark.parametrize("fitter", ["fit", "fit_lm", "fit_multiple_shooting"])
+@pytest.mark.parametrize("case", ["stopped-at-the-start", "an-unmasked-leaf", "the-leaf-moves"])
+def test_best_loss_is_the_loss_of_exactly_the_params_returned(fitter, case):
+    """SYS-071 for every fitter: without the guard, ``best_loss`` (and the entry of
+    ``losses`` it indexes) is the loss of exactly the parameters returned.
+
+    ``stiffness`` starts at 30.0, whose ``log`` round trip ``exp(log(30.0))``
+    is not 30.0 in float32.  Stopped at the start by ``tol`` the fit returns
+    the start bit for bit, and the run used to evaluate the round trip: a
+    ``best_loss`` an ulp's worth of loss away from the returned start's.  Fit
+    in ``damping`` only, ``stiffness`` is never a coordinate and was
+    round-tripped in every evaluation while returned as it went in.  Fit in
+    ``stiffness`` itself, the leaf moves, so the selection's derivative --
+    the round trip's -- is what steps it."""
+    gm = _spring(stiffness=29.0)
+    obs = _record(gm)
+    start = jax.tree.map(lambda x: x, gm.params)
+    start["nodes"]["s"]["stiffness"] = jnp.float32(30.0)
+    k = jnp.float32(30.0)
+    assert float(jnp.exp(jnp.log(k))) != 30.0, "fixture premise: the round trip moves 30.0"
+    mask = {"stopped-at-the-start": _only(gm, "stiffness", "damping"),
+            "an-unmasked-leaf": _only(gm, "damping"),
+            "the-leaf-moves": _only(gm, "stiffness")}[case]
+    kw = dict(params=start, mask=mask, hold_undetermined=False)
+    if case == "stopped-at-the-start":
+        kw.update(tol=1e9, n_iter=5)
+    else:
+        kw.update(n_iter=3)
+    if fitter == "fit":
+        res = fit(gm, lambda q: jnp.sum(_quadratic_residual(q) ** 2), lr=0.01, **kw)
+        again = float(jnp.sum(_quadratic_residual(res.params) ** 2))
+    elif fitter == "fit_lm":
+        res = fit_lm(gm, _quadratic_residual, **kw)
+        again = float(0.5 * jnp.sum(_quadratic_residual(res.params) ** 2))
+    else:
+        res, ws = fit_multiple_shooting(gm, obs, obs_fn=_position, window=WINDOW, lr=0.01, **kw)
+        again = float(windowed_loss(gm, res.params, obs, obs_fn=_position, window=WINDOW,
+                                    window_states=ws, continuity_weight=1.0))
+    stiffness = np.asarray(res.params["nodes"]["s"]["stiffness"])
+    if case == "stopped-at-the-start":
+        assert res.best_iteration == 0
+        assert stiffness.tobytes() == k.tobytes()
+    elif case == "an-unmasked-leaf":
+        assert res.best_iteration > 0
+        assert stiffness.tobytes() == k.tobytes()
+    else:
+        assert res.best_iteration > 0
+        assert stiffness.tobytes() != k.tobytes(), "the gradient did not move the leaf"
+    assert again == float(res.best_loss), (again, res.best_loss)
+    if res.best_iteration < len(res.losses):
+        assert float(res.losses[res.best_iteration]) == float(res.best_loss)
 
 
 def test_the_spring_declares_its_parameter_specs():

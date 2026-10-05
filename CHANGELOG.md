@@ -207,6 +207,8 @@ guidance; the itemized changes follow.
   (stateful machines), the params pytree, `sysid`, retracing and binary frames
 
 ### Changed
+- **Two released behaviours corrected** (MADD-ANO-160, 159, since 0.1.0): `jax.grad` through `run_adaptive_scan` read NaN or exactly 0.0 wherever an attempt's step-doubling estimates agreed exactly (a coupled group at its fixed point, a memoryless or resting node) and now reads the derivative; `compile()` warns, naming the edge, when a coupling group whose members are joined only through outside nodes reads one of them a step late.
+  Action: re-run a calibration or sensitivity study that differentiated `run_adaptive_scan`; a group the new warning names should take the joining nodes in, or be split.
 - **REST refusals agree with `PUT /graph/params`, and the runner routes stay off the shared workers**: `POST /checkpoint/load` and `POST /graph/nodes` refuse a parameter value `PUT` refuses (outside its `ParamSpec` bounds, a boolean or text for a number; on a load also non-finite or refused by the constructor), `GraphManager.load_state` refuses text and booleans for a number, and `PUT` refuses a numeric string (it stored `"1.5"` as 1.5); an integer is bounded at 10^7 only for an integer parameter (an integral JSON number for a float one is a float); a token with surrounding whitespace and an `allowed_hosts` entry that is not a host name raise at construction.
   Start, stop, pause, resume and reset run on pools of their own with deadlines from arrival (`PUT /sim/stride` on the event loop); `run_pod.py` takes no option abbreviations and writes schema 7 (`requested_cells`; a synthetic grid holds at least the requested cells).
   Action: keep parameters inside their bounds; strip the token; spell `run_pod.py` options out; re-run a session recorded at schema 6.
@@ -370,6 +372,9 @@ guidance; the itemized changes follow.
   The `[verify]` extra now only pulls `hypothesis`.
 
 ### Fixed
+- **The known coupling, sysid and FMU findings** (MADD-ANO-158 to 162, CPL-087, SYS-024, SYS-071): `jax.grad` / `jax.jvp` through a bfloat16 or float16 group under `solver="ift"` works (the adjoint solve runs in float32); a 16-bit group's spectral slots are float32; `strict_convergence` on a step spanning several devices raises instead of aborting the process; a typed PRNG key steps under `"ift"` with Aitken or fixed relaxation;
+  the precision warning names float64 leaves when x64 is already on; `best_loss` and `losses` are the loss of exactly the parameters a fit returns (an untouched `log` leaf was evaluated at its round trip, an ulp away).
+  Action: none; a 16-bit group's gradient is to its dtype's resolution.  MADD-ANO-156 and 157 (flux edges across a group's boundary or staggered by an ungrouped cycle) stay open for 0.5.0.
 - **FMU export, round-8 audit fixes** (MADD-ANO-167 to 169, never released): the bridge refuses to start when a `set_param_spec` since the description (or a sidecar spec) would enforce another `min` / `max` than the XML advertises, and holds every write to the advertised bounds too; a start, step end or restored time whose 16 ulps pass a tenth of the master step is refused, and no time slack exceeds a tenth of a step;
   a `get` past what one reply frame carries is refused before anything is read (one 64 MiB frame took 6 GB), a repeated reference is read once; an open `log` / `logit` bound is advertised as the outermost value `ParamSpec.check` accepts (a float32 `logit(-1, 1)` max was refused).
   Action: build the description, sidecar and bridge after the last `set_param_spec`; start an FMU at a time its master step resolves; compute communication points as `start + k * h`; re-package an FMU with a float32 `logit` leaf (its token may change).

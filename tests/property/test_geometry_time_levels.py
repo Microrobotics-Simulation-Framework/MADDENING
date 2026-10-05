@@ -61,7 +61,7 @@ from tests.property.geometry_graphs import x64
 
 #: ``(seed, group rate)`` of the fixed draws.
 _DRAWS = ((3, 0.3), (17, 0.6), (29, 0.5))
-_STEPS = 3
+_STEPS = 4
 _DTYPES = ["float32", pytest.param("float64", marks=pytest.mark.slow)]
 
 
@@ -161,6 +161,7 @@ CASES = {
         [_quiet(iteration_mode="jacobi", convergence_norm="mixed", rtol=1e-4)], "t"),
     "group, mixed anchors, interface norm": (
         _group_in_a_loop, None, [_quiet(convergence_norm="interface", rtol=1e-4)], "sst"),
+    "group, linear predictor": (_group_in_a_loop, None, [_quiet(predictor="linear")], "ts"),
     "group, mixed anchors, fori": (
         _group_in_a_loop, None, [_quiet(solver="fori", max_iterations=100, diagnostics=True)],
         "ts"),

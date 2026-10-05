@@ -147,6 +147,15 @@ SLOW = [
     case("group, fori solver", adv=0.3, dtype="float64", **P_HOLDS,
          group=dict(max_iterations=120, tolerance=1e-13, solver="fori")),
     case("group, two passes", group=dict(max_iterations=2), adv=0.3, **TARGETS),
+    case("group, quadratic predictor", group=dict(_TIGHT32, predictor="quadratic"), adv=0.3,
+         steps=5, **P_HOLDS),
+    case("group IQN-IMVJ, linear predictor, float64", adv=0.3, dtype="float64", steps=5,
+         **F_HOLDS, group=dict(_TIGHT64, acceleration="iqn-imvj", jacobian_reuse=2,
+                               predictor="linear")),
+    case("sub-cycled target, interface norm, three passes", dt_p=DT / 2, adv=0.6,
+         dtype="float64", **SOURCES,
+         group=dict(_SUB, max_iterations=3, convergence_norm="interface", rtol=1e-6,
+                    boundary_interpolation="linear")),
     case("group, a member's flux scattered inside it", group=_TIGHT32, flux="internal",
          adv=0.3, **P_HOLDS),
     case("group with an additive port and a transform", group=_TIGHT32, extra=True, adv=0.3,
@@ -361,6 +370,12 @@ def test_the_cases_cover_what_the_module_claims():
     assert any(c.knobs.get("convergence_norm") == "interface" and c.adv
                for c in PER_PUSH if c.group is not None)
     assert any(c.flux == "reader" and c.group is None and c.down == "target" for c in PER_PUSH)
+    assert {g.get("predictor", "none") for g in groups} >= {"none", "linear", "quadratic"}
+    # A forward and a back edge, each with a source-anchored and a
+    # target-anchored geometry, per push and outside any group.
+    plain = {(c.order, c.down, c.up) for c in PER_PUSH if c.group is None and not c.flux
+             and c.kind == "geom_matrix"}
+    assert plain >= {(("F", "P"), "source", "source"), (("P", "F"), "target", "target")}
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +420,116 @@ def test_the_gradients_of_an_edge_mapped_graph_are_its_node_inlined_twin_s(c):
 @pytest.mark.parametrize("c", GRADIENTS_SLOW, ids=repr)
 def test_the_gradients_of_every_drawn_edge_mapped_graph_are_its_twin_s(c):
     assert_same_gradients(c)
+
+
+# ---------------------------------------------------------------------------
+# Batches and restarts
+# ---------------------------------------------------------------------------
+
+BATCHED_PER_PUSH = [PER_PUSH[0], PER_PUSH[6]]
+BATCHED_SLOW = [
+    case("batched group", group=_TIGHT32, adv=0.3, **P_HOLDS),
+    case("batched group, float64, Jacobi", adv=0.3, dtype="float64", **F_HOLDS,
+         group=dict(_TIGHT64, iteration_mode="jacobi")),
+    case("batched multilinear group", kind="multilinear", group=_TIGHT32, adv=0.3, **TARGETS),
+    case("batched sub-cycled group", dt_p=DT / 2, adv=0.3, **SOURCES,
+         group=dict(_TIGHT32, **_SUB, boundary_interpolation="linear")),
+]
+
+
+def _batch_of(state0: dict, members: int = 3) -> dict:
+    """*members* initial states: every floating field of every node moved a
+    little further per member (the geometry with them); ``_meta`` repeated."""
+    batch = {}
+    for name, fields in state0.items():
+        batch[name] = {}
+        for field, v in fields.items():
+            moved = [v if (name.startswith("_") or not jnp.issubdtype(v.dtype, jnp.floating))
+                     else v + jnp.asarray(0.004 * k, v.dtype) for k in range(members)]
+            batch[name][field] = jnp.stack(moved)
+    return batch
+
+
+def assert_batched_run_matches(c: gg.Case) -> None:
+    """``jax.vmap`` of *c.steps* steps over a batch of initial states (the
+    geometry is state, so it is batched with them): the edge-mapped graph
+    against its node-inlined twin member by member, and every member
+    against its own unbatched run."""
+    with gg.x64(c.needs_x64):
+        edge, inline = gg.graphs(c)
+        outs = []
+        for gm in (edge, inline):
+            run, state0, params0 = gg.rollout(gm, c.steps)
+            batch = _batch_of(state0)
+            batched = jax.jit(jax.vmap(run, in_axes=(0, None)))(batch, params0)
+            outs.append((run, batch, params0, batched))
+        nodes = [n for n in outs[0][3] if not n.startswith("_")]
+
+        def member(tree, k):
+            return {n: {f: np.asarray(v[k]) for f, v in tree[n].items()} for n in nodes}
+
+        run, batch, params0, batched = outs[0]
+        single = jax.jit(run)
+        for k in range(3):
+            assert_same_states(c, member(batched, k), member(outs[1][3], k), step=c.steps)
+            alone = single(jax.tree.map(lambda v, k=k: v[k], batch), params0)
+            assert_same_states(
+                c, member(batched, k),
+                {n: {f: np.asarray(v) for f, v in alone[n].items()} for n in nodes},
+                step=c.steps)
+        first, last = member(batched, 0), member(batched, 2)
+        assert any(np.any(first[n]["x"] != last[n]["x"]) for n in nodes), (
+            "premise: the members of the batch differ")
+
+
+@pytest.mark.parametrize("c", BATCHED_PER_PUSH, ids=repr)
+def test_a_batched_run_of_an_edge_mapped_graph_matches_its_twin_and_its_single_runs(c):
+    """Per push; slow sibling :func:`test_every_batched_run_matches_its_twin_and_its_single_runs`."""
+    assert_batched_run_matches(c)
+
+
+# Slow: a vmapped scan of two graphs and a single one compiled per case.
+# Per push: tests/property/test_differential_geometry_edges.py::test_a_batched_run_of_an_edge_mapped_graph_matches_its_twin_and_its_single_runs
+@pytest.mark.slow
+@pytest.mark.parametrize("c", BATCHED_SLOW, ids=repr)
+def test_every_batched_run_matches_its_twin_and_its_single_runs(c):
+    assert_batched_run_matches(c)
+
+
+_RESTART_CASES = [
+    PER_PUSH[0],
+    pytest.param(case("restarted group", group=_TIGHT32, adv=0.3, **P_HOLDS),
+                 marks=pytest.mark.slow),
+    pytest.param(case("restarted group, quadratic predictor, multilinear", kind="multilinear",
+                      group=dict(_TIGHT32, predictor="quadratic"), adv=0.3, **F_HOLDS),
+                 marks=pytest.mark.slow),
+]
+
+
+# Per push: tests/property/test_differential_geometry_edges.py::test_a_run_restarted_from_a_checkpoint_continues_as_the_uninterrupted_run
+# (on the plain graph; the slow parameters are the same check on groups)
+@pytest.mark.parametrize("c", _RESTART_CASES, ids=repr)
+def test_a_run_restarted_from_a_checkpoint_continues_as_the_uninterrupted_run(c, tmp_path):
+    """A geometry is ordinary node state and a geometry-dependent mapping
+    carries nothing between steps: saved after two steps and loaded into
+    the reset graph, the run continues bit for bit."""
+    with gg.x64(c.needs_x64):
+        gm = gg.build(gg.two_body(c))
+        straight = gg.run_steps(gm, 5)
+        first = gg.run_steps(gm, 2)
+        assert all(np.array_equal(first[-1][n][f], straight[1][n][f])
+                   for n in first[-1] for f in first[-1][n])
+        path = gm.save_state(tmp_path / "checkpoint.npz")
+        gm.reset_state()
+        gm.load_state(path)
+        for k in range(2, 5):
+            gm.step()
+            got = gg.snapshot(gm)
+            for n in got:
+                for f in got[n]:
+                    assert got[n][f].tobytes() == straight[k][n][f].tobytes(), (
+                        f"{c.label}: {n}.{f} after the restart, step {k + 1}")
+    assert np.any(straight[-1]["P"]["x"] != straight[1]["P"]["x"])
 
 
 # ---------------------------------------------------------------------------

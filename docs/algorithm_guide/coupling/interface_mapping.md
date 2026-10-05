@@ -133,7 +133,7 @@ config or a USD stage):
 * a matrix (`matrix_mapping`) must be finite.
 
 An accepted input gives the same operator as before the checks, bit for bit
-(MADD-ANO-174 has the inputs that used to give a wrong one).
+(MADD-ANO-192 has the inputs that used to give a wrong one).
 
 ## Serialisation
 

@@ -3,7 +3,7 @@
 The step turns an edge into a boundary input with ``_apply_edge``: the
 interface mapping, then the transform; additive edges sum; an external
 input replaces what edges delivered to its field.  Three readers of the
-edges rebuilt boundary inputs without it (MADD-ANO-175):
+edges rebuilt boundary inputs without it (MADD-ANO-193):
 
 * ``check_conservation`` read the source field, applied the transform
   only, let a later edge overwrite an additive one, dropped an edge that
@@ -418,7 +418,7 @@ def test_a_back_edges_input_is_paired_with_the_step_that_read_it():
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "MADD-ANO-176: DatasetGenerator pairs a forward edge's boundary input with the "
+    "MADD-ANO-194: DatasetGenerator pairs a forward edge's boundary input with the "
     "source's state before the step, where the step read its state after it; "
     "deferred to 0.5.0"))
 def test_a_forward_edges_input_is_paired_with_the_step_that_read_it():

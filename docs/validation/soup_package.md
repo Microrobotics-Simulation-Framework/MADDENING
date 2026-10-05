@@ -236,10 +236,10 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-171 | save_state cannot write a typed PRNG key leaf | `minor` | `not_safety_relevant` | `open` | >=0.1.0 |
 | MADD-ANO-172 | reset_state() inside a differentiated loss raises UnexpectedTracerError on a predictor group after an earlier transform | `minor` | `not_safety_relevant` | `open` | >=0.4.0.dev0 |
 | MADD-ANO-173 | run_adaptive never returns once its step-doubling error norm is NaN | `major` | `context_dependent` | `open` | >=0.1.0 |
-| MADD-ANO-174 | Interface-mapping factories returned an operator for coordinates their formula does not cover | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
-| MADD-ANO-175 | The conservation diagnostic and the surrogate dataset generator rebuilt boundary inputs by a rule of their own, not the step's | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
-| MADD-ANO-176 | DatasetGenerator pairs a forward edge's boundary input with the source's state before the step | `major` | `context_dependent` | `open` | >=0.1.0 |
-| MADD-ANO-177 | The interface convergence norm reads a mapped edge's source field, not what the edge delivers | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
+| MADD-ANO-192 | Interface-mapping factories returned an operator for coordinates their formula does not cover | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-193 | The conservation diagnostic and the surrogate dataset generator rebuilt boundary inputs by a rule of their own, not the step's | `major` | `context_dependent` | `resolved` (in 0.4.0) | >=0.1.0, <0.4.0 |
+| MADD-ANO-194 | DatasetGenerator pairs a forward edge's boundary input with the source's state before the step | `major` | `context_dependent` | `open` | >=0.1.0 |
+| MADD-ANO-195 | The interface convergence norm reads a mapped edge's source field, not what the edge delivers | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
 
 *177 anomalies registered.  33 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 25 `open` plus 8 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->

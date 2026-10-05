@@ -3,7 +3,7 @@
 ``load_graph_from_usd`` rebuilds an edge's mapping by calling the factory
 on the referenced points, exactly as ``GraphManager.from_dict`` does, so a
 spec the factory refuses -- cell boundaries out of order, a NaN among the
-points, a non-finite matrix (MADD-ANO-174) -- must come back as a
+points, a non-finite matrix (MADD-ANO-192) -- must come back as a
 ``MappingRebuildError`` naming the edge, not as a graph with a wrong
 operator on it.
 """

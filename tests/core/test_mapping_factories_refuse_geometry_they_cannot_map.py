@@ -3,7 +3,7 @@
 Every factory of ``maddening.core.coupling.mapping`` and every closure
 factory of ``maddening.core.coupling.interface_mapping`` builds its
 operator once from coordinates.  Each used to return *an* operator for
-coordinates its formula does not cover (MADD-ANO-174):
+coordinates its formula does not cover (MADD-ANO-192):
 
 * the 1-D projection assumes increasing cell boundaries: a descending
   array gave a matrix of zeros, a non-monotone one rows summing to 4/3;

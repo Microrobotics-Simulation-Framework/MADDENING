@@ -42,7 +42,7 @@ class DatasetGenerator:
     the run's state history by the graph's own edge rule (interface
     mapping, transform, additive edges, external inputs as zeros).
 
-    **Known limit (MADD-ANO-176).**  The inputs of a sample are rebuilt
+    **Known limit (MADD-ANO-194).**  The inputs of a sample are rebuilt
     from the *sources' states at the sample's own step*.  That is what
     the step read on a back edge; on a forward edge (the source runs
     earlier in the schedule) the step read the source's state one step

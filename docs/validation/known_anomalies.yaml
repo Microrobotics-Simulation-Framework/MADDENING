@@ -12122,7 +12122,7 @@ anomalies:
     verification:
       - "tests/core/test_coupling_accelerations_in_every_domain.py::test_run_adaptive_returns_when_a_diverging_group_makes_the_error_nan"
     github_issue: null
-  - anomaly_id: "MADD-ANO-174"
+  - anomaly_id: "MADD-ANO-192"
     title: "Interface-mapping factories returned an operator for coordinates their formula does not cover"
     description: >
       The factories that build an interface operator from coordinates
@@ -12201,7 +12201,7 @@ anomalies:
       - "tests/usd/test_usd_refuses_a_mapping_its_factory_refuses.py::test_a_stage_whose_mapping_spec_the_factory_refuses_does_not_load"
       - "tests/core/test_mapping_factories_refuse_geometry_they_cannot_map.py::test_an_accepted_input_gives_the_operator_it_gave_before_the_checks"
     github_issue: null
-  - anomaly_id: "MADD-ANO-175"
+  - anomaly_id: "MADD-ANO-193"
     title: "The conservation diagnostic and the surrogate dataset generator rebuilt boundary inputs by a rule of their own, not the step's"
     description: >
       The compiled step turns an edge into a boundary input by one rule:
@@ -12261,9 +12261,9 @@ anomalies:
       imbalance of that state and not a replay of the last step (stated
       on the function).  The dataset is rebuilt from a state history and
       still pairs a forward edge's input with the wrong step
-      (MADD-ANO-176); a node fed by a flux-reading edge has no dataset
+      (MADD-ANO-194); a node fed by a flux-reading edge has no dataset
       (`KeyError`, as before).  The interface convergence norm reads a
-      mapped edge before its mapping (MADD-ANO-177).
+      mapped edge before its mapping (MADD-ANO-195).
     verification:
       - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_check_conservation_feeds_the_flux_hook_what_the_step_feeds"
       - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_dataset_pairs_each_state_with_the_boundary_input_the_step_fed"
@@ -12274,7 +12274,7 @@ anomalies:
       - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_flux_the_node_does_not_report_is_a_key_error_not_zero"
       - "tests/api/test_the_surrogate_estimate_counts_what_a_mapped_edge_delivers.py::test_a_mapped_edge_is_counted_at_the_size_it_delivers"
     github_issue: null
-  - anomaly_id: "MADD-ANO-176"
+  - anomaly_id: "MADD-ANO-194"
     title: "DatasetGenerator pairs a forward edge's boundary input with the source's state before the step"
     description: >
       `DatasetGenerator.from_graph` and `from_sweep` rebuild a sample's
@@ -12294,7 +12294,7 @@ anomalies:
       and put in the node's place receives, when it runs, inputs one step
       later than it was trained on: exact for a constant input, an error
       of one step of the input's change otherwise.  Found while comparing
-      the dataset with what the step feeds (MADD-ANO-175).
+      the dataset with what the step feeds (MADD-ANO-193).
     severity: "major"
     safety_relevance: "context_dependent"
     safety_relevance_rationale: >
@@ -12321,7 +12321,7 @@ anomalies:
       - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_forward_edges_input_is_paired_with_the_step_that_read_it"
       - "tests/core/test_every_reader_of_an_edge_applies_it_as_the_step_does.py::test_a_back_edges_input_is_paired_with_the_step_that_read_it"
     github_issue: null
-  - anomaly_id: "MADD-ANO-177"
+  - anomaly_id: "MADD-ANO-195"
     title: "The interface convergence norm reads a mapped edge's source field, not what the edge delivers"
     description: >
       `convergence_norm="interface"` measures, for each edge inside a
@@ -12338,7 +12338,7 @@ anomalies:
       applied to the unmapped field: a shape error when the group is
       traced, or another entry of the field with no error.  No release
       carried it: mapped edges are new in 0.4.0.  Found by the sweep of
-      every reader of an edge's source field that followed MADD-ANO-175
+      every reader of an edge's source field that followed MADD-ANO-193
       (CPU, jax 0.11.0).
     severity: "major"
     safety_relevance: "context_dependent"

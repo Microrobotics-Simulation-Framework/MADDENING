@@ -5,7 +5,7 @@ The step applies an edge's interface mapping and then its transform
 ``residual_precision_floor`` read the edge's *source field* through the
 transform alone, so on a mapped edge inside a coupling group the norm is
 taken on the source field's scale, not on the delivered value's
-(MADD-ANO-177, open; mapped edges are new in 0.4.0, so no release carried
+(MADD-ANO-195, open; mapped edges are new in 0.4.0, so no release carried
 it).  The unmapped case is the control and passes.
 """
 
@@ -46,7 +46,7 @@ def test_the_norm_of_an_unmapped_edge_is_the_scaled_change_of_what_it_delivers()
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "MADD-ANO-177: the interface norm and the precision floor read a mapped edge's "
+    "MADD-ANO-195: the interface norm and the precision floor read a mapped edge's "
     "source field through the transform, without its interface mapping, so they "
     "measure on the source field's scale and not what the edge delivers; open"))
 def test_the_norm_of_a_mapped_edge_is_the_scaled_change_of_what_it_delivers():

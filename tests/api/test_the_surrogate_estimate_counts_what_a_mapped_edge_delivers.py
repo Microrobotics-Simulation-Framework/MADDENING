@@ -2,7 +2,7 @@
 
 The estimate counted each incoming edge at its *source field's* size.
 That was the size the dataset held while ``DatasetGenerator`` ignored
-interface mappings (MADD-ANO-175); now that the dataset holds what the
+interface mappings (MADD-ANO-193); now that the dataset holds what the
 edge delivers, a mapped edge is ``mapping.n_target`` entries, and an
 estimate left at the source's size would under-count a refining mapping
 by ``n_target / n_source``.

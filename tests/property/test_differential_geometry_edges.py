@@ -265,6 +265,22 @@ def assert_same_reports(c: gg.Case, a: dict, b: dict, state: dict, *, step: int)
         else:
             lo, hi = sorted((res_a, res_b))
             assert hi <= 2 * lo + 64 * _residual_floor(c, state), (where, res_a, res_b)
+        # Everything else a report says: the same keys, the same verdicts,
+        # and after the same number of passes the same numbers to within a
+        # factor of two (they are estimates; the residual above is not).
+        assert sorted(ra) == sorted(rb), (where, sorted(ra), sorted(rb))
+        if ia != ib:
+            continue
+        for name in ra:
+            va, vb = ra[name], rb[name]
+            if isinstance(va, (bool, np.bool_)) or isinstance(vb, (bool, np.bool_)):
+                assert bool(va) == bool(vb), (where, name, va, vb)
+                continue
+            va, vb = float(va), float(vb)
+            assert np.isfinite(va) == np.isfinite(vb), (where, name, va, vb)
+            if np.isfinite(va) and name not in ("iterations", "total_iterations", "residual"):
+                lo, hi = sorted((abs(va), abs(vb)))
+                assert hi <= 2 * lo + 64 * _residual_floor(c, state), (where, name, va, vb)
 
 
 @functools.lru_cache(maxsize=4)

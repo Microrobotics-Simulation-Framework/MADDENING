@@ -464,12 +464,19 @@ GRIDS = {1: ((0.25,), (0.5,), (7,)),
          2: ((0.25, -1.0), (0.5, 0.25), (4, 3)),
          3: ((0.25, -1.0, 0.0), (0.5, 0.25, 2.0), (3, 2, 2))}
 #: Index coordinates of the point-side body's points and of the grid-side
-#: body's own (different) set, per axis: every fraction between 0.2 and
-#: 0.8 of a cell, so three steps of motion cross no lattice plane.
-_P_INDEX = np.asarray([[0.42, 0.34, 0.46], [1.34, 1.57, 0.61], [2.54, 0.66, 0.33],
-                       [4.61, 1.41, 0.52]])
-_F_INDEX = np.asarray([[1.37, 1.62, 0.58], [3.27, 0.44, 0.39], [0.61, 0.52, 0.64],
-                       [5.44, 1.36, 0.47]])
+#: body's own (different) set, by dimension: inside the hull, every
+#: fraction between 0.2 and 0.8 of a cell, so three steps of motion cross
+#: no lattice plane.
+_INDEX = {
+    1: (np.asarray([[0.42], [1.34], [2.54], [4.61]]),
+        np.asarray([[1.37], [3.27], [0.61], [5.44]])),
+    2: (np.asarray([[0.42, 0.34], [1.34, 1.57], [2.54, 0.66], [0.61, 1.41]]),
+        np.asarray([[1.37, 1.62], [2.27, 0.44], [0.61, 0.52], [2.44, 1.36]])),
+    3: (np.asarray([[0.42, 0.34, 0.46], [1.34, 0.57, 0.61], [1.54, 0.66, 0.33],
+                    [0.61, 0.41, 0.52]]),
+        np.asarray([[1.37, 0.62, 0.58], [0.27, 0.44, 0.39], [0.61, 0.52, 0.64],
+                    [1.44, 0.36, 0.47]])),
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -534,13 +541,14 @@ def _grid_of(c: Case):
 
 def _positions(c: Case, index: np.ndarray) -> np.ndarray:
     origin, spacing, _shape = _grid_of(c)
-    return np.asarray(origin) + index[:, :c.d] * np.asarray(spacing)
+    return np.asarray(origin) + index * np.asarray(spacing)
 
 
 def geometry_fields(c: Case) -> dict:
     """``{body: {field: initial value}}`` for the case's two bodies."""
     if c.kind == "multilinear":
-        return {"P": {"pos": _positions(c, _P_INDEX)}, "F": {"pos": _positions(c, _F_INDEX)}}
+        return {"P": {"pos": _positions(c, _INDEX[c.d][0])},
+                "F": {"pos": _positions(c, _INDEX[c.d][1])}}
     out = {}
     for k, name in enumerate(("F", "P")):
         rng = np.random.default_rng(700 + k)

@@ -179,6 +179,13 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.coupling.mapping_registry import (
+    _RESERVED_KEYS,
+    _lookup,
+    _MappingKind,
+    _qualified,
+    _registered_kinds,
+)
 
 #: Point sets with at most this many points are inlined into the spec
 #: when the factory is given no reference for them.
@@ -211,31 +218,10 @@ _MAX_ELEMENT_BYTES = 8
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
-# kind -> (factory name, array-argument names, allowed hyper-parameters)
-_FACTORIES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
-    "rbf": ("rbf_mapping", ("source_points", "target_points"),
-            ("kernel", "epsilon", "polynomial", "ridge", "mode")),
-    "nearest_neighbor": ("nearest_neighbor_mapping", ("source_points", "target_points"),
-                         ("mode",)),
-    "projection_1d": ("projection_1d_mapping", ("source_boundaries", "target_boundaries"),
-                      ()),
-    "matrix": ("matrix_mapping", ("H",), ("mode", "label")),
-}
-
-# hyper-parameter -> expected type ("real" = finite int/float, not bool)
-_HYPER_TYPES: dict[str, Any] = {
-    "kernel": str, "mode": str, "label": str, "polynomial": bool,
-    "epsilon": "real", "ridge": "real",
-}
-
-# array-argument name -> the factory keyword that carries its reference
-_REF_KWARG = {
-    "source_points": "source_ref", "target_points": "target_ref",
-    "source_boundaries": "source_ref", "target_boundaries": "target_ref",
-    "H": "asset",
-}
-
-_RESERVED_KEYS = ("kind", "points", "shape")
+# Which factory a kind names, its array arguments, the hyper-parameters it
+# takes (with their types) and the keyword that carries each reference are
+# one table: the registry of ``mapping_registry``, which the built-in kinds
+# are entries of.  Nothing in this module lists kinds.
 
 
 class PointReferenceError(ValueError):
@@ -1059,9 +1045,10 @@ def _node_point_field(node: Any, node_name: str, field_name: str) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
-def _check_hyperparameter(kind: str, key: str, value: Any) -> Any:
-    expected = _HYPER_TYPES[key]
-    if expected == "real":
+def _check_hyperparameter(kind: str, key: str, value: Any, expected: type) -> Any:
+    """*value* as the kind declares hyper-parameter *key* (``str``, ``bool``
+    or ``float`` -- a real number), or a ``ValueError``."""
+    if expected is float:
         if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
             raise ValueError(
                 f"mapping kind {kind!r}: hyper-parameter {key!r} must be a real number, "
@@ -1089,7 +1076,9 @@ class MappingSpec:
     Parameters
     ----------
     kind : str
-        ``"rbf"``, ``"nearest_neighbor"``, ``"projection_1d"`` or ``"matrix"``.
+        A registered kind: ``"rbf"``, ``"nearest_neighbor"``,
+        ``"projection_1d"`` or ``"matrix"``, or one added with
+        :func:`~maddening.core.coupling.mapping_registry.register_mapping`.
     hyperparameters : dict
         The factory's non-array keyword arguments (``kernel``, ``epsilon``,
         ``mode``, ...), JSON-able and type-checked (``epsilon`` / ``ridge``
@@ -1111,9 +1100,10 @@ class MappingSpec:
     points: dict = field(default_factory=dict)
 
     def __post_init__(self):
-        if not isinstance(self.kind, str) or self.kind not in _FACTORIES:
+        entry = _lookup(self.kind)
+        if entry is None:
             raise ValueError(
-                f"unknown mapping kind {self.kind!r}; choose from {sorted(_FACTORIES)}"
+                f"unknown mapping kind {self.kind!r}; choose from {_registered_kinds()}"
             )
         if not isinstance(self.hyperparameters, dict):
             raise ValueError(
@@ -1125,14 +1115,14 @@ class MappingSpec:
                 f"mapping kind {self.kind!r}: 'points' must be a dict mapping each "
                 f"array argument to a point reference, got {type(self.points).__name__}"
             )
-        _, array_names, hyper_names = _FACTORIES[self.kind]
+        array_names, hyper_names = entry.arrays, tuple(entry.hyperparameters)
         unknown = set(self.hyperparameters) - set(hyper_names)
         if unknown:
             raise ValueError(
                 f"mapping kind {self.kind!r} has no hyper-parameter(s) "
                 f"{sorted(unknown)}; it takes {list(hyper_names)}"
             )
-        hyper = {k: _check_hyperparameter(self.kind, k, v)
+        hyper = {k: _check_hyperparameter(self.kind, k, v, entry.hyperparameters[k])
                  for k, v in self.hyperparameters.items()}
         missing = set(array_names) - set(self.points)
         extra = set(self.points) - set(array_names)
@@ -1185,8 +1175,8 @@ class MappingSpec:
         # reach the "unknown mapping kind" ValueError of ``__post_init__``,
         # not come back out of this lookup as ``TypeError: unhashable type``,
         # which names neither the key nor what is wrong with it.
-        if isinstance(kind, str) and kind in _FACTORIES \
-                and "mode" not in _FACTORIES[kind][2]:
+        entry = _lookup(kind)
+        if entry is not None and "mode" not in entry.hyperparameters:
             # ``describe()`` reports the mode of every mapping; a factory
             # with a fixed mode (projection_1d) does not take it back.
             hyper.pop("mode", None)
@@ -1229,28 +1219,147 @@ def _check_digest(name: str, ref: dict, array: Any) -> None:
         )
 
 
+def _entry_of(spec: MappingSpec) -> _MappingKind:
+    """The registry entry of ``spec``'s kind.
+
+    A spec is checked against the registry when it is made, so the kind
+    is missing here only if it was removed since (test support does that).
+    """
+    entry = _lookup(spec.kind)
+    if entry is None:
+        raise ValueError(
+            f"unknown mapping kind {spec.kind!r}; choose from {_registered_kinds()}"
+        )
+    return entry
+
+
 @stability(StabilityLevel.EVOLVING)
 def build_mapping(spec: MappingSpec, resolve_points: Callable[[dict], Any]):
-    """Recompute the mapping described by ``spec``; see :meth:`MappingSpec.build`."""
-    from maddening.core.coupling import mapping as _factories  # noqa: PLC0415
+    """Recompute the mapping described by ``spec``; see :meth:`MappingSpec.build`.
 
-    factory_name, array_names, _ = _FACTORIES[spec.kind]
+    The factory registered for ``spec.kind`` is called as
+    ``factory(**arrays, **hyperparameters, **references)``.  Everything it
+    is handed was checked first: the hyper-parameters against the types
+    the kind declares (when the spec was made), and every array by the
+    reference resolver and against its recorded ``sha256``.  A factory's
+    own exception propagates unchanged; ``GraphManager.from_dict`` and
+    ``load_graph_from_usd`` wrap it in a :class:`MappingRebuildError`
+    naming the edge.  What a factory registered with
+    :func:`~maddening.core.coupling.mapping_registry.register_mapping`
+    returns is checked against what that function documents.
+    """
+    entry = _entry_of(spec)
     missing = spec.missing_points()
     if missing:
         raise PointReferenceError(
             f"mapping spec {spec.kind!r} has no reference for {missing}; it was built "
             f"from a point set too large to inline and without "
-            f"{' / '.join(sorted({_REF_KWARG[n] + '=' for n in missing}))}"
+            f"{' / '.join(sorted({entry.references[n] + '=' for n in missing}))}"
         )
-    arrays = {n: resolve_points(spec.points[n]) for n in array_names}
-    for n in array_names:
+    arrays = {n: resolve_points(spec.points[n]) for n in entry.arrays}
+    for n in entry.arrays:
         _check_digest(n, spec.points[n], arrays[n])
-    refs = {_REF_KWARG[n]: spec.points[n] for n in array_names}
-    hyper = dict(spec.hyperparameters)
-    if spec.kind == "matrix" and "label" in hyper:
-        hyper["kind"] = hyper.pop("label")
-    factory = getattr(_factories, factory_name)
-    return factory(**arrays, **hyper, **refs)
+    refs = {entry.references[n]: spec.points[n] for n in entry.arrays}
+    mapping = entry.factory(**arrays, **spec.hyperparameters, **refs)
+    if not entry.builtin:
+        _check_registered_result(entry, spec, mapping)
+    return mapping
+
+
+def _check_registered_result(entry: _MappingKind, spec: MappingSpec, mapping: Any) -> None:
+    """Refuse what a registered factory returned for ``spec`` unless it is
+    the mapping ``spec`` describes.
+
+    The built-in factories are not asked: they return a
+    ``StaticLinearMapping`` carrying the spec they were called with by
+    construction.  A factory from elsewhere is held to the same outcome,
+    because a reloaded graph is saved again from what it returned: a
+    mapping of another kind, without a spec, or with a spec that dropped a
+    reference or changed a hyper-parameter would be written back as a
+    different recipe than the one that was read.
+    """
+    from maddening.core.coupling.mapping import (  # noqa: PLC0415
+        Mapping,
+        _params_contract_problem,
+    )
+
+    who = (f"the factory registered for mapping kind {entry.kind!r} "
+           f"({_qualified(entry.factory)})")
+    if not isinstance(mapping, Mapping):
+        members = sorted(getattr(Mapping, "__protocol_attrs__", ()))
+        lacking = [m for m in members if not hasattr(mapping, m)]
+        raise TypeError(
+            f"{who} returned {type(mapping).__name__}, which is not a Mapping: it "
+            f"lacks {lacking} of the protocol's members {members}"
+        )
+    if mapping.kind != entry.kind:
+        raise ValueError(
+            f"{who} returned a mapping whose kind is {mapping.kind!r}; a mapping of "
+            f"a registered kind is written to a config under its own kind, so it "
+            f"must be {entry.kind!r}"
+        )
+    built = getattr(mapping, "spec", None)
+    if not isinstance(built, MappingSpec) or built.kind != entry.kind:
+        found = (f"a MappingSpec of kind {built.kind!r}" if isinstance(built, MappingSpec)
+                 else f"{type(built).__name__} as its spec")
+        raise ValueError(
+            f"{who} returned a mapping carrying {found}; it must carry, as .spec, a "
+            f"MappingSpec of kind {entry.kind!r} (build it in the factory from the "
+            f"hyper-parameters and reference_for_array(array, reference, name=...))"
+        )
+    for name in entry.arrays:
+        wanted, got = spec.points[name], built.points.get(name)
+        if got is None or _without_hash(got) != _without_hash(wanted):
+            raise ValueError(
+                f"{who} did not record the reference it was given for {name!r}: the "
+                f"spec says {_reference_summary(wanted)} and the returned mapping's "
+                f"says {_reference_summary(got)}.  Pass the {entry.references[name]}= "
+                f"argument through to reference_for_array, with the array as it was "
+                f"received, so that a reloaded graph saves the reference it loaded"
+            )
+    changed = sorted(
+        k for k, v in spec.hyperparameters.items()
+        if k not in built.hyperparameters or built.hyperparameters[k] != v
+    )
+    if changed:
+        raise ValueError(
+            f"{who} did not record hyper-parameter(s) {changed} as given: the spec "
+            f"says { {k: spec.hyperparameters[k] for k in changed} } and the returned "
+            f"mapping's says { {k: built.hyperparameters.get(k) for k in changed} }; "
+            f"a reloaded graph would be saved as a different recipe"
+        )
+    problem = _params_contract_problem(mapping)
+    if problem is not None:
+        raise ValueError(f"{who} returned a mapping whose {problem}")
+
+
+def _reference_summary(ref: Optional[dict]) -> str:
+    """A reference for an error message: never the inlined points."""
+    if ref is None:
+        return "no reference"
+    if "inline" in ref:
+        return f"an inline set of shape {np.shape(ref['inline'])}"
+    return repr(_without_hash(ref))
+
+
+def _mapping_config_dict(mapping: Any) -> dict:
+    """What an edge writes for its mapping, in a config and on a USD stage.
+
+    ``describe()`` when the mapping has one -- the built-in
+    ``StaticLinearMapping`` does, and its description is its spec plus the
+    user-facing kind and the shape.  A mapping of another class needs no
+    ``describe``: it is written as its :class:`MappingSpec` and its shape.
+    One without either can only be named (display; the strict writers
+    refuse it first, in :func:`check_mapping_serialisable`).
+    """
+    describe = getattr(mapping, "describe", None)
+    if callable(describe):
+        return describe()
+    spec = getattr(mapping, "spec", None)
+    if isinstance(spec, MappingSpec):
+        return {**spec.to_dict(),
+                "shape": [int(mapping.n_target), int(mapping.n_source)]}
+    return {"kind": getattr(mapping, "kind", type(mapping).__name__)}
 
 
 def verify_node_references(spec: MappingSpec, resolve_points: Callable[[dict], Any]) -> None:
@@ -1289,9 +1398,10 @@ def check_mapping_serialisable(mapping: Any, *, edge_key: str = "",
             f"serialised; build it with rbf_mapping / nearest_neighbor_mapping / "
             f"projection_1d_mapping / matrix_mapping(asset=...)"
         )
+    entry = _entry_of(spec)
     missing = spec.missing_points()
     if missing:
-        hint = ", ".join(sorted({_REF_KWARG[n] + "=" for n in missing}))
+        hint = ", ".join(sorted({entry.references[n] + "=" for n in missing}))
         raise ValueError(
             f"mapping {mapping!r}{where} cannot be serialised: point set(s) {missing} "
             f"were not recorded (more than {INLINE_POINT_LIMIT} points, a non-numeric "
@@ -1308,6 +1418,30 @@ def check_mapping_serialisable(mapping: Any, *, edge_key: str = "",
                 f"no longer describes the points it was built from — {exc}.  Rebuild "
                 f"the mapping from the current graph, or reference the right node field"
             ) from exc
+    if not entry.builtin:
+        # A built-in mapping describes itself as its spec by construction.
+        # One from a registered factory is whatever class that factory
+        # returned, and what its edge writes is read back here: a config
+        # that reloads as another recipe, or not at all, is refused now
+        # rather than found at the next load.
+        try:
+            read_back: Any = MappingSpec.from_dict(_mapping_config_dict(mapping))
+        except (ValueError, TypeError) as exc:
+            read_back = exc
+        if read_back != spec:
+            found = (f"it does not read back at all — {type(read_back).__name__}: "
+                     f"{read_back}" if isinstance(read_back, Exception)
+                     else f"it reads back as kind {read_back.kind!r} with "
+                          f"hyper-parameters {read_back.hyperparameters}")
+            raise ValueError(
+                f"mapping {mapping!r}{where} cannot be serialised: what it writes to "
+                f"a config is not its MappingSpec (kind {spec.kind!r}, "
+                f"hyper-parameters {spec.hyperparameters}); {found}.  A mapping of a "
+                f"registered kind must have kind == {spec.kind!r}, and a describe() "
+                f"method, if it defines one, must return its spec's to_dict() (plus "
+                f"'shape' and 'mode' at most); leave describe() out to have the spec "
+                f"written for you"
+            )
     return spec
 
 

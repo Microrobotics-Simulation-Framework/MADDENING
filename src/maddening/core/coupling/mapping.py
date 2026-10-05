@@ -22,7 +22,10 @@ Factories:
 Every factory attaches a :class:`~maddening.core.coupling.mapping_spec.MappingSpec`
 (kind, hyper-parameters, *references* to the point sets — never the
 weights) so a graph config or USD stage can rebuild the mapping; see
-:mod:`maddening.core.coupling.mapping_spec`.
+:mod:`maddening.core.coupling.mapping_spec`.  Each is registered under its
+kind in :mod:`maddening.core.coupling.mapping_registry`, and
+:func:`register_mapping` (experimental) adds a kind of your own to the
+same table.
 
 Modes follow preCICE.  ``"consistent"`` transfers a *value* field
 (temperature, displacement): ``H @ v`` interpolates.  ``"conservative"``
@@ -46,6 +49,10 @@ import numpy as np
 
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
+from maddening.core.coupling.mapping_registry import (
+    _register_builtin,
+    register_mapping,
+)
 from maddening.core.coupling.mapping_spec import (
     MappingSpec,
     normalise_point_reference,
@@ -67,6 +74,15 @@ class Mapping(Protocol):
     :meth:`params_pytree`); ``geom`` is reserved for mappings that
     depend on a moving interface (resolved like a state field) and is
     ignored by static mappings.
+
+    ``params_pytree()`` is snapshotted into ``gm.params["mappings"]``,
+    which checkpoints, ``PUT /graph/params``, system identification, the
+    FMU's state archive and ``to_dict`` all walk as a flat table of
+    arrays.  For any class other than :class:`StaticLinearMapping`,
+    ``GraphManager.add_edge`` therefore refuses one that is not a plain,
+    non-empty ``dict`` from Python identifiers to concrete, non-empty,
+    finite, floating-point JAX arrays, the same on every call (see
+    :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
     """
 
     kind: str
@@ -156,6 +172,95 @@ class StaticLinearMapping:
     def __repr__(self) -> str:
         return (f"StaticLinearMapping({self.kind}, {self.mode}, "
                 f"{self.n_target}x{self.n_source})")
+
+
+# ---------------------------------------------------------------------------
+# What params_pytree() may contain
+# ---------------------------------------------------------------------------
+
+
+def _params_pytree_problem(tree: Any) -> Optional[str]:
+    """Why *tree* cannot be an entry of ``gm.params["mappings"]``, or
+    ``None``.  Structure, key names and leaves; one call's worth."""
+    if type(tree) is not dict:
+        return (f"returned {type(tree).__name__}, not a plain dict of weight name -> "
+                f"array")
+    if not tree:
+        return ("returned an empty dict; a mapping exposes at least one weight (an "
+                "entry without leaves is dropped wherever the parameter tree is "
+                "flattened to its leaves, and its edge then looks unmapped)")
+    for key, leaf in tree.items():
+        if not isinstance(key, str) or not key.isidentifier():
+            return (f"has the key {key!r}; a weight name must be a Python identifier "
+                    f"(it is a member name in a checkpoint archive and a key of a "
+                    f"config's param_specs)")
+        where = f"entry {key!r}"
+        if isinstance(leaf, jax.core.Tracer):
+            return (f"{where} is a traced value; the graph snapshots concrete weights, "
+                    f"so build the mapping outside jit / grad / vmap")
+        if not isinstance(leaf, jax.Array):
+            what = ("a nested container" if isinstance(leaf, (dict, list, tuple))
+                    else type(leaf).__name__)
+            return (f"{where} is {what}, not a JAX array; the entry is a flat table of "
+                    f"arrays, and a NumPy array or a Python number would take its "
+                    f"dtype from jax_enable_x64 at the moment it was read (use "
+                    f"jnp.asarray(value))")
+        if not jnp.issubdtype(leaf.dtype, jnp.floating):
+            return (f"{where} has dtype {leaf.dtype}; a weight is a real "
+                    f"floating-point array (keep indices and other integer structure "
+                    f"as attributes of the mapping, outside the parameter tree)")
+        if leaf.size == 0:
+            return f"{where} has shape {tuple(leaf.shape)} and holds no element"
+        if not bool(np.all(np.isfinite(np.asarray(leaf)))):
+            return f"{where} holds a non-finite value (NaN or infinity)"
+    return None
+
+
+def _params_contract_problem(mapping: Any) -> Optional[str]:
+    """Why ``mapping.params_pytree()`` cannot back an edge, or ``None``.
+
+    The answer starts with ``params_pytree()`` so that a caller can put
+    its own subject in front.  A :class:`StaticLinearMapping` is not
+    asked: its entry is ``{"H": <2-D array>}`` by construction, and what
+    its matrix may hold (an integer selection matrix, say) is unchanged.
+
+    Every other class is held to what each reader of
+    ``gm.params["mappings"]`` assumes, none of which checks it for itself:
+
+    * checkpoints and the FMU state archive store each leaf as the member
+      ``<edge key>/<name>`` -- a nested dict would be pickled as an object
+      array, which the loader refuses, and a ``/`` in a name is read back
+      as part of the edge key and the weight silently not restored;
+    * ``param_specs`` / ``set_param_spec``, the trainable mask and
+      ``sysid`` address a weight as ``mappings -> edge -> name``, three
+      keys deep, and fit only floating-point leaves;
+    * ``PUT /graph/params`` and ``POST /checkpoint/load`` judge each leaf
+      as one numeric array;
+    * ``to_dict`` warns when the live weights differ from
+      ``params_pytree()``, and ``reset_params()`` restores it, so two
+      calls must agree, and a NaN (unequal to itself) would warn forever.
+    """
+    if type(mapping) is StaticLinearMapping:
+        return None
+    first = mapping.params_pytree()
+    problem = _params_pytree_problem(first)
+    if problem is not None:
+        return f"params_pytree() {problem}"
+    second = mapping.params_pytree()
+    if type(second) is not dict or list(second) != list(first):
+        return ("params_pytree() is not the same on every call: a second call "
+                f"returned the keys {list(second) if isinstance(second, dict) else second!r}"
+                f" after {list(first)}")
+    for key, leaf in first.items():
+        again = second[key]
+        if not isinstance(again, jax.Array) or isinstance(again, jax.core.Tracer) \
+                or again.shape != leaf.shape or again.dtype != leaf.dtype \
+                or not np.array_equal(np.asarray(again), np.asarray(leaf)):
+            return (f"params_pytree() is not the same on every call: entry {key!r} "
+                    f"changed between two calls.  It is what reset_params() restores "
+                    f"and what to_dict() compares the live weights with, so compute "
+                    f"the weights once, when the mapping is built")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +376,13 @@ def rbf_matrix(
     return jnp.asarray(H, dtype=dtype)
 
 
+@_register_builtin(
+    "rbf",
+    arrays=("source_points", "target_points"),
+    hyperparameters={"kernel": str, "epsilon": float, "polynomial": bool,
+                     "ridge": float, "mode": str},
+    references={"source_points": "source_ref", "target_points": "target_ref"},
+)
 @stability(StabilityLevel.EVOLVING)
 def rbf_mapping(
     source_points,
@@ -336,6 +448,12 @@ def _nn_matrix(source_points, target_points) -> jnp.ndarray:
     return jnp.asarray(H)
 
 
+@_register_builtin(
+    "nearest_neighbor",
+    arrays=("source_points", "target_points"),
+    hyperparameters={"mode": str},
+    references={"source_points": "source_ref", "target_points": "target_ref"},
+)
 @stability(StabilityLevel.EVOLVING)
 def nearest_neighbor_mapping(
     source_points, target_points, *, mode: str = "consistent",
@@ -361,6 +479,12 @@ def nearest_neighbor_mapping(
     return StaticLinearMapping(H, kind="nearest_neighbor", mode=mode, spec=spec)
 
 
+@_register_builtin(
+    "projection_1d",
+    arrays=("source_boundaries", "target_boundaries"),
+    hyperparameters={},
+    references={"source_boundaries": "source_ref", "target_boundaries": "target_ref"},
+)
 @stability(StabilityLevel.EVOLVING)
 def projection_1d_mapping(
     source_boundaries, target_boundaries, *, source_ref=None, target_ref=None,
@@ -421,6 +545,21 @@ def matrix_mapping(
     return StaticLinearMapping(jnp.asarray(H), kind=kind, mode=mode, spec=spec)
 
 
+@_register_builtin(
+    "matrix",
+    arrays=("H",),
+    hyperparameters={"mode": str, "label": str},
+    references={"H": "asset"},
+)
+def _matrix_from_spec(H, *, mode: str = "consistent", label: str = "matrix",
+                      asset=None) -> StaticLinearMapping:
+    """:func:`matrix_mapping` as a ``MappingSpec`` of kind ``"matrix"``
+    calls it: the spec's ``label`` hyper-parameter is the factory's
+    ``kind`` argument (the user-facing label), because ``kind`` in a spec
+    names the factory."""
+    return matrix_mapping(H, mode=mode, kind=label, asset=asset)
+
+
 __all__ = [
     "Mapping",
     "MappingSpec",
@@ -430,4 +569,5 @@ __all__ = [
     "projection_1d_mapping",
     "rbf_mapping",
     "rbf_matrix",
+    "register_mapping",
 ]

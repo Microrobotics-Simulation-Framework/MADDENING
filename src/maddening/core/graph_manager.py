@@ -6871,6 +6871,12 @@ class GraphManager:
         traced input on every step.  Its ``n_source`` must equal the
         source field's size; ``n_target`` must match the target's
         declared ``boundary_input_spec`` shape when that is an array.
+        A mapping of a class other than ``StaticLinearMapping`` is a
+        ``ValueError`` unless its ``params_pytree()`` is a plain,
+        non-empty dict from identifiers to concrete, non-empty, finite,
+        floating-point JAX arrays, the same on every call (the contract
+        is spelled out in
+        :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
         A :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (or
         its dict form) is rebuilt first with :meth:`point_resolver`.
 
@@ -6933,6 +6939,21 @@ class GraphManager:
                 raise TypeError(
                     f"mapping must implement the Mapping protocol (missing {attr!r})"
                 )
+        # What the mapping puts into params["mappings"][edge.key].  Every
+        # reader of that entry -- checkpoints, PUT /graph/params, sysid,
+        # the FMU archive, to_dict's "live weights differ" warning -- takes
+        # it for a flat table of floating-point arrays and none of them
+        # checks, so a mapping class of the caller's own is asked here,
+        # where the edge is added, before anything can read it.
+        from maddening.core.coupling.mapping import (  # noqa: PLC0415
+            _params_contract_problem,
+        )
+        problem = _params_contract_problem(mapping)
+        if problem is not None:
+            raise ValueError(
+                f"mapping {mapping!r} on {source}.{source_field} -> "
+                f"{target}.{target_field}: {problem}"
+            )
         src_spec = self._nodes.get(source)
         if src_spec is not None:
             src_state = src_spec.node.initial_state()
@@ -11188,8 +11209,17 @@ class GraphManager:
         (a ``ValueError``) naming this edge, with the original exception
         chained: a config is untrusted input and the edge it broke on is
         the only thing that makes the failure actionable.
+
+        A kind added with
+        :func:`~maddening.core.coupling.mapping_registry.register_mapping`
+        runs a factory this library did not write, which may raise
+        anything; for such a kind *every* ``Exception`` is wrapped, not
+        only the types the built-in factories and the resolver raise.
         """
         import zipfile  # noqa: PLC0415
+        from maddening.core.coupling.mapping_registry import (  # noqa: PLC0415
+            _lookup,
+        )
         from maddening.core.coupling.mapping_spec import (  # noqa: PLC0415
             MappingRebuildError,
             MappingSpec,
@@ -11220,6 +11250,15 @@ class GraphManager:
                 zipfile.BadZipFile) as exc:
             # json.JSONDecodeError is a ValueError and numpy's
             # UFuncTypeError a TypeError, so both land here too.
+            raise MappingRebuildError(where, kind, exc) from exc
+        except Exception as exc:
+            # Any other type is the edge's to report only when the kind's
+            # factory is not one of ours: what the built-in kinds can raise
+            # is listed above, and anything else from them is a defect that
+            # should surface as itself.
+            entry = _lookup(kind)
+            if entry is None or entry.builtin:
+                raise
             raise MappingRebuildError(where, kind, exc) from exc
         return mapping
 

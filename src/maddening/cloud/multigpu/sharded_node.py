@@ -18,7 +18,6 @@ sharding or :class:`ShardedStencilNode` for stencil sharding.
 from __future__ import annotations
 
 import functools
-import warnings
 from typing import Any, Optional
 
 import jax
@@ -39,6 +38,7 @@ from maddening.cloud.multigpu.halo import (
     _global_edge_halos,
     halo_exchange,
 )
+from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.node import (
@@ -1608,8 +1608,7 @@ class ShardedStencilNode(_ForwardsCouplingHooks, SimulationNode):
         shapes = self._inner_state_shapes
         if shapes is None:
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
+                with quiet_warnings():
                     built = jax.eval_shape(self._inner.initial_state)
                 shapes = {
                     k: tuple(v.shape) for k, v in dict(built).items()

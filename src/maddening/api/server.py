@@ -69,7 +69,6 @@ import signal
 import threading
 import time
 import uuid
-import warnings
 import weakref
 from pathlib import Path
 from typing import Annotated, Any, Iterable, Mapping, Optional
@@ -105,6 +104,7 @@ from maddening.api.auth import (
     bearer_from_subprotocols,
     is_loopback,
 )
+from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core._size_estimate import (
     AllocationEstimate,
     constructor_arguments,
@@ -1345,8 +1345,7 @@ def _trace_hooks(spec, probe: Any, descended: bool, state: Any, leaves: Any) -> 
             and leaves is not None
             if descended else spec.flux_accepts_params),
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with quiet_warnings():
         bi = _declared_boundary_zeros(probe)
         jax.make_jaxpr(
             lambda st, b, p: _hook_outputs(probe_spec, st, b, p),
@@ -1405,8 +1404,7 @@ def _abstract_initial_state(node: Any) -> tuple[str, Any]:
     not run, so nothing of the state's size is allocated.
     """
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with quiet_warnings():
             return "ok", jax.eval_shape(node.initial_state)
     except _NEEDS_CONCRETE_VALUES as exc:
         return "unknown", exc
@@ -1520,8 +1518,7 @@ def _what_the_node_computes(spec, probe: Any, descended: bool, state: Any,
             if descended else spec.flux_accepts_params),
     )
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with quiet_warnings():
             bi = _declared_boundary_zeros(probe)
             closed = jax.make_jaxpr(
                 lambda st, b, p: _hook_outputs(probe_spec, st, b, p),
@@ -1595,8 +1592,7 @@ def _saved_graph_write_reason(gm: GraphManager, owner: str, changes: dict[str, A
         cls = type(candidate)
 
         def build(params, cls=cls, candidate=candidate):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with quiet_warnings():
                 return cls(name=candidate.name, timestep=candidate.delta_t, **params)
 
         try:

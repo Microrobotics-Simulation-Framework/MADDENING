@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from maddening.core.inspection import InspectionTable
 
 from maddening.core._pow2_frame import pow2_frame
+from maddening.core._quiet_warnings import quiet_warnings
 from maddening.core.coupling import CouplingGroup, coupling_group_kwargs
 from maddening.core.coupling.acceleration import (
     _field_reference,
@@ -6376,10 +6377,9 @@ class GraphManager:
         step_fn = self._raw_step_fn
         if step_fn is not None and not self._dirty:
             try:
-                with warnings.catch_warnings():
+                with quiet_warnings():
                     # A node that warns at trace time warned on the real
                     # trace already; this one is bookkeeping.
-                    warnings.simplefilter("ignore")
                     reads = _param_leaves_read(
                         step_fn, self._state, self._default_external_inputs(),
                         self.params,
@@ -6458,8 +6458,7 @@ class GraphManager:
             leaves = self.params.get("nodes", {}).get(owner)
             if leaves is None:
                 leaves = node.params_pytree()
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with quiet_warnings():
                 args = (self._state[owner], bi, leaves)
                 closed = jax.make_jaxpr(
                     lambda st, b, p: _hook_outputs(spec, st, b, p))(*args)
@@ -6570,8 +6569,7 @@ class GraphManager:
             cls = type(candidate)
 
             def build(params, cls=cls, candidate=candidate):
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
+                with quiet_warnings():
                     return cls(name=candidate.name, timestep=candidate.delta_t, **params)
 
             try:
@@ -6795,8 +6793,7 @@ class GraphManager:
                         and leaves is not None
                         if descended else spec.flux_accepts_params),
                 )
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
+                with quiet_warnings():
                     closed = jax.make_jaxpr(
                         lambda st, b, p, _s=probe_spec: _hook_outputs(_s, st, b, p),
                     )(state, bi, leaves)
@@ -6839,8 +6836,7 @@ class GraphManager:
             cls = type(candidate)
 
             def build(params, cls=cls, candidate=candidate):
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
+                with quiet_warnings():
                     return cls(name=candidate.name, timestep=candidate.delta_t, **params)
 
             try:
@@ -6883,8 +6879,7 @@ class GraphManager:
         probes = _param_probe_pair(node, key, value)
         if probes is None:
             return None
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with quiet_warnings():
             try:
                 before = probes[0].initial_state()
             except Exception:  # noqa: BLE001 - cannot tell: refuse nothing
@@ -6933,8 +6928,7 @@ class GraphManager:
             return None
         probes = pair[:2]
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
+            with quiet_warnings():
                 before = probes[0].initial_state()
                 after = probes[1].initial_state()
         except Exception:  # noqa: BLE001 - cannot tell: refuse nothing
@@ -10373,9 +10367,8 @@ class GraphManager:
             ScanHazard,
             probe_scan_hazards,
         )
-        with warnings.catch_warnings(), probe_scan_hazards() as found:
+        with quiet_warnings(), probe_scan_hazards() as found:
             # A node that warns at trace time warns on the real trace too.
-            warnings.simplefilter("ignore")
             jax.eval_shape(self._build_step_fn(), self._state,
                            self._default_external_inputs(), self.params)
         out = []

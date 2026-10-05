@@ -1333,6 +1333,55 @@ Cannot see: an operation the C API cannot express (a string time), and a
 defect every path shares.  Without a C compiler it compares three paths,
 and `test_the_c_wrapper_is_a_fourth_path_here` says so by skipping.
 
+#### The FMU's clock patterns, with restores, four ways
+
+`tests/property/test_differential_fmu.py` (`CLOCKS`).  Four importers, by
+how they keep their time -- `start + k * h`, a running sum, step sizes a
+little long, points a little late -- each run with no restore, with a save
+and restore after every step, and with one rollback part-way, over the same
+four paths; the wrapper saves into one reused `fmi3FMUState`, as a rollback
+master does.  The oracle: a restore changes no reply.  Every step is
+answered, to the bit, as it is without one, a step taken again after going
+back included.  The reported time is also held to the simulated time in
+exact rational arithmetic, to the documented bound plus three ulps of the
+time (the clock's own float64 rounding; the battery is where that term was
+found).  `tests/fmi/test_a_restore_resumes_the_drift_accounting.py` runs
+the audit's own figures on the bridge alone.
+Cannot see: an archive an importer rewrites (it is taken at its word for
+its time), and a start time given after a restore, which is a new
+reference by design.
+
+#### Every FMI type at its extremes, four ways
+
+`tests/property/test_differential_fmu.py` (`TYPE_VALUES`), under x64.  One
+node with an input and an output of each of the eleven FMI numeric types,
+and the two float parameters a graph can have.  Each type's extreme values
+go in through its typed setter and come back through its typed getter, as
+an input and a step later as an output, over the TCP bridge and the
+compiled wrapper (binary and JSON frames), with the sidecar and the graph
+given the value in the type itself.  A value the float64 wire is reads back
+as itself on every path; an `Int64` / `UInt64` it is not is refused by set
+and, once the model holds it through the FMU-state archive, by get, with
+the four states still identical; a value outside the type is refused by
+every door.  Tolerance: none.
+Cannot see: the half of a fix another half masks.  Negative zero over JSON
+is repaired on both ends (the wrapper writes `-0.0`, the bridge reads
+`-0`), and reverting either alone leaves the battery green; each end has
+its own direct test, and the battery fails only with both reverted.
+
+#### Mutating the C wrapper
+
+The C harnesses (`tests/fmi/c/`) include the wrapper through the macro
+`MADDENING_FMU_C`, which `tests/fmi/test_c_unit.py` sets to
+`maddening.fmi.package.C_SOURCE`.  So a fault seeded in a scratch copy of
+`src/` and run with `PYTHONPATH=<scratch>/src` is compiled into the unit
+tests and the fuzz harness, as it is into the FMU binary; they used to
+include the tree's file by relative path, and no C mutant reached them.
+Two things to check before counting a C mutant as caught: that it built
+without a warning (the build's own no-warnings assertion fails a mutant
+that leaves a parameter unused, which says nothing about the tests), and
+whether it was caught by a `CHECK` or by the binary crashing.
+
 #### The stability filter (metamorphic)
 
 `tests/property/test_metamorphic_fmu_stability_filter.py`.  The
@@ -1353,8 +1402,25 @@ check against the graph.
 | A checkpoint load restores the state and leaves the parameters where they were | acceptance | `test_a_restore_door_takes_what_every_write_door_takes`, the refusal cases (the leaf is never cast, so nothing is refused), the rod and every sharded wrapper's restore case |
 | An open `log` / `logit` bound advertised as itself (inclusive) rather than one float inside | acceptance | `test_every_door_accepts_or_refuses_a_parameter_value_together`; every `test_a_logit_range_no_value_can_enter_is_refused_by_every_door` case |
 | The C wrapper's `fmi3DoStep` reports the step's start as `lastSuccessfulTime` | FMU four ways | `test_four_fmu_paths_agree_after_a_node_params_write`, every case that passes today |
+| `fmi3GetFMUState` allocates a new state over the one it is handed (B1 round 9, F3) | C unit; clocks | `test_c_unit_tests` (the live-allocation count and the pointer); every `every step` clock case |
+| `fmi3FreeInstance` leaves its live states allocated; a reused state's old blob is dropped; unlinking leaves a stale back-link | C unit | `test_c_unit_tests`, by the live-allocation count |
+| `set_state` starts the drift count again at the restored time (F4); the archive records a zero count, or the reported time as the start | clocks | `test_a_restore_between_steps_changes_no_reply_on_any_fmu_path`; `test_a_restore_changes_no_verdict_and_no_reported_time` |
+| A `get` converts an int64 to float64 unchecked; a JSON set stores the rounded neighbour (F5) | types | `test_every_fmi_type_carries_its_extreme_values_or_refuses_them_on_all_four_paths[int64-*]`, `[uint64-*]` |
+| `lost_as_integer` takes `max + 1`, a value below the minimum, or a fraction | exact integers | `tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py` |
+| `load_state` judges an integer by a cast there and back | checkpoint | `test_an_integer_of_the_other_signedness_is_refused_not_wrapped` |
 | A structural `node.params` write no longer marks the graph dirty | FMU four ways | the compiled structural cases (the graph path keeps the old model), and the pending ones (the export no longer refuses) |
 | The clocks ignore the stability filter | stability | `test_a_class_level_filters_exactly_its_own_surfaces[clocks]`, `test_changing_one_class_changes_only_its_own_variables` |
+
+One mutant of this round survives, and is recorded rather than replaced:
+the FMU value check put back on its comparison through float64
+(`_checked_value`).  On x86-64 an out-of-range float-to-integer cast wraps,
+so the old comparison and the exact one give the same verdict for every
+input, and no test here can tell them apart; they part only where the cast
+saturates.  The first attempt at that mutant looked caught, and was not: it
+left out the `np.errstate` guard the old code had, so it failed on a
+`RuntimeWarning` raised as an error.  A second "catch" was a build warning
+(an unused parameter), fixed by keeping the parameter used.  Read how a
+mutant died before counting it.
 
 Three first attempts survived and were replaced, each for a reason worth
 knowing: a float32 rounding of `fit_lm`'s *residual* (a residual near zero

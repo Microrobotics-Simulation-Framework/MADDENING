@@ -283,7 +283,14 @@ def test_a_value_outside_a_64_bit_integer_type_is_refused(field, value, why):
     2**63 for an Int64 and 2**64 for a UInt64.  The value check compared
     the cast with the value through float64, where the type's maximum
     rounds up to exactly that number -- so wherever an out-of-range cast
-    saturates, the maximum was stored for it."""
+    saturates, the maximum would be stored for it.
+
+    This pins the refusal; it is not a regression test for that hazard.
+    On x86-64 the cast wraps, the old comparison refused these values too,
+    and every case here but the last (whose message is new) passed before
+    the check was made exact.  The exact check's own bounds are tested in
+    ``tests/core/test_a_value_is_an_integer_of_a_type_exactly_or_not_at_all.py``,
+    which never casts."""
     with _served() as (bridge, v):
         reply = _set(bridge, v[f"ctr.{field}"], [value])
         assert reply["ok"] is False and why in reply["error"], reply
@@ -299,6 +306,9 @@ def test_a_value_outside_a_64_bit_integer_type_is_refused(field, value, why):
     (np.int8(-1), np.uint8), (np.uint32(4_000_000_000), np.int32), (np.float64(0.5), np.int64),
     (np.float32(3e9), np.int32)])
 def test_the_value_check_refuses_what_an_integer_type_cannot_hold(value, dtype):
+    """Pins the verdicts.  The old float64 comparison gave the same ones on
+    x86-64 (where an out-of-range cast wraps), so these cannot tell the two
+    apart here."""
     with pytest.raises(ValueError, match="does not fit its type"):
         _checked_value(value, dtype, what="x")
 

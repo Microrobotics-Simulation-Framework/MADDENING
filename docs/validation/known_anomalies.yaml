@@ -12234,9 +12234,15 @@ anomalies:
     residual_risk: >
       A transform that is not affine makes the map non-linear in the
       reading, and the bound is then asymptotic, as for any non-linear map.
-      An edge with both an interface mapping and a transform is read by the
-      interface norm through the transform alone (mappings are their own
-      audit area).
+      An internal edge with an interface mapping is read by the interface
+      norm, its float floor and this analysis at its source field (through
+      the transform alone where it has one), not at the value the mapping
+      delivers: the bound is in the reading the residual is in, but that
+      reading is not what the consumer sees.  With the audit's selection
+      written as a mapping the bound reads 1.02-5.2x the distance in the
+      source fields and 0.064-0.32x the distance in the delivered values.
+      That is the mapped-edge anomaly registered with the interface-mapping
+      fixes (open), not this one.
     verification:
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_the_bound_holds_in_the_transformed_reading_on_the_audit_fixtures"
       - "tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_a_transformed_pair"

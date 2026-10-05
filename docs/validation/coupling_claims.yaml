@@ -3295,7 +3295,10 @@ claims:
     transformed reading itself is exercised in single, double and both
     half precisions under both sweeps (the tests named after it above);
     the cells below run untransformed edges, where the reading is the raw
-    fields.
+    fields.  On an internal edge with an interface mapping that norm, and
+    so this bound, reads the source field and not the value the mapping
+    delivers (an open anomaly, registered with the interface-mapping
+    fixes): the bound is in the reading the residual is in.
   domains:
     f32: tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
     f64:

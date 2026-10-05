@@ -30,6 +30,17 @@ late; three or more additive edges into one port, whose sum follows their
 order); and an identity relay on a group-internal edge (bit for bit under
 Gauss-Seidel with a constant iterator, and on its reference everywhere).
 
+**Sparse mapped edges** (``mapping_kind``, see
+:data:`~tests.property.coupled_topologies.MAPPING_KINDS`): the same
+structures with every mapped edge a ``StaticSparseMapping`` over a pattern
+fixed per structure, in both layouts.  The oracle is differential -- a
+sparse edge must do what a dense edge holding the same matrix does -- and
+is stated twice.  Against the reference: the sparse graph satisfies the
+monolithic reference the dense one is held to, unchanged, with the drawn
+``H`` zeroed outside the pattern.  Against the dense graph itself: with one
+entry per target the two compute the same numbers, so the sparse graph must
+return the dense graph's states and reports exactly, in every domain below.
+
 What this cannot see: non-linear nodes (no closed form), sub-cycling and
 multi-rate stepping on these shapes (the covering array and the schedule
 harness hold those), and any fault the reference's restatement of the
@@ -52,14 +63,25 @@ from tests.property import coupled_topologies as ct
 from tests.property.test_coupling_invariances import report_differences
 
 NAMED = ct.named_topologies()
+#: The structure for the mapping kinds (wider interfaces), and every
+#: structure by name.
+MAPPED = ct.mapped_topologies()
+STRUCTURES = {**NAMED, **MAPPED}
 _STEPS = 3
 
+#: The sparse kinds the monolithic reference is run over: every entry, a
+#: ragged pattern with padded rows, and that pattern in the scatter layout.
+_SPARSE_REFERENCE_KINDS = ("sparse-full", "sparse-ragged", "sparse-scatter")
+#: One entry per target, in each layout: the kinds a sparse graph steps
+#: exactly as its dense twin with.
+_SPARSE_EXACT_KINDS = ("sparse-single", "sparse-single-scatter")
 
-@functools.lru_cache(maxsize=24)
+
+@functools.lru_cache(maxsize=48)
 def _built(name: str, choice: int, node_order=None, edge_order=None, rename=None,
-           relay=None, constant=False) -> tuple:
+           relay=None, constant=False, mapping_kind="matrix") -> tuple:
     """``(topology, knobs, Built)`` of a named structure, built once per variant."""
-    topo = NAMED[name]
+    topo = STRUCTURES[name]
     if relay is not None:
         topo = ct.with_identity_relay(topo, relay)
     knobs = ct.topology_knobs(topo, choice)
@@ -73,18 +95,19 @@ def _built(name: str, choice: int, node_order=None, edge_order=None, rename=None
     if rename is not None:
         mapping = dict(rename)
         topo = topo.renamed(mapping)
-        node_order = tuple(mapping[n] for n in (node_order or NAMED[name].names))
-    return topo, knobs, ct.build(topo, knobs, node_order=node_order, edge_order=edge_order)
+        node_order = tuple(mapping[n] for n in (node_order or STRUCTURES[name].names))
+    return topo, knobs, ct.build(topo, knobs, node_order=node_order, edge_order=edge_order,
+                                 mapping_kind=mapping_kind)
 
 
 @st.composite
-def _values(draw, topo, knobs):
+def _values(draw, topo, knobs, mapping_kind="matrix"):
     rho = draw(st.sampled_from([0.3, 0.6, 0.9]))
     seed = draw(st.integers(0, 2**32 - 1))
     return ct.draw_values(topo, np.random.default_rng(seed), rho,
                           nonnormal=draw(st.booleans()),
                           bias_scale=draw(st.sampled_from([1e-3, 1.0, 1e3])),
-                          group_cfgs=ct.group_cfgs_of(knobs))
+                          group_cfgs=ct.group_cfgs_of(knobs), mapping_kind=mapping_kind)
 
 
 def assert_reproduces_the_reference(topo, knobs, built, values, steps=_STEPS, traj=None,
@@ -153,6 +176,87 @@ def test_a_named_topology_reproduces_the_monolithic_reference(name, choice, orde
     topo, knobs, built = _built(name, choice, node_order=node_order)
     values = data.draw(_values(topo, knobs))
     assert_reproduces_the_reference(topo, knobs, built, values)
+
+
+def _sparse_reference_cases():
+    """Every sparse kind on every structure, and the dense kind on the
+    structure built for the mapping kinds (the others have their dense run
+    above).  Per push: the structure with wide interfaces under both
+    configurations, and every other structure under the first, each in its
+    own build order.  The rest -- the second configuration on the narrow
+    structures, the interleaved order -- is slow."""
+    cases = []
+    for name in sorted(STRUCTURES):
+        kinds = _SPARSE_REFERENCE_KINDS + (("matrix",) if name in MAPPED else ())
+        for kind in kinds:
+            for choice in (0, 1):
+                for order in ("as-built", "interleaved"):
+                    per_push = order == "as-built" and (choice == 0 or name in MAPPED)
+                    cases.append(pytest.param(
+                        name, kind, choice, order, id=f"{name}-{kind}-{choice}-{order}",
+                        marks=() if per_push else pytest.mark.slow))
+    return cases
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_the_monolithic_reference
+# (every structure and sparse kind under configuration 0 in its own build
+# order; the slow cases are the same check under configuration 1 and the
+# interleaved order)
+@pytest.mark.parametrize("name, mapping_kind, choice, order", _sparse_reference_cases())
+# Costly tier: one compiled graph per case; the examples draw the gains,
+# biases, mapping matrices, scale and start.
+@settings(max_examples=EXAMPLES_COSTLY, deadline=None, derandomize=True)
+@given(data=st.data())
+def test_a_named_topology_with_sparse_mapped_edges_reproduces_the_monolithic_reference(
+        name, mapping_kind, choice, order, data):
+    """The dense oracle, unchanged, over a graph whose mapped edges are
+    sparse: every node outside a group within its own rounding of its
+    update, every group within what its reported residual allows, with
+    ``H`` the drawn matrix zeroed outside the edge's pattern -- for every
+    entry in the gather layout, for a ragged pattern with padded slots, and
+    for that pattern in the scatter layout."""
+    node_order = None if order == "as-built" else ct.interleaved_order(STRUCTURES[name])
+    topo, knobs, built = _built(name, choice, node_order=node_order, mapping_kind=mapping_kind)
+    mapped = [type(e.mapping).__name__ for e in built.gm.edges if e.mapping is not None]
+    assert mapped and set(mapped) == {
+        "StaticLinearMapping" if mapping_kind == "matrix" else "StaticSparseMapping"}, (
+        "premise: the mapped edges are of the kind under test")
+    values = data.draw(_values(topo, knobs, mapping_kind))
+    assert_reproduces_the_reference(topo, knobs, built, values)
+
+
+def test_the_sparse_patterns_of_the_named_structures_can_express_a_wrong_index():
+    """The fixture can express the defect: across the named structures the
+    ragged pattern leaves entries out, pads rows (so a mask is traced), has
+    a row with two entries (so a row sum is one) and an entry off the
+    diagonal; the scatter layout has a source feeding two targets and one
+    feeding none; and a single-entry pattern selects a source other than
+    the first."""
+    ragged, single = [], []
+    for topo in STRUCTURES.values():
+        for i, e in enumerate(topo.edges):
+            if e.mapped:
+                ragged.append(ct.mapping_pattern(topo, i, "sparse-ragged"))
+                single.append(ct.mapping_pattern(topo, i, "sparse-single"))
+                assert ct.mapping_pattern(topo, i, "sparse-full").all()
+                assert ct.mapping_pattern(topo, i, "matrix") is None
+    assert len(ragged) >= 12
+    wide = MAPPED["mapped-ring-wide"]
+    keys = [(e.src, e.dst, e.port) for e in wide.edges if e.mapped]
+    assert len(keys) == 7 and len(set(keys)) == 6, "two mapped edges on one field pair"
+    assert any(wide.internal(e) and wide.node(e.src).n == wide.node(e.dst).n
+               for e in wide.edges if e.mapped), "a mapped edge between equal sizes"
+    assert any(e.field == "q" for e in wide.edges if e.mapped), "a mapped flux edge"
+    assert any(not mask.all() for mask in ragged)
+    gather = [ct.pattern_slots(mask, scatter=False) for mask in ragged]
+    scatter = [ct.pattern_slots(mask, scatter=True) for mask in ragged]
+    assert any(not s.valid.all() for s in gather), "a padded gather row"
+    assert any(s.valid.sum(axis=1).max() > 1 for s in gather), "a row of two entries"
+    assert any((s.source[s.valid] != 0).any() for s in gather), "an index other than 0"
+    assert any(s.valid.sum(axis=1).max() > 1 for s in scatter), "a source with two targets"
+    assert any(s.valid.sum(axis=1).min() == 0 for s in scatter), "a source with no target"
+    assert all((mask.sum(axis=1) == 1).all() for mask in single)
+    assert any(mask[:, 1:].any() for mask in single if mask.shape[1] > 1)
 
 
 @pytest.mark.parametrize("name", sorted(NAMED))
@@ -727,15 +831,16 @@ def _domain_steps(domain) -> int:
     return {"multi_rate": 4, "predictors_warm_starts": 4}.get(domain, 2)
 
 
-@functools.lru_cache(maxsize=48)
+@functools.lru_cache(maxsize=96)
 def _built_in(domain: str, name: str, choice: int, node_order=None, edge_order=None,
-              rename=None, relay=None, constant: str | None = None) -> tuple:
+              rename=None, relay=None, constant: str | None = None,
+              mapping_kind: str = "matrix") -> tuple:
     """``(topology, knobs, Built)`` of a named structure in *domain*.
 
     *constant* is ``"gauss-seidel"`` or ``"jacobi"``: every group under no
     acceleration and a criterion only exact stationarity meets.
     """
-    topo = _domain_topology(NAMED[name], domain)
+    topo = _domain_topology(STRUCTURES[name], domain)
     names = topo.names
     if relay is not None:
         topo = ct.with_identity_relay(topo, relay)
@@ -751,14 +856,15 @@ def _built_in(domain: str, name: str, choice: int, node_order=None, edge_order=N
         node_order = tuple(mapping[n] for n in (node_order or names))
     with _x64(domain == "f64"):
         built = ct.build(topo, knobs, dtype=_domain_dtype(domain), node_order=node_order,
-                         edge_order=edge_order)
+                         edge_order=edge_order, mapping_kind=mapping_kind)
     return topo, knobs, built
 
 
-def _domain_values(topo, knobs, domain) -> list:
+def _domain_values(topo, knobs, domain, mapping_kind="matrix") -> list:
     with _x64(domain == "f64"):
         return [ct.draw_values(topo, np.random.default_rng(seed), rho,
-                               dtype=_domain_dtype(domain), group_cfgs=ct.group_cfgs_of(knobs))
+                               dtype=_domain_dtype(domain), group_cfgs=ct.group_cfgs_of(knobs),
+                               mapping_kind=mapping_kind)
                 for seed, rho in _DRAWS]
 
 
@@ -848,6 +954,8 @@ def _assert_in_domain(domain, built, runs):
     """The premise: the graph is in *domain* (a fixture that fell back to the
     default lane would check float32 single-rate twice)."""
     gm = built.gm
+    if domain == "f32":
+        return
     assert bool(gm._is_multirate) == (domain == "multi_rate"), "multi-rate premise"
     groups = gm._committed_coupling_groups.values()
     assert all(g.subcycling == (domain == "sub_cycled") for g in groups), "sub-cycling premise"
@@ -1029,3 +1137,140 @@ def test_an_identity_relay_keeps_a_named_topology_on_its_reference_in_every_doma
         with _x64(domain == "f64"):
             assert_reproduces_the_reference(t1, knobs, relayed, rv, traj=traj,
                                             dtype=_domain_dtype(domain))
+
+
+# ---------------------------------------------------------------------------
+# Sparse mapped edges in every domain
+#
+# Two statements, per domain.  With one entry per target, a sparse edge and
+# a dense edge holding the same matrix compute the same number -- the dense
+# row sum adds exact zeros to the one product -- so the sparse graph must
+# return the dense graph's states and reports exactly (a zero may differ in
+# sign).  That holds in every domain, the 16-bit dtypes included, which is
+# what makes it the differential oracle there.  With more than one entry
+# per row the two agree to rounding, not exactly, and the monolithic
+# reference is the judge in the domains it models.
+# ---------------------------------------------------------------------------
+
+def _exact_cases():
+    """The first configuration on the structure with wide interfaces per
+    push, in each domain and layout; the other structures, and the
+    configuration that puts Aitken and the interface norm on its group, are
+    slow."""
+    cases = []
+    for domain in ("f32",) + DOMAINS:
+        for kind in _SPARSE_EXACT_KINDS:
+            for name in sorted(STRUCTURES):
+                for choice in (0, 2):
+                    per_push = name in MAPPED and choice == 0
+                    cases.append(pytest.param(
+                        domain, name, kind, choice, id=f"{domain}-{name}-{kind}-{choice}",
+                        marks=() if per_push else pytest.mark.slow))
+    return cases
+
+
+def _same_numbers(a, b) -> list:
+    """The leaves of two state snapshots that are not the same numbers
+    (``-0.0`` and ``0.0`` are; a NaN is itself)."""
+    out = []
+    for node in sorted(set(a) | set(b)):
+        for field in sorted(set(a.get(node, {})) | set(b.get(node, {}))):
+            x, y = a.get(node, {}).get(field), b.get(node, {}).get(field)
+            if x is None or y is None or x.dtype != y.dtype or x.shape != y.shape \
+                    or not np.array_equal(x, y, equal_nan=x.dtype.kind == "f"):
+                out.append(f"{node}.{field}")
+    return out
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain
+# (on mapped-ring-wide under configuration 0, in every domain and both
+# layouts; the slow cases are the same check on the other structures and
+# under configuration 2)
+@pytest.mark.parametrize("domain, name, mapping_kind, choice", _exact_cases())
+def test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain(
+        domain, name, mapping_kind, choice):
+    """Sparse equals dense, as numbers: the same structure built with dense
+    mapped edges and with sparse ones holding one entry per target, on the
+    same draws, returns the same states and the same reports step for step
+    -- in float32, float64, bfloat16 and float16, on a multi-rate graph, in
+    a sub-cycled group, under ``jax.vmap``, with a predictor's warm start,
+    and across a checkpoint restart (whose archive carries the sparse
+    weights and their pattern's digest)."""
+    topo, knobs, dense = _built_in(domain, name, choice)
+    _t, _k, sparse = _built_in(domain, name, choice, mapping_kind=mapping_kind)
+    assert sparse.slots and not dense.slots
+    for slots in sparse.slots.values():
+        assert slots.scatter == mapping_kind.endswith("scatter")
+        per_target = np.bincount(slots.target[slots.valid], minlength=1)
+        assert per_target.max() == 1, "premise: one entry per target"
+    values = _domain_values(topo, knobs, domain, mapping_kind)
+    for k, (a, b) in enumerate(zip(_runs_in(domain, dense, values),
+                                   _runs_in(domain, sparse, values))):
+        for step, (sa, sb) in enumerate(zip(a, b), start=1):
+            where = f"{domain}/{name}/{mapping_kind} draw {k} step {step}"
+            diff = _same_numbers(sa.state, sb.state)
+            assert not diff, f"{where}: the sparse graph left the dense one in {diff}"
+            for gi in set(sa.reports) | set(sb.reports):
+                rdiff = report_differences(sa.reports.get(gi), sb.reports.get(gi))
+                assert not rdiff, f"{where} group {gi}: reports differ: {rdiff}"
+
+
+def _sparse_domain_reference_cases():
+    """Per push the ragged pattern in both layouts on the structure with
+    wide interfaces; every row full, and the other structures, are slow."""
+    cases = []
+    for domain in _REFERENCE_DOMAINS:
+        for kind in _SPARSE_REFERENCE_KINDS:
+            for name in sorted(STRUCTURES):
+                per_push = name in MAPPED and kind != "sparse-full"
+                cases.append(pytest.param(
+                    domain, name, kind, id=f"{domain}-{name}-{kind}",
+                    marks=() if per_push else pytest.mark.slow))
+    return cases
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain
+# (the ragged pattern in both layouts on mapped-ring-wide, in each domain
+# the reference models; the slow cases are the same check)
+@pytest.mark.parametrize("domain, name, mapping_kind", _sparse_domain_reference_cases())
+def test_a_named_topology_with_sparse_mapped_edges_reproduces_its_reference_in_every_domain(
+        domain, name, mapping_kind):
+    """The dense oracle over sparse mapped edges with several entries in a
+    row, in the domains the monolithic reference models: a float64 graph, a
+    sub-cycled member, and a predictor's other starting guess."""
+    topo, knobs, built = _built_in(domain, name, 1, mapping_kind=mapping_kind)
+    assert built.slots, "premise: sparse mapped edges"
+    for values in _domain_values(topo, knobs, domain, mapping_kind):
+        traj, = _runs_in(domain, built, [values])
+        with _x64(domain == "f64"):
+            assert_reproduces_the_reference(topo, knobs, built, values, traj=traj,
+                                            dtype=_domain_dtype(domain))
+
+
+# Per push: tests/property/test_differential_coupling_topologies.py::test_a_one_entry_sparse_mapping_steps_exactly_as_its_dense_matrix_in_every_domain
+# (the exact comparison with the dense graph runs per push in every domain;
+# these are the bit-for-bit invariances between two sparse builds)
+@pytest.mark.slow
+@pytest.mark.parametrize("name", sorted(STRUCTURES))
+@pytest.mark.parametrize("mapping_kind", ["sparse-ragged", "sparse-scatter"])
+@pytest.mark.parametrize("domain", DOMAINS)
+def test_renaming_and_reordering_a_sparse_mapped_topology_changes_nothing_in_every_domain(
+        domain, mapping_kind, name):
+    """CPL-180 and CPL-181 over sparse mapped edges: every node renamed, and
+    nodes and edges added in another order, bit-identical states and reports
+    (a sparse edge's pattern belongs to the structure, not to a name or to
+    the order the edge was added in)."""
+    topo, knobs, built = _built_in(domain, name, 0, mapping_kind=mapping_kind)
+    rename = _renaming(topo, 11)
+    _rt, _rk, renamed = _built_in(domain, name, 0, rename=rename, mapping_kind=mapping_kind)
+    node_order, edge_order = _orders(topo, 5)
+    _t, _k, reordered = _built_in(domain, name, 0, node_order=node_order,
+                                  edge_order=edge_order, mapping_kind=mapping_kind)
+    values = _domain_values(topo, knobs, domain, mapping_kind)
+    base = _runs_in(domain, built, values)
+    for k, (a, b) in enumerate(zip(base, _runs_in(domain, renamed, values,
+                                                  rename=dict(rename)))):
+        assert_same_runs(a, b, what=f"{domain}/{name}/{mapping_kind} draw {k} renamed")
+    for k, (a, b) in enumerate(zip(base, _runs_in(domain, reordered, values))):
+        assert_same_runs(a, b, what=f"{domain}/{name}/{mapping_kind} draw {k} reordered")
+

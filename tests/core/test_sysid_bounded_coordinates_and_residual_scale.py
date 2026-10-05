@@ -262,11 +262,14 @@ def linear_problem():
     return gm, mask, A, b
 
 
-@pytest.mark.parametrize("scale", [1e-10, 1e-8, 1e-7, 1e-4, 1.0, 1e4, 1e10])
+@pytest.mark.parametrize("scale", [1e-30, 1e-20, 1e-19, 1e-18, 1e-10, 1e-8, 1e-7, 1e-4,
+                                   1.0, 1e4, 1e10, 1e18, 1e19, 1e20, 1e30])
 def test_fit_lm_answers_the_same_for_every_scaling_of_the_residual(linear_problem, scale):
     """``r = s (A x - b)`` has the optimum of ``A x - b`` for every ``s``.  At
     1e-7 the absolute floor left the fit unconverged after 50 iterations; at
-    1e-8 it barely moved."""
+    1e-8 it barely moved.  From ``1e-18`` down, ``r * r``, ``JᵀJ`` and ``Jᵀr``
+    flushed in float32 and the fit reported ``converged=True`` 2-7% off or at
+    its start; from ``1e19`` up they overflowed (MADD-ANO-174)."""
     gm, mask, A, b = linear_problem
     ft = jnp.float32
 
@@ -292,10 +295,124 @@ def test_a_noise_std_is_the_same_scaling(linear_problem):
         x = jnp.stack([q["stiffness"], q["damping"], q["rest_length"]])
         return jnp.asarray(A, jnp.float32) @ x - jnp.asarray(b, jnp.float32)
 
-    for sigma in (1.0, 1e8):
+    for sigma in (1.0, 1e8, 1e20, 1e-20):
         res = fit_lm(gm, residual, mask=mask, n_iter=50, noise_std=sigma)
         assert res.converged, sigma
         assert float(res.params["nodes"]["s"]["damping"]) == pytest.approx(3.0, rel=2e-6)
+
+
+def test_fit_lm_never_converges_on_a_solve_it_could_not_form(linear_problem, monkeypatch):
+    """Defence in depth for MADD-ANO-174: whatever frames the solve, a step
+    whose live columns were not representable (a ``diag(JᵀJ)`` of 0 or
+    ``inf`` for a column ``J`` does not leave at zero) never carries a
+    converged verdict -- the run stops unconverged and says why."""
+    from maddening import sysid
+
+    gm, mask, A, b = linear_problem
+    real = sysid._marquardt_step  # noqa: SLF001
+
+    def unrepresentable(th, r, J, lam, lo, hi, held):
+        cand, _ = real(th, r, J, lam, lo, hi, held)
+        return cand, False
+
+    def residual(p):
+        q = p["nodes"]["s"]
+        x = jnp.stack([q["stiffness"], q["damping"], q["rest_length"]])
+        return jnp.asarray(A, jnp.float32) @ x - jnp.asarray(b, jnp.float32)
+
+    assert fit_lm(gm, residual, mask=mask, n_iter=50).converged       # non-vacuity
+    monkeypatch.setattr(sysid, "_marquardt_step", unrepresentable)
+    with pytest.warns(RuntimeWarning, match="stationarity could not be read"):
+        res = fit_lm(gm, residual, mask=mask, n_iter=50)
+    assert not res.converged
+
+
+def test_the_frames_reach_the_gauss_newton_test_too(linear_problem):
+    """``_gauss_newton_step`` takes its column norms of framed columns: a
+    column of ``1e-23`` used to have a norm that flushed to zero, was left
+    out, and the iterate read as stationary with that parameter unmoved;
+    bare and framed agree bit for bit where the bare norms are normal."""
+    from maddening.sysid import _gauss_newton_step
+
+    rng = np.random.default_rng(3)
+    J = jnp.asarray(rng.normal(size=(20, 2)), jnp.float32)
+    r = jnp.asarray(rng.normal(size=20), jnp.float32)
+    th = jnp.asarray([0.3, 0.7], jnp.float32)
+    lo, hi = jnp.full(2, -jnp.inf, jnp.float32), jnp.full(2, jnp.inf, jnp.float32)
+    held = jnp.zeros(2, bool)
+    base, ok = _gauss_newton_step(th, r, J, lo, hi, held)
+    assert bool(ok)
+    # The second parameter in units 2**-80 smaller: its column 2**-80 the
+    # size (norm ~1e-24, flushed bare), its step 2**80 larger.
+    c = jnp.asarray([1.0, 2.0 ** -80], jnp.float32)
+    th_c = th / c
+    cand, ok = _gauss_newton_step(th_c, r, J * c, lo, hi, held)
+    assert bool(ok)
+    np.testing.assert_array_equal(np.asarray(cand * c), np.asarray(base))
+    # ... and the residual 2**-70 smaller, which flushed the norms' products.
+    cand, ok = _gauss_newton_step(th, r * 2.0 ** -70, J * 2.0 ** -70, lo, hi, held)
+    np.testing.assert_array_equal(np.asarray(cand), np.asarray(base))
+
+
+def test_the_marquardt_step_scales_exactly_with_its_residual():
+    """``_marquardt_step`` frames the residual as well as ``J``'s columns, so
+    its step is linear in ``r`` to the bit for a power-of-two scaling --
+    down to a residual of ``2**-100`` (every entry still a normal number)
+    against a Jacobian whose columns hold entries down to ``1e-8`` of their
+    largest, where the products of a bare ``Jᵀr`` flush."""
+    from maddening.sysid import _marquardt_step
+
+    rng = np.random.default_rng(4)
+    J = jnp.asarray(rng.normal(size=(20, 3)) * np.array([1.0, 1e-2, 1e-4])
+                    * np.logspace(-8.0, 0.0, 20)[:, None], jnp.float32)
+    r = jnp.asarray(rng.normal(size=20), jnp.float32)
+    th = jnp.zeros(3, jnp.float32)
+    lo, hi = jnp.full(3, -jnp.inf, jnp.float32), jnp.full(3, jnp.inf, jnp.float32)
+    held = jnp.zeros(3, bool)
+    lam = jnp.asarray(1e-2, jnp.float32)
+    base, ok = _marquardt_step(th, r, J, lam, lo, hi, held)
+    assert bool(ok)
+    for k in (-100, -60, 60, 100):
+        assert float(jnp.min(jnp.abs(r * 2.0 ** k))) >= float(jnp.finfo(jnp.float32).tiny)
+        cand, ok = _marquardt_step(th, r * 2.0 ** k, J, lam, lo, hi, held)
+        assert bool(ok)
+        np.testing.assert_array_equal(np.asarray(cand) * 2.0 ** -k, np.asarray(base))
+    # At the top of the range ``Jᵀr`` itself overflows unless ``r`` is framed:
+    # twenty residual entries near ``1e38`` summed against framed columns.
+    Jw = jnp.asarray(rng.normal(size=(20, 3)), jnp.float32)
+    rw = jnp.asarray(np.sign(np.asarray(Jw[:, 0])) * 1.5, jnp.float32)
+    base_w, _ = _marquardt_step(th, rw, Jw, lam, lo, hi, held)
+    cand, ok = _marquardt_step(th, rw * 2.0 ** 126, Jw, lam, lo, hi, held)
+    assert bool(ok) and np.all(np.isfinite(np.asarray(cand)))
+    np.testing.assert_array_equal(np.asarray(cand, np.float64) * 2.0 ** -126,
+                                  np.asarray(base_w, np.float64))
+
+
+def test_a_loss_that_underflows_float64_is_never_converged():
+    """Under x64 a residual near ``1e-170`` has a framed loss whose unframing
+    underflows float64 to ``0.0`` while ``r`` is not zero; no step can lower
+    it, and a run started at the optimum is not called converged on it."""
+    from tests.core.test_sysid_claims_under_x64 import _x64
+
+    rng = np.random.default_rng(5)
+    A = rng.normal(size=(30, 2))
+    y = A @ np.array([0.3, 0.7]) + 1e-3 * rng.normal(size=30)
+    optimum = np.linalg.lstsq(A, y, rcond=None)[0]
+    with _x64():
+        gm = GraphManager()
+        gm.add_node(_Spring(name="s", timestep=0.01, stiffness=float(optimum[0]),
+                            damping=float(optimum[1])))
+        gm.compile()
+        mask = _only(gm, "stiffness", "damping")
+
+        def residual(p):
+            q = p["nodes"]["s"]
+            return 1e-170 * (jnp.asarray(A) @ jnp.stack([q["stiffness"], q["damping"]])
+                             - jnp.asarray(y))
+
+        with pytest.warns(RuntimeWarning, match="underflows float64 although r is not zero"):
+            res = fit_lm(gm, residual, mask=mask, n_iter=10, hold_undetermined=False)
+        assert not res.converged and res.best_loss == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -354,24 +471,82 @@ def test_fit_lm_answers_the_same_in_every_unit_system(x64):
         assert abs(runs["SI"] - runs["tonnes"]) <= 2, runs
 
 
-def test_a_shrunken_step_never_reads_as_stationary(monkeypatch):
+#: The two runs a shrunken Marquardt step leaves stuck, as ``(x64, the
+#: fraction of the step taken, step_tol)``.
+_SHRUNKEN = {
+    # No candidate moves, so none lowers the loss: the run ends at its start
+    # on a rejected proposal that is within ``step_tol``.
+    "to-nothing": (False, 0.0, None),
+    # Float64 resolves the loss's decrease over a millionth of the step, so
+    # every proposal is accepted, each within a ``step_tol`` of ``1e-5``.
+    "to-a-millionth": (True, 1e-6, 1e-5),
+}
+
+
+@pytest.mark.parametrize("shrunk", sorted(_SHRUNKEN))
+def test_a_shrunken_step_never_reads_as_stationary(monkeypatch, shrunk):
     """Defence in depth.  Whatever shrinks a step -- a mis-scaled floor, a
     large damping -- ``converged`` also needs the undamped Gauss-Newton step
     from the iterate to be within ``step_tol``, which nothing in the
-    Marquardt solve can shrink.  Simulated here by a step that moves a
-    millionth of the way."""
+    Marquardt solve can shrink.  Simulated by a Marquardt step that goes
+    only a fraction of its way, in the two runs that leaves stuck
+    (:data:`_SHRUNKEN`): the proposal is within ``step_tol`` and rejected
+    from the start, or within ``step_tol`` and accepted every time.  Both
+    are 3x the true damping away, and neither may read as converged.
+
+    Between the two -- a shrunken candidate rejected *after* the run has
+    lowered the loss -- the fit is not stuck: the floor rule takes the
+    Gauss-Newton step itself, which is the next test.  A millionth of the
+    step in float32 is that case or the first by the rounding of one loss
+    comparison: its first candidate tied with the start while the fitters
+    evaluated a leaf they do not move at its ``exp(log(p))`` round trip,
+    and lowered the loss in its sixth digit once they evaluated it as it
+    went in (SYS-071), so the run went on to the truth.  Neither run here
+    rests on a comparison that close."""
     from maddening import sysid
 
-    real = sysid._marquardt_step  # noqa: SLF001
+    x64, fraction, step_tol = _SHRUNKEN[shrunk]
+    marquardt, gauss_newton = sysid._marquardt_step, sysid._gauss_newton_step  # noqa: SLF001
+    proposed, undamped = [], []
 
-    def crushed(th, r, J, lam, lo, hi):
-        return th + 1e-6 * (real(th, r, J, lam, lo, hi) - th)
+    def moved(th, cand) -> float:
+        """The largest move of a coordinate, relative to itself."""
+        return float(jnp.max(jnp.abs(cand - th) / jnp.abs(th)))
 
-    monkeypatch.setattr(sysid, "_marquardt_step", crushed)
+    def shrunken(th, r, J, lam, lo, hi, held):
+        cand, ok = marquardt(th, r, J, lam, lo, hi, held)
+        cand = th + fraction * (cand - th)
+        proposed.append(moved(th, cand))
+        return cand, ok
+
+    def watched(th, r, J, lo, hi, held):
+        cand, ok = gauss_newton(th, r, J, lo, hi, held)
+        undamped.append(moved(th, cand))
+        return cand, ok
+
+    monkeypatch.setattr(sysid, "_marquardt_step", shrunken)
+    monkeypatch.setattr(sysid, "_gauss_newton_step", watched)
     m, k, c_true = _UNITS["tonnes"]
-    res = _unit_fit(m, k, c_true)
+    with _precision(x64):
+        res = _unit_fit(m, k, c_true, step_tol=step_tol)
     assert not res.converged
-    assert _damping(res) == pytest.approx(3.0 * c_true, rel=1e-2)    # it really was stuck
+    # The verdict asked the undamped step, and from every iterate it was
+    # asked at that step would have moved the damping by more than half.
+    assert undamped and min(undamped) > 0.5
+    if fraction == 0.0:
+        # It really was stuck: no candidate moved, and it is at its start,
+        # to the bit.
+        assert proposed and max(proposed) == 0.0
+        assert _damping(res) == 3.0 * c_true
+        assert float(res.params["nodes"]["s"]["stiffness"]) == k
+    else:
+        # It really was stuck: every proposal was within ``step_tol`` and
+        # accepted -- one Marquardt solve an iteration, each lowering the
+        # loss, to the end of the budget -- and fifty of them went nowhere.
+        assert 0.0 < min(proposed) and max(proposed) <= step_tol
+        assert len(proposed) == res.n_iter == 50
+        assert np.all(np.diff(res.losses) < 0.0)
+        assert 3.0 * c_true * (1.0 - 1e-4) < _damping(res) < 3.0 * c_true
 
 
 def test_a_run_of_stalled_candidates_is_not_the_rounding_floor(monkeypatch):
@@ -379,18 +554,84 @@ def test_a_run_of_stalled_candidates_is_not_the_rounding_floor(monkeypatch):
     down to one within ``step_tol`` reads as the rounding floor only if the
     undamped Gauss-Newton step does not lower the loss either.  Simulated by
     candidates that stop moving after the first (accepted) step: they all
-    tie and are rejected, but the fit is nowhere near its floor."""
+    tie and are rejected, but the fit is nowhere near its floor.
+
+    The Gauss-Newton step that lowers the loss is now taken as the iterate
+    (MADD-ANO-174) rather than ending the run unconverged, so a run whose
+    damped candidates all stall is carried on by it, and converges only
+    where that step is within ``step_tol`` -- at the truth."""
     from maddening import sysid
 
     real = sysid._marquardt_step  # noqa: SLF001
     calls = []
 
-    def stalls(th, r, J, lam, lo, hi):
+    def stalls(th, r, J, lam, lo, hi, held):
         calls.append(1)
-        return real(th, r, J, lam, lo, hi) if len(calls) == 1 else th
+        return real(th, r, J, lam, lo, hi, held) if len(calls) == 1 else (th, True)
 
     monkeypatch.setattr(sysid, "_marquardt_step", stalls)
     m, k, c_true = _UNITS["tonnes"]
     res = _unit_fit(m, k, c_true)
     assert len(res.losses) >= 2 and res.losses[1] < res.losses[0]     # it progressed
-    assert not res.converged
+    assert len(calls) > 2                                              # and stalled
+    # Only the first Marquardt candidate moved, so every update after it is
+    # a Gauss-Newton step the floor rule took.
+    assert res.best_iteration > 1
+    assert res.converged
+    assert _damping(res) == pytest.approx(c_true, rel=2e-4)
+    assert float(res.params["nodes"]["s"]["stiffness"]) == pytest.approx(k, rel=1e-5)
+
+
+@pytest.mark.parametrize("n_iter", [2, 10], ids=["its-last-act", "then-converged"])
+def test_a_gauss_newton_iterate_is_evaluated_as_it_is_returned(monkeypatch, n_iter):
+    """Where the floor rule takes the Gauss-Newton step as the iterate, that
+    candidate is what the run evaluates, records and returns, as an accepted
+    Marquardt candidate is: ``best_loss`` is the loss of exactly the
+    parameters returned (SYS-071), and ``converged`` is only ever reported
+    at an iterate a loss-lowering step produced (SYS-080).
+
+    ``stiffness`` is not fitted, and its ``exp(log(30.0))`` round trip is not
+    ``30.0`` in float32: a candidate evaluated at the round trip reports
+    ``12.50001`` for a returned point whose loss is ``12.5``.  With two
+    iterations the Gauss-Newton step is the run's last act and ``best_loss``
+    is that candidate's own evaluation; with more, the run converges on it
+    at the next iteration, which forms its loss again."""
+    from maddening import sysid
+
+    marquardt, gauss_newton = sysid._marquardt_step, sysid._gauss_newton_step  # noqa: SLF001
+    calls, undamped = [], []
+
+    def stalls(th, r, J, lam, lo, hi, held):
+        calls.append(1)
+        return marquardt(th, r, J, lam, lo, hi, held) if len(calls) == 1 else (th, True)
+
+    def watched(th, r, J, lo, hi, held):
+        cand, ok = gauss_newton(th, r, J, lo, hi, held)
+        undamped.append(np.asarray(cand).tobytes())
+        return cand, ok
+
+    def residual(p):
+        q = p["nodes"]["s"]
+        return jnp.stack([q["stiffness"] - 25.0, q["damping"] - 1.0])
+
+    gm = _spring()
+    k = np.asarray(gm.params["nodes"]["s"]["stiffness"])
+    assert float(jnp.exp(jnp.log(jnp.asarray(k)))) != float(k), "premise: the round trip moves it"
+    monkeypatch.setattr(sysid, "_marquardt_step", stalls)
+    monkeypatch.setattr(sysid, "_gauss_newton_step", watched)
+    res = fit_lm(gm, residual, mask=_only(gm, "damping"), n_iter=n_iter, hold_undetermined=False)
+
+    # Two updates, each of which lowered the loss: the one Marquardt step,
+    # then -- every later candidate stalled -- the Gauss-Newton step, which
+    # is the iterate returned, to the bit.
+    assert len(calls) > 2 and res.best_iteration == 2
+    assert np.all(np.diff(res.losses) < 0.0)
+    assert np.asarray(res.params["nodes"]["s"]["damping"]).tobytes() in undamped
+    assert np.asarray(res.params["nodes"]["s"]["stiffness"]).tobytes() == k.tobytes()
+    again = float(0.5 * jnp.sum(residual(res.params) ** 2))
+    assert again == float(res.best_loss) == 12.5, (again, res.best_loss)
+    if n_iter == 2:
+        assert not res.converged and len(res.losses) == 2       # out of budget on that step
+    else:
+        assert res.converged and res.n_iter == 3
+        assert float(res.losses[2]) == float(res.best_loss)

@@ -175,9 +175,23 @@ class SpringDamperNode(SimulationNode):
         }
 
     def initial_state(self) -> dict:
+        """Position and velocity, in the dtype :meth:`update` produces from
+        this node's constants: float32 by default, float64 under
+        ``jax_enable_x64`` for constants given as Python floats (which
+        :meth:`params_pytree` places at float64 there), float32 again for
+        constants given as float32 -- never narrower than float32.
+
+        Seeded in float32 outright until 0.4.0 shipped, so under x64 the
+        first update promoted the state to float64 and every graph scan --
+        ``run_scan``, ``run_scan_with_history``, ``run_sweep``, and the
+        parameter guide's system-identification recipe on this node --
+        refused the carry (MADD-ANO-017's spring surface).  With x64 off
+        nothing changes.
+        """
+        dtype = jnp.result_type(jnp.float32, *self.params_pytree().values())
         return {
-            "position": jnp.array(self.params["initial_position"], dtype=jnp.float32),
-            "velocity": jnp.array(self.params["initial_velocity"], dtype=jnp.float32),
+            "position": jnp.array(self.params["initial_position"], dtype=dtype),
+            "velocity": jnp.array(self.params["initial_velocity"], dtype=dtype),
         }
 
     def update(

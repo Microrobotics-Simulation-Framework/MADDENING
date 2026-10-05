@@ -271,6 +271,67 @@ def test_a_rank_decided_below_the_normal_range_warns():
     assert bool(core.precision_limited)
 
 
+def _rank2_integer_jacobian(m=50, seed=0):
+    """``A`` with integer entries and column 3 = column 1 + column 2 (the sum
+    exact), so its rank is 2 at every scale; and a full-rank ``B``."""
+    rng = np.random.default_rng(seed)
+    A = rng.integers(-4, 5, size=(m, 3)).astype(np.float32)
+    A[:, 2] = A[:, 0] + A[:, 1]
+    B = rng.integers(-4, 5, size=(m, 3)).astype(np.float32)
+    return A, B
+
+
+@pytest.mark.parametrize("which", ["rank-2", "full-rank"])
+def test_a_fisher_matrix_flushed_to_zero_from_a_nonzero_jacobian_warns(which):
+    """SYS-129 taken to the end: at ``|J|`` near ``1e-20`` in float32 every
+    product ``J_ij * J_ik`` flushes, ``F`` is exactly zero, the cutoff is 0 and
+    ``rank`` reads 0 -- which used to be reported silently, every ``crb``
+    ``inf``, ``FIMCore.precision_limited`` False, where the residual has rank
+    2 or 3 at every scale (audit_040_p4_10/fmu-sysid/
+    repro_fim_underflow_rank0_silent.py).  It is now flagged, host and core,
+    whatever ``rank_rtol`` is."""
+    from maddening.sysid import fim_core
+    from maddening.warnings import PrecisionLimitWarning
+
+    A, B = _rank2_integer_jacobian()
+    M = jnp.asarray(A if which == "rank-2" else B)
+    p0 = {"p": jnp.asarray([1.0, 2.0, 3.0], jnp.float32)}
+
+    def residual(p, s=1e-20):
+        return M @ p["p"] * jnp.float32(s)
+
+    assert float(jnp.max(jnp.abs(jax.jacfwd(residual)(p0)["p"]))) > 0.0
+    for rank_rtol in (None, 0.0):
+        with pytest.warns(PrecisionLimitWarning, match="came out exactly zero although J"):
+            report = fim(residual, p0, scale=None, rank_rtol=rank_rtol)
+        assert report.rank == 0 and not np.any(np.asarray(report.fim))
+        core = jax.jit(lambda q, rr=rank_rtol: fim_core(residual, q, scale=None,
+                                                        rank_rtol=rr))(p0)
+        assert bool(core.precision_limited) and float(core.deciding_ratio) == 0.0
+    # Above the flush the verdict is the data's and nothing is said.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        assert fim(lambda p: M @ p["p"], p0, scale=None).rank == (2 if which == "rank-2" else 3)
+
+
+def test_a_residual_that_reads_no_parameter_is_a_real_rank_zero():
+    """A zero ``J`` is a residual that reads nothing, not a flush: rank 0 is
+    the data's answer and no warning is given, host or core."""
+    from maddening.sysid import fim_core
+    from maddening.warnings import PrecisionLimitWarning
+
+    p0 = {"p": jnp.asarray([1.0, 2.0], jnp.float32)}
+
+    def residual(p):
+        return jnp.ones(5, jnp.float32) + 0.0 * jnp.sum(p["p"])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PrecisionLimitWarning)
+        assert fim(residual, p0, scale=None).rank == 0
+    core = jax.jit(lambda q: fim_core(residual, q, scale=None))(p0)
+    assert int(core.rank) == 0 and not bool(core.precision_limited)
+
+
 def test_the_bound_is_in_the_parameters_units():
     """SYS-026: with ``noise_std`` the Cramer-Rao bound is "in the parameters' own units":
     sigma**2 times the unit-noise bound, ``c**2`` times as large for a parameter measured in

@@ -108,11 +108,16 @@ def main() -> None:
     # or MADDENING_API_TOKEN_FILE to a path on a mounted volume.
     server.auth.announce(port)
     warn_if_publicly_bound(host, port)
+    # uvicorn's proxy_headers (on by default, trusting 127.0.0.1) rewrites
+    # the peer the API's authentication sees from X-Forwarded-For, so it
+    # is off here unless the operator opts in by setting uvicorn's own
+    # FORWARDED_ALLOW_IPS to the proxy that fronts this container.
     uvicorn.run(
         server.create_app(),
         host=host,
         port=port,
         log_level="info",
+        proxy_headers=bool(os.environ.get("FORWARDED_ALLOW_IPS", "").strip()),
     )
 
 

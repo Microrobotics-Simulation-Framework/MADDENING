@@ -255,7 +255,7 @@ def test_the_wrapped_fetch_adds_the_header_to_same_origin_calls(tmp_path):
 
 def test_the_helper_is_served_and_is_javascript():
     """The route exists, is exempt, and says it is JavaScript."""
-    from fastapi.testclient import TestClient
+    from tests._loopback_client import LoopbackTestClient as TestClient
 
     from maddening.api.server import SimulationServer
 

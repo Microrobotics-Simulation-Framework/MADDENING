@@ -29,7 +29,7 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 from maddening.api.server import SimulationServer, _host_name
 from maddening.core.graph_manager import GraphManager
@@ -108,7 +108,7 @@ def test_the_bundled_pages_own_origin_is_served():
 
     response = client.post(
         "/sim/reset",
-        headers={"Origin": "http://testserver", "Host": "testserver"},
+        headers={"Origin": "http://127.0.0.1", "Host": "127.0.0.1"},
     )
 
     assert response.status_code == 200
@@ -186,7 +186,7 @@ def test_a_same_origin_page_can_still_open_the_state_stream():
     client = _client()
 
     with client.websocket_connect(
-        "/ws/state", headers={"Origin": "http://testserver", "Host": "testserver"},
+        "/ws/state", headers={"Origin": "http://127.0.0.1", "Host": "127.0.0.1"},
     ) as ws:
         assert ws.accepted_subprotocol is None
 
@@ -211,8 +211,9 @@ def test_a_websocket_with_no_origin_header_is_unaffected():
 # answered 200 (and wrote the file), ``GET /graph`` 200, and ``/ws/state``
 # accepted the handshake.  A loopback-bound server now answers only to the
 # names this machine is reached by.  These requests come from a loopback
-# TCP peer, as a browser's do (``client=``); Starlette's in-process
-# ``"testclient"`` peer is not a browser and is not asked.
+# TCP peer, as a browser's do (``client=``).  The check keys on the Host,
+# never on the peer: Starlette's in-process ``"testclient"`` peer is asked
+# too (and, not being a loopback address, must present the token).
 
 REBOUND = "http://attacker.example:8000"
 LOOPBACK_PEER = ("127.0.0.1", 51234)

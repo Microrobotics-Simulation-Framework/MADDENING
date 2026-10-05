@@ -33,7 +33,7 @@ from pathlib import Path
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 
 pytest.importorskip("equinox", reason="surrogate training needs the surrogates extra")
 pytest.importorskip("optax", reason="surrogate training needs the surrogates extra")
@@ -291,7 +291,9 @@ _EXIT_WITH_A_JOB_ALIVE = textwrap.dedent('''
     gm.add_node(BallNode("ball", timestep=0.01, initial_position=10.0))
     gm.compile()
     server = SimulationServer({}, graph_manager=gm)
-    client = TestClient(server.create_app())
+    # An in-process client is no loopback connection: it presents the token.
+    client = TestClient(server.create_app(),
+                        headers={"Authorization": f"Bearer {server.auth.token}"})
     job = client.post("/surrogate/train", json={"node_name": "ball", "n_epochs": 10000,
         "n_data_steps": 5, "hidden_sizes": [8], "batch_size": 16}).json()["job_id"]
     while client.get(f"/surrogate/status/{job}").json()["epoch"] < 2:

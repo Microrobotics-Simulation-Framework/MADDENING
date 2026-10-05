@@ -23,7 +23,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import numpy as np
 import jax.numpy as jnp
 import pytest
-from fastapi.testclient import TestClient
+from tests._loopback_client import LoopbackTestClient as TestClient
 from hypothesis import event, given, settings
 from hypothesis import strategies as st
 from hypothesis.stateful import run_state_machine_as_test

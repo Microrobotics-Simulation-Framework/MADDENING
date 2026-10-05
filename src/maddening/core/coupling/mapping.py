@@ -79,10 +79,10 @@ class Mapping(Protocol):
     which checkpoints, ``PUT /graph/params``, system identification, the
     FMU's state archive and ``to_dict`` all walk as a flat table of
     arrays.  For any class other than :class:`StaticLinearMapping`,
-    ``GraphManager.add_edge`` therefore refuses one that is not a plain,
-    non-empty ``dict`` from Python identifiers to concrete, non-empty,
-    finite, floating-point JAX arrays, the same on every call (see
-    :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
+    ``GraphManager.add_edge`` therefore refuses one that is not a plain
+    ``dict`` (empty for a mapping without weights) from Python identifiers
+    to concrete, finite, floating-point JAX arrays, the same on every call
+    (see :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
     """
 
     kind: str
@@ -185,10 +185,6 @@ def _params_pytree_problem(tree: Any) -> Optional[str]:
     if type(tree) is not dict:
         return (f"returned {type(tree).__name__}, not a plain dict of weight name -> "
                 f"array")
-    if not tree:
-        return ("returned an empty dict; a mapping exposes at least one weight (an "
-                "entry without leaves is dropped wherever the parameter tree is "
-                "flattened to its leaves, and its edge then looks unmapped)")
     for key, leaf in tree.items():
         if not isinstance(key, str) or not key.isidentifier():
             return (f"has the key {key!r}; a weight name must be a Python identifier "
@@ -209,8 +205,6 @@ def _params_pytree_problem(tree: Any) -> Optional[str]:
             return (f"{where} has dtype {leaf.dtype}; a weight is a real "
                     f"floating-point array (keep indices and other integer structure "
                     f"as attributes of the mapping, outside the parameter tree)")
-        if leaf.size == 0:
-            return f"{where} has shape {tuple(leaf.shape)} and holds no element"
         if not bool(np.all(np.isfinite(np.asarray(leaf)))):
             return f"{where} holds a non-finite value (NaN or infinity)"
     return None

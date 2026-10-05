@@ -6872,10 +6872,9 @@ class GraphManager:
         source field's size; ``n_target`` must match the target's
         declared ``boundary_input_spec`` shape when that is an array.
         A mapping of a class other than ``StaticLinearMapping`` is a
-        ``ValueError`` unless its ``params_pytree()`` is a plain,
-        non-empty dict from identifiers to concrete, non-empty, finite,
-        floating-point JAX arrays, the same on every call (the contract
-        is spelled out in
+        ``ValueError`` unless its ``params_pytree()`` is a plain dict
+        from identifiers to concrete, finite, floating-point JAX arrays,
+        the same on every call (the contract is spelled out in
         :func:`~maddening.core.coupling.mapping_registry.register_mapping`).
         A :class:`~maddening.core.coupling.mapping_spec.MappingSpec` (or
         its dict form) is rebuilt first with :meth:`point_resolver`.

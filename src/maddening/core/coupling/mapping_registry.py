@@ -429,15 +429,15 @@ def register_mapping(
     ``StaticLinearMapping``, ``add_edge`` refuses a ``params_pytree()``
     that is not:
 
-    * a plain ``dict`` with at least one entry;
+    * a plain ``dict`` -- empty for a mapping that has no weights;
     * keyed by Python identifiers (a key is a member name in a checkpoint
       archive and a key of a config's ``param_specs``);
     * holding, under each key, one concrete JAX array of a floating-point
-      dtype with at least one element, all finite -- not a nested
-      container, not a NumPy array or a Python number (whose dtype would
-      depend on ``jax_enable_x64`` at the moment it is read), not an
-      integer or complex array (keep indices and other structure as
-      attributes of the mapping, outside the parameter tree);
+      dtype (any shape), all finite -- not a nested container, not a
+      NumPy array or a Python number (whose dtype would depend on
+      ``jax_enable_x64`` at the moment it is read), not an integer or
+      complex array (keep indices and other structure as attributes of
+      the mapping, outside the parameter tree);
     * the same on every call: same keys, shapes, dtypes and values.  It is
       what ``reset_params()`` restores and what ``to_dict`` compares the
       live weights with.

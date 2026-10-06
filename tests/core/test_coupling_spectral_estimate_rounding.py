@@ -178,3 +178,99 @@ def test_what_a_breakdown_discards_is_reported_as_residual():
     assert rho == pytest.approx(0.25, abs=1e-6) and res >= 0.99e-3, (rho, res)
     rho, res, _amp, _ok = _estimate(A, "float32", v0=np.array([0.0, 1.0]))
     assert rho == pytest.approx(0.5, abs=1e-6) and res < 1e-5, (rho, res)
+
+
+@pytest.mark.parametrize("seed", [90, 130, 131, 241, 270])
+def test_one_samples_signs_do_not_settle_a_radius_rounding_moves(seed):
+    """Five float32 hubs a single probe of the measured disagreement read settled and wrong.
+
+    The disagreement of one fresh product is one sample of rounding: its
+    magnitudes are the measurement, its signs are luck.  Probed along it
+    alone, these radii read settled 12% to 60% of themselves off; under
+    eight sign patterns each is refused or right.
+    """
+    A, dtype = _hub(seed)
+    true = float(max(abs(np.linalg.eigvals(A))))
+    rho, _res, _amp, ok = _estimate(A, dtype)
+    assert not ok or abs(rho - true) <= SPECTRAL_SETTLED_FRACTION * (1.0 - true), (rho, true)
+
+
+def test_the_reorthogonalisation_test_alone_stops_at_a_full_space(monkeypatch):
+    """With the noise threshold off, a full space still ends the basis.
+
+    Six dimensions, eight steps: after six the leftover of a product is
+    the orthogonalisation's own rounding, which the second sweep removes
+    again.  Normalised into a seventh "basis vector" it is orthogonal to
+    nothing and the Ritz values are no one's.
+    """
+    monkeypatch.setattr(acceleration, "_ARNOLDI_NOISE_ULPS", 0.0)
+    _compiled.cache_clear()
+    try:
+        for seed in range(8):
+            A, dtype = _normal(seed)
+            true = float(max(abs(np.linalg.eigvals(A))))
+            rho, res, _amp, ok = _estimate(A, dtype)
+            assert rho == pytest.approx(true, abs=1e-5) and ok and res < 1e-4, (seed, rho, true, res)
+    finally:
+        _compiled.cache_clear()
+
+
+def test_a_part_of_the_residual_far_above_rounding_is_taken_into_the_space():
+    """1e-7 of the residual, along a mode the start does not excite, is most of the distance.
+
+    ``A = diag(1 - 1e-9, 0.5, 0.2)`` from a start with no first component:
+    the space is the last two modes.  The residual's first component is
+    1e-7 of it and is amplified 1e9 times; left outside the space as
+    "rounding" (it is eight orders above float64's), the factor applied to
+    the residual was 2.
+    """
+    A = np.diag([1.0 - 1e-9, 0.5, 0.2])
+    r = np.array([1e-7, 1.0, 1.0])
+    exact = float(np.linalg.norm(np.linalg.solve(np.eye(3) - A, r)))
+    _rho, _res, amp, _ok = _estimate(A, "float64", v0=np.array([0.0, 1.0, 1.0]), v_extra=r)
+    assert amp * float(np.linalg.norm(r)) >= exact * (1.0 - 1e-6), (amp, exact)
+
+
+@pytest.mark.parametrize("family", ["hub", "ring"])
+def test_the_estimate_on_a_reading_follows_the_same_rule(family):
+    """``_arnoldi_through`` with the identity for a reading is the same estimate.
+
+    The interface norm's spectrum is taken through preimages; its
+    breakdown test, its one more product and what it reports are the
+    state's, so on the identity the two agree: the same verdicts, and no
+    settled radius outside the margin.
+    """
+    build, _least = FAMILIES[family]
+    through = jax.jit(lambda A, v0: acceleration._arnoldi_through(  # noqa: SLF001
+        lambda v: A @ v, lambda v: v, v0))
+    for seed in SEEDS:
+        A, dtype = build(seed)
+        true = float(max(abs(np.linalg.eigvals(A))))
+        Aj = jnp.asarray(A, dtype)
+        v0 = jax.random.normal(jax.random.PRNGKey(0), (A.shape[0],), Aj.dtype)
+        rho, res, _amp = through(Aj, v0)
+        ok = bool(spectral_rate_settled(rho, res))
+        assert not ok or abs(float(rho) - true) <= SPECTRAL_SETTLED_FRACTION * (1.0 - true), (
+            seed, float(rho), true)
+    with precision(True):
+        A64 = jnp.asarray(np.array([[0.3, 1e-8], [1e6, 0.3]]), jnp.float64)
+        rho, _res, _amp = acceleration._arnoldi_through(  # noqa: SLF001
+            lambda v: A64 @ v, lambda v: v, jnp.asarray([0.0, 1.0], jnp.float64))
+        assert float(rho) == pytest.approx(0.4, abs=1e-9)
+
+
+def test_the_products_rounding_is_the_coarsest_fields_not_the_analysis(monkeypatch):
+    """A 16-bit group's products round at its own ``eps``, and the estimate is told so."""
+    from tests.core.test_coupling_sixteen_bit_groups import _rotation
+
+    seen = []
+    real = acceleration.arnoldi_spectral_radius
+
+    def recording(matvec, v0, *args, noise_eps=None, **kwargs):
+        seen.append(noise_eps)
+        return real(matvec, v0, *args, noise_eps=noise_eps, **kwargs)
+
+    monkeypatch.setattr(acceleration, "arnoldi_spectral_radius", recording)
+    gm = _rotation(jnp.bfloat16, 9, diagnostics=True)
+    gm.step()
+    assert seen and all(e == float(jnp.finfo(jnp.bfloat16).eps) for e in seen), seen

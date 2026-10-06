@@ -238,6 +238,57 @@ def test_the_cast_check_holds_for_every_kind_of_extension_dtype(target, values):
         _checked_cast(values, dtype, "leaf 'probe'")
 
 
+#: A float wider than float64, where the platform has one (x86's 80-bit
+#: extended; elsewhere ``longdouble`` is float64 and the case cannot be
+#: written).
+_WIDER_THAN_FLOAT64 = np.finfo(np.longdouble).nmant > np.finfo(np.float64).nmant
+
+
+@pytest.mark.parametrize("target, values", [
+    # A complex value for a real leaf: the cast drops the imaginary part.
+    # The rule read the NumPy kind of the leaf, which is void for these.
+    ("bfloat16", np.asarray([1.5 + 0j, 1.5 + 1j], np.complex64)),
+    ("float8_e4m3fn", np.asarray([1.5 + 0j, 1.5 + 1j], np.complex128)),
+    ("int4", np.asarray([3 + 0j, 3 + 1j], np.complex64)),
+    ("uint4", np.asarray([3 + 0j, 3 + 2j], np.complex128)),
+    ("int4", np.asarray([3 + 0j, 2.5 + 0j], np.complex64)),           # real, not whole
+    # The other signedness, which a cast there and back cannot see.
+    ("uint4", np.asarray([3, -1], np.int8)),
+    ("int4", np.asarray([3, 200], np.uint8)),
+    ("int4", np.asarray([3, np.iinfo(np.uint64).max], np.uint64)),
+    ("uint4", np.asarray([3, np.iinfo(np.int64).min], np.int64)),
+    ("int4", np.asarray([3.0, np.nan], np.float64)),
+    *([("int4", np.asarray([3, np.longdouble(7) + np.longdouble(2) ** -60], np.longdouble)),
+       ("uint4", np.asarray([3, np.longdouble(15) + np.longdouble(2) ** -59], np.longdouble))]
+      if _WIDER_THAN_FLOAT64 else []),                                # whole only as a float64
+], ids=lambda v: v if isinstance(v, str) else f"{v.dtype}:{v[1]!r}")
+def test_an_extension_leaf_is_held_to_the_rule_a_numpy_leaf_of_its_kind_is(target, values):
+    """What ``load_state`` refuses for a float32 or an int32 leaf, it
+    refuses for a bfloat16 or a 4-bit one: an imaginary part, an integer
+    of the other signedness, a value that is not whole."""
+    dtype = np.dtype(getattr(ml_dtypes, target))
+    kept = _checked_cast(values[:1], dtype, "leaf 'probe'")
+    assert kept.dtype == dtype and float(kept[0]) == float(np.real(values[0]))
+    with pytest.raises(ValueError, match="leaf 'probe' holds .* cannot hold"):
+        _checked_cast(values, dtype, "leaf 'probe'")
+
+
+@pytest.mark.parametrize("source", [np.int8, np.int64, np.float32, np.float64, np.complex64])
+@pytest.mark.parametrize("target", ["int4", "uint4"])
+def test_a_four_bit_leaf_takes_its_own_extremes_and_nothing_past_them(target, source):
+    """NumPy has no ``iinfo`` for JAX's small integers, so the rule's
+    bounds for them are JAX's: each extreme loads, and one past it is
+    refused where the cast would wrap it."""
+    dtype = np.dtype(getattr(ml_dtypes, target))
+    low, high = (-8, 7) if target == "int4" else (0, 15)
+    assert (int(jnp.iinfo(dtype).min), int(jnp.iinfo(dtype).max)) == (low, high)
+    kept = _checked_cast(np.asarray([low, high], source), dtype, "leaf 'probe'")
+    assert kept.dtype == dtype and [int(v) for v in kept] == [low, high]
+    for past in (low - 1, high + 1):
+        with pytest.raises(ValueError, match="leaf 'probe' holds .* cannot hold"):
+            _checked_cast(np.asarray([low, past], source), dtype, "leaf 'probe'")
+
+
 def test_a_leaf_dtype_with_no_rule_is_refused_not_assumed_lossless():
     """A cast into a dtype that is neither a float, an integer nor a
     boolean used to be taken as it came."""

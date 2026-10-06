@@ -592,9 +592,13 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
         # One of JAX's 2- and 4-bit integers, which NumPy has no ``iinfo``
         # for: the same rule -- in range, whole, no imaginary part -- on
         # the bounds JAX gives.  They are at most 15 in magnitude, so
-        # float64 holds each of them, and any value near them, exactly.
+        # float64 holds each of them exactly, and every value of a source
+        # type no wider than it; a wider float is compared as it is
+        # (rounded to float64, 7 + 2**-60 is the whole number 7).
         info = jnp.iinfo(target)
-        wide = np.real(a).astype(np.float64)
+        wide = np.asarray(np.real(a))
+        if not (wide.dtype.kind == "f" and wide.dtype.itemsize > 8):
+            wide = wide.astype(np.float64)
         with np.errstate(invalid="ignore"):
             lost = ~((wide >= info.min) & (wide <= info.max) & (wide == np.trunc(wide)))
         if source_kind == "c":

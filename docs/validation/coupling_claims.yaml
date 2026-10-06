@@ -578,7 +578,8 @@ claims:
   area: configuration
   claim: >-
     The diagnostics cost "8 Jacobian-vector products for the spectrum (16
-    under convergence_norm="interface" with a transform on an internal edge
+    under convergence_norm="interface" with a mapping or a transform on an
+    internal edge, or a field that more than one internal edge reads
     ...) and 11 + 4 k + 5 n_p more for the bound per group per step (plus one
     linearisation and k reverse-mode products where the state has more than
     k entries; k <= 8, n_p the probes: every entry of a floating constant of
@@ -588,13 +589,16 @@ claims:
   sources:
     - src/maddening/core/coupling/group.py:116 (CouplingGroup, diagnostics)
     - src/maddening/core/coupling/acceleration.py:861 (arnoldi_spectral_radius)
-    - src/maddening/core/graph_manager.py:691 (_gradient_error_bound_at)
+    - src/maddening/core/graph_manager.py:945 (_gradient_error_bound_at)
+    - src/maddening/core/graph_manager.py:379 (_reading_is_the_fields)
   conditions: solver="ift", diagnostics=True.
   oracle: Jacobian-vector products counted by evaluating the analysis eagerly with vmap unrolled.
   tests:
     - tests/core/test_coupling_claims_helpers.py::test_arnoldi_costs_n_steps_jacobian_vector_products
     - tests/core/test_coupling_claims_helpers.py::test_the_gradient_bound_costs_eleven_plus_four_k_plus_five_n_p_products
     - tests/core/test_coupling_claims_helpers.py::test_the_spectrum_on_a_transformed_reading_costs_eight_more_products
+    - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_only_a_group_whose_reading_is_not_its_fields_takes_the_second_spectrum
+    - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_reading_is_the_fields_only_where_each_is_read_once_as_it_is
   status: verified
   domains:
     f32: n/a
@@ -3286,11 +3290,12 @@ claims:
     accelerator did -- so this is a bound on ||x - x*||" where
     spectral_usable is True.
   sources:
-    - src/maddening/core/graph_manager.py:9558 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/graph_manager.py:9598 (coupling_diagnostics, spectral_error_bound)
     - src/maddening/core/coupling/acceleration.py:1435 (spectral_error_bound)
     - docs/developer_guide/coupling_algorithm_guide.md#spectral_error_bound-the-spectrum-measured
     - src/maddening/core/inspection.py:1397 (coupling_report, the error_estimate note)
-    - src/maddening/core/graph_manager.py:643 (_interface_spectral_rate_at)
+    - src/maddening/core/graph_manager.py:681 (_interface_spectral_rate_at)
+    - src/maddening/core/graph_manager.py:379 (_reading_is_the_fields)
   conditions: >-
     F linear; solver="ift", diagnostics=True; at most eight independent
     interface scalars (spectral_usable); the group's own norm at the
@@ -3301,13 +3306,15 @@ claims:
     edge's interface mapping (the weights the step ran with) and then its
     transform, with the mappings linear and the transforms affine (offsets,
     scales, selections; a non-affine transform makes the map non-linear in
-    the reading) (MADD-ANO-187, MADD-ANO-195); every acceleration and schedule; long
+    the reading) (MADD-ANO-187, MADD-ANO-195), and a field that several
+    internal edges read counted once for each of them, as that norm counts
+    it (MADD-ANO-206); every acceleration and schedule; long
     Gauss-Seidel chains, sub-cycled and multi-rate groups; float16 to
     float64, a delivered value wider than its source field resolved at the
-    source's eps (MADD-ANO-197).  Where the residual is at its float floor
+    source's eps (MADD-ANO-204).  Where the residual is at its float floor
     the bound rests on the counted floor (CPL-092, CPL-102), which does not
     see a same-pass read that differences entries of one field
-    (MADD-ANO-198, open).
+    (MADD-ANO-205, open).
   oracle: exact float64 fixed point of the evaluated map.
   tests:
     - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
@@ -3339,6 +3346,11 @@ claims:
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_usable_bound_holds_on_random_mapped_internal_edges
     - tests/core/test_coupling_spectral_bound_on_the_transformed_reading.py::test_a_stalled_float32_pair_behind_edges_that_widen_is_bounded_at_float32_resolution
     - tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver
+    - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_on_a_star
+    - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_an_identity_transform_on_every_edge_of_a_star_changes_no_bound
+    - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_norms_that_count_a_field_once_keep_their_bound_on_a_star
+    - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_the_interface_norm_counts_a_field_once_for_every_edge_that_reads_it
+    - tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice
   status: verified
   notes: >-
     The round-6 audit found the interface norm's transformed reading
@@ -3356,44 +3368,62 @@ claims:
     through the step's edge rule (1.001x, 66.5x and 1.003x on the same
     pair), and each cell below runs, beside its untransformed pair, a pair
     with one mapped and one plain internal edge in that domain.
+    The round-12 audit found a field read by several internal edges outside
+    the analysis where no edge was mapped or transformed: the norm counts
+    it once per edge and the fields' weights once, and on a star whose hub
+    every leaf reads the bound read 0.26-0.73x the true distance, usable
+    (MADD-ANO-206).  Such a group is analysed on the reading too (1.001x to
+    1.010x on the same stars), and each cell below also runs a pair in
+    which one member feeds two ports of the other (0.741x before, 1.016x).
   domains:
     f32:
       - tests/core/test_coupling_error_bound.py::test_the_spectral_bound_is_never_smaller_than_the_distance_it_bounds
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[f32]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[f32]'
     f64:
       - tests/property/test_differential_coupling_interactions.py::test_the_float64_rows_hold_every_oracle_in_a_subprocess
       - tests/property/test_differential_precision.py::test_the_coupling_report_agrees_across_precisions
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[f64]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[f64]'
     mixed_dtype:
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_float32_member_under_x64[CPL-088]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[mixed_dtype]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[mixed_dtype]'
     16bit:
       - tests/core/test_coupling_sixteen_bit_groups.py::test_a_usable_sixteen_bit_spectral_bound_is_not_below_the_true_distance
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_sixteen_bit_group[CPL-088]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[bfloat16]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[bfloat16]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[float16]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[float16]'
     jit: tests/property/test_differential_fixed_point.py::test_a_usable_spectral_bound_is_never_below_the_true_distance
     grad: n/a
     vmap:
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_for_each_member_of_a_vmapped_step[CPL-088]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[vmap]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[vmap]'
     multi_rate:
       - tests/core/test_coupling_claims_graphs.py::test_a_usable_bound_holds_on_a_stalled_subcycled_or_multirate_group
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_multirate_graph[CPL-088]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[multi_rate]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[multi_rate]'
     sub_cycled:
       - tests/core/test_coupling_claims_graphs.py::test_a_usable_bound_holds_on_a_stalled_subcycled_or_multirate_group
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_on_a_subcycled_group[CPL-088]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[sub_cycled]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[sub_cycled]'
     predictors_warm_starts:
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_with_a_predictor_and_a_warm_start[CPL-088]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[predictors_warm_starts]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[predictors_warm_starts]'
     adaptive:
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_run_adaptive[CPL-088]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[adaptive]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[adaptive]'
     checkpoint_restart:
       - 'tests/core/test_coupling_claims_in_every_domain.py::test_the_claim_holds_after_a_checkpoint_restart[CPL-088]'
       - 'tests/core/test_coupling_mapped_edges_in_every_domain.py::test_a_usable_bound_covers_the_distance_in_what_mapped_edges_deliver[checkpoint_restart]'
+      - 'tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_a_usable_bound_covers_the_distance_where_a_node_reads_a_field_twice[checkpoint_restart]'
     sharded:
       - 'tests/cloud/multigpu/test_coupling_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-088]'
       - 'tests/cloud/multigpu/test_coupling_domain_claims_on_a_sharded_graph.py::test_the_claim_holds_with_a_sharded_member[CPL-088]'
@@ -3542,7 +3572,7 @@ claims:
     does the count see a same-pass read that differences entries of one
     source field (a mapping row [1, -1] on a field at 1000 with a
     difference of order one): a Gauss-Seidel group stalled behind it read
-    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-198, open).  In
+    0.054x with the flag set, 2.6e-4x at 1e5 (MADD-ANO-205, open).  In
     the other direction mixed-sign chains read up to 1e7x and sub-cycled
     groups 1e3-1e5x (valid, too loose to read).  A measured, opt-in
     diagnostics="rounding" level is planned for 0.5.0.
@@ -3826,7 +3856,7 @@ claims:
     "interface" the entries are what each internal edge delivers (its
     mapping, with the weights passed as `mappings`, then its transform),
     each at the coarser of its own dtype's eps and its source field's
-    (MADD-ANO-197).
+    (MADD-ANO-204).
   oracle: closed form.
   tests:
     - tests/core/test_coupling_interface_reading_is_what_the_edge_delivers.py::test_the_floor_of_a_mapped_edge_counts_what_it_delivers
@@ -3909,7 +3939,7 @@ claims:
     difference of two entries of that field cancels: a same-pass read
     through a mapping row [1, -1] is counted as a gain of about one, and a
     Gauss-Seidel group stalled behind it read its bound at 0.054x to
-    2.6e-4x the true distance, usable (MADD-ANO-198, open).
+    2.6e-4x the true distance, usable (MADD-ANO-205, open).
     diagnostics="rounding", which measures instead of counting, is
     planned for 0.5.0.
   oracle: the count against hand-derived chains; the step and the report count the same.
@@ -5521,7 +5551,7 @@ claims:
     itself and the report reads it, so a params override, or an edit of the
     weights since, does not move it either."
   sources:
-    - src/maddening/core/graph_manager.py:9558 (coupling_diagnostics, spectral_error_bound)
+    - src/maddening/core/graph_manager.py:9598 (coupling_diagnostics, spectral_error_bound)
     - src/maddening/core/graph_manager.py:352 (_reads_mapping_weights)
     - docs/developer_guide/coupling_algorithm_guide.md#a-stalled-float32-iterate-reads-convergedtrue
   conditions: >-

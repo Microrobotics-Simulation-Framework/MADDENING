@@ -385,7 +385,16 @@ the reading of `dF/dx` applied to it), so no transform is ever inverted.
 Taken on the raw source fields instead, the bound multiplied a residual
 in one set of coordinates by a resolvent measured in another and read
 0.0014-0.098x the true distance with `spectral_usable=True` (round-6
-audit).  And while the norm and this analysis applied the transform but
+audit).  The norm also counts a field once for every internal edge that
+reads it, where the state's weights count it once: on a star whose hub's
+field every leaf reads, with no mapping or transform anywhere, the
+fields' analysis read 0.26-0.73x the true distance with
+`spectral_usable=True` (2 to 16 leaves, Jacobi; MADD-ANO-206), so a group
+with a field that more than one internal edge reads is analysed on the
+reading too.  Only a group whose internal edges read each field once, as
+it is, keeps the analysis in the state's weights (`_reading_is_the_fields`
+in `core/graph_manager.py`, static): there the two are one norm, and the
+second spectrum's eight Jacobian-vector products are not spent.  And while the norm and this analysis applied the transform but
 left an edge's mapping out, a mapped edge was measured on its source
 field throughout: the bound was consistent with the residual and both
 described a value the consuming node never sees -- 0.064-0.318x the true

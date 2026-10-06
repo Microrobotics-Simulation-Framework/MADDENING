@@ -2588,7 +2588,7 @@ anomalies:
       piece to its edge and stops there, from 11 of 24 starts; it
       reports that `converged=False` with a `RuntimeWarning` naming a
       residual that is not differentiable (the same ending reported as
-      converged was MADD-ANO-214, resolved).  `fit` and
+      converged was MADD-ANO-216, resolved).  `fit` and
       `fit_multiple_shooting` return their lowest-loss iterate and make
       no statement.  `fim` at such a point returns the rank and the
       bounds of the smooth piece the point is on, finite and with no
@@ -14540,7 +14540,7 @@ anomalies:
       - "tests/core/test_coupling_spectral_bound_where_edges_share_a_field.py::test_only_a_group_whose_reading_is_not_its_fields_takes_the_second_spectrum"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-214"
+  - anomaly_id: "MADD-ANO-216"
     title: "fit_lm reported converged=True beside a jump of a residual that is not differentiable in the trained parameters, at a loss far above the minimum and with no warning"
     description: >
       `fit_lm`'s floor rule reports `converged=True` when, after the run
@@ -14626,7 +14626,7 @@ anomalies:
       - "tests/property/test_sysid_targeted_search.py::test_fit_lm_on_the_ball_is_not_converged_where_the_loss_falls_along_its_piece"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-215"
+  - anomaly_id: "MADD-ANO-217"
     title: "fit_lm from a stiffness started far too high can stop short, unconverged, on the end of a wide damping range where the loss still falls"
     description: >
       On the parameter guide's spring with the damping given a range 100

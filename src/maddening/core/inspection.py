@@ -674,7 +674,7 @@ def _group_key(group: Any) -> str:
 
 
 def _subcycle_dividers(gm: "GraphManager", group: Any) -> dict[str, int]:
-    from maddening.core.graph_manager import _group_dividers  # noqa: PLC0415
+    from maddening.core.coupling._group_layout import _group_dividers  # noqa: PLC0415
     if not all(n in gm._nodes for n in group.nodes):
         return {}
     return dict(_group_dividers(group, gm._nodes) or {})

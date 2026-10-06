@@ -596,7 +596,7 @@ def _group_sweeps(gm) -> dict[str, int]:
     (``maddening.core.graph_manager._group_waveform_sweeps``) -- and so
     the passes the one-iteration variant runs, one per sweep.
     """
-    from maddening.core.graph_manager import _group_waveform_sweeps  # noqa: PLC0415
+    from maddening.core.coupling._group_layout import _group_waveform_sweeps  # noqa: PLC0415
 
     return {"+".join(sorted(g.nodes)): int(_group_waveform_sweeps(g, gm._nodes))
             for g in gm._coupling_groups}

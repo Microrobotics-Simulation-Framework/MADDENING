@@ -120,15 +120,19 @@ from maddening.core.graph_manager import (
     EVENT_NODE_REMOVED,
     EVENT_STEP,
     GraphManager,
+)
+from maddening.core._graph_specs import (
     _UNCARRIABLE_WHY,
+    _node_name_refusal,
+    _NodeSpec,
+    _uncarriable_characters,
+)
+from maddening.core._param_probes import (
     _declared_boundary_zeros,
     _hook_outputs,
     _leaf_values_equal,
-    _node_name_refusal,
     _node_with_params,
-    _NodeSpec,
     _params_holders,
-    _uncarriable_characters,
 )
 from maddening.core.node import SimulationNode, _method_accepts_params
 from maddening.viz.relay import StateRelay

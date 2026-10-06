@@ -9112,7 +9112,7 @@ anomalies:
       zero.  `context_dependent` because what a zero gradient does depends
       on what is fitted with it.
     affected_components:
-      - "maddening.core.graph_manager._ift_linear_solve"
+      - "maddening.core.coupling._ift._ift_linear_solve"
     affected_versions: ">=0.3.0, <0.4.0"
     workaround: >
       Before 0.4.0: pass `linear_solver="dense"` to `add_coupling_group()`
@@ -9237,9 +9237,9 @@ anomalies:
     affected_components:
       - "maddening.core.coupling.acceleration.fixed_relaxation"
       - "maddening.core.coupling.acceleration.aitken_relaxation"
-      - "maddening.core.graph_manager._fixed_point_while"
-      - "maddening.core.graph_manager._spectral_rate_at"
-      - "maddening.core.graph_manager._gradient_error_bound_body"
+      - "maddening.core.coupling._fixed_point._fixed_point_while"
+      - "maddening.core.coupling._bounds._spectral_rate_at"
+      - "maddening.core.coupling._bounds._gradient_error_bound_body"
     affected_versions: "none"
     workaround: >
       Not applicable to a tagged release.  On the affected development
@@ -9291,7 +9291,7 @@ anomalies:
       `acceleration="none"`/`"fixed"`), which is `minor` under the 0.4.0
       definition.  No value was ever produced from it.
     affected_components:
-      - "maddening.core.graph_manager._run_coupled_block_impl"
+      - "maddening.core.coupling._coupled_block._run_coupled_block_impl"
     affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Before 0.4.0: use `solver="ift"` (from 0.3.0), keep the coupled state
@@ -9747,7 +9747,7 @@ anomalies:
       larger units avoided it.  `context_dependent` because what a
       desynchronised node does depends on the model.
     affected_components:
-      - "maddening.core.graph_manager._multi_gcd"
+      - "maddening.core._graph_specs._multi_gcd"
     affected_versions: ">=0.1.0, <0.4.0"
     workaround: >
       Before 0.4.0: write the timesteps in units where they are above about
@@ -10572,7 +10572,7 @@ anomalies:
       always returned.  `context_dependent` because whether the bound gates
       anything is the program's choice.
     affected_components:
-      - "maddening.core.graph_manager._gradient_error_bound_body"
+      - "maddening.core.coupling._bounds._gradient_error_bound_body"
     affected_versions: "none"
     workaround: >
       Not applicable to a tagged release.  On the affected development
@@ -10630,7 +10630,7 @@ anomalies:
       `context_dependent` because whether the bound gates anything is the
       program's choice.
     affected_components:
-      - "maddening.core.graph_manager._gradient_error_bound_body"
+      - "maddening.core.coupling._bounds._gradient_error_bound_body"
     affected_versions: "none"
     workaround: >
       Not applicable to a tagged release.  On the affected development
@@ -10767,7 +10767,7 @@ anomalies:
       `context_dependent` because whether the bound gates anything is the
       program's choice.
     affected_components:
-      - "maddening.core.graph_manager._spectral_rate_at"
+      - "maddening.core.coupling._bounds._spectral_rate_at"
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
     affected_versions: "none"
     workaround: >
@@ -11180,7 +11180,7 @@ anomalies:
       it.  `context_dependent` because what a zero derivative does depends
       on what is fitted with it.
     affected_components:
-      - "maddening.core.graph_manager._ift_linear_solve"
+      - "maddening.core.coupling._ift._ift_linear_solve"
     affected_versions: "none"
     workaround: >
       Not applicable to a tagged release.  On the affected development
@@ -11535,7 +11535,7 @@ anomalies:
       16-bit groups are affected, and a float32 group or the deprecated
       `"fori"` solver differentiates the same model.
     affected_components:
-      - "maddening.core.graph_manager._ift_linear_solve"
+      - "maddening.core.coupling._ift._ift_linear_solve"
     affected_versions: ">=0.3.0, <0.4.0"
     workaround: >
       Before 0.4.0: hold the group's fields in float32 to differentiate it,
@@ -12005,7 +12005,7 @@ anomalies:
       iterations from the guide's sentence can run one pass more than
       planned, which `iterations` reports.
     affected_components:
-      - "maddening.core.graph_manager._fixed_point_while"
+      - "maddening.core.coupling._fixed_point._fixed_point_while"
     affected_versions: ">=0.4.0.dev0"
     workaround: >
       Budget Aitken's iterations from the reported `iterations`, not from the
@@ -12808,7 +12808,7 @@ anomalies:
       unaffected.  `context_dependent` because whether the bound gates
       anything is the program's choice.
     affected_components:
-      - "maddening.core.graph_manager._spectral_rate_at"
+      - "maddening.core.coupling._bounds._spectral_rate_at"
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
     affected_versions: "none"
     workaround: >
@@ -12872,7 +12872,7 @@ anomalies:
       step, and the forward state is unaffected.  `context_dependent`
       because whether the bound gates anything is the program's choice.
     affected_components:
-      - "maddening.core.graph_manager._gradient_error_bound_at"
+      - "maddening.core.coupling._bounds._gradient_error_bound_at"
       - "maddening.core.graph_manager.GraphManager.coupling_diagnostics"
     affected_versions: "none"
     workaround: >

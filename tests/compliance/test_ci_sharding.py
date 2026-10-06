@@ -8,6 +8,13 @@ path alone, every test lands on exactly one shard, the pins are real and
 in range, and CI runs the job count the pins were balanced for -- every
 shard of it (no matrix leg excluded or added).
 
+The slow lane restores no cache and splits by measured time instead
+(``i/N:weighted``, from ``tests/slow_lane_weights.json``).  For it the tests
+pin that the split is still a partition by file, that the table names real
+files and is the one the generator writes, that the deal is balanced and
+under the lane's time target, that the per-push split does not move, and
+that the workflow asks for it on every shard of its own count.
+
 They also pin what the sharded lanes select, in each place a selection can
 be written, since a narrower one drops tests from CI while every other
 check here still passes:
@@ -36,6 +43,7 @@ fixture in a test module that deselects or skips its own tests.
 
 import ast
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -53,6 +61,12 @@ import yaml
 from tests import _jax_timing, _sharding
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+#: Each sharded lane's job count, and the suffix of its shard spec.
+LANES = {
+    "ci.yml": (_sharding.PINS_FOR, ""),
+    "slow-tests.yml": (_sharding.SLOW_LANE_SHARDS, ":" + _sharding.WEIGHTED),
+}
 
 
 def test_the_assignment_is_a_fixed_function_of_the_path():
@@ -83,23 +97,48 @@ def test_every_pin_names_a_real_file_and_a_real_shard():
         assert 1 <= shard <= _sharding.PINS_FOR, (path, shard)
 
 
-@pytest.mark.parametrize("spec", ["0/4", "5/4", "a/b", "4", "1/4/2", ""])
+@pytest.mark.parametrize("spec", ["0/4", "5/4", "a/b", "4", "1/4/2", "", " 1/4", "1/ 4", "+1/4", "1/1_0",
+                                  "0/6:weighted", "7/6:weighted", "1/6:", "1/6:weigthed",
+                                  "1/6:weighted:weighted", ":weighted", "1/6 :weighted"])
 def test_a_malformed_shard_spec_is_refused(spec):
+    # A misspelt suffix must not fall back to the hash split: the slow lane
+    # would run, every test once, with one shard back at its timeout.
     with pytest.raises(pytest.UsageError):
         _sharding.parse(spec)
 
 
-def test_the_shards_partition_the_tests_and_keep_files_together():
+def test_a_shard_spec_says_which_split_it_asks_for():
+    assert _sharding.parse("2/4") == (2, 4, False)
+    assert _sharding.parse("6/6:weighted") == (6, 6, True)
+
+
+def _tree_test_files() -> list[str]:
+    """Every file pytest collects tests from under ``tests/`` (its default patterns)."""
+    files = {p.relative_to(REPO_ROOT).as_posix()
+             for pattern in ("test_*.py", "*_test.py") for p in (REPO_ROOT / "tests").rglob(pattern)}
+    assert len(files) > 500, len(files)
+    return sorted(files)
+
+
+@pytest.mark.parametrize("n, weighted", [
+    (_sharding.PINS_FOR, False), (_sharding.SLOW_LANE_SHARDS, True),
+    # The weighted split at other counts, the per-push lane's included: the
+    # table is dealt for whatever count the spec names.
+    (_sharding.PINS_FOR, True), (1, True), (8, True)])
+def test_the_shards_partition_the_tests_and_keep_files_together(n, weighted):
+    weights = _sharding.load_weights() if weighted else None
     nodeids = [f"tests/{d}/test_{f}.py::test_{t}" for d in "abc" for f in range(7) for t in range(3)]
     nodeids += list(_sharding.PINS)  # pinned files too
-    n = _sharding.PINS_FOR
+    # Every real test file, two tests each: the ones the table lists and the
+    # ones it leaves to the hash.
+    nodeids += [f"{path}::test_{t}" for path in _tree_test_files() for t in "ab"]
     seen = {}
     for shard in range(1, n + 1):
         items = [SimpleNamespace(nodeid=nid) for nid in nodeids]
         dropped = []
         config = SimpleNamespace(hook=SimpleNamespace(
             pytest_deselected=lambda items: dropped.extend(items)))
-        _sharding.Plugin(shard, n).pytest_collection_modifyitems(config, items)
+        _sharding.Plugin(shard, n, weights).pytest_collection_modifyitems(config, items)
         assert len(items) + len(dropped) == len(nodeids)
         for item in items:
             assert item.nodeid not in seen, f"{item.nodeid} on shards {seen[item.nodeid]} and {shard}"
@@ -111,15 +150,224 @@ def test_the_shards_partition_the_tests_and_keep_files_together():
     assert all(len(s) == 1 for s in by_file.values()), "a file was split across shards"
 
 
-@pytest.mark.parametrize("workflow", ["ci.yml", "slow-tests.yml"])
-def test_ci_runs_the_job_count_the_pins_were_balanced_for(workflow):
+#: --- the slow lane's weighted split -------------------------------------------
+
+#: Minutes of measured test time the heaviest slow-lane shard may hold.  The
+#: wrapper kills a shard at 175; the lane is rebalanced (more shards, or a
+#: file split) long before that, when a refreshed table predicts over this.
+SLOW_SHARD_TARGET_MIN = 100
+
+
+def _table() -> dict:
+    return json.loads(_sharding.WEIGHTS_FILE.read_text(encoding="utf-8"))
+
+
+def test_every_weighted_file_is_a_real_test_file():
+    """An entry for a deleted or renamed file is dealt a slot nothing runs in.
+
+    Every test still runs once, but the shard that "holds" the ghost is
+    lighter than the table says and the others heavier; a heavy file's
+    rename would quietly undo the balance.
+    """
+    weights = _sharding.load_weights()
+    real = set(_tree_test_files())
+    ghosts = sorted(set(weights) - real)
+    assert not ghosts, (
+        f"tests/slow_lane_weights.json lists files that are not test files in the tree: {ghosts}; "
+        "regenerate it (scripts/slow_lane_weights.py) or remove the entries")
+
+
+def test_the_weights_table_says_where_its_numbers_came_from():
+    table = _table()
+    assert table["runs"], "no run recorded"
+    for run in table["runs"]:
+        assert re.fullmatch(r"[0-9]+", run["run"]), run
+        assert re.fullmatch(r"[0-9a-f]{7,40}", run["commit"]), run
+        assert run["artifacts"] and all(a.startswith("slow-durations-") for a in run["artifacts"]), run
+    floor = table["min_seconds"]
+    assert type(floor) is int and floor >= 1
+    light = {p: s for p, s in table["seconds"].items() if s < floor}
+    assert not light, f"entries under the table's own {floor} s floor: {light}"
+    assert list(table["seconds"]) == sorted(table["seconds"]), "the table is written sorted by path"
+
+
+@pytest.mark.parametrize("table", [
+    {}, {"seconds": {}}, {"seconds": {"tests/test_a.py": 0}}, {"seconds": {"tests/test_a.py": -3}},
+    {"seconds": {"tests/test_a.py": 2.5}}, {"seconds": {"tests/test_a.py": "12"}},
+    {"seconds": {"tests/test_a.py": True}}, {"seconds": ["tests/test_a.py"]}, "not json"])
+def test_a_weights_table_that_cannot_be_dealt_is_refused(tmp_path, table):
+    # Fail closed: a weighted run with no usable table must not quietly
+    # become a hash split (or, with a zero or negative weight, a lopsided one).
+    path = tmp_path / "weights.json"
+    path.write_text(table if isinstance(table, str) else json.dumps(table), encoding="utf-8")
+    with pytest.raises(pytest.UsageError):
+        _sharding.load_weights(path)
+    with pytest.raises(pytest.UsageError):
+        _sharding.load_weights(tmp_path / "missing.json")
+
+
+def test_the_deal_puts_the_longest_files_on_the_lightest_shards():
+    # By hand, loads after each file: a 50 -> shard 1 (50, 0, 0); b 30 -> 2
+    # (50, 30, 0); c 20 -> 3 (50, 30, 20); d 20 -> 3 (50, 30, 40); e 10 -> 2.
+    weights = {"t/e.py": 10, "t/a.py": 50, "t/d.py": 20, "t/b.py": 30, "t/c.py": 20}
+    assert _sharding.deal(weights, 3) == {"t/a.py": 1, "t/b.py": 2, "t/c.py": 3, "t/d.py": 3, "t/e.py": 2}
+    # The table's order is not an input.
+    assert _sharding.deal(dict(reversed(list(weights.items()))), 3) == _sharding.deal(weights, 3)
+    # Equal weights tie on the path, equal loads on the lower shard.
+    assert _sharding.deal({"t/y.py": 7, "t/x.py": 7}, 4) == {"t/x.py": 1, "t/y.py": 2}
+    assert _sharding.deal(weights, 1) == dict.fromkeys(weights, 1)
+
+
+def test_a_file_the_table_does_not_list_goes_by_the_hash_of_its_path():
+    n = _sharding.SLOW_LANE_SHARDS
+    dealt = _sharding.deal(_sharding.load_weights(), n)
+    for path in ("tests/core/test_not_measured_yet.py", "tests/new/test_added_since.py"):
+        by_hash = int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1
+        assert path not in dealt
+        assert _sharding.weighted_shard_of(path, n, dealt) == by_hash
+    for path, shard in dealt.items():
+        assert _sharding.weighted_shard_of(path, n, dealt) == shard
+
+
+def test_the_weighted_split_ignores_the_per_push_pins():
+    # The pins balance the per-push lane's times.  At a weighted count equal
+    # to PINS_FOR an unlisted pinned file must still go by hash, or the two
+    # rules would both claim it.
+    n = _sharding.PINS_FOR
+    for path in _sharding.PINS:
+        by_hash = int(hashlib.sha256(path.encode("utf-8")).hexdigest(), 16) % n + 1
+        assert _sharding.weighted_shard_of(path, n, {}) == by_hash
+        assert _sharding.Plugin(1, n, {"tests/test_other.py": 5}).shard_of(path) == by_hash
+
+
+def test_the_per_push_split_does_not_read_the_weights():
+    """The per-push lane's shards hold the files their saved caches were built from.
+
+    A plain ``i/N`` spec must give ``shard_of`` for every real file -- the
+    table's files included -- whatever the table says.
+    """
+    n = _sharding.PINS_FOR
+    plain = _sharding.Plugin(1, n)
+    assert not plain.weighted
+    moved = [p for p in _tree_test_files() if plain.shard_of(p) != _sharding.shard_of(p, n)]
+    assert not moved, moved
+    weighted = _sharding.Plugin(1, n, _sharding.load_weights())
+    assert weighted.weighted
+    assert any(weighted.shard_of(p) != _sharding.shard_of(p, n) for p in _tree_test_files()), (
+        "the weighted split at four shards equals the hash split: the table is not being used")
+
+
+def test_the_slow_lanes_weighted_shards_are_balanced_and_under_the_target():
+    """The table's own prediction for the count the workflow runs.
+
+    Longest-first dealing leaves any two shards within the heaviest file of
+    each other; and the heaviest shard has to be under the lane's target,
+    or the table was refreshed into a lane that needs more shards.
+    """
+    n = _sharding.SLOW_LANE_SHARDS
+    weights = _sharding.load_weights()
+    dealt = _sharding.deal(weights, n)
+    assert set(dealt) == set(weights) and set(dealt.values()) == set(range(1, n + 1))
+    load = [0] * n
+    for path, shard in dealt.items():
+        load[shard - 1] += weights[path]
+    assert max(load) - min(load) <= max(weights.values()), load
+    assert max(load) / 60 < SLOW_SHARD_TARGET_MIN, (
+        f"the weighted split predicts {max(load) / 60:.0f} min on the heaviest of {n} slow-lane shards "
+        f"(target: under {SLOW_SHARD_TARGET_MIN}); raise SLOW_LANE_SHARDS or split the heaviest file")
+    # One file alone must leave room on its shard, or no count can balance it.
+    assert max(weights.values()) / 60 < SLOW_SHARD_TARGET_MIN
+
+
+def test_a_weighted_spec_registers_the_weighted_split_from_the_shipped_table():
+    registered = []
+    config = SimpleNamespace(pluginmanager=SimpleNamespace(
+        register=lambda plugin, name: registered.append((plugin, name))))
+    n = _sharding.SLOW_LANE_SHARDS
+    _sharding.register(config, f"2/{n}:weighted")
+    _sharding.register(config, f"2/{n}")
+    (weighted, name), (plain, _) = registered
+    assert name == "maddening-test-shard"
+    assert (weighted.shard, weighted.of, weighted.weighted) == (2, n, True)
+    assert (plain.shard, plain.of, plain.weighted) == (2, n, False)
+    heaviest = max(_sharding.load_weights().items(), key=lambda kv: (kv[1], kv[0]))[0]
+    # Longest first onto the lightest shard: the heaviest file opens shard 1.
+    assert weighted.shard_of(heaviest) == 1
+    assert weighted.pytest_report_header(config) == (
+        f"test shard: 2/{n} (by file, weighted; see tests/_sharding.py)")
+    assert plain.pytest_report_header(config) == f"test shard: 2/{n} (by file; see tests/_sharding.py)"
+
+
+def test_the_weights_generator_writes_a_table_the_split_reads(tmp_path):
+    """``scripts/slow_lane_weights.py`` on two small runs: slower lane, later run, floor, ghosts."""
+    def report(run, artifact, cases):
+        directory = tmp_path / run / artifact
+        directory.mkdir(parents=True)
+        body = "".join(f'<testcase classname="x" name="t{i}" file="{f}" time="{s}"/>'
+                       for i, (f, s) in enumerate(cases))
+        (directory / "test-results.xml").write_text(
+            f'<testsuites><testsuite name="pytest">{body}</testsuite></testsuites>', encoding="utf-8")
+
+    real_a, real_b, real_c = _tree_test_files()[:3]
+    # First run: both lanes, both shards.  a: 30 + 31 s on the old lane, 40 s on the new.
+    report("r1", "slow-durations-py3.12-jax0.10.2-shard1of2", [(real_a, 30.0), (real_a, 31.0), (real_b, 4.0)])
+    report("r1", "slow-durations-py3.12-jax0.10.2-shard2of2", [(real_c, 99.0), ("tests/test_gone.py", 500.0)])
+    report("r1", "slow-durations-py3.12-jax0.11.2-shard1of2", [(real_a, 40.0), (real_b, 3.0)])
+    report("r1", "slow-durations-py3.12-jax0.11.2-shard2of2", [(real_c, 90.0)])
+    # Second run lost its first shard on one lane; it re-measured c there at 20 s.
+    report("r2", "slow-durations-py3.12-jax0.10.2-shard2of2", [(real_c, 20.4)])
+    out = tmp_path / "weights.json"
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "slow_lane_weights.py"),
+         "--run", f"11={tmp_path / 'r1'}", "--run", f"22={tmp_path / 'r2'}",
+         "--commit", "11=abc1234", "--commit", "22=def5678", "--shards", "2",
+         "--write", "--output", str(out)],
+        capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    table = json.loads(out.read_text(encoding="utf-8"))
+    # a: its slower lane (61 s, two tests summed).  b: under the floor.  c: the
+    # later run's 20 s on one lane, the first run's 90 s on the other.
+    assert table["seconds"] == {real_a: 61, real_c: 90}
+    assert [(r["run"], r["commit"]) for r in table["runs"]] == [("11", "abc1234"), ("22", "def5678")]
+    assert table["runs"][1]["artifacts"] == ["slow-durations-py3.12-jax0.10.2-shard2of2"]
+    assert "no longer in the tree, left out: tests/test_gone.py" in proc.stdout
+    assert _sharding.load_weights(out) == table["seconds"]
+    # The prediction, per lane: c (90) opens shard 1, a (61) shard 2; b is
+    # unlisted and goes by hash.
+    b_shard = _sharding.weighted_shard_of(real_b, 2, {})
+    lane = [90.0, 40.0]
+    lane[b_shard - 1] += 3.0
+    assert f"{'weighted, 2 shards':<34}{lane[0] / 60:6.1f} {lane[1] / 60:6.1f}" in proc.stdout, proc.stdout
+
+
+def test_the_shipped_weights_table_is_what_the_generator_writes():
+    # "do not edit by hand": keys in the generator's order and nothing else.
+    assert list(_table()) == ["what", "measured", "runs", "min_seconds", "seconds"]
+
+
+#: Every way a workflow writes a lane's shard count besides the matrix: the
+#: shard spec, artifact and cache names (``of4``), step titles (``of 4``,
+#: ``of 4 shard``) and the slow lane's issue titles (``shard ${shard}/4``).
+_COUNT_MENTIONS = re.compile(
+    r"matrix\.shard \}\}/([0-9]+)|matrix\.shard \}\}of([0-9]+)|matrix\.shard \}\} of ([0-9]+)"
+    r"|\$\{shard\}/([0-9]+)|\bof ([0-9]+) shards?\b|-ne ([0-9]+) \]")
+
+
+@pytest.mark.parametrize("workflow", sorted(LANES))
+def test_each_lane_runs_every_shard_of_its_own_count(workflow):
     ci = (REPO_ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
     shards = re.search(r"^\s*shard:\s*\[([0-9, ]+)\]", ci, re.M)
     assert shards, f"{workflow}: the test matrix has no shard axis"
     listed = [int(x) for x in shards.group(1).split(",")]
-    n = _sharding.PINS_FOR
+    n, suffix = LANES[workflow]
     assert listed == list(range(1, n + 1)), workflow
-    assert f'MADDENING_TEST_SHARD: "${{{{ matrix.shard }}}}/{n}"' in ci, workflow
+    assert f'MADDENING_TEST_SHARD: "${{{{ matrix.shard }}}}/{n}{suffix}"' in ci, workflow
+    # The count written anywhere else: artifact names, titles, the issue
+    # titles.  A stale one mislabels a shard's report ("shard 5 of 4").
+    mentions = [(m.group(0), int(next(g for g in m.groups() if g))) for m in _COUNT_MENTIONS.finditer(ci)]
+    assert len(mentions) >= 4, mentions
+    stale = [text for text, count in mentions if count != n]
+    assert not stale, f"{workflow} runs {n} shards but also says: {stale}"
 
 
 def _workflow(name):
@@ -142,7 +390,7 @@ def test_no_matrix_leg_drops_or_adds_a_shard(workflow, job):
     # `exclude: [{shard: 4}]` would leave the shard axis intact -- so the
     # count check above passes -- while a quarter of the suite runs nowhere.
     matrix = _workflow(workflow)["jobs"][job]["strategy"]["matrix"]
-    assert matrix["shard"] == list(range(1, _sharding.PINS_FOR + 1))
+    assert matrix["shard"] == list(range(1, LANES[workflow][0] + 1))
     for key in ("exclude", "include"):
         for leg in matrix.get(key) or []:
             assert "shard" not in leg, f"{workflow}: matrix {key} touches a shard: {leg}"
@@ -250,7 +498,8 @@ def test_each_lane_sets_its_shard_once_from_the_matrix(workflow):
     steps = wf["jobs"][job_id]["steps"]
     (index,) = [i for i, s in enumerate(steps) if s.get("name") == step_name]
     allowed = ("jobs", job_id, "steps", index, "env", "MADDENING_TEST_SHARD")
-    assert steps[index]["env"]["MADDENING_TEST_SHARD"] == f"${{{{ matrix.shard }}}}/{_sharding.PINS_FOR}"
+    n, suffix = LANES[workflow]
+    assert steps[index]["env"]["MADDENING_TEST_SHARD"] == f"${{{{ matrix.shard }}}}/{n}{suffix}"
     elsewhere = [f"{'.'.join(map(str, where))}: {text.strip()[:120]!r}"
                  for where, text in _mentions(wf) if where != allowed]
     assert not elsewhere, (

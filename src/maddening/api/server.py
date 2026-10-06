@@ -2146,7 +2146,9 @@ def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
                 continue
             reason = _leaf_value_refusal(key, part, own_specs.get(key))
             if reason is not None:
-                return f"node {owner!r}, {reason}"
+                return (f"node {owner!r}, {reason} (the checkpoint holds "
+                        f"{_shown_value(value)}; PUT /graph/params/{owner} refuses "
+                        "the same value)")
         changes = {k: np.asarray(v).tolist() for k, v in staged.items()}
         found = _params_write_refusal(
             gm, owner, changes, staged, dict(live), {**live, **staged},
@@ -2154,7 +2156,11 @@ def _loaded_params_refusal(gm: GraphManager, loaded: dict) -> Optional[str]:
                           if k in ctor and _leaf_values_equal(v, ctor[k])])
         if found is not None:
             keys, reason, _reported = found
-            return f"node {owner!r}, {', '.join(keys)}: {reason}"
+            holds = ", ".join(f"{k} = {_shown_value(staged[k])}" for k in keys if k in staged)
+            return (f"node {owner!r}, {', '.join(keys)}: the checkpoint holds {holds}, "
+                    f"and {reason}.  PUT /graph/params/{owner} refuses the same; to "
+                    f"run the node with it, rebuild the node (DELETE /graph/nodes/{owner}, "
+                    "then POST /graph/nodes with the checkpoint's value) and load again")
     for edge, leaves in (loaded.get("mappings") or {}).items():
         live = (live_tree.get("mappings") or {}).get(edge)
         if not isinstance(live, dict) or not isinstance(leaves, dict):

@@ -18,7 +18,7 @@ to forget on a release; there is deliberately no longer one here.
 | Source Repository | https://github.com/Microrobotics-Simulation-Framework/MADDENING |
 | Python Version | >=3.12 permitted; verified on 3.12 (the CI matrix) |
 | JAX Version | jax>=0.10,<0.13 permitted; verified at 0.10.2, 0.11.2 (the versions CI installs) |
-| Base Dependencies | jax>=0.10,<0.13, jaxlib>=0.10,<0.13, lineax>=0.0.7, numpy>=1.24, pyyaml>=6.0 |
+| Base Dependencies | jax>=0.10,<0.13, jaxlib>=0.10,<0.13, lineax>=0.0.7, numpy>=1.24, pyyaml>=6.0, scipy>=1.14 |
 | Build System | hatchling |
 | Install | `pip install maddening` |
 <!-- END GENERATED: software-identification -->
@@ -259,11 +259,18 @@ stale copy fails CI rather than shipping.
 | MADD-ANO-194 | DatasetGenerator pairs a forward edge's boundary input with the source's state before the step | `major` | `context_dependent` | `open` | >=0.1.0 |
 | MADD-ANO-195 | The interface convergence norm reads a mapped edge's source field, not what the edge delivers | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-196 | A hand-written Mapping class's weight table was kept by reference and unchecked: an edit of gm.params rewrote the mapping, and a weight could be silently left out of a restore | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-197 | Restoring an FMU state started the bridge's drift count again at the restored time, so a master that saved and restored between steps was never held to the time-drift bound | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-198 | The FMU wire rounded an Int64 / UInt64 above 2**53: fmi3GetInt64 answered fmi3OK with a neighbouring integer, and a JSON set of 2**53 + 1 was stored as 2**53 | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-199 | A set of negative zero through the FMU's C wrapper on a JSON connection was stored as positive zero | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-200 | load_state loaded an integer of the other signedness wrapped: -1 for a uint32 field as 4294967295, 4000000000 for an int32 field as -294967296 | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-201 | build_model_description(selected_outputs=...) exported nothing, without a word, for a pair that named no state field | `minor` | `not_safety_relevant` | `resolved` (in 0.4.0) | >=0.3.0, <0.4.0 |
+| MADD-ANO-202 | The fitters evaluated their objective at parameters other than the ones they returned: under a logit or offset log transform with bounds wide beside the value, best_loss was another point's loss, and a leaf left out of the fit was run perturbed | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
+| MADD-ANO-203 | Assigning node.params a mapping reverted every other calibrated constant of the node to the node's own value | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-204 | The float floor of an interface edge that delivers a wider dtype than its source field was taken at the wider dtype's eps: a stalled float32 group read its spectral bound at 6.7e-7x the true distance, spectral_usable=True | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 | MADD-ANO-205 | The floor's gain of a same-pass read is measured along the source's own state: a Gauss-Seidel group reading a difference of two entries of one field stalls with spectral_error_bound at 0.054x (to 2.6e-4x) the true distance, spectral_usable=True | `major` | `context_dependent` | `open` | >=0.4.0.dev0 |
 | MADD-ANO-206 | Under the interface norm a field read by several internal edges was counted once per edge by the residual and once by the spectral analysis: on a star spectral_error_bound read 0.26 to 0.73 of the true distance, spectral_usable=True | `major` | `context_dependent` | `resolved` (in 0.4.0) | none |
 
-*199 anomalies registered.  34 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 25 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
+*206 anomalies registered.  34 have a defect reachable in this version — every entry whose `resolution_status` is not `resolved` or `duplicate`, which is 25 `open` plus 9 `partially_resolved` whose residual risk is still live.  The Affected Versions column is a PEP 440 specifier set read against this document's version; `none` marks a defect introduced and fixed within one development cycle, which no release carried.  The convention, and the gate that holds every range to it, are in the header of `known_anomalies.yaml`.  Rationale, workaround, affected components and verification evidence for each: `known_anomalies.yaml`.*
 <!-- END GENERATED: known-anomalies -->
 
 ## 4. Verification Evidence

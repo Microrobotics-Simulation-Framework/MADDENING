@@ -24,6 +24,18 @@ optional interface mapping (``matrix_mapping``: a dense ``H`` from the
 source's size to the target's, a traced parameter) and the ``additive``
 flag; two or more edges into one port sum.
 
+**The mapping kind** (``build(..., mapping_kind=)``, :data:`MAPPING_KINDS`)
+says how a mapped edge holds that ``H``: as the dense matrix (``"matrix"``,
+the default and the code path every caller had), or as a
+``StaticSparseMapping`` over a sparsity pattern fixed per structure
+(:func:`mapping_pattern`).  The pattern is structure -- a sparse mapping's
+index is baked into the compiled step -- so it cannot be drawn per example
+on one compiled graph; :func:`draw_values` zeroes the drawn ``H`` outside
+it instead, before a group's spectral radius is rescaled, and the model
+below is handed that same ``H``.  The reference, the oracle and
+:class:`LinearModel` are therefore the dense ones, unchanged: a sparse edge
+must reproduce what a dense edge with the same matrix does.
+
 **The reference.**  Every node is affine in its pre-step state and its
 inputs, so a step is one linear system: each edge reads its source's new
 value, except a *back edge*, which reads the pre-step value.  The
@@ -68,6 +80,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from maddening.core.coupling.mapping import matrix_mapping
+from maddening.core.coupling.sparse_mapping import (
+    StaticSparseMapping,
+    sparse_matrix_mapping,
+)
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.core.transforms import scale
@@ -90,6 +106,20 @@ LEAF_KINDS = ("count", "tag", "flag", "key")
 #: folds into it.
 KEY_SEED = 271828
 KEY_FOLD = 7
+
+#: How a mapped edge holds its matrix.  ``"matrix"`` is the dense
+#: ``matrix_mapping``; the others are a ``StaticSparseMapping`` over a
+#: pattern fixed per structure (:func:`mapping_pattern`):
+#:
+#: * ``"sparse-full"``: every entry, in the gather layout -- every row
+#:   full, so no slot is padded and any dense ``H`` is its weights;
+#: * ``"sparse-ragged"``: a seeded pattern with rows of different lengths
+#:   (one row full, the others shorter where the sizes allow), in the
+#:   gather layout: padded slots, masked;
+#: * ``"sparse-scatter"``: the ragged pattern in the scatter layout (a row
+#:   lists the targets of a *source*).
+MAPPING_KINDS = ("matrix", "sparse-full", "sparse-ragged", "sparse-scatter")
+SPARSE_KINDS = MAPPING_KINDS[1:]
 
 #: The reference's working precision.  The defects it measures are of the
 #: order of the graph's own rounding, so it computes them in a precision
@@ -353,16 +383,99 @@ class Built:
     warnings: list
     node_order: tuple
     edge_order: tuple
+    mapping_kind: str = "matrix"
+    #: ``{edge index: Slots}`` for every mapped edge of a sparse build.
+    slots: dict = dataclasses.field(default_factory=dict)
+
+
+def mapping_pattern(topo: Topology, edge_index: int, mapping_kind: str) -> Optional[np.ndarray]:
+    """The entries mapped edge *edge_index* holds under *mapping_kind*, as a
+    boolean ``(n_target, n_source)`` mask; ``None`` for ``"matrix"`` (all).
+
+    Fixed per structure, like :func:`fixed_constants`: seeded by the edge's
+    place among the mapped edges and its shape -- not by a name or an edge
+    index -- so a renamed topology, or one with a relay inserted, holds the
+    same pattern.
+    """
+    assert mapping_kind in MAPPING_KINDS, mapping_kind
+    if mapping_kind == "matrix":
+        return None
+    e = topo.edges[edge_index]
+    assert e.mapped, e
+    n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
+    if mapping_kind == "sparse-full":
+        return np.ones((n_dst, n_src), dtype=bool)
+    place = sum(1 for other in topo.edges[:edge_index] if other.mapped)
+    rng = np.random.default_rng(20_000 + 131 * place + 17 * n_dst + n_src)
+    mask = np.zeros((n_dst, n_src), dtype=bool)
+    # Ragged: one row full and every other row a proper, non-empty subset,
+    # so the shorter rows are padded; a single row is a proper subset
+    # itself (where it has more than one column to choose from).
+    full = int(rng.integers(0, n_dst)) if n_dst > 1 else -1
+    for i in range(n_dst):
+        size = n_src if i == full or n_src == 1 else int(rng.integers(1, n_src))
+        mask[i, rng.choice(n_src, size=size, replace=False)] = True
+    return mask
+
+
+@dataclasses.dataclass(frozen=True)
+class Slots:
+    """Where each weight slot of a sparse edge reads the dense ``H``.
+
+    ``index`` is the mapping's row structure (``-1`` in a padded slot);
+    slot ``(r, m)`` holds ``H[target[r, m], source[r, m]]`` where ``valid``.
+    """
+
+    scatter: bool
+    index: np.ndarray
+    target: np.ndarray
+    source: np.ndarray
+    valid: np.ndarray
+
+    def weights(self, H: np.ndarray) -> np.ndarray:
+        H = np.asarray(H)
+        picked = H[np.where(self.valid, self.target, 0), np.where(self.valid, self.source, 0)]
+        return np.where(self.valid, picked, np.zeros((), H.dtype))
+
+
+def pattern_slots(mask: np.ndarray, *, scatter: bool) -> Slots:
+    """The row structure of *mask*: per target its sources (gather), or per
+    source its targets (scatter), each row's entries in descending order
+    (a builder keeps the order it is given), padded to the longest row."""
+    rows_of = mask.T if scatter else mask
+    n_rows = rows_of.shape[0]
+    lists = [np.nonzero(row)[0][::-1] for row in rows_of]
+    k = max(1, max(len(entries) for entries in lists))
+    index = np.full((n_rows, k), -1, dtype=np.int64)
+    for r, entries in enumerate(lists):
+        index[r, :len(entries)] = entries
+    valid = index >= 0
+    own = np.broadcast_to(np.arange(n_rows)[:, None], index.shape)
+    target, source = (index, own) if scatter else (own, index)
+    return Slots(scatter, index, np.asarray(target), np.asarray(source), valid)
+
+
+def _sparse_edge_mapping(slots: Slots, n_src: int, n_dst: int, dtype):
+    """A sparse mapping over *slots* with zero weights (a draw fills them)."""
+    zeros = np.zeros(slots.index.shape, _dt(dtype))
+    if not slots.scatter:
+        return sparse_matrix_mapping(slots.index, zeros, n_source=n_src)
+    counts = slots.valid.sum(axis=1)
+    return StaticSparseMapping(np.where(slots.valid, slots.index, 0), jnp.asarray(zeros),
+                               n_source=n_src, n_target=n_dst, counts=counts,
+                               layout="scatter")
 
 
 def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order=None,
-          compile: bool = True) -> Built:
+          compile: bool = True, mapping_kind: str = "matrix") -> Built:
     """A :class:`GraphManager` for *topo*, nodes and edges added in the given orders.
 
     *knobs* is one ``CouplingGroup`` configuration for every group, or a
     sequence of them, one per group; knobs a configuration leaves inert are
     dropped (:func:`coupled_graphs.live_knobs`).  ``compile()``'s
-    ``UserWarning`` texts are recorded rather than raised.
+    ``UserWarning`` texts are recorded rather than raised.  *mapping_kind*
+    (one of :data:`MAPPING_KINDS`) says how every mapped edge holds its
+    matrix; ``"matrix"`` is the dense mapping every caller had.
     """
     topo.check()
     node_order = tuple(topo.names if node_order is None else node_order)
@@ -374,12 +487,18 @@ def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order
     for name in node_order:
         nd = topo.node(name)
         gm.add_node(make_node(nd, dtype, constants.get(name)))
+    slots = {}
     for i in edge_order:
         e = topo.edges[i]
         mapping = None
         if e.mapped:
             n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
-            mapping = matrix_mapping(np.zeros((n_dst, n_src), _dt(dtype)))
+            if mapping_kind == "matrix":
+                mapping = matrix_mapping(np.zeros((n_dst, n_src), _dt(dtype)))
+            else:
+                slots[i] = pattern_slots(mapping_pattern(topo, i, mapping_kind),
+                                         scatter=mapping_kind.endswith("scatter"))
+                mapping = _sparse_edge_mapping(slots[i], n_src, n_dst, dtype)
         gm.add_edge(e.src, e.dst, e.field, f"u{e.port}", transform=e.transform,
                     additive=e.additive, mapping=mapping)
     per_group = knobs if isinstance(knobs, (list, tuple)) else [knobs] * len(topo.groups)
@@ -403,7 +522,8 @@ def build(topo: Topology, knobs, *, dtype="float32", node_order=None, edge_order
             if "multi-rate" in str(w.message):
                 continue
             recorded.append(str(w.message))
-    return Built(gm, topo, str(dtype), keys, recorded, node_order, edge_order)
+    return Built(gm, topo, str(dtype), keys, recorded, node_order, edge_order,
+                 mapping_kind, slots)
 
 
 # ---------------------------------------------------------------------------
@@ -418,8 +538,13 @@ def _spectral_radius(M: np.ndarray) -> float:
 
 def draw_values(topo: Topology, rng: np.random.Generator, rho: float, *,
                 nonnormal: bool = False, bias_scale: float = 1.0, dtype="float32",
-                group_cfgs=None) -> dict:
+                group_cfgs=None, mapping_kind: str = "matrix") -> dict:
     """Gains, biases, mapping matrices and initial states; each group at rate *rho*.
+
+    Under a sparse *mapping_kind* every drawn ``H`` is zeroed outside its
+    edge's pattern (:func:`mapping_pattern`) before the groups are rescaled,
+    so ``values["H"]`` is the matrix a sparse edge and a dense edge both
+    hold.  ``"matrix"`` draws what it always drew.
 
     ``{"nodes": {name: {"G": [...], "b": ..., "x0": ...}}, "H": {edge: ...}}``.
     Every group's coupling operator (its fixed-point map, sub-cycling
@@ -450,6 +575,9 @@ def draw_values(topo: Topology, rng: np.random.Generator, rho: float, *,
         if e.mapped:
             n_src, n_dst = topo.node(e.src).n, topo.node(e.dst).n
             values["H"][i] = rng.normal(size=(n_dst, n_src)) / np.sqrt(n_src)
+            pattern = mapping_pattern(topo, i, mapping_kind)
+            if pattern is not None:
+                values["H"][i] = np.where(pattern, values["H"][i], 0.0)
     # Ports that read anything other than their own group's members are
     # scaled down; ports wholly inside a group are what the rescale moves.
     for nd in topo.nodes:
@@ -508,7 +636,9 @@ def _rescale_group(topo, values, gi, rho, constants, dtype, group_cfgs):
 
 
 def params_for(built: Built, values: dict, rename: Optional[dict] = None) -> dict:
-    """``gm.params`` with every four-argument node's gains, bias and every mapping's ``H``."""
+    """``gm.params`` with every four-argument node's gains, bias and every
+    mapping's weights: ``H`` itself for a dense edge, ``H`` read through the
+    edge's pattern into ``W`` for a sparse one."""
     gm = built.gm
     rename = rename or {}
     base = gm.params
@@ -522,7 +652,10 @@ def params_for(built: Built, values: dict, rename: Optional[dict] = None) -> dic
         nodes[live]["b"] = jnp.asarray(v["b"], nodes[live]["b"].dtype)
     mappings = {k: dict(p) for k, p in base.get("mappings", {}).items()}
     for i, key in built.mapping_keys.items():
-        mappings[key]["H"] = jnp.asarray(values["H"][i], mappings[key]["H"].dtype)
+        (leaf, live), = mappings[key].items()
+        weights = values["H"][i] if i not in built.slots else built.slots[i].weights(
+            values["H"][i])
+        mappings[key][leaf] = jnp.asarray(weights, live.dtype)
     return {**base, "nodes": nodes, "mappings": mappings}
 
 
@@ -1502,6 +1635,41 @@ def named_topologies() -> dict:
     b.group("g0", "g1")
     out["chain-into-ring"] = b.build("chain-into-ring")
     return out
+
+
+def mapped_topologies() -> dict:
+    """Structures for the mapping kinds, with interfaces wide enough for a
+    sparsity pattern to have rows of different lengths.
+
+    The mapped edges of :func:`named_topologies` all join a node of size 2
+    and one of size 1, so a pattern over them has one row or one column: no
+    row can be shorter than another.  Here the interfaces have 2, 3 and 4
+    entries:
+
+    * ``mapped-ring-wide``: a ring group ``m0 (3) -> m1 (4) -> m2 (4) ->
+      m0`` whose three edges are all mapped (one between equal sizes), a
+      fourth mapped edge inside the group that shares a port with an
+      unmapped edge from outside, a mapped *flux* edge between two outside
+      nodes, and two mapped edges on one field pair into a reader (so two
+      mappings share an edge key but for its ordinal).
+    """
+    b = TopologyBuilder()
+    b.node("drv", 2, alpha=1.0, beta=1.0, flux=True)
+    b.node("pre", 3, alpha=0.25, leaves=("tag",))
+    b.node("m0", 3, alpha=0.5, beta=1.0, leaves=("count",))
+    b.node("m1", 4, alpha=-0.25, leaves=("flag",))
+    b.node("m2", 4, alpha=0.25)
+    b.node("out", 3, alpha=0.5, leaves=("count", "tag"))
+    b.edge("drv", "pre", field="q")
+    b.edge("m0", "m1")
+    b.edge("m1", "m2", mapped=True)
+    b.edge("m2", "m0", transform="negate")
+    p = b.edge("pre", "m0")
+    b.edge("m1", "m0", port=p, transform="scale_0.5")
+    p = b.edge("m2", "out")
+    b.edge("m2", "out", port=p, transform="scale_2.0")
+    b.group("m0", "m1", "m2")
+    return {"mapped-ring-wide": b.build("mapped-ring-wide")}
 
 
 def topology_knobs(topo: Topology, choice: int = 0) -> list:

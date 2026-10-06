@@ -10,11 +10,13 @@ its description does not describe: identity weights forged to
 every call ``ok``.  Every mapping leaf is now fixed, on the bridge and in
 ``FmuSidecar.set_fmu_state``, with the same message.
 
-Run over the built-in matrix mapping and over a mapping of a kind
+Run over the built-in matrix mapping, over a mapping of a kind
 registered the way another library registers one
 (``tests/registered_mapping_kinds.py``): a class of its own with two
 weights, each of which an archive carries under its own name and neither
-of which it may install.
+of which it may install; and over the three sparse kinds, whose one weight
+``W`` holds a number per slot of an index the archive does not carry at
+all.
 """
 
 from __future__ import annotations
@@ -29,6 +31,11 @@ import pytest
 from maddening.core.compliance.metadata import StabilityLevel
 from maddening.core.compliance.stability import stability
 from maddening.core.coupling.mapping import matrix_mapping
+from maddening.core.coupling.sparse_mapping import (
+    sparse_matrix_mapping,
+    sparse_nearest_neighbor_mapping,
+    sparse_projection_1d_mapping,
+)
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from maddening.fmi import build_model_description
@@ -39,6 +46,8 @@ from tests.registered_mapping_kinds import INVERSE_DISTANCE, KINDS, SELECTION
 
 DT = 0.01
 FORGED = np.asarray([[0.0, 10.0], [-3.0, 0.0]], np.float32)
+#: The same forgery for a sparse mapping with one slot per row.
+FORGED_SLOTS = np.asarray([[10.0], [-3.0]], np.float32)
 EDGE = "a.v->b.inp"
 
 
@@ -58,6 +67,25 @@ MAPPINGS = {
     "matrix": (lambda: matrix_mapping(np.eye(2, dtype=np.float32)), {"H": FORGED}),
     INVERSE_DISTANCE: (_identity_of_a_registered_kind,
                        {"W": FORGED, "gain": np.asarray(5.0, np.float32)}),
+    # The sparse kinds, each the identity between two points (or two cells).
+    "sparse_nearest_neighbor": (
+        lambda: sparse_nearest_neighbor_mapping([0.0, 1.0], [0.0, 1.0]),
+        {"W": FORGED_SLOTS}),
+    "sparse_nearest_neighbor-conservative": (
+        lambda: sparse_nearest_neighbor_mapping([0.0, 1.0], [0.0, 1.0], mode="conservative"),
+        {"W": FORGED_SLOTS}),
+    "sparse_nearest_neighbor-scatter": (
+        lambda: sparse_nearest_neighbor_mapping([0.0, 1.0], [0.0, 1.0], mode="conservative",
+                                                transpose="scatter"),
+        {"W": FORGED_SLOTS}),
+    "sparse_projection_1d": (
+        lambda: sparse_projection_1d_mapping([0.0, 1.0, 2.0], [0.0, 1.0, 2.0]),
+        {"W": FORGED_SLOTS}),
+    "sparse_matrix": (
+        lambda: sparse_matrix_mapping(np.array([[0, 1], [1, 0]]),
+                                      np.array([[1.0, 0.0], [1.0, 0.0]], np.float32),
+                                      n_source=2),
+        {"W": FORGED}),
 }
 #: One case per weight of each mapping.
 WEIGHTS = [(kind, name) for kind, (_, forged) in MAPPINGS.items() for name in forged]

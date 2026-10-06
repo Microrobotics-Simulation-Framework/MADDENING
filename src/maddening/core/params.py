@@ -89,6 +89,62 @@ def _clip_into_bounds_jvp(lo, hi, primals, tangents):
     return _clip_into_bounds(u, lo, hi), jnp.where(inside, du, jnp.zeros_like(du))
 
 
+#: The narrowest ``logit`` interval a dtype can map, in smallest normal
+#: numbers of it (``ParamSpec._require_representable``).
+_LOGIT_MIN_WIDTH_TINIES = 4
+
+
+def _is_subnormal_bound(bound, dtype) -> bool:
+    """Is ``bound``, rounded to ``dtype``, a subnormal number of it?"""
+    if bound is None:
+        return False
+    with np.errstate(all="ignore"):
+        b = float(np.abs(np.asarray(bound, dtype=np.dtype(dtype))))
+    return 0.0 < b < float(np.finfo(np.dtype(dtype)).tiny)
+
+
+def _clip_at_subnormal_bounds(u, lo, hi):
+    """``_clip_into_bounds`` for bounds of which one is a subnormal number
+    of ``u``'s dtype: the value lands inside the bounds as
+    :meth:`ParamSpec.check` compares them (exactly, on the host).
+
+    XLA's CPU backend reads a subnormal operand as zero and stores a
+    subnormal result as zero, so ``jnp.clip(u, None, -1.4e-45)`` in float32
+    is ``-0.0`` for every ``u``, which is above the bound: ``constrain``
+    returned a value ``check`` refuses, from any coordinate.  Here nothing
+    is computed with a subnormal number.  A subnormal ``u``, found by its
+    bits, is taken as the zero the arithmetic reads it as; which side of a
+    subnormal bound a zero or a normal number lies on is its sign's to say
+    (``u > -1.4e-45`` exactly when ``u >= 0``); and the bound itself is
+    *selected*, never computed, so it arrives with its bits.  The derivative
+    is ``_clip_into_bounds``'s: 1 where the value is passed through, 0 where
+    a bound is selected.
+    """
+    dtype = np.dtype(u.dtype)
+    unsigned = np.dtype(f"uint{dtype.itemsize * 8}")
+    magnitude = jax.lax.bitcast_convert_type(jnp.abs(u), unsigned)
+    smallest_normal = np.asarray(np.finfo(dtype).tiny, dtype=dtype).view(unsigned)
+    subnormal = (magnitude != 0) & (magnitude < smallest_normal)
+    out = jnp.where(subnormal, jnp.zeros_like(u), u)
+    zero = np.zeros((), dtype)
+
+    def beyond(bound, side):
+        """Where ``out`` (a zero or a normal number) is outside ``bound``:
+        below it for ``side=-1``, above it for ``side=+1``."""
+        b = np.asarray(bound, dtype=dtype)
+        if not _is_subnormal_bound(bound, dtype):
+            return out < b if side < 0 else out > b
+        if side < 0:                       # out < b
+            return out <= zero if b > 0 else out < zero
+        return out > zero if b > 0 else out >= zero        # out > b
+
+    if lo is not None:
+        out = jnp.where(beyond(lo, -1), jnp.asarray(np.asarray(lo, dtype=dtype)), out)
+    if hi is not None:
+        out = jnp.where(beyond(hi, +1), jnp.asarray(np.asarray(hi, dtype=dtype)), out)
+    return out
+
+
 @stability(StabilityLevel.EVOLVING)
 @dataclass(frozen=True)
 class ParamSpec:
@@ -286,17 +342,47 @@ class ParamSpec:
             with np.errstate(over="ignore", under="ignore", invalid="ignore"):
                 rounded = abs(float(np.asarray(float(x), dtype=dtype)))
             width = what.startswith("width")
-            if math.isfinite(rounded) and not (width and rounded < float(fi.tiny)):
+            # Four smallest normals: one inside each bound, which ``check``
+            # asks of a value, and a normal distance between them.  A
+            # narrower interval holds no value the maps can return (one of
+            # exactly the smallest normal used to be accepted here, and
+            # ``constrain`` then returned its lower bound from every
+            # coordinate).
+            if math.isfinite(rounded) and not (
+                    width and rounded < _LOGIT_MIN_WIDTH_TINIES * float(fi.tiny)):
                 continue
             raise ValueError(
                 f"ParamSpec(bounds={self.bounds}, transform={self.transform!r}) "
                 f"cannot map a {np.dtype(dtype).name} leaf: its {what} {float(x):g} "
                 f"is not a finite{' normal' if width else ''} "
-                f"{np.dtype(dtype).name} number (the range is {float(fi.tiny):g} "
+                f"{np.dtype(dtype).name} number"
+                f"{f' of at least {_LOGIT_MIN_WIDTH_TINIES} smallest normals' if width else ''} "
+                f"(the range is {float(fi.tiny):g} "
                 f"to {float(fi.max):g}), and the transform computes with it in the "
                 f"leaf's dtype -- p = lo + (hi - lo) * sigmoid(u) for 'logit', "
                 f"p = lo + exp(u) for 'log' -- so every value it mapped would be "
                 f"wrong. Narrow the bounds, or hold the leaf in a wider dtype.")
+        if self.transform != "logit":
+            return
+        for what, x in quantities[:2]:
+            if x is None:
+                continue
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                rounded = abs(float(np.asarray(float(x), dtype=dtype)))
+            if 0.0 < rounded < float(fi.tiny):
+                # The maps would compute with two different bounds: the
+                # arithmetic reads a subnormal operand as zero, the width
+                # is formed from the number itself, and ``(p - lo) / (hi -
+                # lo)`` then reaches 1 inside the interval.
+                raise ValueError(
+                    f"ParamSpec(bounds={self.bounds}, transform={self.transform!r}) "
+                    f"cannot map a {np.dtype(dtype).name} leaf: its {what} {float(x):g} "
+                    f"is a subnormal {np.dtype(dtype).name} number (below "
+                    f"{float(fi.tiny):g}), which the arithmetic of the transform reads "
+                    f"as 0 -- p = lo + (hi - lo) * sigmoid(u) -- so every value it "
+                    f"mapped would be measured from another bound than the one "
+                    f"declared. Use 0.0 for that bound, or hold the leaf in a wider "
+                    f"dtype.")
 
     def to_unconstrained(self, p):
         p = jnp.asarray(p)
@@ -343,6 +429,17 @@ class ParamSpec:
         _t = np.dtype(fi.dtype).type
         inner_lo = max(lo + m, float(np.nextafter(_t(lo), _t(np.inf))))
         inner_hi = min(hi - m, float(np.nextafter(_t(hi), _t(-np.inf))))
+        # ... and at least the dtype's smallest normal number inside each
+        # bound, which is the distance ``check`` asks of a value (the
+        # arithmetic stores a smaller one as zero), from the bound as that
+        # arithmetic reads it (a subnormal bound is zero to it).  Only an
+        # interval within ``1 / (4 eps)`` smallest normals of zero is
+        # narrower than that: for ``(0, 7.5e-37)`` in float32 the margin
+        # above was a subnormal number, the clip stored it as 0.0, and
+        # ``check`` refused what ``constrain`` returned.
+        tiny = float(fi.tiny)
+        inner_lo = max(inner_lo, (0.0 if abs(lo) < tiny else lo) + tiny)
+        inner_hi = min(inner_hi, (0.0 if abs(hi) < tiny else hi) - tiny)
         if inner_lo > inner_hi:                    # no interior float at all
             inner_lo = inner_hi = 0.5 * (lo + hi)
         return inner_lo, inner_hi
@@ -558,6 +655,8 @@ class ParamSpec:
             # leaf has no derivative to take, so it keeps the plain clip.
             if not floating:
                 return jnp.clip(u, lo, hi).astype(u.dtype)
+            if _is_subnormal_bound(lo, u.dtype) or _is_subnormal_bound(hi, u.dtype):
+                return _clip_at_subnormal_bounds(u, lo, hi)
             return _clip_into_bounds(u, lo, hi).astype(u.dtype)
         return u
 

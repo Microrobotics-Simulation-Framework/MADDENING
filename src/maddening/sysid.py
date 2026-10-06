@@ -40,7 +40,7 @@ import math
 import numbers
 import warnings
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, Optional
 
 import jax
 import jax.core
@@ -4514,13 +4514,14 @@ def _curvature_rank(J, scale) -> Optional[int]:
     if not (np.all(np.isfinite(Jd)) and np.all(np.isfinite(scale)) and np.all(scale > 0.0)):
         return None
     n = Jd.shape[1]
-    # ``_gauss_newton_flatness`` returns None only where ``Jd / scale`` is not
-    # finite; ``cast`` tells the checker the tuple is there and changes nothing
-    # at run time (the unpacking below still fails where it is not).
-    flatness = cast(
-        "tuple[Any, np.ndarray, Any]",
-        _gauss_newton_flatness(Jd, np.eye(n), np.asarray(J).dtype, scale=scale),
-    )
+    # A finite column over a tiny scale can overflow: no statement then, as
+    # the docstring says, rather than an error out of a diagnostic.
+    with np.errstate(over="ignore", invalid="ignore"):
+        if not np.all(np.isfinite(Jd / scale)):
+            return None
+    flatness = _gauss_newton_flatness(Jd, np.eye(n), np.asarray(J).dtype, scale=scale)
+    if flatness is None:
+        return None
     _, flat, _ = flatness
     return n - int(np.count_nonzero(flat))
 

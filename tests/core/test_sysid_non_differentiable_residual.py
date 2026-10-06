@@ -487,3 +487,16 @@ def test_the_warning_does_not_fire_on_a_coordinate_its_transform_flattens():
     assert res.converged and res.excited_rank == 2
     assert float(res.params["nodes"]["spring"]["damping"]) == pytest.approx(1.9, rel=1e-4)
     assert not _messages(caught, RANK)
+
+
+def test_the_rank_reading_makes_no_statement_where_its_scaled_jacobian_overflows():
+    """A finite Jacobian column over a tiny scale overflows in the guard's
+    coordinates; the reading then says nothing instead of raising out of a
+    diagnostic (it used to reach the SVD with an infinite matrix)."""
+    import numpy as np
+
+    from maddening.sysid import _curvature_rank
+
+    J = np.array([[1e300, 1.0], [1.0, 1.0]])
+    assert _curvature_rank(J, np.array([1e-300, 1.0])) is None
+    assert _curvature_rank(np.array([[2.0, 1.0], [1.0, 3.0]]), np.array([1.0, 1.0])) == 2

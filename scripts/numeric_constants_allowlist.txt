@@ -21,7 +21,6 @@ src/maddening/cloud/multigpu/iterative_solver.py sharded_gmres 1e-6  # dimension
 
 # --- coupling ----------------------------------------------------------------
 src/maddening/core/coupling/acceleration.py coupling_residual_interface 1e-6  # dimensionless: rtol, the relative change demanded of each interface quantity
-src/maddening/core/coupling/acceleration.py <module> 1e-5  # dimensionless: _ARNOLDI_BREAKDOWN_RTOL, a fraction of ||A q_j||
 src/maddening/core/coupling/acceleration.py <module> 1e-4  # dimensionless: RANGE_CAPTURED_RTOL, a relative Frobenius residual ||J U - U M|| / ||J U||
 src/maddening/core/coupling/acceleration.py iqn_ils_update 1e-6  # dimensionless: pinv's rtol, a fraction of the largest singular value of the framed secant matrix
 src/maddening/core/coupling/group.py CouplingGroup 1e-6*2  # dimensionless: tolerance (every 0.4.0 norm divides a field by its own magnitude) and rtol (a relative change)

@@ -4041,10 +4041,19 @@ class GraphManager:
               the residual sequence and reports the mode dominating the
               *step*, this sees every mode whatever its current
               amplitude: on the two-mode case where the sequence reads
-              0.2 it reads 0.999.  Exact (non-zero eigenvalues, to
-              float32) for a group whose Jacobian has rank at most
-              eight -- rank is at most the number of boundary scalars
-              crossing the group's edges -- and an estimate otherwise,
+              0.2 it reads 0.999.  **Where** ``"spectral_usable"``
+              **is** ``True`` **it is within 5% of**
+              ``1 - rho_spectral`` **of the radius**: that is the
+              margin the flag holds the analysis to.  For a group
+              whose Jacobian has rank at most eight -- rank is at most
+              the number of boundary scalars crossing the group's edges
+              -- it is the radius of a matrix within the analysis
+              dtype's rounding of the Jacobian (in the norm's weights):
+              exact to that rounding for a normal Jacobian (1e-9 and
+              better in float64), while a non-normal one can turn a
+              rounding into more, which is measured and withdraws the
+              flag where it exceeds the margin (a float32 hub with a
+              field 1e-4 of what drives it).  An estimate otherwise,
               which ``"spectral_usable"`` reports: from below for a
               normal ``dF/dx`` (in the norm's weights), from either side
               for a non-normal one, whose Ritz values can lie outside
@@ -4060,7 +4069,7 @@ class GraphManager:
               for ``"fori"``, for ``diagnostics=False``, at
               ``max_iterations=1`` (no fixed point was solved) and on
               a non-finite state (a Jacobian there describes nothing).
-              Costs eight Jacobian-vector
+              Costs nine Jacobian-vector
               products per group per step, which is why it is gated.
             - ``"spectral_error_bound"`` : float — ``residual`` plus
               its own float resolution
@@ -4185,7 +4194,13 @@ class GraphManager:
               exactly what they were.
             - ``"spectral_usable"`` : bool — the bound above is finite
               and the Arnoldi space had settled: the Arnoldi residual
-              ``h_{k+1,k}`` is at most 5% of ``1 - rho_spectral``
+              ``h_{k+1,k}``, any direction the breakdown test
+              discarded as rounding, and the distance one more
+              Jacobian-vector product moves ``rho_spectral`` (the
+              ninth Krylov vector where the space was still growing;
+              where it was not, the product's disagreement with the
+              eight before it, which is rounding's) are each at most
+              5% of ``1 - rho_spectral``
               (:func:`~maddening.core.coupling.acceleration.spectral_rate_settled`).
               ``False`` where nothing was computed (see
               ``"rho_spectral"``), where the bound is ``inf``, for

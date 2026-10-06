@@ -610,7 +610,7 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
 
     **The spectrum is measured, beside this, under ``solver="ift"``
     with ``diagnostics=True``.**  :func:`arnoldi_spectral_radius` takes
-    eight Jacobian-vector products of the one-pass map at the returned
+    nine Jacobian-vector products of the one-pass map at the returned
     iterate and :func:`spectral_error_bound` turns them into
     ``coupling_diagnostics()['spectral_error_bound']``, which on the
     same two-mode case reads 8x *over* the true distance where this
@@ -839,10 +839,10 @@ def reported_converged(residual, amplification, step_scale: float,
 # The spectral bound (``solver="ift"``, ``diagnostics=True``)
 # ------------------------------------------------------------------
 
-#: Arnoldi steps per group per timestep, i.e. the number of
-#: Jacobian-vector products the spectral bound costs.  Each step is one
-#: ``jax.jvp`` of the group's one-pass map -- roughly the price of one
-#: coupling pass.  A coupling Jacobian's rank is at most the number of
+#: Arnoldi steps per group per timestep.  Each step is one ``jax.jvp``
+#: of the group's one-pass map -- roughly the price of one coupling pass
+#: -- and the spectral bound costs one more than this, the product its
+#: result is checked against (:func:`_compressed_spectrum`).  A coupling Jacobian's rank is at most the number of
 #: boundary scalars that cross the group's edges, and a Krylov space of
 #: that dimension *is* the Jacobian's range, so eight steps give the
 #: exact non-zero spectrum of any group with up to eight independent
@@ -855,9 +855,12 @@ SPECTRAL_KRYLOV_STEPS = 8
 #: formed.  That residual is the norm of the part of ``A q_k`` the
 #: Krylov space does not contain, in the same units as the eigenvalues;
 #: for a normal ``A`` every Ritz value lies within it of a true
-#: eigenvalue (Bauer-Fike with constant one).  It is zero, up to float32
+#: eigenvalue (Bauer-Fike with constant one).  It is zero, up to
 #: rounding, when the Krylov space is invariant, so the margin costs a
-#: resolved spectrum nothing.
+#: resolved spectrum nothing.  The residual reported is the largest of
+#: that, of any direction a breakdown discarded, and of how far one more
+#: product moved the radius -- which is what stands in for it where
+#: ``A`` is not normal (:func:`_compressed_spectrum`).
 SPECTRAL_MARGIN = 2.0
 
 #: The convergence test behind ``spectral_usable``: the Arnoldi
@@ -888,15 +891,16 @@ SPECTRAL_SETTLED_FRACTION = 0.05
 #: which a non-normal Jacobian (norm 56 beside a radius of 0.084)
 #: turned into a radius 0.9% low and a field 1e-4 of its driver into
 #: 0.379 for 0.5, both with the spectrum reported settled.  The multiple
-#: is measured: on a space that already holds the range the leftover of
-#: ``A q_j`` after orthogonalisation is at most 2.3 units of
-#: ``eps * a`` over the cells of
+#: is measured: what the test discarded, in units of ``eps * a``, over
+#: 1 291 steps of the cells of
 #: ``tests/property/test_coupling_targeted_search.py`` in float32 and
-#: float64 (jaxlib 0.10.2, 0.11.0, 0.11.2); eight is 3.5x that.  Whatever was
-#: discarded is not forgotten: it is a part of ``A q_j`` the space does
-#: not hold, so its norm is reported in the Arnoldi residual beside
-#: ``h_{k+1,k}``, and the one more product the radius's sensitivity is
-#: probed with (:func:`_compressed_spectrum`) sees it.
+#: float64 had a median of 0.06, a 99th percentile of 3.6 to 4.8 and a
+#: largest value of 5.4, 3.7 and 4.8 on jaxlib 0.11.0, 0.10.2 and 0.11.2;
+#: eight is 1.5x the largest.  A rounding left above it is kept as a
+#: direction, which costs a column and no correctness: the compression is
+#: then on a larger space.  Whatever was discarded is not forgotten: it
+#: is a part of ``A q_j`` the space does not hold, so its norm is
+#: reported in the Arnoldi residual beside ``h_{k+1,k}``.
 #:
 #: A second, scale-free test stands beside it (Daniel, Gragg, Kaufman
 #: and Stewart's reorthogonalisation criterion): the vector is
@@ -910,6 +914,15 @@ _ARNOLDI_NOISE_ULPS = 8.0
 #: The reorthogonalisation criterion's ratio: a new direction must keep
 #: this fraction of its norm through the second Gram-Schmidt sweep.
 _ARNOLDI_REORTH_KEEP = 0.5
+
+#: The last Arnoldi residual ``h_{k+1,k}``, in units of the products'
+#: rounding, above which the space is taken to be still growing and the
+#: one more product is spent on the next Arnoldi column; at or below it
+#: (a breakdown, a space continued from the residual, or a last
+#: direction within a few roundings of one) the space is invariant to
+#: rounding, the next column says nothing about it, and the product is
+#: spent on the rounding probe (:func:`_compressed_spectrum`).
+_ARNOLDI_GROWING_ULPS = 64.0
 
 #: Perturbations of the compressed Jacobian by which the radius's
 #: sensitivity to rounding is measured (:func:`_compressed_spectrum`):
@@ -995,6 +1008,7 @@ def _spectral_radius(H):
 def _noise_eps(dtype, noise_eps) -> float:
     """``eps`` of the coarsest dtype in play: the analysis's or the map's."""
     eps = float(jnp.finfo(dtype).eps)
+    # units: dimensionless -- two dtypes' relative roundings, compared with each other
     return eps if noise_eps is None else max(eps, float(noise_eps))
 
 
@@ -1016,8 +1030,8 @@ def _compressed_spectrum(H, coefficients, column, extended):
     says which) and passes as *column*, its components along the
     ``k + 1`` basis vectors:
 
-    * **The space was still growing** (*extended*: a ``k + 1``-th basis
-      vector exists).  The product is ``A q_{k+1}``, the next Arnoldi
+    * **The space was still growing** (*extended*: ``h_{k+1,k}`` is above
+      :data:`_ARNOLDI_GROWING_ULPS` roundings of the products).  The product is ``A q_{k+1}``, the next Arnoldi
       column, and ``unsettled`` is ``|rho(H_{k+1}) - rho(Hk)|``: the
       radius measured on eight vectors and on nine.  The Arnoldi residual
       ``h_{k+1,k}`` bounds how far a Ritz value is from an eigenvalue
@@ -1131,10 +1145,17 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     **When the answer is exact, and how it says so.**  A coupling
     Jacobian has rank at most the number of boundary scalars crossing
     the group's edges; once the Krylov space contains that range the
-    next Arnoldi vector is zero (breakdown, see
-    ``_ARNOLDI_BREAKDOWN_RTOL``), the remaining columns of ``H`` stay
-    zero, the non-zero Ritz values are the non-zero eigenvalues of
-    ``A`` exactly, and ``residual`` is ``0.0``.  A group with more
+    next Arnoldi vector is rounding (breakdown, see
+    ``_ARNOLDI_NOISE_ULPS``), the remaining columns of ``H`` stay
+    zero, and the non-zero Ritz values are the non-zero eigenvalues of
+    a matrix within rounding of ``A``.  How far those are from ``A``'s
+    is not a property of the rounding alone -- a non-normal ``A`` can
+    turn one ``eps`` of its norm into a large movement of an eigenvalue
+    -- so it is measured: one more product, along a combination of the
+    basis, is compared with what the Arnoldi relation says it is, and
+    ``residual`` is how far that disagreement, under eight sign
+    patterns, moves the radius (:func:`_compressed_spectrum`); zero, to
+    rounding, for a well-conditioned spectrum.  A group with more
     independent interface scalars than ``n_steps`` gets Ritz values
     that lie, for a normal ``A``, inside the convex hull of the
     spectrum -- an estimate of ``rho`` *from below* -- and for a
@@ -1144,17 +1165,24 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     eigenvalue has modulus 0.95) -- and a
     ``residual`` that is not small, which is what
     :func:`spectral_rate_settled` reports and
-    :func:`spectral_error_bound` adds a margin for.  Eight steps
+    :func:`spectral_error_bound` adds a margin for.  There the one more
+    product is the ninth Arnoldi column, and ``residual`` is at least
+    how far it moves the radius: the Arnoldi residual alone bounds a
+    Ritz value's error only for a normal ``A``.  Eight steps
     resolve any spectrum whatever its clustering where the rank allows
     it, which is where a power iteration of the same cost does not: on
     random symmetric contractions of dimension 6 with eigenvalues
     0.949 and 0.983 the power iteration read 0.949 after eight
     products, while Arnoldi's space of dimension 6 is the whole range.
 
-    ``n_steps`` is static (a Python int) and is the number of
-    Jacobian-vector products the call costs, with or without
-    ``v_extra``; the SVD behind ``amplification`` is of a ``k x k``
-    matrix and costs nothing beside them.  A zero ``v0``, or a Jacobian
+    ``n_steps`` is static (a Python int); the call costs ``n_steps + 1``
+    Jacobian-vector products, with or without ``v_extra``.  The SVD
+    behind ``amplification`` and the eigenvalues behind ``rho`` and the
+    probes are of matrices no larger than ``(k + 1) x (k + 1)`` and cost
+    nothing beside them.  ``noise_eps`` is the ``eps`` of the coarsest
+    dtype ``matvec`` evaluates in, where that is coarser than ``v0``'s
+    (a bfloat16 map analysed in float32): the rounding the breakdown
+    test is scaled to.  A zero ``v0``, or a Jacobian
     that annihilates the start (``A v0 = 0``), gives ``rho = 0.0``,
     ``residual = 0.0`` and ``amplification = 1.0`` when there is no
     ``v_extra`` to continue from: nothing is amplified, so nothing is
@@ -1243,7 +1271,7 @@ def arnoldi_spectral_radius(matvec, v0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     # growing, a combination of the basis against what the Arnoldi
     # relation says it is where it broke down (``_compressed_spectrum``).
     c = _probe_coefficients(active)
-    extended = jnp.sum(Q[k] * Q[k]) > 0
+    extended = H[k, k - 1] > _ARNOLDI_GROWING_ULPS * eps * anorm
     column = Q @ matvec(jnp.where(extended, Q[k], c @ Q[:k]))
     rho, sensitivity, amplification = _compressed_spectrum(H, c, column, extended)
     # A direction a breakdown discarded is a part of ``A q_j`` outside the
@@ -1286,9 +1314,10 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     ``extra`` is ``(u, q)``, the residual's preimage and the residual in the
     measured coordinates, which the space continues from at a breakdown as
     :func:`arnoldi_spectral_radius` continues from ``v_extra``.  Returns
-    ``(rho, residual, amplification)`` with the meanings, conventions and
-    breakdown rule of :func:`arnoldi_spectral_radius`, and agrees with it,
-    to rounding, when ``measure`` is the identity.
+    ``(rho, residual, amplification)`` with the meanings, conventions,
+    breakdown rule, one more product and ``noise_eps`` of
+    :func:`arnoldi_spectral_radius`, and agrees with it, to rounding, when
+    ``measure`` is the identity.
     """
     if n_steps < 1:
         raise ValueError(
@@ -1364,7 +1393,7 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
     Q, _U, H, anorm, dropped = jax.lax.fori_loop(0, k, body, (Q0, U0, H0, zero, zero))
     active = (jnp.sum(Q[:k] * Q[:k], axis=1) > 0).astype(dtype)
     c = _probe_coefficients(active)
-    extended = jnp.sum(Q[k] * Q[k]) > 0
+    extended = H[k, k - 1] > _ARNOLDI_GROWING_ULPS * eps * anorm
     probe_u = jnp.where(extended, _U[k], c @ _U[:k])
     column = Q @ jnp.asarray(measure(jnp.asarray(matvec(probe_u), dtype)), dtype)
     rho, sensitivity, amplification = _compressed_spectrum(H, c, column, extended)

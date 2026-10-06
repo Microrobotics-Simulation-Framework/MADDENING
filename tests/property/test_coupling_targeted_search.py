@@ -37,18 +37,23 @@ and held to a floor in the slow profile):
 1. *error bound* (CPL-088): the true distance to the fixed point, in the
    group's norm at the returned state, over ``spectral_error_bound``,
    where ``spectral_usable``;
-2. *spectral radius* (CPL-087): ``|rho_spectral - rho|`` over what the
-   claim allows -- "exact ... to float32" where the space settled
-   (``spectral_usable``), read as 1e-4 of the radius plus the movement of
-   the radius under a perturbation of the weighted Jacobian of the
-   analysis dtype's rounding (:func:`_radius_allowance`: what a
-   backward-stable computation could deliver; the claim as written has no
-   such allowance, and ``"radius_strict"`` scores it so), and for a pass
-   whose Jacobian has rank above eight, where the claim says "an
-   estimate", the 5% of ``1 - rho`` the flag itself tests; and, where the
+2. *spectral radius* (CPL-087), two statements.  ``"radius"``: for a pass
+   whose Jacobian has rank at most eight ``rho_spectral`` is the radius of
+   a matrix within the analysis dtype's rounding of the weighted Jacobian
+   -- ``|rho_spectral - rho|`` over 1e-4 of the radius plus its movement
+   under perturbations of that size (:func:`_radius_allowance`: what a
+   backward-stable computation delivers, which is what the claim says of
+   a settled spectrum), and past rank eight, where the claim says "an
+   estimate", plus the 5% of ``1 - rho`` the flag tests; and, where the
    weighted Jacobian is normal, how far the estimate is *above* the
-   radius ("from below for a normal dF/dx"), whatever the flag.  No row
-   promises ``rho_spectral`` as an upper estimate, so none is scored;
+   radius ("from below for a normal dF/dx"), whatever the flag.
+   ``"radius_strict"``: the statement a user can check, with no reference
+   to the Jacobian -- where ``spectral_usable``, ``rho_spectral`` is
+   within ``SPECTRAL_SETTLED_FRACTION`` of ``1 - rho_spectral`` of the
+   radius (the margin the flag holds the Arnoldi residual, a discarded
+   direction, a ninth Krylov vector's movement of the radius and its
+   measured sensitivity to rounding to).  No row promises
+   ``rho_spectral`` as an upper estimate, so none is scored;
 3. *gradient bound* (CPL-093): the true relative error of the implicit
    derivative taken at the returned iterate against the same dense solve
    at the fixed point, the worst over every scalar gain and mapping
@@ -521,11 +526,11 @@ def observe(case: Case) -> dict:
             # Normal in the norm's weights: an estimate "from below",
             # whatever the flag.
             off = max(off, rho_reported - rho)
-        # The claim as written -- "exact ... to float32", with no word
-        # about conditioning -- and the claim as a backward-stable
-        # eigenvalue computation in the group's dtype can keep it.
-        out["radius_strict"] = off / max(allowance - _radius_allowance(
-            A, rho, eps_analysis, case.seed) + 1e-4 * rho, 1e-300)
+        # The statement a user can check: within the flag's own margin of
+        # the radius, wherever the flag is set.
+        if out["spectral_usable"]:
+            out["radius_strict"] = abs(rho_reported - rho) / max(
+                SPECTRAL_SETTLED_FRACTION * (1.0 - rho_reported), 1e-300)
         out["radius"] = off / allowance
         out["report"]["jacobian_norm"] = norm_A
 
@@ -736,43 +741,71 @@ def _known(case: Case, score: str, reason: str):
     return pytest.param(case, score, marks=pytest.mark.xfail(strict=True, reason=reason))
 
 
+#: What the search reached and a fix closed, each the shrunk example of the
+#: hunt that found it: ``(case, score, flag)``.  The score holds, and the
+#: flag reads what it should -- set where the number is now right (a fix
+#: that withdrew the flag everywhere would pass a score alone), withdrawn
+#: where the dtype cannot determine it.
+FIXED = {
+    # A breakdown test at 1e-5 of the product in every dtype (audit round 7,
+    # F2): rho_spectral 0.379 for an exact 0.5, a field 1e-4 of its driver.
+    "F2-a-small-field": (Case(0, 0, 0.5, False, 1e-4, 0.0, 1.0, 0, 0.0, 0), "radius", True),
+    # The same cause with no small field: non-normal gains, the weighted
+    # Jacobian's norm 56 beside a radius of 0.084, read 0.9% low in float64.
+    "F2-non-normal-gains": (
+        Case(1, 46570, 0.2897030151530067, True, 1.0, 0.0, 1.0, 1, 0.03712724112413696, 2),
+        "radius", True),
+    # The same on jaxlib 0.11.2's per-push draw: 0.0202 for 0.0156.
+    "F2-the-draw-jaxlib-0.11.2-reaches": (
+        Case(1, 2200, 0.125, True, 0.1, 0.0, 1.0, 0, 0.0, 0), "radius", True),
+    # The float32 reading of F2: a field 1e-4 of its driver on the fan-out
+    # hub, 0.574 for 0.092.  Float32 rounding moves that radius by more
+    # than the flag's margin: the measured sensitivity withdraws the flag.
+    "F2-a-small-field-in-float32-is-not-settled": (
+        Case(3, 5, 0.3, False, 1e-4, 0.0, 1.0, 0, 0.0, 0), "radius_strict", False),
+    # spectral_error_bound 0.61x the distance: three modes within 1e-5 of
+    # each other at a gain of 1 - 1e-6, float64 (audit round 7, F3).
+    "F3-near-degenerate-slow-modes": (
+        Case(1, 98, 0.999999, True, 1.0, 1e-5, 1.0, 0, 1.0, 0), "bound", True),
+    # Twelve scalars, non-normal, float64: 0.941 for 0.735 with an Arnoldi
+    # residual under 5% of the gap.  The ninth vector moves the radius.
+    "a-non-normal-spectrum-past-eight-is-not-settled": (
+        Case(45, 434, 0.7345602069808425, True, 0.1, 0.0, 1.0, 0, 3.4603590782731456e-06, 2),
+        "radius", False),
+    # A float32 ring of five, one field a fiftieth of its driver: 0.901 for
+    # 0.889, the repeated squaring's own rounding (eigvals reads 0.8894).
+    "a-float32-ring-of-five-the-squaring-misread": (
+        Case(23, 0, 0.889427129235508, True, 0.02025875358340762, 0.0, 1.0, 6, 0.0, 0),
+        "radius", True),
+}
+
+
+@pytest.mark.parametrize("name", sorted(FIXED))
+def test_a_defect_the_search_reached_stays_fixed(name):
+    case, score, flag = FIXED[name]
+    seen = observe(case)
+    assert seen[FLAG[score]] is flag, f"the flag reads {seen[FLAG[score]]}: {seen['report']}"
+    assert all(seen[s] <= THRESHOLD[s] for s in THRESHOLD), (
+        f"{ {s: seen[s] for s in THRESHOLD if seen[s] > THRESHOLD[s]} }: {seen['report']}")
+
+
 #: The known defects the search reached on this tree, each the shrunk
 #: example of a hunt over the widened domain that names it.  Strict: the
 #: fix turns each green, and its domain then joins :data:`CLAIMED`.
 KNOWN = {
-    # rho_spectral 0.379 for an exact 0.5, spectral_usable: a field 1e-4
-    # of what drives it (found in 7 to 28 examples on three seeds).
-    "F2-a-small-field": _known(
-        Case(0, 0, 0.5, False, 1e-4, 0.0, 1.0, 0, 0.0, 0), "radius_strict",
-        "coupling audit round 7, F2: the Arnoldi breakdown threshold is 1e-5 in every dtype"),
-    # The same cause with no small field: non-normal gains, the weighted
-    # Jacobian's norm 56 beside a radius of 0.084, read 0.9% low in float64
-    # (found inside the claimed domain, example 20 of a hunt).
-    "F2-non-normal-gains": _known(
-        Case(1, 46570, 0.2897030151530067, True, 1.0, 0.0, 1.0, 1, 0.03712724112413696, 2),
-        "radius_strict",
-        "coupling audit round 7, F2: the Arnoldi breakdown threshold is 1e-5 in every dtype"),
-    # The float32 reading of F2: a field 1e-4 of its driver on the fan-out
-    # hub, rho_spectral 0.574 for 0.092, spectral_usable.  Rounding alone
-    # explains it (the weighted eigenproblem is that ill-conditioned), so
-    # only the strict score sees it: CPL-087 says "exact" unconditionally.
-    "F2-a-small-field-in-float32": _known(
-        Case(3, 5, 0.3, False, 1e-4, 0.0, 1.0, 0, 0.0, 0), "radius_strict",
-        "coupling audit round 7, F2 (float32): the radius is lost to conditioning, flag set"),
-    # NEW (this search, the widened domain, example 61 of a block): a
-    # float32 multi-rate ring under the interface norm whose small field is
-    # 1e-6 of its driver reads rho_spectral 1.7e-12 for 1.25e-4,
-    # spectral_usable -- past every allowance of the "radius" score, and
-    # unchanged with the breakdown threshold at 1e-6, so not F2's cause.
+    # A float32 multi-rate ring whose small field is 1e-6 of its driver
+    # reads rho_spectral 1e-12 for 1.25e-4, spectral_usable.  The loop
+    # passes through a change of the driver 3.5e-8 of the driver's own
+    # magnitude, and the sub-cycled member's boundary interpolation
+    # ``a + alpha * (b - a)`` rounds the tangent of the new value at one
+    # float32 eps of the old one's: the Jacobian-vector product is exact
+    # along the small field alone and loses the loop along any vector
+    # with a driver component -- as the float32 pass itself does (the
+    # iteration stalls in one pass).  Not the estimator's arithmetic:
+    # the product it is handed (MADD-ANO-217).
     "a-float32-field-at-its-drivers-rounding-reads-a-zero-radius": _known(
         Case(len(_FIRST), 5, 0.05, False, 1e-6, 0.0, 1.0, 0, 0.0, 5), "radius",
-        "new finding (EDGE): rho_spectral reads zero with the flag set, CPL-087"),
-    # spectral_error_bound 0.61x the distance, spectral_usable: three modes
-    # within 1e-5 of each other at a gain of 1 - 1e-6, float64 (found in
-    # 152 to 274 examples on three seeds).
-    "F3-near-degenerate-slow-modes": _known(
-        Case(1, 98, 0.999999, True, 1.0, 1e-5, 1.0, 0, 1.0, 0), "bound",
-        "coupling audit round 7, F3: modes within the breakdown threshold are taken for one"),
+        "MADD-ANO-217: a loop below a float32 field's rounding is not in the products"),
     # A mapping row [1, -1] on a field 1e4 times the difference, read in
     # the same Gauss-Seidel pass, stalled in float32: the exact residual is
     # 16 floors and the bound 0.06x the distance, spectral_usable (found

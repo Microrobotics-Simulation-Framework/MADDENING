@@ -1389,7 +1389,7 @@ def _run_coupled_block_impl(
             # The spectral bound's ingredients, at the state being
             # returned (``x_star_full`` before the strict guard, whose
             # value it is).  Only with ``diagnostics=True``: it costs
-            # ``SPECTRAL_KRYLOV_STEPS`` Jacobian-vector products
+            # ``SPECTRAL_KRYLOV_STEPS + 1`` Jacobian-vector products
             # per group per step, which the always-on ift report is
             # not charged for.  NaN is what ``coupling_diagnostics``
             # reads as "not computed" (``spectral_usable=False``).

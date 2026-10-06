@@ -810,26 +810,26 @@ KNOWN = {
     # along the small field alone and loses the loop along any vector
     # with a driver component -- as the float32 pass itself does (the
     # iteration stalls in one pass).  Not the estimator's arithmetic:
-    # the product it is handed (MADD-ANO-217).
+    # the product it is handed (MADD-ANO-219).
     "a-float32-field-at-its-drivers-rounding-reads-a-zero-radius": _known(
         Case(len(_FIRST), 5, 0.05, False, 1e-6, 0.0, 1.0, 0, 0.0, 5), "radius",
-        "MADD-ANO-217: a loop below a float32 field's rounding is not in the products"),
+        "MADD-ANO-219: a loop below a float32 field's rounding is not in the products"),
     # Twelve float32 scalars under Jacobi, non-normal gains: 0.273 for
     # 0.219 with the Arnoldi residual and the ninth vector's movement of
     # the radius both inside the margin (found by the floor search, one
     # example in 9 660 over twelve hunts; the tree before reads the same).
     # Past eight scalars the claim is "an estimate", and for a non-normal
     # Jacobian neither test bounds its error.
-    "MADD-ANO-220-a-non-normal-estimate-past-eight-scalars": _known(
+    "MADD-ANO-222-a-non-normal-estimate-past-eight-scalars": _known(
         Case(4, 0, 0.21902815820121518, True, 1.0, 0.0, 1.0, -6, 1e-09, 0), "radius",
-        "MADD-ANO-220: past eight scalars a non-normal radius reads settled 1.5 margins off"),
+        "MADD-ANO-222: past eight scalars a non-normal radius reads settled 1.5 margins off"),
     # A float32 Jacobi ring of mapped edges stopped at its float floor:
     # gradient_relative_error_bound 5.1e-6 for a true 3.0e-5 (250 float32
     # eps), gradient_bound_usable (found by the floor search, twelve
     # examples of one hunt; the tree before reads the same).
-    "MADD-ANO-221-the-gradient-bound-at-the-float-floor": _known(
+    "MADD-ANO-223-the-gradient-bound-at-the-float-floor": _known(
         Case(53, 6984, 0.05, False, 1.0, 0.0, 1.0, 6, 1.0, 3), "gradient",
-        "MADD-ANO-221: the gradient bound of a precision-limited iterate reads below the error"),
+        "MADD-ANO-223: the gradient bound of a precision-limited iterate reads below the error"),
     # A mapping row [1, -1] on a field 1e4 times the difference, read in
     # the same Gauss-Seidel pass, stalled in float32: the exact residual is
     # 16 floors and the bound 0.06x the distance, spectral_usable (found

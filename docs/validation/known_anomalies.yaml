@@ -14639,7 +14639,7 @@ anomalies:
       - "tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-216"
+  - anomaly_id: "MADD-ANO-218"
     title: "The Arnoldi breakdown test was 1e-5 of the product in every dtype: rho_spectral read 0.379 for 0.5 and spectral_error_bound 0.61x the true distance, spectral_usable=True"
     description: >
       The spectral estimate of `coupling_diagnostics()` (`solver="ift"`,
@@ -14700,7 +14700,7 @@ anomalies:
       - "tests/core/test_coupling_spectral_estimate_rounding.py::test_near_degenerate_modes_are_not_taken_for_one"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-217"
+  - anomaly_id: "MADD-ANO-219"
     title: "A coupling loop that passes through a change of a field below that field's float rounding is not in rho_spectral: a float32 sub-cycled ring with a field 1e-6 of its driver reads 1e-12 for 1.25e-4, spectral_usable=True"
     description: >
       `rho_spectral` is computed from Jacobian-vector products of the
@@ -14722,7 +14722,7 @@ anomalies:
       float32 pass itself does the same -- the iteration stalls after one
       pass at `residual=0.0` -- and `spectral_error_bound` holds there
       (the floor carries it).  Unchanged by the breakdown test's
-      threshold (MADD-ANO-216), and not visible to the estimate's own
+      threshold (MADD-ANO-218), and not visible to the estimate's own
       checks: the products agree with each other.  No release carries
       the spectral bound.  Found by the targeted search over fields down
       to 1e-8 of their drivers.
@@ -14755,7 +14755,7 @@ anomalies:
       - "tests/property/test_coupling_targeted_search.py::test_a_known_defect_the_search_reached_is_fixed"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-218"
+  - anomaly_id: "MADD-ANO-220"
     title: "The spectral radius of the compressed Jacobian was taken by repeated squaring, which is not backward stable for a non-normal matrix: a float32 ring of five read rho_spectral 0.901 for 0.889, spectral_usable=True"
     description: >
       `arnoldi_spectral_radius` took the radius of its small Hessenberg
@@ -14774,7 +14774,7 @@ anomalies:
       than 1% of `1 - rho` on 237 and `eigvals` on 40.  In float64 the
       same squaring held the radius to about 1e-6 relative, which is why
       `rho_spectral` was documented "to float32".  No release carried it.
-      Found by the targeted search once the breakdown test (MADD-ANO-216)
+      Found by the targeted search once the breakdown test (MADD-ANO-218)
       no longer masked it.
     severity: "major"
     safety_relevance: "context_dependent"
@@ -14802,7 +14802,7 @@ anomalies:
       - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-219"
+  - anomaly_id: "MADD-ANO-221"
     title: "spectral_usable tested only the Arnoldi residual, which bounds a Ritz value's error for a normal Jacobian alone: a non-normal group of twelve scalars read rho_spectral 0.941 for 0.735 and a float32 hub 0.574 for 0.092, flag set"
     description: >
       `spectral_usable` reported the spectrum settled when the Arnoldi
@@ -14848,13 +14848,13 @@ anomalies:
       error lies in a direction the one product does not excite can still
       read settled.  The targeted search holds the outcome on its cells
       (no settled radius outside the margin on three seeds of its slow
-      profile).  MADD-ANO-217 is a case the check cannot see.
+      profile).  MADD-ANO-219 is a case the check cannot see.
     verification:
       - "tests/property/test_coupling_targeted_search.py::test_a_defect_the_search_reached_stays_fixed"
       - "tests/core/test_coupling_spectral_estimate_rounding.py::test_a_settled_radius_is_within_the_margin_and_the_determined_ones_settle"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-220"
+  - anomaly_id: "MADD-ANO-222"
     title: "Past eight interface scalars a non-normal group's rho_spectral can read settled outside the margin: twelve float32 scalars read 0.273 for 0.219, spectral_usable=True"
     description: >
       For a group whose pass Jacobian has rank above the eight Krylov
@@ -14870,7 +14870,7 @@ anomalies:
       movement of 0.023 against a margin of 0.036: 1.5 margins off, flag
       set.  `spectral_error_bound` held on it.  The tree before the
       ninth-vector check read the same number on this example, and 0.941
-      for 0.735 on another that the check now refuses (MADD-ANO-219).
+      for 0.735 on another that the check now refuses (MADD-ANO-221).
       One example in 9 660 drawn by twelve hunts of the targeted search.
       No release carries the spectral bound.
     severity: "major"
@@ -14898,7 +14898,7 @@ anomalies:
       - "tests/property/test_coupling_targeted_search.py::test_a_known_defect_the_search_reached_is_fixed"
     github_issue: null
 
-  - anomaly_id: "MADD-ANO-221"
+  - anomaly_id: "MADD-ANO-223"
     title: "gradient_relative_error_bound of an iterate stopped at its float floor can read below the error: 5.1e-6 for 3.0e-5 on a float32 Jacobi ring of mapped edges, gradient_bound_usable=True"
     description: >
       Measured (CPU, jaxlib 0.11.0, float32): a Jacobi ring of three

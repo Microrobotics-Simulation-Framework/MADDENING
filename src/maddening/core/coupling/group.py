@@ -125,6 +125,10 @@ class CouplingGroup:
         field's bare magnitude and carries its threshold in
         ``tolerance`` -- so setting it away from its default under
         ``convergence_norm="l2"`` is inert and warns (``UserWarning``).
+        Must be greater than zero under the two norms that read it
+        (``ValueError``): each field's change is divided by
+        ``rtol * max|field|``, and ``atol`` is a dead band, not a term of
+        that scale.
     diagnostics : bool
         Under ``solver="ift"`` the iteration count, the final residual
         and the amplification are stored in ``_meta`` (and reported by
@@ -417,6 +421,43 @@ class CouplingGroup:
             raise ValueError(
                 f"CouplingGroup.relaxation={value!r}: it must be a finite number > 0."
             )
+        # ``"mixed"`` and ``"interface"`` divide each field's change by
+        # ``rtol * max|field|`` (``atol`` is a dead band, not a term of the
+        # scale), so at ``rtol=0`` the residual is ``0/0``: the step ran to
+        # its cap every time with ``residual=nan`` and
+        # ``coupling_diagnostics()`` raised ``ZeroDivisionError`` from the
+        # float floor's ``eps / rtol``.  ``"l2"`` does not read ``rtol``.
+        if self.convergence_norm in ("mixed", "interface") and float(self.rtol) == 0.0:
+            raise ValueError(
+                f"CouplingGroup.rtol={self.rtol!r} under convergence_norm="
+                f"{self.convergence_norm!r}: it must be > 0.  This norm divides each "
+                "field's change by rtol * max|field| (atol is a dead band below which a "
+                "field is not read, not an absolute tolerance), so at 0 the residual "
+                "is 0/0 and nothing converges."
+            )
+
+    def _refuse_non_boolean_flags(self) -> None:
+        """Raise ``TypeError`` for a boolean option that was not given a boolean.
+
+        Every option annotated ``bool`` (``diagnostics``, ``subcycling``,
+        ``strict_convergence``) is read by truth value, so any object was
+        accepted and acted as ``bool(value)``: ``diagnostics="rounding"``
+        (a level planned for a later release) and ``diagnostics="off"``
+        both turned the diagnostics *on*, ``subcycling="no"`` sub-cycled,
+        and ``to_dict()`` wrote the string.  A ``bool`` or a NumPy bool is
+        accepted; ``0`` and ``1`` are not (an integer here is as likely a
+        count meant for another option).
+        """
+        hints = get_type_hints(type(self))
+        for f in fields(self):
+            if hints.get(f.name) is not bool:
+                continue
+            value = getattr(self, f.name)
+            if not isinstance(value, (bool, np.bool_)):
+                raise TypeError(
+                    f"CouplingGroup.{f.name}={value!r}: it must be True or False, not "
+                    f"{type(value).__name__}."
+                )
 
     def to_dict(self) -> dict[str, Any]:
         """Every field of this group as JSON-compatible plain data.
@@ -479,6 +520,7 @@ class CouplingGroup:
                     f"CouplingGroup.{f.name}={value!r} is not a valid "
                     f"option; expected one of {valid!r}"
                 )
+        self._refuse_non_boolean_flags()
         self._refuse_out_of_range_numbers()
         if self.accelerated_fields is not None:
             # Shape, before anything reads the mapping.  A non-mapping

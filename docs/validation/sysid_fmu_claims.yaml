@@ -3212,7 +3212,9 @@ claims:
     - src/maddening/core/params.py:431 (ParamSpec.check)
   conditions: >-
     large bounds whose width the leaf's dtype holds (a wider one is
-    refused, SYS-131); an interval a few ulps wide; float32 values within 40 ulps
+    refused, SYS-131, as is an interval under four smallest normal numbers
+    of the dtype or with a subnormal bound); bounds within 64 smallest
+    normals of zero, in float32 and float64; an interval a few ulps wide; float32 values within 40 ulps
     of either bound, the coordinate infinite and finite. Not claimed for
     mixed dtypes or 16-bit floats.
   oracle: strict inequality; check accepts exactly the values unconstrain gives a finite coordinate.
@@ -3222,6 +3224,8 @@ claims:
     - tests/core/test_param_spec_edge_cases.py::test_check_refuses_a_logit_value_whose_coordinate_rounds_onto_a_bound
     - tests/core/test_param_spec_edge_cases.py::test_check_accepts_a_value_whose_logit_coordinate_is_finite
     - tests/core/test_param_spec_edge_cases.py::test_check_accepts_a_logit_value_exactly_when_its_coordinate_is_finite
+    - tests/core/test_constrain_lands_inside_bounds_near_the_smallest_normal.py::test_constrain_lands_inside_the_bounds_check_enforces
+    - tests/core/test_constrain_lands_inside_bounds_near_the_smallest_normal.py::test_a_logit_interval_narrower_than_four_smallest_normals_is_refused_by_name
   status: verified
   notes: >-
     Round 7 (B1, on 04bc3e5): a float32 nextafter(1, 0) under (-1, 1) passed
@@ -3259,7 +3263,9 @@ claims:
   conditions: >-
     any coordinates, including extreme ones, for constrain landing inside
     bounds and unconstrain(constrain(u)) being finite, for bounds the
-    leaf's dtype holds (others are refused, SYS-131); the inverse --
+    leaf's dtype holds (others are refused, SYS-131), subnormal bounds of
+    an identity-transform leaf included (the clip there is a selection,
+    since the CPU arithmetic reads a subnormal operand as zero); the inverse --
     |constrain(unconstrain(p)) - p| <= 16 * (ParamSpec._resolution(dtype) +
     eps * |p|), eager and under jax.jit, which need not return the same
     float -- for a p inside the clamp's interior, at least 4 * eps *
@@ -3278,6 +3284,9 @@ claims:
     - tests/core/test_params_spec.py::test_unconstrain_of_constrain_is_finite_for_any_coordinate
     - tests/core/test_params_spec.py::test_maps_are_jittable_and_differentiable
     - tests/core/test_param_spec_edge_cases.py::test_unconstrain_and_constrain_apply_the_transform_to_a_list_leaf
+    - tests/core/test_constrain_lands_inside_bounds_near_the_smallest_normal.py::test_constrain_lands_inside_the_bounds_check_enforces
+    - tests/core/test_constrain_lands_inside_bounds_near_the_smallest_normal.py::test_a_subnormal_bound_clips_as_the_exact_comparison_says
+    - tests/core/test_constrain_lands_inside_bounds_near_the_smallest_normal.py::test_the_subnormal_clip_differentiates_and_batches_as_the_ordinary_one
   status: verified
   domains:
     f32: tests/core/test_params_spec.py::test_constrain_lands_inside_bounds_for_any_coordinates
@@ -4347,7 +4356,9 @@ claims:
     - src/maddening/fmi/model_description.py:83 (FMIVariable, start)
   conditions: >-
     Boolean, integer and float variables; a hand-built start in float form;
-    FMPy and the FMI 3.0 schema. Not claimed for 16-bit floats.
+    the DefaultExperiment attributes and a clock's interval from NumPy
+    scalars of every float and integer type, and non-finite ones (written
+    with repr until 0.4.0, MADD-ANO-219); FMPy and the FMI 3.0 schema. Not claimed for 16-bit floats.
   oracle: the XML attributes; schema validation; simulate_fmu with its default validation.
   tests:
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
@@ -4355,6 +4366,8 @@ claims:
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_the_fmi3_schema_validates_the_description
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_simulate_fmu_with_its_default_validation_runs_the_fmu
     - tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_a_hand_built_start_in_float_form_is_written_in_the_types_form
+    - tests/fmi/test_default_step_is_one_graph_step.py::test_every_number_a_hand_built_description_writes_is_an_xs_double
+    - tests/fmi/test_default_step_is_one_graph_step.py::test_a_non_finite_experiment_time_is_written_in_the_schemas_spelling
   status: verified
   domains:
     f32: tests/fmi/test_start_values_have_the_lexical_form_of_their_type.py::test_every_start_min_and_max_is_a_literal_of_the_variables_type
@@ -4574,12 +4587,19 @@ claims:
   sources:
     - src/maddening/fmi/model_description.py:683 (build_model_description, default_step_size)
     - docs/user_guide/fmu_export.md (Building and packaging)
-  conditions: single-rate, multi-rate dividing and not, sub-cycled; an explicit default.
+  conditions: >-
+    single-rate, multi-rate dividing and not, sub-cycled; an explicit
+    default that is a finite, positive Python or NumPy number (every NumPy
+    scalar type; stored and written as a Python float) and a whole number
+    of graph steps to within four ulps. Anything else is refused when the
+    description is built (FMU-020).
   oracle: gm.timestep.
   tests:
     - tests/fmi/test_default_step_is_one_graph_step.py::test_the_default_step_is_one_graph_step
     - tests/fmi/test_default_step_is_one_graph_step.py::test_an_explicit_default_step_size_still_wins
     - tests/fmi/test_default_step_is_one_graph_step.py::test_a_sub_cycled_member_is_on_its_groups_clock
+    - tests/fmi/test_default_step_is_one_graph_step.py::test_a_numpy_scalar_step_size_is_stored_and_written_as_the_float_it_is
+    - tests/fmi/test_default_step_is_one_graph_step.py::test_a_step_size_that_is_not_a_finite_positive_number_is_refused_at_build
   status: verified
   domains:
     f32: n/a
@@ -4907,7 +4927,14 @@ claims:
   conditions: >-
     uniform, multi-rate not dividing (0.02 / 0.03), multi-rate dividing,
     sub-cycled; a coarser advertised step; a multi-clock description; a
-    hand-built one. Not claimed for 16-bit floats.
+    hand-built one. "A whole number of graph steps" is to within four ulps
+    of the step (another spelling of the same number, 0.07 against 7 *
+    0.01), refused otherwise by build_model_description, naming the nearest
+    whole multiple, and by a bridge given a hand-built description; an
+    advertised step a bridge accepts is served for 1,000 steps at start +
+    k * h, from starts of 0, 1, -0.5, 123.456 and -7 s, at ten graph steps
+    from 1e-9 to 1/3 s and 1 to 4096 graph steps per communication step.
+    Not claimed for 16-bit floats.
   oracle: gm.run over the same simulated time; the ValueError.
   tests:
     - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_a_master_dt_other_than_the_graph_step_is_refused
@@ -4918,8 +4945,16 @@ claims:
     - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_master_dt_must_be_a_positive_finite_number
     - tests/fmi/test_bridge_security_and_stepping.py::test_step_must_be_a_whole_multiple_of_master_dt
     - tests/fmi/test_communication_points.py::test_a_biased_importer_is_stopped_before_its_drift_passes_the_tolerance
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_an_advertised_step_off_a_whole_number_of_graph_steps_is_refused_at_build
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_another_spelling_of_a_whole_number_of_graph_steps_is_accepted
+    - tests/fmi/test_bridge_master_dt_is_the_graph_step.py::test_an_advertised_step_a_bridge_accepts_is_served_for_a_thousand_steps
   status: verified
   notes: >-
+    Failing on 76c74db (B1 round 11): the advertised step was held to a
+    millionth of a master step where the description and the bridge are
+    built, and the sum of the steps to the same tolerance over a run, so
+    float(np.float32(0.05)) on a 0.01 s graph was accepted and refused at
+    the fourteenth doStep.
     "at the graph step the FMU is the graph at the time it reports" failed
     on 04bc3e5 (B1 round 7) for an importer whose step sizes were all a
     little long: the reported time left the simulated time behind by up to
@@ -5815,8 +5850,12 @@ claims:
     structural one (HeatNode stencil_order), with the step traced before the
     write and not, which the description refuses until compile(); the same
     write, or a recompile, between the description and the sidecar or the
-    bridge; a node or an external input added; a graph never compiled. Not
-    claimed for float64 (x64), mixed dtypes or 16-bit floats.
+    bridge; a node or an external input added; a graph never compiled; the
+    same Python number set on an input of the FMU and handed to gm.step, in
+    float32 and under x64, with the default (float32) declaration and with
+    dtype=float32 or float64 declared (the graph casts a supplied value to
+    the declared dtype, which is the FMU variable's type). Not claimed for
+    mixed dtypes or 16-bit floats.
   oracle: gm.run over the same simulated time; the start the description advertises; the refusal.
   tests:
     - tests/fmi/test_fmu_claims_edges.py::test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs
@@ -5828,6 +5867,9 @@ claims:
     - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_sidecar_refuses_a_step_its_graph_has_left
     - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_a_bridge_refuses_a_description_or_a_step_its_graph_has_left
     - tests/fmi/test_an_fmu_runs_the_model_its_graph_runs.py::test_what_carries_no_graph_is_not_judged
+    - tests/property/test_differential_fmu.py::test_an_fmu_and_its_graph_run_the_same_number_handed_to_both
+    - tests/core/test_an_external_input_runs_in_its_declared_dtype.py::test_an_x64_graph_runs_a_supplied_value_in_the_declared_dtype
+    - tests/core/test_an_external_input_runs_in_its_declared_dtype.py::test_a_value_the_cast_changes_is_reported_once_per_input
   status: verified
   notes: >-
     Failing in the first edition: the description advertised start 30.0 and
@@ -5836,10 +5878,13 @@ claims:
     closed it.  Failing again on 04bc3e5 (B1 round 7) for a structural
     write: the sync only marks the graph dirty, and the FMU ran the old
     model, 6.35 K off after 50 steps, when the step had been traced before
-    the write (MADD-ANO-147).
+    the write (MADD-ANO-147).  Failing on 76c74db (B1 round 11) under x64
+    with a default-declared input: the graph ran a supplied 0.1 as a
+    float64 and the FMU as float32(0.1), 3.8e-10 apart after ten steps
+    (MADD-ANO-218).
   domains:
     f32: tests/fmi/test_fmu_claims_edges.py::test_an_fmu_exported_after_a_node_params_write_runs_what_the_graph_runs
-    f64: narrowed
+    f64: 'tests/property/test_differential_fmu.py::test_an_fmu_and_its_graph_run_the_same_number_handed_to_both[x64-default]'
     mixed_dtype: narrowed
     16bit: narrowed
     jit: n/a

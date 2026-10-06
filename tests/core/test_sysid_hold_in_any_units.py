@@ -434,3 +434,71 @@ def test_fims_rank_is_the_same_in_any_units_under_its_default_scale(unit, raw_ra
         si = fim(*problem(1.0))
     assert int(relative.rank) == 3 and int(raw.rank) == raw_rank
     assert float(relative.cond) == pytest.approx(float(si.cond), rel=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# A column that overflows over its scale is "no curvature test", not an error
+# ---------------------------------------------------------------------------
+
+_OVERFLOWING = [
+    # (J column size, scale): finite, and not finite once divided
+    (1e200, 1e-200), (1e300, 1e-300), (1.0, 5e-324), (1e-10, 0.0), (1.0, 1e-320),
+]
+
+
+def _quiet(H):
+    """``V -> H V`` as a model's product returns it: an overflow is an
+    ``inf`` in the answer, not a NumPy warning."""
+    def hvp(V):
+        with np.errstate(all="ignore"):
+            return H @ V
+    return hvp
+
+
+@pytest.mark.parametrize("size, scale", _OVERFLOWING)
+def test_the_gauss_newton_test_says_no_curvature_when_a_scaled_column_overflows(size, scale):
+    """``_gauss_newton_flatness`` checked that ``J`` is finite *before*
+    dividing its columns by the scale: a finite column over a tiny scale
+    overflowed and reached the SVD, which raised ``LinAlgError`` out of a
+    diagnostic.  It answers as its docstring says: ``None``, with the
+    warning (``_curvature_rank`` guarded its own call only)."""
+    J = np.array([[size, 1.0], [0.5 * size, 2.0], [0.25 * size, 3.0]])
+    scales = np.array([scale, 1.0])
+    with pytest.warns(RuntimeWarning, match="not finite in the guard's coordinates"):
+        assert _gauss_newton_flatness(J, np.eye(2), np.float64, scale=scales) is None
+    # the same Jacobian in coordinates it is finite in is tested as before
+    W, flat, curvature = _gauss_newton_flatness(J, np.eye(2), np.float64,
+                                                scale=np.array([size, 1.0]))
+    assert np.isfinite(curvature) and not flat.any() and W.shape == (2, 2)
+
+
+def test_the_gauss_newton_test_says_no_curvature_when_the_candidate_product_overflows():
+    """Finite after the division and not after the product with the
+    candidates: 1.5e308 + 1.5e308."""
+    J = np.array([[1.5e308, 1.5e308], [1.0, 2.0]])
+    mixing = np.array([[1.0, 1.0], [1.0, -1.0]])
+    with pytest.warns(RuntimeWarning, match="not finite in the guard's coordinates"):
+        assert _gauss_newton_flatness(J, mixing, np.float64, scale=np.ones(2)) is None
+
+
+@pytest.mark.parametrize("size, scale", _OVERFLOWING)
+def test_the_hessian_test_says_no_curvature_when_a_scaled_product_overflows(size, scale):
+    """The same ordering in ``_hessian_flatness``: the product was checked,
+    then divided by the scale."""
+    H = np.diag([size, 1.0])
+    scales = np.array([scale, 1.0])
+    with pytest.warns(RuntimeWarning, match="Hessian-vector product is not finite"):
+        assert _hessian_flatness(_quiet(H), np.eye(2), np.eye(2), np.float64,
+                                 "test", scales) is None
+    W, flat, curvature = _hessian_flatness(_quiet(H), np.eye(2), np.eye(2),
+                                           np.float64, "test", np.array([np.sqrt(size), 1.0]))
+    assert np.isfinite(curvature) and not flat.any()
+
+
+def test_the_hessian_test_says_no_curvature_when_only_the_second_scaling_overflows():
+    """A product that is finite, of a direction that was finite, and
+    overflows on the way out: H = 1e300 over a scale of 1e-5 each way."""
+    H = np.array([[1e300, 0.0], [0.0, 1.0]])
+    with pytest.warns(RuntimeWarning, match="in the guard's coordinates"):
+        assert _hessian_flatness(_quiet(H), np.eye(2), np.eye(2), np.float64,
+                                 "test", np.array([1e-5, 1.0])) is None

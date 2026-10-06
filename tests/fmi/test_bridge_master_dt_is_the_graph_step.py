@@ -22,13 +22,17 @@ import math
 
 import numpy as np
 import pytest
+from hypothesis import example, given, settings
+from hypothesis import strategies as st
 
 from maddening.core.graph_manager import GraphManager
 from maddening.fmi import build_model_description
-from maddening.fmi.model_description import FMIVariable, ModelDescription
+from maddening.fmi.model_description import FMIVariable, ModelDescription, _whole_steps
 from maddening.fmi.sidecar import FmuSidecar, SidecarConfig
 from maddening.fmi.tcp_bridge import FmuTcpBridge, values_of
 from maddening.nodes.spring import SpringDamperNode
+
+from tests.conftest import EXAMPLES_STANDARD
 
 
 def _springs(*dts, subcycled=()):
@@ -157,8 +161,12 @@ def test_an_advertised_step_the_bridge_would_refuse_is_refused_up_front():
     of graph steps -- or more of them than one request may take -- would
     make every ``doStep`` fail; the bridge says so when it is built."""
     build = lambda: _springs(0.01)          # noqa: E731
-    with pytest.raises(ValueError, match="not a whole multiple"):
+    with pytest.raises(ValueError, match="not a whole number of steps of graph_timestep"):
         _served(build, 0.01, default_step_size=0.015)
+    hand_built = _hand_built(0.015)
+    hand_built.graph_timestep = 0.01
+    with pytest.raises(ValueError, match="not a whole multiple.*every doStep would be refused"):
+        FmuTcpBridge(_identity_sidecar(), hand_built, master_dt=0.01)
     gm = build()
     md = build_model_description(gm, model_name="m", default_step_size=0.1)
     with pytest.raises(ValueError, match="more than the 5 one request may take"):
@@ -214,3 +222,126 @@ def test_max_steps_per_request_must_be_a_positive_integer(bad):
     md = build_model_description(gm, model_name="m")
     with pytest.raises(ValueError, match="max_steps_per_request must be a positive integer"):
         FmuTcpBridge(_sidecar(gm, md), md, master_dt=0.01, max_steps_per_request=bad)
+
+
+# ---------------------------------------------------------------------------
+# An advertised step that is accepted is one a whole run is served at
+# ---------------------------------------------------------------------------
+#
+# The description and the bridge held the advertised step to the tolerance
+# on one step (a millionth of a master step); the drift check holds the sum
+# of the steps to the same tolerance.  So ``default_step_size=
+# float(np.float32(0.05))`` on a 0.01 s graph, 7.5e-8 of a step off five
+# steps, was accepted at build and by the bridge, and an importer stepping
+# at exactly that size, each point ``start + k * h`` as FMPy computes it,
+# got fmi3Error at the fourteenth doStep; ``0.05 * (1 + 5e-8)`` at the fifth
+# (B1 round 11).  The advertised step is now held to rounding (four ulps)
+# of a whole number of graph steps where the description is built and where
+# a bridge takes one.
+
+def _identity_sidecar():
+    return FmuSidecar(SidecarConfig(
+        schema_token="tok", step_fn=lambda s, e: s,
+        initial_state={"n": {"x": np.float32(1.0)}}))
+
+
+def _advertising(step, graph_step):
+    md = _hand_built(step)
+    md.graph_timestep = graph_step
+    return md
+
+
+def _ulps_away(x: float, k: int) -> float:
+    for _ in range(abs(k)):
+        x = math.nextafter(x, math.inf if k > 0 else -math.inf)
+    return x
+
+
+@pytest.mark.parametrize("step, nearest", [
+    (float(np.float32(0.05)), "5, is 0.05 "),            # the audit's
+    (0.05 * (1 + 5e-8), "5, is 0.05 "),                  # and its second
+    (0.05 * (1 - 1e-12), "5, is 0.05 "),
+    (0.015, "2, is 0.02 "), (0.005, "1, is 0.01 "), (1e-9, "1, is 0.01 "),
+    (_ulps_away(0.05, 5), "5, is 0.05 "), (_ulps_away(0.05, -5), "5, is 0.05 "),
+])
+def test_an_advertised_step_off_a_whole_number_of_graph_steps_is_refused_at_build(step, nearest):
+    """By the description, naming the nearest whole multiple, and by a
+    bridge handed a description built by hand."""
+    gm = _springs(0.01)
+    with pytest.raises(ValueError, match="not a whole number of steps of graph_timestep=0.01") as err:
+        build_model_description(gm, model_name="m", default_step_size=step)
+    assert f"the nearest whole number, {nearest}" in str(err.value), str(err.value)
+    assert "* graph_timestep" in str(err.value)
+    with pytest.raises(ValueError, match="default_step_size"):
+        FmuTcpBridge(_identity_sidecar(), _advertising(step, 0.01), master_dt=0.01)
+
+
+@pytest.mark.parametrize("step, n", [(0.05, 5), (0.07, 7), (7 * 0.01, 7), (0.01, 1),
+                                     (_ulps_away(0.05, 4), 5), (_ulps_away(0.05, -4), 5),
+                                     (0.30000000000000004, 30), (0.3, 30)])
+def test_another_spelling_of_a_whole_number_of_graph_steps_is_accepted(step, n):
+    """``0.07`` is not ``7 * 0.01`` (one ulp apart): rounding is not a
+    different step."""
+    gm = _springs(0.01)
+    md = build_model_description(gm, model_name="m", default_step_size=step)
+    assert md.default_step_size == step and _whole_steps(step, 0.01) == n
+    bridge = FmuTcpBridge(_sidecar(gm, md), md, master_dt=0.01)
+    try:
+        for k in range(3):
+            assert bridge.handle({"op": "step", "t": k * step, "dt": step})["ok"]
+    finally:
+        bridge.stop()
+
+
+#: Graph steps with nothing in common with a power of two or with each other.
+_GRAPH_STEPS = [0.01, 0.02, 0.1, 0.3, 1 / 3, 1e-3 * math.pi, 7e-5, 1.7e-6, 2.0 ** -10, 1e-9]
+_STARTS = [0.0, 1.0, -0.5, 123.456, -7.0]
+_OFF = (st.integers(-8, 8).map(lambda k: ("ulps", k))
+        | st.floats(1e-13, 1e-5).map(lambda r: ("relative", r))
+        | st.floats(-1e-5, -1e-13).map(lambda r: ("relative", r)))
+
+
+@settings(max_examples=EXAMPLES_STANDARD, derandomize=True, deadline=None)
+@given(dt=st.sampled_from(_GRAPH_STEPS), n=st.integers(1, 64), off=_OFF,
+       start=st.sampled_from(_STARTS))
+@example(dt=0.01, n=5, off=("exactly", float(np.float32(0.05))), start=0.0)
+@example(dt=0.01, n=5, off=("exactly", 0.05 * (1 + 5e-8)), start=0.0)
+@example(dt=0.01, n=7, off=("exactly", 0.07), start=123.456)
+@example(dt=1 / 3, n=4096, off=("ulps", 4), start=-0.5)
+@example(dt=1e-9, n=1, off=("ulps", -4), start=1.0)
+def test_an_advertised_step_a_bridge_accepts_is_served_for_a_thousand_steps(dt, n, off, start):
+    """Accepted when the bridge is built implies: an importer stepping at
+    the advertised size, each point ``start + k * h``, is never refused in
+    1,000 steps, and the time reported stays the time simulated.  And the
+    bridge accepts exactly what the description's rule accepts."""
+    kind, amount = off
+    if kind == "ulps":
+        h = _ulps_away(n * dt, amount)
+    elif kind == "relative":
+        h = n * dt * (1 + amount)
+    else:
+        h = amount
+    try:
+        steps = _whole_steps(h, dt)
+    except ValueError:
+        steps = None
+    try:
+        bridge = FmuTcpBridge(_identity_sidecar(), _advertising(h, dt), master_dt=dt)
+    except ValueError as exc:
+        assert steps is None, (h, dt, str(exc))
+        assert "default_step_size" in str(exc)
+        return
+    try:
+        assert steps == n, (h, dt, steps)
+        assert bridge.handle({"op": "initialize", "t": start}) == {"ok": True, "t": start}
+        # the model is the identity: only the clock is under test, and a
+        # thousand steps of up to 4096 graph steps are four million calls
+        bridge._sidecar._advanced = lambda state, inputs: state     # noqa: SLF001
+        for k in range(1000):
+            reply = bridge.handle({"op": "step", "t": start + k * h, "dt": h})
+            assert reply["ok"], (k, h, dt, start, reply)
+        assert bridge._n_ref == 1000 * n                            # noqa: SLF001
+        simulated = start + 1000 * n * dt
+        assert abs(reply["t"] - simulated) <= 1e-6 * dt + 8 * math.ulp(abs(simulated) + n * dt)
+    finally:
+        bridge.stop()

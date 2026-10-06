@@ -450,6 +450,116 @@ class _StepState(dict):
 
 _EMPTY_EXTERNAL_INPUTS: dict[str, dict] = {}
 
+
+def _declared_input_dtypes(external_inputs) -> dict[str, dict]:
+    """``{node: {field: dtype}}`` of the declared external inputs, each
+    dtype as JAX runs it (a ``float64`` declaration is ``float32`` without
+    ``jax_enable_x64``, as the zeros of an omitted input already were)."""
+    out: dict[str, dict] = {}
+    for ei in external_inputs:
+        out.setdefault(ei.target_node, {})[ei.target_field] = (
+            jax.dtypes.canonicalize_dtype(ei.dtype))
+    return out
+
+
+def _cast_external_inputs(external_inputs, declared: dict[str, dict]):
+    """``external_inputs`` with every declared leaf in its declared dtype.
+
+    Called at the top of every step program, so the declaration is what
+    runs whichever door the value came in by: ``step``, a scan, an
+    ensemble, the raw compiled step, the FMU bridge (which casts on the
+    host and meets a no-op here) and the REST server.  The declared dtype
+    used to be applied only to the zeros of an omitted input and by the
+    FMU export, so an x64 graph ran ``0.1`` as float64 where its FMU ran
+    ``float32(0.1)``.
+
+    A leaf that already has the dtype, strongly typed, is passed through
+    untouched: the cast adds nothing to the program of a graph stepped
+    with arrays of the declared dtype (the committed step programs).  A
+    weakly typed one (a Python scalar) becomes strongly typed, like the
+    zeros it replaces.
+    """
+    if not declared or not external_inputs:
+        return external_inputs
+    out = None
+    for node, fields in external_inputs.items():
+        want = declared.get(node)
+        if not want:
+            continue
+        for field, value in fields.items():
+            dtype = want.get(field)
+            if dtype is None or (
+                getattr(value, "dtype", None) == dtype
+                and not getattr(value, "weak_type", False)
+            ):
+                continue
+            if out is None:
+                out = {n: dict(f) for n, f in external_inputs.items()}
+            out[node][field] = jnp.asarray(value, dtype=dtype)
+    return external_inputs if out is None else out
+
+
+def _input_cast_changes(value, dtype) -> Optional[str]:
+    """What kind of value ``value`` is, when casting it to the declared
+    ``dtype`` changes the number the step would otherwise have run; else
+    ``None``.
+
+    The comparison is with the value as JAX takes it in (a ``numpy.float64``
+    is already float32 without ``jax_enable_x64``), so nothing is reported
+    for a narrowing JAX itself always made.  A concrete value is compared
+    exactly, on the host: ``0.5`` into a float32 input changes nothing,
+    ``0.1`` from float64 does.  A traced value has no number to compare and
+    is judged by dtype alone.
+    """
+    have = getattr(value, "dtype", None)
+    if have is not None and have == dtype:
+        return None
+    if isinstance(value, jax.core.Tracer):
+        return None if _holds_every_value(have, dtype) else f"a traced {have}"
+    try:
+        arr = np.asarray(value)
+        have = jax.dtypes.canonicalize_dtype(arr.dtype)
+    except Exception:  # noqa: BLE001 - not a numeric leaf: the step will say so
+        return None
+    if have == dtype or _holds_every_value(have, dtype):
+        return None
+    # No warnings filter is touched here (they are per-process, and graphs
+    # run in threads): NumPy's floating-point complaints about a cast are
+    # ``errstate``'s, which is per-thread, and the one cast that warns
+    # through ``warnings`` -- complex to real -- is not made.
+    with np.errstate(all="ignore"):
+        try:
+            before = arr.astype(have)
+            if have.kind == "c" and np.dtype(dtype).kind != "c":
+                if bool(np.any(np.imag(before) != 0)):
+                    return f"a {have}"
+                before = np.real(before)
+                have = before.dtype
+            after = before.astype(dtype)
+            # Back in the dtype it came from, so the comparison is exact:
+            # NumPy would compare an int64 with a float64 as float64s.
+            same = bool(np.array_equal(after.astype(have), before, equal_nan=True))
+            if same and have.kind in "iu" and dtype.kind == "f":
+                # ... and the way back is defined only inside the integer's
+                # range (a uint64 2**64 - 1 is the float 2**64).
+                info = np.iinfo(have)
+                same = bool(np.all(after < float(2 ** info.bits if have.kind == "u"
+                                                 else 2 ** (info.bits - 1))))
+        except Exception:  # noqa: BLE001
+            same = False
+    return None if same else f"a {have}"
+
+
+def _holds_every_value(have, dtype) -> bool:
+    """Does ``dtype`` hold every value of ``have``?  NumPy's "safe" cast,
+    less the one it gets wrong for this purpose: a 64-bit integer into a
+    float64, whose mantissa is 53 bits."""
+    have, dtype = np.dtype(have), np.dtype(dtype)
+    if have.kind in "iu" and dtype.kind == "f":
+        bits = have.itemsize * 8 - (have.kind == "i")
+        return bits <= np.finfo(dtype).nmant + 1
+    return bool(np.can_cast(have, dtype, "safe"))
+
 # Key for internal multi-rate metadata in the full state dict.
 _META_KEY = "_meta"
 #: State and checkpoint keys a node may not be named: the graph's own state

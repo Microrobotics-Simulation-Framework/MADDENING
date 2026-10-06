@@ -198,6 +198,7 @@ from maddening.fmi.model_description import (
     _graph_changed_since,
     _parse_xs_value,
     _specs_changed_since,
+    _whole_steps,
 )
 from maddening.fmi.sidecar import (
     FmuSidecar,
@@ -2010,6 +2011,16 @@ class FmuTcpBridge:
                 f"{exc}; an importer steps at the advertised size "
                 "(canHandleVariableCommunicationStepSize is false), and every doStep "
                 "would be refused") from None
+        # ... and for a whole run: ``_master_steps`` holds one step to the
+        # tolerance on time, the drift check holds their sum to it, so an
+        # advertised step between rounding and that tolerance off a whole
+        # number of master steps was served here and refused a few steps in
+        # (``float(np.float32(0.05))`` at a 0.01 s step: the fourteenth).
+        # ``build_model_description`` refuses it; this is the same rule for
+        # a hand-built description, and against this bridge's ``master_dt``.
+        _whole_steps(advertised, self._dt,
+                    what="the model description's default_step_size",
+                    of="master_dt", ulps=_STEP_SIZE_ULPS)
 
     @staticmethod
     def _check_one_compile(md: ModelDescription, sidecar: FmuSidecar) -> None:

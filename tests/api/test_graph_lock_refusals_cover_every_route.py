@@ -42,6 +42,7 @@ from maddening.api import server as server_module
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes import BallNode
+from tests.api.rest_claims_support import collector_off
 from tests.property.differential import no_cloud_launch
 
 EDGE = {"source_node": "ball", "target_node": "ball", "source_field": "position",
@@ -263,13 +264,16 @@ def _queue_behind_a_start(server, client, calls) -> dict:
 
 def test_a_runner_route_behind_a_waiting_start_answers_within_one_lock_timeout(
         tmp_path, monkeypatch):
+    """Timed with the garbage collector off, from before the server is
+    built (``collector_off``): the bound leaves 0.15 s for the request."""
     monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", TIMEOUT)
-    server, client = _served(tmp_path)
-    try:
-        log = _queue_behind_a_start(server, client, [("reset 1", "POST", "/sim/reset"),
-                                                     ("reset 2", "POST", "/sim/reset")])
-    finally:
-        _stop(server)
+    with collector_off():
+        server, client = _served(tmp_path)
+        try:
+            log = _queue_behind_a_start(server, client, [("reset 1", "POST", "/sim/reset"),
+                                                         ("reset 2", "POST", "/sim/reset")])
+        finally:
+            _stop(server)
     assert set(log) == {"start", "reset 1", "reset 2"}, log
     for label, (waited, status, _body) in log.items():
         assert waited < 1.6 * TIMEOUT, (label, round(waited, 3), status, log)
@@ -279,13 +283,15 @@ def test_stop_behind_a_start_waiting_for_the_graph_answers_within_one_lock_timeo
         tmp_path, monkeypatch):
     """The start holds the runner lock while it waits for the graph, so the
     stop is answered when the start gives up -- within about one timeout of
-    the stop's arrival, not at once, and not after the graph is free."""
+    the stop's arrival, not at once, and not after the graph is free.
+    Timed with the garbage collector off, as the test above."""
     monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", TIMEOUT)
-    server, client = _served(tmp_path)
-    try:
-        log = _queue_behind_a_start(server, client, [("stop", "POST", "/sim/stop")])
-    finally:
-        _stop(server)
+    with collector_off():
+        server, client = _served(tmp_path)
+        try:
+            log = _queue_behind_a_start(server, client, [("stop", "POST", "/sim/stop")])
+        finally:
+            _stop(server)
     waited, status, body = log["stop"]
     assert waited < 1.6 * TIMEOUT, (round(waited, 3), status, body)
     assert log["start"][1] == 503, log

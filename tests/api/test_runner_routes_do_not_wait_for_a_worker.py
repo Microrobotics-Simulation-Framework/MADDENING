@@ -29,6 +29,7 @@ from maddening.api import server as server_module
 from maddening.api.server import SimulationServer
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes import BallNode
+from tests.api.rest_claims_support import collector_off
 
 TIMEOUT = 1.5
 N_READS = 48            # more than anyio's 40 worker threads
@@ -37,7 +38,10 @@ N_READS = 48            # more than anyio's 40 worker threads
 @pytest.fixture
 def saturated(monkeypatch):
     """A client whose every worker thread is waiting for the graph lock,
-    which the test thread holds for the length of the test."""
+    which the test thread holds for the length of the test.  The garbage
+    collector is off from before the app is built and served until the test
+    is over (``collector_off``): the tests here time a request sent just
+    after 48 others."""
     monkeypatch.setattr(server_module, "_GRAPH_LOCK_TIMEOUT", TIMEOUT)
     gm = GraphManager()
     gm.add_node(BallNode("ball", timestep=0.01, initial_position=1.0))
@@ -45,7 +49,8 @@ def saturated(monkeypatch):
         warnings.simplefilter("ignore")
         gm.compile()
     server = SimulationServer({}, graph_manager=gm)
-    with TestClient(server.create_app(), raise_server_exceptions=False) as client:
+    with collector_off(), \
+            TestClient(server.create_app(), raise_server_exceptions=False) as client:
         server._graph_lock.acquire()
         statuses: list = []
         readers = [threading.Thread(target=lambda: statuses.append(

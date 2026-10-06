@@ -33,7 +33,6 @@ and the module runs under :func:`tests.property.differential.no_cloud_launch`.
 from __future__ import annotations
 
 import contextlib
-import gc
 import hashlib
 import json
 import os
@@ -152,33 +151,9 @@ def reading(base: str, headers: dict):
     assert not bad, bad[:3]
 
 
-@contextlib.contextmanager
-def collector_off():
-    """Python's cyclic garbage collector switched off for the block.
-
-    A test here that times a request shares its process with the server it
-    asks, and a full (oldest-generation) collection stops every thread of
-    that process -- the client, the server's event loop and its workers --
-    for as long as it takes: 0.1 to 0.4 s in these tests on an idle core,
-    longer on a busy one.  The collector runs once enough objects have been
-    allocated, so a test that has just built and sent a hundred requests is
-    where one falls, and one that falls inside a timed request is counted
-    as the route's own time.  The two misses reproduced here (jax 0.10.2,
-    one busy core: a stop at 0.54 s and at 0.60 s against 0.5 s) each had
-    a collection of 0.46 s and of 0.42 s inside the request; CI's three,
-    0.70 to 0.76 s, are read the same way.  What the routes are asked for
-    -- not to wait for a worker thread, or for the graph -- has nothing to
-    do with it.
-
-    A collection another thread has already begun is not stopped, so a
-    test enters this before it starts its server or any thread."""
-    was_enabled = gc.isenabled()
-    gc.disable()
-    try:
-        yield
-    finally:
-        if was_enabled:
-            gc.enable()
+#: The garbage collector off for a timed request: shared with the other
+#: wall-clock tests of ``tests/api`` (``rest_claims_support.collector_off``).
+collector_off = S.collector_off
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +546,60 @@ def test_a_run_that_cannot_have_the_graph_among_simultaneous_requests_says_how_f
         body = out["r"].json()
         assert out["r"].status_code == 503 and body["status"] == "interrupted", body
         assert body["steps_run"] == server.relay.step_count > 0
+
+
+def test_a_run_among_simultaneous_requests_stops_at_its_next_slice_at_shutdown(tmp_path):
+    """REST-052: a /sim/run in flight on a real server (its slices slowed)
+    while three clients read the state and two write a parameter, all
+    released together by a barrier with the thread that calls
+    ``request_shutdown()``.  The run answers the 503 'interrupted' body with
+    the steps it took, the graph is left after exactly those steps, and
+    every request sent beside the shutdown is served."""
+    with S.loopback_server(_ANY, tmp_path) as (server, base):
+        gm = server.gm
+        real_run, done = gm.run, threading.Event()
+
+        def slow(n, *args, **kwargs):     # one 30 ms step a slice until the run is answered
+            if not done.is_set():
+                time.sleep(0.03)
+            return real_run(n, *args, **kwargs)
+
+        gm.run = slow
+        out: dict = {}
+        run = threading.Thread(target=lambda: out.setdefault(
+            "r", _client(base, server).post("/sim/run", params={"n_steps": 100_000})))
+        run.start()
+        try:
+            assert S.wait_for(lambda: server.relay.step_count >= 2), "the run never stepped"
+
+            def read():
+                with _client(base, server) as c:
+                    return [c.get("/graph/state/ball").status_code for _ in range(8)]
+
+            def write():
+                with _client(base, server) as c:
+                    return [c.put("/graph/params/spring",
+                                  json={"params": {"stiffness": 40.0}}).status_code
+                            for _ in range(4)]
+
+            def shut_down():
+                time.sleep(0.02)          # the reads and writes are in flight
+                server.request_shutdown()
+                return []
+
+            replies = simultaneously([read] * 3 + [write] * 2 + [shut_down])
+            run.join(30)
+        finally:
+            done.set()
+            gm.run = real_run
+        assert not run.is_alive(), "the run did not stop at the shutdown"
+        resp = out["r"]
+        assert resp.status_code == 503, resp.text
+        body = resp.json()
+        assert body["status"] == "interrupted" and body["n_steps"] == 100_000
+        assert 0 < body["steps_run"] < 100_000
+        assert server.relay.step_count == body["steps_run"]
+        assert [code for codes in replies for code in codes] == [200] * (3 * 8 + 2 * 4), replies
 
 
 def test_simultaneous_saves_of_one_name_leave_a_manifest_that_hashes_to_the_file(tmp_path):

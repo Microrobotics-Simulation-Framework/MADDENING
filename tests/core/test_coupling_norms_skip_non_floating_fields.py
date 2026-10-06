@@ -35,10 +35,14 @@ def _states():
     return new, old_full, old_floats
 
 
-_EDGES = [SimpleNamespace(source_node="a", source_field="x", transform=None),
-          SimpleNamespace(source_node="b", source_field="x", transform=None),
-          SimpleNamespace(source_node="a", source_field="n", transform=None),
-          SimpleNamespace(source_node="b", source_field="tag", transform=None)]
+def _edge(source_node, source_field):
+    """What the interface norm reads of an ``EdgeSpec``: its source, and the
+    mapping and transform the edge rule applies to it (none here)."""
+    return SimpleNamespace(source_node=source_node, source_field=source_field,
+                           mapping=None, transform=None)
+
+
+_EDGES = [_edge("a", "x"), _edge("b", "x"), _edge("a", "n"), _edge("b", "tag")]
 
 
 @pytest.mark.parametrize("norm", ["l2", "mixed", "interface"])

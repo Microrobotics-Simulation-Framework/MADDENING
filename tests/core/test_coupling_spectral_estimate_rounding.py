@@ -69,9 +69,12 @@ def _normal(seed):
 
 
 #: family -> (builder, the least number of the forty seeds it must call settled).
-#: Measured on this tree: 30, 40 and 40 (the tree before read 37, 40 and 40,
-#: with 8, 2 and 0 of them wrong by more than the margin).
-FAMILIES = {"hub": (_hub, 24), "ring": (_ring, 36), "normal": (_normal, 40)}
+#: Measured on this tree: 23, 40 and 40 (the tree before the breakdown
+#: rule read 37, 40 and 40, with 8, 2 and 0 of them wrong by more than the
+#: margin; with it and the sampled sensitivity alone, 30).  The hub family
+#: is float32 with fields 1e-4 to 1e-2 of the rest: the certificate over
+#: every perturbation of the measured size refuses more of it.
+FAMILIES = {"hub": (_hub, 18), "ring": (_ring, 36), "normal": (_normal, 40)}
 
 
 @functools.lru_cache(maxsize=None)

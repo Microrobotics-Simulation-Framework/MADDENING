@@ -1020,6 +1020,91 @@ def _probe_coefficients(active):
     return c / jnp.where(nrm > 0, nrm, 1.0)
 
 
+#: Points per circle in :func:`_rounding_keeps_the_radius`.
+_CERTIFICATE_ANGLES = 32
+
+#: How far above ``SPECTRAL_SETTLED_FRACTION * (1 - rho)`` a spectrum
+#: that is not certified is reported unsettled by, as a factor of that
+#: margin: any amount above it reads ``spectral_usable=False``; a
+#: sixteenth is far above the comparison's own rounding and raises the
+#: margin :func:`spectral_error_bound` adds by no more than that.
+_UNSETTLED_OVER_MARGIN = 1.0625  # units: dimensionless -- a factor of the settle margin
+
+
+def _rounding_keeps_the_radius(Hk, defect, active, rho, margin):
+    """Whether rounding of the measured size can move ``rho(Hk)`` by *margin*.
+
+    *defect* is the disagreement of one fresh product with the Arnoldi
+    relation, component by component along the basis: the measured size
+    of a product's rounding in each row of ``Hk``.  Every column of ``Hk``
+    is such a product, so the matrix the exact products would have given
+    is ``Hk + E`` with ``|E_ij| <= d_i`` on the active columns, ``d`` the
+    defect's magnitudes.  For any such ``E``, ``z`` is an eigenvalue of
+    ``Hk + E`` only if ``sigma_min(D^{-1} (z I - Hk)) <= ||D^{-1} E||_2
+    <= sqrt(k k_a)`` (``D = diag(d)``, ``k_a`` the active columns).  So
+    where that singular value is above ``sqrt(k k_a)`` at every point of
+    the circle ``|z| = rho + margin`` and of the circle of radius
+    *margin* about the dominant eigenvalue, no member of the family has
+    an eigenvalue on either circle, the count inside each is the same
+    for every member (the family is connected), and the radius of each
+    is within *margin* of ``rho``: a statement about every sign pattern
+    and every combination of columns, exact in the perturbation's size
+    (a near-defective eigenvalue moves by a root of it), where eight
+    sampled perturbations read 0.013 and 0.023 against margins of 0.037
+    and 0.045 on two float32 groups of rank six whose radius the exact
+    products put 0.044 and 0.051 away.  The circles are sampled at
+    :data:`_CERTIFICATE_ANGLES` points each.  ``True`` on a backend
+    without ``eigvals`` (nothing is certified there; the sampled
+    movement stands alone).
+    """
+    if jax.default_backend() not in _EIGVALS_BACKENDS:
+        return jnp.ones((), bool)
+    k = Hk.shape[0]
+    dtype = Hk.dtype
+    eps = float(jnp.finfo(dtype).eps)
+    finite = jnp.logical_and(jnp.all(jnp.isfinite(Hk)), jnp.all(jnp.isfinite(defect)))
+    Hs = jnp.where(finite, Hk, jnp.zeros_like(Hk))
+    mag = jnp.where(finite, jnp.abs(defect), jnp.zeros_like(defect))
+    on = active != 0
+    # Never exactly zero: a row the fresh product agreed on to the bit is
+    # held to ``sqrt(eps)`` of the largest disagreement (and a product
+    # that agreed everywhere to ``eps**2``; the entries are
+    # dimensionless).  Not ``eps`` of it: the rows are divided by ``d``,
+    # and a singular value is computed to ``eps`` of the largest one, so
+    # rows scaled ``1 / eps`` apart drowned the smallest in the SVD's own
+    # rounding and refused spectra known to sixteen digits.
+    d = mag + float(np.sqrt(eps)) * jnp.max(mag) + eps * eps
+    top = jnp.max(d)
+    row_scale = top / d
+    k_active = jnp.sum(on.astype(dtype))
+    bound = top * jnp.sqrt(k * jnp.maximum(k_active, 1.0))
+    eig = jnp.linalg.eigvals(Hs)
+    lead = eig[jnp.argmax(jnp.abs(eig))]
+    angles = (jnp.arange(_CERTIFICATE_ANGLES, dtype=dtype) + 0.5) * (
+        2.0 * jnp.pi / _CERTIFICATE_ANGLES)
+    radius = jnp.maximum(margin, jnp.zeros_like(margin))
+    cos, sin = jnp.cos(angles), jnp.sin(angles)
+    re = jnp.concatenate([(rho + radius) * cos, jnp.real(lead).astype(dtype) + radius * cos])
+    im = jnp.concatenate([(rho + radius) * sin, jnp.imag(lead).astype(dtype) + radius * sin])
+    eye = jnp.eye(k, dtype=dtype)
+    # The family lives on the active block (a basis vector that was never
+    # filled is zero, and so are its row and column of ``Hk`` and of every
+    # ``E``): the rest of the matrix is replaced by a diagonal above the
+    # bound, which takes no part in the smallest singular value.
+    block = jnp.logical_and(on[:, None], on[None, :])
+    idle = jnp.where(on, jnp.zeros_like(d), 2.0 * bound + 1.0)
+
+    def smallest(x, y):
+        # ``z I - Hk`` for complex ``z = x + i y`` as a real matrix of
+        # twice the size: the same singular values, each twice.
+        a = jnp.where(block, row_scale[:, None] * (x * eye - Hs), 0.0) + jnp.diag(idle)
+        b = jnp.where(block, row_scale[:, None] * (y * eye), 0.0)
+        return jnp.linalg.svd(jnp.block([[a, -b], [b, a]]), compute_uv=False)[-1]
+
+    clear = jnp.all(jax.vmap(smallest)(re, im) > bound)
+    return jnp.logical_and(finite, jnp.logical_and(clear, margin > 0))
+
+
 def _compressed_spectrum(H, coefficients, column, extended):
     """``(rho, unsettled, amplification)`` of a Krylov-compressed Jacobian.
 
@@ -1082,8 +1167,17 @@ def _compressed_spectrum(H, coefficients, column, extended):
     right = right.at[0].set(coefficients)
     agreed = Hk[None] + (signs * defect[None, :])[:, :, None] * right[:, None, :]
     moved = jnp.max(jnp.abs(jax.vmap(_spectral_radius)(agreed) - rho))
+    # What the flag's margin is, and the least that reads as beyond it.
+    margin = SPECTRAL_SETTLED_FRACTION * (1.0 - rho)
+    beyond = _UNSETTLED_OVER_MARGIN * jnp.maximum(margin, jnp.zeros_like(margin))
+    certified = _rounding_keeps_the_radius(Hk, defect, active, rho, margin)
+    moved = jnp.where(certified, moved, jnp.maximum(moved, beyond))
     grown = jnp.zeros((k + 1, k + 1), Hk.dtype).at[:, :k].set(H).at[:, k].set(column)
-    unsettled = jnp.where(extended, jnp.abs(_spectral_radius(grown) - rho), moved)
+    # A space still growing at the cap is not invariant, and a Ritz value
+    # of a space that is not invariant is within no computed distance of
+    # the radius unless the Jacobian is normal: beyond the margin, always.
+    growing = jnp.maximum(jnp.abs(_spectral_radius(grown) - rho), beyond)
+    unsettled = jnp.where(extended, growing, moved)
     return rho, unsettled, amplification
 
 

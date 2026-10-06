@@ -61,6 +61,42 @@ from maddening.core.coupling._reports import (
 )
 
 
+@jax.custom_jvp
+def _interpolate(a, b, alpha):
+    return a + alpha * (b - a)
+
+
+@_interpolate.defjvp
+def _interpolate_jvp(primals, tangents):
+    a, b, alpha = primals
+    a_dot, b_dot, alpha_dot = tangents
+    return _interpolate(a, b, alpha), (
+        (1.0 - alpha) * a_dot + alpha * b_dot + alpha_dot * (b - a))
+
+
+def _interpolated(a, b, alpha):
+    """``a + alpha * (b - a)``, differentiated as ``(1 - alpha) a + alpha b``.
+
+    The value is the expression a sub-cycled member's boundary has always
+    been interpolated with, to the bit.  Its tangent by the chain rule is
+    ``a_dot + alpha * (b_dot - a_dot)``, which rounds ``b_dot`` at one
+    ``eps`` of ``a_dot``: at the last sub-step (``alpha = 1``) the exact
+    tangent is ``b_dot`` alone, and under Gauss-Seidel ``a`` is the
+    iterate and ``b`` this pass's value of the same field, so a loop whose
+    gain passes through a change of that field below its rounding left the
+    Jacobian-vector product altogether -- a float32 ring with a field 1e-6
+    of what it drives read ``rho_spectral = 1e-12`` for a radius of
+    1.25e-4, ``spectral_usable=True`` (MADD-ANO-222).  The rule below
+    weights the two tangents separately, which is exact at both ends and
+    rounds each at its own size between them.  A leaf that is not
+    floating is interpolated as before.
+    """
+    if not (jnp.issubdtype(jnp.result_type(a), jnp.inexact)
+            and jnp.issubdtype(jnp.result_type(b), jnp.inexact)):
+        return a + alpha * (b - a)
+    return _interpolate(a, b, alpha)
+
+
 def _apply_interface_overrides(node_state, pre_state, boundary_inputs, dt,
                                node_obj, coupled_bi_names=None, node_params=None):
     """Correct interface DOFs after update to undo internal BC enforcement.
@@ -557,7 +593,7 @@ def _run_coupled_block_impl(
                             + (-alpha + 2.0 * alpha * alpha) * g_cur
                         )
                     else:
-                        geom = g_prev + alpha * (g_cur - g_prev)
+                        geom = _interpolated(g_prev, g_cur, alpha)
                 if use_quadratic_interp and s_prev_prev is not None:
                     # Quadratic Lagrange through 3 points:
                     # (0, v_pp), (0.5, v_prev), (1, v_cur)
@@ -575,7 +611,7 @@ def _run_coupled_block_impl(
                     v_prev = s_prev[edge.source_node][edge.source_field]
                     v_cur = s_cur[edge.source_node][edge.source_field]
                     value = jax.tree.map(
-                        lambda a, b: a + alpha * (b - a), v_prev, v_cur
+                        lambda a, b: _interpolated(a, b, alpha), v_prev, v_cur
                     )
             else:
                 value = _resolve_value(edge, s_cur, flux_s)

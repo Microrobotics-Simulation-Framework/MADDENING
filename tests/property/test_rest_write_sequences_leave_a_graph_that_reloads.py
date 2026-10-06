@@ -33,7 +33,15 @@ through the state-changing routes in whatever order Hypothesis picks --
    compiled, and of every example's last graph; a graph whose
    configuration cannot step must be one whose reload cannot either);
 5. a stable configuration stays stable: no ``HeatNode`` is left past its
-   Fourier limit, by the values its step reads or by those a save carries.
+   Fourier limit, by the values its step reads or by those a save carries;
+6. a request that *fails unexpectedly* changes nothing either.  Every
+   request is first sent with a failure injected into the route's body --
+   at each point it reaches in turn, before and after every step that
+   mutates the graph, publishes to the streams or writes the reply
+   (``tests/property/injected_failures.py``) -- and after each the graph
+   must be exactly as it was: by invariant 2's snapshot, and object for
+   object (``tests/property/graph_fingerprint.py``).  A refusal of the
+   request's own is held to the same object-for-object comparison.
 
 What makes the historical sequences reachable is the vocabulary.  A rod is
 drawn *at* its limit, not safely inside it: its diffusivity, length,
@@ -87,12 +95,14 @@ from maddening.nodes import BallNode, HeatNode, SpringDamperNode
 from tests.conftest import EXAMPLES_FLOOR
 from tests.property import rest_oracle as O
 from tests.property.differential import no_cloud_launch, note, quiet
+from tests.property.graph_fingerprint import assert_exactly_as_it_was, served_fingerprint
+from tests.property.injected_failures import fail_at_every_point, injection_points
 from tests.property.node_catalogue import f32
 
 
 @pytest.fixture(scope="module", autouse=True)
 def _no_cloud():
-    with no_cloud_launch():
+    with no_cloud_launch(), injection_points():
         yield
 
 
@@ -240,14 +250,15 @@ def _same(a: Any, b: Any) -> bool:
         return a == b
 
 
-def _partial_run(resp) -> bool:
-    """A ``POST /sim/run`` whose 4xx or 503 says it took some of its steps:
-    the one refusal that is documented to leave the graph changed."""
+def _partial_run(resp) -> int:
+    """The steps a ``POST /sim/run`` says it took before its 4xx, 500 or
+    503: the one refusal that is documented to leave the graph changed.
+    Zero for any other reply."""
     try:
         body = resp.json()
     except ValueError:
-        return False
-    return isinstance(body, dict) and bool(body.get("steps_run"))
+        return 0
+    return int(body.get("steps_run") or 0) if isinstance(body, dict) else 0
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +329,6 @@ class RestWriteSequences(RuleBasedStateMachine):
         assert self.served is not None
         assert not url.startswith(("/cloud", "/surrogate", "/ws")), url
         self.settled = False
-        before = O.snapshot(self.served)
         kwargs: dict = {}
         if body is not None:
             # NaN and Infinity spelled as Python's encoder (and a careless
@@ -327,8 +337,22 @@ class RestWriteSequences(RuleBasedStateMachine):
                       "headers": {"content-type": "application/json"}}
         if params is not None:
             kwargs["params"] = params
-        resp = self.served.client.request(method, url, **kwargs)
         what = O.describe(method, url, body if body is not None else params)
+        served = self.served
+
+        def moved_on(fired, failed):
+            # A run that failed after some of its steps left the graph
+            # after them: invariants 3 to 5 are asked of it again.
+            note(f"{what} with a failure injected at {fired} -> {failed.status_code}")
+            if _partial_run(failed):
+                self.unchecked = True
+
+        # Invariant 6, then the request itself.
+        resp, injected, before, fingerprint = fail_at_every_point(
+            served, lambda: served.client.request(method, url, **kwargs), what,
+            partial=_partial_run, on_failure=moved_on)
+        type(self).counts["failures injected"] += len(injected)
+        type(self).counts[(rule_name, "failed at a point")] += bool(injected)
         note(f"{what} -> {resp.status_code} {resp.text[:300]}")
         O.assert_no_server_error(resp, what)
         if resp.status_code < 300:
@@ -338,6 +362,8 @@ class RestWriteSequences(RuleBasedStateMachine):
         type(self).counts[(rule_name, outcome)] += 1
         if resp.status_code >= 400 and not _partial_run(resp):
             O.assert_nothing_changed(before, O.snapshot(self.served), what)
+            assert_exactly_as_it_was(fingerprint, served_fingerprint(self.served),
+                                     f"{what}, refused {resp.status_code},")
         else:
             self.unchecked = True
             self.last_kind = rule_name
@@ -808,6 +834,11 @@ def test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload():
     assert accepted >= 40 and refused >= 10, dict(counts)
     assert counts["stepped beside its reload"] >= 40, dict(counts)
     assert len({key[0] for key in counts if isinstance(key, tuple)}) >= 8, dict(counts)
+    # Invariant 6 was asked: failures were injected, in most kinds of request.
+    assert counts["failures injected"] >= 400, dict(counts)
+    assert len({key[0] for key, n in counts.items()
+                if isinstance(key, tuple) and key[1] == "failed at a point" and n}) >= 8, \
+        dict(counts)
 
 
 # Per push: tests/property/test_rest_write_sequences_leave_a_graph_that_reloads.py::test_short_sequences_of_rest_writes_leave_a_graph_that_runs_as_its_reload
@@ -932,6 +963,10 @@ def test_every_kind_of_request_the_machine_sends_is_both_accepted_and_refused():
                  "add edge", "remove edge", "step", "run", "compile", "save", "load"):
         for outcome in ("accepted", "refused"):
             assert counts[(kind, outcome)] > 0, (kind, outcome, dict(counts))
+        # ... and with a failure injected into its body (invariant 6).
+        assert counts[(kind, "failed at a point")] > 0, (kind, dict(counts))
+    assert counts[("reset", "failed at a point")] and counts["failures injected"] >= 150, \
+        dict(counts)
     assert counts[("reset", "accepted")] and counts[("fit", "kept")] \
         and counts[("fit", "put back")], dict(counts)
     assert counts["stepped beside its reload"] >= 15 and counts[

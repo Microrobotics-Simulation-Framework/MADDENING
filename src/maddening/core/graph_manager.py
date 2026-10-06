@@ -2384,14 +2384,18 @@ class GraphManager:
         scheduled = _graph_specs._scheduled_timesteps(self._nodes, self._coupling_groups)
         if len(set(scheduled.values())) > 1:
             base_dt = _graph_specs._step_duration(scheduled)
-            dividers = {
-                name: round(scheduled[name] / base_dt)
-                for name in self._nodes
-            }
-            issues.append(
-                f"INFO: multi-rate scheduling enabled. "
-                f"Base timestep: {base_dt}, rate dividers: {dividers}"
-            )
+            try:
+                dividers = _graph_specs._rate_dividers(scheduled)
+            except ValueError as exc:
+                # What compile() raises: a schedule that would not keep a
+                # node's clock used to be reported here as enabled, with a
+                # rate divider of 0.
+                issues.append(f"ERROR: {exc}")
+            else:
+                issues.append(
+                    f"INFO: multi-rate scheduling enabled. "
+                    f"Base timestep: {base_dt}, rate dividers: {dividers}"
+                )
 
         # Coupling group validation
         coupled_nodes: set[str] = set()
@@ -2524,6 +2528,12 @@ class GraphManager:
         # state is usable; a graph still holding a transform's tracers
         # goes back to the state it had before it first.
         self._recover_from_escaped_tracers()
+        # A multi-rate schedule that would not keep a node's clock is a
+        # ValueError naming the two nodes, before anything else is asked
+        # (validate() lists it among its errors too).
+        scheduled = _graph_specs._scheduled_timesteps(self._nodes, self._coupling_groups)
+        if len(set(scheduled.values())) > 1:
+            _graph_specs._rate_dividers(scheduled)
         issues = self.validate()
         errors = [i for i in issues if i.startswith("ERROR")]
         if errors:
@@ -2668,10 +2678,9 @@ class GraphManager:
         if len(timesteps) > 1:
             is_multirate = True
             base_dt = _graph_specs._step_duration(effective_timesteps)
-            rate_dividers = {
-                name: round(effective_timesteps[name] / base_dt)
-                for name in self._nodes
-            }
+            # Refuses (ValueError) a schedule that would not keep a node's
+            # clock; the dividers of one it keeps are what they were.
+            rate_dividers = _graph_specs._rate_dividers(effective_timesteps)
         else:
             is_multirate = False
             rate_dividers = {name: 1 for name in self._nodes}

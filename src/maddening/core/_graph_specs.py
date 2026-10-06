@@ -804,6 +804,57 @@ def _multi_gcd(values: Sequence[float], rtol: float = _GCD_RTOL) -> float:
     return result
 
 
+#: How closely ``divider * base_dt`` must reproduce a node's scheduled
+#: timestep, as a fraction of that timestep, for the multi-rate schedule to
+#: be compiled.  The float GCD is exact to a few ulps for timesteps a few
+#: decades apart and loses about one digit per decade of their ratio; a
+#: node whose clock the schedule would run more than a part in a million
+#: fast or slow is refused instead (:func:`_rate_dividers`).
+_RATE_RTOL = 1e-6  # units: dimensionless, a fraction of the node's timestep
+
+
+def _rate_dividers(scheduled) -> dict:
+    """``{node: divider}`` of a multi-rate graph: the node is stepped every
+    *divider*-th base step, the base step being :func:`_step_duration` of
+    *scheduled* (:func:`_scheduled_timesteps`'s mapping).
+
+    ``ValueError`` when the schedule would not keep a node's clock: its
+    divider rounds to zero, or ``divider * base_dt`` misses its timestep by
+    more than :data:`_RATE_RTOL` of it.  The GCD takes a remainder at or
+    below ``1e-9`` of the largest timestep for float noise, so a timestep
+    below that fraction of the largest *was* the noise: nodes at ``1.0``
+    and ``1e-10`` got a base step of ``1.0`` and dividers of 1 and 0, the
+    fast node was stepped once per base step with its own ``1e-10``, and
+    after four steps its clock read ``4e-10`` against ``4.0`` -- add,
+    compile, validate and run all succeeding.  Timesteps a little closer
+    together could leave a divider that was a third off (``1.0`` and
+    ``1.5e-9``: a base of ``1e-9`` and a divider of 2).  The dividers of a
+    graph whose schedule is kept are computed as they always were.
+    """
+    base_dt = _step_duration(scheduled)
+    dividers = {name: round(dt / base_dt) for name, dt in scheduled.items()}
+    slowest = max(scheduled, key=lambda name: scheduled[name])
+    for name, dt in scheduled.items():
+        divider = dividers[name]
+        if divider >= 1 and abs(divider * base_dt - dt) <= _RATE_RTOL * dt:
+            continue
+        if divider < 1:
+            how = (f"it is not above {_GCD_RTOL:g} of the largest timestep, which the "
+                   f"common step ({base_dt!r}) is computed to, so it would be stepped "
+                   f"once per step of {base_dt!r} and advance its own {dt!r} each time")
+        else:
+            how = (f"the common step found for them is {base_dt!r}, and stepping it "
+                   f"every {divider} of those advances the graph's clock by "
+                   f"{divider * base_dt!r} for each {dt!r} of its own")
+        raise ValueError(
+            f"nodes {name!r} (timestep {dt!r}) and {slowest!r} (timestep "
+            f"{scheduled[slowest]!r}) cannot be scheduled together: {how}.  Give the "
+            "nodes timesteps that are whole multiples of one common step, no more "
+            f"than about {1 / _GCD_RTOL:g} times apart."
+        )
+    return dividers
+
+
 def _multi_device_mesh(nodes, state, graph_mesh=None):
     """The device mesh a step spans when it spans more than one device, else ``None``.
 

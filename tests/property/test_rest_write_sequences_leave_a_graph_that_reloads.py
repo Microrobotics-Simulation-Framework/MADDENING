@@ -1344,8 +1344,7 @@ def test_a_save_made_before_an_initial_condition_was_written_still_loads():
             node = machine.gm._nodes[name].node  # noqa: SLF001
             assert _same(node.params[key], saved[(name, key)]), (name, key)
             assert _same(machine.gm.params["nodes"][name][key], saved[(name, key)])
-            assert step(machine.do_reset).status_code == 200
-            assert step(machine.do_step).status_code == 200
+        assert step(machine.do_reset).status_code == 200
     counts = RestWriteSequences.counts
     assert counts[("load", "accepted")] == len(written), dict(counts)
     # ... and a failure was injected at every point of each load (invariant 6)

@@ -711,7 +711,7 @@ def _graph_timing(gm: "GraphManager") -> tuple[float, bool]:
     :class:`~maddening.usd.writer.USDWriter` wrote 0.01 for every graph
     (MADD-ANO-097).
     """
-    from maddening.core.graph_manager import _scheduled_timesteps  # noqa: PLC0415
+    from maddening.core._graph_specs import _scheduled_timesteps  # noqa: PLC0415
 
     if not gm._nodes:
         return 0.01, False

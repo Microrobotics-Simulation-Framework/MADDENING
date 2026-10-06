@@ -15,7 +15,7 @@ the hub (counted once per leaf), and the bound read 0.73, 0.52, 0.37 and
 the analysis on the reading and read 1.005 (CPL-088, MADD-ANO-213).
 
 Such a group's report is now taken on the reading too
-(``graph_manager._reading_is_the_fields`` decides, statically).  The oracle
+(``coupling._group_layout._reading_is_the_fields`` decides, statically).  The oracle
 is the float64 fixed point of the affine map as the step holds it, and the
 distance is the interface norm's: every internal edge's source value, its
 change over ``rtol`` times its own ``max|v|`` at the returned state, the RMS
@@ -35,7 +35,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maddening.core import graph_manager as gmod
+from maddening.core.coupling import _coupled_block as block_mod
+from maddening.core.coupling import _group_layout as layout_mod
 from maddening.core.coupling.acceleration import coupling_residual_interface
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import BoundaryInputSpec, SimulationNode
@@ -283,7 +284,7 @@ def test_the_reading_is_the_fields_only_where_each_is_read_once_as_it_is():
     """The static rule: the state's weights are the interface norm's exactly
     when every internal edge delivers its floating source field unchanged
     and no field is read twice."""
-    is_fields = gmod._reading_is_the_fields                                  # noqa: SLF001
+    is_fields = layout_mod._reading_is_the_fields                            # noqa: SLF001
     floats = {"a": ("x", "y"), "b": ("x",), "c": ("x",)}
     assert is_fields([], floats)
     assert is_fields([_edge("a"), _edge("b")], floats), "a pair"
@@ -337,13 +338,14 @@ def test_only_a_group_whose_reading_is_not_its_fields_takes_the_second_spectrum(
     diagnostics cost (CPL-013), are what they were."""
     build, expected = _SECOND_SPECTRUM[which]
     calls = []
-    real = gmod._interface_spectral_rate_at                                 # noqa: SLF001
+    real = block_mod._interface_spectral_rate_at                            # noqa: SLF001
 
     def counted(*args, **kwargs):
         calls.append(1)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(gmod, "_interface_spectral_rate_at", counted)
+    # The coupled block reads its own binding of the name, so that is the one patched.
+    monkeypatch.setattr(block_mod, "_interface_spectral_rate_at", counted)
     gm = build()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 from maddening.core.coupling.acceleration import SPECTRAL_KRYLOV_STEPS, jacobian_range_basis
-from maddening.core.graph_manager import _full_resolvent_norm
+from maddening.core.coupling._bounds import _full_resolvent_norm
 
 
 def _low_rank(n, rank, seed, scale):

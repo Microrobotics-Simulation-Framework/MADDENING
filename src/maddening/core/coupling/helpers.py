@@ -320,7 +320,7 @@ def check_conservation(
         and cannot be rebuilt from a state alone; the diagnostic used to
         drop them and compare fluxes computed without them.
     """
-    from maddening.core.graph_manager import _node_fluxes  # noqa: PLC0415
+    from maddening.core._graph_specs import _node_fluxes  # noqa: PLC0415
 
     node_params = gm._params_or_default(None).get("nodes", {})
     computed: dict[str, dict] = {}

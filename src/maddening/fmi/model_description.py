@@ -774,13 +774,13 @@ def _node_timesteps(graph_manager: Any) -> dict[str, float]:
     """Each node's timestep as the graph's step schedules it.
 
     A ``GraphManager``'s scheduled timesteps
-    (``maddening.core.graph_manager._scheduled_timesteps``): every member of
+    (``maddening.core._graph_specs._scheduled_timesteps``): every member of
     a sub-cycling coupling group at the group's largest member timestep,
     because the group solves once per macro step and an importer sees its
     members change only then.  A duck-typed graph without coupling groups
     gives its nodes' own timesteps.
     """
-    from maddening.core.graph_manager import _scheduled_timesteps  # noqa: PLC0415
+    from maddening.core._graph_specs import _scheduled_timesteps  # noqa: PLC0415
 
     nodes = getattr(graph_manager, "_nodes", {}) or {}
     own = {
@@ -838,7 +838,7 @@ def _master_timestep(graph_manager: Any) -> float:
     empty graph 1e-3.  (This used to read a ``_base_dt`` attribute nothing
     set and fall back to the smallest node timestep, MADD-ANO-097.)
     """
-    from maddening.core.graph_manager import _step_duration  # noqa: PLC0415
+    from maddening.core._graph_specs import _step_duration  # noqa: PLC0415
 
     try:
         return float(graph_manager.timestep)

@@ -13,7 +13,8 @@ import pytest
 from hypothesis import given, settings, note
 from hypothesis import strategies as st
 
-from maddening.core.graph_manager import _RESERVED_STATE_KEYS, GraphManager
+from maddening.core.graph_manager import GraphManager
+from maddening.core._graph_specs import _RESERVED_STATE_KEYS
 from maddening.nodes.ball import BallNode
 from maddening.nodes.spring import SpringDamperNode
 from maddening.nodes.heat import HeatNode

@@ -51,7 +51,7 @@ from maddening.cloud.multigpu.device_mesh import create_device_mesh
 from maddening.cloud.multigpu.halo_unstructured import build_unstructured_partition
 from maddening.cloud.multigpu.sharded_node import ShardedPointwiseNode, ShardedStencilNode
 from maddening.cloud.multigpu.sharded_unstructured import ShardedUnstructuredNode
-from maddening.core import graph_manager as gm_mod
+from maddening.core import _graph_specs as specs_mod
 from maddening.core.graph_manager import GraphManager
 from maddening.core.node import (
     SimulationNode,
@@ -341,7 +341,7 @@ PROBES = {
             _make(kind, s).accepts_params() if kind == "node" else None),
         "_method_accepts_params": _node_probe(lambda n: _method_accepts_params(n, "update")),
         "_signature_takes_params": _node_probe(lambda n: _signature_takes_params(n.update)),
-        "graph _update_accepts_params": _node_probe(gm_mod._update_accepts_params),
+        "graph _update_accepts_params": _node_probe(specs_mod._update_accepts_params),
         "graph add_node spec": _Door(_graph_spec("accepts_params")),
         "graph nodes_without_params": _Door(lambda kind, s: (
             lambda gm: (gm.add_node(_make(kind, s)), "n" not in gm.nodes_without_params())[1]
@@ -381,7 +381,7 @@ PROBES = {
     "compute_boundary_fluxes": {
         "_method_accepts_params": _node_probe(
             lambda n: _method_accepts_params(n, "compute_boundary_fluxes")),
-        "graph _flux_accepts_params": _node_probe(gm_mod._flux_accepts_params),
+        "graph _flux_accepts_params": _node_probe(specs_mod._flux_accepts_params),
         "graph add_node spec": _Door(_graph_spec("flux_accepts_params")),
         "verification _flux_accepts_params": _node_probe(ver_mod._flux_accepts_params),
         "HybridNode forwards": _Door(_hybrid_forwards("compute_boundary_fluxes")),
@@ -389,7 +389,7 @@ PROBES = {
     "compute_interface_correction": {
         "_method_accepts_params": _node_probe(
             lambda n: _method_accepts_params(n, "compute_interface_correction")),
-        "graph _correction_accepts_params": _node_probe(gm_mod._correction_accepts_params),
+        "graph _correction_accepts_params": _node_probe(specs_mod._correction_accepts_params),
         "HybridNode forwards": _Door(_hybrid_forwards("compute_interface_correction")),
     },
 }

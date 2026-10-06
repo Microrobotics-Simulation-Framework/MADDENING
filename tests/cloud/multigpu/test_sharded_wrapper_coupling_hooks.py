@@ -224,7 +224,7 @@ def test_every_wrapper_forwards_the_update_evaluations_of_the_node_it_wraps(kind
     """A wrapper that drops the declaration makes a coupling group read the
     node's float floor as one evaluation.  ``HybridNode`` and
     ``ShardedUnstructuredNode`` dropped it; the Cartesian wrappers did not."""
-    from maddening.core.graph_manager import _declared_evaluations
+    from maddening.core.coupling._group_layout import _declared_evaluations
 
     wrapped = _declaring_wrapped(kind)
     assert wrapped.update_evaluations() == 7

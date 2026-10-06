@@ -410,7 +410,7 @@ def _interface_readings(interface_edges, *states, mappings=None):
     (:func:`coupling_residual_interface`), its float floor
     (:func:`residual_precision_floor`) and the spectral analysis the
     report's bound is taken on (``_reading_values`` in
-    ``core/graph_manager.py``) all iterate this generator, so they
+    ``core/coupling/_coupled_block.py``) all iterate this generator, so they
     cannot disagree about what the norm measures, and none of them can
     measure a value the consuming node never sees.
 
@@ -520,7 +520,7 @@ def coupling_residual_interface(
     edges in an order fixed by the group itself: by each edge's source's
     place in the group's sweep, then its source field, its target's place,
     its target field and its ordinal (``_interface_edge_order`` in
-    ``core/graph_manager.py``), the order the L2 and mixed norms sum the
+    ``core/coupling/_group_layout.py``), the order the L2 and mixed norms sum the
     members in.  So the norm depends neither on the order of the
     ``add_edge`` calls nor on the nodes' names.  Before 0.4.0 it summed in
     the order the edges had been added: the same group built with its
@@ -605,7 +605,7 @@ def error_amplification(residual, prev_residual, prev2_residual=None):
     development, for exactly this reason; no release carried the old
     name) reports a usable *ratio*, not a valid *bound*.  The
     full list of what the estimate rests on is in
-    ``graph_manager._fixed_point_while``; the decision it feeds is in
+    ``coupling._fixed_point._fixed_point_while``; the decision it feeds is in
     ``benchmarks/results/audit_040_final/ERROR_BOUND_DECISION.md``.
 
     **The spectrum is measured, beside this, under ``solver="ift"``
@@ -1254,7 +1254,7 @@ def _arnoldi_through(matvec, measure, u0, n_steps: int = SPECTRAL_KRYLOV_STEPS,
 #: whether the node looped inside ``update`` or the framework
 #: sub-cycled it.  So the floor is this constant times the number of
 #: evaluations one coupling pass rounds like
-#: (``maddening.core.graph_manager._group_evaluations``, a module-level
+#: (``maddening.core.coupling._group_layout._group_evaluations``, a module-level
 #: function).  A node's own update counts its sub-cycling divider times
 #: :meth:`SimulationNode.update_evaluations`, which is ``4N`` for the
 #: sub-stepping node above -- 16, 40, 80, 200 and 400 units against
@@ -1368,7 +1368,7 @@ def residual_precision_floor(state, node_names, convergence_norm="l2",
         How many evaluations of the map one coupling pass rounds like:
         the floor is ``PRECISION_FLOOR_ULPS`` units *per evaluation*.
         ``GraphManager.coupling_diagnostics`` passes the count of
-        ``maddening.core.graph_manager._group_evaluations``: each node
+        ``maddening.core.coupling._group_layout._group_evaluations``: each node
         counts ``sub-cycling divider * SimulationNode.update_evaluations()``,
         and the pass the worst node's count under Jacobi or the longest
         chain of same-pass reads under Gauss-Seidel; ``1.0`` is a pass

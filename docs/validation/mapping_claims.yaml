@@ -318,7 +318,7 @@ claims:
     and the hyper-parameters it was given".
   sources:
     - docs/algorithm_guide/coupling/interface_mapping.md (Registering your own mapping kind)
-    - src/maddening/core/graph_manager.py (GraphManager._rebuild_mapping)
+    - src/maddening/core/graph_manager.py::GraphManager._rebuild_mapping
     - src/maddening/core/coupling/mapping_spec.py (_check_registered_result)
   conditions: >-
     twenty-three exception types, those no built-in factory raises included;
@@ -428,7 +428,7 @@ claims:
   sources:
     - docs/algorithm_guide/coupling/interface_mapping.md (What params_pytree() may contain)
     - src/maddening/core/coupling/mapping.py (_params_contract_problem)
-    - src/maddening/core/graph_manager.py (GraphManager.add_edge)
+    - src/maddening/core/graph_manager.py::GraphManager.add_edge
   conditions: >-
     every structure, key and leaf the four rules exclude, a table that
     changes between two calls in its values, a shape, a dtype or its keys; a
@@ -590,7 +590,7 @@ claims:
     to_dict() warns that the live weights differ.
   sources:
     - docs/release_notes/v0.4.0.md (Registering a mapping kind)
-    - src/maddening/core/graph_manager.py (GraphManager._snapshot_params)
+    - src/maddening/core/graph_manager.py::GraphManager._snapshot_params
   conditions: >-
     a mapping that hands out the dict it keeps, with a matrix and a scalar
     weight, both edited in place.  A property of the table, on the host,

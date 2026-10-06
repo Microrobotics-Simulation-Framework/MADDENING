@@ -34,12 +34,14 @@ from maddening.core.coupling.acceleration import (
     residual_precision_floor,
 )
 from maddening.core.edge import EdgeSpec
-from maddening.core.graph_manager import (
+from maddening.core.coupling._bounds import (
     _gradient_error_bound_at,
     _interface_spectral_rate_at,
+    _spectral_rate_at,
+)
+from maddening.core.coupling._ift import (
     _ift_linear_solve,
     _ift_solve,
-    _spectral_rate_at,
 )
 
 F32 = jnp.float32

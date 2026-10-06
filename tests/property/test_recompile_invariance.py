@@ -31,7 +31,8 @@ import numpy as np
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from maddening.core.graph_manager import _META_KEY, GraphManager
+from maddening.core.graph_manager import GraphManager
+from maddening.core._graph_specs import _META_KEY
 from maddening.core.node import BoundaryInputSpec, SimulationNode
 from tests.conftest import EXAMPLES_COSTLY
 

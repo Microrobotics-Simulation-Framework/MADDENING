@@ -393,7 +393,7 @@ fields' analysis read 0.26-0.73x the true distance with
 with a field that more than one internal edge reads is analysed on the
 reading too.  Only a group whose internal edges read each field once, as
 it is, keeps the analysis in the state's weights (`_reading_is_the_fields`
-in `core/graph_manager.py`, static): there the two are one norm, and the
+in `core/coupling/_group_layout.py`, static): there the two are one norm, and the
 second spectrum's eight Jacobian-vector products are not spent.  And while the norm and this analysis applied the transform but
 left an edge's mapping out, a mapped edge was measured on its source
 field throughout: the bound was consistent with the residual and both
@@ -1023,7 +1023,7 @@ right.
 One property of Aitken worth knowing before reaching for it: since the
 correction it needs the convergence threshold met on **two consecutive
 passes**.  The mechanism is real — `_TWO_PASS_EXIT` in
-`core/graph_manager.py`, argued in `_fixed_point_while`'s docstring —
+`core/coupling/_fixed_point.py`, argued in `_fixed_point_while`'s docstring —
 but an earlier version of this paragraph drew the wrong floor from it
 and said Aitken "cannot exit in fewer than four".  **It can, and the
 repo's own recorded baseline says so.**  The streak's first member is
@@ -1405,7 +1405,7 @@ is `2 * N**2 * itemsize`. In float32:
 
 `jax_enable_x64` doubles every row. The figures are XLA's own
 compiled-module memory analysis of the `_dense` body in
-`maddening.core.graph_manager`, taken on CPython 3.12.3 with
+`maddening.core.coupling._ift`, taken on CPython 3.12.3 with
 jax/jaxlib 0.11.0 on the CPU backend; nothing was allocated to produce
 them, and the analysis agrees with `2 * N**2 * 4` to within a few tens
 of kilobytes at every size from 64 DOF to 3.6e5.

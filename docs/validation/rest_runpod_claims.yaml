@@ -5871,8 +5871,8 @@ claims:
     refuse the other reserved names; a lookalike (meta, __meta, _Meta,
     _meta_, params) is taken.
   sources:
-    - src/maddening/core/graph_manager.py:6601 (GraphManager.add_node)
-    - src/maddening/core/graph_manager.py:2619 (_RESERVED_STATE_KEYS)
+    - src/maddening/core/graph_manager.py::GraphManager.add_node
+    - src/maddening/core/_graph_specs.py::_RESERVED_STATE_KEYS
   conditions: >-
     each reserved name over REST and in-process; seven lookalikes; the graph
     compiles, steps and saves after a refusal.
@@ -5911,7 +5911,7 @@ claims:
   sources:
     - src/maddening/api/server.py:599 (AddNodeRequest)
     - src/maddening/api/server.py:3211 (_request_validation_error)
-    - src/maddening/core/graph_manager.py:6582 (GraphManager.add_node)
+    - src/maddening/core/graph_manager.py::GraphManager.add_node
   conditions: >-
     NaN, Infinity, -Infinity, 0, 0.0, -0.0, -0.01 and -1e308 over REST, the
     same three as JSON text ("NaN") and a surrogate in the refused value, and

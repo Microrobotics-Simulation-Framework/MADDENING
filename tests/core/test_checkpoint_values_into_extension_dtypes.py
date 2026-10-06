@@ -289,6 +289,17 @@ def test_a_four_bit_leaf_takes_its_own_extremes_and_nothing_past_them(target, so
             _checked_cast(np.asarray([low, past], source), dtype, "leaf 'probe'")
 
 
+def test_a_numpy_integer_leaf_is_not_sent_through_the_small_integers_float64():
+    """The 4-bit branch compares in float64, which is exact for bounds of
+    at most 15 and not for a 64-bit leaf's: 2**63 rounds onto int64's
+    largest value there.  NumPy's integers keep the exact rule."""
+    edge = np.asarray([3, 2**63 - 1], np.uint64)
+    kept = _checked_cast(edge, np.dtype(np.int64), "leaf 'probe'")
+    assert kept.dtype == np.int64 and [int(v) for v in kept] == [3, 2**63 - 1]
+    with pytest.raises(ValueError, match="leaf 'probe' holds 9223372036854775808 .* cannot hold"):
+        _checked_cast(np.asarray([3, 2**63], np.uint64), np.dtype(np.int64), "leaf 'probe'")
+
+
 def test_a_leaf_dtype_with_no_rule_is_refused_not_assumed_lossless():
     """A cast into a dtype that is neither a float, an integer nor a
     boolean used to be taken as it came."""

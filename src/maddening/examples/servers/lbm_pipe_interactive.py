@@ -44,8 +44,6 @@ if "--gpu" in sys.argv:
 else:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import warnings
-
 import jax
 import numpy as np
 
@@ -97,9 +95,7 @@ def build_graph(prop_strength: float = INITIAL_PROP_STRENGTH) -> GraphManager:
         propeller_strength=prop_strength,
         initial_velocity=0.0,
     ))
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gm.compile()
+    gm.compile()
     return gm
 
 

@@ -622,6 +622,28 @@ def _read_checkpoint_archive(path: Path) -> dict[str, np.ndarray]:
         archive.close()
 
 
+def _number_kind(dtype: np.dtype) -> str:
+    """``dtype.kind``, with a dtype NumPy has no kind for told from JAX's
+    own lattice: ``"f"``, ``"i"`` or ``"u"``.
+
+    bfloat16, the 4-, 6- and 8-bit floats and the 2- and 4-bit integers
+    are JAX dtypes that NumPy carries as extension types, and reports as
+    kind ``"V"`` (void), the kind of raw bytes.  A rule written on
+    ``kind`` alone therefore took a bfloat16 leaf for "not a number":
+    :func:`_checked_cast` cast a checkpoint's value into one with no
+    check at all (MADD-ANO-207).
+    """
+    if dtype.kind != "V":
+        return dtype.kind
+    if jnp.issubdtype(dtype, jnp.floating):
+        return "f"
+    if jnp.issubdtype(dtype, jnp.unsignedinteger):
+        return "u"
+    if jnp.issubdtype(dtype, jnp.signedinteger):
+        return "i"
+    return dtype.kind
+
+
 def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
     """*arr* in the live leaf's *dtype*, refused (``ValueError``) when the
     cast would lose a value.
@@ -641,9 +663,16 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
     one), which a cast there and back cannot see
     (:func:`maddening.core._exact_integers.lost_as_integer`) -- and so is a
     complex value with an imaginary part for a real leaf.
+
+    The live leaf may be of a dtype NumPy knows only as an extension type
+    (bfloat16; :func:`_number_kind`): it is held to the same rule.  A
+    float32 ``1e-44`` used to load into a bfloat16 leaf as ``0.0`` and
+    ``3.4028235e38`` as ``inf`` with nothing said, because the rule was
+    chosen by ``dtype.kind`` and an extension dtype's is ``"V"``.
     """
     a = np.asarray(arr)
     target = np.dtype(dtype)
+    source_kind, target_kind = _number_kind(a.dtype), _number_kind(target)
     # Text and booleans are not numbers: NumPy casts "1.5" to 1.5 and True
     # to 1.0 without a word, and every other surface (PUT /graph/params,
     # the FMU) refuses both.  A boolean for a boolean leaf is a boolean.
@@ -658,10 +687,10 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
         cast = a.astype(target)
     if a.dtype == target:
         return cast
-    if target.kind in "fc":
-        finite = np.isfinite(a) if a.dtype.kind in "fc" else np.ones(a.shape, bool)
+    if target_kind in "fc":
+        finite = np.isfinite(a) if source_kind in "fc" else np.ones(a.shape, bool)
         lost = (finite & ~np.isfinite(cast)) | ((a != 0) & (cast == 0))
-        if a.dtype.kind == "c" and target.kind == "f":
+        if source_kind == "c" and target_kind == "f":
             lost = lost | (np.imag(a) != 0)    # the cast drops an imaginary part
     elif target.kind in "iu":
         # By range and wholeness, never by a cast there and back: that is a
@@ -670,10 +699,29 @@ def _checked_cast(arr: np.ndarray, dtype: Any, what: str) -> np.ndarray:
         # 18446744073709551615; and a comparison through float64 rounds
         # both sides above 2**53.
         lost = lost_as_integer(a, target)
-    elif target.kind == "b":
+    elif target_kind in "iu":
+        # One of JAX's 2- and 4-bit integers, which NumPy has no ``iinfo``
+        # for: the same rule -- in range, whole, no imaginary part -- on
+        # the bounds JAX gives.  They are at most 15 in magnitude, so
+        # float64 holds each of them exactly, and every value of a source
+        # type no wider than it; a wider float is compared as it is
+        # (rounded to float64, 7 + 2**-60 is the whole number 7).
+        info = jnp.iinfo(target)
+        wide = np.asarray(np.real(a))
+        if not (wide.dtype.kind == "f" and wide.dtype.itemsize > 8):
+            wide = wide.astype(np.float64)
+        with np.errstate(invalid="ignore"):
+            lost = ~((wide >= info.min) & (wide <= info.max) & (wide == np.trunc(wide)))
+        if source_kind == "c":
+            lost = lost | (np.imag(a) != 0)
+    elif target_kind == "b":
         lost = (a != 0) & (a != 1)
     else:
-        lost = np.zeros(a.shape, bool)
+        # No rule for this dtype: say so, where "no value was lost" used
+        # to be assumed.
+        raise ValueError(
+            f"Checkpoint {what} holds {a.dtype} data and this graph's leaf is {target}, "
+            "a dtype a checkpoint value cannot be checked against.  Nothing was loaded.")
     if np.any(lost):
         index = tuple(int(i) for i in np.argwhere(lost)[0]) if a.ndim else ()
         raise ValueError(

@@ -39,8 +39,6 @@ if "--gpu" in sys.argv:
 else:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import warnings
-
 from maddening.core.graph_manager import GraphManager
 from maddening.nodes.lbm_pipe import LBMPipeNode
 
@@ -66,9 +64,7 @@ def build_lbm_graph(
         initial_velocity=0.0,
     ))
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        gm.compile()
+    gm.compile()
 
     return gm
 

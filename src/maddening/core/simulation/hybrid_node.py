@@ -23,6 +23,7 @@ from typing import Any, Callable, Optional
 from maddening.core.node import (
     SimulationNode,
     _method_accepts_params,
+    _refuse_params_no_keyword_reaches,
     _signature_takes_params,
 )
 
@@ -64,6 +65,11 @@ class HybridNode(SimulationNode):
             timestep=physics_node.delta_t,
             **physics_node.params,
         )
+        # The hybrid hands ``params`` on to the physics node's hooks under
+        # the one params rule, so a hook there that names ``params`` where
+        # no keyword reaches it is refused here, as the graph refuses it
+        # for the node unwrapped.
+        _refuse_params_no_keyword_reaches(physics_node, caller="HybridNode")
         self.physics_node = physics_node
         # One node, one params dict, as the sharded wrappers do: the
         # hybrid's ``params_pytree()`` reads the physics node's, so a copy

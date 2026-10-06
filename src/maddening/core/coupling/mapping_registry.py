@@ -272,10 +272,11 @@ def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str
 
     The rebuild calls ``factory(**arrays, **hyperparameters, **references)``.
     A declared name the factory does not take would only surface there, as
-    a ``TypeError`` while loading someone's config; a required argument
-    nothing declares would too, and so would a required positional-only
-    one, which no keyword reaches.  A callable whose signature cannot be
-    read is taken on trust.
+    a ``TypeError`` while loading someone's config -- one it does not have,
+    and one it has where no keyword reaches it (an optional positional-only
+    parameter, the name of ``*args``); a required argument nothing declares
+    would too, and so would a required positional-only one.  A callable
+    whose signature cannot be read is taken on trust.
 
     Both questions are asked of ``maddening.core.node``, the one module
     that reads a signature.  Whether the factory takes a keyword is the
@@ -286,6 +287,16 @@ def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str
     required = _signature_required_arguments(factory)
     if required is None:
         return
+    # Before the keyword question: a required positional-only argument is
+    # also a name no keyword reaches, and this is the refusal that says
+    # what is wrong with it.
+    positional = sorted(name for name, by_keyword in required.items() if not by_keyword)
+    if positional:
+        raise ValueError(
+            f"mapping kind {kind!r}: {_qualified(factory)} requires positional-only "
+            f"argument(s) {positional}, which no serialised mapping could supply: "
+            f"the rebuild calls factory(**arrays, **hyperparameters, **references)"
+        )
     absent = sorted(name for name in used if not _signature_takes_keyword(factory, name))
     if absent:
         raise ValueError(
@@ -293,13 +304,6 @@ def _check_signature(kind: str, factory: Callable[..., Any], used: dict[str, str
             f"argument(s) {absent}, which the registration declares "
             f"({', '.join(f'{n}: {used[n]}' for n in absent)}); the rebuild "
             f"calls factory(**arrays, **hyperparameters, **references)"
-        )
-    positional = sorted(name for name, by_keyword in required.items() if not by_keyword)
-    if positional:
-        raise ValueError(
-            f"mapping kind {kind!r}: {_qualified(factory)} requires positional-only "
-            f"argument(s) {positional}, which no serialised mapping could supply: "
-            f"the rebuild calls factory(**arrays, **hyperparameters, **references)"
         )
     undeclared = sorted(name for name in required if name not in used)
     if undeclared:

@@ -42,7 +42,7 @@ import numpy as np
 import numpy.typing as npt
 
 from maddening.core.compliance.metadata import StabilityLevel
-from maddening.core.node import _method_accepts_params
+from maddening.core.node import _method_accepts_params, _refuse_params_no_keyword_reaches
 from maddening.core.compliance.stability import stability
 from maddening.testing.strategies import (
     boundary_inputs_for,
@@ -535,7 +535,15 @@ _WITHOUT_KEYWORD = {
 }
 
 
-def _skip_no_params(name: str) -> VerificationResult:
+def _skip_no_params(name: str, node) -> VerificationResult:
+    """The result for a node whose ``update`` is not passed ``params``:
+    ``SKIP`` -- or ``FAIL`` when a hook names ``params`` where no keyword
+    reaches it (``params=None, /``, ``*params``).  The graph refuses that
+    node when it is added, and ``SKIP`` counts as passed."""
+    try:
+        _refuse_params_no_keyword_reaches(node)
+    except ValueError as exc:
+        return VerificationResult(name, "FAIL", detail=str(exc))
     return VerificationResult(
         name, "SKIP",
         detail="update() does not take a params keyword (constants are "
@@ -561,7 +569,7 @@ def node_params_consistent(
     """
     node = inputs.node
     if not _node_accepts_params(node):
-        return _skip_no_params("params_consistent")
+        return _skip_no_params("params_consistent", node)
     if _produces_fluxes(node) and not _flux_accepts_params(node):
         return VerificationResult(
             "params_consistent", "FAIL",
@@ -603,7 +611,7 @@ def node_params_gradient_finite(inputs: _Inputs, **kw) -> VerificationResult:
     """
     node = inputs.node
     if not _node_accepts_params(node):
-        return _skip_no_params("params_gradient_finite")
+        return _skip_no_params("params_gradient_finite", node)
     missing = _missing_pytree("params_gradient_finite", node)
     if missing is not None:
         return missing
@@ -758,7 +766,7 @@ def node_params_effective(
     """
     node = inputs.node
     if not _node_accepts_params(node):
-        return _skip_no_params("params_effective")
+        return _skip_no_params("params_effective", node)
     missing = _missing_pytree("params_effective", node)
     if missing is not None:
         return missing

@@ -36,7 +36,7 @@ INSTALL_CMD = (
 )
 
 BENCHMARK_SCRIPT = r"""
-import json, time, warnings, sys
+import json, time, sys
 import jax
 import jax.numpy as jnp
 
@@ -85,9 +85,7 @@ for n_cells in [10, 50, 100, 500, 1000, 5000]:
             max_iterations=5, tolerance=1e-6,
             iteration_mode="jacobi",
         )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            gm.compile()
+        gm.compile()
         return gm
 
     n_steps = 200

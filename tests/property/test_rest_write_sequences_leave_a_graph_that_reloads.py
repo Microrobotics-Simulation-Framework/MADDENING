@@ -453,24 +453,6 @@ class RestWriteSequences(RuleBasedStateMachine):
     def _nodes(self) -> list[str]:
         return list(self.gm._nodes)  # noqa: SLF001
 
-    def _withheld(self, name: str, params: dict) -> bool:
-        """Whether a parameter write is one the machine does not send: a
-        rod's ``length`` when a mapped edge was built from its grid.  The
-        route refuses such a write, except after a fit or a load left
-        another leaf away from the node's own value (pinned below as a
-        strict xfail; drop this with it).  The refusal itself is in the
-        tour of the mapped graphs."""
-        mapped = {end for edge in self.gm._edges if edge.mapping is not None  # noqa: SLF001
-                  for end in (edge.source_node, edge.target_node)}
-        if name in mapped and "length" in params:
-            type(self).counts["withheld"] += 1
-            return True
-        return False
-
-    def _grouped(self) -> set[str]:
-        """The nodes a coupling group names."""
-        return {name for group in self.gm._coupling_groups for name in group.nodes}  # noqa: SLF001
-
     def _draw_node(self, data, *, ghost: bool = True) -> str:
         """A node of the graph, one with a stability limit three times as
         often; sometimes a name the graph does not have."""
@@ -536,13 +518,8 @@ class RestWriteSequences(RuleBasedStateMachine):
     @rule(data=st.data())
     def add_or_remove_a_node(self, data):
         present = self._nodes()
-        # A member of a coupling group is not removed: the route takes the
-        # request and leaves the group naming it, a graph whose save does
-        # not reload (pinned below as a strict xfail; drop this filter with
-        # it).
-        removable = [n for n in present if n not in self._grouped()]
         if present and data.draw(st.integers(0, 2), label="remove") == 0:
-            self.do_remove_node(data.draw(st.sampled_from(removable * 3 + ["ghost"]),
+            self.do_remove_node(data.draw(st.sampled_from(present * 3 + ["ghost"]),
                                           label="name"))
             return
         free = [n for n in NAMES if n not in present]
@@ -630,8 +607,7 @@ class RestWriteSequences(RuleBasedStateMachine):
             return
         key = data.draw(st.sampled_from(self._keys(name) * 2 + ["no_such_param"]), label="key")
         value = 1.0 if key == "no_such_param" else self._draw_value(data, name, key)
-        if not self._withheld(name, {key: value}):
-            self.do_put(name, {key: value})
+        self.do_put(name, {key: value})
 
     @precondition(lambda self: self.served is not None and self._nodes())
     @rule(data=st.data())
@@ -644,8 +620,7 @@ class RestWriteSequences(RuleBasedStateMachine):
         keys = data.draw(st.lists(st.sampled_from(pool), min_size=min(2, len(set(pool))),
                                   max_size=3, unique=True), label="keys")
         body = {key: self._draw_value(data, name, key) for key in keys}
-        if not self._withheld(name, body):
-            self.do_put(name, body, rule_name="put several params")
+        self.do_put(name, body, rule_name="put several params")
 
     @precondition(lambda self: self.served is not None and self._nodes())
     @rule(data=st.data())
@@ -667,8 +642,7 @@ class RestWriteSequences(RuleBasedStateMachine):
         if others and data.draw(st.integers(0, 2), label="and a new value") == 0:
             key = data.draw(st.sampled_from(others), label="new key")
             body[key] = self._draw_value(data, name, key)
-        if not self._withheld(name, body):
-            self.do_put(name, body, rule_name="put params back")
+        self.do_put(name, body, rule_name="put params back")
 
     def _limited(self) -> list[str]:
         return [name for name in self._nodes() if O.limit_fraction(self.gm, name) is not None]
@@ -697,8 +671,7 @@ class RestWriteSequences(RuleBasedStateMachine):
         if not nearer:
             return
         key, value = data.draw(st.sampled_from(nearer), label="write")
-        if not self._withheld(name, {key: value}):
-            self.do_put(name, {key: value}, rule_name="put towards the limit")
+        self.do_put(name, {key: value}, rule_name="put towards the limit")
 
     def do_fit(self, name: str, key: str, value: Any) -> bool:
         """A direct ``gm.params`` write, as a fit (or any Python code)
@@ -1210,40 +1183,36 @@ def test_a_coupled_mapped_or_multi_rate_graph_runs_as_its_reload_after_every_kin
     assert counts["failures injected"] >= 60, dict(counts)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "DELETE /graph/nodes/{name} takes the removal of a coupling group's member and leaves "
-    "the group naming it: the graph's save does not reload and every step is a 400 until a "
-    "node of that name is added again"))
 def test_a_graph_whose_coupling_group_lost_a_member_still_reloads():
-    """Found by the tour above, under either solver.  ``DELETE /graph/nodes/extra`` on two rods
-    in a coupling group answers 200; the group still names ``extra``, so
-    ``GraphManager.from_dict`` refuses the graph's own save ("cannot be
+    """MADD-ANO-214, found by the tour above, under either solver.
+    ``DELETE /graph/nodes/extra`` on two rods in a coupling group answers
+    200; the group used to go on naming ``extra``, so
+    ``GraphManager.from_dict`` refused the graph's own save ("cannot be
     rebuilt: No node named 'extra'") and ``POST /sim/step`` and
-    ``/graph/compile`` answer 400 ("coupling group references non-existent
-    node") -- and no route removes a group.  Either answer would hold the
-    invariant: refuse the removal, or drop the group with the node."""
+    ``/graph/compile`` answered 400 ("coupling group references
+    non-existent node") -- and no route removes a group.  The group now
+    loses the member, and goes with it when one member is left."""
     with replay("coupled (ift)") as (machine, step):
         resp = step(machine.do_remove_node, "extra")
-        assert resp.status_code in (200, 400, 409), resp.text
+        assert resp.status_code == 200, resp.text
+        assert not machine.gm._coupling_groups  # noqa: SLF001
+        assert step(machine.do_step).status_code == 200
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "PUT /graph/params takes a rod's new length, which moves the points a mapped edge was "
-    "built from, when a load (or a fit) has left the rod's diffusivity away from the node's "
-    "own value and the new length is unstable at the node's own: the graph's save does not "
-    "reload"))
 def test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built_from():
-    """Found by the machine on the mapped graphs (of either kind: the dense
-    one answers the same), over REST alone.  The
+    """MADD-ANO-215, found by the machine on the mapped graphs (of either
+    kind: the dense one answers the same), over REST alone.  The
     rod's diffusivity is lowered, saved, raised again and the save loaded:
     the live leaf is the low value and the node's own the high one, as
     after a fit.  A length of 0.5 is then stable for the rod that runs
     (Fourier 0.2) and unstable at the node's own diffusivity (0.6).  The
     route refuses a length of 0.75 here, as it does without the load ("the
     interface mapping on edge ... was built from" the rod's grid); the
-    length of 0.5 it answers 200, and the mapped edge keeps the operator
-    built for the old grid while ``GraphManager.from_dict`` refuses the
-    graph's own save (``PointReferenceError``)."""
+    length of 0.5 it used to answer 200, the mapped edge keeping the
+    operator built for the old grid while ``GraphManager.from_dict``
+    refused the graph's own save (``PointReferenceError``): the check
+    built the rod from the values it was constructed with, and took the
+    constructor refusing those as nothing to say."""
     with replay("mapped (sparse)") as (machine, step):
         low, high = O.ROD_ALPHAS
         assert step(machine.do_put, "rod", {"thermal_diffusivity": low}).status_code == 200
@@ -1252,7 +1221,7 @@ def test_a_length_written_after_a_load_is_held_to_the_points_a_mapping_was_built
         assert step(machine.do_load, "a.npz").status_code == 200
         assert step(machine.do_put, "rod", {"length": 0.75}).status_code == 400
         resp = step(machine.do_put, "rod", {"length": 0.5})
-        assert resp.status_code == 400, resp.text
+        assert resp.status_code == 400 and "was built from" in resp.text, resp.text
 
 
 def test_a_value_written_back_after_a_fit_is_held_to_the_stability_limit():

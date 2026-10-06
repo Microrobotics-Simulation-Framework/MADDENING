@@ -386,61 +386,6 @@ class NotSent(Exception):
 #: The three strings ``maddening.serialization.json_codec`` writes a
 #: non-finite float as.
 TOKEN_TEXTS = ("NaN", "Infinity", "-Infinity")
-#: How often :func:`exchange` met the known defect below, by route.
-KNOWN_DEFECT_SEEN: dict = {}
-
-
-def carries_a_token_as_text(req: Request) -> bool:
-    """Whether *req* carries ``NaN``, ``Infinity`` or ``-Infinity`` as a
-    whole *text* value: a query value, or a JSON string in its body."""
-    if any(value in TOKEN_TEXTS for _, value in req.query):
-        return True
-    body = req.content() or b""
-    return any(b'"' + token.encode() + b'"' in body for token in TOKEN_TEXTS)
-
-
-def is_the_known_422_echo_defect(req: Request, status: int) -> bool:
-    """A defect this oracle found on the tree it was written on, kept as
-    the strict xfails of
-    ``test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500`` and
-    left unfixed (this branch writes tests only).
-
-    A request its model refuses is answered 422 with the refused input
-    echoed, and the app encodes that body as it encodes every reply
-    (``_json_reply``).  That encoder refuses the *strings* ``"NaN"``,
-    ``"Infinity"`` and ``"-Infinity"``, because they are how it writes a
-    non-finite float, so a 422 that echoes one of them as text raises
-    inside the exception handler: ``POST /sim/run?n_steps=NaN`` is a 500.
-    Until it is fixed, a 500 on a request that carries one of the three as
-    a whole text value is counted here and not failed by the batteries or
-    the fuzzer, which would otherwise report nothing else; when the xfails
-    pass, this function and its two callers go."""
-    return status == 500 and carries_a_token_as_text(req)
-
-
-def is_a_known_accepted_defect(op: Operation, req: Request) -> Optional[str]:
-    """Two more defects this oracle found, in what the server *accepts*;
-    each is a strict xfail below and is counted, not failed, by the
-    batteries and the fuzzer until it is fixed.  Returns which, or ``None``.
-
-    * ``POST /graph/edges`` checks the source field and takes any target
-      field.  One that is the text ``NaN``, ``Infinity`` or ``-Infinity``
-      is a 201, and ``GET /graph`` is then a 500 until the edge is
-      removed: ``to_dict`` cannot write the string
-      (``test_an_edge_to_a_target_field_named_as_a_non_finite_token_...``).
-    * ``POST /graph/nodes`` takes a name with a NUL in it.  The graph
-      steps, ``POST /checkpoint/save`` answers 200, and the checkpoint it
-      wrote does not load: an archive member's name ends at the NUL
-      (``test_a_checkpoint_of_a_node_named_with_a_nul_...``)."""
-    body = req.body if isinstance(req.body, dict) else {}
-    if op.key == "POST /graph/edges" and body.get("target_field") in TOKEN_TEXTS:
-        return "an edge to a target field named as a non-finite token"
-    if op.key == "POST /graph/nodes" and isinstance(body.get("name"), str) \
-            and "\x00" in body["name"]:
-        return "a node named with a NUL"
-    return None
-
-
 def exchange(served: O.Served, op: Operation, req: Request, *,
              must_refuse: bool = False) -> tuple[list, Any]:
     """Send *req* and hold the reply to the invariants: ``(problems, reply)``.
@@ -462,10 +407,6 @@ def exchange(served: O.Served, op: Operation, req: Request, *,
     resp = served.client.request(req.method, url, content=req.content(), headers=headers,
                                  follow_redirects=False)
     status, problems = resp.status_code, []
-    if is_the_known_422_echo_defect(req, status):
-        KNOWN_DEFECT_SEEN[op.key] = KNOWN_DEFECT_SEEN.get(op.key, 0) + 1
-        assert not O.differences(before, O.snapshot(served)), req.describe()
-        return problems, resp
     if status >= 500:
         changed = O.differences(before, O.snapshot(served))
         problems.append(f"{status}: {resp.text[:300]}" + (
@@ -495,11 +436,7 @@ def exchange(served: O.Served, op: Operation, req: Request, *,
             O.check_accepted_graph(served, req.describe(), step=False,
                                    shapes_may_differ=op.key == "POST /graph/edges")
         except AssertionError as exc:
-            known = is_a_known_accepted_defect(op, req)
-            if known is None:
-                problems.append(f"{status}: {str(exc)[:500]}")
-            else:
-                KNOWN_DEFECT_SEEN[known] = KNOWN_DEFECT_SEEN.get(known, 0) + 1
+            problems.append(f"{status}: {str(exc)[:500]}")
     return problems, resp
 
 
@@ -535,7 +472,28 @@ STRING_VALUES: tuple = (
     ("the text NaN", "NaN"), ("the text Infinity", "Infinity"),
     ("the text -Infinity", "-Infinity"), ("a number", 5), ("a boolean", True), ("null", None),
     ("a list", ["a"]), ("an object", {"a": "b"}),
+    # What not every carrier of a name can hold, and what an edge's key is
+    # made with: refused where a name is introduced, echoed without a 500
+    # everywhere else.  The surrogate is a body's alone (a URL cannot
+    # spell one: see can_be_in_a_url).
+    ("a lone surrogate", "a\ud800b"), ("a line break", "a\nb"),
+    ("an escape character", "a\x1bb"), ("U+FFFE", "a\ufffeb"), ("a hash", "a#b"),
+    ("a dot", "a.b"),
 )
+
+
+def can_be_in_a_url(value: Any) -> bool:
+    """Whether *value* is text a path or a query can spell: a lone
+    surrogate has no UTF-8 bytes to percent-encode."""
+    if not isinstance(value, str):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 OBJECT_VALUES: tuple = (
     ("an empty object", {}), ("text", "abc"), ("a number", 1), ("null", None), ("a list", []),
     ("a reserved key", {"_meta": 1.0}), ("an empty key", {"": 1.0}),
@@ -552,7 +510,7 @@ QUERY_NUMBER_VALUES: tuple = (
     ("hexadecimal", "0x10"), ("spaces around it", " 1 "), ("a list", "[1]"),
 )
 QUERY_STRING_VALUES: tuple = tuple((label, value) for label, value in STRING_VALUES
-                                   if isinstance(value, str)) + (
+                                   if can_be_in_a_url(value)) + (
     ("an absolute path", "/etc/hostname"), ("a path out of the root", "a/../../x.npz"),
     ("a directory", "nested/dir/file"),
 )
@@ -757,7 +715,7 @@ def path_variants(op: Operation) -> Iterator[Variant]:
 
     for name in op.path_params:
         for label, value in STRING_VALUES:
-            if isinstance(value, str):
+            if can_be_in_a_url(value):
                 yield Variant(f"path {name}", label, put(name, value))
 
 
@@ -886,43 +844,53 @@ def test_every_malformed_header_is_refused_whole_or_served(key):
 
 
 # ---------------------------------------------------------------------------
-# What the battery found
+# What the battery found on the tree it was written on (fixed since)
 # ---------------------------------------------------------------------------
 
-#: Every door of the defect ``is_the_known_422_echo_defect`` describes, as
-#: the battery met it: each integer query parameter given the text of a
-#: token, a model's number field given one as a JSON string, a body that is
-#: that string, and a refused body echoed whole with one inside it.
+#: Every door by which a refusal echoed text its encoder refused, as the
+#: battery met them: each integer query parameter given the text of a
+#: non-finite token, a model's number field given one as a JSON string, a
+#: body that is that string, a refused body echoed whole with one inside
+#: it -- and the same echoes of a surrogate, which UTF-8 cannot encode.
+#: ``(method, url, body, the refusal's status)``.
 _ECHOED = [
-    ("POST", "/sim/run?n_steps=NaN", None),
-    ("POST", "/sim/run?n_steps=Infinity", None),
-    ("POST", "/sim/run?n_steps=-Infinity", None),
-    ("PUT", "/sim/stride?steps_per_frame=NaN", None),
-    ("PUT", "/sim/stride?relay_stride=Infinity", None),
-    ("POST", "/sim/profile?n_steps=NaN", None),
-    ("POST", "/sim/profile?n_warmup=-Infinity", None),
+    ("POST", "/sim/run?n_steps=NaN", None, 422),
+    ("POST", "/sim/run?n_steps=Infinity", None, 422),
+    ("POST", "/sim/run?n_steps=-Infinity", None, 422),
+    ("PUT", "/sim/stride?steps_per_frame=NaN", None, 422),
+    ("PUT", "/sim/stride?relay_stride=Infinity", None, 422),
+    ("POST", "/sim/profile?n_steps=NaN", None, 422),
+    ("POST", "/sim/profile?n_warmup=-Infinity", None, 422),
     ("POST", "/graph/nodes", {"type": "BallNode", "name": "new", "timestep": "NaN",
-                              "params": {}}),
-    ("POST", "/graph/nodes", "NaN"),
-    ("POST", "/graph/nodes", {"type": "NaN"}),
-    ("POST", "/graph/edges", {"source_node": "Infinity"}),
-    ("DELETE", "/graph/edges", "-Infinity"),
-    ("PUT", "/graph/state/ball", {"state": "NaN"}),
-    ("PUT", "/graph/params/spring", {"params": "Infinity"}),
+                              "params": {}}, 422),
+    ("POST", "/graph/nodes", "NaN", 422),
+    ("POST", "/graph/nodes", {"type": "NaN"}, 422),
+    ("POST", "/graph/edges", {"source_node": "Infinity"}, 422),
+    ("DELETE", "/graph/edges", "-Infinity", 422),
+    ("PUT", "/graph/state/ball", {"state": "NaN"}, 422),
+    ("PUT", "/graph/params/spring", {"params": "Infinity"}, 422),
+    # A surrogate: in a 422's echo, and in the detail of a route's own 4xx.
+    ("POST", "/graph/nodes", {"type": "BallNode", "name": "new", "timestep": "\ud800"}, 422),
+    ("POST", "/graph/edges", {"source_node": "a\udfffb"}, 422),
+    ("PUT", "/graph/state/ball", {"state": "\ud800"}, 422),
+    ("POST", "/graph/nodes", {"type": "a\ud800b", "name": "new", "timestep": 0.01}, 400),
+    ("POST", "/graph/nodes", {"type": "BallNode", "name": "a\ud800b", "timestep": 0.01}, 400),
+    ("POST", "/graph/edges", {"source_node": "a\ud800b", "target_node": "spring",
+                              "source_field": "position", "target_field": "x"}, 404),
+    ("PUT", "/graph/params/ball", {"params": {"a\ud800b": 1.0}}, 400),
 ]
 
 
-@pytest.mark.parametrize("method, url, body", _ECHOED, ids=[
-    f"{m} {u}{'' if b is None else ' ' + json.dumps(b)[:40]}" for m, u, b in _ECHOED])
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "found by the request oracle: the app's RequestValidationError handler encodes the 422 "
-    "with _json_reply, whose encoder refuses the strings 'NaN', 'Infinity' and '-Infinity', "
-    "so a refused request that carried one of them as text is a 500 (nothing is changed); "
-    "it was a 422 before the handler was added"))
-def test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500(method, url, body):
-    """Minimal reproducer: ``POST /sim/run?n_steps=NaN`` -- what a browser
-    sends for ``parseInt("")`` -- answers 500 Internal Server Error, where
-    ``n_steps=abc`` answers 422.  Every door the battery met is a case."""
+@pytest.mark.parametrize("method, url, body, status", _ECHOED, ids=[
+    f"{m} {u}{'' if b is None else ' ' + json.dumps(b)[:40]}" for m, u, b, _ in _ECHOED])
+def test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500(method, url, body, status):
+    """``POST /sim/run?n_steps=NaN`` -- what a browser sends for
+    ``parseInt("")`` -- answered 500 Internal Server Error, where
+    ``n_steps=abc`` answered 422: the handler encoded the echo with the
+    encoder of *data*, which refuses that text.  Every door the battery
+    met is a case, and so is the echo of a surrogate, which was a 500 by
+    Starlette's own encoder (and, on ``POST /graph/nodes``, after the node
+    had been added)."""
     served = serve()
     try:
         before = O.snapshot(served)
@@ -930,81 +898,60 @@ def test_a_422_that_echoes_a_non_finite_token_as_text_is_not_a_500(method, url, 
                                           "headers": {"content-type": "application/json"}}
         resp = served.client.request(method, url, **kwargs)
         assert not O.differences(before, O.snapshot(served))
-        assert resp.status_code == 422, (resp.status_code, resp.text[:200])
+        assert resp.status_code == status, (resp.status_code, resp.text[:200])
         O.assert_strict_json(resp, f"{method} {url}")
+        resp.content.decode("utf-8")
     finally:
         served.close()
 
 
 @pytest.mark.parametrize("token", TOKEN_TEXTS)
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "found by the request oracle: POST /graph/edges takes a target field that is the text "
-    "'NaN', 'Infinity' or '-Infinity' (it checks the source field only), and GET /graph is "
-    "then a 500 until the edge is removed, because to_dict cannot write the string"))
 def test_an_edge_to_a_target_field_named_as_a_non_finite_token_is_refused_or_saves(token):
-    """Minimal reproducer: ``POST /graph/edges {"source_node": "ball",
-    "target_node": "spring", "source_field": "position", "target_field":
-    "NaN"}`` answers 201, and the next ``GET /graph`` answers 500."""
+    """``POST /graph/edges {"source_node": "ball", "target_node": "spring",
+    "source_field": "position", "target_field": "NaN"}`` answered 201, and
+    ``GET /graph`` then answered 500 until the edge was removed: the config
+    writes a non-finite float as that text, so its encoder refuses a string
+    that spells it.  The edge is a 400 now, where the name is introduced;
+    a lookalike is a field like any other."""
     served = serve()
     try:
-        resp = served.client.post("/graph/edges", json={
-            "source_node": "ball", "target_node": "spring", "source_field": "position",
-            "target_field": token})
-        assert resp.status_code < 500
+        before = O.snapshot(served)
+        edge = {"source_node": "ball", "target_node": "spring", "source_field": "position"}
+        resp = served.client.post("/graph/edges", json={**edge, "target_field": token})
+        assert resp.status_code == 400, resp.text
+        assert repr(token) in resp.json()["detail"]
+        assert not O.differences(before, O.snapshot(served))
+        assert served.client.get("/graph").status_code == 200, "GET /graph after the refusal"
+        resp = served.client.post("/graph/edges", json={**edge, "target_field": token.lower()})
+        assert resp.status_code == 201, resp.text
         assert served.client.get("/graph").status_code == 200, "GET /graph after the edge"
-        if resp.status_code < 300:
-            O.check_accepted_graph(served, f"an edge to {token!r}", step=False,
-                                   shapes_may_differ=True)
+        O.check_accepted_graph(served, f"an edge to {token.lower()!r}", step=False,
+                               shapes_may_differ=True)
     finally:
         served.close()
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "found by the request oracle: POST /graph/nodes takes a name with a NUL in it; a "
-    "checkpoint of the graph is then saved with a 200 (or refused, where warnings are "
-    "errors) and does not load, because an archive member's name ends at the NUL"))
 def test_a_checkpoint_of_a_node_named_with_a_nul_loads_or_the_name_is_refused():
-    """Minimal reproducer: ``POST /graph/nodes {"type": "BallNode", "name":
-    "a\\u0000b", "timestep": 0.01}`` answers 201; ``POST /checkpoint/save``
-    then answers 200 and ``POST /checkpoint/load`` of that file 400 ("it is
-    not an .npz archive of plain arrays saved by this API")."""
+    """``POST /graph/nodes {"type": "BallNode", "name": "a\\u0000b",
+    "timestep": 0.01}`` answered 201; ``POST /checkpoint/save`` then
+    answered 200 and ``POST /checkpoint/load`` of that file 400 ("it is not
+    an .npz archive of plain arrays saved by this API"): an archive
+    member's name ends at the NUL.  The name is a 400 now, and a save of
+    the graph loads."""
     served = serve()
     try:
+        before = O.snapshot(served)
         resp = served.client.post("/graph/nodes", json={
             "type": "BallNode", "name": "a\x00b", "timestep": 0.01, "params": {}})
-        assert resp.status_code < 500
-        if resp.status_code < 300:
-            saved = served.client.post("/checkpoint/save", params={"path": "nul.npz"})
-            assert saved.status_code == 200, saved.text
-            loaded = served.client.post("/checkpoint/load", params={"path": "nul.npz"})
-            assert loaded.status_code == 200, loaded.text
+        assert resp.status_code == 400, resp.text
+        assert "U+0000" in resp.json()["detail"]
+        assert not O.differences(before, O.snapshot(served))
+        saved = served.client.post("/checkpoint/save", params={"path": "nul.npz"})
+        assert saved.status_code == 200, saved.text
+        loaded = served.client.post("/checkpoint/load", params={"path": "nul.npz"})
+        assert loaded.status_code == 200, loaded.text
     finally:
         served.close()
-
-
-def test_the_known_defects_are_all_the_batteries_tolerate():
-    """Each tolerance is as narrow as its defect: a 500 on a request that
-    carries a token as text, and nothing else -- not another status, not a
-    500 on a request without one, not a bare (numeric) NaN; an edge to a
-    target field that is exactly a token; a new node's name with a NUL."""
-    def req(query=(), body=ABSENT):
-        return Request("POST", "/sim/run", {}, list(query), body, {})
-
-    assert is_the_known_422_echo_defect(req(query=[("n_steps", "NaN")]), 500)
-    assert is_the_known_422_echo_defect(req(body={"a": ["-Infinity"]}), 500)
-    assert not is_the_known_422_echo_defect(req(query=[("n_steps", "NaN")]), 422)
-    assert not is_the_known_422_echo_defect(req(query=[("n_steps", "abc")]), 500)
-    assert not is_the_known_422_echo_defect(req(query=[("n_steps", "NaNs")]), 500)
-    assert not is_the_known_422_echo_defect(req(body={"a": float("nan")}), 500)
-    assert not is_the_known_422_echo_defect(req(body={"a": "not NaN"}), 500)
-    edges, nodes = IN_SCOPE["POST /graph/edges"], IN_SCOPE["POST /graph/nodes"]
-    assert is_a_known_accepted_defect(edges, req(body={"target_field": "NaN"}))
-    assert not is_a_known_accepted_defect(edges, req(body={"target_field": "nan"}))
-    assert not is_a_known_accepted_defect(edges, req(body={"source_field": "NaN"}))
-    assert not is_a_known_accepted_defect(nodes, req(body={"target_field": "NaN"}))
-    assert is_a_known_accepted_defect(nodes, req(body={"name": "a\x00b"}))
-    assert not is_a_known_accepted_defect(nodes, req(body={"name": "a b"}))
-    assert not is_a_known_accepted_defect(edges, req(body={"name": "a\x00b"}))
 
 
 # ---------------------------------------------------------------------------
@@ -1015,7 +962,7 @@ def test_the_known_defects_are_all_the_batteries_tolerate():
 _COUNTS = st.one_of(st.integers(-16, 16), st.integers(2 ** 40, 2 ** 80),
                     st.integers(-2 ** 80, -2 ** 40))
 _TEXT = st.one_of(st.text(max_size=30), st.sampled_from([v for _, v in STRING_VALUES
-                                                         if isinstance(v, str)]))
+                                                         if can_be_in_a_url(v)]))
 _SCALARS = st.one_of(
     st.floats(allow_nan=True, allow_infinity=True), st.floats(width=32, allow_nan=False),
     _COUNTS, _TEXT, st.booleans(), st.none())
